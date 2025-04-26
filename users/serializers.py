@@ -18,7 +18,6 @@ class RegisterSerializer(serializers.ModelSerializer):
             password=validated_data['password']
         )
         return user
-
 class ServiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Service
