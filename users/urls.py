@@ -4,7 +4,7 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 from rest_framework.routers import DefaultRouter
-from .views import RegisterView, ServiceViewSet
+from .views import RegisterView, ServiceViewSet, ProfileDetailView, MyProfileView
 
 urlpatterns = [
     path('login/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
@@ -16,3 +16,8 @@ router = DefaultRouter()
 router.register(r'services', ServiceViewSet, basename='services')
 
 urlpatterns += router.urls
+
+urlpatterns += [
+    path('profile/<int:pk>/', ProfileDetailView.as_view(), name='profile-detail'),
+    path('profile/me/', MyProfileView.as_view(), name='my-profile'),
+]

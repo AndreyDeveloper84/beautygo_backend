@@ -29,3 +29,15 @@ class Service(models.Model):
 
     def __str__(self):
         return f"{self.name} — {self.specialist.username}"
+
+class Profile(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
+
+    full_name = models.CharField(max_length=255)
+    avatar = models.ImageField(upload_to='avatars/', blank=True, null=True)
+    bio = models.TextField(blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    experience_years = models.PositiveIntegerField(default=0)
+
+    def __str__(self):
+        return f"Профиль {self.user.username}"

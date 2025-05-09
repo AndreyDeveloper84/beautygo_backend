@@ -1,10 +1,10 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status, viewsets, permissions
+from rest_framework import status, viewsets, permissions, generics
 from django_filters.rest_framework import FilterSet, filters
 
-from .serializers import RegisterSerializer, ServiceSerializer
-from .models import Service
+from .serializers import RegisterSerializer, ServiceSerializer, ProfileSerializer
+from .models import Service, Profile
 
 class RegisterView(APIView):
     def post(self, request):
@@ -36,3 +36,16 @@ class ServiceFilter(FilterSet):
     class Meta:
         model = Service
         fields = ['name', 'min_price', 'max_price', 'duration_minutes', 'specialist']
+
+class ProfileDetailView(generics.RetrieveAPIView):
+    queryset = Profile.objects.all()
+    serializer_class = ProfileSerializer
+    permission_classes = [permissions.AllowAny]
+
+class MyProfileView(generics.RetrieveUpdateAPIView):
+    serializer_class = ProfileSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_object(self):
+        profile, created = Profile.objects.get_or_create(user=self.request.user)
+        return profile
