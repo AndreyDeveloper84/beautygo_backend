@@ -60,10 +60,10 @@ jobs:
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
 
     steps:
-      - name: Deploy to VPS via SSH
+      - name: Deploy to dev server via SSH
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -71,9 +71,9 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
           script: |
-            cd /opt/beautygo
-            git fetch origin main
-            git reset --hard origin/main
+            cd /home/taximeter/beautygo/dev
+            git fetch origin dev
+            git reset --hard origin/dev
             docker compose build
             docker compose up -d
             echo "Waiting for containers..."
