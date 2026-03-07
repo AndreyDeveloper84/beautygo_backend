@@ -3,14 +3,13 @@ set -e
 
 echo "Waiting for PostgreSQL..."
 while ! python -c "
-import socket
+import socket, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 try:
     s.connect(('db', 5432))
     s.close()
-    exit(0)
-except:
-    exit(1)
+except Exception:
+    sys.exit(1)
 " 2>/dev/null; do
     echo "PostgreSQL not ready, waiting..."
     sleep 1
