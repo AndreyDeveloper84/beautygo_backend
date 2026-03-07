@@ -9,8 +9,8 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=djangoProject.settings.prod
     volumes:
-      - /var/www/beautygo/staticfiles:/app/staticfiles
-      - /var/www/beautygo/media:/app/media
+      - /home/taximeter/beautygo/dev/staticfiles:/app/staticfiles
+      - /home/taximeter/beautygo/dev/media:/app/media
     depends_on:
       db:
         condition: service_healthy
