@@ -14,6 +14,7 @@ class User(AbstractUser):
     def __str__(self):
         return f"{self.username} ({self.role})"
 
+
 class Service(models.Model):
     specialist = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -30,8 +31,11 @@ class Service(models.Model):
     def __str__(self):
         return f"{self.name} — {self.specialist.username}"
 
+
 class Profile(models.Model):
-    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile")
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile"
+    )
 
     full_name = models.CharField(max_length=255)
     avatar = models.ImageField(upload_to='avatars/', blank=True, null=True)
