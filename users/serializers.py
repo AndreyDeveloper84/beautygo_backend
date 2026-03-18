@@ -1,7 +1,6 @@
 from rest_framework import serializers
-from .models import User
-from .models import Service
-from .models import Profile
+from .models import User, Service, Profile
+
 
 class RegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
@@ -20,11 +19,13 @@ class RegisterSerializer(serializers.ModelSerializer):
         )
         return user
 
+
 class ServiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Service
         fields = '__all__'
         read_only_fields = ['specialist']
+
 
 class ProfileSerializer(serializers.ModelSerializer):
     class Meta:
