@@ -68,9 +68,26 @@ SIMPLE_JWT = {
 }
 
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'Specialist Marketplace API',
-    'DESCRIPTION': 'REST API для маркетплейса специалистов',
+    'TITLE': 'BeautyGO API',
+    'DESCRIPTION': 'REST API для платформы бронирования бьюти-услуг BeautyGO',
     'VERSION': '1.0.0',
+    'SERVERS': [
+        {'url': 'http://localhost:8000/api/v1', 'description': 'Development'},
+        {'url': 'https://api.beautygo.ru/api/v1', 'description': 'Production'},
+    ],
+    'TAGS': [
+        {'name': 'auth', 'description': '⚪ Аутентификация (shared)'},
+        {'name': 'users', 'description': '⚪ Профиль пользователя (shared)'},
+        {'name': 'specialists', 'description': '🟢 Мастера (client)'},
+        {'name': 'specialists-pro', 'description': '🟣 Управление профилем мастера (pro)'},
+        {'name': 'services', 'description': '⚪ Услуги и категории (shared)'},
+        {'name': 'services-pro', 'description': '🟣 Управление услугами (pro)'},
+        {'name': 'appointments', 'description': '⚪ Записи (shared)'},
+        {'name': 'reviews', 'description': '🟢 Отзывы (client)'},
+        {'name': 'payments', 'description': '🟢 Платежи (client)'},
+        {'name': 'notifications', 'description': '⚪ Уведомления (shared)'},
+        {'name': 'ai', 'description': '🟢 AI-ассистент (client)'},
+    ],
 }
 
 MIDDLEWARE = [
