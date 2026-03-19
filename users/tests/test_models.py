@@ -1,24 +1,45 @@
 import pytest
+from datetime import timedelta
 from decimal import Decimal
 
-from users.models import User, Service, Profile
+from django.utils import timezone
+
+from users.models import OTPCode, Profile, Service, User
 
 
 @pytest.mark.django_db
 class TestUserModel:
     def test_create_client(self):
-        user = User.objects.create_user(username='c1', password='pass', role='client')
+        user = User.objects.create_user(
+            username='c1', password='pass', role='client', phone='+79001000001',
+        )
         assert user.role == 'client'
+        assert user.is_client
+        assert not user.is_specialist
         assert str(user) == 'c1 (client)'
 
     def test_create_specialist(self):
-        user = User.objects.create_user(username='s1', password='pass', role='specialist')
+        user = User.objects.create_user(
+            username='s1', password='pass', role='specialist', phone='+79001000002',
+        )
         assert user.role == 'specialist'
-        assert str(user) == 's1 (specialist)'
+        assert user.is_specialist
+        assert not user.is_client
 
-    def test_phone_optional(self):
-        user = User.objects.create_user(username='u1', password='pass', role='client')
-        assert user.phone is None
+    def test_phone_unique(self):
+        User.objects.create_user(
+            username='u1', password='pass', role='client', phone='+79001000003',
+        )
+        with pytest.raises(Exception):
+            User.objects.create_user(
+                username='u2', password='pass', role='client', phone='+79001000003',
+            )
+
+    def test_is_verified_default_false(self):
+        user = User.objects.create_user(
+            username='u3', password='pass', role='client', phone='+79001000004',
+        )
+        assert user.is_verified is False
 
 
 @pytest.mark.django_db
@@ -54,3 +75,38 @@ class TestProfileModel:
         assert profile.bio == ''
         assert profile.city == ''
         assert profile.experience_years == 0
+
+
+@pytest.mark.django_db
+class TestOTPCodeModel:
+    def test_create(self):
+        now = timezone.now()
+        otp = OTPCode.objects.create(
+            phone='+79001000001',
+            code='123456',
+            expires_at=now + timedelta(minutes=5),
+        )
+        assert otp.is_used is False
+        assert otp.attempts == 0
+        assert not otp.is_expired
+        assert otp.is_valid
+        assert 'active' in str(otp)
+
+    def test_expired(self):
+        otp = OTPCode.objects.create(
+            phone='+79001000001',
+            code='123456',
+            expires_at=timezone.now() - timedelta(minutes=1),
+        )
+        assert otp.is_expired
+        assert not otp.is_valid
+
+    def test_used(self):
+        otp = OTPCode.objects.create(
+            phone='+79001000001',
+            code='123456',
+            expires_at=timezone.now() + timedelta(minutes=5),
+            is_used=True,
+        )
+        assert not otp.is_valid
+        assert 'used' in str(otp)
