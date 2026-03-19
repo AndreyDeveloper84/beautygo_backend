@@ -37,7 +37,24 @@ phone+OTP и social auth. Начинаем с мелких правок, зак�
 
 ---
 
-## Шаг 2: Модель User — phone как primary identifier
+## Шаг 2: UUID primary keys + Модель User — phone как primary identifier
+
+### 2.0 — UUID primary keys для всех моделей
+Моделей мало (User, Service, Profile), данных нет — самый дешёвый момент для перехода.
+- Создать `core/models.py` с `BaseModel`:
+```python
+class BaseModel(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+```
+- `User`: добавить `id = UUIDField(primary_key=True, default=uuid.uuid4)`
+- `Service`, `Profile`: наследовать от `BaseModel`
+- Пересоздать миграции (squash или reset, данных нет)
+- `DEFAULT_AUTO_FIELD` в settings оставить как есть (UUID задаётся явно в BaseModel)
 
 ### 2.1 — Сделать phone обязательным и unique
 - `phone = CharField(max_length=20, unique=True)` — основной идентификатор
@@ -46,7 +63,7 @@ phone+OTP и social auth. Начинаем с мелких правок, зак�
 - Убрать обязательность username (сгенерировать автоматически или убрать)
 - Новая миграция
 
-### 2.2 — Модель OTPCode
+### 2.2 — Модель OTPCode (наследует BaseModel)
 ```python
 class OTPCode(models.Model):
     phone = CharField(max_length=20, db_index=True)
@@ -145,14 +162,15 @@ class SocialAccount(models.Model):
 | 1 | Logout endpoint | Мелкая | — |
 | 2 | Разнести URL routes | Мелкая | — |
 | 3 | Core app + response format | Мелкая | — |
-| 4 | User model: phone as primary | Средняя | Миграция |
-| 5 | OTPCode модель | Средняя | #4 |
-| 6 | SMS сервис (заглушка) | Мелкая | — |
-| 7 | send-otp + verify-otp endpoints | Средняя | #4, #5, #6 |
-| 8 | Обновить register | Средняя | #7 |
-| 9 | SocialAccount модель | Средняя | #4 |
-| 10 | Social auth endpoints | Средняя | #9 |
-| 11 | Rate limiting | Мелкая | #7, #10 |
+| 4 | UUID PK для всех моделей + BaseModel | Средняя | Миграция (reset) |
+| 5 | User model: phone as primary | Средняя | #4 |
+| 6 | OTPCode модель | Средняя | #5 |
+| 7 | SMS сервис (заглушка) | Мелкая | — |
+| 8 | send-otp + verify-otp endpoints | Средняя | #5, #6, #7 |
+| 9 | Обновить register | Средняя | #8 |
+| 10 | SocialAccount модель | Средняя | #5 |
+| 11 | Social auth endpoints | Средняя | #10 |
+| 12 | Rate limiting | Мелкая | #8, #11 |
 
 ---
 
@@ -160,4 +178,3 @@ class SocialAccount(models.Model):
 - Services CRUD — переедет в отдельный app позже
 - Profile → SpecialistProfile/ClientProfile — отдельная задача
 - X-App-Type middleware — отдельная задача
-- UUID primary keys — слишком много миграций, отдельная задача
