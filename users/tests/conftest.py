@@ -6,13 +6,16 @@ from users.models import User
 
 @pytest.fixture
 def api_client():
-    return APIClient()
+    client = APIClient()
+    client.defaults['HTTP_X_APP_TYPE'] = 'client'
+    return client
 
 
 @pytest.fixture
 def client_user(db):
     return User.objects.create_user(
         username='testclient', password='testpass123', role='client',
+        phone='+79990000001',
     )
 
 
@@ -20,6 +23,7 @@ def client_user(db):
 def specialist_user(db):
     return User.objects.create_user(
         username='testspecialist', password='testpass123', role='specialist',
+        phone='+79990000002',
     )
 
 

@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import User, Service, Profile
+from .models import OTPCode, Profile, Service, User
 
 
 class ProfileInline(admin.StackedInline):
@@ -14,14 +14,22 @@ class ProfileInline(admin.StackedInline):
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
     inlines = [ProfileInline]
-    list_display = ('username', 'email', 'role', 'phone', 'is_staff')
+    list_display = ('username', 'email', 'role', 'phone', 'is_verified', 'is_staff')
     list_filter = ('role', 'is_staff', 'is_active')
     fieldsets = BaseUserAdmin.fieldsets + (
-        ('Дополнительно', {'fields': ('role', 'phone')}),
+        ('Дополнительно', {'fields': ('role', 'phone', 'is_verified')}),
     )
     add_fieldsets = BaseUserAdmin.add_fieldsets + (
         ('Дополнительно', {'fields': ('role', 'phone')}),
     )
+
+
+@admin.register(OTPCode)
+class OTPCodeAdmin(admin.ModelAdmin):
+    list_display = ('phone', 'code', 'created_at', 'expires_at', 'is_used', 'attempts')
+    list_filter = ('is_used',)
+    search_fields = ('phone',)
+    readonly_fields = ('phone', 'code', 'created_at', 'expires_at')
 
 
 @admin.register(Service)
