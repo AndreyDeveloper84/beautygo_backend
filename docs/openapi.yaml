@@ -2,29 +2,34 @@ openapi: 3.0.3
 info:
   title: BeautyGO API
   description: |
-    REST API для платформы бронирования бьюти-услуг BeautyGO.
+    REST API for BeautyGO beauty services booking platform.
 
-    ## Два приложения
-    - **BeautyGO** (🟢 client) — для клиентов
-    - **BeautyGO Pro** (🟣 pro) — для мастеров
+    ## Two Applications
+    - **BeautyGO** (client) - for clients searching and booking beauty services
+    - **BeautyGO Pro** (pro) - for specialists managing their business
 
-    ## Обязательный заголовок
-    Все запросы должны содержать `X-App-Type: client` или `X-App-Type: pro`.
+    ## Required Header
+    All requests MUST include the `X-App-Type` header with value `client` or `pro`.
 
-    ## Аутентификация
-    OTP-based. Вход по телефону → SMS код → JWT токены.
-    - Access token: 30 мин
-    - Refresh token: 7 дней
-    - Header: `Authorization: Bearer <token>`
+    ## Authentication
+    JWT Bearer token. Access token lifetime: 60 min. Refresh token: 7 days.
+    OTP-only authentication (no passwords).
 
-    ## Формат ответов
-    Успех (список): `{ "data": [...], "meta": { "page": 1, "per_page": 20, "total": 100 } }`
-    Успех (объект): `{ "data": {...} }`
-    Ошибка: `{ "error": { "code": "...", "message": "...", "details": {...} } }`
+    ## Response Format
+    Success: `{ "data": {...}, "meta": {...} }`
+    Error: `{ "error": { "code": "...", "message": "...", "details": {...} } }`
+
+    ## Pagination
+    `{ "data": [...], "meta": { "page": 1, "per_page": 20, "total": 100 } }`
+
+    ## IDs
+    All IDs are UUID v4.
+
+    ## Dates
+    All dates and times are in ISO 8601 format.
   version: 1.0.0
   contact:
     name: BeautyGO Team
-
 servers:
   - url: https://api.beautygo.ru/api/v1
     description: Production
