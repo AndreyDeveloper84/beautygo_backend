@@ -1,0 +1,3282 @@
+openapi: 3.0.3
+info:
+  title: BeautyGO API
+  description: |
+    REST API for BeautyGO beauty services booking platform.
+
+    ## Two Applications
+    - **BeautyGO** (client) - for clients searching and booking beauty services
+    - **BeautyGO Pro** (pro) - for specialists managing their business
+
+    ## Required Header
+    All requests MUST include the `X-App-Type` header with value `client` or `pro`.
+
+    ## Authentication
+    JWT Bearer token. Access token lifetime: 60 min. Refresh token: 7 days.
+    OTP-only authentication (no passwords).
+
+    ## Response Format
+    Success: `{ "data": {...}, "meta": {...} }`
+    Error: `{ "error": { "code": "...", "message": "...", "details": {...} } }`
+
+    ## Pagination
+    `{ "data": [...], "meta": { "page": 1, "per_page": 20, "total": 100 } }`
+
+    ## IDs
+    All IDs are UUID v4.
+
+    ## Dates
+    All dates and times are in ISO 8601 format.
+  version: 1.0.0
+  contact:
+    name: BeautyGO Team
+servers:
+  - url: https://api.beautygo.ru/api/v1
+    description: Production
+  - url: http://localhost:8000/api/v1
+    description: Development
+
+tags:
+  - name: auth
+    description: "⚪ Аутентификация (shared)"
+  - name: users
+    description: "⚪ Профиль пользователя (shared)"
+  - name: specialists
+    description: "🟢 Мастера (client)"
+  - name: specialists-pro
+    description: "🟣 Управление профилем мастера (pro)"
+  - name: services-pro
+    description: "🟣 Управление услугами (pro)"
+  - name: categories
+    description: "🟢 Категории услуг (client)"
+  - name: search
+    description: "🟢 Поиск (client)"
+  - name: appointments
+    description: "⚪ Записи (shared)"
+  - name: reviews
+    description: "⚪ Отзывы (shared)"
+  - name: payments
+    description: "🟢 Платежи (client)"
+  - name: notifications
+    description: "⚪ Уведомления (shared)"
+  - name: favorites
+    description: "🟢 Избранное (client)"
+  - name: ai
+    description: "🟢 AI-ассистент (client)"
+  - name: analytics
+    description: "🟣 Аналитика (pro)"
+  - name: health
+    description: "Health checks"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    AppTypeHeader:
+      name: X-App-Type
+      in: header
+      required: true
+      schema:
+        type: string
+        enum: [client, pro]
+      description: "Тип приложения (client = BeautyGO, pro = BeautyGO Pro)"
+
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+
+    PerPageParam:
+      name: per_page
+      in: query
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 50
+
+    UUIDPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    # ═══════════════════════════════════════
+    # COMMON
+    # ═══════════════════════════════════════
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+              example: Invalid input
+            details:
+              type: object
+              additionalProperties: true
+
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+        per_page:
+          type: integer
+        total:
+          type: integer
+
+    # ═══════════════════════════════════════
+    # AUTH
+    # ═══════════════════════════════════════
+
+    RegisterRequest:
+      type: object
+      required: [phone, name, role]
+      properties:
+        phone:
+          type: string
+          pattern: '^\+7\d{10}$'
+          example: "+79991234567"
+        name:
+          type: string
+          maxLength: 100
+          example: Елена Иванова
+        role:
+          type: string
+          enum: [client, specialist]
+        email:
+          type: string
+          format: email
+
+    LoginRequest:
+      type: object
+      required: [phone]
+      properties:
+        phone:
+          type: string
+          pattern: '^\+7\d{10}$'
+          example: "+79991234567"
+
+    OTPSentResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            message:
+              type: string
+              example: OTP sent
+            expires_in:
+              type: integer
+              description: Секунд до истечения кода
+              example: 300
+            retry_after:
+              type: integer
+              description: Секунд до повторной отправки
+              example: 60
+
+    VerifyOTPRequest:
+      type: object
+      required: [phone, code]
+      properties:
+        phone:
+          type: string
+          example: "+79991234567"
+        code:
+          type: string
+          minLength: 4
+          maxLength: 4
+          example: "1234"
+
+    TokenPairResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            access:
+              type: string
+            refresh:
+              type: string
+            expires_in:
+              type: integer
+              description: Секунды до истечения access token
+            user:
+              $ref: '#/components/schemas/User'
+
+    SocialAuthRequest:
+      type: object
+      required: [provider, token]
+      properties:
+        provider:
+          type: string
+          enum: [google, vk, apple, yandex]
+        token:
+          type: string
+          description: OAuth токен от провайдера
+        role:
+          type: string
+          enum: [client, specialist]
+          description: Для новых пользователей
+
+    SocialAuthResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            access:
+              type: string
+            refresh:
+              type: string
+            expires_in:
+              type: integer
+            user:
+              $ref: '#/components/schemas/User'
+            is_new_user:
+              type: boolean
+
+    RefreshRequest:
+      type: object
+      required: [refresh]
+      properties:
+        refresh:
+          type: string
+
+    # ═══════════════════════════════════════
+    # USER
+    # ═══════════════════════════════════════
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        phone:
+          type: string
+        email:
+          type: string
+          format: email
+          nullable: true
+        name:
+          type: string
+        role:
+          type: string
+          enum: [client, specialist, admin]
+        avatar_url:
+          type: string
+          format: uri
+          nullable: true
+        is_phone_verified:
+          type: boolean
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    UserMeResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            user:
+              $ref: '#/components/schemas/User'
+            client_profile:
+              $ref: '#/components/schemas/ClientProfile'
+              nullable: true
+            specialist_profile:
+              $ref: '#/components/schemas/SpecialistProfile'
+              nullable: true
+
+    UserUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        email:
+          type: string
+          format: email
+        avatar:
+          type: string
+          format: binary
+
+    ClientProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        preferred_notification:
+          type: string
+          enum: [push, sms, both]
+        location_lat:
+          type: number
+          format: double
+          nullable: true
+        location_lon:
+          type: number
+          format: double
+          nullable: true
+        favorite_specialists:
+          type: array
+          items:
+            type: string
+            format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+    ClientProfileUpdateRequest:
+      type: object
+      properties:
+        preferred_notification:
+          type: string
+          enum: [push, sms, both]
+        location_lat:
+          type: number
+          format: double
+        location_lon:
+          type: number
+          format: double
+
+    # ═══════════════════════════════════════
+    # SPECIALIST
+    # ═══════════════════════════════════════
+
+    SpecialistProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        bio:
+          type: string
+          nullable: true
+        experience_years:
+          type: integer
+          nullable: true
+        rating:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 5
+          example: 4.8
+        reviews_count:
+          type: integer
+        is_verified:
+          type: boolean
+        is_available:
+          type: boolean
+          description: Принимает ли записи
+        address:
+          type: string
+        location_lat:
+          type: number
+          format: double
+        location_lon:
+          type: number
+          format: double
+        portfolio_urls:
+          type: array
+          items:
+            type: string
+            format: uri
+        certificates:
+          type: array
+          items:
+            $ref: '#/components/schemas/Certificate'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Certificate:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        specialist_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        issuer:
+          type: string
+        issue_date:
+          type: string
+          format: date
+        image_url:
+          type: string
+          format: uri
+
+    SpecialistListItem:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            avatar_url:
+              type: string
+              format: uri
+              nullable: true
+        bio:
+          type: string
+          nullable: true
+        rating:
+          type: number
+          format: float
+        reviews_count:
+          type: integer
+        is_verified:
+          type: boolean
+        address:
+          type: string
+        distance_km:
+          type: number
+          format: float
+          nullable: true
+          description: Только если переданы lat/lon
+        services_preview:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              name:
+                type: string
+              price:
+                type: number
+              price_max:
+                type: number
+                nullable: true
+        next_available_slot:
+          type: string
+          format: date-time
+          nullable: true
+          description: Только если передан date
+
+    SpecialistDetailResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            user:
+              $ref: '#/components/schemas/User'
+            profile:
+              $ref: '#/components/schemas/SpecialistProfile'
+            services:
+              type: array
+              items:
+                $ref: '#/components/schemas/Service'
+            working_hours:
+              type: array
+              items:
+                $ref: '#/components/schemas/WorkingHours'
+            reviews_summary:
+              type: object
+              properties:
+                average_rating:
+                  type: number
+                total_count:
+                  type: integer
+                distribution:
+                  type: object
+                  properties:
+                    "5":
+                      type: integer
+                    "4":
+                      type: integer
+                    "3":
+                      type: integer
+                    "2":
+                      type: integer
+                    "1":
+                      type: integer
+            recent_reviews:
+              type: array
+              maxItems: 5
+              items:
+                $ref: '#/components/schemas/ReviewWithClient'
+
+    SpecialistUpdateRequest:
+      type: object
+      properties:
+        bio:
+          type: string
+          maxLength: 1000
+        experience_years:
+          type: integer
+          minimum: 0
+        address:
+          type: string
+          maxLength: 200
+        location_lat:
+          type: number
+          format: double
+        location_lon:
+          type: number
+          format: double
+        is_available:
+          type: boolean
+        portfolio_urls:
+          type: array
+          items:
+            type: string
+            format: uri
+
+    # ═══════════════════════════════════════
+    # SERVICE & CATEGORY
+    # ═══════════════════════════════════════
+
+    ServiceCategory:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Маникюр
+        slug:
+          type: string
+          example: manicure
+        icon_url:
+          type: string
+          format: uri
+          nullable: true
+        parent_id:
+          type: string
+          format: uuid
+          nullable: true
+        sort_order:
+          type: integer
+
+    Service:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        specialist_id:
+          type: string
+          format: uuid
+        category_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Классический маникюр
+        description:
+          type: string
+          nullable: true
+        price:
+          type: number
+          example: 2500
+        price_max:
+          type: number
+          nullable: true
+          description: "Для цен 'от-до'"
+          example: 3500
+        duration_minutes:
+          type: integer
+          example: 60
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    ServiceCreateRequest:
+      type: object
+      required: [category_id, name, price, duration_minutes]
+      properties:
+        category_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 1000
+        price:
+          type: number
+          minimum: 0
+        price_max:
+          type: number
+          minimum: 0
+        duration_minutes:
+          type: integer
+          minimum: 30
+          maximum: 480
+          description: Должно быть кратно 30
+
+    ServiceUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 200
+        description:
+          type: string
+        price:
+          type: number
+        price_max:
+          type: number
+        duration_minutes:
+          type: integer
+          minimum: 30
+          maximum: 480
+        is_active:
+          type: boolean
+
+    # ═══════════════════════════════════════
+    # SCHEDULE
+    # ═══════════════════════════════════════
+
+    WorkingHours:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        specialist_id:
+          type: string
+          format: uuid
+        day_of_week:
+          type: integer
+          minimum: 0
+          maximum: 6
+          description: "0=Пн, 6=Вс"
+        start_time:
+          type: string
+          example: "10:00"
+        end_time:
+          type: string
+          example: "19:00"
+        break_start:
+          type: string
+          nullable: true
+          example: "13:00"
+        break_end:
+          type: string
+          nullable: true
+          example: "14:00"
+        is_working_day:
+          type: boolean
+
+    WorkingHoursInput:
+      type: object
+      required: [day_of_week, start_time, end_time, is_working_day]
+      properties:
+        day_of_week:
+          type: integer
+          minimum: 0
+          maximum: 6
+        start_time:
+          type: string
+        end_time:
+          type: string
+        break_start:
+          type: string
+        break_end:
+          type: string
+        is_working_day:
+          type: boolean
+
+    ScheduleBlock:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        specialist_id:
+          type: string
+          format: uuid
+        start_datetime:
+          type: string
+          format: date-time
+        end_datetime:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          enum: [vacation, sick_leave, personal, other]
+        comment:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ScheduleBlockCreateRequest:
+      type: object
+      required: [start_datetime, end_datetime, reason]
+      properties:
+        start_datetime:
+          type: string
+          format: date-time
+        end_datetime:
+          type: string
+          format: date-time
+        reason:
+          type: string
+          enum: [vacation, sick_leave, personal, other]
+        comment:
+          type: string
+          maxLength: 500
+
+    ScheduleDay:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        is_working_day:
+          type: boolean
+        working_hours:
+          type: object
+          nullable: true
+          properties:
+            start:
+              type: string
+            end:
+              type: string
+            break_start:
+              type: string
+              nullable: true
+            break_end:
+              type: string
+              nullable: true
+        appointments:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              start_time:
+                type: string
+              end_time:
+                type: string
+              status:
+                type: string
+                enum: [pending, confirmed, completed, cancelled, no_show]
+              client:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  phone:
+                    type: string
+                  avatar_url:
+                    type: string
+                    nullable: true
+              service:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  price:
+                    type: number
+        blocks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ScheduleBlock'
+
+    SlotsResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            specialist_id:
+              type: string
+              format: uuid
+            date:
+              type: string
+              format: date
+            service:
+              type: object
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                name:
+                  type: string
+                duration_minutes:
+                  type: integer
+                price:
+                  type: number
+            slots:
+              type: array
+              items:
+                type: string
+              example: ["10:00", "11:30", "14:00", "15:30"]
+            working_hours:
+              type: object
+              nullable: true
+              description: "null если выходной"
+              properties:
+                start:
+                  type: string
+                end:
+                  type: string
+                break_start:
+                  type: string
+                  nullable: true
+                break_end:
+                  type: string
+                  nullable: true
+
+    # ═══════════════════════════════════════
+    # APPOINTMENT
+    # ═══════════════════════════════════════
+
+    Appointment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        client_id:
+          type: string
+          format: uuid
+        specialist_id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        start_datetime:
+          type: string
+          format: date-time
+        end_datetime:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [pending, confirmed, completed, cancelled, no_show]
+        source:
+          type: string
+          enum: [app, manual, ai]
+        client_comment:
+          type: string
+          nullable: true
+        specialist_comment:
+          type: string
+          nullable: true
+        price:
+          type: number
+          description: Зафиксированная цена на момент записи
+        cancellation_fee:
+          type: number
+          nullable: true
+          description: "Штраф при отмене (24+ч=0, 2-24ч=50%, <2ч=100%)"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AppointmentWithDetails:
+      type: object
+      properties:
+        appointment:
+          $ref: '#/components/schemas/Appointment'
+        specialist:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            avatar_url:
+              type: string
+              nullable: true
+            address:
+              type: string
+            phone:
+              type: string
+        client:
+          type: object
+          nullable: true
+          description: Только для мастера
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            avatar_url:
+              type: string
+              nullable: true
+            phone:
+              type: string
+        service:
+          $ref: '#/components/schemas/Service'
+        can_cancel:
+          type: boolean
+        can_reschedule:
+          type: boolean
+        review:
+          $ref: '#/components/schemas/Review'
+          nullable: true
+
+    AppointmentCreateRequest:
+      type: object
+      required: [specialist_id, service_id, start_datetime]
+      properties:
+        specialist_id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        start_datetime:
+          type: string
+          format: date-time
+          description: "Минимум за 1 час от текущего времени"
+        client_comment:
+          type: string
+          maxLength: 500
+        source:
+          type: string
+          enum: [app, ai]
+          default: app
+
+    ManualAppointmentRequest:
+      type: object
+      required: [service_id, start_datetime, client_name, client_phone]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        start_datetime:
+          type: string
+          format: date-time
+        client_name:
+          type: string
+          maxLength: 100
+        client_phone:
+          type: string
+          pattern: '^\+7\d{10}$'
+        client_comment:
+          type: string
+          maxLength: 500
+
+    AppointmentStatusUpdate:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [confirmed, cancelled, completed, no_show]
+        cancellation_reason:
+          type: string
+          maxLength: 500
+          description: При отмене
+
+    RescheduleRequest:
+      type: object
+      required: [new_datetime]
+      properties:
+        new_datetime:
+          type: string
+          format: date-time
+
+    # ═══════════════════════════════════════
+    # REVIEW
+    # ═══════════════════════════════════════
+
+    Review:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        appointment_id:
+          type: string
+          format: uuid
+        client_id:
+          type: string
+          format: uuid
+        specialist_id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        text:
+          type: string
+          nullable: true
+        is_anonymous:
+          type: boolean
+        specialist_reply:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ReviewWithClient:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        rating:
+          type: integer
+        text:
+          type: string
+          nullable: true
+        client_name:
+          type: string
+          nullable: true
+          description: "null если анонимный"
+        client_avatar:
+          type: string
+          nullable: true
+        service_name:
+          type: string
+        specialist_reply:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    ReviewCreateRequest:
+      type: object
+      required: [appointment_id, rating]
+      properties:
+        appointment_id:
+          type: string
+          format: uuid
+        rating:
+          type: integer
+          minimum: 1
+          maximum: 5
+        text:
+          type: string
+          maxLength: 2000
+        is_anonymous:
+          type: boolean
+          default: false
+
+    ReviewUpdateRequest:
+      type: object
+      properties:
+        text:
+          type: string
+          maxLength: 2000
+
+    ReviewReplyRequest:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          maxLength: 2000
+
+    # ═══════════════════════════════════════
+    # PAYMENT
+    # ═══════════════════════════════════════
+
+    Payment:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        appointment_id:
+          type: string
+          format: uuid
+        client_id:
+          type: string
+          format: uuid
+        amount:
+          type: number
+          example: 2500
+        commission:
+          type: number
+          description: "8% комиссия"
+          example: 200
+        status:
+          type: string
+          enum: [pending, succeeded, failed, refunded]
+        provider:
+          type: string
+          example: yookassa
+        external_id:
+          type: string
+          description: ID в YooKassa
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    PaymentCreateRequest:
+      type: object
+      required: [appointment_id, return_url]
+      properties:
+        appointment_id:
+          type: string
+          format: uuid
+        return_url:
+          type: string
+          format: uri
+          description: URL для редиректа после оплаты
+
+    PaymentCreateResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            payment_id:
+              type: string
+              format: uuid
+            confirmation_url:
+              type: string
+              format: uri
+              description: URL для перехода к оплате YooKassa
+            amount:
+              type: number
+
+    # ═══════════════════════════════════════
+    # NOTIFICATION
+    # ═══════════════════════════════════════
+
+    Notification:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum:
+            - appointment_created
+            - appointment_confirmed
+            - appointment_cancelled
+            - appointment_reminder
+            - review_request
+            - payment_success
+            - payment_failed
+        title:
+          type: string
+        body:
+          type: string
+        data:
+          type: object
+          nullable: true
+        is_read:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    RegisterDeviceRequest:
+      type: object
+      required: [token, platform]
+      properties:
+        token:
+          type: string
+          description: FCM/APNs token
+        platform:
+          type: string
+          enum: [ios, android]
+
+    # ═══════════════════════════════════════
+    # AI
+    # ═══════════════════════════════════════
+
+    AIChatRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+          maxLength: 2000
+        conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: "null = новый диалог"
+        context:
+          type: object
+          properties:
+            location:
+              type: object
+              properties:
+                lat:
+                  type: number
+                lon:
+                  type: number
+            preferred_date:
+              type: string
+              format: date
+            preferred_time:
+              type: string
+              enum: [morning, afternoon, evening]
+
+    AIChatResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            conversation_id:
+              type: string
+              format: uuid
+            message:
+              $ref: '#/components/schemas/AIMessage'
+            action:
+              $ref: '#/components/schemas/AIAction'
+              nullable: true
+
+    AIMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, assistant]
+        content:
+          type: string
+        action:
+          $ref: '#/components/schemas/AIAction'
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    AIAction:
+      type: object
+      properties:
+        type:
+          type: string
+          enum:
+            - show_specialists
+            - show_slots
+            - confirm_booking
+            - show_appointments
+            - ask_clarification
+        data:
+          type: object
+          description: "Данные зависят от type"
+
+    AIActionConfirmRequest:
+      type: object
+      required: [action_type, confirmed]
+      properties:
+        action_type:
+          type: string
+          enum: [show_specialists, show_slots, confirm_booking, ask_clarification]
+        confirmed:
+          type: boolean
+        data:
+          type: object
+          properties:
+            specialist_id:
+              type: string
+              format: uuid
+            service_id:
+              type: string
+              format: uuid
+            datetime:
+              type: string
+              format: date-time
+            selected_specialist_id:
+              type: string
+              format: uuid
+            answer:
+              type: string
+
+    AIConversation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        preview:
+          type: string
+          description: Первое сообщение
+        messages_count:
+          type: integer
+        last_message_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    # ═══════════════════════════════════════
+    # ANALYTICS
+    # ═══════════════════════════════════════
+
+    AnalyticsResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            period:
+              type: object
+              properties:
+                start:
+                  type: string
+                  format: date
+                end:
+                  type: string
+                  format: date
+            appointments:
+              type: object
+              properties:
+                total:
+                  type: integer
+                completed:
+                  type: integer
+                cancelled:
+                  type: integer
+                no_show:
+                  type: integer
+            revenue:
+              type: object
+              properties:
+                total:
+                  type: number
+                average_check:
+                  type: number
+            clients:
+              type: object
+              properties:
+                total:
+                  type: integer
+                new:
+                  type: integer
+                returning:
+                  type: integer
+            rating:
+              type: object
+              properties:
+                current:
+                  type: number
+                change:
+                  type: number
+            popular_services:
+              type: array
+              items:
+                type: object
+                properties:
+                  service_id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  count:
+                    type: integer
+
+    # ═══════════════════════════════════════
+    # SEARCH
+    # ═══════════════════════════════════════
+
+    SearchResponse:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            specialists:
+              type: array
+              items:
+                $ref: '#/components/schemas/SpecialistListItem'
+            services:
+              type: array
+              items:
+                type: object
+                properties:
+                  service:
+                    $ref: '#/components/schemas/Service'
+                  specialist:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      name:
+                        type: string
+                      rating:
+                        type: number
+                      avatar_url:
+                        type: string
+                        nullable: true
+
+  responses:
+    Unauthorized:
+      description: Не авторизован
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: Authentication credentials were not provided.
+
+    Forbidden:
+      description: Доступ запрещён / Неверный X-App-Type
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: WRONG_APP_TYPE
+              message: This endpoint is not available for your app type.
+
+    NotFound:
+      description: Не найдено
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: NOT_FOUND
+              message: Object not found.
+
+    ValidationError:
+      description: Ошибка валидации
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+
+# ═══════════════════════════════════════════════════════════
+# PATHS
+# ═══════════════════════════════════════════════════════════
+
+paths:
+  # ─── AUTH ⚪ ───────────────────────────────────────────
+
+  /auth/register/:
+    post:
+      tags: [auth]
+      summary: Регистрация нового пользователя
+      description: Создаёт аккаунт и отправляет OTP на указанный телефон.
+      operationId: auth_register
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Пользователь создан, OTP отправлен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OTPSentResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          description: Телефон уже зарегистрирован
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: PHONE_EXISTS
+                  message: User with this phone already exists
+
+  /auth/login/:
+    post:
+      tags: [auth]
+      summary: Вход — отправка OTP
+      description: Отправляет OTP на телефон зарегистрированного пользователя.
+      operationId: auth_login
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: OTP отправлен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OTPSentResponse'
+        '404':
+          description: Пользователь не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: USER_NOT_FOUND
+                  message: User with this phone not found
+        '429':
+          description: Слишком частые запросы
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: TOO_MANY_REQUESTS
+                  message: Please wait before requesting a new code
+
+  /auth/verify-otp/:
+    post:
+      tags: [auth]
+      summary: Проверка OTP → получение токенов
+      operationId: auth_verify_otp
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyOTPRequest'
+      responses:
+        '200':
+          description: Токены получены
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPairResponse'
+        '400':
+          description: Неверный или просроченный OTP
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: INVALID_OTP
+                  message: Invalid or expired OTP code
+
+  /auth/social/:
+    post:
+      tags: [auth]
+      summary: Авторизация через соцсети
+      description: OAuth авторизация. Если пользователя нет — создаёт новый аккаунт (нужен role).
+      operationId: auth_social
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SocialAuthRequest'
+      responses:
+        '200':
+          description: Авторизация успешна
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SocialAuthResponse'
+        '400':
+          description: Невалидный OAuth токен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: INVALID_TOKEN
+                  message: Invalid OAuth token
+
+  /auth/token/refresh/:
+    post:
+      tags: [auth]
+      summary: Обновить access token
+      operationId: auth_refresh
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: Новая пара токенов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPairResponse'
+        '401':
+          description: Невалидный refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/logout/:
+    post:
+      tags: [auth]
+      summary: Выход — инвалидация refresh token
+      operationId: auth_logout
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh:
+                  type: string
+      responses:
+        '204':
+          description: Успешный выход
+
+  # ─── USERS ⚪ ──────────────────────────────────────────
+
+  /users/me/:
+    get:
+      tags: [users]
+      summary: Текущий пользователь
+      operationId: users_me_read
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      responses:
+        '200':
+          description: Профиль пользователя
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserMeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    patch:
+      tags: [users]
+      summary: Обновить профиль
+      operationId: users_me_update
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/UserUpdateRequest'
+      responses:
+        '200':
+          description: Обновлённый пользователь
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/User'
+
+    delete:
+      tags: [users]
+      summary: Удалить аккаунт
+      operationId: users_me_delete
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      responses:
+        '204':
+          description: Аккаунт удалён
+
+  /users/me/client-profile/:
+    patch:
+      tags: [users]
+      summary: Обновить профиль клиента
+      operationId: users_me_client_profile_update
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientProfileUpdateRequest'
+      responses:
+        '200':
+          description: Обновлённый профиль клиента
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ClientProfile'
+
+  # ─── SPECIALISTS 🟢 ───────────────────────────────────
+
+  /specialists/:
+    get:
+      tags: [specialists]
+      summary: Поиск мастеров
+      operationId: specialists_list
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - name: category_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: service_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: lat
+          in: query
+          schema:
+            type: number
+            format: double
+        - name: lon
+          in: query
+          schema:
+            type: number
+            format: double
+        - name: radius
+          in: query
+          schema:
+            type: number
+            default: 10
+          description: Радиус в км
+        - name: min_rating
+          in: query
+          schema:
+            type: number
+            minimum: 1
+            maximum: 5
+        - name: is_available
+          in: query
+          schema:
+            type: boolean
+        - name: date
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Для проверки наличия слотов
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [rating, distance, price, reviews]
+            default: rating
+      responses:
+        '200':
+          description: Список мастеров
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SpecialistListItem'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+
+  /specialists/{id}/:
+    get:
+      tags: [specialists]
+      summary: Детальный профиль мастера
+      operationId: specialists_detail
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: Профиль мастера
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SpecialistDetailResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /specialists/{id}/services/:
+    get:
+      tags: [specialists]
+      summary: Услуги мастера
+      operationId: specialists_services
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: Услуги с категориями
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      results:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Service'
+                      categories:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ServiceCategory'
+
+  /specialists/{id}/slots/:
+    get:
+      tags: [specialists]
+      summary: Доступные слоты
+      description: "Интервал 30 мин. Слоты не ближе 1 часа от текущего времени."
+      operationId: specialists_slots
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+        - name: date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: service_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Доступные слоты
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SlotsResponse'
+        '400':
+          description: Некорректная дата
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                date_in_past:
+                  value:
+                    error:
+                      code: DATE_IN_PAST
+                      message: Date is in the past
+                date_too_far:
+                  value:
+                    error:
+                      code: DATE_TOO_FAR
+                      message: Date is too far in the future (max 30 days)
+
+  /specialists/{id}/reviews/:
+    get:
+      tags: [specialists]
+      summary: Отзывы о мастере
+      operationId: specialists_reviews
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - name: rating
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
+      responses:
+        '200':
+          description: Отзывы
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ReviewWithClient'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+
+  # ─── SPECIALISTS PRO 🟣 ───────────────────────────────
+
+  /specialists/me/:
+    patch:
+      tags: [specialists-pro]
+      summary: Обновить профиль мастера
+      operationId: specialists_me_update
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SpecialistUpdateRequest'
+      responses:
+        '200':
+          description: Обновлённый профиль
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/SpecialistProfile'
+
+  /specialists/me/services/:
+    get:
+      tags: [services-pro]
+      summary: Мои услуги
+      operationId: specialists_me_services_list
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      responses:
+        '200':
+          description: Список услуг
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Service'
+
+    post:
+      tags: [services-pro]
+      summary: Создать услугу
+      operationId: specialists_me_services_create
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceCreateRequest'
+      responses:
+        '201':
+          description: Услуга создана
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Service'
+        '400':
+          description: Ошибка валидации
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_category:
+                  value:
+                    error:
+                      code: INVALID_CATEGORY
+                      message: Category does not exist
+                invalid_duration:
+                  value:
+                    error:
+                      code: INVALID_DURATION
+                      message: Duration must be a multiple of 30
+
+  /specialists/me/services/{id}/:
+    patch:
+      tags: [services-pro]
+      summary: Обновить услугу
+      operationId: specialists_me_services_update
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceUpdateRequest'
+      responses:
+        '200':
+          description: Обновлённая услуга
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Service'
+
+    delete:
+      tags: [services-pro]
+      summary: Удалить услугу
+      description: "409 если есть будущие записи на эту услугу."
+      operationId: specialists_me_services_delete
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '204':
+          description: Удалено
+        '409':
+          description: Есть будущие записи
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: HAS_APPOINTMENTS
+                  message: Service has future appointments
+
+  /specialists/me/working-hours/:
+    get:
+      tags: [specialists-pro]
+      summary: Мои рабочие часы
+      operationId: specialists_me_working_hours_read
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      responses:
+        '200':
+          description: Рабочие часы
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WorkingHours'
+
+    put:
+      tags: [specialists-pro]
+      summary: Установить рабочие часы (полная замена)
+      operationId: specialists_me_working_hours_set
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [working_hours]
+              properties:
+                working_hours:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/WorkingHoursInput'
+      responses:
+        '200':
+          description: Обновлённые рабочие часы
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WorkingHours'
+        '400':
+          description: Ошибка валидации
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_time:
+                  value:
+                    error:
+                      code: INVALID_TIME_RANGE
+                      message: end_time must be after start_time
+                invalid_break:
+                  value:
+                    error:
+                      code: INVALID_BREAK
+                      message: Break must be within working hours
+
+  /specialists/me/schedule/:
+    get:
+      tags: [specialists-pro]
+      summary: Расписание на период
+      operationId: specialists_me_schedule
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - name: start_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          description: Максимум 30 дней от start_date
+      responses:
+        '200':
+          description: Расписание с записями и блокировками
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      days:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ScheduleDay'
+
+  /specialists/me/schedule/blocks/:
+    post:
+      tags: [specialists-pro]
+      summary: Заблокировать время
+      operationId: specialists_me_blocks_create
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScheduleBlockCreateRequest'
+      responses:
+        '201':
+          description: Блокировка создана
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/ScheduleBlock'
+        '409':
+          description: Есть записи на это время
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: HAS_APPOINTMENTS
+                  message: There are appointments during this period
+
+  /specialists/me/schedule/blocks/{id}/:
+    delete:
+      tags: [specialists-pro]
+      summary: Снять блокировку
+      operationId: specialists_me_blocks_delete
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '204':
+          description: Блокировка снята
+
+  /specialists/me/analytics/:
+    get:
+      tags: [analytics]
+      summary: Статистика мастера
+      operationId: specialists_me_analytics
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - name: period
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [week, month, year]
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Аналитика
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsResponse'
+
+  # ─── CATEGORIES 🟢 ────────────────────────────────────
+
+  /categories/:
+    get:
+      tags: [categories]
+      summary: Список категорий услуг
+      operationId: categories_list
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - name: parent_id
+          in: query
+          schema:
+            type: string
+          description: "UUID или 'root' для корневых"
+      responses:
+        '200':
+          description: Категории
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ServiceCategory'
+
+  /categories/{id}/:
+    get:
+      tags: [categories]
+      summary: Категория с подкатегориями
+      operationId: categories_detail
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: Категория
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      category:
+                        $ref: '#/components/schemas/ServiceCategory'
+                      subcategories:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ServiceCategory'
+                      specialists_count:
+                        type: integer
+
+  # ─── SEARCH 🟢 ────────────────────────────────────────
+
+  /search/:
+    get:
+      tags: [search]
+      summary: Глобальный поиск
+      operationId: search
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [specialists, services, all]
+            default: all
+        - name: lat
+          in: query
+          schema:
+            type: number
+        - name: lon
+          in: query
+          schema:
+            type: number
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        '200':
+          description: Результаты поиска
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'
+
+  # ─── APPOINTMENTS ⚪ ───────────────────────────────────
+
+  /appointments/:
+    post:
+      tags: [appointments]
+      summary: Создать запись
+      operationId: appointments_create
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppointmentCreateRequest'
+      responses:
+        '201':
+          description: Запись создана
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/AppointmentWithDetails'
+        '400':
+          description: Ошибка
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                slot_taken:
+                  value:
+                    error:
+                      code: SLOT_NOT_AVAILABLE
+                      message: This time slot is already taken or blocked
+                invalid_time:
+                  value:
+                    error:
+                      code: INVALID_DATETIME
+                      message: Booking must be at least 1 hour in advance
+                duplicate:
+                  value:
+                    error:
+                      code: DUPLICATE_APPOINTMENT
+                      message: You already have an appointment at this time
+
+    get:
+      tags: [appointments]
+      summary: Мои записи
+      operationId: appointments_list
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, confirmed, completed, cancelled, no_show]
+          description: Можно передать несколько через запятую
+        - name: start_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: end_date
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: upcoming
+          in: query
+          schema:
+            type: boolean
+          description: Только будущие
+      responses:
+        '200':
+          description: Список записей
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AppointmentWithDetails'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+
+  /appointments/{id}/:
+    get:
+      tags: [appointments]
+      summary: Детали записи
+      operationId: appointments_detail
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: Детали записи
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/AppointmentWithDetails'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /appointments/{id}/status/:
+    patch:
+      tags: [appointments]
+      summary: Изменить статус записи
+      description: |
+        Допустимые переходы:
+        - pending → confirmed (мастер)
+        - pending → cancelled (клиент, мастер)
+        - confirmed → cancelled (клиент, мастер)
+        - confirmed → completed (мастер)
+        - confirmed → no_show (мастер)
+
+        Политика отмены:
+        - За 24+ часов: бесплатно
+        - За 2-24 часа: 50% стоимости
+        - За менее 2 часов: 100% стоимости
+      operationId: appointments_status_update
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AppointmentStatusUpdate'
+      responses:
+        '200':
+          description: Статус обновлён
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Appointment'
+        '400':
+          description: Недопустимый переход
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_transition:
+                  value:
+                    error:
+                      code: INVALID_STATUS_TRANSITION
+                      message: Cannot transition from completed to cancelled
+                too_late:
+                  value:
+                    error:
+                      code: CANCELLATION_TOO_LATE
+                      message: Cannot cancel less than 2 hours before appointment
+        '403':
+          description: Нет прав
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: NOT_ALLOWED
+                  message: Only specialist can confirm appointments
+
+  /appointments/{id}/reschedule/:
+    patch:
+      tags: [appointments]
+      summary: Перенести запись
+      description: Переносит запись на новое время. Статус сбрасывается на pending.
+      operationId: appointments_reschedule
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RescheduleRequest'
+      responses:
+        '200':
+          description: Запись перенесена
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Appointment'
+        '400':
+          description: Слот недоступен или слишком поздно
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /appointments/manual/:
+    post:
+      tags: [appointments]
+      summary: "🟣 Ручное добавление записи мастером"
+      description: |
+        Только для BeautyGO Pro. Мастер создаёт запись вручную.
+        Если клиента с таким телефоном нет в системе, запись создаётся
+        с указанными client_name/client_phone без привязки к user.
+      operationId: appointments_manual_create
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualAppointmentRequest'
+      responses:
+        '201':
+          description: Запись создана
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Appointment'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /appointments/{id}/calendar/:
+    get:
+      tags: [appointments]
+      summary: Скачать .ics файл
+      operationId: appointments_calendar
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: iCalendar файл
+          content:
+            text/calendar:
+              schema:
+                type: string
+                format: binary
+
+  # ─── REVIEWS ⚪ ────────────────────────────────────────
+
+  /reviews/:
+    post:
+      tags: [reviews]
+      summary: Создать отзыв
+      description: Только для завершённых записей (status=completed). Один отзыв на запись.
+      operationId: reviews_create
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewCreateRequest'
+      responses:
+        '201':
+          description: Отзыв создан
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Review'
+        '400':
+          description: Нельзя оставить отзыв
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: APPOINTMENT_NOT_COMPLETED
+                  message: You can only review completed appointments
+        '409':
+          description: Отзыв уже существует
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: REVIEW_EXISTS
+                  message: Review for this appointment already exists
+
+  /reviews/{id}/:
+    patch:
+      tags: [reviews]
+      summary: Редактировать отзыв
+      description: Только автор может редактировать текст.
+      operationId: reviews_update
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewUpdateRequest'
+      responses:
+        '200':
+          description: Отзыв обновлён
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Review'
+
+  /reviews/{id}/reply/:
+    post:
+      tags: [reviews]
+      summary: Ответ мастера на отзыв
+      operationId: reviews_reply
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewReplyRequest'
+      responses:
+        '200':
+          description: Ответ добавлен
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Review'
+
+  # ─── PAYMENTS 🟢 ──────────────────────────────────────
+
+  /payments/create/:
+    post:
+      tags: [payments]
+      summary: Создать платёж
+      operationId: payments_create
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentCreateRequest'
+      responses:
+        '201':
+          description: Платёж создан, URL для оплаты
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentCreateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /payments/{id}/:
+    get:
+      tags: [payments]
+      summary: Статус платежа
+      operationId: payments_detail
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: Детали платежа
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Payment'
+
+  /payments/webhook/:
+    post:
+      tags: [payments]
+      summary: YooKassa webhook
+      description: Без авторизации. Проверка через подпись запроса.
+      operationId: payments_webhook
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                event:
+                  type: string
+                  enum: [payment.succeeded, payment.canceled, refund.succeeded]
+                object:
+                  type: object
+      responses:
+        '200':
+          description: Webhook обработан
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+        '403':
+          description: Невалидная подпись
+
+  # ─── NOTIFICATIONS ⚪ ──────────────────────────────────
+
+  /notifications/:
+    get:
+      tags: [notifications]
+      summary: Список уведомлений
+      operationId: notifications_list
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+        - name: is_read
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Уведомления
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Notification'
+                  meta:
+                    allOf:
+                      - $ref: '#/components/schemas/PaginationMeta'
+                      - type: object
+                        properties:
+                          unread_count:
+                            type: integer
+
+  /notifications/{id}/read/:
+    patch:
+      tags: [notifications]
+      summary: Прочитать уведомление
+      operationId: notifications_read
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: Помечено прочитанным
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Notification'
+
+  /notifications/read-all/:
+    post:
+      tags: [notifications]
+      summary: Прочитать все уведомления
+      operationId: notifications_read_all
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      responses:
+        '200':
+          description: Все помечены прочитанными
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      marked_count:
+                        type: integer
+
+  /notifications/register-device/:
+    post:
+      tags: [notifications]
+      summary: Зарегистрировать FCM token
+      description: "app_type берётся из X-App-Type header."
+      operationId: notifications_register_device
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterDeviceRequest'
+      responses:
+        '201':
+          description: Устройство зарегистрировано
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      device_id:
+                        type: string
+                        format: uuid
+                      app_type:
+                        type: string
+                        enum: [client, pro]
+
+  # ─── FAVORITES 🟢 ─────────────────────────────────────
+
+  /favorites/specialists/:
+    get:
+      tags: [favorites]
+      summary: Избранные мастера
+      operationId: favorites_list
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      responses:
+        '200':
+          description: Список избранных
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/SpecialistListItem'
+
+  /favorites/specialists/{id}/:
+    post:
+      tags: [favorites]
+      summary: Добавить в избранное
+      operationId: favorites_add
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '201':
+          description: Добавлено
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      added:
+                        type: boolean
+                        example: true
+
+    delete:
+      tags: [favorites]
+      summary: Удалить из избранного
+      operationId: favorites_remove
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '204':
+          description: Удалено
+
+  # ─── AI 🟢 ────────────────────────────────────────────
+
+  /ai/chat/:
+    post:
+      tags: [ai]
+      summary: Отправить сообщение AI
+      description: |
+        Если conversation_id не указан — создаётся новый диалог.
+        Ответ может содержать action с данными для UI.
+
+        Типы action:
+        - show_specialists: рекомендации мастеров с match_score и причинами
+        - show_slots: доступные слоты для выбранного мастера
+        - confirm_booking: подтверждение бронирования
+        - show_appointments: показать записи
+        - ask_clarification: уточняющий вопрос с подсказками
+      operationId: ai_chat
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AIChatRequest'
+      responses:
+        '200':
+          description: Ответ AI
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIChatResponse'
+        '429':
+          description: Rate limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: RATE_LIMITED
+                  message: Too many requests
+        '503':
+          description: AI недоступен
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: AI_UNAVAILABLE
+                  message: AI service is temporarily unavailable
+
+  /ai/chat/{conversation_id}/action/:
+    post:
+      tags: [ai]
+      summary: Подтвердить/отклонить действие AI
+      operationId: ai_action_confirm
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - name: conversation_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AIActionConfirmRequest'
+      responses:
+        '200':
+          description: Действие обработано
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      success:
+                        type: boolean
+                      result:
+                        type: object
+                        properties:
+                          appointment:
+                            $ref: '#/components/schemas/Appointment'
+                            nullable: true
+                          next_message:
+                            $ref: '#/components/schemas/AIMessage'
+                            nullable: true
+                          next_action:
+                            $ref: '#/components/schemas/AIAction'
+                            nullable: true
+
+  /ai/conversations/:
+    get:
+      tags: [ai]
+      summary: История диалогов
+      operationId: ai_conversations_list
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/PerPageParam'
+      responses:
+        '200':
+          description: Список диалогов
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AIConversation'
+                  meta:
+                    $ref: '#/components/schemas/PaginationMeta'
+
+  /ai/conversations/{id}/:
+    get:
+      tags: [ai]
+      summary: Диалог с сообщениями
+      operationId: ai_conversations_detail
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '200':
+          description: Диалог
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      messages:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AIMessage'
+                      created_at:
+                        type: string
+                        format: date-time
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [ai]
+      summary: Удалить диалог
+      operationId: ai_conversations_delete
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AppTypeHeader'
+        - $ref: '#/components/parameters/UUIDPath'
+      responses:
+        '204':
+          description: Удалено
+
+  # ─── HEALTH ────────────────────────────────────────────
+
+  /health/:
+    get:
+      tags: [health]
+      summary: Health check
+      operationId: health_check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+                  version:
+                    type: string
+                    example: "1.0.0"
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  /health/ready/:
+    get:
+      tags: [health]
+      summary: Readiness check
+      operationId: health_ready
+      responses:
+        '200':
+          description: Все сервисы доступны
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+                  database:
+                    type: string
+                    example: connected
+                  cache:
+                    type: string
+                    example: connected
+                  ai:
+                    type: string
+                    example: available
