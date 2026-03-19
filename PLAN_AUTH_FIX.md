@@ -84,22 +84,23 @@ class OTPCode(models.Model):
 - Генерирует 6-значный код
 - Сохраняет OTPCode
 - Отправляет SMS (заглушка на dev, SMS.RU на prod)
-- Rate limit: max 3 запроса в минуту на номер
+- Rate limit: max 3 запроса в минуту на номер (отдельный resend-otp не нужен)
 - Ответ: `{"data": {"retry_after": 60}}`
 
 ### 3.2 — Endpoint `POST /auth/verify-otp/`
 - Принимает `{"phone": "+79001234567", "code": "123456"}`
 - Проверяет код (не истёк, не использован, attempts < 5)
-- Если юзера нет — создаёт (role определяется позже или через query param)
-- Возвращает JWT (access + refresh)
+- Если юзера нет — создаёт User (role из X-App-Type header: client → client, pro → specialist)
+- Возвращает JWT (access + refresh) + `is_new_user: true/false`
 - Помечает OTP как is_used=True
 
 ### 3.3 — Обновить `POST /auth/register/`
-Оставить для явной регистрации с указанием роли:
-- Принимает `{"phone": "...", "code": "...", "role": "client|specialist", "first_name": "..."}`
-- Проверяет OTP
-- Создаёт User с ролью
-- Возвращает JWT
+Отдельный endpoint для завершения регистрации (вызывается при is_new_user=true):
+- **Требует Authorization** (Bearer token из verify-otp)
+- Принимает `{"first_name": "...", "last_name": "..."}`
+- Роль УЖЕ задана при verify-otp из X-App-Type (не передаётся в body)
+- Обновляет имя, помечает is_verified=true
+- Создаёт ClientProfile или SpecialistProfile
 
 ### 3.4 — SMS сервис (абстракция)
 ```python
@@ -116,10 +117,12 @@ class SMSRuService(BaseSMSService):       # prod
 
 ### 4.1 — Endpoint `POST /auth/social/{provider}/`
 - Providers: `vk`, `google`, `apple`, `yandex`
-- Принимает `{"access_token": "...", "role": "client"}` (role при первом входе)
+- Принимает `{"access_token": "..."}` (Apple: `{"id_token": "...", "authorization_code": "..."}`)
+- Роль определяется из X-App-Type header (как в verify-otp)
 - Валидирует token через API провайдера
 - Создаёт/находит User
 - Возвращает JWT + `{"is_new_user": true/false}`
+- При is_new_user=true клиент вызывает POST /auth/register/ (тот же flow)
 
 ### 4.2 — Модель SocialAccount
 ```python
