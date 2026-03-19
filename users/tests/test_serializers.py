@@ -2,9 +2,7 @@ import pytest
 
 from users.models import User
 from users.serializers import (
-    LoginSerializer,
     PhoneSerializer,
-    RegisterPhoneSerializer,
     RegisterSerializer,
     VerifyOTPSerializer,
 )

@@ -1,8 +1,5 @@
 """X-App-Type header middleware."""
 
-import json
-
-from django.conf import settings
 from django.http import JsonResponse
 
 
@@ -36,13 +33,22 @@ class AppTypeMiddleware:
 
         if not app_type:
             return JsonResponse(
-                {"error": {"code": "APP_TYPE_MISSING", "message": "X-App-Type header is required"}},
+                {"error": {
+                    "code": "APP_TYPE_MISSING",
+                    "message": "X-App-Type header is required",
+                }},
                 status=403,
             )
 
         if app_type not in VALID_APP_TYPES:
             return JsonResponse(
-                {"error": {"code": "APP_TYPE_INVALID", "message": f"X-App-Type must be one of: {', '.join(VALID_APP_TYPES)}"}},
+                {"error": {
+                    "code": "APP_TYPE_INVALID",
+                    "message": (
+                        f"X-App-Type must be one of: "
+                        f"{', '.join(VALID_APP_TYPES)}"
+                    ),
+                }},
                 status=403,
             )
 
