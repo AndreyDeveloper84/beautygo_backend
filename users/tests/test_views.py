@@ -303,7 +303,7 @@ class TestClientProfileView:
             self.URL, {'avatar': buf}, format='multipart',
         )
         logger.info("Response %s: avatar=%s", response.status_code,
-                     response.data.get('data', {}).get('avatar'))
+                    response.data.get('data', {}).get('avatar'))
         assert response.status_code == status.HTTP_200_OK
         assert response.data['data']['avatar'] is not None
 
