@@ -18,14 +18,14 @@ class TestProfileSignal:
         logger.info("Specialist created: profile exists=%s", exists)
         assert exists
 
-    def test_profile_not_created_for_client(self):
+    def test_profile_created_for_client(self):
         user = User.objects.create_user(
             username='newclient', password='testpass123', role='client',
             phone='+79002000002',
         )
         exists = Profile.objects.filter(user=user).exists()
-        logger.info("Client created: profile exists=%s (expected False)", exists)
-        assert not exists
+        logger.info("Client created: profile exists=%s", exists)
+        assert exists
 
     def test_no_duplicate_on_save(self):
         user = User.objects.create_user(

@@ -2,6 +2,7 @@
 
 import logging
 
+import rest_framework.parsers
 from django_filters.rest_framework import FilterSet, filters
 from rest_framework import generics, permissions, viewsets
 from rest_framework.views import APIView
@@ -11,6 +12,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .models import Profile, Service
 from .response import error_response, success_response
 from .serializers import (
+    ClientProfileSerializer,
     LoginSerializer,
     LogoutSerializer,
     ProfileSerializer,
@@ -179,3 +181,46 @@ class MyProfileView(generics.RetrieveUpdateAPIView):
     def get_object(self):
         profile, created = Profile.objects.get_or_create(user=self.request.user)
         return profile
+
+
+class IsClient(permissions.BasePermission):
+    """Allow access only to users with role=client."""
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.role == 'client'
+
+
+class ClientProfileView(generics.RetrieveUpdateAPIView):
+    """GET/PATCH /api/v1/auth/clients/me/ — Client profile CRUD."""
+    serializer_class = ClientProfileSerializer
+    permission_classes = [permissions.IsAuthenticated, IsClient]
+    parser_classes = [
+        rest_framework.parsers.MultiPartParser,
+        rest_framework.parsers.JSONParser,
+    ]
+
+    def get_object(self):
+        profile, _ = Profile.objects.get_or_create(user=self.request.user)
+        return profile
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return success_response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(
+            instance, data=request.data, partial=partial,
+        )
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+        serializer.save()
+        return success_response(serializer.data)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs['partial'] = True
+        return self.update(request, *args, **kwargs)

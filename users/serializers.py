@@ -89,3 +89,36 @@ class ProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = Profile
         fields = ['id', 'full_name', 'avatar', 'bio', 'city', 'experience_years']
+
+
+ALLOWED_AVATAR_TYPES = ('image/jpeg', 'image/png', 'image/webp')
+MAX_AVATAR_SIZE = 5 * 1024 * 1024  # 5 MB
+
+
+class ClientProfileSerializer(serializers.ModelSerializer):
+    """Serializer for client profile with avatar and location validation."""
+
+    class Meta:
+        model = Profile
+        fields = [
+            'id', 'full_name', 'avatar', 'city',
+            'default_location_lat', 'default_location_lng',
+        ]
+
+    def validate_full_name(self, value):
+        if len(value.strip()) < 2:
+            raise serializers.ValidationError(
+                "Имя должно содержать минимум 2 символа"
+            )
+        return value.strip()
+
+    def validate_avatar(self, value):
+        if value.content_type not in ALLOWED_AVATAR_TYPES:
+            raise serializers.ValidationError(
+                f"Допустимые форматы: JPEG, PNG, WebP"
+            )
+        if value.size > MAX_AVATAR_SIZE:
+            raise serializers.ValidationError(
+                "Размер файла не должен превышать 5 МБ"
+            )
+        return value
