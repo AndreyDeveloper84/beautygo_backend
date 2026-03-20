@@ -115,7 +115,7 @@ class ClientProfileSerializer(serializers.ModelSerializer):
     def validate_avatar(self, value):
         if value.content_type not in ALLOWED_AVATAR_TYPES:
             raise serializers.ValidationError(
-                f"Допустимые форматы: JPEG, PNG, WebP"
+                "Допустимые форматы: JPEG, PNG, WebP"
             )
         if value.size > MAX_AVATAR_SIZE:
             raise serializers.ValidationError(
