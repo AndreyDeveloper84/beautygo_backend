@@ -33,3 +33,6 @@ Thumbs.db
 *.egg-info/
 dist/
 build/
+
+# Test logs
+test_results.log
