@@ -36,3 +36,4 @@ build/
 
 # Test logs
 test_results.log
+tests/integration_results.log
