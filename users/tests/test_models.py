@@ -84,7 +84,10 @@ class TestProfileModel:
 
     def test_defaults(self, client_user):
         profile = Profile.objects.create(user=client_user, full_name='Test')
-        logger.info("Profile defaults: bio='%s', city='%s', experience=%d", profile.bio, profile.city, profile.experience_years)
+        logger.info(
+            "Profile defaults: bio='%s', city='%s', experience=%d",
+            profile.bio, profile.city, profile.experience_years,
+        )
         assert profile.bio == ''
         assert profile.city == ''
         assert profile.experience_years == 0
