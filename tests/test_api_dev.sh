@@ -7,6 +7,8 @@
 #   ./tests/test_api_dev.sh https://dev.beautygo.ru # custom server
 #   BASE_URL=https://dev.beautygo.ru ./tests/test_api_dev.sh
 #
+# Logs are written to: tests/integration_results.log
+#
 # Requirements: curl, jq
 # =============================================================================
 
@@ -14,6 +16,44 @@ set -euo pipefail
 
 BASE_URL="${1:-${BASE_URL:-http://localhost:8000}}"
 API="${BASE_URL}/api/v1"
+
+# --- Log file ---
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOG_FILE="${SCRIPT_DIR}/integration_results.log"
+RUN_TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+
+# Initialize log file
+cat > "$LOG_FILE" <<EOF
+================================================================================
+BeautyGO Integration Tests
+Server: ${BASE_URL}
+Started: ${RUN_TIMESTAMP}
+================================================================================
+
+EOF
+
+# Log to both file and stdout
+log() {
+    local level="$1"
+    shift
+    local ts
+    ts="$(date '+%Y-%m-%d %H:%M:%S')"
+    echo "${ts} [${level}] $*" >> "$LOG_FILE"
+}
+
+log_section() {
+    echo "" >> "$LOG_FILE"
+    echo "--- $1 ---" >> "$LOG_FILE"
+}
+
+log_http() {
+    local method="$1"
+    local path="$2"
+    local status="$3"
+    local body="$4"
+    log "HTTP" "${method} ${path} → ${status}"
+    log "BODY" "${body:0:500}"
+}
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -37,11 +77,13 @@ assert() {
 
     if [ "$expected" = "$actual" ]; then
         echo -e "  ${GREEN}✓${NC} ${name}"
+        log "PASS" "${name}"
         PASSED=$((PASSED + 1))
     else
         echo -e "  ${RED}✗${NC} ${name}"
         echo -e "    expected: ${YELLOW}${expected}${NC}"
         echo -e "    actual:   ${RED}${actual}${NC}"
+        log "FAIL" "${name} (expected=${expected}, got=${actual})"
         FAILED=$((FAILED + 1))
         FAILURES="${FAILURES}\n  ✗ ${name} (expected=${expected}, got=${actual})"
     fi
@@ -55,10 +97,12 @@ assert_not() {
 
     if [ "$unexpected" != "$actual" ]; then
         echo -e "  ${GREEN}✓${NC} ${name}"
+        log "PASS" "${name}"
         PASSED=$((PASSED + 1))
     else
         echo -e "  ${RED}✗${NC} ${name}"
         echo -e "    should NOT be: ${RED}${unexpected}${NC}"
+        log "FAIL" "${name} (should not be ${unexpected})"
         FAILED=$((FAILED + 1))
         FAILURES="${FAILURES}\n  ✗ ${name} (should not be ${unexpected})"
     fi
@@ -72,11 +116,13 @@ assert_contains() {
 
     if echo "$body" | grep -q "$substring"; then
         echo -e "  ${GREEN}✓${NC} ${name}"
+        log "PASS" "${name}"
         PASSED=$((PASSED + 1))
     else
         echo -e "  ${RED}✗${NC} ${name}"
         echo -e "    body does not contain: ${YELLOW}${substring}${NC}"
         echo -e "    body: ${RED}${body:0:200}${NC}"
+        log "FAIL" "${name} (missing '${substring}' in: ${body:0:200})"
         FAILED=$((FAILED + 1))
         FAILURES="${FAILURES}\n  ✗ ${name} (missing '${substring}')"
     fi
@@ -120,6 +166,8 @@ http() {
 
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
+
+    log_http "$method" "$path" "$HTTP_STATUS" "$HTTP_BODY"
 }
 
 # Generate unique phone for test isolation
@@ -139,6 +187,7 @@ echo ""
 # =============================================================================
 # 0. CONNECTIVITY
 # =============================================================================
+log_section "[0] Server connectivity"
 echo -e "${CYAN}[0] Server connectivity${NC}"
 
 http GET "/health/"
@@ -150,6 +199,7 @@ assert_json_field "Health body has status=ok" ".status" "ok" "$HTTP_BODY"
 # 1. X-APP-TYPE MIDDLEWARE
 # =============================================================================
 echo ""
+log_section "[1] X-App-Type middleware"
 echo -e "${CYAN}[1] X-App-Type middleware${NC}"
 
 # 1.1 Missing header
@@ -202,6 +252,7 @@ assert "X-App-Type is case-sensitive (CLIENT ≠ client) → 403" "403" "$status
 # 2. REGISTRATION
 # =============================================================================
 echo ""
+log_section "[2] Registration (POST /auth/register/)"
 echo -e "${CYAN}[2] Registration (POST /auth/register/)${NC}"
 
 # 2.1 Successful client registration
@@ -263,6 +314,7 @@ assert_not "Phone with spaces doesn't 500" "500" "$HTTP_STATUS"
 # 3. LOGIN
 # =============================================================================
 echo ""
+log_section "[3] Login (POST /auth/login/)"
 echo -e "${CYAN}[3] Login (POST /auth/login/)${NC}"
 
 # Need to wait for OTP rate limit from registration
@@ -297,6 +349,7 @@ assert "Login invalid phone → 400" "400" "$HTTP_STATUS"
 # 4. VERIFY OTP
 # =============================================================================
 echo ""
+log_section "[4] Verify OTP (POST /auth/verify-otp/)"
 echo -e "${CYAN}[4] Verify OTP (POST /auth/verify-otp/)${NC}"
 
 # Register fresh user for OTP tests
@@ -363,6 +416,7 @@ assert_json_field "Error code = MAX_ATTEMPTS_EXCEEDED" ".error.code" "MAX_ATTEMP
 # 5. AUTHENTICATED ENDPOINTS
 # =============================================================================
 echo ""
+log_section "[5] Authenticated endpoints"
 echo -e "${CYAN}[5] Authenticated endpoints${NC}"
 
 # 5.1 Profile without auth
@@ -400,6 +454,7 @@ assert "No Authorization header → 401" "401" "$HTTP_STATUS"
 # 6. LOGOUT
 # =============================================================================
 echo ""
+log_section "[6] Logout (POST /auth/logout/)"
 echo -e "${CYAN}[6] Logout (POST /auth/logout/)${NC}"
 
 if [ -n "$ACCESS_TOKEN" ] && [ "$ACCESS_TOKEN" != "null" ] && \
@@ -435,6 +490,7 @@ fi
 # 7. TOKEN REFRESH
 # =============================================================================
 echo ""
+log_section "[7] Token refresh (POST /auth/token/refresh/)"
 echo -e "${CYAN}[7] Token refresh (POST /auth/token/refresh/)${NC}"
 
 # Get fresh tokens
@@ -471,6 +527,7 @@ assert "Refresh with empty body → 400" "400" "$HTTP_STATUS"
 # 8. SERVICES CRUD (specialist only)
 # =============================================================================
 echo ""
+log_section "[8] Services CRUD (specialist only)"
 echo -e "${CYAN}[8] Services CRUD (specialist only)${NC}"
 
 # Get specialist tokens
@@ -522,6 +579,7 @@ assert "Services without auth → 401" "401" "$HTTP_STATUS"
 # 9. EDGE CASES & SECURITY
 # =============================================================================
 echo ""
+log_section "[9] Edge cases & security"
 echo -e "${CYAN}[9] Edge cases & security${NC}"
 
 # 9.1 Wrong HTTP method
@@ -593,6 +651,7 @@ assert_not "100KB body doesn't 500" "500" "$status"
 # 10. RATE LIMITING (OTP)
 # =============================================================================
 echo ""
+log_section "[10] OTP rate limiting"
 echo -e "${CYAN}[10] OTP rate limiting${NC}"
 
 # Register a new user, then try to send OTP immediately again
@@ -610,6 +669,7 @@ assert_json_field "Error code = RATE_LIMITED" ".error.code" "RATE_LIMITED" "$HTT
 # 11. RESPONSE FORMAT CONSISTENCY
 # =============================================================================
 echo ""
+log_section "[11] Response format consistency"
 echo -e "${CYAN}[11] Response format consistency${NC}"
 
 # 11.1 Success responses have "data" wrapper
@@ -630,6 +690,25 @@ assert_contains "Validation error has details" '"details"' "$HTTP_BODY"
 # =============================================================================
 # RESULTS
 # =============================================================================
+# Write summary to log
+{
+    echo ""
+    echo "================================================================================"
+    echo "SUMMARY"
+    echo "Finished: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "Server:   ${BASE_URL}"
+    echo "Total:    ${TOTAL}"
+    echo "Passed:   ${PASSED}"
+    echo "Failed:   ${FAILED}"
+    if [ "$FAILED" -gt 0 ]; then
+        echo ""
+        echo "Failed tests:"
+        echo -e "${FAILURES}"
+    fi
+    echo "================================================================================"
+} >> "$LOG_FILE"
+
+# Print to terminal
 echo ""
 echo -e "${CYAN}══════════════════════════════════════════════════════${NC}"
 if [ "$FAILED" -eq 0 ]; then
@@ -640,6 +719,7 @@ else
     echo ""
     echo -e "${RED}  Failed tests:${FAILURES}${NC}"
 fi
+echo -e "${CYAN}  Log: ${LOG_FILE}${NC}"
 echo -e "${CYAN}══════════════════════════════════════════════════════${NC}"
 echo ""
 
