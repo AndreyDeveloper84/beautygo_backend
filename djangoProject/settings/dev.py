@@ -1,3 +1,5 @@
+import os
+
 from .base import *
 
 DEBUG = True
@@ -22,4 +24,23 @@ DATABASES = {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
     }
+}
+
+# S3-compatible storage (Minio local)
+STORAGES = {
+    "default": {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+        "OPTIONS": {
+            "access_key": os.environ.get("MINIO_ROOT_USER", "minioadmin"),
+            "secret_key": os.environ.get("MINIO_ROOT_PASSWORD", "minioadmin"),
+            "bucket_name": "beautygo-media",
+            "endpoint_url": os.environ.get("MINIO_ENDPOINT", "http://localhost:9000"),
+            "custom_domain": None,
+            "default_acl": "public-read",
+            "file_overwrite": False,
+        },
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
 }

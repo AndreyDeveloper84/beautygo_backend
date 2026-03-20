@@ -11,6 +11,10 @@ drf-spectacular==0.28.0
 # Image handling (Profile.avatar)
 Pillow==11.3.0
 
+# S3-compatible storage (Minio / AWS S3)
+django-storages==1.14.4
+boto3==1.35.99
+
 # Environment
 python-dotenv==1.1.1
 
