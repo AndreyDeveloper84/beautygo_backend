@@ -234,3 +234,122 @@ class TestProfileViews:
         logger.info("Response %s: full_name=%s", response.status_code, response.data.get('full_name'))
         assert response.status_code == status.HTTP_200_OK
         assert response.data['full_name'] == 'Новое Имя'
+
+
+@pytest.mark.django_db
+class TestClientProfileView:
+    """Tests for GET/PATCH /api/v1/auth/clients/me/"""
+
+    URL = '/api/v1/auth/clients/me/'
+
+    def test_get_client_profile(self, authenticated_client):
+        logger.info("GET %s — authenticated client", self.URL)
+        response = authenticated_client.get(self.URL)
+        logger.info("Response %s: %s", response.status_code, response.data)
+        assert response.status_code == status.HTTP_200_OK
+        assert 'data' in response.data
+        data = response.data['data']
+        assert 'full_name' in data
+        assert 'default_location_lat' in data
+        assert 'default_location_lng' in data
+
+    def test_update_client_profile_name(self, authenticated_client):
+        logger.info("PATCH %s — update full_name", self.URL)
+        response = authenticated_client.patch(
+            self.URL, {'full_name': 'Анна Иванова'}, format='json',
+        )
+        logger.info("Response %s: %s", response.status_code, response.data)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['full_name'] == 'Анна Иванова'
+
+    def test_update_client_profile_location(self, authenticated_client):
+        logger.info("PATCH %s — update location", self.URL)
+        response = authenticated_client.patch(
+            self.URL,
+            {
+                'default_location_lat': '55.796127',
+                'default_location_lng': '49.106405',
+            },
+            format='json',
+        )
+        logger.info("Response %s: %s", response.status_code, response.data)
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data['data']
+        assert data['default_location_lat'] == '55.796127'
+        assert data['default_location_lng'] == '49.106405'
+
+    def test_upload_avatar(self, authenticated_client, settings, tmp_path):
+        from io import BytesIO
+        from PIL import Image
+
+        settings.STORAGES = {
+            "default": {
+                "BACKEND": "django.core.files.storage.FileSystemStorage",
+                "OPTIONS": {"location": str(tmp_path)},
+            },
+            "staticfiles": {
+                "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+            },
+        }
+
+        img = Image.new('RGB', (100, 100), color='red')
+        buf = BytesIO()
+        img.save(buf, format='JPEG')
+        buf.seek(0)
+        buf.name = 'avatar.jpg'
+
+        logger.info("PATCH %s — upload avatar (JPEG)", self.URL)
+        response = authenticated_client.patch(
+            self.URL, {'avatar': buf}, format='multipart',
+        )
+        logger.info("Response %s: avatar=%s", response.status_code,
+                     response.data.get('data', {}).get('avatar'))
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['avatar'] is not None
+
+    def test_avatar_invalid_mime_type(self, authenticated_client, settings, tmp_path):
+        from io import BytesIO
+        from PIL import Image
+
+        settings.STORAGES = {
+            "default": {
+                "BACKEND": "django.core.files.storage.FileSystemStorage",
+                "OPTIONS": {"location": str(tmp_path)},
+            },
+            "staticfiles": {
+                "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+            },
+        }
+
+        img = Image.new('RGB', (100, 100), color='blue')
+        buf = BytesIO()
+        img.save(buf, format='GIF')
+        buf.seek(0)
+        buf.name = 'avatar.gif'
+
+        logger.info("PATCH %s — upload avatar (GIF, should fail)", self.URL)
+        response = authenticated_client.patch(
+            self.URL, {'avatar': buf}, format='multipart',
+        )
+        logger.info("Response %s: %s", response.status_code, response.data)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_name_too_short(self, authenticated_client):
+        logger.info("PATCH %s — name too short", self.URL)
+        response = authenticated_client.patch(
+            self.URL, {'full_name': 'А'}, format='json',
+        )
+        logger.info("Response %s: %s", response.status_code, response.data)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_specialist_cannot_access(self, authenticated_specialist):
+        logger.info("GET %s — specialist (should be 403)", self.URL)
+        response = authenticated_specialist.get(self.URL)
+        logger.info("Response %s", response.status_code)
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_unauthenticated(self, api_client):
+        logger.info("GET %s — unauthenticated", self.URL)
+        response = api_client.get(self.URL)
+        logger.info("Response %s", response.status_code)
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED

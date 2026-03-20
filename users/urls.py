@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
+    ClientProfileView,
     LoginView,
     LogoutView,
     MyProfileView,
@@ -29,4 +30,5 @@ urlpatterns += router.urls
 urlpatterns += [
     path('profile/<int:pk>/', ProfileDetailView.as_view(), name='profile-detail'),
     path('profile/me/', MyProfileView.as_view(), name='my-profile'),
+    path('clients/me/', ClientProfileView.as_view(), name='client-profile'),
 ]

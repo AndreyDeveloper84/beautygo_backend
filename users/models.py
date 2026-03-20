@@ -57,6 +57,12 @@ class Profile(models.Model):
     bio = models.TextField(blank=True)
     city = models.CharField(max_length=100, blank=True)
     experience_years = models.PositiveIntegerField(default=0)
+    default_location_lat = models.DecimalField(
+        max_digits=9, decimal_places=6, blank=True, null=True,
+    )
+    default_location_lng = models.DecimalField(
+        max_digits=9, decimal_places=6, blank=True, null=True,
+    )
 
     def __str__(self):
         return f"Профиль {self.user.username}"

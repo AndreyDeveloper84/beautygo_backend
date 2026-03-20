@@ -42,6 +42,9 @@ class ServiceAdmin(admin.ModelAdmin):
 
 @admin.register(Profile)
 class ProfileAdmin(admin.ModelAdmin):
-    list_display = ('user', 'full_name', 'city', 'experience_years')
+    list_display = (
+        'user', 'full_name', 'city', 'experience_years',
+        'default_location_lat', 'default_location_lng',
+    )
     list_filter = ('city',)
     search_fields = ('full_name', 'user__username', 'city')

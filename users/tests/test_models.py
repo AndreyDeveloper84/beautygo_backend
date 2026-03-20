@@ -83,7 +83,9 @@ class TestProfileModel:
         assert str(profile) == f'Профиль {specialist_user.username}'
 
     def test_defaults(self, client_user):
-        profile = Profile.objects.create(user=client_user, full_name='Test')
+        profile = Profile.objects.get(user=client_user)
+        profile.full_name = 'Test'
+        profile.save()
         logger.info(
             "Profile defaults: bio='%s', city='%s', experience=%d",
             profile.bio, profile.city, profile.experience_years,
