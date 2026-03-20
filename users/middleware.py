@@ -1,6 +1,12 @@
-"""X-App-Type header middleware."""
+"""X-App-Type header and JWT context middleware."""
+
+import logging
 
 from django.http import JsonResponse
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
+
+logger = logging.getLogger(__name__)
 
 
 VALID_APP_TYPES = ("client", "pro")
@@ -53,4 +59,32 @@ class AppTypeMiddleware:
             )
 
         request.app_type = app_type
+        return self.get_response(request)
+
+
+class JWTContextMiddleware:
+    """Decode JWT and add user_id + role to request context."""
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.jwt_auth = JWTAuthentication()
+
+    def __call__(self, request):
+        request.user_id = None
+        request.user_role = None
+
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        if auth_header.startswith("Bearer "):
+            try:
+                validated_token = self.jwt_auth.get_validated_token(
+                    auth_header.split(" ", 1)[1]
+                )
+                user = self.jwt_auth.get_user(validated_token)
+                request.user_id = str(user.pk)
+                request.user_role = user.role
+            except (InvalidToken, TokenError):
+                pass
+            except Exception:
+                logger.exception("Unexpected error in JWTContextMiddleware")
+
         return self.get_response(request)

@@ -8,6 +8,7 @@ class User(AbstractUser):
     ROLE_CHOICES = (
         ('client', 'Client'),
         ('specialist', 'Specialist'),
+        ('admin', 'Admin'),
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
     phone = models.CharField(max_length=20, unique=True)
@@ -23,6 +24,10 @@ class User(AbstractUser):
     @property
     def is_specialist(self):
         return self.role == 'specialist'
+
+    @property
+    def is_admin(self):
+        return self.role == 'admin'
 
 
 class Service(models.Model):
