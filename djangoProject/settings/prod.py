@@ -49,8 +49,25 @@ SECURE_HSTS_PRELOAD = True
 # Static / Media
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+
+# S3-compatible storage (Minio / AWS S3)
+STORAGES = {
+    "default": {
+        "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+        "OPTIONS": {
+            "access_key": os.environ.get("MINIO_ROOT_USER", "minioadmin"),
+            "secret_key": os.environ.get("MINIO_ROOT_PASSWORD", "minioadmin"),
+            "bucket_name": os.environ.get("S3_BUCKET_NAME", "beautygo-media"),
+            "endpoint_url": os.environ.get("MINIO_ENDPOINT", "http://minio:9000"),
+            "custom_domain": None,
+            "default_acl": "public-read",
+            "file_overwrite": False,
+        },
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+}
 
 # Logging
 LOGGING = {
