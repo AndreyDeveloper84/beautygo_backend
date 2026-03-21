@@ -5,7 +5,7 @@ from decimal import Decimal
 import pytest
 from django.utils import timezone
 
-from users.models import OTPCode, Profile, Service, User
+from users.models import DeviceToken, OTPCode, Profile, Service, User
 
 logger = logging.getLogger(__name__)
 
@@ -131,3 +131,45 @@ class TestOTPCodeModel:
         logger.info("Used OTP: is_valid=%s, str=%s", otp.is_valid, str(otp))
         assert not otp.is_valid
         assert 'used' in str(otp)
+
+
+@pytest.mark.django_db
+class TestDeviceTokenModel:
+    def test_create(self, client_user):
+        token = DeviceToken.objects.create(
+            user=client_user,
+            token='fcm_test_token_123',
+            app_type='client',
+            platform='ios',
+        )
+        logger.info("Created DeviceToken: %s", str(token))
+        assert token.is_active
+        assert token.app_type == 'client'
+        assert token.platform == 'ios'
+        assert 'client' in str(token)
+
+    def test_unique_token(self, client_user):
+        DeviceToken.objects.create(
+            user=client_user,
+            token='unique_token',
+            app_type='client',
+            platform='android',
+        )
+        with pytest.raises(Exception):
+            DeviceToken.objects.create(
+                user=client_user,
+                token='unique_token',
+                app_type='pro',
+                platform='ios',
+            )
+
+    def test_cascade_delete(self, client_user):
+        DeviceToken.objects.create(
+            user=client_user,
+            token='cascade_token',
+            app_type='client',
+            platform='ios',
+        )
+        assert DeviceToken.objects.count() == 1
+        client_user.delete()
+        assert DeviceToken.objects.count() == 0

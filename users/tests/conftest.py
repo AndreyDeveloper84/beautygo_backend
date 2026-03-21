@@ -34,6 +34,13 @@ def authenticated_client(api_client, client_user):
 
 
 @pytest.fixture
-def authenticated_specialist(api_client, specialist_user):
-    api_client.force_authenticate(user=specialist_user)
-    return api_client
+def pro_api_client():
+    client = APIClient()
+    client.defaults['HTTP_X_APP_TYPE'] = 'pro'
+    return client
+
+
+@pytest.fixture
+def authenticated_specialist(pro_api_client, specialist_user):
+    pro_api_client.force_authenticate(user=specialist_user)
+    return pro_api_client
