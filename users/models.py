@@ -93,3 +93,34 @@ class OTPCode(models.Model):
 
     def __str__(self):
         return f"OTP for {self.phone} ({'used' if self.is_used else 'active'})"
+
+
+class DeviceToken(models.Model):
+    """FCM device token for push notifications."""
+
+    class AppType(models.TextChoices):
+        CLIENT = "client", "BeautyGO"
+        PRO = "pro", "BeautyGO Pro"
+
+    class Platform(models.TextChoices):
+        IOS = "ios", "iOS"
+        ANDROID = "android", "Android"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='device_tokens',
+    )
+    token = models.CharField(max_length=255, unique=True)
+    app_type = models.CharField(max_length=10, choices=AppType.choices)
+    platform = models.CharField(max_length=10, choices=Platform.choices)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['user', 'app_type', 'is_active']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} ({self.app_type}/{self.platform})"

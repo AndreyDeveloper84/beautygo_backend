@@ -20,6 +20,7 @@ from .serializers import (
     ServiceSerializer,
     VerifyOTPSerializer,
 )
+from .permissions import IsClient, IsClientApp, IsProApp, IsSpecialist
 from .services import AuthError, AuthService
 
 logger = logging.getLogger(__name__)
@@ -138,18 +139,12 @@ class RegisterView(APIView):
         )
 
 
-# --- Permissions ---
-
-class IsSpecialist(permissions.BasePermission):
-    def has_permission(self, request, view):
-        return request.user.is_authenticated and request.user.role == 'specialist'
-
-
 # --- Service/Profile Views ---
 
 class ServiceViewSet(viewsets.ModelViewSet):
+    """🟣 Pro only — CRUD услуг мастера."""
     serializer_class = ServiceSerializer
-    permission_classes = [permissions.IsAuthenticated, IsSpecialist]
+    permission_classes = [permissions.IsAuthenticated, IsProApp, IsSpecialist]
 
     def get_queryset(self):
         return Service.objects.filter(specialist=self.request.user)
@@ -183,16 +178,10 @@ class MyProfileView(generics.RetrieveUpdateAPIView):
         return profile
 
 
-class IsClient(permissions.BasePermission):
-    """Allow access only to users with role=client."""
-    def has_permission(self, request, view):
-        return request.user.is_authenticated and request.user.role == 'client'
-
-
 class ClientProfileView(generics.RetrieveUpdateAPIView):
-    """GET/PATCH /api/v1/auth/clients/me/ — Client profile CRUD."""
+    """🟢 Client only — GET/PATCH /api/v1/auth/clients/me/"""
     serializer_class = ClientProfileSerializer
-    permission_classes = [permissions.IsAuthenticated, IsClient]
+    permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
     parser_classes = [
         rest_framework.parsers.MultiPartParser,
         rest_framework.parsers.JSONParser,
