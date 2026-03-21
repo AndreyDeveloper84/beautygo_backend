@@ -2,7 +2,7 @@ import re
 
 from rest_framework import serializers
 
-from .models import Profile, Service, User
+from .models import Profile, User
 
 
 # --- Phone validation mixin ---
@@ -76,14 +76,7 @@ class RegisterSerializer(serializers.ModelSerializer):
         return user
 
 
-# --- Existing serializers ---
-
-class ServiceSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Service
-        fields = '__all__'
-        read_only_fields = ['specialist']
-
+# --- Profile serializers ---
 
 class ProfileSerializer(serializers.ModelSerializer):
     class Meta:

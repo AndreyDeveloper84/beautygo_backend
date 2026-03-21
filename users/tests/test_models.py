@@ -1,11 +1,10 @@
 import logging
 from datetime import timedelta
-from decimal import Decimal
 
 import pytest
 from django.utils import timezone
 
-from users.models import DeviceToken, OTPCode, Profile, Service, User
+from users.models import DeviceToken, OTPCode, Profile, User
 
 logger = logging.getLogger(__name__)
 
@@ -48,31 +47,6 @@ class TestUserModel:
         )
         logger.info("New user is_verified=%s", user.is_verified)
         assert user.is_verified is False
-
-
-@pytest.mark.django_db
-class TestServiceModel:
-    def test_create_service(self, specialist_user):
-        service = Service.objects.create(
-            specialist=specialist_user,
-            name='Стрижка',
-            price=Decimal('500.00'),
-            duration_minutes=60,
-        )
-        logger.info("Created service: id=%s, name=%s, price=%s", service.pk, service.name, service.price)
-        assert str(service) == f'Стрижка — {specialist_user.username}'
-        assert service.created_at is not None
-
-    def test_cascade_delete(self, specialist_user):
-        Service.objects.create(
-            specialist=specialist_user, name='Test',
-            price=Decimal('100'), duration_minutes=30,
-        )
-        assert Service.objects.count() == 1
-        logger.info("Deleting specialist user — services should cascade")
-        specialist_user.delete()
-        logger.info("Services after delete: count=%d", Service.objects.count())
-        assert Service.objects.count() == 0
 
 
 @pytest.mark.django_db

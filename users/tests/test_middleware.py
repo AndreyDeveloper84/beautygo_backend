@@ -109,7 +109,7 @@ class TestEndpointRestrictions:
         )
         api_client.force_authenticate(user=user)
         response = api_client.get(
-            '/api/v1/auth/services/', HTTP_X_APP_TYPE='pro',
+            '/api/v1/services/', HTTP_X_APP_TYPE='pro',
         )
         logger.info("pro app → /services/ → %s", response.status_code)
         assert response.status_code == status.HTTP_200_OK
@@ -122,7 +122,7 @@ class TestEndpointRestrictions:
         )
         api_client.force_authenticate(user=user)
         response = api_client.get(
-            '/api/v1/auth/services/', HTTP_X_APP_TYPE='client',
+            '/api/v1/services/', HTTP_X_APP_TYPE='client',
         )
         logger.info("client app → /services/ → %s", response.status_code)
         assert response.status_code == status.HTTP_403_FORBIDDEN

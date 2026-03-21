@@ -1,5 +1,4 @@
 from django.urls import path
-from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
@@ -9,7 +8,6 @@ from .views import (
     MyProfileView,
     ProfileDetailView,
     RegisterPhoneView,
-    ServiceViewSet,
     VerifyOTPView,
 )
 
@@ -20,14 +18,8 @@ urlpatterns = [
     path('verify-otp/', VerifyOTPView.as_view(), name='verify-otp'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
     path('logout/', LogoutView.as_view(), name='logout'),
-]
 
-router = DefaultRouter()
-router.register(r'services', ServiceViewSet, basename='services')
-
-urlpatterns += router.urls
-
-urlpatterns += [
+    # Profile endpoints
     path('profile/<int:pk>/', ProfileDetailView.as_view(), name='profile-detail'),
     path('profile/me/', MyProfileView.as_view(), name='my-profile'),
     path('clients/me/', ClientProfileView.as_view(), name='client-profile'),

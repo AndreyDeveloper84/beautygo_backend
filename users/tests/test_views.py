@@ -4,7 +4,7 @@ import pytest
 from django.urls import reverse
 from rest_framework import status
 
-from users.models import Profile, Service, User
+from users.models import Profile, User
 
 logger = logging.getLogger(__name__)
 
@@ -145,59 +145,6 @@ class TestLogoutView:
         response = api_client.post(url, {'refresh': 'fake-token'})
         logger.info("Response %s", response.status_code)
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
-
-
-@pytest.mark.django_db
-class TestServiceViewSet:
-    def test_specialist_can_create(self, authenticated_specialist):
-        url = reverse('services-list')
-        data = {
-            'name': 'Консультация',
-            'description': 'Описание',
-            'price': '1000.00',
-            'duration_minutes': 60,
-        }
-        logger.info("POST %s — specialist creates service '%s'", url, data['name'])
-        response = authenticated_specialist.post(url, data)
-        logger.info("Response %s: %s", response.status_code, response.data)
-        assert response.status_code == status.HTTP_201_CREATED
-        assert response.data['name'] == 'Консультация'
-
-    def test_client_cannot_create(self, authenticated_client):
-        url = reverse('services-list')
-        data = {'name': 'Test', 'price': '100', 'duration_minutes': 30}
-        logger.info("POST %s — client tries to create service (should be denied)", url)
-        response = authenticated_client.post(url, data)
-        logger.info("Response %s", response.status_code)
-        assert response.status_code == status.HTTP_403_FORBIDDEN
-
-    def test_unauthenticated_denied(self, api_client):
-        url = reverse('services-list')
-        logger.info("GET %s — unauthenticated (should be denied)", url)
-        response = api_client.get(url)
-        logger.info("Response %s", response.status_code)
-        assert response.status_code == status.HTTP_401_UNAUTHORIZED
-
-    def test_specialist_sees_own_services(self, authenticated_specialist, specialist_user):
-        Service.objects.create(
-            specialist=specialist_user, name='Mine',
-            price='500', duration_minutes=30,
-        )
-        other = User.objects.create_user(
-            username='other_spec', password='pass', role='specialist',
-            phone='+79005000099',
-        )
-        Service.objects.create(
-            specialist=other, name='NotMine',
-            price='500', duration_minutes=30,
-        )
-        url = reverse('services-list')
-        logger.info("GET %s — specialist should see only own services", url)
-        response = authenticated_specialist.get(url)
-        logger.info("Response %s: count=%d", response.status_code, len(response.data))
-        assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 1
-        assert response.data[0]['name'] == 'Mine'
 
 
 @pytest.mark.django_db
