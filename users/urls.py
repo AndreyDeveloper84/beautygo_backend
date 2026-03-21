@@ -8,6 +8,7 @@ from .views import (
     MyProfileView,
     ProfileDetailView,
     RegisterPhoneView,
+    SendCodeView,
     VerifyOTPView,
 )
 
@@ -18,6 +19,7 @@ urlpatterns = [
     path('verify-otp/', VerifyOTPView.as_view(), name='verify-otp'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
     path('logout/', LogoutView.as_view(), name='logout'),
+    path('send-code/', SendCodeView.as_view(), name='send-code'),
 
     # Profile endpoints
     path('profile/<int:pk>/', ProfileDetailView.as_view(), name='profile-detail'),

@@ -170,7 +170,9 @@ class AuthService:
 
         self.otp_service.send_otp(phone)
 
-    def verify_and_get_tokens(self, phone: str, code: str) -> dict:
+    def verify_and_get_tokens(
+        self, phone: str, code: str, device_id: str = None,
+    ) -> dict:
         """Verify OTP and return JWT tokens."""
         self.otp_service.verify_otp(phone, code)
 
@@ -181,6 +183,8 @@ class AuthService:
             user.save(update_fields=['is_verified'])
 
         refresh = RefreshToken.for_user(user)
+        if device_id:
+            refresh['device_id'] = device_id
 
         return {
             "access": str(refresh.access_token),

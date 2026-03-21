@@ -34,13 +34,20 @@ class LoginSerializer(PhoneSerializer):
 
 
 class VerifyOTPSerializer(PhoneSerializer):
-    """Verify OTP: phone + code."""
+    """Verify OTP: phone + code + optional device_id."""
     code = serializers.CharField(max_length=6, min_length=4)
+    device_id = serializers.CharField(max_length=255, required=False)
 
     def validate_code(self, value):
         if not value.isdigit():
             raise serializers.ValidationError("Code must be numeric")
         return value
+
+
+class SendCodeSerializer(PhoneSerializer):
+    """Send OTP code to phone."""
+    PURPOSE_CHOICES = [('verify', 'Verify'), ('login', 'Login')]
+    purpose = serializers.ChoiceField(choices=PURPOSE_CHOICES, default='login')
 
 
 class LogoutSerializer(serializers.Serializer):
