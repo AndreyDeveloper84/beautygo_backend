@@ -5,6 +5,8 @@ from .views import (
     ClientProfileView,
     LoginView,
     LogoutView,
+    MasterMeView,
+    MasterProfileView,
     MyProfileView,
     ProfileDetailView,
     RegisterPhoneView,
@@ -20,6 +22,10 @@ urlpatterns = [
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
     path('logout/', LogoutView.as_view(), name='logout'),
     path('send-code/', SendCodeView.as_view(), name='send-code'),
+
+    # Specialist profile endpoints
+    path('masters/profile/', MasterProfileView.as_view(), name='master-profile'),
+    path('masters/me/', MasterMeView.as_view(), name='master-me'),
 
     # Profile endpoints
     path('profile/<int:pk>/', ProfileDetailView.as_view(), name='profile-detail'),

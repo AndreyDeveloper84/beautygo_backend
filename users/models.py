@@ -51,6 +51,54 @@ class Profile(models.Model):
         return f"Профиль {self.user.username}"
 
 
+class SpecialistProfile(models.Model):
+    """Profile for specialists (masters) in BeautyGO Pro."""
+
+    class ProfileStatus(models.TextChoices):
+        DRAFT = "draft", "Черновик"
+        PENDING = "pending", "На верификации"
+        ACTIVE = "active", "Активен"
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="specialist_profile",
+    )
+    display_name = models.CharField(max_length=255)
+    avatar = models.ImageField(
+        upload_to='specialists/avatars/', blank=True, null=True,
+    )
+    bio = models.TextField(blank=True)
+    experience_years = models.PositiveIntegerField(default=0)
+
+    # Location
+    address = models.CharField(max_length=500, blank=True)
+    location_lat = models.DecimalField(
+        max_digits=9, decimal_places=6, blank=True, null=True,
+    )
+    location_lng = models.DecimalField(
+        max_digits=9, decimal_places=6, blank=True, null=True,
+    )
+
+    # Status & ratings
+    status = models.CharField(
+        max_length=10,
+        choices=ProfileStatus.choices,
+        default=ProfileStatus.DRAFT,
+    )
+    rating = models.DecimalField(
+        max_digits=2, decimal_places=1, default=0.0,
+    )
+    reviews_count = models.PositiveIntegerField(default=0)
+    is_available = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.display_name} ({self.get_status_display()})"
+
+
 class OTPCode(models.Model):
     """OTP code for phone verification."""
     phone = models.CharField(max_length=20, db_index=True)
