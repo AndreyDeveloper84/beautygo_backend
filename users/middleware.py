@@ -82,6 +82,24 @@ class JWTContextMiddleware:
                 user = self.jwt_auth.get_user(validated_token)
                 request.user_id = str(user.pk)
                 request.user_role = user.role
+
+                # Device ID check: reauth required on device change
+                token_device_id = validated_token.get('device_id')
+                request_device_id = request.META.get(
+                    "HTTP_X_DEVICE_ID",
+                )
+                if (
+                    token_device_id
+                    and request_device_id
+                    and token_device_id != request_device_id
+                ):
+                    return JsonResponse(
+                        {"error": {
+                            "code": "DEVICE_MISMATCH",
+                            "message": "Device changed, re-authentication required",
+                        }},
+                        status=401,
+                    )
             except (InvalidToken, TokenError):
                 pass
             except Exception:

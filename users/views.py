@@ -8,7 +8,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Profile
+from .models import Profile, User
 from .permissions import IsClient, IsClientApp
 from .response import error_response, success_response
 from .serializers import (
@@ -17,6 +17,7 @@ from .serializers import (
     LogoutSerializer,
     ProfileSerializer,
     RegisterPhoneSerializer,
+    SendCodeSerializer,
     VerifyOTPSerializer,
 )
 from .services import AuthError, AuthService
@@ -89,6 +90,7 @@ class VerifyOTPView(APIView):
             tokens = auth_service.verify_and_get_tokens(
                 phone=serializer.validated_data['phone'],
                 code=serializer.validated_data['code'],
+                device_id=serializer.validated_data.get('device_id'),
             )
             return success_response(tokens)
         except AuthError as e:
@@ -135,6 +137,36 @@ class RegisterView(APIView):
             "VALIDATION_ERROR", "Invalid input",
             details=serializer.errors, status_code=400,
         )
+
+
+# --- Send Code View ---
+
+class SendCodeView(APIView):
+    """POST /api/v1/auth/send-code/ — Send OTP to phone (reauth)."""
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = SendCodeSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+
+        phone = serializer.validated_data['phone']
+        if not User.objects.filter(phone=phone).exists():
+            return error_response(
+                "USER_NOT_FOUND", "User with this phone not found",
+                status_code=404,
+            )
+
+        try:
+            from .services import OTPService
+            otp_service = OTPService()
+            otp_service.send_otp(phone)
+            return success_response({"message": "OTP sent"})
+        except AuthError as e:
+            return error_response(e.code, str(e), status_code=e.status_code)
 
 
 # --- Profile Views ---

@@ -148,6 +148,88 @@ class TestLogoutView:
 
 
 @pytest.mark.django_db
+class TestSendCodeView:
+    def test_send_code_existing_user(self, api_client, client_user):
+        url = reverse('send-code')
+        response = api_client.post(url, {
+            'phone': client_user.phone, 'purpose': 'login',
+        })
+        logger.info("send-code → %s", response.status_code)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['message'] == 'OTP sent'
+
+    def test_send_code_nonexistent_phone(self, api_client):
+        url = reverse('send-code')
+        response = api_client.post(url, {
+            'phone': '+79001111111', 'purpose': 'login',
+        })
+        logger.info("send-code unknown phone → %s", response.status_code)
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_send_code_invalid_phone(self, api_client):
+        url = reverse('send-code')
+        response = api_client.post(url, {
+            'phone': '12345', 'purpose': 'verify',
+        })
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+@pytest.mark.django_db
+class TestDeviceId:
+    def test_device_id_in_token(self, api_client, client_user, settings):
+        settings.DEBUG = True
+        api_client.post(reverse('login'), {'phone': client_user.phone})
+        response = api_client.post(reverse('verify-otp'), {
+            'phone': client_user.phone,
+            'code': '000000',
+            'device_id': 'iphone-abc-123',
+        })
+        assert response.status_code == status.HTTP_200_OK
+        # Decode the access token to check device_id
+        import jwt
+        access = response.data['data']['access']
+        payload = jwt.decode(access, options={"verify_signature": False})
+        logger.info("Token payload device_id=%s", payload.get('device_id'))
+        assert payload.get('device_id') == 'iphone-abc-123'
+
+    def test_device_id_mismatch_returns_401(
+        self, api_client, client_user, settings,
+    ):
+        settings.DEBUG = True
+        api_client.post(reverse('login'), {'phone': client_user.phone})
+        resp = api_client.post(reverse('verify-otp'), {
+            'phone': client_user.phone,
+            'code': '000000',
+            'device_id': 'device-original',
+        })
+        token = resp.data['data']['access']
+        # Request with different device_id
+        api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        response = api_client.get(
+            reverse('my-profile'),
+            HTTP_X_DEVICE_ID='device-different',
+        )
+        logger.info("Device mismatch → %s", response.status_code)
+        assert response.status_code == 401
+        assert response.json()['error']['code'] == 'DEVICE_MISMATCH'
+
+    def test_no_device_id_works_fine(
+        self, api_client, client_user, settings,
+    ):
+        """Without device_id — no mismatch check."""
+        settings.DEBUG = True
+        api_client.post(reverse('login'), {'phone': client_user.phone})
+        resp = api_client.post(reverse('verify-otp'), {
+            'phone': client_user.phone,
+            'code': '000000',
+        })
+        token = resp.data['data']['access']
+        api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
+        response = api_client.get(reverse('my-profile'))
+        assert response.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.django_db
 class TestProfileViews:
     def test_my_profile_authenticated(self, authenticated_specialist):
         url = reverse('my-profile')
