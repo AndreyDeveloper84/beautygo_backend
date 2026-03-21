@@ -1,15 +1,15 @@
-"""User views: auth endpoints + service/profile management."""
+"""User views: auth endpoints + profile management."""
 
 import logging
 
 import rest_framework.parsers
-from django_filters.rest_framework import FilterSet, filters
-from rest_framework import generics, permissions, viewsets
+from rest_framework import generics, permissions
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Profile, Service
+from .models import Profile
+from .permissions import IsClient, IsClientApp
 from .response import error_response, success_response
 from .serializers import (
     ClientProfileSerializer,
@@ -17,10 +17,8 @@ from .serializers import (
     LogoutSerializer,
     ProfileSerializer,
     RegisterPhoneSerializer,
-    ServiceSerializer,
     VerifyOTPSerializer,
 )
-from .permissions import IsClient, IsClientApp, IsProApp, IsSpecialist
 from .services import AuthError, AuthService
 
 logger = logging.getLogger(__name__)
@@ -139,29 +137,7 @@ class RegisterView(APIView):
         )
 
 
-# --- Service/Profile Views ---
-
-class ServiceViewSet(viewsets.ModelViewSet):
-    """🟣 Pro only — CRUD услуг мастера."""
-    serializer_class = ServiceSerializer
-    permission_classes = [permissions.IsAuthenticated, IsProApp, IsSpecialist]
-
-    def get_queryset(self):
-        return Service.objects.filter(specialist=self.request.user)
-
-    def perform_create(self, serializer):
-        serializer.save(specialist=self.request.user)
-
-
-class ServiceFilter(FilterSet):
-    min_price = filters.NumberFilter(field_name="price", lookup_expr='gte')
-    max_price = filters.NumberFilter(field_name="price", lookup_expr='lte')
-    name = filters.CharFilter(field_name="name", lookup_expr='icontains')
-
-    class Meta:
-        model = Service
-        fields = ['name', 'min_price', 'max_price', 'duration_minutes', 'specialist']
-
+# --- Profile Views ---
 
 class ProfileDetailView(generics.RetrieveAPIView):
     queryset = Profile.objects.all()

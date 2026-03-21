@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import DeviceToken, OTPCode, Profile, Service, User
+from .models import DeviceToken, OTPCode, Profile, User
 
 
 class ProfileInline(admin.StackedInline):
@@ -30,14 +30,6 @@ class OTPCodeAdmin(admin.ModelAdmin):
     list_filter = ('is_used',)
     search_fields = ('phone',)
     readonly_fields = ('phone', 'code', 'created_at', 'expires_at')
-
-
-@admin.register(Service)
-class ServiceAdmin(admin.ModelAdmin):
-    list_display = ('name', 'specialist', 'price', 'duration_minutes', 'created_at')
-    list_filter = ('specialist', 'created_at')
-    search_fields = ('name', 'description', 'specialist__username')
-    readonly_fields = ('created_at',)
 
 
 @admin.register(Profile)
