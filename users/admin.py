@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
-from .models import DeviceToken, OTPCode, Profile, User
+from .models import DeviceToken, OTPCode, Profile, SpecialistProfile, User
 
 
 class ProfileInline(admin.StackedInline):
@@ -48,3 +48,14 @@ class DeviceTokenAdmin(admin.ModelAdmin):
     list_filter = ('app_type', 'platform', 'is_active')
     search_fields = ('user__username', 'token')
     readonly_fields = ('created_at',)
+
+
+@admin.register(SpecialistProfile)
+class SpecialistProfileAdmin(admin.ModelAdmin):
+    list_display = (
+        'user', 'display_name', 'status', 'rating',
+        'reviews_count', 'is_available', 'address',
+    )
+    list_filter = ('status', 'is_available')
+    search_fields = ('display_name', 'user__username', 'address')
+    readonly_fields = ('rating', 'reviews_count', 'created_at', 'updated_at')

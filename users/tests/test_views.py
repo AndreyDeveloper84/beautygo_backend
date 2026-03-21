@@ -4,7 +4,7 @@ import pytest
 from django.urls import reverse
 from rest_framework import status
 
-from users.models import Profile, User
+from users.models import Profile, SpecialistProfile, User
 
 logger = logging.getLogger(__name__)
 
@@ -382,3 +382,146 @@ class TestClientProfileView:
         response = api_client.get(self.URL)
         logger.info("Response %s", response.status_code)
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+
+@pytest.mark.django_db
+class TestMasterProfile:
+    """Tests for POST/PATCH /masters/profile/ and GET /masters/me/"""
+
+    PROFILE_URL = '/api/v1/auth/masters/profile/'
+    ME_URL = '/api/v1/auth/masters/me/'
+
+    def test_create_profile_when_no_signal(self, pro_api_client):
+        """POST creates profile for specialist without auto-created one."""
+        user = User.objects.create_user(
+            username='newmaster', password='pass',
+            role='specialist', phone='+79990100010',
+        )
+        # Delete auto-created profile to test POST
+        SpecialistProfile.objects.filter(user=user).delete()
+        pro_api_client.force_authenticate(user=user)
+        response = pro_api_client.post(
+            self.PROFILE_URL,
+            {'display_name': 'Елена Мастер', 'bio': 'Опыт 5 лет'},
+            format='json',
+        )
+        logger.info("POST master profile → %s", response.status_code)
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.data['data']['display_name'] == 'Елена Мастер'
+
+    def test_create_profile_duplicate(self, authenticated_specialist):
+        """POST returns 400 when profile already exists (created by signal)."""
+        response = authenticated_specialist.post(
+            self.PROFILE_URL,
+            {'display_name': 'Test'},
+            format='json',
+        )
+        logger.info("Duplicate POST → %s", response.status_code)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.data['error']['code'] == 'PROFILE_EXISTS'
+
+    def test_get_master_me(self, authenticated_specialist):
+        response = authenticated_specialist.get(self.ME_URL)
+        logger.info("GET /masters/me/ → %s", response.status_code)
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data['data']
+        assert 'display_name' in data
+        assert 'status' in data
+        assert data['status'] == 'draft'
+
+    def test_update_profile_address(self, authenticated_specialist):
+        response = authenticated_specialist.patch(
+            self.PROFILE_URL,
+            {
+                'address': 'ул. Баумана, 1, Казань',
+                'location_lat': '55.796127',
+                'location_lng': '49.106405',
+            },
+            format='json',
+        )
+        logger.info("PATCH address → %s", response.status_code)
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data['data']
+        assert data['address'] == 'ул. Баумана, 1, Казань'
+        assert data['location_lat'] == '55.796127'
+
+    def test_update_name_and_address_moves_to_pending(
+        self, authenticated_specialist, specialist_user,
+    ):
+        profile = SpecialistProfile.objects.get(user=specialist_user)
+        profile.display_name = 'Елена'
+        profile.save()
+        response = authenticated_specialist.patch(
+            self.PROFILE_URL,
+            {'address': 'ул. Пушкина, 10'},
+            format='json',
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['status'] == 'pending'
+
+    def test_upload_avatar(
+        self, authenticated_specialist, settings, tmp_path,
+    ):
+        from io import BytesIO
+        from PIL import Image
+
+        settings.STORAGES = {
+            "default": {
+                "BACKEND": "django.core.files.storage.FileSystemStorage",
+                "OPTIONS": {"location": str(tmp_path)},
+            },
+            "staticfiles": {
+                "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+            },
+        }
+        img = Image.new('RGB', (200, 200), color='green')
+        buf = BytesIO()
+        img.save(buf, format='JPEG')
+        buf.seek(0)
+        buf.name = 'master_avatar.jpg'
+
+        response = authenticated_specialist.patch(
+            self.PROFILE_URL, {'avatar': buf}, format='multipart',
+        )
+        logger.info("Upload avatar → %s", response.status_code)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['avatar'] is not None
+
+    def test_name_too_short(self, authenticated_specialist):
+        response = authenticated_specialist.patch(
+            self.PROFILE_URL,
+            {'display_name': 'А'},
+            format='json',
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_client_cannot_access(self, authenticated_client):
+        response = authenticated_client.get(self.ME_URL)
+        logger.info("Client → /masters/me/ → %s", response.status_code)
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_client_app_cannot_access(self, api_client, specialist_user):
+        api_client.force_authenticate(user=specialist_user)
+        response = api_client.get(
+            self.ME_URL, HTTP_X_APP_TYPE='client',
+        )
+        logger.info("client app → /masters/me/ → %s", response.status_code)
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_unauthenticated(self, pro_api_client):
+        response = pro_api_client.get(self.ME_URL)
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_services_count(self, authenticated_specialist, specialist_user):
+        from services.models import Service
+        Service.objects.create(
+            specialist=specialist_user, name='Маникюр',
+            price='1500', duration_minutes=60,
+        )
+        Service.objects.create(
+            specialist=specialist_user, name='Педикюр',
+            price='2000', duration_minutes=90,
+        )
+        response = authenticated_specialist.get(self.ME_URL)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['services_count'] == 2

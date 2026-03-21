@@ -2,7 +2,7 @@ import re
 
 from rest_framework import serializers
 
-from .models import Profile, User
+from .models import Profile, SpecialistProfile, User
 
 
 # --- Phone validation mixin ---
@@ -122,3 +122,82 @@ class ClientProfileSerializer(serializers.ModelSerializer):
                 "Размер файла не должен превышать 5 МБ"
             )
         return value
+
+
+# --- Specialist Profile serializers ---
+
+class SpecialistProfileCreateSerializer(serializers.ModelSerializer):
+    """Step 1: create profile (display_name, avatar, bio)."""
+
+    class Meta:
+        model = SpecialistProfile
+        fields = ['display_name', 'avatar', 'bio', 'experience_years']
+
+    def validate_display_name(self, value):
+        if len(value.strip()) < 2:
+            raise serializers.ValidationError(
+                "Имя должно содержать минимум 2 символа"
+            )
+        return value.strip()
+
+    def validate_avatar(self, value):
+        if value.content_type not in ALLOWED_AVATAR_TYPES:
+            raise serializers.ValidationError(
+                "Допустимые форматы: JPEG, PNG, WebP"
+            )
+        if value.size > MAX_AVATAR_SIZE:
+            raise serializers.ValidationError(
+                "Размер файла не должен превышать 5 МБ"
+            )
+        return value
+
+
+class SpecialistProfileUpdateSerializer(serializers.ModelSerializer):
+    """Step 2+: update profile (address, location, bio, etc)."""
+
+    class Meta:
+        model = SpecialistProfile
+        fields = [
+            'display_name', 'avatar', 'bio', 'experience_years',
+            'address', 'location_lat', 'location_lng',
+            'is_available',
+        ]
+
+    def validate_display_name(self, value):
+        if len(value.strip()) < 2:
+            raise serializers.ValidationError(
+                "Имя должно содержать минимум 2 символа"
+            )
+        return value.strip()
+
+    def validate_avatar(self, value):
+        if value.content_type not in ALLOWED_AVATAR_TYPES:
+            raise serializers.ValidationError(
+                "Допустимые форматы: JPEG, PNG, WebP"
+            )
+        if value.size > MAX_AVATAR_SIZE:
+            raise serializers.ValidationError(
+                "Размер файла не должен превышать 5 МБ"
+            )
+        return value
+
+
+class SpecialistProfileDetailSerializer(serializers.ModelSerializer):
+    """Full profile for GET /masters/me."""
+    services_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SpecialistProfile
+        fields = [
+            'id', 'display_name', 'avatar', 'bio', 'experience_years',
+            'address', 'location_lat', 'location_lng',
+            'status', 'rating', 'reviews_count', 'is_available',
+            'services_count', 'created_at', 'updated_at',
+        ]
+        read_only_fields = [
+            'id', 'status', 'rating', 'reviews_count',
+            'created_at', 'updated_at',
+        ]
+
+    def get_services_count(self, obj):
+        return obj.user.services.count()

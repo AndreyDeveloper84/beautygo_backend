@@ -8,8 +8,8 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Profile, User
-from .permissions import IsClient, IsClientApp
+from .models import Profile, SpecialistProfile, User
+from .permissions import IsClient, IsClientApp, IsProApp, IsSpecialist
 from .response import error_response, success_response
 from .serializers import (
     ClientProfileSerializer,
@@ -18,6 +18,9 @@ from .serializers import (
     ProfileSerializer,
     RegisterPhoneSerializer,
     SendCodeSerializer,
+    SpecialistProfileCreateSerializer,
+    SpecialistProfileDetailSerializer,
+    SpecialistProfileUpdateSerializer,
     VerifyOTPSerializer,
 )
 from .services import AuthError, AuthService
@@ -167,6 +170,81 @@ class SendCodeView(APIView):
             return success_response({"message": "OTP sent"})
         except AuthError as e:
             return error_response(e.code, str(e), status_code=e.status_code)
+
+
+# --- Specialist Profile Views ---
+
+class MasterProfileView(APIView):
+    """POST/PATCH /api/v1/auth/masters/profile/ — Create or update master profile."""
+    permission_classes = [permissions.IsAuthenticated, IsProApp, IsSpecialist]
+    parser_classes = [
+        rest_framework.parsers.MultiPartParser,
+        rest_framework.parsers.JSONParser,
+    ]
+
+    def post(self, request):
+        """Step 1: create specialist profile."""
+        if SpecialistProfile.objects.filter(user=request.user).exists():
+            return error_response(
+                "PROFILE_EXISTS",
+                "Specialist profile already exists, use PATCH to update",
+                status_code=400,
+            )
+        serializer = SpecialistProfileCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+        serializer.save(user=request.user)
+        return success_response(serializer.data, status_code=201)
+
+    def patch(self, request):
+        """Step 2+: update specialist profile."""
+        try:
+            profile = SpecialistProfile.objects.get(user=request.user)
+        except SpecialistProfile.DoesNotExist:
+            return error_response(
+                "PROFILE_NOT_FOUND",
+                "Create profile first with POST",
+                status_code=404,
+            )
+        serializer = SpecialistProfileUpdateSerializer(
+            profile, data=request.data, partial=True,
+        )
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+        serializer.save()
+        # Move to pending if still draft and required fields filled
+        if (
+            profile.status == SpecialistProfile.ProfileStatus.DRAFT
+            and profile.display_name
+            and profile.address
+        ):
+            profile.status = SpecialistProfile.ProfileStatus.PENDING
+            profile.save(update_fields=['status'])
+        detail = SpecialistProfileDetailSerializer(profile)
+        return success_response(detail.data)
+
+
+class MasterMeView(APIView):
+    """GET /api/v1/auth/masters/me/ — Get current master's full profile."""
+    permission_classes = [permissions.IsAuthenticated, IsProApp, IsSpecialist]
+
+    def get(self, request):
+        try:
+            profile = SpecialistProfile.objects.get(user=request.user)
+        except SpecialistProfile.DoesNotExist:
+            return error_response(
+                "PROFILE_NOT_FOUND",
+                "Specialist profile not found",
+                status_code=404,
+            )
+        serializer = SpecialistProfileDetailSerializer(profile)
+        return success_response(serializer.data)
 
 
 # --- Profile Views ---
