@@ -2,6 +2,68 @@ from rest_framework import serializers
 
 from .models import Service, ServiceCategory
 
+# --- Public serializers (Client App) ---
+
+
+class SpecialistShortSerializer(serializers.Serializer):
+    """Minimal specialist info for service listings."""
+    id = serializers.IntegerField(source='specialist.id')
+    display_name = serializers.CharField(
+        source='specialist.specialist_profile.display_name',
+        default='',
+    )
+    avatar = serializers.ImageField(
+        source='specialist.specialist_profile.avatar',
+        default=None,
+    )
+    rating = serializers.DecimalField(
+        source='specialist.specialist_profile.rating',
+        max_digits=2, decimal_places=1, default=0.0,
+    )
+    reviews_count = serializers.IntegerField(
+        source='specialist.specialist_profile.reviews_count',
+        default=0,
+    )
+
+
+class ServicePublicListSerializer(serializers.ModelSerializer):
+    """Public service listing for Client App."""
+    category_name = serializers.CharField(
+        source='category.name', read_only=True, default=None,
+    )
+    specialist_info = SpecialistShortSerializer(source='*', read_only=True)
+
+    class Meta:
+        model = Service
+        fields = [
+            'id', 'name', 'description', 'price', 'duration_minutes',
+            'category', 'category_name', 'image',
+            'specialist_info', 'created_at',
+        ]
+
+
+class ServicePublicDetailSerializer(ServicePublicListSerializer):
+    """Detailed service view — includes specialist address."""
+    specialist_address = serializers.CharField(
+        source='specialist.specialist_profile.address',
+        default='',
+    )
+    specialist_location_lat = serializers.DecimalField(
+        source='specialist.specialist_profile.location_lat',
+        max_digits=9, decimal_places=6, default=None,
+    )
+    specialist_location_lng = serializers.DecimalField(
+        source='specialist.specialist_profile.location_lng',
+        max_digits=9, decimal_places=6, default=None,
+    )
+
+    class Meta(ServicePublicListSerializer.Meta):
+        fields = ServicePublicListSerializer.Meta.fields + [
+            'specialist_address',
+            'specialist_location_lat',
+            'specialist_location_lng',
+        ]
+
 
 class ServiceCategorySerializer(serializers.ModelSerializer):
     """Category with nested children."""
