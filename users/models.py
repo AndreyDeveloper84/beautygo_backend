@@ -11,7 +11,7 @@ class User(AbstractUser):
         ('admin', 'Admin'),
     )
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
-    phone = models.CharField(max_length=20, unique=True)
+    phone = models.CharField(max_length=20, unique=True, null=True, blank=True)
     is_verified = models.BooleanField(default=False)
 
     def __str__(self):
@@ -124,6 +124,35 @@ class OTPCode(models.Model):
 
     def __str__(self):
         return f"OTP for {self.phone} ({'used' if self.is_used else 'active'})"
+
+
+class SocialAccount(models.Model):
+    """Linked social provider account for a user."""
+
+    class Provider(models.TextChoices):
+        VK = "vk", "VKontakte"
+        GOOGLE = "google", "Google"
+        APPLE = "apple", "Apple"
+        YANDEX = "yandex", "Yandex"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='social_accounts',
+    )
+    provider = models.CharField(max_length=20, choices=Provider.choices)
+    provider_uid = models.CharField(max_length=255)
+    extra_data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('provider', 'provider_uid')
+        indexes = [
+            models.Index(fields=['user', 'provider']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} — {self.provider} ({self.provider_uid})"
 
 
 class DeviceToken(models.Model):

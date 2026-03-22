@@ -124,6 +124,32 @@ class ClientProfileSerializer(serializers.ModelSerializer):
         return value
 
 
+# --- Social Auth serializers ---
+
+class SocialAuthSerializer(serializers.Serializer):
+    """Validate social auth request."""
+    token = serializers.CharField(
+        help_text="OAuth access_token or id_token from provider",
+    )
+    device_id = serializers.CharField(max_length=255, required=False)
+    first_name = serializers.CharField(
+        max_length=150, required=False, default="",
+    )
+    last_name = serializers.CharField(
+        max_length=150, required=False, default="",
+    )
+
+
+class BindPhoneSerializer(PhoneSerializer):
+    """Bind a phone number to a social-auth user via OTP."""
+    code = serializers.CharField(max_length=6, min_length=4)
+
+    def validate_code(self, value):
+        if not value.isdigit():
+            raise serializers.ValidationError("Code must be numeric")
+        return value
+
+
 # --- Specialist Profile serializers ---
 
 class SpecialistProfileCreateSerializer(serializers.ModelSerializer):
