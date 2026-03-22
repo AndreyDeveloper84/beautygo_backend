@@ -123,6 +123,147 @@ class TestServiceViewSet:
 
 
 @pytest.mark.django_db
+class TestServicePublicViewSet:
+    """Tests for GET /api/v1/services/search/ — public read API."""
+    URL = '/api/v1/services/search/'
+
+    def test_list_active_services(
+        self, authenticated_client, specialist_user,
+    ):
+        """Client sees only active services."""
+        Service.objects.create(
+            specialist=specialist_user, name='Active',
+            price='1000', duration_minutes=60, is_active=True,
+        )
+        Service.objects.create(
+            specialist=specialist_user, name='Hidden',
+            price='500', duration_minutes=30, is_active=False,
+        )
+        response = authenticated_client.get(self.URL)
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.data) == 1
+        assert response.data[0]['name'] == 'Active'
+
+    def test_includes_specialist_info(
+        self, authenticated_client, specialist_user,
+    ):
+        """Response includes specialist name, rating, reviews_count."""
+        Service.objects.create(
+            specialist=specialist_user, name='Маникюр',
+            price='1500', duration_minutes=60,
+        )
+        response = authenticated_client.get(self.URL)
+        assert response.status_code == status.HTTP_200_OK
+        info = response.data[0]['specialist_info']
+        assert info['display_name'] == 'Елена Мастер'
+        assert float(info['rating']) == 4.8
+        assert info['reviews_count'] == 25
+
+    def test_detail_includes_address(
+        self, authenticated_client, specialist_user,
+    ):
+        """Detail view includes specialist address and location."""
+        svc = Service.objects.create(
+            specialist=specialist_user, name='Стрижка',
+            price='800', duration_minutes=45,
+        )
+        response = authenticated_client.get(f'{self.URL}{svc.pk}/')
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['specialist_address'] == 'Казань, ул. Баумана 1'
+        assert response.data['specialist_location_lat'] is not None
+
+    def test_filter_by_category(
+        self, authenticated_client, specialist_user,
+    ):
+        """Can filter services by category."""
+        cat = ServiceCategory.objects.create(name='Ногти фильтр')
+        Service.objects.create(
+            specialist=specialist_user, name='Маникюр',
+            price='1500', duration_minutes=60, category=cat,
+        )
+        Service.objects.create(
+            specialist=specialist_user, name='Стрижка',
+            price='800', duration_minutes=45,
+        )
+        response = authenticated_client.get(
+            self.URL, {'category': cat.pk},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.data) == 1
+        assert response.data[0]['name'] == 'Маникюр'
+
+    def test_filter_by_price_range(
+        self, authenticated_client, specialist_user,
+    ):
+        """Can filter by min/max price."""
+        Service.objects.create(
+            specialist=specialist_user, name='Cheap',
+            price='500', duration_minutes=30,
+        )
+        Service.objects.create(
+            specialist=specialist_user, name='Expensive',
+            price='3000', duration_minutes=90,
+        )
+        response = authenticated_client.get(
+            self.URL, {'min_price': 1000, 'max_price': 5000},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.data) == 1
+        assert response.data[0]['name'] == 'Expensive'
+
+    def test_ordering_by_price(
+        self, authenticated_client, specialist_user,
+    ):
+        """Can order by price ascending."""
+        Service.objects.create(
+            specialist=specialist_user, name='B',
+            price='2000', duration_minutes=60,
+        )
+        Service.objects.create(
+            specialist=specialist_user, name='A',
+            price='500', duration_minutes=30,
+        )
+        response = authenticated_client.get(
+            self.URL, {'ordering': 'price'},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data[0]['name'] == 'A'
+        assert response.data[1]['name'] == 'B'
+
+    def test_unauthenticated_denied(self, client_api_client):
+        """Unauthenticated user cannot access public search."""
+        response = client_api_client.get(self.URL)
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_search_by_name(
+        self, authenticated_client, specialist_user,
+    ):
+        """Can search services by name substring."""
+        Service.objects.create(
+            specialist=specialist_user, name='Классический маникюр',
+            price='1500', duration_minutes=60,
+        )
+        Service.objects.create(
+            specialist=specialist_user, name='Стрижка',
+            price='800', duration_minutes=45,
+        )
+        response = authenticated_client.get(
+            self.URL, {'name': 'маникюр'},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.data) == 1
+        assert 'маникюр' in response.data[0]['name'].lower()
+
+    def test_readonly_no_post(self, authenticated_client):
+        """Public API is read-only — POST not allowed."""
+        response = authenticated_client.post(
+            self.URL,
+            {'name': 'Hack', 'price': '100', 'duration_minutes': 30},
+        )
+        assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
+
+
+@pytest.mark.django_db
 class TestServiceCategoryAPI:
     URL = '/api/v1/services/categories/'
 
