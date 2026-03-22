@@ -96,7 +96,7 @@ class OTPService:
                 raise RateLimitError()
 
         # Generate code
-        if settings.DEBUG:
+        if settings.DEBUG or getattr(settings, 'OTP_DEBUG_CODE_ENABLED', False):
             code = settings.OTP_DEBUG_CODE
         else:
             code = str(random.randint(100000, 999999))

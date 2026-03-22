@@ -4,6 +4,8 @@ from .base import *
 
 # Security
 DEBUG = False
+# Allow debug OTP code on dev server (never in real production)
+OTP_DEBUG_CODE_ENABLED = os.environ.get('OTP_DEBUG_CODE_ENABLED', '').lower() == 'true'
 SECRET_KEY = os.environ['DJANGO_SECRET_KEY']
 
 ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',')
