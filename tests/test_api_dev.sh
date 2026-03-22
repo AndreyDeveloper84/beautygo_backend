@@ -9,7 +9,7 @@
 #
 # Logs are written to: tests/integration_results.log
 #
-# Requirements: curl, jq
+# Requirements: curl, python3
 # =============================================================================
 
 set -uo pipefail
@@ -128,13 +128,40 @@ assert_contains() {
     fi
 }
 
+# Python-based JSON field extractor (no jq dependency)
+json_get() {
+    local jq_expr="$1"
+    local body="$2"
+    python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    keys = sys.argv[2].strip('.').split('.')
+    val = data
+    for k in keys:
+        if isinstance(val, dict):
+            val = val.get(k)
+        else:
+            val = None
+            break
+    if val is None:
+        print('null')
+    elif isinstance(val, bool):
+        print(str(val).lower())
+    else:
+        print(val)
+except Exception:
+    print('JSON_ERROR')
+" "$body" "$jq_expr" 2>/dev/null || echo "JSON_ERROR"
+}
+
 assert_json_field() {
     local name="$1"
     local jq_expr="$2"
     local expected="$3"
     local body="$4"
     local actual
-    actual=$(echo "$body" | jq -r "$jq_expr" 2>/dev/null || echo "JQ_ERROR")
+    actual=$(json_get "$jq_expr" "$body")
     assert "$name" "$expected" "$actual"
 }
 
@@ -182,7 +209,7 @@ http() {
     # Verbose: show response
     if [ "$VERBOSE" = "1" ]; then
         local pretty
-        pretty=$(echo "$HTTP_BODY" | jq . 2>/dev/null || echo "$HTTP_BODY")
+        pretty=$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1]),indent=2,ensure_ascii=False))" "$HTTP_BODY" 2>/dev/null || echo "$HTTP_BODY")
         echo -e "    ${YELLOW}← ${HTTP_STATUS} ${pretty:0:300}${NC}"
     fi
 
@@ -378,8 +405,8 @@ http POST "/auth/register/" "{\"phone\": \"${TEST_PHONE2}\"}" -H "X-App-Type: cl
 http POST "/auth/verify-otp/" "{\"phone\": \"${TEST_PHONE2}\", \"code\": \"000000\"}" -H "X-App-Type: client"
 assert "Verify correct OTP → 200" "200" "$HTTP_STATUS"
 # Check access token exists (non-null)
-ACCESS_TOKEN=$(echo "$HTTP_BODY" | jq -r '.data.access' 2>/dev/null)
-REFRESH_TOKEN=$(echo "$HTTP_BODY" | jq -r '.data.refresh' 2>/dev/null)
+ACCESS_TOKEN=$(json_get ".data.access" "$HTTP_BODY")
+REFRESH_TOKEN=$(json_get ".data.refresh" "$HTTP_BODY")
 TOTAL=$((TOTAL + 1))
 if [ -n "$ACCESS_TOKEN" ] && [ "$ACCESS_TOKEN" != "null" ]; then
     echo -e "  ${GREEN}✓${NC} Access token present"
@@ -515,13 +542,13 @@ echo -e "${CYAN}[7] Token refresh (POST /auth/token/refresh/)${NC}"
 # Get fresh tokens
 http POST "/auth/register/" "{\"phone\": \"+7900${RANDOM_SUFFIX}050\"}" -H "X-App-Type: client"
 http POST "/auth/verify-otp/" "{\"phone\": \"+7900${RANDOM_SUFFIX}050\", \"code\": \"000000\"}" -H "X-App-Type: client"
-FRESH_REFRESH=$(echo "$HTTP_BODY" | jq -r '.data.refresh' 2>/dev/null)
+FRESH_REFRESH=$(json_get ".data.refresh" "$HTTP_BODY")
 
 if [ -n "$FRESH_REFRESH" ] && [ "$FRESH_REFRESH" != "null" ]; then
     # 7.1 Valid refresh
     http POST "/auth/token/refresh/" "{\"refresh\": \"${FRESH_REFRESH}\"}" -H "X-App-Type: client"
     assert "Token refresh → 200" "200" "$HTTP_STATUS"
-    NEW_ACCESS=$(echo "$HTTP_BODY" | jq -r '.access' 2>/dev/null)
+    NEW_ACCESS=$(json_get ".access" "$HTTP_BODY")
     TOTAL=$((TOTAL + 1))
     if [ -n "$NEW_ACCESS" ] && [ "$NEW_ACCESS" != "null" ]; then
         echo -e "  ${GREEN}✓${NC} New access token received"
@@ -558,12 +585,12 @@ if [ "$HTTP_STATUS" = "429" ]; then
     http POST "/auth/login/" "{\"phone\": \"${TEST_PHONE_SPECIALIST}\"}" -H "X-App-Type: pro"
 fi
 http POST "/auth/verify-otp/" "{\"phone\": \"${TEST_PHONE_SPECIALIST}\", \"code\": \"000000\"}" -H "X-App-Type: pro"
-SPEC_ACCESS=$(echo "$HTTP_BODY" | jq -r '.data.access' 2>/dev/null)
+SPEC_ACCESS=$(json_get ".data.access" "$HTTP_BODY")
 
 # Get client tokens for comparison
 http POST "/auth/register/" "{\"phone\": \"+7900${RANDOM_SUFFIX}060\"}" -H "X-App-Type: client"
 http POST "/auth/verify-otp/" "{\"phone\": \"+7900${RANDOM_SUFFIX}060\", \"code\": \"000000\"}" -H "X-App-Type: client"
-CLIENT_ACCESS=$(echo "$HTTP_BODY" | jq -r '.data.access' 2>/dev/null)
+CLIENT_ACCESS=$(json_get ".data.access" "$HTTP_BODY")
 
 if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
 
@@ -573,7 +600,7 @@ if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
         -H "X-App-Type: pro" \
         -H "Authorization: Bearer ${SPEC_ACCESS}"
     assert "Create service → 201" "201" "$HTTP_STATUS"
-    SERVICE_ID=$(echo "$HTTP_BODY" | jq -r '.id' 2>/dev/null)
+    SERVICE_ID=$(json_get ".id" "$HTTP_BODY")
     assert_json_field "Service name matches" ".name" "Test Manicure" "$HTTP_BODY"
     assert_json_field "Service is_active default true" ".is_active" "true" "$HTTP_BODY"
 
@@ -785,7 +812,7 @@ echo -e "${CYAN}[12] Service Categories (GET /services/categories/)${NC}"
 # 12.1 List categories (public — no auth needed, but X-App-Type required)
 http GET "/services/categories/" "" -H "X-App-Type: client"
 assert "List categories → 200" "200" "$HTTP_STATUS"
-CAT_COUNT=$(echo "$HTTP_BODY" | jq 'length' 2>/dev/null)
+CAT_COUNT=$(python3 -c "import json,sys; data=json.loads(sys.argv[1]); print(len(data) if isinstance(data,list) else 0)" "$HTTP_BODY" 2>/dev/null)
 TOTAL=$((TOTAL + 1))
 if [ -n "$CAT_COUNT" ] && [ "$CAT_COUNT" -gt 0 ] 2>/dev/null; then
     echo -e "  ${GREEN}✓${NC} Categories returned: ${CAT_COUNT}"
@@ -797,9 +824,9 @@ fi
 
 # 12.2 Categories with children structure
 if [ -n "$CAT_COUNT" ] && [ "$CAT_COUNT" -gt 0 ] 2>/dev/null; then
-    FIRST_CAT_ID=$(echo "$HTTP_BODY" | jq -r '.[0].id' 2>/dev/null)
-    FIRST_CAT_NAME=$(echo "$HTTP_BODY" | jq -r '.[0].name' 2>/dev/null)
-    CHILDREN=$(echo "$HTTP_BODY" | jq '.[0].children | length' 2>/dev/null)
+    FIRST_CAT_ID=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])[0]['id'])" "$HTTP_BODY" 2>/dev/null)
+    FIRST_CAT_NAME=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])[0]['name'])" "$HTTP_BODY" 2>/dev/null)
+    CHILDREN=$(python3 -c "import json,sys; print(len(json.loads(sys.argv[1])[0].get('children',[])))" "$HTTP_BODY" 2>/dev/null)
     assert_contains "Category has name field" '"name"' "$HTTP_BODY"
     assert_contains "Category has slug field" '"slug"' "$HTTP_BODY"
     assert_contains "Category has children field" '"children"' "$HTTP_BODY"
@@ -834,7 +861,7 @@ if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
         '{"name": "Search Manicure", "price": "1500.00", "duration_minutes": 60}' \
         -H "X-App-Type: pro" \
         -H "Authorization: Bearer ${SPEC_ACCESS}"
-    SEARCH_SVC_ID=$(echo "$HTTP_BODY" | jq -r '.id' 2>/dev/null)
+    SEARCH_SVC_ID=$(json_get ".id" "$HTTP_BODY")
 
     http POST "/services/" \
         '{"name": "Search Pedicure", "price": "2500.00", "duration_minutes": 90}' \
