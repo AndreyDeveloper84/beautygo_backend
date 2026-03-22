@@ -66,6 +66,61 @@ class TestServiceViewSet:
         assert len(response.data) == 1
         assert response.data[0]['name'] == 'Mine'
 
+    def test_create_service_with_category(
+        self, authenticated_specialist,
+    ):
+        cat = ServiceCategory.objects.create(name='Ногти API')
+        response = authenticated_specialist.post(
+            '/api/v1/services/',
+            {
+                'name': 'Маникюр',
+                'price': '1500.00',
+                'duration_minutes': 60,
+                'category': cat.pk,
+            },
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.data['category'] == cat.pk
+        assert response.data['category_name'] == 'Ногти API'
+
+    def test_create_service_without_category(
+        self, authenticated_specialist,
+    ):
+        response = authenticated_specialist.post(
+            '/api/v1/services/',
+            {
+                'name': 'Без категории',
+                'price': '500.00',
+                'duration_minutes': 30,
+            },
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.data['category'] is None
+
+    def test_service_is_active_default(
+        self, authenticated_specialist,
+    ):
+        response = authenticated_specialist.post(
+            '/api/v1/services/',
+            {'name': 'Active', 'price': '100', 'duration_minutes': 30},
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+        assert response.data['is_active'] is True
+
+    def test_deactivate_service(
+        self, authenticated_specialist, specialist_user,
+    ):
+        svc = Service.objects.create(
+            specialist=specialist_user, name='ToHide',
+            price='500', duration_minutes=30,
+        )
+        response = authenticated_specialist.patch(
+            f'/api/v1/services/{svc.pk}/',
+            {'is_active': False},
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['is_active'] is False
+
 
 @pytest.mark.django_db
 class TestServiceCategoryAPI:

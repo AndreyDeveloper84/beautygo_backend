@@ -30,6 +30,34 @@ class TestServiceModel:
         specialist_user.delete()
         assert Service.objects.count() == 0
 
+    def test_service_with_category(self, specialist_user):
+        cat = ServiceCategory.objects.create(name='Маникюр тест')
+        service = Service.objects.create(
+            specialist=specialist_user, name='Классический маникюр',
+            price=Decimal('1500'), duration_minutes=60,
+            category=cat,
+        )
+        assert service.category == cat
+        assert cat.services.count() == 1
+
+    def test_is_active_default(self, specialist_user):
+        service = Service.objects.create(
+            specialist=specialist_user, name='Active test',
+            price=Decimal('500'), duration_minutes=30,
+        )
+        assert service.is_active is True
+
+    def test_category_set_null(self, specialist_user):
+        cat = ServiceCategory.objects.create(name='Temp')
+        service = Service.objects.create(
+            specialist=specialist_user, name='Test',
+            price=Decimal('500'), duration_minutes=30,
+            category=cat,
+        )
+        cat.delete()
+        service.refresh_from_db()
+        assert service.category is None
+
 
 @pytest.mark.django_db
 class TestServiceCategoryModel:
