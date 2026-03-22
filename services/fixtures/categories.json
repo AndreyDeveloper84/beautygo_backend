@@ -1,0 +1,28 @@
+[
+  {"model": "services.servicecategory", "pk": 1, "fields": {"name": "Ногтевой сервис", "slug": "nails", "icon": "nail-polish", "sort_order": 1, "parent": null, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 2, "fields": {"name": "Маникюр", "slug": "manicure", "icon": "nail-polish", "sort_order": 1, "parent": 1, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 3, "fields": {"name": "Педикюр", "slug": "pedicure", "icon": "nail-polish", "sort_order": 2, "parent": 1, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 4, "fields": {"name": "Наращивание ногтей", "slug": "nail-extensions", "icon": "nail-polish", "sort_order": 3, "parent": 1, "is_active": true}},
+
+  {"model": "services.servicecategory", "pk": 5, "fields": {"name": "Волосы", "slug": "hair", "icon": "scissors", "sort_order": 2, "parent": null, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 6, "fields": {"name": "Стрижка", "slug": "haircut", "icon": "scissors", "sort_order": 1, "parent": 5, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 7, "fields": {"name": "Окрашивание", "slug": "coloring", "icon": "palette", "sort_order": 2, "parent": 5, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 8, "fields": {"name": "Укладка", "slug": "styling", "icon": "wind", "sort_order": 3, "parent": 5, "is_active": true}},
+
+  {"model": "services.servicecategory", "pk": 9, "fields": {"name": "Брови и ресницы", "slug": "brows-lashes", "icon": "eye", "sort_order": 3, "parent": null, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 10, "fields": {"name": "Коррекция бровей", "slug": "brow-shaping", "icon": "eye", "sort_order": 1, "parent": 9, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 11, "fields": {"name": "Ламинирование бровей", "slug": "brow-lamination", "icon": "eye", "sort_order": 2, "parent": 9, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 12, "fields": {"name": "Наращивание ресниц", "slug": "lash-extensions", "icon": "eye", "sort_order": 3, "parent": 9, "is_active": true}},
+
+  {"model": "services.servicecategory", "pk": 13, "fields": {"name": "Косметология", "slug": "cosmetology", "icon": "sparkles", "sort_order": 4, "parent": null, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 14, "fields": {"name": "Чистка лица", "slug": "facial-cleansing", "icon": "sparkles", "sort_order": 1, "parent": 13, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 15, "fields": {"name": "Пилинг", "slug": "peeling", "icon": "sparkles", "sort_order": 2, "parent": 13, "is_active": true}},
+
+  {"model": "services.servicecategory", "pk": 16, "fields": {"name": "Массаж", "slug": "massage", "icon": "hand", "sort_order": 5, "parent": null, "is_active": true}},
+
+  {"model": "services.servicecategory", "pk": 17, "fields": {"name": "Депиляция", "slug": "hair-removal", "icon": "zap", "sort_order": 6, "parent": null, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 18, "fields": {"name": "Шугаринг", "slug": "sugaring", "icon": "zap", "sort_order": 1, "parent": 17, "is_active": true}},
+  {"model": "services.servicecategory", "pk": 19, "fields": {"name": "Восковая депиляция", "slug": "waxing", "icon": "zap", "sort_order": 2, "parent": 17, "is_active": true}},
+
+  {"model": "services.servicecategory", "pk": 20, "fields": {"name": "Макияж", "slug": "makeup", "icon": "brush", "sort_order": 7, "parent": null, "is_active": true}}
+]
