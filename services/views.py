@@ -3,8 +3,19 @@ from rest_framework import permissions, viewsets
 
 from users.permissions import IsProApp, IsSpecialist
 
-from .models import Service
-from .serializers import ServiceSerializer
+from .models import Service, ServiceCategory
+from .serializers import ServiceCategorySerializer, ServiceSerializer
+
+
+class ServiceCategoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """GET /api/v1/services/categories/ — public categories list."""
+    serializer_class = ServiceCategorySerializer
+    permission_classes = [permissions.AllowAny]
+
+    def get_queryset(self):
+        return ServiceCategory.objects.filter(
+            is_active=True, parent__isnull=True,
+        )
 
 
 class ServiceViewSet(viewsets.ModelViewSet):

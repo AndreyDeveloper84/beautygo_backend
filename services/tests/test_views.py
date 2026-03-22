@@ -2,8 +2,9 @@ import logging
 
 import pytest
 from rest_framework import status
+from rest_framework.test import APIClient
 
-from services.models import Service
+from services.models import Service, ServiceCategory
 from users.models import User
 
 logger = logging.getLogger(__name__)
@@ -64,3 +65,63 @@ class TestServiceViewSet:
         assert response.status_code == status.HTTP_200_OK
         assert len(response.data) == 1
         assert response.data[0]['name'] == 'Mine'
+
+
+@pytest.mark.django_db
+class TestServiceCategoryAPI:
+    URL = '/api/v1/services/categories/'
+
+    def test_list_categories_public(self):
+        """Categories endpoint is public (no auth required)."""
+        ServiceCategory.objects.create(name='Ногти', sort_order=1)
+        ServiceCategory.objects.create(name='Волосы', sort_order=2)
+        client = APIClient()
+        client.defaults['HTTP_X_APP_TYPE'] = 'client'
+        response = client.get(self.URL)
+        logger.info("GET categories → %s, count=%d",
+                    response.status_code, len(response.data))
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.data) == 2
+
+    def test_categories_with_children(self):
+        parent = ServiceCategory.objects.create(name='Ногти', sort_order=1)
+        ServiceCategory.objects.create(
+            name='Маникюр', parent=parent, sort_order=1,
+        )
+        ServiceCategory.objects.create(
+            name='Педикюр', parent=parent, sort_order=2,
+        )
+        client = APIClient()
+        client.defaults['HTTP_X_APP_TYPE'] = 'client'
+        response = client.get(self.URL)
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.data) == 1  # only root
+        assert len(response.data[0]['children']) == 2
+
+    def test_inactive_categories_hidden(self):
+        ServiceCategory.objects.create(
+            name='Активная', sort_order=1, is_active=True,
+        )
+        ServiceCategory.objects.create(
+            name='Скрытая', sort_order=2, is_active=False,
+        )
+        client = APIClient()
+        client.defaults['HTTP_X_APP_TYPE'] = 'client'
+        response = client.get(self.URL)
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.data) == 1
+        assert response.data[0]['name'] == 'Активная'
+
+    def test_categories_from_fixture(self):
+        """Verify fixture loaded correctly."""
+        from django.core.management import call_command
+        call_command('loaddata', 'categories', verbosity=0)
+        client = APIClient()
+        client.defaults['HTTP_X_APP_TYPE'] = 'client'
+        response = client.get(self.URL)
+        assert response.status_code == status.HTTP_200_OK
+        # 7 root categories from fixture
+        root_names = [c['name'] for c in response.data]
+        assert 'Ногтевой сервис' in root_names
+        assert 'Волосы' in root_names
+        assert 'Массаж' in root_names
