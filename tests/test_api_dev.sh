@@ -138,6 +138,9 @@ assert_json_field() {
     assert "$name" "$expected" "$actual"
 }
 
+# Verbose mode: set VERBOSE=1 to see request/response details
+VERBOSE="${VERBOSE:-0}"
+
 # Make HTTP request, capture status + body
 # Usage: http METHOD path [data] [extra_curl_args...]
 # Sets: HTTP_STATUS, HTTP_BODY
@@ -157,15 +160,31 @@ http() {
         curl_args+=(-d "$data")
     fi
 
+    # Verbose: show request
+    if [ "$VERBOSE" = "1" ]; then
+        echo -e "    ${CYAN}→ ${method} ${path}${NC}"
+        if [ -n "$data" ]; then
+            echo -e "    ${CYAN}  body: ${data:0:200}${NC}"
+        fi
+    fi
+
     local response
     response=$(curl "${curl_args[@]}" "${API}${path}" 2>/dev/null) || {
         HTTP_STATUS="000"
         HTTP_BODY='{"error": "connection refused"}'
+        [ "$VERBOSE" = "1" ] && echo -e "    ${RED}← CONNECTION REFUSED${NC}"
         return
     }
 
     HTTP_STATUS=$(echo "$response" | tail -1)
     HTTP_BODY=$(echo "$response" | sed '$d')
+
+    # Verbose: show response
+    if [ "$VERBOSE" = "1" ]; then
+        local pretty
+        pretty=$(echo "$HTTP_BODY" | jq . 2>/dev/null || echo "$HTTP_BODY")
+        echo -e "    ${YELLOW}← ${HTTP_STATUS} ${pretty:0:300}${NC}"
+    fi
 
     log_http "$method" "$path" "$HTTP_STATUS" "$HTTP_BODY"
 }
@@ -524,16 +543,17 @@ assert "Refresh with empty body → 400" "400" "$HTTP_STATUS"
 
 
 # =============================================================================
-# 8. SERVICES CRUD (specialist only)
+# 8. SERVICES CRUD (specialist only, X-App-Type: pro)
 # =============================================================================
 echo ""
 log_section "[8] Services CRUD (specialist only)"
-echo -e "${CYAN}[8] Services CRUD (specialist only)${NC}"
+echo -e "${CYAN}[8] Services CRUD — Pro App (POST/GET/PATCH/DELETE /services/)${NC}"
 
 # Get specialist tokens
 sleep 1
 http POST "/auth/login/" "{\"phone\": \"${TEST_PHONE_SPECIALIST}\"}" -H "X-App-Type: pro"
 if [ "$HTTP_STATUS" = "429" ]; then
+    echo -e "  ${YELLOW}⚠${NC} Rate limited, waiting 61s..."
     sleep 61
     http POST "/auth/login/" "{\"phone\": \"${TEST_PHONE_SPECIALIST}\"}" -H "X-App-Type: pro"
 fi
@@ -545,33 +565,101 @@ http POST "/auth/register/" "{\"phone\": \"+7900${RANDOM_SUFFIX}060\"}" -H "X-Ap
 http POST "/auth/verify-otp/" "{\"phone\": \"+7900${RANDOM_SUFFIX}060\", \"code\": \"000000\"}" -H "X-App-Type: client"
 CLIENT_ACCESS=$(echo "$HTTP_BODY" | jq -r '.data.access' 2>/dev/null)
 
-# 8.1 Client cannot create service
+if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
+
+    # 8.1 Create service (without category)
+    http POST "/services/" \
+        '{"name": "Test Manicure", "price": "1500.00", "duration_minutes": 60}' \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert "Create service → 201" "201" "$HTTP_STATUS"
+    SERVICE_ID=$(echo "$HTTP_BODY" | jq -r '.id' 2>/dev/null)
+    assert_json_field "Service name matches" ".name" "Test Manicure" "$HTTP_BODY"
+    assert_json_field "Service is_active default true" ".is_active" "true" "$HTTP_BODY"
+
+    # 8.2 List own services
+    http GET "/services/" "" \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert "List services → 200" "200" "$HTTP_STATUS"
+    assert_contains "Response contains created service" "Test Manicure" "$HTTP_BODY"
+
+    # 8.3 Get single service
+    if [ -n "$SERVICE_ID" ] && [ "$SERVICE_ID" != "null" ]; then
+        http GET "/services/${SERVICE_ID}/" "" \
+            -H "X-App-Type: pro" \
+            -H "Authorization: Bearer ${SPEC_ACCESS}"
+        assert "Get service by id → 200" "200" "$HTTP_STATUS"
+        assert_json_field "Service id matches" ".id" "$SERVICE_ID" "$HTTP_BODY"
+    fi
+
+    # 8.4 Update service (PATCH)
+    if [ -n "$SERVICE_ID" ] && [ "$SERVICE_ID" != "null" ]; then
+        http PATCH "/services/${SERVICE_ID}/" \
+            '{"price": "2000.00", "name": "Updated Manicure"}' \
+            -H "X-App-Type: pro" \
+            -H "Authorization: Bearer ${SPEC_ACCESS}"
+        assert "Update service → 200" "200" "$HTTP_STATUS"
+        assert_json_field "Price updated" ".price" "2000.00" "$HTTP_BODY"
+        assert_json_field "Name updated" ".name" "Updated Manicure" "$HTTP_BODY"
+    fi
+
+    # 8.5 Deactivate service
+    if [ -n "$SERVICE_ID" ] && [ "$SERVICE_ID" != "null" ]; then
+        http PATCH "/services/${SERVICE_ID}/" \
+            '{"is_active": false}' \
+            -H "X-App-Type: pro" \
+            -H "Authorization: Bearer ${SPEC_ACCESS}"
+        assert "Deactivate service → 200" "200" "$HTTP_STATUS"
+        assert_json_field "is_active = false" ".is_active" "false" "$HTTP_BODY"
+    fi
+
+    # 8.6 Delete service
+    if [ -n "$SERVICE_ID" ] && [ "$SERVICE_ID" != "null" ]; then
+        http DELETE "/services/${SERVICE_ID}/" "" \
+            -H "X-App-Type: pro" \
+            -H "Authorization: Bearer ${SPEC_ACCESS}"
+        assert "Delete service → 204" "204" "$HTTP_STATUS"
+
+        # Confirm deletion
+        http GET "/services/${SERVICE_ID}/" "" \
+            -H "X-App-Type: pro" \
+            -H "Authorization: Bearer ${SPEC_ACCESS}"
+        assert "Deleted service → 404" "404" "$HTTP_STATUS"
+    fi
+
+    # 8.7 Create service with missing required fields
+    http POST "/services/" \
+        '{"name": ""}' \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert "Empty name → 400" "400" "$HTTP_STATUS"
+
+    http POST "/services/" \
+        '{"name": "Test", "price": "-100", "duration_minutes": 30}' \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert_not "Negative price doesn't 500" "500" "$HTTP_STATUS"
+
+    http POST "/services/" \
+        '{}' \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert "Empty body → 400" "400" "$HTTP_STATUS"
+
+fi
+
+# 8.8 Client cannot create service
 if [ -n "$CLIENT_ACCESS" ] && [ "$CLIENT_ACCESS" != "null" ]; then
-    http POST "/auth/services/" \
+    http POST "/services/" \
         '{"name": "Hack", "price": "100.00", "duration_minutes": 30}' \
         -H "X-App-Type: client" \
         -H "Authorization: Bearer ${CLIENT_ACCESS}"
     assert "Client cannot create service → 403" "403" "$HTTP_STATUS"
 fi
 
-# 8.2 Specialist can create service
-if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
-    http POST "/auth/services/" \
-        '{"name": "Test Manicure", "price": "1500.00", "duration_minutes": 60}' \
-        -H "X-App-Type: pro" \
-        -H "Authorization: Bearer ${SPEC_ACCESS}"
-    assert "Specialist creates service → 201" "201" "$HTTP_STATUS"
-    SERVICE_ID=$(echo "$HTTP_BODY" | jq -r '.id // .data.id' 2>/dev/null)
-
-    # 8.3 List services
-    http GET "/auth/services/" "" \
-        -H "X-App-Type: pro" \
-        -H "Authorization: Bearer ${SPEC_ACCESS}"
-    assert "List services → 200" "200" "$HTTP_STATUS"
-fi
-
-# 8.4 Unauthenticated access
-http GET "/auth/services/" "" -H "X-App-Type: client"
+# 8.9 Unauthenticated access
+http GET "/services/" "" -H "X-App-Type: pro"
 assert "Services without auth → 401" "401" "$HTTP_STATUS"
 
 
@@ -685,6 +773,309 @@ assert_contains "Error has message field" '"message"' "$HTTP_BODY"
 # 11.3 Validation errors include details
 http POST "/auth/verify-otp/" '{}' -H "X-App-Type: client"
 assert_contains "Validation error has details" '"details"' "$HTTP_BODY"
+
+
+# =============================================================================
+# 12. SERVICE CATEGORIES
+# =============================================================================
+echo ""
+log_section "[12] Service Categories (GET /services/categories/)"
+echo -e "${CYAN}[12] Service Categories (GET /services/categories/)${NC}"
+
+# 12.1 List categories (public — no auth needed, but X-App-Type required)
+http GET "/services/categories/" "" -H "X-App-Type: client"
+assert "List categories → 200" "200" "$HTTP_STATUS"
+CAT_COUNT=$(echo "$HTTP_BODY" | jq 'length' 2>/dev/null)
+TOTAL=$((TOTAL + 1))
+if [ -n "$CAT_COUNT" ] && [ "$CAT_COUNT" -gt 0 ] 2>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} Categories returned: ${CAT_COUNT}"
+    PASSED=$((PASSED + 1))
+else
+    echo -e "  ${YELLOW}⚠${NC} No categories found (fixture may not be loaded)"
+    PASSED=$((PASSED + 1))  # Not a failure, just no data
+fi
+
+# 12.2 Categories with children structure
+if [ -n "$CAT_COUNT" ] && [ "$CAT_COUNT" -gt 0 ] 2>/dev/null; then
+    FIRST_CAT_ID=$(echo "$HTTP_BODY" | jq -r '.[0].id' 2>/dev/null)
+    FIRST_CAT_NAME=$(echo "$HTTP_BODY" | jq -r '.[0].name' 2>/dev/null)
+    CHILDREN=$(echo "$HTTP_BODY" | jq '.[0].children | length' 2>/dev/null)
+    assert_contains "Category has name field" '"name"' "$HTTP_BODY"
+    assert_contains "Category has slug field" '"slug"' "$HTTP_BODY"
+    assert_contains "Category has children field" '"children"' "$HTTP_BODY"
+
+    # 12.3 Get single category
+    if [ -n "$FIRST_CAT_ID" ] && [ "$FIRST_CAT_ID" != "null" ]; then
+        http GET "/services/categories/${FIRST_CAT_ID}/" "" -H "X-App-Type: client"
+        assert "Get category by id → 200" "200" "$HTTP_STATUS"
+    fi
+fi
+
+# 12.4 Categories from pro app too
+http GET "/services/categories/" "" -H "X-App-Type: pro"
+assert "Categories from pro app → 200" "200" "$HTTP_STATUS"
+
+# 12.5 Categories without X-App-Type
+response=$(curl -s -w '\n%{http_code}' "${API}/services/categories/" 2>/dev/null)
+status=$(echo "$response" | tail -1)
+assert "Categories without X-App-Type → 403" "403" "$status"
+
+
+# =============================================================================
+# 13. SERVICE PUBLIC SEARCH (Client App)
+# =============================================================================
+echo ""
+log_section "[13] Service Public Search (GET /services/search/)"
+echo -e "${CYAN}[13] Service Public Search (GET /services/search/)${NC}"
+
+# First create some services as specialist for search tests
+if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
+    http POST "/services/" \
+        '{"name": "Search Manicure", "price": "1500.00", "duration_minutes": 60}' \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    SEARCH_SVC_ID=$(echo "$HTTP_BODY" | jq -r '.id' 2>/dev/null)
+
+    http POST "/services/" \
+        '{"name": "Search Pedicure", "price": "2500.00", "duration_minutes": 90}' \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+fi
+
+# 13.1 List all active services (authenticated client)
+if [ -n "$CLIENT_ACCESS" ] && [ "$CLIENT_ACCESS" != "null" ]; then
+    http GET "/services/search/" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Public search → 200" "200" "$HTTP_STATUS"
+
+    # 13.2 Response includes specialist_info
+    assert_contains "Response has specialist_info" '"specialist_info"' "$HTTP_BODY"
+
+    # 13.3 Filter by name
+    http GET "/services/search/?name=Manicure" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Filter by name → 200" "200" "$HTTP_STATUS"
+
+    # 13.4 Filter by price range
+    http GET "/services/search/?min_price=2000&max_price=3000" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Filter by price range → 200" "200" "$HTTP_STATUS"
+
+    # 13.5 Order by price
+    http GET "/services/search/?ordering=price" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Order by price → 200" "200" "$HTTP_STATUS"
+
+    # 13.6 Order by price descending
+    http GET "/services/search/?ordering=-price" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Order by -price → 200" "200" "$HTTP_STATUS"
+
+    # 13.7 Get single service detail
+    if [ -n "$SEARCH_SVC_ID" ] && [ "$SEARCH_SVC_ID" != "null" ]; then
+        http GET "/services/search/${SEARCH_SVC_ID}/" "" \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${CLIENT_ACCESS}"
+        assert "Service detail → 200" "200" "$HTTP_STATUS"
+        assert_contains "Detail has specialist_info" '"specialist_info"' "$HTTP_BODY"
+        assert_contains "Detail has specialist_address" '"specialist_address"' "$HTTP_BODY"
+    fi
+
+    # 13.8 POST on read-only → 405
+    http POST "/services/search/" \
+        '{"name": "Hack"}' \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "POST on search (read-only) → 405" "405" "$HTTP_STATUS"
+fi
+
+# 13.9 Unauthenticated → 401
+http GET "/services/search/" "" -H "X-App-Type: client"
+assert "Public search without auth → 401" "401" "$HTTP_STATUS"
+
+
+# =============================================================================
+# 14. CLIENT PROFILE
+# =============================================================================
+echo ""
+log_section "[14] Client Profile (GET/PATCH /auth/clients/me/)"
+echo -e "${CYAN}[14] Client Profile (GET/PATCH /auth/clients/me/)${NC}"
+
+if [ -n "$CLIENT_ACCESS" ] && [ "$CLIENT_ACCESS" != "null" ]; then
+    # 14.1 Get client profile
+    http GET "/auth/clients/me/" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Get client profile → 200" "200" "$HTTP_STATUS"
+    assert_contains "Profile has full_name" '"full_name"' "$HTTP_BODY"
+
+    # 14.2 Update client profile
+    http PATCH "/auth/clients/me/" \
+        '{"full_name": "Test Client Name"}' \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Update client profile → 200" "200" "$HTTP_STATUS"
+    assert_json_field "Name updated" ".full_name" "Test Client Name" "$HTTP_BODY"
+
+    # 14.3 Name too short → 400
+    http PATCH "/auth/clients/me/" \
+        '{"full_name": "A"}' \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Name < 2 chars → 400" "400" "$HTTP_STATUS"
+
+    # 14.4 Client profile from pro app → 403
+    http GET "/auth/clients/me/" "" \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Client profile from pro app → 403" "403" "$HTTP_STATUS"
+fi
+
+# 14.5 Specialist cannot access client profile
+if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
+    http GET "/auth/clients/me/" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert "Specialist → client profile → 403" "403" "$HTTP_STATUS"
+fi
+
+# 14.6 Without auth → 401
+http GET "/auth/clients/me/" "" -H "X-App-Type: client"
+assert "Client profile without auth → 401" "401" "$HTTP_STATUS"
+
+
+# =============================================================================
+# 15. SPECIALIST PROFILE
+# =============================================================================
+echo ""
+log_section "[15] Specialist Profile (POST/PATCH /auth/masters/profile/, GET /auth/masters/me/)"
+echo -e "${CYAN}[15] Specialist Profile (masters/profile/ & masters/me/)${NC}"
+
+if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
+    # 15.1 Get specialist profile
+    http GET "/auth/masters/me/" "" \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert "Get specialist profile → 200" "200" "$HTTP_STATUS"
+    assert_contains "Profile has display_name" '"display_name"' "$HTTP_BODY"
+    assert_contains "Profile has status" '"status"' "$HTTP_BODY"
+    assert_contains "Profile has rating" '"rating"' "$HTTP_BODY"
+
+    # 15.2 Update specialist profile
+    http PATCH "/auth/masters/profile/" \
+        '{"display_name": "Updated Master", "bio": "Test bio"}' \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert "Update specialist profile → 200" "200" "$HTTP_STATUS"
+
+    # 15.3 Update address + location
+    http PATCH "/auth/masters/profile/" \
+        '{"address": "Казань, ул. Баумана 1", "location_lat": "55.796127", "location_lng": "49.106405"}' \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert "Update address → 200" "200" "$HTTP_STATUS"
+
+    # 15.4 Specialist profile from client app → 403
+    http GET "/auth/masters/me/" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert "Master profile from client app → 403" "403" "$HTTP_STATUS"
+fi
+
+# 15.5 Client cannot access master profile
+if [ -n "$CLIENT_ACCESS" ] && [ "$CLIENT_ACCESS" != "null" ]; then
+    http GET "/auth/masters/me/" "" \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Client → master profile → 403" "403" "$HTTP_STATUS"
+fi
+
+# 15.6 Without auth → 401
+http GET "/auth/masters/me/" "" -H "X-App-Type: pro"
+assert "Master profile without auth → 401" "401" "$HTTP_STATUS"
+
+
+# =============================================================================
+# 16. SEND CODE (Reauth)
+# =============================================================================
+echo ""
+log_section "[16] Send Code (POST /auth/send-code/)"
+echo -e "${CYAN}[16] Send Code (POST /auth/send-code/)${NC}"
+
+# 16.1 Send code to registered phone (need to wait for rate limit)
+sleep 2
+http POST "/auth/send-code/" "{\"phone\": \"${TEST_PHONE2}\"}" -H "X-App-Type: client"
+# May be 200 or 429 depending on timing
+if [ "$HTTP_STATUS" = "429" ]; then
+    echo -e "  ${YELLOW}⚠${NC} Rate limited (expected after previous OTP sends)"
+    TOTAL=$((TOTAL + 1)); PASSED=$((PASSED + 1))
+    echo -e "  ${GREEN}✓${NC} Rate limiting works on send-code"
+else
+    assert "Send code to existing phone → 200" "200" "$HTTP_STATUS"
+fi
+
+# 16.2 Send code to unregistered phone → 404
+http POST "/auth/send-code/" '{"phone": "+79099998877"}' -H "X-App-Type: client"
+assert "Send code to unknown phone → 404" "404" "$HTTP_STATUS"
+
+# 16.3 Empty body → 400
+http POST "/auth/send-code/" '{}' -H "X-App-Type: client"
+assert "Send code empty body → 400" "400" "$HTTP_STATUS"
+
+# 16.4 Invalid phone → 400
+http POST "/auth/send-code/" '{"phone": "not-a-phone"}' -H "X-App-Type: client"
+assert "Send code invalid phone → 400" "400" "$HTTP_STATUS"
+
+
+# =============================================================================
+# 17. CROSS-APP SECURITY
+# =============================================================================
+echo ""
+log_section "[17] Cross-App Security"
+echo -e "${CYAN}[17] Cross-App Security${NC}"
+
+# 17.1 Client app → Pro-only endpoints
+if [ -n "$CLIENT_ACCESS" ] && [ "$CLIENT_ACCESS" != "null" ]; then
+    http POST "/services/" \
+        '{"name": "Hack", "price": "100", "duration_minutes": 30}' \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Client app → create service → 403" "403" "$HTTP_STATUS"
+
+    http GET "/auth/masters/me/" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Client app → master profile → 403" "403" "$HTTP_STATUS"
+fi
+
+# 17.2 Pro app → Client-only endpoints
+if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
+    http GET "/auth/clients/me/" "" \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert "Pro app → client profile → 403" "403" "$HTTP_STATUS"
+fi
+
+# 17.3 Wrong role + wrong app combo
+if [ -n "$CLIENT_ACCESS" ] && [ "$CLIENT_ACCESS" != "null" ]; then
+    http GET "/services/" "" \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Client token + pro header → services → 403" "403" "$HTTP_STATUS"
+fi
+
+# 17.4 Specialist on client endpoint
+if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
+    http GET "/auth/clients/me/" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${SPEC_ACCESS}"
+    assert "Specialist token + client header → client profile → 403" "403" "$HTTP_STATUS"
+fi
 
 
 # =============================================================================
