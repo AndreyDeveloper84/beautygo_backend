@@ -2,6 +2,7 @@ from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
+    BindPhoneView,
     ClientProfileView,
     LoginView,
     LogoutView,
@@ -11,6 +12,7 @@ from .views import (
     ProfileDetailView,
     RegisterPhoneView,
     SendCodeView,
+    SocialAuthView,
     VerifyOTPView,
 )
 
@@ -22,6 +24,10 @@ urlpatterns = [
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
     path('logout/', LogoutView.as_view(), name='logout'),
     path('send-code/', SendCodeView.as_view(), name='send-code'),
+
+    # Social auth
+    path('social/<str:provider>/', SocialAuthView.as_view(), name='social-auth'),
+    path('bind-phone/', BindPhoneView.as_view(), name='bind-phone'),
 
     # Specialist profile endpoints
     path('masters/profile/', MasterProfileView.as_view(), name='master-profile'),

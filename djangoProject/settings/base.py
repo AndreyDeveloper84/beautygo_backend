@@ -189,3 +189,9 @@ OTP_EXPIRY_MINUTES = 5
 OTP_RATE_LIMIT_SECONDS = 60
 OTP_MAX_ATTEMPTS = 3
 OTP_DEBUG_CODE = "000000"
+
+# Social Auth Provider Settings
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+APPLE_CLIENT_ID = os.environ.get("APPLE_CLIENT_ID", "")
+VK_CLIENT_SECRET = os.environ.get("VK_CLIENT_SECRET", "")
+YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID", "")

@@ -12,16 +12,22 @@ from .models import Profile, SpecialistProfile, User
 from .permissions import IsClient, IsClientApp, IsProApp, IsSpecialist
 from .response import error_response, success_response
 from .serializers import (
+    BindPhoneSerializer,
     ClientProfileSerializer,
     LoginSerializer,
     LogoutSerializer,
     ProfileSerializer,
     RegisterPhoneSerializer,
     SendCodeSerializer,
+    SocialAuthSerializer,
     SpecialistProfileCreateSerializer,
     SpecialistProfileDetailSerializer,
     SpecialistProfileUpdateSerializer,
     VerifyOTPSerializer,
+)
+from .social_auth import (
+    SocialAuthError,
+    SocialAuthService,
 )
 from .services import AuthError, AuthService
 
@@ -299,3 +305,66 @@ class ClientProfileView(generics.RetrieveUpdateAPIView):
     def partial_update(self, request, *args, **kwargs):
         kwargs['partial'] = True
         return self.update(request, *args, **kwargs)
+
+
+# --- Social Auth ---
+
+class SocialAuthView(APIView):
+    """POST /api/v1/auth/social/{provider}/ — Social auth entry point."""
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, provider):
+        serializer = SocialAuthSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+
+        try:
+            service = SocialAuthService()
+            result = service.authenticate(
+                provider=provider,
+                token=serializer.validated_data["token"],
+                app_type=getattr(request, 'app_type', 'client'),
+                device_id=serializer.validated_data.get("device_id"),
+                extra_fields={
+                    "first_name": serializer.validated_data.get(
+                        "first_name", "",
+                    ),
+                    "last_name": serializer.validated_data.get(
+                        "last_name", "",
+                    ),
+                },
+            )
+            return success_response(result, status_code=200)
+        except SocialAuthError as e:
+            return error_response(
+                e.code, e.message, status_code=e.status_code,
+            )
+
+
+class BindPhoneView(APIView):
+    """POST /api/v1/auth/bind-phone/ — Bind phone to social-auth account."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        serializer = BindPhoneSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+
+        try:
+            service = SocialAuthService()
+            service.bind_phone(
+                user=request.user,
+                phone=serializer.validated_data["phone"],
+                code=serializer.validated_data["code"],
+            )
+            return success_response({"message": "Phone bound successfully"})
+        except SocialAuthError as e:
+            return error_response(
+                e.code, e.message, status_code=e.status_code,
+            )
