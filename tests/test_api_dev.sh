@@ -12,9 +12,9 @@
 # Requirements: curl, jq
 # =============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
-BASE_URL="${1:-${BASE_URL:-http://localhost:8000}}"
+BASE_URL="${1:-${BASE_URL:-https://dev.gobeauty.site}}"
 API="${BASE_URL}/api/v1"
 
 # --- Log file ---
@@ -150,7 +150,7 @@ http() {
     local data="${3:-}"
     shift 2; [ -n "$data" ] && shift || true
 
-    local curl_args=(-s -w '\n%{http_code}' -X "$method")
+    local curl_args=(-s -k -w '\n%{http_code}' -X "$method")
     curl_args+=(-H "Content-Type: application/json")
 
     # Pass remaining args (headers etc.)
@@ -222,7 +222,7 @@ log_section "[1] X-App-Type middleware"
 echo -e "${CYAN}[1] X-App-Type middleware${NC}"
 
 # 1.1 Missing header
-response=$(curl -s -w '\n%{http_code}' -X POST "${API}/auth/login/" \
+response=$(curl -sk -w '\n%{http_code}' -X POST "${API}/auth/login/" \
     -H "Content-Type: application/json" \
     -d '{"phone": "+79001234567"}' 2>/dev/null)
 status=$(echo "$response" | tail -1)
@@ -231,7 +231,7 @@ assert "Missing X-App-Type → 403" "403" "$status"
 assert_json_field "Error code = APP_TYPE_MISSING" ".error.code" "APP_TYPE_MISSING" "$body"
 
 # 1.2 Invalid header value
-response=$(curl -s -w '\n%{http_code}' -X POST "${API}/auth/login/" \
+response=$(curl -sk -w '\n%{http_code}' -X POST "${API}/auth/login/" \
     -H "Content-Type: application/json" \
     -H "X-App-Type: hacker" \
     -d '{"phone": "+79001234567"}' 2>/dev/null)
@@ -241,7 +241,7 @@ assert "Invalid X-App-Type → 403" "403" "$status"
 assert_json_field "Error code = APP_TYPE_INVALID" ".error.code" "APP_TYPE_INVALID" "$body"
 
 # 1.3 Empty header
-response=$(curl -s -w '\n%{http_code}' -X POST "${API}/auth/login/" \
+response=$(curl -sk -w '\n%{http_code}' -X POST "${API}/auth/login/" \
     -H "Content-Type: application/json" \
     -H "X-App-Type: " \
     -d '{"phone": "+79001234567"}' 2>/dev/null)
@@ -249,17 +249,17 @@ status=$(echo "$response" | tail -1)
 assert "Empty X-App-Type → 403" "403" "$status"
 
 # 1.4 Health bypass
-response=$(curl -s -w '\n%{http_code}' "${API}/health/" 2>/dev/null)
+response=$(curl -sk -w '\n%{http_code}' "${API}/health/" 2>/dev/null)
 status=$(echo "$response" | tail -1)
 assert "Health endpoint bypasses middleware (no header needed)" "200" "$status"
 
 # 1.5 Docs bypass
-response=$(curl -s -w '\n%{http_code}' "${BASE_URL}/api/docs/" 2>/dev/null)
+response=$(curl -sk -w '\n%{http_code}' "${BASE_URL}/api/docs/" 2>/dev/null)
 status=$(echo "$response" | tail -1)
 assert_not "Docs endpoint bypasses middleware" "403" "$status"
 
 # 1.6 Case sensitivity
-response=$(curl -s -w '\n%{http_code}' -X POST "${API}/auth/login/" \
+response=$(curl -sk -w '\n%{http_code}' -X POST "${API}/auth/login/" \
     -H "Content-Type: application/json" \
     -H "X-App-Type: CLIENT" \
     -d '{"phone": "+79001234567"}' 2>/dev/null)
@@ -310,7 +310,7 @@ http POST "/auth/register/" '' -H "X-App-Type: client"
 assert "Empty body → 400" "400" "$HTTP_STATUS"
 
 # 2.8 Invalid JSON
-response=$(curl -s -w '\n%{http_code}' -X POST "${API}/auth/register/" \
+response=$(curl -sk -w '\n%{http_code}' -X POST "${API}/auth/register/" \
     -H "Content-Type: application/json" \
     -H "X-App-Type: client" \
     -d 'not json at all' 2>/dev/null)
@@ -671,12 +671,12 @@ log_section "[9] Edge cases & security"
 echo -e "${CYAN}[9] Edge cases & security${NC}"
 
 # 9.1 Wrong HTTP method
-response=$(curl -s -w '\n%{http_code}' -X GET "${API}/auth/register/" \
+response=$(curl -sk -w '\n%{http_code}' -X GET "${API}/auth/register/" \
     -H "X-App-Type: client" 2>/dev/null)
 status=$(echo "$response" | tail -1)
 assert "GET on POST-only endpoint → 405" "405" "$status"
 
-response=$(curl -s -w '\n%{http_code}' -X DELETE "${API}/auth/login/" \
+response=$(curl -sk -w '\n%{http_code}' -X DELETE "${API}/auth/login/" \
     -H "X-App-Type: client" 2>/dev/null)
 status=$(echo "$response" | tail -1)
 assert "DELETE on login → 405" "405" "$status"
@@ -711,7 +711,7 @@ http POST "/auth/register/" "{\"phone\": \"+7900${RANDOM_SUFFIX}070\", \"admin\"
 assert "Extra fields don't cause 500" "201" "$HTTP_STATUS"
 
 # 9.9 Content-Type variations
-response=$(curl -s -w '\n%{http_code}' -X POST "${API}/auth/login/" \
+response=$(curl -sk -w '\n%{http_code}' -X POST "${API}/auth/login/" \
     -H "X-App-Type: client" \
     -H "Content-Type: text/plain" \
     -d '{"phone": "+79001234567"}' 2>/dev/null)
@@ -719,7 +719,7 @@ status=$(echo "$response" | tail -1)
 assert_not "text/plain Content-Type doesn't 500" "500" "$status"
 
 # 9.10 Empty Content-Type
-response=$(curl -s -w '\n%{http_code}' -X POST "${API}/auth/login/" \
+response=$(curl -sk -w '\n%{http_code}' -X POST "${API}/auth/login/" \
     -H "X-App-Type: client" \
     -d '{"phone": "+79001234567"}' 2>/dev/null)
 status=$(echo "$response" | tail -1)
@@ -727,7 +727,7 @@ assert_not "No Content-Type doesn't 500" "500" "$status"
 
 # 9.11 Huge JSON body
 BIG_BODY=$(python3 -c "import json; print(json.dumps({'phone': '+79001234567', 'extra': 'A' * 100000}))")
-response=$(curl -s -w '\n%{http_code}' -X POST "${API}/auth/register/" \
+response=$(curl -sk -w '\n%{http_code}' -X POST "${API}/auth/register/" \
     -H "Content-Type: application/json" \
     -H "X-App-Type: client" \
     -d "$BIG_BODY" 2>/dev/null)
@@ -816,7 +816,7 @@ http GET "/services/categories/" "" -H "X-App-Type: pro"
 assert "Categories from pro app → 200" "200" "$HTTP_STATUS"
 
 # 12.5 Categories without X-App-Type
-response=$(curl -s -w '\n%{http_code}' "${API}/services/categories/" 2>/dev/null)
+response=$(curl -sk -w '\n%{http_code}' "${API}/services/categories/" 2>/dev/null)
 status=$(echo "$response" | tail -1)
 assert "Categories without X-App-Type → 403" "403" "$status"
 
@@ -1114,4 +1114,7 @@ echo -e "${CYAN}  Log: ${LOG_FILE}${NC}"
 echo -e "${CYAN}══════════════════════════════════════════════════════${NC}"
 echo ""
 
+echo ""
+echo "Press Enter to close..."
+read -r
 exit "$FAILED"

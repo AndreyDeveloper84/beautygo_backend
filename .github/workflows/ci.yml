@@ -90,9 +90,10 @@ jobs:
             cd /home/taximeter/beautygo/dev
             git fetch origin dev
             git reset --hard origin/dev
-            docker compose build
+            docker compose build --no-cache
             docker compose up -d
             echo "Waiting for containers..."
             sleep 10
             docker compose ps
+            docker compose exec -T web python manage.py showmigrations --list 2>/dev/null | tail -20
             echo "Deploy complete!"
