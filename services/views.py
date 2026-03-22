@@ -40,4 +40,5 @@ class ServiceFilter(FilterSet):
         fields = [
             'name', 'min_price', 'max_price',
             'duration_minutes', 'specialist',
+            'category', 'is_active',
         ]

@@ -13,7 +13,10 @@ class ServiceCategoryAdmin(admin.ModelAdmin):
 
 @admin.register(Service)
 class ServiceAdmin(admin.ModelAdmin):
-    list_display = ('name', 'specialist', 'price', 'duration_minutes', 'created_at')
-    list_filter = ('specialist', 'created_at')
+    list_display = (
+        'name', 'specialist', 'category', 'price',
+        'duration_minutes', 'is_active', 'sort_order', 'created_at',
+    )
+    list_filter = ('category', 'is_active', 'specialist', 'created_at')
     search_fields = ('name', 'description', 'specialist__username')
     readonly_fields = ('created_at',)
