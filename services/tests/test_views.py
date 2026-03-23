@@ -49,7 +49,7 @@ class TestServiceViewSet:
         self, authenticated_specialist, specialist_user,
     ):
         Service.objects.create(
-            specialist=specialist_user, name='Mine',
+            specialist=specialist_user.specialist_profile, name='Mine',
             price='500', duration_minutes=30,
         )
         other = User.objects.create_user(
@@ -57,7 +57,7 @@ class TestServiceViewSet:
             role='specialist', phone='+79990100099',
         )
         Service.objects.create(
-            specialist=other, name='NotMine',
+            specialist=other.specialist_profile, name='NotMine',
             price='500', duration_minutes=30,
         )
         response = authenticated_specialist.get('/api/v1/services/')
@@ -111,7 +111,7 @@ class TestServiceViewSet:
         self, authenticated_specialist, specialist_user,
     ):
         svc = Service.objects.create(
-            specialist=specialist_user, name='ToHide',
+            specialist=specialist_user.specialist_profile, name='ToHide',
             price='500', duration_minutes=30,
         )
         response = authenticated_specialist.patch(
@@ -132,11 +132,11 @@ class TestServicePublicViewSet:
     ):
         """Client sees only active services."""
         Service.objects.create(
-            specialist=specialist_user, name='Active',
+            specialist=specialist_user.specialist_profile, name='Active',
             price='1000', duration_minutes=60, is_active=True,
         )
         Service.objects.create(
-            specialist=specialist_user, name='Hidden',
+            specialist=specialist_user.specialist_profile, name='Hidden',
             price='500', duration_minutes=30, is_active=False,
         )
         response = authenticated_client.get(self.URL)
@@ -149,7 +149,7 @@ class TestServicePublicViewSet:
     ):
         """Response includes specialist name, rating, reviews_count."""
         Service.objects.create(
-            specialist=specialist_user, name='Маникюр',
+            specialist=specialist_user.specialist_profile, name='Маникюр',
             price='1500', duration_minutes=60,
         )
         response = authenticated_client.get(self.URL)
@@ -164,7 +164,7 @@ class TestServicePublicViewSet:
     ):
         """Detail view includes specialist address and location."""
         svc = Service.objects.create(
-            specialist=specialist_user, name='Стрижка',
+            specialist=specialist_user.specialist_profile, name='Стрижка',
             price='800', duration_minutes=45,
         )
         response = authenticated_client.get(f'{self.URL}{svc.pk}/')
@@ -178,11 +178,11 @@ class TestServicePublicViewSet:
         """Can filter services by category."""
         cat = ServiceCategory.objects.create(name='Ногти фильтр')
         Service.objects.create(
-            specialist=specialist_user, name='Маникюр',
+            specialist=specialist_user.specialist_profile, name='Маникюр',
             price='1500', duration_minutes=60, category=cat,
         )
         Service.objects.create(
-            specialist=specialist_user, name='Стрижка',
+            specialist=specialist_user.specialist_profile, name='Стрижка',
             price='800', duration_minutes=45,
         )
         response = authenticated_client.get(
@@ -197,11 +197,11 @@ class TestServicePublicViewSet:
     ):
         """Can filter by min/max price."""
         Service.objects.create(
-            specialist=specialist_user, name='Cheap',
+            specialist=specialist_user.specialist_profile, name='Cheap',
             price='500', duration_minutes=30,
         )
         Service.objects.create(
-            specialist=specialist_user, name='Expensive',
+            specialist=specialist_user.specialist_profile, name='Expensive',
             price='3000', duration_minutes=90,
         )
         response = authenticated_client.get(
@@ -216,11 +216,11 @@ class TestServicePublicViewSet:
     ):
         """Can order by price ascending."""
         Service.objects.create(
-            specialist=specialist_user, name='B',
+            specialist=specialist_user.specialist_profile, name='B',
             price='2000', duration_minutes=60,
         )
         Service.objects.create(
-            specialist=specialist_user, name='A',
+            specialist=specialist_user.specialist_profile, name='A',
             price='500', duration_minutes=30,
         )
         response = authenticated_client.get(
@@ -240,11 +240,11 @@ class TestServicePublicViewSet:
     ):
         """Can search services by name substring."""
         Service.objects.create(
-            specialist=specialist_user, name='Классический маникюр',
+            specialist=specialist_user.specialist_profile, name='Классический маникюр',
             price='1500', duration_minutes=60,
         )
         Service.objects.create(
-            specialist=specialist_user, name='Стрижка',
+            specialist=specialist_user.specialist_profile, name='Стрижка',
             price='800', duration_minutes=45,
         )
         response = authenticated_client.get(
@@ -361,11 +361,11 @@ class TestCategoriesAPI:
     def test_specialists_count(self, specialist_user):
         cat = ServiceCategory.objects.create(name='Ногти count')
         Service.objects.create(
-            specialist=specialist_user, name='Маникюр',
+            specialist=specialist_user.specialist_profile, name='Маникюр',
             price='1500', duration_minutes=60, category=cat,
         )
         Service.objects.create(
-            specialist=specialist_user, name='Педикюр',
+            specialist=specialist_user.specialist_profile, name='Педикюр',
             price='1000', duration_minutes=45, category=cat,
         )
         client = APIClient()

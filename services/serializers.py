@@ -9,19 +9,19 @@ class SpecialistShortSerializer(serializers.Serializer):
     """Minimal specialist info for service listings."""
     id = serializers.IntegerField(source='specialist.id')
     display_name = serializers.CharField(
-        source='specialist.specialist_profile.display_name',
+        source='specialist.display_name',
         default='',
     )
     avatar = serializers.ImageField(
-        source='specialist.specialist_profile.avatar',
+        source='specialist.avatar',
         default=None,
     )
     rating = serializers.DecimalField(
-        source='specialist.specialist_profile.rating',
+        source='specialist.rating',
         max_digits=2, decimal_places=1, default=0.0,
     )
     reviews_count = serializers.IntegerField(
-        source='specialist.specialist_profile.reviews_count',
+        source='specialist.reviews_count',
         default=0,
     )
 
@@ -45,15 +45,15 @@ class ServicePublicListSerializer(serializers.ModelSerializer):
 class ServicePublicDetailSerializer(ServicePublicListSerializer):
     """Detailed service view — includes specialist address."""
     specialist_address = serializers.CharField(
-        source='specialist.specialist_profile.address',
+        source='specialist.address',
         default='',
     )
     specialist_location_lat = serializers.DecimalField(
-        source='specialist.specialist_profile.location_lat',
+        source='specialist.location_lat',
         max_digits=9, decimal_places=6, default=None,
     )
     specialist_location_lng = serializers.DecimalField(
-        source='specialist.specialist_profile.location_lng',
+        source='specialist.location_lng',
         max_digits=9, decimal_places=6, default=None,
     )
 

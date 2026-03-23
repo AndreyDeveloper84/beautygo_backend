@@ -1,4 +1,3 @@
-from django.conf import settings
 from django.db import models
 from django.utils.text import slugify
 
@@ -32,7 +31,7 @@ class ServiceCategory(models.Model):
 
 class Service(models.Model):
     specialist = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        'users.SpecialistProfile',
         on_delete=models.CASCADE,
         related_name='services',
     )
@@ -59,4 +58,4 @@ class Service(models.Model):
         ordering = ['sort_order', 'name']
 
     def __str__(self):
-        return f"{self.name} — {self.specialist.username}"
+        return f"{self.name} — {self.specialist.display_name}"
