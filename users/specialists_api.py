@@ -42,14 +42,14 @@ class SpecialistListSerializer(serializers.ModelSerializer):
     def get_services_preview(self, obj):
         """Top-3 active services by sort_order."""
         services = (
-            obj.user.services
+            obj.services
             .filter(is_active=True)
             .order_by('sort_order', 'name')[:3]
         )
         return ServicePreviewSerializer(services, many=True).data
 
     def get_services_count(self, obj):
-        return obj.user.services.filter(is_active=True).count()
+        return obj.services.filter(is_active=True).count()
 
     def get_distance_km(self, obj):
         """Distance from client's location (if provided in request)."""
@@ -115,26 +115,26 @@ class SpecialistFilter(FilterSet):
 
     def filter_by_category(self, queryset, name, value):
         return queryset.filter(
-            user__services__category_id=value,
-            user__services__is_active=True,
+            services__category_id=value,
+            services__is_active=True,
         ).distinct()
 
     def filter_by_service(self, queryset, name, value):
         return queryset.filter(
-            user__services__id=value,
-            user__services__is_active=True,
+            services__id=value,
+            services__is_active=True,
         ).distinct()
 
     def filter_by_min_price(self, queryset, name, value):
         return queryset.filter(
-            user__services__price__gte=value,
-            user__services__is_active=True,
+            services__price__gte=value,
+            services__is_active=True,
         ).distinct()
 
     def filter_by_max_price(self, queryset, name, value):
         return queryset.filter(
-            user__services__price__lte=value,
-            user__services__is_active=True,
+            services__price__lte=value,
+            services__is_active=True,
         ).distinct()
 
 
@@ -158,7 +158,7 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
                 user__is_active=True,
             )
             .select_related('user')
-            .prefetch_related('user__services')
+            .prefetch_related('services')
         )
 
         # Geo filter: lat, lon, radius (km)

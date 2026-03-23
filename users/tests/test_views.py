@@ -577,12 +577,12 @@ class TestMasterProfile:
     def test_services_count(self, authenticated_specialist, specialist_user):
         from services.models import Service
         Service.objects.create(
-            specialist=specialist_user, name='Маникюр',
-            price='1500', duration_minutes=60,
+            specialist=specialist_user.specialist_profile,
+            name='Маникюр', price='1500', duration_minutes=60,
         )
         Service.objects.create(
-            specialist=specialist_user, name='Педикюр',
-            price='2000', duration_minutes=90,
+            specialist=specialist_user.specialist_profile,
+            name='Педикюр', price='2000', duration_minutes=90,
         )
         response = authenticated_specialist.get(self.ME_URL)
         assert response.status_code == status.HTTP_200_OK

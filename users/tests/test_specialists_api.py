@@ -46,11 +46,11 @@ def active_specialist(db):
     profile.save()
 
     Service.objects.create(
-        specialist=user, name='Маникюр',
+        specialist=profile, name='Маникюр',
         price=Decimal('1500'), duration_minutes=60,
     )
     Service.objects.create(
-        specialist=user, name='Педикюр',
+        specialist=profile, name='Педикюр',
         price=Decimal('2000'), duration_minutes=90,
     )
     return user
@@ -101,7 +101,8 @@ class TestSpecialistList:
     def test_filter_by_category(self, client_app, active_specialist):
         cat = ServiceCategory.objects.create(name='Ногти фильтр спец')
         Service.objects.filter(
-            specialist=active_specialist, name='Маникюр',
+            specialist=active_specialist.specialist_profile,
+            name='Маникюр',
         ).update(category=cat)
 
         response = client_app.get(
