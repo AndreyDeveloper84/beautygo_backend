@@ -14,6 +14,7 @@ from .response import error_response, success_response
 from .serializers import (
     BindPhoneSerializer,
     ClientProfileSerializer,
+    DeleteAccountSerializer,
     LoginSerializer,
     LogoutSerializer,
     ProfileSerializer,
@@ -305,6 +306,30 @@ class ClientProfileView(generics.RetrieveUpdateAPIView):
     def partial_update(self, request, *args, **kwargs):
         kwargs['partial'] = True
         return self.update(request, *args, **kwargs)
+
+
+# --- Account Deletion ---
+
+class DeleteAccountView(APIView):
+    """DELETE /api/v1/auth/users/me/ — Soft delete account."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request):
+        serializer = DeleteAccountSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+
+        from .services import AuthService
+        AuthService.delete_account(
+            user=request.user,
+            reason=serializer.validated_data.get("reason", ""),
+        )
+        return success_response(
+            {"message": "Account scheduled for deletion"},
+        )
 
 
 # --- Social Auth ---

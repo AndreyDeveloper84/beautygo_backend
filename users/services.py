@@ -196,3 +196,72 @@ class AuthService:
                 "is_verified": user.is_verified,
             },
         }
+
+    @staticmethod
+    def delete_account(user, reason: str = "") -> None:
+        """
+        Soft delete user account: anonymize PII, deactivate, schedule cleanup.
+
+        Args:
+            user: User instance to delete.
+            reason: Optional reason for deletion.
+        """
+        from django.utils import timezone
+        from rest_framework_simplejwt.token_blacklist.models import (
+            OutstandingToken,
+        )
+
+        from .models import DeviceToken
+
+        logger.info(
+            "Deleting account user_id=%s reason=%s", user.pk, reason,
+        )
+
+        # 1. Anonymize PII
+        user.phone = None
+        user.email = ""
+        user.first_name = "Удалён"
+        user.last_name = ""
+        user.is_active = False
+        user.is_verified = False
+        user.deleted_at = timezone.now()
+        user.save(update_fields=[
+            "phone", "email", "first_name", "last_name",
+            "is_active", "is_verified", "deleted_at",
+        ])
+
+        # 2. Clear avatar from profile
+        if hasattr(user, 'profile'):
+            profile = user.profile
+            profile.avatar = None
+            profile.full_name = "Удалён"
+            profile.save(update_fields=["avatar", "full_name"])
+
+        # 3. Deactivate specialist profile
+        if hasattr(user, 'specialist_profile'):
+            sp = user.specialist_profile
+            sp.is_available = False
+            sp.display_name = "Удалён"
+            sp.avatar = None
+            sp.save(update_fields=[
+                "is_available", "display_name", "avatar",
+            ])
+
+        # 4. Blacklist all refresh tokens
+        tokens = OutstandingToken.objects.filter(user=user)
+        for token in tokens:
+            try:
+                from rest_framework_simplejwt.token_blacklist.models import (
+                    BlacklistedToken,
+                )
+                BlacklistedToken.objects.get_or_create(token=token)
+            except Exception:
+                pass
+
+        # 5. Delete device tokens
+        DeviceToken.objects.filter(user=user).delete()
+
+        # 6. Delete social accounts
+        user.social_accounts.all().delete()
+
+        logger.info("Account deleted: user_id=%s", user.pk)

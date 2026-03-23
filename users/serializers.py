@@ -124,6 +124,21 @@ class ClientProfileSerializer(serializers.ModelSerializer):
         return value
 
 
+# --- Account deletion ---
+
+class DeleteAccountSerializer(serializers.Serializer):
+    """Validate account deletion request."""
+    confirmation = serializers.CharField()
+    reason = serializers.CharField(required=False, default="")
+
+    def validate_confirmation(self, value):
+        if value != "DELETE":
+            raise serializers.ValidationError(
+                "Для подтверждения удаления передайте 'DELETE'"
+            )
+        return value
+
+
 # --- Social Auth serializers ---
 
 class SocialAuthSerializer(serializers.Serializer):

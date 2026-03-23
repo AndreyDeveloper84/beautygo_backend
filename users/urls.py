@@ -4,6 +4,7 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     BindPhoneView,
     ClientProfileView,
+    DeleteAccountView,
     LoginView,
     LogoutView,
     MasterMeView,
@@ -24,6 +25,9 @@ urlpatterns = [
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
     path('logout/', LogoutView.as_view(), name='logout'),
     path('send-code/', SendCodeView.as_view(), name='send-code'),
+
+    # Account deletion
+    path('users/me/', DeleteAccountView.as_view(), name='delete-account'),
 
     # Social auth
     path('social/<str:provider>/', SocialAuthView.as_view(), name='social-auth'),
