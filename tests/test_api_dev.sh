@@ -192,9 +192,6 @@ assert_json_field() {
     assert "$name" "$expected" "$actual"
 }
 
-# Verbose mode: set VERBOSE=1 to see request/response details
-VERBOSE="${VERBOSE:-0}"
-
 # Make HTTP request, capture status + body
 # Usage: http METHOD path [data] [extra_curl_args...]
 # Sets: HTTP_STATUS, HTTP_BODY
@@ -214,34 +211,30 @@ http() {
         curl_args+=(-d "$data")
     fi
 
-    # Verbose: show request
-    if [ "$VERBOSE" = "1" ]; then
-        echo -e "    ${CYAN}→ ${method} ${path}${NC}"
-        if [ -n "$data" ]; then
-            echo -e "    ${CYAN}  body: ${data:0:200}${NC}"
-        fi
+    # Show request
+    echo -e "    ${CYAN}→ ${method} ${path}${NC}"
+    if [ -n "$data" ]; then
+        echo -e "    ${CYAN}  body: ${data:0:200}${NC}"
     fi
 
     local response
     response=$(curl "${curl_args[@]}" "${API}${path}" 2>/dev/null) || {
         HTTP_STATUS="000"
         HTTP_BODY='{"error": "connection refused"}'
-        [ "$VERBOSE" = "1" ] && echo -e "    ${RED}← CONNECTION REFUSED${NC}"
+        echo -e "    ${RED}← CONNECTION REFUSED${NC}"
         return
     }
 
     HTTP_STATUS=$(echo "$response" | tail -1 | tr -d '\r')
     HTTP_BODY=$(echo "$response" | sed '$d' | tr -d '\r')
 
-    # Verbose: show response
-    if [ "$VERBOSE" = "1" ]; then
-        local pretty _vtmp
-        _vtmp=$(mktemp)
-        printf '%s' "$HTTP_BODY" > "$_vtmp"
-        pretty=$($PYTHON -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])),indent=2,ensure_ascii=False))" "$_vtmp" 2>/dev/null || echo "$HTTP_BODY")
-        rm -f "$_vtmp"
-        echo -e "    ${YELLOW}← ${HTTP_STATUS} ${pretty:0:300}${NC}"
-    fi
+    # Show response
+    local pretty _vtmp
+    _vtmp=$(mktemp)
+    printf '%s' "$HTTP_BODY" > "$_vtmp"
+    pretty=$($PYTHON -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])),indent=2,ensure_ascii=False))" "$_vtmp" 2>/dev/null || echo "$HTTP_BODY")
+    rm -f "$_vtmp"
+    echo -e "    ${YELLOW}← ${HTTP_STATUS} ${pretty:0:300}${NC}"
 
     log_http "$method" "$path" "$HTTP_STATUS" "$HTTP_BODY"
 }
