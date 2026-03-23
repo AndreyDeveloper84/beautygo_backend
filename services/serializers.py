@@ -7,7 +7,7 @@ from .models import Service, ServiceCategory
 
 class SpecialistShortSerializer(serializers.Serializer):
     """Minimal specialist info for service listings."""
-    id = serializers.IntegerField(source='specialist.id')
+    id = serializers.UUIDField(source='specialist.id')
     display_name = serializers.CharField(
         source='specialist.display_name',
         default='',

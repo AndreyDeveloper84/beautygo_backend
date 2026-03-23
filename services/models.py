@@ -1,9 +1,12 @@
+import uuid
+
 from django.db import models
 from django.utils.text import slugify
 
 
 class ServiceCategory(models.Model):
     """Hierarchical category for beauty services."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100, unique=True)
     slug = models.SlugField(max_length=100, unique=True, blank=True)
     parent = models.ForeignKey(
@@ -30,6 +33,7 @@ class ServiceCategory(models.Model):
 
 
 class Service(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     specialist = models.ForeignKey(
         'users.SpecialistProfile',
         on_delete=models.CASCADE,
@@ -54,7 +58,6 @@ class Service(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'users_service'
         ordering = ['sort_order', 'name']
 
     def __str__(self):
