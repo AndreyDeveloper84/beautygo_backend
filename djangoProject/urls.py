@@ -21,6 +21,7 @@ urlpatterns = [
     # API v1
     path('api/v1/auth/', include('users.urls')),
     path('api/v1/services/', include('services.urls')),
+    path('api/v1/categories/', include('services.categories_urls')),
 
     # Health
     path('api/v1/health/', health_check, name='health-check'),
