@@ -1159,6 +1159,51 @@ assert_contains "Categories have children field" '"children"' "$HTTP_BODY"
 
 
 # =============================================================================
+# 18.5 SPECIALISTS LIST (EPIC-02)
+# =============================================================================
+echo ""
+log_section "[18.5] Specialists list (GET /specialists/)"
+echo -e "${CYAN}[18.5] Specialists list (GET /specialists/)${NC}"
+
+# 18.5.1 List specialists (authenticated client)
+if [ -n "$CLIENT_ACCESS" ] && [ "$CLIENT_ACCESS" != "null" ]; then
+    http GET "/specialists/" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "List specialists → 200" "200" "$HTTP_STATUS"
+
+    # 18.5.2 Response has expected fields
+    assert_contains "Has display_name" '"display_name"' "$HTTP_BODY"
+    assert_contains "Has rating" '"rating"' "$HTTP_BODY"
+    assert_contains "Has services_preview" '"services_preview"' "$HTTP_BODY"
+
+    # 18.5.3 Filter by min_rating
+    http GET "/specialists/?min_rating=4.0" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Filter by min_rating → 200" "200" "$HTTP_STATUS"
+
+    # 18.5.4 Ordering
+    http GET "/specialists/?ordering=-rating" "" \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "Order by rating → 200" "200" "$HTTP_STATUS"
+fi
+
+# 18.5.5 Unauthenticated → 401
+http GET "/specialists/" "" -H "X-App-Type: client"
+assert "Specialists without auth → 401" "401" "$HTTP_STATUS"
+
+# 18.5.6 POST not allowed
+if [ -n "$CLIENT_ACCESS" ] && [ "$CLIENT_ACCESS" != "null" ]; then
+    http POST "/specialists/" '{"name": "Hack"}' \
+        -H "X-App-Type: client" \
+        -H "Authorization: Bearer ${CLIENT_ACCESS}"
+    assert "POST specialists → 405" "405" "$HTTP_STATUS"
+fi
+
+
+# =============================================================================
 # 19. SOCIAL AUTH
 # =============================================================================
 echo ""
