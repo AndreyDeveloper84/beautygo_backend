@@ -38,7 +38,7 @@ urlpatterns = [
     path('masters/me/', MasterMeView.as_view(), name='master-me'),
 
     # Profile endpoints
-    path('profile/<int:pk>/', ProfileDetailView.as_view(), name='profile-detail'),
+    path('profile/<uuid:pk>/', ProfileDetailView.as_view(), name='profile-detail'),
     path('profile/me/', MyProfileView.as_view(), name='my-profile'),
     path('clients/me/', ClientProfileView.as_view(), name='client-profile'),
 ]

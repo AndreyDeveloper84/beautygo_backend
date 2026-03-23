@@ -24,7 +24,7 @@ class ServicePreviewSerializer(serializers.ModelSerializer):
 
 class SpecialistListSerializer(serializers.ModelSerializer):
     """Specialist card for catalog listing."""
-    user_id = serializers.IntegerField(source='user.id')
+    user_id = serializers.UUIDField(source='user.id')
     services_preview = serializers.SerializerMethodField()
     services_count = serializers.SerializerMethodField()
     distance_km = serializers.SerializerMethodField()
@@ -88,11 +88,11 @@ def _haversine(lat1, lon1, lat2, lon2):
 
 class SpecialistFilter(FilterSet):
     """Filters for specialist search."""
-    category_id = filters.NumberFilter(
+    category_id = filters.UUIDFilter(
         method='filter_by_category',
         label='Category ID',
     )
-    service_id = filters.NumberFilter(
+    service_id = filters.UUIDFilter(
         method='filter_by_service',
         label='Service ID',
     )

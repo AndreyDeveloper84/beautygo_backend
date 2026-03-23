@@ -1,3 +1,5 @@
+import uuid
+
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.conf import settings
@@ -5,6 +7,7 @@ from django.utils import timezone
 
 
 class User(AbstractUser):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     ROLE_CHOICES = (
         ('client', 'Client'),
         ('specialist', 'Specialist'),
@@ -32,6 +35,7 @@ class User(AbstractUser):
 
 
 class Profile(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="profile"
     )
@@ -54,6 +58,7 @@ class Profile(models.Model):
 
 class SpecialistProfile(models.Model):
     """Profile for specialists (masters) in BeautyGO Pro."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     class ProfileStatus(models.TextChoices):
         DRAFT = "draft", "Черновик"
@@ -102,6 +107,7 @@ class SpecialistProfile(models.Model):
 
 class OTPCode(models.Model):
     """OTP code for phone verification."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     phone = models.CharField(max_length=20, db_index=True)
     code = models.CharField(max_length=6)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -129,6 +135,7 @@ class OTPCode(models.Model):
 
 class SocialAccount(models.Model):
     """Linked social provider account for a user."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     class Provider(models.TextChoices):
         VK = "vk", "VKontakte"
@@ -158,6 +165,7 @@ class SocialAccount(models.Model):
 
 class DeviceToken(models.Model):
     """FCM device token for push notifications."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     class AppType(models.TextChoices):
         CLIENT = "client", "BeautyGO"
