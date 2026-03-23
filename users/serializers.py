@@ -241,4 +241,4 @@ class SpecialistProfileDetailSerializer(serializers.ModelSerializer):
         ]
 
     def get_services_count(self, obj):
-        return obj.user.services.count()
+        return obj.services.count()
