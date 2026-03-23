@@ -385,6 +385,68 @@ class TestClientProfileView:
 
 
 @pytest.mark.django_db
+class TestDeleteAccount:
+    """Tests for DELETE /api/v1/auth/users/me/"""
+
+    URL = '/api/v1/auth/users/me/'
+
+    def test_delete_account_success(self, authenticated_client, client_user):
+        logger.info("DELETE %s — soft delete account", self.URL)
+        response = authenticated_client.delete(
+            self.URL, {'confirmation': 'DELETE'}, format='json',
+        )
+        logger.info("Response %s: %s", response.status_code, response.data)
+        assert response.status_code == status.HTTP_200_OK
+
+        client_user.refresh_from_db()
+        assert client_user.is_active is False
+        assert client_user.deleted_at is not None
+        assert client_user.phone is None
+        assert client_user.first_name == 'Удалён'
+        assert client_user.email == ''
+
+    def test_delete_without_confirmation(self, authenticated_client):
+        response = authenticated_client.delete(
+            self.URL, {'confirmation': 'WRONG'}, format='json',
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_delete_empty_body(self, authenticated_client):
+        response = authenticated_client.delete(
+            self.URL, {}, format='json',
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_delete_unauthenticated(self, api_client):
+        response = api_client.delete(
+            self.URL, {'confirmation': 'DELETE'}, format='json',
+        )
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_delete_clears_profile(self, authenticated_client, client_user):
+        profile = client_user.profile
+        profile.full_name = 'Real Name'
+        profile.save()
+
+        authenticated_client.delete(
+            self.URL, {'confirmation': 'DELETE'}, format='json',
+        )
+        profile.refresh_from_db()
+        assert profile.full_name == 'Удалён'
+        assert profile.avatar == ''
+
+    def test_delete_with_reason(self, authenticated_client, client_user):
+        response = authenticated_client.delete(
+            self.URL,
+            {'confirmation': 'DELETE', 'reason': 'Privacy concerns'},
+            format='json',
+        )
+        assert response.status_code == status.HTTP_200_OK
+        client_user.refresh_from_db()
+        assert client_user.is_active is False
+
+
+@pytest.mark.django_db
 class TestMasterProfile:
     """Tests for POST/PATCH /masters/profile/ and GET /masters/me/"""
 
