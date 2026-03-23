@@ -14,6 +14,25 @@
 
 set -uo pipefail
 
+# Find python executable (Windows compatibility)
+PYTHON=""
+for cmd in python3 python py; do
+    if command -v "$cmd" &>/dev/null; then
+        PYTHON="$cmd"
+        break
+    fi
+done
+if [ -z "$PYTHON" ]; then
+    # Fallback to known Windows path
+    for p in /c/Users/*/AppData/Local/Programs/Python/Python*/python.exe; do
+        if [ -x "$p" ]; then PYTHON="$p"; break; fi
+    done
+fi
+if [ -z "$PYTHON" ]; then
+    echo "ERROR: python not found in PATH"
+    exit 1
+fi
+
 BASE_URL="${1:-${BASE_URL:-https://dev.gobeauty.site}}"
 API="${BASE_URL}/api/v1"
 
@@ -129,18 +148,24 @@ assert_contains() {
 }
 
 # Python-based JSON field extractor (no jq dependency)
+# Writes body to temp file, reads from python via sys.argv path
 json_get() {
-    local jq_expr="$1"
-    local body="$2"
-    python3 -c "
+    local tmpf
+    tmpf=$(mktemp)
+    printf '%s' "$2" > "$tmpf"
+    local result
+    result=$($PYTHON -c "
 import json, sys
 try:
-    data = json.loads(sys.argv[1])
+    with open(sys.argv[1], 'r') as f:
+        data = json.load(f)
     keys = sys.argv[2].strip('.').split('.')
     val = data
     for k in keys:
         if isinstance(val, dict):
             val = val.get(k)
+        elif isinstance(val, list) and k.isdigit():
+            val = val[int(k)]
         else:
             val = None
             break
@@ -150,9 +175,11 @@ try:
         print(str(val).lower())
     else:
         print(val)
-except Exception:
-    print('JSON_ERROR')
-" "$body" "$jq_expr" 2>/dev/null || echo "JSON_ERROR"
+except Exception as e:
+    print('JSON_ERROR:' + str(e))
+" "$tmpf" "$1") || result="JSON_ERROR"
+    rm -f "$tmpf"
+    echo "$result"
 }
 
 assert_json_field() {
@@ -203,13 +230,16 @@ http() {
         return
     }
 
-    HTTP_STATUS=$(echo "$response" | tail -1)
-    HTTP_BODY=$(echo "$response" | sed '$d')
+    HTTP_STATUS=$(echo "$response" | tail -1 | tr -d '\r')
+    HTTP_BODY=$(echo "$response" | sed '$d' | tr -d '\r')
 
     # Verbose: show response
     if [ "$VERBOSE" = "1" ]; then
-        local pretty
-        pretty=$(python3 -c "import json,sys; print(json.dumps(json.loads(sys.argv[1]),indent=2,ensure_ascii=False))" "$HTTP_BODY" 2>/dev/null || echo "$HTTP_BODY")
+        local pretty _vtmp
+        _vtmp=$(mktemp)
+        printf '%s' "$HTTP_BODY" > "$_vtmp"
+        pretty=$($PYTHON -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])),indent=2,ensure_ascii=False))" "$_vtmp" 2>/dev/null || echo "$HTTP_BODY")
+        rm -f "$_vtmp"
         echo -e "    ${YELLOW}← ${HTTP_STATUS} ${pretty:0:300}${NC}"
     fi
 
@@ -600,7 +630,7 @@ if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
         -H "X-App-Type: pro" \
         -H "Authorization: Bearer ${SPEC_ACCESS}"
     assert "Create service → 201" "201" "$HTTP_STATUS"
-    SERVICE_ID=$(json_get ".id" "$HTTP_BODY")
+    SERVICE_ID=$(json_get ".id" "$HTTP_BODY" | tr -d '[:space:]')
     assert_json_field "Service name matches" ".name" "Test Manicure" "$HTTP_BODY"
     assert_json_field "Service is_active default true" ".is_active" "true" "$HTTP_BODY"
 
@@ -617,7 +647,7 @@ if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
             -H "X-App-Type: pro" \
             -H "Authorization: Bearer ${SPEC_ACCESS}"
         assert "Get service by id → 200" "200" "$HTTP_STATUS"
-        assert_json_field "Service id matches" ".id" "$SERVICE_ID" "$HTTP_BODY"
+        assert_contains "Service response has correct id" "\"id\":${SERVICE_ID}" "$HTTP_BODY"
     fi
 
     # 8.4 Update service (PATCH)
@@ -753,7 +783,7 @@ status=$(echo "$response" | tail -1)
 assert_not "No Content-Type doesn't 500" "500" "$status"
 
 # 9.11 Huge JSON body
-BIG_BODY=$(python3 -c "import json; print(json.dumps({'phone': '+79001234567', 'extra': 'A' * 100000}))")
+BIG_BODY=$($PYTHON -c "import json; print(json.dumps({'phone': '+79001234567', 'extra': 'A' * 100000}))")
 response=$(curl -sk -w '\n%{http_code}' -X POST "${API}/auth/register/" \
     -H "Content-Type: application/json" \
     -H "X-App-Type: client" \
@@ -812,7 +842,10 @@ echo -e "${CYAN}[12] Service Categories (GET /services/categories/)${NC}"
 # 12.1 List categories (public — no auth needed, but X-App-Type required)
 http GET "/services/categories/" "" -H "X-App-Type: client"
 assert "List categories → 200" "200" "$HTTP_STATUS"
-CAT_COUNT=$(python3 -c "import json,sys; data=json.loads(sys.argv[1]); print(len(data) if isinstance(data,list) else 0)" "$HTTP_BODY" 2>/dev/null)
+_tmp_cat=$(mktemp)
+printf '%s' "$HTTP_BODY" > "$_tmp_cat"
+CAT_COUNT=$($PYTHON -c "import json,sys; data=json.load(open(sys.argv[1])); print(len(data) if isinstance(data,list) else 0)" "$_tmp_cat" 2>/dev/null)
+rm -f "$_tmp_cat"
 TOTAL=$((TOTAL + 1))
 if [ -n "$CAT_COUNT" ] && [ "$CAT_COUNT" -gt 0 ] 2>/dev/null; then
     echo -e "  ${GREEN}✓${NC} Categories returned: ${CAT_COUNT}"
@@ -824,9 +857,9 @@ fi
 
 # 12.2 Categories with children structure
 if [ -n "$CAT_COUNT" ] && [ "$CAT_COUNT" -gt 0 ] 2>/dev/null; then
-    FIRST_CAT_ID=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])[0]['id'])" "$HTTP_BODY" 2>/dev/null)
-    FIRST_CAT_NAME=$(python3 -c "import json,sys; print(json.loads(sys.argv[1])[0]['name'])" "$HTTP_BODY" 2>/dev/null)
-    CHILDREN=$(python3 -c "import json,sys; print(len(json.loads(sys.argv[1])[0].get('children',[])))" "$HTTP_BODY" 2>/dev/null)
+    FIRST_CAT_ID=$(json_get ".0.id" "$HTTP_BODY")
+    FIRST_CAT_NAME=$(json_get ".0.name" "$HTTP_BODY")
+    CHILDREN=$(json_get ".0.children" "$HTTP_BODY")
     assert_contains "Category has name field" '"name"' "$HTTP_BODY"
     assert_contains "Category has slug field" '"slug"' "$HTTP_BODY"
     assert_contains "Category has children field" '"children"' "$HTTP_BODY"
@@ -947,7 +980,7 @@ if [ -n "$CLIENT_ACCESS" ] && [ "$CLIENT_ACCESS" != "null" ]; then
         -H "X-App-Type: client" \
         -H "Authorization: Bearer ${CLIENT_ACCESS}"
     assert "Update client profile → 200" "200" "$HTTP_STATUS"
-    assert_json_field "Name updated" ".full_name" "Test Client Name" "$HTTP_BODY"
+    assert_json_field "Name updated" ".data.full_name" "Test Client Name" "$HTTP_BODY"
 
     # 14.3 Name too short → 400
     http PATCH "/auth/clients/me/" \
@@ -1102,6 +1135,114 @@ if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
         -H "X-App-Type: client" \
         -H "Authorization: Bearer ${SPEC_ACCESS}"
     assert "Specialist token + client header → client profile → 403" "403" "$HTTP_STATUS"
+fi
+
+
+# =============================================================================
+# 18. CATEGORIES API (EPIC-02)
+# =============================================================================
+echo ""
+log_section "[18] Categories API (GET /categories/)"
+echo -e "${CYAN}[18] Categories API (GET /categories/)${NC}"
+
+# 18.1 List root categories (public)
+http GET "/categories/" "" -H "X-App-Type: client"
+assert "List categories → 200" "200" "$HTTP_STATUS"
+assert_contains "Response has specialists_count" '"specialists_count"' "$HTTP_BODY"
+
+# 18.2 Categories available from pro app
+http GET "/categories/" "" -H "X-App-Type: pro"
+assert "Categories from pro → 200" "200" "$HTTP_STATUS"
+
+# 18.3 Without X-App-Type → 403
+response=$(curl -sk -w '\n%{http_code}' "${API}/categories/" 2>/dev/null)
+status=$(echo "$response" | tail -1 | tr -d '\r')
+assert "Categories without X-App-Type → 403" "403" "$status"
+
+# 18.4 Load fixture and verify (if not loaded)
+# Categories from fixture should have children
+http GET "/categories/" "" -H "X-App-Type: client"
+assert_contains "Categories have children field" '"children"' "$HTTP_BODY"
+
+
+# =============================================================================
+# 19. SOCIAL AUTH
+# =============================================================================
+echo ""
+log_section "[19] Social Auth (POST /auth/social/{provider}/)"
+echo -e "${CYAN}[19] Social Auth (POST /auth/social/{provider}/)${NC}"
+
+# 19.1 Invalid provider → 400
+http POST "/auth/social/facebook/" '{"token": "fake"}' -H "X-App-Type: client"
+assert "Invalid provider → 400" "400" "$HTTP_STATUS"
+assert_json_field "Error code = INVALID_PROVIDER" ".error.code" "INVALID_PROVIDER" "$HTTP_BODY"
+
+# 19.2 Missing token → 400
+http POST "/auth/social/vk/" '{}' -H "X-App-Type: client"
+assert "Missing token → 400" "400" "$HTTP_STATUS"
+
+# 19.3 Invalid VK token → 401
+http POST "/auth/social/vk/" '{"token": "invalid_token"}' -H "X-App-Type: client"
+assert "Invalid VK token → 401" "401" "$HTTP_STATUS"
+assert_json_field "Error code = SOCIAL_TOKEN_INVALID" ".error.code" "SOCIAL_TOKEN_INVALID" "$HTTP_BODY"
+
+# 19.4 Without X-App-Type → 403
+response=$(curl -sk -w '\n%{http_code}' -X POST "${API}/auth/social/vk/" \
+    -H "Content-Type: application/json" \
+    -d '{"token": "x"}' 2>/dev/null)
+status=$(echo "$response" | tail -1 | tr -d '\r')
+assert "Social auth without X-App-Type → 403" "403" "$status"
+
+# 19.5 Bind phone without auth → 401
+http POST "/auth/bind-phone/" '{"phone": "+79001234567", "code": "000000"}' -H "X-App-Type: client"
+assert "Bind phone without auth → 401" "401" "$HTTP_STATUS"
+
+
+# =============================================================================
+# 20. ACCOUNT DELETION
+# =============================================================================
+echo ""
+log_section "[20] Account Deletion (DELETE /auth/users/me/)"
+echo -e "${CYAN}[20] Account Deletion (DELETE /auth/users/me/)${NC}"
+
+# 20.1 Without auth → 401
+http DELETE "/auth/users/me/" '{"confirmation": "DELETE"}' -H "X-App-Type: client"
+assert "Delete without auth → 401" "401" "$HTTP_STATUS"
+
+# 20.2 Without confirmation → 400
+if [ -n "$CLIENT_ACCESS" ] && [ "$CLIENT_ACCESS" != "null" ]; then
+    # Register a disposable user for deletion test
+    DISPOSABLE_PHONE="+7900${RANDOM_SUFFIX}090"
+    http POST "/auth/register/" "{\"phone\": \"${DISPOSABLE_PHONE}\"}" -H "X-App-Type: client"
+    http POST "/auth/verify-otp/" "{\"phone\": \"${DISPOSABLE_PHONE}\", \"code\": \"000000\"}" -H "X-App-Type: client"
+    DISPOSABLE_ACCESS=$(json_get ".data.access" "$HTTP_BODY" | tr -d '[:space:]')
+
+    if [ -n "$DISPOSABLE_ACCESS" ] && [ "$DISPOSABLE_ACCESS" != "null" ]; then
+        # 20.2 Wrong confirmation → 400
+        http DELETE "/auth/users/me/" '{"confirmation": "WRONG"}' \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${DISPOSABLE_ACCESS}"
+        assert "Wrong confirmation → 400" "400" "$HTTP_STATUS"
+
+        # 20.3 Empty body → 400
+        http DELETE "/auth/users/me/" '{}' \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${DISPOSABLE_ACCESS}"
+        assert "Delete empty body → 400" "400" "$HTTP_STATUS"
+
+        # 20.4 Successful deletion
+        http DELETE "/auth/users/me/" '{"confirmation": "DELETE"}' \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${DISPOSABLE_ACCESS}"
+        assert "Delete account → 200" "200" "$HTTP_STATUS"
+        assert_contains "Scheduled message" '"message"' "$HTTP_BODY"
+
+        # 20.5 Deleted user token should be invalid
+        http GET "/auth/profile/me/" "" \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${DISPOSABLE_ACCESS}"
+        assert "Deleted user → 401" "401" "$HTTP_STATUS"
+    fi
 fi
 
 
