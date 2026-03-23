@@ -321,3 +321,73 @@ class TestServiceCategoryAPI:
         assert 'Ногтевой сервис' in root_names
         assert 'Волосы' in root_names
         assert 'Массаж' in root_names
+
+
+@pytest.mark.django_db
+class TestCategoriesAPI:
+    """Tests for GET /api/v1/categories/ — standalone endpoint."""
+    URL = '/api/v1/categories/'
+
+    def test_list_root_categories(self):
+        ServiceCategory.objects.create(name='Ногти', sort_order=1)
+        ServiceCategory.objects.create(name='Волосы', sort_order=2)
+        client = APIClient()
+        client.defaults['HTTP_X_APP_TYPE'] = 'client'
+        response = client.get(self.URL)
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.data) == 2
+
+    def test_filter_by_parent_id(self):
+        parent = ServiceCategory.objects.create(name='Ногти', sort_order=1)
+        ServiceCategory.objects.create(
+            name='Маникюр', parent=parent, sort_order=1,
+        )
+        ServiceCategory.objects.create(
+            name='Педикюр', parent=parent, sort_order=2,
+        )
+        client = APIClient()
+        client.defaults['HTTP_X_APP_TYPE'] = 'client'
+        # Root only (default)
+        response = client.get(self.URL)
+        assert len(response.data) == 1
+        # Children of parent
+        response = client.get(self.URL, {'parent_id': parent.pk})
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.data) == 2
+        names = [c['name'] for c in response.data]
+        assert 'Маникюр' in names
+        assert 'Педикюр' in names
+
+    def test_specialists_count(self, specialist_user):
+        cat = ServiceCategory.objects.create(name='Ногти count')
+        Service.objects.create(
+            specialist=specialist_user, name='Маникюр',
+            price='1500', duration_minutes=60, category=cat,
+        )
+        Service.objects.create(
+            specialist=specialist_user, name='Педикюр',
+            price='1000', duration_minutes=45, category=cat,
+        )
+        client = APIClient()
+        client.defaults['HTTP_X_APP_TYPE'] = 'client'
+        response = client.get(f'{self.URL}{cat.pk}/')
+        assert response.status_code == status.HTTP_200_OK
+        # 1 specialist with 2 services = specialists_count=1
+        assert response.data['specialists_count'] == 1
+
+    def test_has_specialists_count_field(self):
+        ServiceCategory.objects.create(name='Empty cat')
+        client = APIClient()
+        client.defaults['HTTP_X_APP_TYPE'] = 'client'
+        response = client.get(self.URL)
+        assert response.status_code == status.HTTP_200_OK
+        assert 'specialists_count' in response.data[0]
+        assert response.data[0]['specialists_count'] == 0
+
+    def test_detail_view(self):
+        cat = ServiceCategory.objects.create(name='Detailable')
+        client = APIClient()
+        client.defaults['HTTP_X_APP_TYPE'] = 'client'
+        response = client.get(f'{self.URL}{cat.pk}/')
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['name'] == 'Detailable'

@@ -66,16 +66,30 @@ class ServicePublicDetailSerializer(ServicePublicListSerializer):
 
 
 class ServiceCategorySerializer(serializers.ModelSerializer):
-    """Category with nested children."""
+    """Category with nested children and specialists count."""
     children = serializers.SerializerMethodField()
+    specialists_count = serializers.SerializerMethodField()
 
     class Meta:
         model = ServiceCategory
-        fields = ['id', 'name', 'slug', 'icon', 'sort_order', 'children']
+        fields = [
+            'id', 'name', 'slug', 'icon', 'sort_order',
+            'specialists_count', 'children',
+        ]
 
     def get_children(self, obj):
         children = obj.children.filter(is_active=True)
         return ServiceCategorySerializer(children, many=True).data
+
+    def get_specialists_count(self, obj):
+        """Count distinct specialists with active services in this category."""
+        return (
+            obj.services
+            .filter(is_active=True)
+            .values('specialist')
+            .distinct()
+            .count()
+        )
 
 
 ALLOWED_IMAGE_TYPES = ('image/jpeg', 'image/png', 'image/webp')

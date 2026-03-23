@@ -14,14 +14,18 @@ from .serializers import (
 
 
 class ServiceCategoryViewSet(viewsets.ReadOnlyModelViewSet):
-    """GET /api/v1/services/categories/ — public categories list."""
+    """GET /api/v1/categories/ — public categories with filtering."""
     serializer_class = ServiceCategorySerializer
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
-        return ServiceCategory.objects.filter(
-            is_active=True, parent__isnull=True,
-        )
+        qs = ServiceCategory.objects.filter(is_active=True)
+        parent_id = self.request.query_params.get('parent_id')
+        if parent_id == 'root' or parent_id is None:
+            qs = qs.filter(parent__isnull=True)
+        else:
+            qs = qs.filter(parent_id=parent_id)
+        return qs.prefetch_related('services')
 
 
 class ServiceViewSet(viewsets.ModelViewSet):
