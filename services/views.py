@@ -34,10 +34,14 @@ class ServiceViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated, IsProApp, IsSpecialist]
 
     def get_queryset(self):
-        return Service.objects.filter(specialist=self.request.user)
+        return Service.objects.filter(
+            specialist=self.request.user.specialist_profile,
+        )
 
     def perform_create(self, serializer):
-        serializer.save(specialist=self.request.user)
+        serializer.save(
+            specialist=self.request.user.specialist_profile,
+        )
 
 
 class ServicePublicFilter(FilterSet):
@@ -68,7 +72,8 @@ class ServicePublicViewSet(viewsets.ReadOnlyModelViewSet):
             .filter(is_active=True)
             .select_related(
                 'category',
-                'specialist__specialist_profile',
+                'specialist',
+                'specialist__user',
             )
         )
 

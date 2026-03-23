@@ -12,18 +12,18 @@ logger = logging.getLogger(__name__)
 class TestServiceModel:
     def test_create_service(self, specialist_user):
         service = Service.objects.create(
-            specialist=specialist_user,
+            specialist=specialist_user.specialist_profile,
             name='Стрижка',
             price=Decimal('500.00'),
             duration_minutes=60,
         )
         logger.info("Created service: %s", service)
-        assert str(service) == f'Стрижка — {specialist_user.username}'
+        assert str(service) == 'Стрижка — Елена Мастер'
         assert service.created_at is not None
 
     def test_cascade_delete(self, specialist_user):
         Service.objects.create(
-            specialist=specialist_user, name='Test',
+            specialist=specialist_user.specialist_profile, name='Test',
             price=Decimal('100'), duration_minutes=30,
         )
         assert Service.objects.count() == 1
@@ -33,7 +33,7 @@ class TestServiceModel:
     def test_service_with_category(self, specialist_user):
         cat = ServiceCategory.objects.create(name='Маникюр тест')
         service = Service.objects.create(
-            specialist=specialist_user, name='Классический маникюр',
+            specialist=specialist_user.specialist_profile, name='Классический маникюр',
             price=Decimal('1500'), duration_minutes=60,
             category=cat,
         )
@@ -42,7 +42,7 @@ class TestServiceModel:
 
     def test_is_active_default(self, specialist_user):
         service = Service.objects.create(
-            specialist=specialist_user, name='Active test',
+            specialist=specialist_user.specialist_profile, name='Active test',
             price=Decimal('500'), duration_minutes=30,
         )
         assert service.is_active is True
@@ -50,7 +50,7 @@ class TestServiceModel:
     def test_category_set_null(self, specialist_user):
         cat = ServiceCategory.objects.create(name='Temp')
         service = Service.objects.create(
-            specialist=specialist_user, name='Test',
+            specialist=specialist_user.specialist_profile, name='Test',
             price=Decimal('500'), duration_minutes=30,
             category=cat,
         )
