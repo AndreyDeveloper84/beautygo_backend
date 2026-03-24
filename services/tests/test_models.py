@@ -102,3 +102,11 @@ class TestServiceCategoryModel:
         parent.parent = child
         with pytest.raises(ValidationError):
             parent.save()
+
+    def test_max_depth_exceeded(self):
+        """Cannot create a grandchild category (depth > 2)."""
+        root = ServiceCategory.objects.create(name='Root depth test')
+        child = ServiceCategory.objects.create(name='Child depth test', parent=root)
+        grandchild = ServiceCategory(name='Grandchild depth test', parent=child)
+        with pytest.raises(ValidationError):
+            grandchild.save()

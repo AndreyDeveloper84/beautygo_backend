@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import uuid
+from typing import Any
 
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -22,7 +25,8 @@ class ServiceCategory(models.Model):
         ordering = ['sort_order', 'name']
         verbose_name_plural = 'Service Categories'
 
-    def clean(self):
+    def clean(self) -> None:
+        """Validate parent: no cycles, max depth 2 (root → subcategory)."""
         if self.parent_id and self.parent_id == self.pk:
             raise ValidationError(
                 {'parent': 'Category cannot be its own parent.'}
@@ -31,8 +35,13 @@ class ServiceCategory(models.Model):
             raise ValidationError(
                 {'parent': 'Circular parent reference detected.'}
             )
+        if self.parent_id and self.parent.parent_id is not None:
+            raise ValidationError(
+                {'parent': 'Category hierarchy cannot exceed 2 levels.'}
+            )
 
-    def save(self, *args, **kwargs):
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        """Auto-generate slug from name and run validation before saving."""
         if not self.slug:
             self.slug = slugify(self.name, allow_unicode=True)
         self.clean()
