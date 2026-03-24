@@ -2,6 +2,7 @@ import logging
 from decimal import Decimal
 
 import pytest
+from django.core.exceptions import ValidationError
 
 from services.models import Service, ServiceCategory
 
@@ -86,3 +87,18 @@ class TestServiceCategoryModel:
         assert ServiceCategory.objects.count() == 3
         parent.delete()
         assert ServiceCategory.objects.count() == 0
+
+    def test_category_cannot_be_own_parent(self):
+        cat = ServiceCategory.objects.create(name='Self Loop')
+        cat.parent = cat
+        with pytest.raises(ValidationError):
+            cat.save()
+
+    def test_indirect_cycle_prevented(self):
+        parent = ServiceCategory.objects.create(name='Parent')
+        child = ServiceCategory.objects.create(
+            name='Child', parent=parent,
+        )
+        parent.parent = child
+        with pytest.raises(ValidationError):
+            parent.save()

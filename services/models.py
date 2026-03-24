@@ -1,5 +1,6 @@
 import uuid
 
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils.text import slugify
 
@@ -21,9 +22,20 @@ class ServiceCategory(models.Model):
         ordering = ['sort_order', 'name']
         verbose_name_plural = 'Service Categories'
 
+    def clean(self):
+        if self.parent_id and self.parent_id == self.pk:
+            raise ValidationError(
+                {'parent': 'Category cannot be its own parent.'}
+            )
+        if self.parent and self.parent.parent_id == self.pk:
+            raise ValidationError(
+                {'parent': 'Circular parent reference detected.'}
+            )
+
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = slugify(self.name, allow_unicode=True)
+        self.clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
