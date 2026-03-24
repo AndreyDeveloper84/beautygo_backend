@@ -1,3 +1,4 @@
+from django.db.models import Count, Prefetch, Q
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
 from rest_framework import permissions, viewsets
 from rest_framework.filters import OrderingFilter
@@ -19,13 +20,37 @@ class ServiceCategoryViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [permissions.AllowAny]
 
     def get_queryset(self):
-        qs = ServiceCategory.objects.filter(is_active=True)
+        children_prefetch = Prefetch(
+            'children',
+            queryset=ServiceCategory.objects.filter(is_active=True)
+            .annotate(
+                specialists_count=Count(
+                    'services__specialist',
+                    filter=Q(services__is_active=True),
+                    distinct=True,
+                ),
+            )
+            .order_by('sort_order', 'name'),
+        )
+        qs = (
+            ServiceCategory.objects
+            .filter(is_active=True)
+            .annotate(
+                specialists_count=Count(
+                    'services__specialist',
+                    filter=Q(services__is_active=True),
+                    distinct=True,
+                ),
+            )
+            .prefetch_related(children_prefetch)
+            .order_by('sort_order', 'name')
+        )
         parent_id = self.request.query_params.get('parent_id')
         if parent_id == 'root' or parent_id is None:
             qs = qs.filter(parent__isnull=True)
         else:
             qs = qs.filter(parent_id=parent_id)
-        return qs.prefetch_related('services')
+        return qs
 
 
 class ServiceViewSet(viewsets.ModelViewSet):

@@ -78,18 +78,19 @@ class ServiceCategorySerializer(serializers.ModelSerializer):
         ]
 
     def get_children(self, obj):
-        children = obj.children.filter(is_active=True)
-        return ServiceCategorySerializer(children, many=True).data
+        """Children categories (uses prefetched data, depth-limited)."""
+        depth = self.context.get('depth', 0)
+        if depth >= 2:
+            return []
+        children = obj.children.all()  # uses prefetch cache
+        context = {**self.context, 'depth': depth + 1}
+        return ServiceCategorySerializer(
+            children, many=True, context=context,
+        ).data
 
     def get_specialists_count(self, obj):
-        """Count distinct specialists with active services in this category."""
-        return (
-            obj.services
-            .filter(is_active=True)
-            .values('specialist')
-            .distinct()
-            .count()
-        )
+        """Distinct specialists count (uses annotation, no extra query)."""
+        return getattr(obj, 'specialists_count', 0)
 
 
 ALLOWED_IMAGE_TYPES = ('image/jpeg', 'image/png', 'image/webp')
