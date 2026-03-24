@@ -188,3 +188,81 @@ class TestSpecialistList:
             SPECIALISTS_URL, {'name': 'Hack'}, format='json',
         )
         assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
+
+
+@pytest.mark.django_db
+class TestSpecialistDetail:
+    """Tests for GET /api/v1/specialists/{id}/ (DRF-61)."""
+
+    def test_retrieve_specialist(self, client_app, active_specialist):
+        profile = active_specialist.specialist_profile
+        url = f'{SPECIALISTS_URL}{profile.pk}/'
+        response = client_app.get(url)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['display_name'] == 'Елена Мастер'
+        assert 'services' in response.data
+        assert 'reviews_summary' in response.data
+        assert 'working_hours' in response.data
+        assert 'recent_reviews' in response.data
+        assert 'created_at' in response.data
+
+    def test_retrieve_includes_full_services(
+        self, client_app, active_specialist,
+    ):
+        profile = active_specialist.specialist_profile
+        url = f'{SPECIALISTS_URL}{profile.pk}/'
+        response = client_app.get(url)
+        services = response.data['services']
+        assert len(services) == 2
+        # Full service has description and category_name
+        assert 'description' in services[0]
+        assert 'category_name' in services[0]
+        assert 'duration_minutes' in services[0]
+
+    def test_retrieve_reviews_summary_stub(
+        self, client_app, active_specialist,
+    ):
+        profile = active_specialist.specialist_profile
+        url = f'{SPECIALISTS_URL}{profile.pk}/'
+        response = client_app.get(url)
+        summary = response.data['reviews_summary']
+        assert summary['average'] == 4.8
+        assert summary['count'] == 25
+        assert 'distribution' in summary
+
+    def test_retrieve_nonexistent(self, client_app):
+        import uuid
+        url = f'{SPECIALISTS_URL}{uuid.uuid4()}/'
+        response = client_app.get(url)
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_retrieve_inactive_specialist(
+        self, client_app, draft_specialist,
+    ):
+        profile = draft_specialist.specialist_profile
+        url = f'{SPECIALISTS_URL}{profile.pk}/'
+        response = client_app.get(url)
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_services_endpoint(self, client_app, active_specialist):
+        profile = active_specialist.specialist_profile
+        url = f'{SPECIALISTS_URL}{profile.pk}/services/'
+        response = client_app.get(url)
+        assert response.status_code == status.HTTP_200_OK
+        assert len(response.data) == 2
+        assert 'category_name' in response.data[0]
+
+    def test_slots_endpoint_stub(self, client_app, active_specialist):
+        profile = active_specialist.specialist_profile
+        url = f'{SPECIALISTS_URL}{profile.pk}/slots/'
+        response = client_app.get(url)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data == []
+
+    def test_reviews_endpoint_stub(self, client_app, active_specialist):
+        profile = active_specialist.specialist_profile
+        url = f'{SPECIALISTS_URL}{profile.pk}/reviews/'
+        response = client_app.get(url)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['results'] == []
+        assert response.data['count'] == 0

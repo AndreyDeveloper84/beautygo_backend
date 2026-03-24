@@ -5,7 +5,9 @@ import math
 
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
 from rest_framework import permissions, serializers, viewsets
+from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter
+from rest_framework.response import Response
 
 from services.models import Service
 from .models import SpecialistProfile
@@ -67,6 +69,88 @@ class SpecialistListSerializer(serializers.ModelSerializer):
             )
         except (ValueError, TypeError):
             return None
+
+
+class ServiceFullSerializer(serializers.ModelSerializer):
+    """Full service details for specialist detail view."""
+    category_name = serializers.CharField(
+        source='category.name', default=None,
+    )
+
+    class Meta:
+        model = Service
+        fields = [
+            'id', 'name', 'description', 'price', 'duration_minutes',
+            'image', 'category', 'category_name', 'is_active', 'sort_order',
+        ]
+
+
+class SpecialistDetailSerializer(serializers.ModelSerializer):
+    """Full specialist profile for detail/card view."""
+    user_id = serializers.UUIDField(source='user.id')
+    services = serializers.SerializerMethodField()
+    services_count = serializers.SerializerMethodField()
+    distance_km = serializers.SerializerMethodField()
+    reviews_summary = serializers.SerializerMethodField()
+    recent_reviews = serializers.SerializerMethodField()
+    working_hours = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SpecialistProfile
+        fields = [
+            'id', 'user_id', 'display_name', 'avatar', 'bio',
+            'experience_years', 'address',
+            'location_lat', 'location_lng',
+            'rating', 'reviews_count', 'is_available',
+            'services', 'services_count', 'distance_km',
+            'reviews_summary', 'recent_reviews', 'working_hours',
+            'created_at',
+        ]
+
+    def get_services(self, obj):
+        """All active services, ordered by sort_order."""
+        services = (
+            obj.services
+            .filter(is_active=True)
+            .select_related('category')
+            .order_by('sort_order', 'name')
+        )
+        return ServiceFullSerializer(services, many=True).data
+
+    def get_services_count(self, obj):
+        return obj.services.filter(is_active=True).count()
+
+    def get_distance_km(self, obj):
+        request = self.context.get('request')
+        if not request:
+            return None
+        lat = request.query_params.get('lat')
+        lon = request.query_params.get('lon')
+        if not lat or not lon or not obj.location_lat or not obj.location_lng:
+            return None
+        try:
+            return _haversine(
+                float(lat), float(lon),
+                float(obj.location_lat), float(obj.location_lng),
+            )
+        except (ValueError, TypeError):
+            return None
+
+    def get_reviews_summary(self, obj):
+        """Reviews summary — stub until Review model exists."""
+        return {
+            'average': float(obj.rating),
+            'count': obj.reviews_count,
+            'distribution': {1: 0, 2: 0, 3: 0, 4: 0, 5: 0},
+        }
+
+    def get_recent_reviews(self, obj):
+        """Recent reviews — stub until Review model exists."""
+        return []
+
+    def get_working_hours(self, obj):
+        """Working hours — stub until WorkingHours model exists."""
+        return []
 
 
 def _haversine(lat1, lon1, lat2, lon2):
@@ -148,6 +232,37 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_class = SpecialistFilter
     ordering_fields = ['rating', 'reviews_count', 'experience_years']
     ordering = ['-rating']
+
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return SpecialistDetailSerializer
+        return SpecialistListSerializer
+
+    @action(detail=True, methods=['get'], url_path='services')
+    def services(self, request, pk=None):
+        """GET /specialists/{id}/services/ — all active services."""
+        specialist = self.get_object()
+        services = (
+            specialist.services
+            .filter(is_active=True)
+            .select_related('category')
+            .order_by('sort_order', 'name')
+        )
+        return Response(
+            ServiceFullSerializer(services, many=True).data,
+        )
+
+    @action(detail=True, methods=['get'], url_path='slots')
+    def slots(self, request, pk=None):
+        """GET /specialists/{id}/slots/ — available slots (stub)."""
+        self.get_object()  # 404 if not found
+        return Response([])
+
+    @action(detail=True, methods=['get'], url_path='reviews')
+    def reviews(self, request, pk=None):
+        """GET /specialists/{id}/reviews/ — reviews (stub)."""
+        self.get_object()  # 404 if not found
+        return Response({'results': [], 'count': 0})
 
     def get_queryset(self):
         qs = (
