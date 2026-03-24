@@ -1,9 +1,11 @@
 """Specialists public API — list and search for Client App."""
+from __future__ import annotations
 
 import logging
 import math
+from typing import Any
 
-from django.db.models import Count, Prefetch, Q
+from django.db.models import Count, Prefetch, Q, QuerySet
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
 from rest_framework import permissions, serializers, viewsets
 from rest_framework.decorators import action
@@ -42,17 +44,17 @@ class SpecialistListSerializer(serializers.ModelSerializer):
             'services_preview', 'services_count', 'distance_km',
         ]
 
-    def get_services_preview(self, obj):
+    def get_services_preview(self, obj: SpecialistProfile) -> list[dict[str, Any]]:
         """Top-3 active services (uses prefetched data, no extra query)."""
         return ServicePreviewSerializer(
             list(obj.services.all()[:3]), many=True,
         ).data
 
-    def get_services_count(self, obj):
+    def get_services_count(self, obj: SpecialistProfile) -> int:
         """Active services count (uses annotation, no extra query)."""
         return getattr(obj, 'active_services_count', 0)
 
-    def get_distance_km(self, obj):
+    def get_distance_km(self, obj: SpecialistProfile) -> float | None:
         """Distance from client's location (if provided in request)."""
         request = self.context.get('request')
         if not request:
@@ -106,17 +108,17 @@ class SpecialistDetailSerializer(serializers.ModelSerializer):
             'created_at',
         ]
 
-    def get_services(self, obj):
+    def get_services(self, obj: SpecialistProfile) -> list[dict[str, Any]]:
         """All active services (uses prefetched data, no extra query)."""
         return ServiceFullSerializer(
             obj.services.all(), many=True,
         ).data
 
-    def get_services_count(self, obj):
+    def get_services_count(self, obj: SpecialistProfile) -> int:
         """Active services count (uses annotation, no extra query)."""
         return getattr(obj, 'active_services_count', 0)
 
-    def get_distance_km(self, obj):
+    def get_distance_km(self, obj: SpecialistProfile) -> float | None:
         request = self.context.get('request')
         if not request:
             return None
@@ -132,7 +134,7 @@ class SpecialistDetailSerializer(serializers.ModelSerializer):
         except (ValueError, TypeError):
             return None
 
-    def get_reviews_summary(self, obj):
+    def get_reviews_summary(self, obj: SpecialistProfile) -> dict[str, Any]:
         """Reviews summary — stub until Review model exists."""
         return {
             'average': float(obj.rating),
@@ -140,16 +142,16 @@ class SpecialistDetailSerializer(serializers.ModelSerializer):
             'distribution': {1: 0, 2: 0, 3: 0, 4: 0, 5: 0},
         }
 
-    def get_recent_reviews(self, obj):
+    def get_recent_reviews(self, obj: SpecialistProfile) -> list:
         """Recent reviews — stub until Review model exists."""
         return []
 
-    def get_working_hours(self, obj):
+    def get_working_hours(self, obj: SpecialistProfile) -> list:
         """Working hours — stub until WorkingHours model exists."""
         return []
 
 
-def _haversine(lat1, lon1, lat2, lon2):
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculate distance in km between two points using Haversine formula."""
     R = 6371  # Earth radius in km
     dlat = math.radians(lat2 - lat1)
@@ -193,25 +195,25 @@ class SpecialistFilter(FilterSet):
         model = SpecialistProfile
         fields = ['min_rating', 'is_available']
 
-    def filter_by_category(self, queryset, name, value):
+    def filter_by_category(self, queryset: QuerySet, name: str, value: Any) -> QuerySet:
         return queryset.filter(
             services__category_id=value,
             services__is_active=True,
         ).distinct()
 
-    def filter_by_service(self, queryset, name, value):
+    def filter_by_service(self, queryset: QuerySet, name: str, value: Any) -> QuerySet:
         return queryset.filter(
             services__id=value,
             services__is_active=True,
         ).distinct()
 
-    def filter_by_min_price(self, queryset, name, value):
+    def filter_by_min_price(self, queryset: QuerySet, name: str, value: Any) -> QuerySet:
         return queryset.filter(
             services__price__gte=value,
             services__is_active=True,
         ).distinct()
 
-    def filter_by_max_price(self, queryset, name, value):
+    def filter_by_max_price(self, queryset: QuerySet, name: str, value: Any) -> QuerySet:
         return queryset.filter(
             services__price__lte=value,
             services__is_active=True,
@@ -229,7 +231,7 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
     ordering_fields = ['rating', 'reviews_count', 'experience_years']
     ordering = ['-rating']
 
-    def get_serializer_class(self):
+    def get_serializer_class(self) -> type:
         if self.action == 'retrieve':
             return SpecialistDetailSerializer
         return SpecialistListSerializer
@@ -260,7 +262,7 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
         self.get_object()  # 404 if not found
         return Response({'results': [], 'count': 0})
 
-    def get_queryset(self):
+    def get_queryset(self) -> QuerySet:
         active_services = Prefetch(
             'services',
             queryset=(
