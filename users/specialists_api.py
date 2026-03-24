@@ -3,6 +3,7 @@
 import logging
 import math
 
+from django.db.models import Count, Prefetch, Q
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
 from rest_framework import permissions, serializers, viewsets
 from rest_framework.decorators import action
@@ -42,16 +43,14 @@ class SpecialistListSerializer(serializers.ModelSerializer):
         ]
 
     def get_services_preview(self, obj):
-        """Top-3 active services by sort_order."""
-        services = (
-            obj.services
-            .filter(is_active=True)
-            .order_by('sort_order', 'name')[:3]
-        )
-        return ServicePreviewSerializer(services, many=True).data
+        """Top-3 active services (uses prefetched data, no extra query)."""
+        return ServicePreviewSerializer(
+            list(obj.services.all()[:3]), many=True,
+        ).data
 
     def get_services_count(self, obj):
-        return obj.services.filter(is_active=True).count()
+        """Active services count (uses annotation, no extra query)."""
+        return getattr(obj, 'active_services_count', 0)
 
     def get_distance_km(self, obj):
         """Distance from client's location (if provided in request)."""
@@ -108,17 +107,14 @@ class SpecialistDetailSerializer(serializers.ModelSerializer):
         ]
 
     def get_services(self, obj):
-        """All active services, ordered by sort_order."""
-        services = (
-            obj.services
-            .filter(is_active=True)
-            .select_related('category')
-            .order_by('sort_order', 'name')
-        )
-        return ServiceFullSerializer(services, many=True).data
+        """All active services (uses prefetched data, no extra query)."""
+        return ServiceFullSerializer(
+            obj.services.all(), many=True,
+        ).data
 
     def get_services_count(self, obj):
-        return obj.services.filter(is_active=True).count()
+        """Active services count (uses annotation, no extra query)."""
+        return getattr(obj, 'active_services_count', 0)
 
     def get_distance_km(self, obj):
         request = self.context.get('request')
@@ -265,6 +261,15 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({'results': [], 'count': 0})
 
     def get_queryset(self):
+        active_services = Prefetch(
+            'services',
+            queryset=(
+                Service.objects
+                .filter(is_active=True)
+                .select_related('category')
+                .order_by('sort_order', 'name')
+            ),
+        )
         qs = (
             SpecialistProfile.objects
             .filter(
@@ -273,7 +278,13 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
                 user__is_active=True,
             )
             .select_related('user')
-            .prefetch_related('services')
+            .prefetch_related(active_services)
+            .annotate(
+                active_services_count=Count(
+                    'services',
+                    filter=Q(services__is_active=True),
+                ),
+            )
         )
 
         # Geo filter: lat, lon, radius (km)
