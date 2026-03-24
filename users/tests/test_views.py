@@ -4,7 +4,7 @@ import pytest
 from django.urls import reverse
 from rest_framework import status
 
-from users.models import Profile, SpecialistProfile, User
+from users.models import SpecialistProfile, User
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +206,7 @@ class TestDeviceId:
         # Request with different device_id
         api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
         response = api_client.get(
-            reverse('my-profile'),
+            reverse('user-me'),
             HTTP_X_DEVICE_ID='device-different',
         )
         logger.info("Device mismatch → %s", response.status_code)
@@ -225,44 +225,30 @@ class TestDeviceId:
         })
         token = resp.data['data']['access']
         api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
-        response = api_client.get(reverse('my-profile'))
+        response = api_client.get(reverse('user-me'))
         assert response.status_code == status.HTTP_200_OK
 
 
 @pytest.mark.django_db
-class TestProfileViews:
-    def test_my_profile_authenticated(self, authenticated_specialist):
-        url = reverse('my-profile')
-        logger.info("GET %s — authenticated specialist", url)
-        response = authenticated_specialist.get(url)
+class TestUserMeView:
+    """Tests for GET/DELETE /api/v1/auth/users/me/"""
+
+    URL = '/api/v1/auth/users/me/'
+
+    def test_get_current_user_authenticated(self, authenticated_specialist):
+        logger.info("GET %s — authenticated specialist", self.URL)
+        response = authenticated_specialist.get(self.URL)
         logger.info("Response %s", response.status_code)
         assert response.status_code == status.HTTP_200_OK
+        assert 'data' in response.data
+        assert 'phone' in response.data['data']
+        assert 'role' in response.data['data']
 
-    def test_my_profile_unauthenticated(self, api_client):
-        url = reverse('my-profile')
-        logger.info("GET %s — unauthenticated", url)
-        response = api_client.get(url)
+    def test_get_current_user_unauthenticated(self, api_client):
+        logger.info("GET %s — unauthenticated", self.URL)
+        response = api_client.get(self.URL)
         logger.info("Response %s", response.status_code)
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
-
-    def test_profile_detail_public(self, api_client, specialist_user):
-        profile = Profile.objects.get(user=specialist_user)
-        profile.full_name = 'Тест Специалист'
-        profile.save()
-        url = reverse('profile-detail', kwargs={'pk': profile.pk})
-        logger.info("GET %s — public profile detail", url)
-        response = api_client.get(url)
-        logger.info("Response %s: full_name=%s", response.status_code, response.data.get('full_name'))
-        assert response.status_code == status.HTTP_200_OK
-        assert response.data['full_name'] == 'Тест Специалист'
-
-    def test_update_own_profile(self, authenticated_specialist):
-        url = reverse('my-profile')
-        logger.info("PATCH %s — update full_name", url)
-        response = authenticated_specialist.patch(url, {'full_name': 'Новое Имя'})
-        logger.info("Response %s: full_name=%s", response.status_code, response.data.get('full_name'))
-        assert response.status_code == status.HTTP_200_OK
-        assert response.data['full_name'] == 'Новое Имя'
 
 
 @pytest.mark.django_db
@@ -448,9 +434,9 @@ class TestDeleteAccount:
 
 @pytest.mark.django_db
 class TestMasterProfile:
-    """Tests for POST/PATCH /masters/profile/ and GET /masters/me/"""
+    """Tests for GET/POST/PATCH /masters/me/"""
 
-    PROFILE_URL = '/api/v1/auth/masters/profile/'
+    PROFILE_URL = '/api/v1/auth/masters/me/'
     ME_URL = '/api/v1/auth/masters/me/'
 
     def test_create_profile_when_no_signal(self, pro_api_client):

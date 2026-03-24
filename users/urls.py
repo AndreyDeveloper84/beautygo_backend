@@ -4,16 +4,13 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from .views import (
     BindPhoneView,
     ClientProfileView,
-    DeleteAccountView,
     LoginView,
     LogoutView,
     MasterMeView,
-    MasterProfileView,
-    MyProfileView,
-    ProfileDetailView,
     RegisterPhoneView,
     SendCodeView,
     SocialAuthView,
+    UserMeView,
     VerifyOTPView,
 )
 
@@ -26,19 +23,16 @@ urlpatterns = [
     path('logout/', LogoutView.as_view(), name='logout'),
     path('send-code/', SendCodeView.as_view(), name='send-code'),
 
-    # Account deletion
-    path('users/me/', DeleteAccountView.as_view(), name='delete-account'),
+    # Current user (GET info, DELETE account)
+    path('users/me/', UserMeView.as_view(), name='user-me'),
 
     # Social auth
     path('social/<str:provider>/', SocialAuthView.as_view(), name='social-auth'),
     path('bind-phone/', BindPhoneView.as_view(), name='bind-phone'),
 
-    # Specialist profile endpoints
-    path('masters/profile/', MasterProfileView.as_view(), name='master-profile'),
+    # Specialist profile (GET/POST/PATCH)
     path('masters/me/', MasterMeView.as_view(), name='master-me'),
 
-    # Profile endpoints
-    path('profile/<uuid:pk>/', ProfileDetailView.as_view(), name='profile-detail'),
-    path('profile/me/', MyProfileView.as_view(), name='my-profile'),
+    # Client profile (GET/PATCH)
     path('clients/me/', ClientProfileView.as_view(), name='client-profile'),
 ]
