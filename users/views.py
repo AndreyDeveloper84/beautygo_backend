@@ -181,13 +181,25 @@ class SendCodeView(APIView):
 
 # --- Specialist Profile Views ---
 
-class MasterProfileView(APIView):
-    """POST/PATCH /api/v1/auth/masters/profile/ — Create or update master profile."""
+class MasterMeView(APIView):
+    """GET/POST/PATCH /api/v1/auth/masters/me/ — Master profile management."""
     permission_classes = [permissions.IsAuthenticated, IsProApp, IsSpecialist]
     parser_classes = [
         rest_framework.parsers.MultiPartParser,
         rest_framework.parsers.JSONParser,
     ]
+
+    def get(self, request):
+        try:
+            profile = SpecialistProfile.objects.get(user=request.user)
+        except SpecialistProfile.DoesNotExist:
+            return error_response(
+                "PROFILE_NOT_FOUND",
+                "Specialist profile not found",
+                status_code=404,
+            )
+        serializer = SpecialistProfileDetailSerializer(profile)
+        return success_response(serializer.data)
 
     def post(self, request):
         """Step 1: create specialist profile."""
@@ -225,7 +237,6 @@ class MasterProfileView(APIView):
                 details=serializer.errors, status_code=400,
             )
         serializer.save()
-        # Move to pending if still draft and required fields filled
         if (
             profile.status == SpecialistProfile.ProfileStatus.DRAFT
             and profile.display_name
@@ -235,23 +246,6 @@ class MasterProfileView(APIView):
             profile.save(update_fields=['status'])
         detail = SpecialistProfileDetailSerializer(profile)
         return success_response(detail.data)
-
-
-class MasterMeView(APIView):
-    """GET /api/v1/auth/masters/me/ — Get current master's full profile."""
-    permission_classes = [permissions.IsAuthenticated, IsProApp, IsSpecialist]
-
-    def get(self, request):
-        try:
-            profile = SpecialistProfile.objects.get(user=request.user)
-        except SpecialistProfile.DoesNotExist:
-            return error_response(
-                "PROFILE_NOT_FOUND",
-                "Specialist profile not found",
-                status_code=404,
-            )
-        serializer = SpecialistProfileDetailSerializer(profile)
-        return success_response(serializer.data)
 
 
 # --- Profile Views ---
@@ -310,9 +304,19 @@ class ClientProfileView(generics.RetrieveUpdateAPIView):
 
 # --- Account Deletion ---
 
-class DeleteAccountView(APIView):
-    """DELETE /api/v1/auth/users/me/ — Soft delete account."""
+class UserMeView(APIView):
+    """GET/DELETE /api/v1/auth/users/me/ — Current user info & account deletion."""
     permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        """Return current user basic info."""
+        user = request.user
+        return success_response({
+            "id": str(user.id),
+            "phone": user.phone,
+            "role": user.role,
+            "is_verified": user.is_verified,
+        })
 
     def delete(self, request):
         serializer = DeleteAccountSerializer(data=request.data)

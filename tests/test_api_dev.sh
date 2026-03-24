@@ -489,12 +489,12 @@ log_section "[5] Authenticated endpoints"
 echo -e "${CYAN}[5] Authenticated endpoints${NC}"
 
 # 5.1 Profile without auth
-http GET "/auth/profile/me/" "" -H "X-App-Type: client"
+http GET "/auth/users/me/" "" -H "X-App-Type: client"
 assert "Profile without auth → 401" "401" "$HTTP_STATUS"
 
 # 5.2 Profile with valid token
 if [ -n "$ACCESS_TOKEN" ] && [ "$ACCESS_TOKEN" != "null" ]; then
-    http GET "/auth/profile/me/" "" \
+    http GET "/auth/users/me/" "" \
         -H "X-App-Type: client" \
         -H "Authorization: Bearer ${ACCESS_TOKEN}"
     assert "Profile with auth → 200" "200" "$HTTP_STATUS"
@@ -503,19 +503,19 @@ if [ -n "$ACCESS_TOKEN" ] && [ "$ACCESS_TOKEN" != "null" ]; then
 fi
 
 # 5.3 Invalid token
-http GET "/auth/profile/me/" "" \
+http GET "/auth/users/me/" "" \
     -H "X-App-Type: client" \
     -H "Authorization: Bearer invalid.token.here"
 assert "Invalid token → 401" "401" "$HTTP_STATUS"
 
 # 5.4 Expired/garbage token
-http GET "/auth/profile/me/" "" \
+http GET "/auth/users/me/" "" \
     -H "X-App-Type: client" \
     -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbl90eXBlIjoiYWNjZXNzIiwiZXhwIjoxMDAwMDAwMDAwfQ.invalid"
 assert "Forged token → 401" "401" "$HTTP_STATUS"
 
 # 5.5 Missing Authorization header
-http GET "/auth/profile/me/" "" -H "X-App-Type: client"
+http GET "/auth/users/me/" "" -H "X-App-Type: client"
 assert "No Authorization header → 401" "401" "$HTTP_STATUS"
 
 
@@ -1006,8 +1006,8 @@ assert "Client profile without auth → 401" "401" "$HTTP_STATUS"
 # 15. SPECIALIST PROFILE
 # =============================================================================
 echo ""
-log_section "[15] Specialist Profile (POST/PATCH /auth/masters/profile/, GET /auth/masters/me/)"
-echo -e "${CYAN}[15] Specialist Profile (masters/profile/ & masters/me/)${NC}"
+log_section "[15] Specialist Profile (POST/PATCH /auth/masters/me/, GET /auth/masters/me/)"
+echo -e "${CYAN}[15] Specialist Profile (masters/me/ & masters/me/)${NC}"
 
 if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
     # 15.1 Get specialist profile
@@ -1020,14 +1020,14 @@ if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
     assert_contains "Profile has rating" '"rating"' "$HTTP_BODY"
 
     # 15.2 Update specialist profile
-    http PATCH "/auth/masters/profile/" \
+    http PATCH "/auth/masters/me/" \
         '{"display_name": "Updated Master", "bio": "Test bio"}' \
         -H "X-App-Type: pro" \
         -H "Authorization: Bearer ${SPEC_ACCESS}"
     assert "Update specialist profile → 200" "200" "$HTTP_STATUS"
 
     # 15.3 Update address + location
-    http PATCH "/auth/masters/profile/" \
+    http PATCH "/auth/masters/me/" \
         '{"address": "Казань, ул. Баумана 1", "location_lat": "55.796127", "location_lng": "49.106405"}' \
         -H "X-App-Type: pro" \
         -H "Authorization: Bearer ${SPEC_ACCESS}"
@@ -1280,7 +1280,7 @@ if [ -n "$CLIENT_ACCESS" ] && [ "$CLIENT_ACCESS" != "null" ]; then
         assert_contains "Scheduled message" '"message"' "$HTTP_BODY"
 
         # 20.5 Deleted user token should be invalid
-        http GET "/auth/profile/me/" "" \
+        http GET "/auth/users/me/" "" \
             -H "X-App-Type: client" \
             -H "Authorization: Bearer ${DISPOSABLE_ACCESS}"
         assert "Deleted user → 401" "401" "$HTTP_STATUS"
