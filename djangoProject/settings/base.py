@@ -37,6 +37,8 @@ ALLOWED_HOSTS = ['localhost']
 # Application definition
 
 INSTALLED_APPS = [
+    'unfold',
+    'unfold.contrib.filters',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -68,6 +70,62 @@ SIMPLE_JWT = {
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'AUTH_HEADER_TYPES': ('Bearer',),
+}
+
+UNFOLD = {
+    "SITE_TITLE": "BeautyGO Admin",
+    "SITE_HEADER": "BeautyGO",
+    "SITE_URL": "/",
+    "SITE_SYMBOL": "spa",  # Material Symbol icon
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": False,
+    "THEME": "dark",
+    "COLORS": {
+        "primary": {
+            "50": "250 245 255",
+            "100": "243 232 255",
+            "200": "233 213 255",
+            "300": "216 180 254",
+            "400": "192 132 252",
+            "500": "168 85 247",
+            "600": "147 51 234",
+            "700": "126 34 206",
+            "800": "107 33 168",
+            "900": "88 28 135",
+            "950": "59 7 100",
+        },
+    },
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": True,
+        "navigation": [
+            {
+                "title": "Пользователи",
+                "separator": True,
+                "items": [
+                    {"title": "Пользователи", "icon": "person", "link": "/admin/users/user/"},
+                    {"title": "Профили", "icon": "badge", "link": "/admin/users/profile/"},
+                    {"title": "Мастера", "icon": "content_cut", "link": "/admin/users/specialistprofile/"},
+                ],
+            },
+            {
+                "title": "Услуги",
+                "separator": True,
+                "items": [
+                    {"title": "Категории", "icon": "category", "link": "/admin/services/servicecategory/"},
+                    {"title": "Услуги", "icon": "spa", "link": "/admin/services/service/"},
+                ],
+            },
+            {
+                "title": "Авторизация",
+                "items": [
+                    {"title": "OTP коды", "icon": "pin", "link": "/admin/users/otpcode/"},
+                    {"title": "Соц. аккаунты", "icon": "link", "link": "/admin/users/socialaccount/"},
+                    {"title": "Устройства", "icon": "smartphone", "link": "/admin/users/devicetoken/"},
+                ],
+            },
+        ],
+    },
 }
 
 SPECTACULAR_SETTINGS = {
