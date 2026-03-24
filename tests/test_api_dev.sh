@@ -640,7 +640,7 @@ if [ -n "$SPEC_ACCESS" ] && [ "$SPEC_ACCESS" != "null" ]; then
             -H "X-App-Type: pro" \
             -H "Authorization: Bearer ${SPEC_ACCESS}"
         assert "Get service by id → 200" "200" "$HTTP_STATUS"
-        assert_contains "Service response has correct id" "\"id\":${SERVICE_ID}" "$HTTP_BODY"
+        assert_contains "Service response has correct id" "\"id\":\"${SERVICE_ID}\"" "$HTTP_BODY"
     fi
 
     # 8.4 Update service (PATCH)
