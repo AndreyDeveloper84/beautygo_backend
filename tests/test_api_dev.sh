@@ -1289,6 +1289,60 @@ fi
 
 
 # =============================================================================
+# 21. BLOCKED USER (DRF-76)
+# Requires localhost — uses manage.py shell to simulate admin block action
+# =============================================================================
+
+if [[ "$BASE_URL" == *"localhost"* ]] || [[ "$BASE_URL" == *"127.0.0.1"* ]]; then
+    log_section "[21] Blocked User (DRF-76 — localhost only)"
+
+    BLOCKED_PHONE="+7900${RANDOM_SUFFIX}091"
+
+    # Register and authenticate
+    http POST "/auth/register/" "{\"phone\": \"${BLOCKED_PHONE}\"}" -H "X-App-Type: client"
+    http POST "/auth/verify-otp/" "{\"phone\": \"${BLOCKED_PHONE}\", \"code\": \"000000\"}" -H "X-App-Type: client"
+    BLOCKED_ACCESS=$(json_get ".data.access" "$HTTP_BODY" | tr -d '[:space:]')
+
+    if [ -n "$BLOCKED_ACCESS" ] && [ "$BLOCKED_ACCESS" != "null" ]; then
+        # 21.1 Token works before blocking
+        http GET "/auth/users/me/" "" \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${BLOCKED_ACCESS}"
+        assert "Active user → /users/me/ → 200" "200" "$HTTP_STATUS"
+
+        # Block user via manage.py shell (simulates admin block action)
+        MANAGE_PY="${SCRIPT_DIR}/../manage.py"
+        DJANGO_SETTINGS_MODULE=djangoProject.settings.dev \
+            $PYTHON "$MANAGE_PY" shell -c \
+            "from users.models import User; User.objects.filter(phone='${BLOCKED_PHONE}').update(is_active=False)" \
+            2>/dev/null
+
+        # 21.2 Existing token must be rejected for blocked user
+        http GET "/auth/users/me/" "" \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${BLOCKED_ACCESS}"
+        assert "Blocked user token → 401" "401" "$HTTP_STATUS"
+
+        # 21.3 Blocked user cannot get new token via verify-otp
+        http POST "/auth/login/" "{\"phone\": \"${BLOCKED_PHONE}\"}" -H "X-App-Type: client"
+        http POST "/auth/verify-otp/" "{\"phone\": \"${BLOCKED_PHONE}\", \"code\": \"000000\"}" -H "X-App-Type: client"
+        NEW_TOKEN=$(json_get ".data.access" "$HTTP_BODY" | tr -d '[:space:]')
+        if [ -n "$NEW_TOKEN" ] && [ "$NEW_TOKEN" != "null" ]; then
+            http GET "/auth/users/me/" "" \
+                -H "X-App-Type: client" \
+                -H "Authorization: Bearer ${NEW_TOKEN}"
+            assert "Blocked user new token → 401" "401" "$HTTP_STATUS"
+        fi
+    else
+        echo "  SKIP: could not get token for blocked user test"
+    fi
+else
+    echo ""
+    echo -e "${YELLOW}  [21] Blocked User — skipped (requires localhost)${NC}"
+fi
+
+
+# =============================================================================
 # RESULTS
 # =============================================================================
 # Write summary to log
