@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 VALID_APP_TYPES = ("client", "pro")
 
 EXCLUDED_PATH_PREFIXES = (
-    "/admin/",
+    "/admin",        # Django Admin (with and without trailing slash)
     "/api/schema/",
     "/api/docs/",
     "/api/redoc/",
