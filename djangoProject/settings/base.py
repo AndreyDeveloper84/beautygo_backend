@@ -79,7 +79,7 @@ UNFOLD = {
     "SITE_SYMBOL": "spa",  # Material Symbol icon
     "SHOW_HISTORY": True,
     "SHOW_VIEW_ON_SITE": False,
-    "THEME": "dark",
+    "THEME": "light",
     "COLORS": {
         "primary": {
             "50": "250 245 255",
