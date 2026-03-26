@@ -1,6 +1,8 @@
-from django.db.models import Count, Prefetch, Q
+from __future__ import annotations
+
+from django.db.models import Count, Prefetch, Q, QuerySet
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
-from rest_framework import permissions, viewsets
+from rest_framework import permissions, serializers, viewsets
 from rest_framework.filters import OrderingFilter
 
 from users.permissions import IsProApp, IsSpecialist
@@ -19,7 +21,8 @@ class ServiceCategoryViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = ServiceCategorySerializer
     permission_classes = [permissions.AllowAny]
 
-    def get_queryset(self):
+    def get_queryset(self) -> QuerySet[ServiceCategory]:
+        """Return active categories with specialist counts and prefetched children."""
         children_prefetch = Prefetch(
             'children',
             queryset=ServiceCategory.objects.filter(is_active=True)
@@ -58,12 +61,14 @@ class ServiceViewSet(viewsets.ModelViewSet):
     serializer_class = ServiceSerializer
     permission_classes = [permissions.IsAuthenticated, IsProApp, IsSpecialist]
 
-    def get_queryset(self):
+    def get_queryset(self) -> QuerySet[Service]:
+        """Return services belonging to the authenticated specialist."""
         return Service.objects.filter(
             specialist=self.request.user.specialist_profile,
         )
 
-    def perform_create(self, serializer):
+    def perform_create(self, serializer: ServiceSerializer) -> None:
+        """Assign the current specialist as the service owner on create."""
         serializer.save(
             specialist=self.request.user.specialist_profile,
         )
@@ -91,7 +96,8 @@ class ServicePublicViewSet(viewsets.ReadOnlyModelViewSet):
     ordering_fields = ['price', 'name', 'created_at']
     ordering = ['sort_order', 'name']
 
-    def get_queryset(self):
+    def get_queryset(self) -> QuerySet[Service]:
+        """Return active services with related specialist and category."""
         return (
             Service.objects
             .filter(is_active=True)
@@ -102,7 +108,8 @@ class ServicePublicViewSet(viewsets.ReadOnlyModelViewSet):
             )
         )
 
-    def get_serializer_class(self):
+    def get_serializer_class(self) -> type[serializers.Serializer]:
+        """Return detail serializer for retrieve, list serializer otherwise."""
         if self.action == 'retrieve':
             return ServicePublicDetailSerializer
         return ServicePublicListSerializer

@@ -252,12 +252,22 @@ class TestSpecialistDetail:
         assert len(response.data) == 2
         assert 'category_name' in response.data[0]
 
-    def test_slots_endpoint_stub(self, client_app, active_specialist):
+    def test_slots_endpoint_requires_service_id(self, client_app, active_specialist):
         profile = active_specialist.specialist_profile
         url = f'{SPECIALISTS_URL}{profile.pk}/slots/'
         response = client_app.get(url)
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_slots_endpoint_with_service(self, client_app, active_specialist):
+        from django.utils import timezone
+        profile = active_specialist.specialist_profile
+        service = profile.services.first()
+        tomorrow = (timezone.localdate() + timezone.timedelta(days=1)).isoformat()
+        url = f'{SPECIALISTS_URL}{profile.pk}/slots/?service_id={service.pk}&date={tomorrow}'
+        response = client_app.get(url)
         assert response.status_code == status.HTTP_200_OK
-        assert response.data == []
+        assert 'slots' in response.data
+        assert len(response.data['slots']) > 0
 
     def test_reviews_endpoint_stub(self, client_app, active_specialist):
         profile = active_specialist.specialist_profile
