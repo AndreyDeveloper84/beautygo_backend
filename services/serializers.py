@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import Any
+
 from rest_framework import serializers
 
 from .models import Service, ServiceCategory
@@ -77,7 +81,7 @@ class ServiceCategorySerializer(serializers.ModelSerializer):
             'specialists_count', 'children',
         ]
 
-    def get_children(self, obj):
+    def get_children(self, obj: ServiceCategory) -> list:
         """Children categories (uses prefetched data, depth-limited)."""
         depth = self.context.get('depth', 0)
         if depth >= 2:
@@ -88,7 +92,7 @@ class ServiceCategorySerializer(serializers.ModelSerializer):
             children, many=True, context=context,
         ).data
 
-    def get_specialists_count(self, obj):
+    def get_specialists_count(self, obj: ServiceCategory) -> int:
         """Distinct specialists count (uses annotation, no extra query)."""
         return getattr(obj, 'specialists_count', 0)
 
@@ -112,7 +116,8 @@ class ServiceSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['specialist', 'created_at']
 
-    def validate_image(self, value):
+    def validate_image(self, value: Any) -> Any:
+        """Validate image content type and file size."""
         if value.content_type not in ALLOWED_IMAGE_TYPES:
             raise serializers.ValidationError(
                 "Допустимые форматы: JPEG, PNG, WebP"

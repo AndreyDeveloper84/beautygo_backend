@@ -1,9 +1,12 @@
 """User views: auth endpoints + profile management."""
+from __future__ import annotations
 
 import logging
 
 import rest_framework.parsers
 from rest_framework import generics, permissions
+from rest_framework.request import Request
+from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -41,7 +44,8 @@ class RegisterPhoneView(APIView):
     """POST /api/v1/auth/register/ — Register with phone number."""
     permission_classes = [permissions.AllowAny]
 
-    def post(self, request):
+    def post(self, request: Request) -> Response:
+        """Register new user with phone number."""
         serializer = RegisterPhoneSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(
@@ -67,7 +71,7 @@ class LoginView(APIView):
     """POST /api/v1/auth/login/ — Send OTP to phone."""
     permission_classes = [permissions.AllowAny]
 
-    def post(self, request):
+    def post(self, request: Request) -> Response:
         serializer = LoginSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(

@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import logging
 import math
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from django.db.models import Count, Prefetch, Q, QuerySet
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
 from rest_framework import permissions, serializers, viewsets
 from rest_framework.decorators import action
@@ -251,10 +253,90 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
         )
 
     @action(detail=True, methods=['get'], url_path='slots')
-    def slots(self, request, pk=None):
-        """GET /specialists/{id}/slots/ — available slots (stub)."""
-        self.get_object()  # 404 if not found
-        return Response([])
+    def slots(self, request, pk=None) -> Response:
+        """
+        GET /specialists/{id}/slots/?service_id=<uuid>&date=<YYYY-MM-DD>
+
+        Returns available 30-min booking slots for the given specialist,
+        service and date. Defaults to today if date not supplied.
+        Working hours are 09:00–18:00 until a WorkingHours model is added.
+        """
+        from appointments.models import Appointment
+
+        specialist = self.get_object()
+
+        service_id = request.query_params.get('service_id')
+        if not service_id:
+            return Response(
+                {'error': {'code': 'MISSING_PARAM', 'message': 'service_id is required'}},
+                status=400,
+            )
+
+        try:
+            service = Service.objects.get(
+                id=service_id, specialist=specialist, is_active=True,
+            )
+        except Service.DoesNotExist:
+            return Response(
+                {'error': {'code': 'NOT_FOUND', 'message': 'Service not found'}},
+                status=404,
+            )
+
+        # Parse date param (defaults to today in Moscow tz)
+        date_param = request.query_params.get('date')
+        try:
+            slot_date: date = (
+                datetime.strptime(date_param, '%Y-%m-%d').date()
+                if date_param
+                else timezone.localdate()
+            )
+        except ValueError:
+            return Response(
+                {'error': {'code': 'INVALID_PARAM', 'message': 'date must be YYYY-MM-DD'}},
+                status=400,
+            )
+
+        # Default working window: 09:00–18:00
+        work_start = time(9, 0)
+        work_end = time(18, 0)
+        slot_interval = timedelta(minutes=30)
+        duration = timedelta(minutes=service.duration_minutes)
+
+        # Build candidate slots
+        tz = timezone.get_current_timezone()
+        slot_start = datetime.combine(slot_date, work_start, tzinfo=tz)
+        day_end = datetime.combine(slot_date, work_end, tzinfo=tz)
+        now = timezone.now()
+        min_booking = now + timedelta(hours=1)
+
+        # Fetch booked windows for this specialist on this date
+        booked = list(
+            Appointment.objects.filter(
+                specialist=specialist,
+                status__in=[
+                    Appointment.Status.PENDING,
+                    Appointment.Status.CONFIRMED,
+                    Appointment.Status.IN_PROGRESS,
+                ],
+                start_datetime__date=slot_date,
+            ).values_list('start_datetime', 'end_datetime')
+        )
+
+        available: list[str] = []
+        while slot_start + duration <= day_end:
+            slot_end = slot_start + duration
+            # Skip past / too-soon slots
+            if slot_start >= min_booking:
+                # Check no overlap with existing bookings
+                overlap = any(
+                    b_start < slot_end and b_end > slot_start
+                    for b_start, b_end in booked
+                )
+                if not overlap:
+                    available.append(slot_start.isoformat())
+            slot_start += slot_interval
+
+        return Response({'date': slot_date.isoformat(), 'slots': available})
 
     @action(detail=True, methods=['get'], url_path='reviews')
     def reviews(self, request, pk=None):
