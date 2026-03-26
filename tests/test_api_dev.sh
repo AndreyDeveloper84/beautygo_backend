@@ -3,13 +3,29 @@
 # Integration tests for BeautyGO dev server
 #
 # Usage:
-#   ./tests/test_api_dev.sh                        # default: http://localhost:8000
-#   ./tests/test_api_dev.sh https://dev.beautygo.ru # custom server
-#   BASE_URL=https://dev.beautygo.ru ./tests/test_api_dev.sh
+#   # Local server (default)
+#   ./tests/test_api_dev.sh
+#
+#   # Remote dev server (HTTP only — manage.py tests skipped)
+#   ./tests/test_api_dev.sh https://dev.gobeauty.site
+#
+#   # Remote dev server + SSH for manage.py commands
+#   ./tests/test_api_dev.sh https://dev.gobeauty.site --ssh user@dev-server
+#   ./tests/test_api_dev.sh https://dev.gobeauty.site --ssh user@dev-server --remote-dir /app
+#
+#   # Or via env vars
+#   BASE_URL=https://dev.gobeauty.site REMOTE_SSH=user@dev-server ./tests/test_api_dev.sh
+#
+# Environment variables:
+#   BASE_URL      — server URL (default: https://dev.gobeauty.site)
+#   REMOTE_SSH    — SSH connection string for manage.py commands (e.g. user@server)
+#   REMOTE_DIR    — project directory on remote server (default: /app)
+#   REMOTE_PYTHON — python executable on remote server (default: python)
+#   REMOTE_SETTINGS — Django settings module on remote (default: djangoProject.settings.dev)
 #
 # Logs are written to: tests/integration_results.log
 #
-# Requirements: curl, python3
+# Requirements: curl, python3 (+ ssh if using --ssh)
 # =============================================================================
 
 set -uo pipefail
@@ -33,8 +49,57 @@ if [ -z "$PYTHON" ]; then
     exit 1
 fi
 
-BASE_URL="${1:-${BASE_URL:-https://dev.gobeauty.site}}"
+# --- Parse arguments ---
+POSITIONAL_ARGS=()
+REMOTE_SSH="${REMOTE_SSH:-}"
+REMOTE_DIR="${REMOTE_DIR:-/app}"
+REMOTE_PYTHON="${REMOTE_PYTHON:-python}"
+REMOTE_SETTINGS="${REMOTE_SETTINGS:-djangoProject.settings.dev}"
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --ssh)
+            REMOTE_SSH="$2"
+            shift 2
+            ;;
+        --remote-dir)
+            REMOTE_DIR="$2"
+            shift 2
+            ;;
+        --remote-python)
+            REMOTE_PYTHON="$2"
+            shift 2
+            ;;
+        --remote-settings)
+            REMOTE_SETTINGS="$2"
+            shift 2
+            ;;
+        -*)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+        *)
+            POSITIONAL_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+
+BASE_URL="${POSITIONAL_ARGS[0]:-${BASE_URL:-https://dev.gobeauty.site}}"
 API="${BASE_URL}/api/v1"
+
+# --- Determine if we can run manage.py commands ---
+# Priority: 1) localhost → local manage.py  2) SSH → remote manage.py  3) skip
+CAN_MANAGE=false
+IS_LOCAL=false
+
+if [[ "$BASE_URL" == *"localhost"* ]] || [[ "$BASE_URL" == *"127.0.0.1"* ]]; then
+    CAN_MANAGE=true
+    IS_LOCAL=true
+elif [ -n "$REMOTE_SSH" ]; then
+    CAN_MANAGE=true
+    IS_LOCAL=false
+fi
 
 # --- Log file ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,6 +111,7 @@ cat > "$LOG_FILE" <<EOF
 ================================================================================
 BeautyGO Integration Tests
 Server: ${BASE_URL}
+SSH:    ${REMOTE_SSH:-none (local)}
 Started: ${RUN_TIMESTAMP}
 ================================================================================
 
@@ -239,6 +305,36 @@ http() {
     log_http "$method" "$path" "$HTTP_STATUS" "$HTTP_BODY"
 }
 
+# ---------------------------------------------------------------------------
+# run_manage — execute manage.py shell command locally or via SSH
+#
+# Usage: run_manage "from users.models import User; print(User.objects.count())"
+#
+# On localhost: runs manage.py directly
+# On remote:   runs via SSH (requires REMOTE_SSH)
+# No access:   prints skip message, returns 1
+# ---------------------------------------------------------------------------
+run_manage() {
+    local code="$1"
+
+    if [ "$CAN_MANAGE" = false ]; then
+        echo -e "    ${YELLOW}⚠ SKIP: manage.py not available (set --ssh for remote)${NC}"
+        return 1
+    fi
+
+    if [ "$IS_LOCAL" = true ]; then
+        # Local: run manage.py directly
+        local manage_py="${SCRIPT_DIR}/../manage.py"
+        DJANGO_SETTINGS_MODULE=djangoProject.settings.dev \
+            $PYTHON "$manage_py" shell -c "$code" 2>/dev/null
+    else
+        # Remote: run via SSH
+        echo -e "    ${CYAN}  ssh → ${REMOTE_SSH}${NC}"
+        ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no "$REMOTE_SSH" \
+            "cd ${REMOTE_DIR} && DJANGO_SETTINGS_MODULE=${REMOTE_SETTINGS} ${REMOTE_PYTHON} manage.py shell -c '$code'" 2>/dev/null
+    fi
+}
+
 # Generate unique phone for test isolation
 RANDOM_SUFFIX=$((RANDOM % 9000 + 1000))
 TEST_PHONE="+7900${RANDOM_SUFFIX}001"
@@ -250,6 +346,13 @@ echo ""
 echo -e "${CYAN}══════════════════════════════════════════════════════${NC}"
 echo -e "${CYAN}  BeautyGO API Integration Tests${NC}"
 echo -e "${CYAN}  Server: ${BASE_URL}${NC}"
+if [ -n "$REMOTE_SSH" ]; then
+    echo -e "${CYAN}  SSH:    ${REMOTE_SSH} (${REMOTE_DIR})${NC}"
+elif [ "$IS_LOCAL" = true ]; then
+    echo -e "${CYAN}  Mode:   localhost (manage.py direct)${NC}"
+else
+    echo -e "${YELLOW}  Mode:   remote HTTP only (no manage.py — use --ssh for full tests)${NC}"
+fi
 echo -e "${CYAN}══════════════════════════════════════════════════════${NC}"
 echo ""
 
@@ -1290,11 +1393,12 @@ fi
 
 # =============================================================================
 # 21. BLOCKED USER (DRF-76)
-# Requires localhost — uses manage.py shell to simulate admin block action
+# Requires manage.py access (localhost or SSH)
 # =============================================================================
 
-if [[ "$BASE_URL" == *"localhost"* ]] || [[ "$BASE_URL" == *"127.0.0.1"* ]]; then
-    log_section "[21] Blocked User (DRF-76 — localhost only)"
+if [ "$CAN_MANAGE" = true ]; then
+    log_section "[21] Blocked User (DRF-76)"
+    echo -e "${CYAN}[21] Blocked User (DRF-76)${NC}"
 
     BLOCKED_PHONE="+7900${RANDOM_SUFFIX}091"
 
@@ -1310,12 +1414,8 @@ if [[ "$BASE_URL" == *"localhost"* ]] || [[ "$BASE_URL" == *"127.0.0.1"* ]]; the
             -H "Authorization: Bearer ${BLOCKED_ACCESS}"
         assert "Active user → /users/me/ → 200" "200" "$HTTP_STATUS"
 
-        # Block user via manage.py shell (simulates admin block action)
-        MANAGE_PY="${SCRIPT_DIR}/../manage.py"
-        DJANGO_SETTINGS_MODULE=djangoProject.settings.dev \
-            $PYTHON "$MANAGE_PY" shell -c \
-            "from users.models import User; User.objects.filter(phone='${BLOCKED_PHONE}').update(is_active=False)" \
-            2>/dev/null
+        # Block user via manage.py (local or SSH)
+        run_manage "from users.models import User; User.objects.filter(phone='${BLOCKED_PHONE}').update(is_active=False)"
 
         # 21.2 Existing token must be rejected for blocked user
         http GET "/auth/users/me/" "" \
@@ -1338,7 +1438,7 @@ if [[ "$BASE_URL" == *"localhost"* ]] || [[ "$BASE_URL" == *"127.0.0.1"* ]]; the
     fi
 else
     echo ""
-    echo -e "${YELLOW}  [21] Blocked User — skipped (requires localhost)${NC}"
+    echo -e "${YELLOW}  [21] Blocked User — skipped (no manage.py access, use --ssh)${NC}"
 fi
 
 
@@ -1368,11 +1468,8 @@ APPT_CLIENT_ACCESS=$(json_get ".data.access" "$HTTP_BODY" | tr -d '[:space:]')
 if [ -n "$APPT_SPEC_ACCESS" ] && [ "$APPT_SPEC_ACCESS" != "null" ] && \
    [ -n "$APPT_CLIENT_ACCESS" ] && [ "$APPT_CLIENT_ACCESS" != "null" ]; then
 
-    # Activate specialist profile via manage.py (localhost only)
-    if [[ "$BASE_URL" == *"localhost"* ]] || [[ "$BASE_URL" == *"127.0.0.1"* ]]; then
-        MANAGE_PY="${SCRIPT_DIR}/../manage.py"
-        DJANGO_SETTINGS_MODULE=djangoProject.settings.dev \
-            $PYTHON "$MANAGE_PY" shell -c "
+    # Activate specialist profile via manage.py (local or SSH)
+    run_manage "
 from users.models import User, SpecialistProfile
 u = User.objects.get(phone='${APPT_SPEC_PHONE}')
 sp = SpecialistProfile.objects.get(user=u)
@@ -1382,8 +1479,7 @@ sp.is_booking_enabled = True
 sp.display_name = 'Appt Test Specialist'
 sp.address = 'Test Address'
 sp.save()
-" 2>/dev/null
-    fi
+"
 
     # Create a service for this specialist
     http POST "/services/" \
@@ -1511,17 +1607,14 @@ print(dt.isoformat())
         assert "Specialist cannot create → 403" "403" "$HTTP_STATUS"
 
         # 22.10 Cancel appointment (need confirmed status for policy)
-        # First: update status to confirmed via manage.py (localhost only)
         if [ -n "$APPT_ID" ] && [ "$APPT_ID" != "null" ]; then
-            if [[ "$BASE_URL" == *"localhost"* ]] || [[ "$BASE_URL" == *"127.0.0.1"* ]]; then
-                DJANGO_SETTINGS_MODULE=djangoProject.settings.dev \
-                    $PYTHON "$MANAGE_PY" shell -c "
+            # Transition to confirmed via manage.py (local or SSH)
+            run_manage "
 from appointments.models import Appointment
 a = Appointment.objects.get(id='${APPT_ID}')
 a.status = 'confirmed'
 a.save(update_fields=['status'])
-" 2>/dev/null
-            fi
+"
 
             http POST "/appointments/${APPT_ID}/cancel/" \
                 '{"reason": "Integration test cancel"}' \
@@ -1552,15 +1645,12 @@ a.save(update_fields=['status'])
 
         # 22.13 Complete appointment (specialist only, needs confirmed status)
         if [ -n "$APPT2_ID" ] && [ "$APPT2_ID" != "null" ]; then
-            if [[ "$BASE_URL" == *"localhost"* ]] || [[ "$BASE_URL" == *"127.0.0.1"* ]]; then
-                DJANGO_SETTINGS_MODULE=djangoProject.settings.dev \
-                    $PYTHON "$MANAGE_PY" shell -c "
+            run_manage "
 from appointments.models import Appointment
 a = Appointment.objects.get(id='${APPT2_ID}')
 a.status = 'confirmed'
 a.save(update_fields=['status'])
-" 2>/dev/null
-            fi
+"
 
             # Client cannot complete
             http POST "/appointments/${APPT2_ID}/complete/" "" \
