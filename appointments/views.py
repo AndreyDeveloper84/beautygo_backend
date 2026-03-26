@@ -59,6 +59,11 @@ class AppointmentViewSet(viewsets.GenericViewSet):
     """
     permission_classes = [permissions.IsAuthenticated]
 
+    # Service classes — override in tests for mocking
+    create_booking_service_class = CreateBookingService
+    cancel_booking_service_class = CancelBookingService
+    reschedule_booking_service_class = RescheduleBookingService
+
     def get_queryset(self) -> QuerySet:
         user = self.request.user
         qs = (
@@ -111,7 +116,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         )
 
         try:
-            service = CreateBookingService()
+            service = self.create_booking_service_class()
             result = service.execute(dto)
         except (SpecialistNotActiveError, ServiceNotActiveError) as e:
             return error_response(
@@ -179,7 +184,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         )
 
         try:
-            CancelBookingService().execute(dto)
+            self.cancel_booking_service_class().execute(dto)
         except CancellationNotAllowedError as e:
             return error_response(
                 "CANCELLATION_NOT_ALLOWED", str(e), status_code=422,
@@ -241,7 +246,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         )
 
         try:
-            RescheduleBookingService().execute(dto)
+            self.reschedule_booking_service_class().execute(dto)
         except SlotNotAvailableError as e:
             return error_response(
                 "SLOT_NOT_AVAILABLE", str(e), status_code=409,

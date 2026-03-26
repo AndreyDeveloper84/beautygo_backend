@@ -20,6 +20,28 @@ from .models import SpecialistProfile
 logger = logging.getLogger(__name__)
 
 
+# --- Mixins ---
+
+class DistanceMixin:
+    """Mixin for serializers that need distance calculation from request lat/lon."""
+
+    def get_distance_km(self, obj: SpecialistProfile) -> float | None:
+        request = self.context.get('request')
+        if not request:
+            return None
+        lat = request.query_params.get('lat')
+        lon = request.query_params.get('lon')
+        if not lat or not lon or not obj.location_lat or not obj.location_lng:
+            return None
+        try:
+            return _haversine(
+                float(lat), float(lon),
+                float(obj.location_lat), float(obj.location_lng),
+            )
+        except (ValueError, TypeError):
+            return None
+
+
 # --- Serializers ---
 
 class ServicePreviewSerializer(serializers.ModelSerializer):
@@ -29,7 +51,7 @@ class ServicePreviewSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'price', 'duration_minutes']
 
 
-class SpecialistListSerializer(serializers.ModelSerializer):
+class SpecialistListSerializer(DistanceMixin, serializers.ModelSerializer):
     """Specialist card for catalog listing."""
     user_id = serializers.UUIDField(source='user.id')
     services_preview = serializers.SerializerMethodField()
@@ -56,23 +78,6 @@ class SpecialistListSerializer(serializers.ModelSerializer):
         """Active services count (uses annotation, no extra query)."""
         return getattr(obj, 'active_services_count', 0)
 
-    def get_distance_km(self, obj: SpecialistProfile) -> float | None:
-        """Distance from client's location (if provided in request)."""
-        request = self.context.get('request')
-        if not request:
-            return None
-        lat = request.query_params.get('lat')
-        lon = request.query_params.get('lon')
-        if not lat or not lon or not obj.location_lat or not obj.location_lng:
-            return None
-        try:
-            return _haversine(
-                float(lat), float(lon),
-                float(obj.location_lat), float(obj.location_lng),
-            )
-        except (ValueError, TypeError):
-            return None
-
 
 class ServiceFullSerializer(serializers.ModelSerializer):
     """Full service details for specialist detail view."""
@@ -88,7 +93,7 @@ class ServiceFullSerializer(serializers.ModelSerializer):
         ]
 
 
-class SpecialistDetailSerializer(serializers.ModelSerializer):
+class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
     """Full specialist profile for detail/card view."""
     user_id = serializers.UUIDField(source='user.id')
     services = serializers.SerializerMethodField()
@@ -120,24 +125,8 @@ class SpecialistDetailSerializer(serializers.ModelSerializer):
         """Active services count (uses annotation, no extra query)."""
         return getattr(obj, 'active_services_count', 0)
 
-    def get_distance_km(self, obj: SpecialistProfile) -> float | None:
-        request = self.context.get('request')
-        if not request:
-            return None
-        lat = request.query_params.get('lat')
-        lon = request.query_params.get('lon')
-        if not lat or not lon or not obj.location_lat or not obj.location_lng:
-            return None
-        try:
-            return _haversine(
-                float(lat), float(lon),
-                float(obj.location_lat), float(obj.location_lng),
-            )
-        except (ValueError, TypeError):
-            return None
-
     def get_reviews_summary(self, obj: SpecialistProfile) -> dict[str, Any]:
-        """Reviews summary — stub until Review model exists."""
+        # TODO(DRF-reviews): implement when Review model is added
         return {
             'average': float(obj.rating),
             'count': obj.reviews_count,
@@ -145,12 +134,27 @@ class SpecialistDetailSerializer(serializers.ModelSerializer):
         }
 
     def get_recent_reviews(self, obj: SpecialistProfile) -> list:
-        """Recent reviews — stub until Review model exists."""
+        # TODO(DRF-reviews): implement when Review model is added
         return []
 
     def get_working_hours(self, obj: SpecialistProfile) -> list:
-        """Working hours — stub until WorkingHours model exists."""
-        return []
+        """Specialist weekly schedule from SpecialistWorkingHours model."""
+        from appointments.models import SpecialistWorkingHours
+        hours = SpecialistWorkingHours.objects.filter(
+            specialist=obj,
+        ).order_by('day_of_week')
+        return [
+            {
+                'day_of_week': wh.day_of_week,
+                'day_name': wh.get_day_of_week_display(),
+                'is_working_day': wh.is_working_day,
+                'start_time': wh.start_time.strftime('%H:%M') if wh.start_time else None,
+                'end_time': wh.end_time.strftime('%H:%M') if wh.end_time else None,
+                'break_start': wh.break_start.strftime('%H:%M') if wh.break_start else None,
+                'break_end': wh.break_end.strftime('%H:%M') if wh.break_end else None,
+            }
+            for wh in hours
+        ]
 
 
 def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -262,6 +266,7 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
         Working hours are 09:00–18:00 until a WorkingHours model is added.
         """
         from appointments.models import Appointment
+        from appointments.domain.value_objects import ACTIVE_BOOKING_STATUSES
 
         specialist = self.get_object()
 
@@ -313,11 +318,7 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
         booked = list(
             Appointment.objects.filter(
                 specialist=specialist,
-                status__in=[
-                    Appointment.Status.PENDING,
-                    Appointment.Status.CONFIRMED,
-                    Appointment.Status.IN_PROGRESS,
-                ],
+                status__in=[s.value for s in ACTIVE_BOOKING_STATUSES],
                 start_datetime__date=slot_date,
             ).values_list('start_datetime', 'end_datetime')
         )
