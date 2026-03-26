@@ -273,7 +273,6 @@ class TestSlotsEndpoint:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
     def test_returns_slots(self, client_user, specialist, service):
-        from datetime import date
         c = APIClient()
         c.defaults['HTTP_X_APP_TYPE'] = 'client'
         c.force_authenticate(user=client_user)
