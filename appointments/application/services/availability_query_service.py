@@ -16,7 +16,6 @@ from appointments.application.dto import (
     GetAvailabilityWeekDTO,
     WeekAvailabilityDTO,
 )
-from appointments.domain.value_objects import TimeInterval
 from appointments.infrastructure.availability.providers import (
     BusyIntervalProvider,
     make_read_provider,

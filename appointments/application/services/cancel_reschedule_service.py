@@ -10,7 +10,6 @@ Both follow the same transaction pattern:
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 
 from django.db import transaction
 

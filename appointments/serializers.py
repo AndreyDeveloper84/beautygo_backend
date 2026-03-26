@@ -1,13 +1,8 @@
 """Appointment serializers — upgraded with booking engine fields."""
 from __future__ import annotations
 
-from typing import Any
-
-from django.utils import timezone
 from rest_framework import serializers
 
-from services.models import Service
-from users.models import SpecialistProfile
 from .models import Appointment, Payment
 
 
