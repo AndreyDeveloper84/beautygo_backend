@@ -1343,6 +1343,254 @@ fi
 
 
 # =============================================================================
+# 22. APPOINTMENTS / BOOKING ENGINE
+# =============================================================================
+echo ""
+log_section "[22] Appointments — Booking Engine (POST/GET /appointments/)"
+echo -e "${CYAN}[22] Appointments — Booking Engine${NC}"
+
+# We need: a specialist with active profile + service, and a client token.
+# Re-authenticate specialist and create a fresh service for booking tests.
+
+APPT_SPEC_PHONE="+7900${RANDOM_SUFFIX}022"
+APPT_CLIENT_PHONE="+7900${RANDOM_SUFFIX}023"
+
+# Register specialist
+http POST "/auth/register/" "{\"phone\": \"${APPT_SPEC_PHONE}\"}" -H "X-App-Type: pro"
+http POST "/auth/verify-otp/" "{\"phone\": \"${APPT_SPEC_PHONE}\", \"code\": \"000000\"}" -H "X-App-Type: pro"
+APPT_SPEC_ACCESS=$(json_get ".data.access" "$HTTP_BODY" | tr -d '[:space:]')
+
+# Register client
+http POST "/auth/register/" "{\"phone\": \"${APPT_CLIENT_PHONE}\"}" -H "X-App-Type: client"
+http POST "/auth/verify-otp/" "{\"phone\": \"${APPT_CLIENT_PHONE}\", \"code\": \"000000\"}" -H "X-App-Type: client"
+APPT_CLIENT_ACCESS=$(json_get ".data.access" "$HTTP_BODY" | tr -d '[:space:]')
+
+if [ -n "$APPT_SPEC_ACCESS" ] && [ "$APPT_SPEC_ACCESS" != "null" ] && \
+   [ -n "$APPT_CLIENT_ACCESS" ] && [ "$APPT_CLIENT_ACCESS" != "null" ]; then
+
+    # Activate specialist profile via manage.py (localhost only)
+    if [[ "$BASE_URL" == *"localhost"* ]] || [[ "$BASE_URL" == *"127.0.0.1"* ]]; then
+        MANAGE_PY="${SCRIPT_DIR}/../manage.py"
+        DJANGO_SETTINGS_MODULE=djangoProject.settings.dev \
+            $PYTHON "$MANAGE_PY" shell -c "
+from users.models import User, SpecialistProfile
+u = User.objects.get(phone='${APPT_SPEC_PHONE}')
+sp = SpecialistProfile.objects.get(user=u)
+sp.status = 'active'
+sp.is_available = True
+sp.is_booking_enabled = True
+sp.display_name = 'Appt Test Specialist'
+sp.address = 'Test Address'
+sp.save()
+" 2>/dev/null
+    fi
+
+    # Create a service for this specialist
+    http POST "/services/" \
+        '{"name": "Booking Test Cut", "price": "2500.00", "duration_minutes": 60}' \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${APPT_SPEC_ACCESS}"
+    APPT_SERVICE_ID=$(json_get ".data.id" "$HTTP_BODY" | tr -d '[:space:]')
+    # Fallback: try without .data wrapper
+    if [ -z "$APPT_SERVICE_ID" ] || [ "$APPT_SERVICE_ID" = "null" ]; then
+        APPT_SERVICE_ID=$(json_get ".id" "$HTTP_BODY" | tr -d '[:space:]')
+    fi
+
+    # Get specialist profile ID
+    http GET "/auth/masters/me/" "" \
+        -H "X-App-Type: pro" \
+        -H "Authorization: Bearer ${APPT_SPEC_ACCESS}"
+    APPT_SPECIALIST_ID=$(json_get ".data.id" "$HTTP_BODY" | tr -d '[:space:]')
+
+    # Calculate future datetime (3 hours from now, rounded to :00)
+    FUTURE_DT=$($PYTHON -c "
+from datetime import datetime, timedelta, timezone
+dt = datetime.now(tz=timezone.utc) + timedelta(hours=3)
+dt = dt.replace(minute=0, second=0, microsecond=0)
+print(dt.isoformat())
+")
+
+    FUTURE_DT_OVERLAP=$($PYTHON -c "
+from datetime import datetime, timedelta, timezone
+dt = datetime.now(tz=timezone.utc) + timedelta(hours=3, minutes=30)
+dt = dt.replace(second=0, microsecond=0)
+print(dt.isoformat())
+")
+
+    FUTURE_DT_2=$($PYTHON -c "
+from datetime import datetime, timedelta, timezone
+dt = datetime.now(tz=timezone.utc) + timedelta(hours=6)
+dt = dt.replace(minute=0, second=0, microsecond=0)
+print(dt.isoformat())
+")
+
+    IDEMPOTENCY_KEY=$($PYTHON -c "import uuid; print(uuid.uuid4())")
+
+    if [ -n "$APPT_SERVICE_ID" ] && [ "$APPT_SERVICE_ID" != "null" ] && \
+       [ -n "$APPT_SPECIALIST_ID" ] && [ "$APPT_SPECIALIST_ID" != "null" ]; then
+
+        # 22.1 Create appointment (client)
+        http POST "/appointments/" \
+            "{\"specialist_id\": \"${APPT_SPECIALIST_ID}\", \"service_id\": \"${APPT_SERVICE_ID}\", \"start_datetime\": \"${FUTURE_DT}\"}" \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${APPT_CLIENT_ACCESS}" \
+            -H "X-Idempotency-Key: ${IDEMPOTENCY_KEY}"
+        assert "Create appointment → 201" "201" "$HTTP_STATUS"
+        assert_contains "Status is awaiting_payment" '"awaiting_payment"' "$HTTP_BODY"
+        APPT_ID=$(json_get ".data.id" "$HTTP_BODY" | tr -d '[:space:]')
+
+        # 22.2 Idempotency — same key returns same booking
+        if [ -n "$APPT_ID" ] && [ "$APPT_ID" != "null" ]; then
+            http POST "/appointments/" \
+                "{\"specialist_id\": \"${APPT_SPECIALIST_ID}\", \"service_id\": \"${APPT_SERVICE_ID}\", \"start_datetime\": \"${FUTURE_DT}\"}" \
+                -H "X-App-Type: client" \
+                -H "Authorization: Bearer ${APPT_CLIENT_ACCESS}" \
+                -H "X-Idempotency-Key: ${IDEMPOTENCY_KEY}"
+            assert "Idempotent retry → 201" "201" "$HTTP_STATUS"
+            APPT_ID_RETRY=$(json_get ".data.id" "$HTTP_BODY" | tr -d '[:space:]')
+            assert "Same booking returned" "$APPT_ID" "$APPT_ID_RETRY"
+        fi
+
+        # 22.3 Slot conflict — overlapping time
+        http POST "/appointments/" \
+            "{\"specialist_id\": \"${APPT_SPECIALIST_ID}\", \"service_id\": \"${APPT_SERVICE_ID}\", \"start_datetime\": \"${FUTURE_DT_OVERLAP}\"}" \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${APPT_CLIENT_ACCESS}" \
+            -H "X-Idempotency-Key: $($PYTHON -c 'import uuid; print(uuid.uuid4())')"
+        assert "Overlapping slot → 409" "409" "$HTTP_STATUS"
+        assert_contains "Slot not available error" '"SLOT_NOT_AVAILABLE"' "$HTTP_BODY"
+
+        # 22.4 List appointments (client sees own)
+        http GET "/appointments/" "" \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${APPT_CLIENT_ACCESS}"
+        assert "List appointments → 200" "200" "$HTTP_STATUS"
+        assert_contains "Has appointment in list" '"awaiting_payment"' "$HTTP_BODY"
+
+        # 22.5 List appointments (specialist sees own)
+        http GET "/appointments/" "" \
+            -H "X-App-Type: pro" \
+            -H "Authorization: Bearer ${APPT_SPEC_ACCESS}"
+        assert "Specialist list appointments → 200" "200" "$HTTP_STATUS"
+
+        # 22.6 Retrieve appointment detail
+        if [ -n "$APPT_ID" ] && [ "$APPT_ID" != "null" ]; then
+            http GET "/appointments/${APPT_ID}/" "" \
+                -H "X-App-Type: client" \
+                -H "Authorization: Bearer ${APPT_CLIENT_ACCESS}"
+            assert "Retrieve appointment → 200" "200" "$HTTP_STATUS"
+            assert_contains "Has snapshot_service_name" '"snapshot_service_name"' "$HTTP_BODY"
+            assert_contains "Has snapshot_price" '"snapshot_price"' "$HTTP_BODY"
+            assert_contains "Has payment info" '"payment"' "$HTTP_BODY"
+        fi
+
+        # 22.7 Booking too soon (< 1 hour) → 400
+        TOO_SOON=$($PYTHON -c "
+from datetime import datetime, timedelta, timezone
+dt = datetime.now(tz=timezone.utc) + timedelta(minutes=30)
+print(dt.isoformat())
+")
+        http POST "/appointments/" \
+            "{\"specialist_id\": \"${APPT_SPECIALIST_ID}\", \"service_id\": \"${APPT_SERVICE_ID}\", \"start_datetime\": \"${TOO_SOON}\"}" \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${APPT_CLIENT_ACCESS}" \
+            -H "X-Idempotency-Key: $($PYTHON -c 'import uuid; print(uuid.uuid4())')"
+        assert "Booking too soon → 400" "400" "$HTTP_STATUS"
+
+        # 22.8 Unauthenticated → 401
+        http POST "/appointments/" '{"specialist_id": "fake", "service_id": "fake", "start_datetime": "2026-04-01T10:00:00Z"}' \
+            -H "X-App-Type: client"
+        assert "Create appointment without auth → 401" "401" "$HTTP_STATUS"
+
+        # 22.9 Specialist cannot create appointments
+        http POST "/appointments/" \
+            "{\"specialist_id\": \"${APPT_SPECIALIST_ID}\", \"service_id\": \"${APPT_SERVICE_ID}\", \"start_datetime\": \"${FUTURE_DT_2}\"}" \
+            -H "X-App-Type: pro" \
+            -H "Authorization: Bearer ${APPT_SPEC_ACCESS}" \
+            -H "X-Idempotency-Key: $($PYTHON -c 'import uuid; print(uuid.uuid4())')"
+        assert "Specialist cannot create → 403" "403" "$HTTP_STATUS"
+
+        # 22.10 Cancel appointment (need confirmed status for policy)
+        # First: update status to confirmed via manage.py (localhost only)
+        if [ -n "$APPT_ID" ] && [ "$APPT_ID" != "null" ]; then
+            if [[ "$BASE_URL" == *"localhost"* ]] || [[ "$BASE_URL" == *"127.0.0.1"* ]]; then
+                DJANGO_SETTINGS_MODULE=djangoProject.settings.dev \
+                    $PYTHON "$MANAGE_PY" shell -c "
+from appointments.models import Appointment
+a = Appointment.objects.get(id='${APPT_ID}')
+a.status = 'confirmed'
+a.save(update_fields=['status'])
+" 2>/dev/null
+            fi
+
+            http POST "/appointments/${APPT_ID}/cancel/" \
+                '{"reason": "Integration test cancel"}' \
+                -H "X-App-Type: client" \
+                -H "Authorization: Bearer ${APPT_CLIENT_ACCESS}"
+            assert "Cancel appointment → 200" "200" "$HTTP_STATUS"
+            assert_contains "Status is cancelled" '"cancelled"' "$HTTP_BODY"
+            assert_contains "Cancel reason saved" '"Integration test cancel"' "$HTTP_BODY"
+        fi
+
+        # 22.11 Cannot cancel already cancelled
+        if [ -n "$APPT_ID" ] && [ "$APPT_ID" != "null" ]; then
+            http POST "/appointments/${APPT_ID}/cancel/" \
+                '{"reason": "Try again"}' \
+                -H "X-App-Type: client" \
+                -H "Authorization: Bearer ${APPT_CLIENT_ACCESS}"
+            assert "Cancel already cancelled → 422" "422" "$HTTP_STATUS"
+        fi
+
+        # 22.12 Create second appointment for complete test
+        APPT2_KEY=$($PYTHON -c "import uuid; print(uuid.uuid4())")
+        http POST "/appointments/" \
+            "{\"specialist_id\": \"${APPT_SPECIALIST_ID}\", \"service_id\": \"${APPT_SERVICE_ID}\", \"start_datetime\": \"${FUTURE_DT_2}\"}" \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${APPT_CLIENT_ACCESS}" \
+            -H "X-Idempotency-Key: ${APPT2_KEY}"
+        APPT2_ID=$(json_get ".data.id" "$HTTP_BODY" | tr -d '[:space:]')
+
+        # 22.13 Complete appointment (specialist only, needs confirmed status)
+        if [ -n "$APPT2_ID" ] && [ "$APPT2_ID" != "null" ]; then
+            if [[ "$BASE_URL" == *"localhost"* ]] || [[ "$BASE_URL" == *"127.0.0.1"* ]]; then
+                DJANGO_SETTINGS_MODULE=djangoProject.settings.dev \
+                    $PYTHON "$MANAGE_PY" shell -c "
+from appointments.models import Appointment
+a = Appointment.objects.get(id='${APPT2_ID}')
+a.status = 'confirmed'
+a.save(update_fields=['status'])
+" 2>/dev/null
+            fi
+
+            # Client cannot complete
+            http POST "/appointments/${APPT2_ID}/complete/" "" \
+                -H "X-App-Type: client" \
+                -H "Authorization: Bearer ${APPT_CLIENT_ACCESS}"
+            assert "Client cannot complete → 403" "403" "$HTTP_STATUS"
+
+            # Specialist completes
+            http POST "/appointments/${APPT2_ID}/complete/" "" \
+                -H "X-App-Type: pro" \
+                -H "Authorization: Bearer ${APPT_SPEC_ACCESS}"
+            assert "Specialist complete → 200" "200" "$HTTP_STATUS"
+            assert_contains "Status is completed" '"completed"' "$HTTP_BODY"
+        fi
+
+        # 22.14 Filter appointments by status
+        http GET "/appointments/?status=cancelled" "" \
+            -H "X-App-Type: client" \
+            -H "Authorization: Bearer ${APPT_CLIENT_ACCESS}"
+        assert "Filter by status=cancelled → 200" "200" "$HTTP_STATUS"
+
+    else
+        echo -e "  ${YELLOW}⚠${NC} SKIP: could not get service_id or specialist_id"
+    fi
+else
+    echo -e "  ${YELLOW}⚠${NC} SKIP: could not get tokens for appointment tests"
+fi
+
+
+# =============================================================================
 # RESULTS
 # =============================================================================
 # Write summary to log
