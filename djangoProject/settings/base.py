@@ -52,6 +52,7 @@ INSTALLED_APPS = [
     'storages',
     'users',
     'services',
+    'appointments',
 ]
 
 AUTH_USER_MODEL = 'users.User'
@@ -114,6 +115,22 @@ UNFOLD = {
                 "items": [
                     {"title": "Категории", "icon": "category", "link": "/admin/services/servicecategory/"},
                     {"title": "Услуги", "icon": "spa", "link": "/admin/services/service/"},
+                ],
+            },
+            {
+                "title": "Записи",
+                "separator": True,
+                "items": [
+                    {"title": "Записи", "icon": "calendar_month", "link": "/admin/appointments/appointment/"},
+                    {"title": "Платежи", "icon": "payments", "link": "/admin/appointments/payment/"},
+                    {"title": "Расписание", "icon": "schedule", "link": "/admin/appointments/specialistworkinghours/"},
+                    {"title": "Выходные", "icon": "event_busy", "link": "/admin/appointments/specialisttimeoff/"},
+                ],
+            },
+            {
+                "title": "Система",
+                "items": [
+                    {"title": "Outbox Events", "icon": "outbox", "link": "/admin/appointments/outboxevent/"},
                 ],
             },
             {
@@ -247,6 +264,12 @@ OTP_EXPIRY_MINUTES = 5
 OTP_RATE_LIMIT_SECONDS = 60
 OTP_MAX_ATTEMPTS = 3
 OTP_DEBUG_CODE = "000000"
+
+# Booking Engine Configuration
+BOOKING_COMMISSION_PERCENT = 8.0        # Platform commission (%)
+BOOKING_MIN_AHEAD_MINUTES = 60          # Min booking lead time
+BOOKING_MAX_AHEAD_DAYS = 60             # Max days in advance
+BOOKING_SLOT_GRID_MINUTES = 30          # Slot interval grid
 
 # Social Auth Provider Settings
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID") or None

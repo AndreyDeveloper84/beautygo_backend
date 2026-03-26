@@ -22,15 +22,15 @@ class User(AbstractUser):
         return f"{self.username} ({self.role})"
 
     @property
-    def is_client(self):
+    def is_client(self) -> bool:
         return self.role == 'client'
 
     @property
-    def is_specialist(self):
+    def is_specialist(self) -> bool:
         return self.role == 'specialist'
 
     @property
-    def is_admin(self):
+    def is_admin(self) -> bool:
         return self.role == 'admin'
 
 
@@ -86,6 +86,16 @@ class SpecialistProfile(models.Model):
         max_digits=9, decimal_places=6, blank=True, null=True,
     )
 
+    # Booking engine fields
+    timezone = models.CharField(
+        max_length=50, default="Europe/Moscow",
+        help_text="IANA timezone string, e.g. Europe/Moscow",
+    )
+    is_booking_enabled = models.BooleanField(
+        default=True,
+        help_text="Master can pause bookings without deactivating profile",
+    )
+
     # Status & ratings
     status = models.CharField(
         max_length=10,
@@ -122,11 +132,11 @@ class OTPCode(models.Model):
         ]
 
     @property
-    def is_expired(self):
+    def is_expired(self) -> bool:
         return timezone.now() > self.expires_at
 
     @property
-    def is_valid(self):
+    def is_valid(self) -> bool:
         return not self.is_used and not self.is_expired and self.attempts < settings.OTP_MAX_ATTEMPTS
 
     def __str__(self):

@@ -75,6 +75,10 @@ class Service(models.Model):
     )
     is_active = models.BooleanField(default=True)
     sort_order = models.PositiveIntegerField(default=0)
+    buffer_after_minutes = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Required gap (minutes) after this service before next booking",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
