@@ -290,13 +290,14 @@ const api = createApiClient('pro');
                          └──────────────────┘
 ```
 ### Key Relationships
-- `User` → `ClientProfile` (OneToOne, role=client)
+- `User` → `Profile` (OneToOne, role=client)
 - `User` → `SpecialistProfile` (OneToOne, role=specialist)
 - `SpecialistProfile` → `Service` (OneToMany)
-- `SpecialistProfile` → `Schedule` (OneToMany)
+- `SpecialistProfile` → `SpecialistWorkingHours` (OneToMany, 7 days)
+- `SpecialistProfile` → `SpecialistTimeOff` (OneToMany)
 - `Appointment` → `User` (client), `SpecialistProfile`, `Service`
-- `Review` → `Appointment`, `User`, `SpecialistProfile`
-- `Payment` → `Appointment`
+- `Appointment` → `Payment` (OneToMany)
+- `Review` → `Appointment`, `User`, `SpecialistProfile` (planned)
 ### Enums & Choices
 ```python
 # User roles
@@ -308,20 +309,23 @@ class Role(TextChoices):
 class AppType(TextChoices):
     CLIENT = "client"       # 🟢 BeautyGO
     PRO = "pro"             # 🟣 BeautyGO Pro
-# Appointment status
+# Appointment status (Booking Engine state machine)
 class AppointmentStatus(TextChoices):
-    PENDING = "pending"           # Ожидает подтверждения
-    CONFIRMED = "confirmed"       # Подтверждена
-    IN_PROGRESS = "in_progress"   # В процессе
-    COMPLETED = "completed"       # Завершена
-    CANCELLED = "cancelled"       # Отменена
-    NO_SHOW = "no_show"           # Клиент не пришёл
+    PENDING = "pending"                   # Ожидает подтверждения
+    AWAITING_PAYMENT = "awaiting_payment" # Ожидает оплаты (NEW)
+    CONFIRMED = "confirmed"               # Подтверждена
+    IN_PROGRESS = "in_progress"           # В процессе
+    COMPLETED = "completed"               # Завершена
+    CANCELLED = "cancelled"               # Отменена
+    NO_SHOW = "no_show"                   # Клиент не пришёл
 # Payment status
 class PaymentStatus(TextChoices):
     PENDING = "pending"
-    SUCCEEDED = "succeeded"
-    CANCELLED = "cancelled"
+    AUTHORIZED = "authorized"
+    PAID = "paid"
+    FAILED = "failed"
     REFUNDED = "refunded"
+    PARTIALLY_REFUNDED = "partially_refunded"
 # Device platform
 class DevicePlatform(TextChoices):
     IOS = "ios"
@@ -1044,6 +1048,68 @@ make django-shell      # Django shell (IPython)
 make psql              # PostgreSQL shell
 ```
 ---
+## 🏗️ BOOKING ENGINE (DDD Architecture)
+
+> **Добавлен 2026-03-26.** Полноценный booking engine с DDD-архитектурой внутри `appointments/`.
+
+### Архитектура слоёв
+```
+appointments/
+├── domain/                  # Чистый Python, без Django
+│   ├── value_objects.py     # TimeInterval, BookingStatus, BookingStateMachine, BookingSnapshot
+│   ├── exceptions.py        # BookingDomainError → 7 типов исключений
+│   └── policies.py          # CommissionPolicy(8%), CancellationPolicy, ReschedulePolicy, BookingWindowPolicy
+├── application/             # Use-cases, DTOs
+│   ├── dto.py               # Input/Output DTOs (все ID — UUID)
+│   └── services/
+│       ├── create_booking_service.py    # Атомарное создание + idempotency + row locking
+│       ├── cancel_reschedule_service.py # Отмена/перенос через state machine
+│       └── availability_query_service.py # Расчёт слотов + cache-aside
+├── infrastructure/
+│   ├── availability/
+│   │   ├── providers.py     # BusyIntervalProviders (bookings + time-off)
+│   │   └── slot_builder.py  # SlotBuilderService (30-мин сетка, ZoneInfo)
+│   ├── cache/
+│   │   └── slot_cache.py    # SlotCacheService (LocMemCache для MVP)
+│   └── outbox_worker.py     # Обработчик событий (заглушка для MVP)
+└── models.py                # Appointment (upgraded) + WorkingHours + TimeOff + Payment + OutboxEvent
+```
+
+### Ключевые паттерны
+| Паттерн | Где | Зачем |
+|---------|-----|-------|
+| **State Machine** | `BookingStateMachine` | Явные переходы статусов (pending→awaiting_payment→confirmed→completed) |
+| **Idempotency Key** | `Appointment.idempotency_key` + `X-Idempotency-Key` header | Защита от дубликатов при сетевых ретраях |
+| **Snapshot** | `Appointment.snapshot_*` поля | Неизменяемая запись финансов на момент бронирования |
+| **Strategy/Policy** | `domain/policies.py` | Подменяемые бизнес-правила (комиссия, отмена, перенос) |
+| **Transactional Outbox** | `OutboxEvent` модель | Гарантированная доставка событий (booking.created, booking.cancelled и т.д.) |
+| **Row-Level Locking** | `select_for_update()` в CreateBookingService | Блокировка только записей конкретного мастера, не всей таблицы |
+| **Thin Views** | `appointments/views.py` | Views только парсят/валидируют, вся логика в application services |
+
+### Статусы бронирования (State Machine)
+```
+pending → awaiting_payment → confirmed → completed
+                          └→ cancelled
+confirmed → cancelled | no_show
+```
+**ACTIVE_BOOKING_STATUSES** (держат слот): `{pending, awaiting_payment, confirmed}`
+**Terminal** (нет дальнейших переходов): `{completed, cancelled, no_show}`
+
+### Настройки Booking Engine
+```python
+BOOKING_COMMISSION_PERCENT = 8.0    # Комиссия платформы (%)
+BOOKING_MIN_AHEAD_MINUTES = 60      # Мин. время до записи
+BOOKING_MAX_AHEAD_DAYS = 60         # Макс. дней вперёд
+BOOKING_SLOT_GRID_MINUTES = 30      # Интервал сетки слотов
+```
+
+### MVP-ограничения (активировать позже)
+1. **Outbox worker не запущен** — события пишутся в БД, но не обрабатываются (нужен Celery + Redis)
+2. **Нет интеграции с YooKassa** — Payment модель создаётся, но платёжный провайдер не вызывается
+3. **LocMemCache** — заменить на django-redis для production
+4. **select_for_update() — no-op на SQLite** — concurrency тесты требуют PostgreSQL
+
+---
 ## ⚠️ IMPORTANT NOTES
 ### Two Apps Architecture Rules
 1. **X-App-Type обязателен** — каждый запрос должен содержать header
@@ -1088,4 +1154,4 @@ make psql              # PostgreSQL shell
 - **Database Schema**: Notion
 - **Analytics Events**: Notion
 ---
-*Last updated: March 17, 2026 — Two Apps Architecture*
+*Last updated: March 26, 2026 — Booking Engine DDD Integration*
