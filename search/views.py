@@ -195,10 +195,12 @@ class GlobalSearchView(APIView):
         from django.contrib.postgres.search import (
             SearchQuery, SearchRank, SearchVector,
         )
-        vector = SearchVector('display_name', weight='A') + \
-                 SearchVector('bio', weight='B') + \
-                 SearchVector('services__name', weight='A') + \
-                 SearchVector('services__category__name', weight='B')
+        vector = (
+            SearchVector('display_name', weight='A')
+            + SearchVector('bio', weight='B')
+            + SearchVector('services__name', weight='A')
+            + SearchVector('services__category__name', weight='B')
+        )
         query = SearchQuery(q, config='russian')
         return (
             qs
@@ -214,9 +216,11 @@ class GlobalSearchView(APIView):
         from django.contrib.postgres.search import (
             SearchQuery, SearchRank, SearchVector,
         )
-        vector = SearchVector('name', weight='A') + \
-                 SearchVector('description', weight='B') + \
-                 SearchVector('category__name', weight='B')
+        vector = (
+            SearchVector('name', weight='A')
+            + SearchVector('description', weight='B')
+            + SearchVector('category__name', weight='B')
+        )
         query = SearchQuery(q, config='russian')
         return (
             qs
