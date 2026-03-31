@@ -85,7 +85,7 @@ class OTPService:
     """Handles OTP generation, sending, and verification."""
 
     def send_otp(self, phone: str) -> None:
-        """Generate OTP and send via SMS (log in dev mode)."""
+        """Generate OTP and send via SMS."""
         now = timezone.now()
 
         # Rate limiting: check last OTP for this phone
@@ -96,7 +96,7 @@ class OTPService:
                 raise RateLimitError()
 
         # Generate code
-        if settings.DEBUG or getattr(settings, 'OTP_DEBUG_CODE_ENABLED', False):
+        if settings.DEBUG and not getattr(settings, 'SMS_ENABLED', False):
             code = settings.OTP_DEBUG_CODE
         else:
             code = str(random.randint(100000, 999999))
@@ -109,7 +109,9 @@ class OTPService:
             expires_at=expires_at,
         )
 
-        logger.info("OTP for %s: %s", phone, code)
+        # Send SMS (or log in dev mode)
+        from .sms import SMSService
+        SMSService().send_otp(phone, code)
 
     def verify_otp(self, phone: str, code: str) -> bool:
         """Verify OTP code. Returns True if valid."""

@@ -26,6 +26,7 @@ class TestOTPService:
 
     def test_send_otp_creates_code(self, settings):
         settings.DEBUG = True
+
         logger.info("Sending OTP to %s", self.phone)
         self.service.send_otp(self.phone)
         otp = OTPCode.objects.filter(phone=self.phone).first()
@@ -36,6 +37,7 @@ class TestOTPService:
 
     def test_send_otp_rate_limit(self, settings):
         settings.DEBUG = True
+
         self.service.send_otp(self.phone)
         logger.info("Sending second OTP immediately (should hit rate limit)")
         with pytest.raises(RateLimitError):
@@ -58,6 +60,7 @@ class TestOTPService:
 
     def test_verify_otp_correct(self, settings):
         settings.DEBUG = True
+
         self.service.send_otp(self.phone)
         logger.info("Verifying OTP with correct code")
         result = self.service.verify_otp(self.phone, '000000')
@@ -68,6 +71,7 @@ class TestOTPService:
 
     def test_verify_otp_wrong_code(self, settings):
         settings.DEBUG = True
+
         self.service.send_otp(self.phone)
         logger.info("Verifying OTP with wrong code (should fail)")
         with pytest.raises(InvalidOTPError):
@@ -75,6 +79,7 @@ class TestOTPService:
         logger.info("InvalidOTPError raised as expected")
 
     def test_verify_otp_max_attempts(self, settings):
+
         settings.DEBUG = True
         settings.OTP_MAX_ATTEMPTS = 3
         self.service.send_otp(self.phone)

@@ -271,6 +271,12 @@ BOOKING_MIN_AHEAD_MINUTES = 60          # Min booking lead time
 BOOKING_MAX_AHEAD_DAYS = 60             # Max days in advance
 BOOKING_SLOT_GRID_MINUTES = 30          # Slot interval grid
 
+# SMS.RU Configuration
+SMS_RU_API_ID = os.environ.get("SMS_RU_API_ID", "")
+SMS_ENABLED = os.environ.get("SMS_ENABLED", "false").lower() == "true"
+SMS_RU_SENDER = os.environ.get("SMS_RU_SENDER", "")  # Empty = default sender
+SMS_RU_TIMEOUT = 10  # HTTP timeout in seconds
+
 # Social Auth Provider Settings
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID") or None
 APPLE_CLIENT_ID = os.environ.get("APPLE_CLIENT_ID") or None

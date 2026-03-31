@@ -4,6 +4,12 @@ from rest_framework.test import APIClient
 from users.models import User
 
 
+@pytest.fixture(autouse=True)
+def _disable_sms(settings):
+    """Disable real SMS sending in all user tests."""
+    settings.SMS_ENABLED = False
+
+
 @pytest.fixture
 def api_client():
     client = APIClient()
