@@ -89,5 +89,5 @@ class SMSService:
 
     def send_otp(self, phone: str, code: str) -> bool:
         """Send OTP code via SMS."""
-        message = f"BeautyGO: {code} — your verification code"
+        message = f"BeautyGO: {code} — ваш код подтверждения"
         return self.send(phone, message)
