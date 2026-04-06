@@ -4,6 +4,7 @@ import uuid
 from typing import Any
 
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.text import slugify
 
@@ -68,8 +69,13 @@ class Service(models.Model):
     )
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
-    duration_minutes = models.PositiveIntegerField()
+    price = models.DecimalField(
+        max_digits=10, decimal_places=2,
+        validators=[MinValueValidator(1)],
+    )
+    duration_minutes = models.PositiveIntegerField(
+        validators=[MinValueValidator(15), MaxValueValidator(480)],
+    )
     image = models.ImageField(
         upload_to='services/', blank=True, null=True,
     )
@@ -81,6 +87,7 @@ class Service(models.Model):
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ['sort_order', 'name']
