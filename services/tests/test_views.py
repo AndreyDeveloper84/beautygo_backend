@@ -25,7 +25,7 @@ class TestServiceViewSet:
         )
         logger.info("Response %s: %s", response.status_code, response.data)
         assert response.status_code == status.HTTP_201_CREATED
-        assert response.data['name'] == 'Консультация'
+        assert response.data['data']['name'] == 'Консультация'
 
     def test_client_cannot_create(self, pro_api_client):
         user = User.objects.create_user(
@@ -61,10 +61,10 @@ class TestServiceViewSet:
             price='500', duration_minutes=30,
         )
         response = authenticated_specialist.get('/api/v1/services/')
-        logger.info("Specialist sees %d services", len(response.data))
+        logger.info("Specialist sees %d services", len(response.data['data']))
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 1
-        assert response.data[0]['name'] == 'Mine'
+        assert len(response.data['data']) == 1
+        assert response.data['data'][0]['name'] == 'Mine'
 
     def test_create_service_with_category(
         self, authenticated_specialist,
@@ -80,8 +80,8 @@ class TestServiceViewSet:
             },
         )
         assert response.status_code == status.HTTP_201_CREATED
-        assert response.data['category'] == cat.pk
-        assert response.data['category_name'] == 'Ногти API'
+        assert response.data['data']['category'] == cat.pk
+        assert response.data['data']['category_name'] == 'Ногти API'
 
     def test_create_service_without_category(
         self, authenticated_specialist,
@@ -95,7 +95,7 @@ class TestServiceViewSet:
             },
         )
         assert response.status_code == status.HTTP_201_CREATED
-        assert response.data['category'] is None
+        assert response.data['data']['category'] is None
 
     def test_service_is_active_default(
         self, authenticated_specialist,
@@ -105,7 +105,7 @@ class TestServiceViewSet:
             {'name': 'Active', 'price': '100', 'duration_minutes': 30},
         )
         assert response.status_code == status.HTTP_201_CREATED
-        assert response.data['is_active'] is True
+        assert response.data['data']['is_active'] is True
 
     def test_deactivate_service(
         self, authenticated_specialist, specialist_user,
@@ -119,7 +119,7 @@ class TestServiceViewSet:
             {'is_active': False},
         )
         assert response.status_code == status.HTTP_200_OK
-        assert response.data['is_active'] is False
+        assert response.data['data']['is_active'] is False
 
 
 @pytest.mark.django_db

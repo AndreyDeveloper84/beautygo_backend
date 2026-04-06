@@ -112,9 +112,35 @@ class ServiceSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'name', 'description', 'price', 'duration_minutes',
             'category', 'category_name', 'image', 'is_active',
-            'sort_order', 'specialist', 'created_at',
+            'sort_order', 'buffer_after_minutes',
+            'specialist', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['specialist', 'created_at']
+        read_only_fields = ['specialist', 'created_at', 'updated_at']
+
+    def validate_price(self, value: Any) -> Any:
+        if value < 1:
+            raise serializers.ValidationError(
+                "Цена должна быть не менее 1 рубля"
+            )
+        return value
+
+    def validate_duration_minutes(self, value: Any) -> Any:
+        if value < 15:
+            raise serializers.ValidationError(
+                "Длительность должна быть не менее 15 минут"
+            )
+        if value > 480:
+            raise serializers.ValidationError(
+                "Длительность не может превышать 8 часов (480 минут)"
+            )
+        return value
+
+    def validate_buffer_after_minutes(self, value: Any) -> Any:
+        if value < 0 or value > 120:
+            raise serializers.ValidationError(
+                "Буфер должен быть от 0 до 120 минут"
+            )
+        return value
 
     def validate_image(self, value: Any) -> Any:
         """Validate image content type and file size."""

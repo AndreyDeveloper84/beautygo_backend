@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from django.db.models import Count, Prefetch, Q, QuerySet
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
-from rest_framework import permissions, serializers, viewsets
+from rest_framework import permissions, serializers, status, viewsets
 from rest_framework.filters import OrderingFilter
+from rest_framework.response import Response
 
 from users.permissions import IsProApp, IsSpecialist
+from users.response import error_response, success_response
 
 from .models import Service, ServiceCategory
 from .serializers import (
@@ -65,13 +67,70 @@ class ServiceViewSet(viewsets.ModelViewSet):
         """Return services belonging to the authenticated specialist."""
         return Service.objects.filter(
             specialist=self.request.user.specialist_profile,
-        )
+        ).select_related('category')
 
     def perform_create(self, serializer: ServiceSerializer) -> None:
         """Assign the current specialist as the service owner on create."""
         serializer.save(
             specialist=self.request.user.specialist_profile,
         )
+
+    def list(self, request, *args, **kwargs):
+        qs = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(qs, many=True)
+        return success_response(serializer.data)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+        self.perform_create(serializer)
+        return success_response(serializer.data, status_code=201)
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return success_response(serializer.data)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(
+            instance, data=request.data, partial=partial,
+        )
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+        serializer.save()
+        return success_response(serializer.data)
+
+    def partial_update(self, request, *args, **kwargs):
+        kwargs['partial'] = True
+        return self.update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+
+        # Check for active appointments
+        from appointments.domain.value_objects import ACTIVE_BOOKING_STATUSES
+        active_count = instance.appointments.filter(
+            status__in=[s.value for s in ACTIVE_BOOKING_STATUSES],
+        ).count()
+
+        if active_count > 0:
+            return error_response(
+                "HAS_APPOINTMENTS",
+                f"Нельзя удалить услугу с активными записями ({active_count})",
+                status_code=409,
+            )
+
+        instance.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ServicePublicFilter(FilterSet):
