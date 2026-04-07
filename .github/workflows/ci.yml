@@ -97,10 +97,8 @@ jobs:
             git fetch origin dev
             git reset --hard origin/dev
             docker compose build
-            docker compose up -d
-            echo "Waiting for containers..."
-            sleep 10
+            docker compose up -d --force-recreate web
+            sleep 5
+            docker compose exec -T web python manage.py migrate --noinput || true
             docker compose ps
-            docker compose exec -T web python manage.py migrate --noinput 2>/dev/null || true
-            docker compose exec -T web python manage.py showmigrations --list 2>/dev/null | tail -20
             echo "Deploy complete!"
