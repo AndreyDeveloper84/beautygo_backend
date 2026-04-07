@@ -86,6 +86,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
+          timeout: 300s
           command_timeout: 5m
           script: |
             cd /home/taximeter/beautygo/dev
@@ -95,7 +96,7 @@ jobs:
 
             git fetch origin dev
             git reset --hard origin/dev
-            docker compose build --no-cache
+            docker compose build
             docker compose up -d
             echo "Waiting for containers..."
             sleep 10
