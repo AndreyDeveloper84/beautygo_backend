@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from typing import Any
 
 from django.conf import settings
@@ -335,7 +336,7 @@ class Payment(models.Model):
     # Financial fields
     amount = models.DecimalField(
         max_digits=10, decimal_places=2,
-        validators=[MinValueValidator(0.01)],
+        validators=[MinValueValidator(Decimal("0.01"))],
     )
     status = models.CharField(
         max_length=25,
