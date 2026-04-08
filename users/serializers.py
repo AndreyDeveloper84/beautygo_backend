@@ -125,8 +125,6 @@ class ClientProfileSerializer(serializers.ModelSerializer):
         return value
 
 
-
-
 # --- Social Auth serializers ---
 
 class SocialAuthSerializer(serializers.Serializer):

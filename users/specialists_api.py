@@ -339,11 +339,12 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({'date': slot_date.isoformat(), 'slots': available})
 
-    @action(detail=True, methods=['get'], url_path='reviews')
+    @action(detail=True, methods=['get'], url_path='reviews',
+            permission_classes=[permissions.AllowAny])
     def reviews(self, request, pk=None):
-        """GET /specialists/{id}/reviews/ — reviews (stub)."""
-        self.get_object()  # 404 if not found
-        return Response({'results': [], 'count': 0})
+        """GET /specialists/{id}/reviews/ — delegates to SpecialistReviewsView."""
+        from reviews.views import SpecialistReviewsView
+        return SpecialistReviewsView().get(request, specialist_id=pk)
 
     def get_queryset(self) -> QuerySet:
         active_services = Prefetch(

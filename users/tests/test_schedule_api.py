@@ -4,7 +4,6 @@ from __future__ import annotations
 import pytest
 import datetime as dt
 
-from django.utils import timezone
 from rest_framework.test import APIClient
 
 from appointments.models import SpecialistWorkingHours, SpecialistTimeOff

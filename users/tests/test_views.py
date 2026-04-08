@@ -379,7 +379,7 @@ class TestDeleteAccount:
     def test_delete_account_success(self, authenticated_client, client_user):
         logger.info("DELETE %s — soft delete account", self.URL)
         response = authenticated_client.delete(
-            self.URL, {'confirmation': 'DELETE'}, format='json',
+            self.URL, {'reason': 'no longer needed'}, format='json',
         )
         logger.info("Response %s: %s", response.status_code, response.data)
         assert response.status_code == status.HTTP_200_OK
@@ -391,15 +391,17 @@ class TestDeleteAccount:
         assert client_user.first_name == 'Удалён'
         assert client_user.email == ''
 
-    def test_delete_without_confirmation(self, authenticated_client):
-        response = authenticated_client.delete(
-            self.URL, {'confirmation': 'WRONG'}, format='json',
-        )
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-
-    def test_delete_empty_body(self, authenticated_client):
+    def test_delete_empty_body_is_allowed(self, authenticated_client):
+        """reason is optional — empty body should succeed."""
         response = authenticated_client.delete(
             self.URL, {}, format='json',
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+    def test_delete_invalid_otp_format(self, authenticated_client):
+        """Non-numeric otp_code should be rejected."""
+        response = authenticated_client.delete(
+            self.URL, {'otp_code': 'abcd'}, format='json',
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 

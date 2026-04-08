@@ -274,5 +274,5 @@ class TestSpecialistDetail:
         url = f'{SPECIALISTS_URL}{profile.pk}/reviews/'
         response = client_app.get(url)
         assert response.status_code == status.HTTP_200_OK
-        assert response.data['results'] == []
-        assert response.data['count'] == 0
+        assert response.data['data'] == []
+        assert response.data['meta']['count'] == 0
