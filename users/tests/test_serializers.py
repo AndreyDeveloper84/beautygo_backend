@@ -94,7 +94,7 @@ class TestPhoneSerializer:
 
 class TestVerifyOTPSerializer:
     def test_valid(self):
-        serializer = VerifyOTPSerializer(data={'phone': '+79001234567', 'code': '123456'})
+        serializer = VerifyOTPSerializer(data={'phone': '+79001234567', 'code': '1234'})
         logger.info("Valid OTP data: valid=%s", serializer.is_valid())
         assert serializer.is_valid()
 

@@ -99,7 +99,7 @@ class OTPService:
         if settings.DEBUG and not getattr(settings, 'SMS_ENABLED', False):
             code = settings.OTP_DEBUG_CODE
         else:
-            code = str(random.randint(100000, 999999))
+            code = str(random.randint(1000, 9999))
 
         expires_at = now + timedelta(minutes=settings.OTP_EXPIRY_MINUTES)
 
@@ -180,7 +180,8 @@ class AuthService:
 
         user = User.objects.get(phone=phone)
 
-        if not user.is_verified:
+        is_new_user = not user.is_verified
+        if is_new_user:
             user.is_verified = True
             user.save(update_fields=['is_verified'])
 
@@ -191,6 +192,7 @@ class AuthService:
         return {
             "access": str(refresh.access_token),
             "refresh": str(refresh),
+            "is_new_user": is_new_user,
             "user": {
                 "id": user.pk,
                 "phone": user.phone,

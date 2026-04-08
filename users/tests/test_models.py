@@ -75,7 +75,7 @@ class TestOTPCodeModel:
         now = timezone.now()
         otp = OTPCode.objects.create(
             phone='+79001000001',
-            code='123456',
+            code='1234',
             expires_at=now + timedelta(minutes=5),
         )
         logger.info("Created OTP: phone=%s, is_valid=%s, is_expired=%s", otp.phone, otp.is_valid, otp.is_expired)
@@ -88,7 +88,7 @@ class TestOTPCodeModel:
     def test_expired(self):
         otp = OTPCode.objects.create(
             phone='+79001000001',
-            code='123456',
+            code='1234',
             expires_at=timezone.now() - timedelta(minutes=1),
         )
         logger.info("Expired OTP: is_expired=%s, is_valid=%s", otp.is_expired, otp.is_valid)
@@ -98,7 +98,7 @@ class TestOTPCodeModel:
     def test_used(self):
         otp = OTPCode.objects.create(
             phone='+79001000001',
-            code='123456',
+            code='1234',
             expires_at=timezone.now() + timedelta(minutes=5),
             is_used=True,
         )

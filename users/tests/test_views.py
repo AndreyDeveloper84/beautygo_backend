@@ -87,7 +87,7 @@ class TestVerifyOTPView:
         url = reverse('verify-otp')
         response = api_client.post(url, {
             'phone': client_user.phone,
-            'code': '000000',
+            'code': '0000',
         })
         logger.info("Verify OTP response %s: keys=%s", response.status_code, list(response.data.get('data', {}).keys()))
         assert response.status_code == status.HTTP_200_OK
@@ -103,7 +103,7 @@ class TestVerifyOTPView:
         logger.info("Verify OTP with wrong code for phone=%s", client_user.phone)
         response = api_client.post(url, {
             'phone': client_user.phone,
-            'code': '999999',
+            'code': '9999',
         })
         logger.info("Response %s: %s", response.status_code, response.data)
         assert response.status_code == status.HTTP_400_BAD_REQUEST
@@ -114,7 +114,7 @@ class TestVerifyOTPView:
         logger.info("Verify OTP without sending code first")
         response = api_client.post(url, {
             'phone': '+79009999999',
-            'code': '000000',
+            'code': '0000',
         })
         logger.info("Response %s: %s", response.status_code, response.data)
         assert response.status_code == status.HTTP_400_BAD_REQUEST
@@ -128,7 +128,7 @@ class TestLogoutView:
         # Login flow
         api_client.post(reverse('login'), {'phone': client_user.phone})
         resp = api_client.post(reverse('verify-otp'), {
-            'phone': client_user.phone, 'code': '000000',
+            'phone': client_user.phone, 'code': '0000',
         })
         tokens = resp.data['data']
         logger.info("Got tokens, performing logout")
@@ -181,7 +181,7 @@ class TestDeviceId:
         api_client.post(reverse('login'), {'phone': client_user.phone})
         response = api_client.post(reverse('verify-otp'), {
             'phone': client_user.phone,
-            'code': '000000',
+            'code': '0000',
             'device_id': 'iphone-abc-123',
         })
         assert response.status_code == status.HTTP_200_OK
@@ -199,7 +199,7 @@ class TestDeviceId:
         api_client.post(reverse('login'), {'phone': client_user.phone})
         resp = api_client.post(reverse('verify-otp'), {
             'phone': client_user.phone,
-            'code': '000000',
+            'code': '0000',
             'device_id': 'device-original',
         })
         token = resp.data['data']['access']
@@ -221,7 +221,7 @@ class TestDeviceId:
         api_client.post(reverse('login'), {'phone': client_user.phone})
         resp = api_client.post(reverse('verify-otp'), {
             'phone': client_user.phone,
-            'code': '000000',
+            'code': '0000',
         })
         token = resp.data['data']['access']
         api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
@@ -573,3 +573,128 @@ class TestMasterProfile:
         response = authenticated_specialist.get(self.ME_URL)
         assert response.status_code == status.HTTP_200_OK
         assert response.data['data']['services_count'] == 2
+
+
+# --- SendOTPView Tests ---
+
+@pytest.mark.django_db
+class TestSendOTPView:
+    URL = reverse('send-otp')
+
+    def test_new_user_creates_and_sends_otp(self, api_client):
+        phone = '+79005550001'
+        response = api_client.post(
+            self.URL, {'phone': phone}, HTTP_X_APP_TYPE='client',
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['retry_after'] == 60
+        assert User.objects.filter(phone=phone).exists()
+
+    def test_existing_user_sends_otp(self, api_client, client_user):
+        response = api_client.post(
+            self.URL, {'phone': client_user.phone}, HTTP_X_APP_TYPE='client',
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['retry_after'] == 60
+
+    def test_invalid_phone_returns_400(self, api_client):
+        response = api_client.post(
+            self.URL, {'phone': '12345'}, HTTP_X_APP_TYPE='client',
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_rate_limit(self, api_client):
+        phone = '+79005550002'
+        api_client.post(
+            self.URL, {'phone': phone}, HTTP_X_APP_TYPE='client',
+        )
+        response = api_client.post(
+            self.URL, {'phone': phone}, HTTP_X_APP_TYPE='client',
+        )
+        assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+
+    def test_verify_otp_returns_is_new_user(self, api_client, settings):
+        settings.DEBUG = True
+        phone = '+79005550003'
+        api_client.post(
+            self.URL, {'phone': phone}, HTTP_X_APP_TYPE='client',
+        )
+        response = api_client.post(
+            reverse('verify-otp'),
+            {'phone': phone, 'code': '0000'},
+            HTTP_X_APP_TYPE='client',
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data['data']
+        assert data['is_new_user'] is True
+        assert 'access' in data
+        assert 'refresh' in data
+
+    def test_verify_otp_existing_user_not_new(
+        self, api_client, client_user, settings,
+    ):
+        settings.DEBUG = True
+        # Simulate already-verified user (returning user)
+        client_user.is_verified = True
+        client_user.save(update_fields=['is_verified'])
+
+        api_client.post(
+            self.URL, {'phone': client_user.phone}, HTTP_X_APP_TYPE='client',
+        )
+        response = api_client.post(
+            reverse('verify-otp'),
+            {'phone': client_user.phone, 'code': '0000'},
+            HTTP_X_APP_TYPE='client',
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['is_new_user'] is False
+
+
+# --- CompleteProfileView Tests ---
+
+@pytest.mark.django_db
+class TestCompleteProfileView:
+    URL = reverse('complete-profile')
+
+    def test_complete_profile_success(self, api_client, settings):
+        settings.DEBUG = True
+        phone = '+79005550010'
+        api_client.post(
+            reverse('send-otp'), {'phone': phone}, HTTP_X_APP_TYPE='client',
+        )
+        resp = api_client.post(
+            reverse('verify-otp'),
+            {'phone': phone, 'code': '0000'},
+            HTTP_X_APP_TYPE='client',
+        )
+        token = resp.data['data']['access']
+        api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        response = api_client.post(
+            self.URL,
+            {'first_name': 'Анна', 'last_name': 'Иванова'},
+            HTTP_X_APP_TYPE='client',
+        )
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data['data']
+        assert data['first_name'] == 'Анна'
+        assert data['last_name'] == 'Иванова'
+        user = User.objects.get(phone=phone)
+        assert user.first_name == 'Анна'
+
+    def test_unauthenticated_returns_401(self, api_client):
+        response = api_client.post(
+            self.URL,
+            {'first_name': 'Тест'},
+            HTTP_X_APP_TYPE='client',
+        )
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+
+    def test_missing_first_name_returns_400(self, authenticated_client):
+        response = authenticated_client.post(self.URL, {})
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    def test_short_first_name_returns_400(self, authenticated_client):
+        response = authenticated_client.post(
+            self.URL, {'first_name': 'А'},
+        )
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
