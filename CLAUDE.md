@@ -99,92 +99,83 @@ BeautyGO — мобильное приложение для бронирован
 | Push | Firebase FCM | Push-уведомления |
 | Maps | 2GIS | Геолокация, адреса |
 ---
-## 📁 PROJECT STRUCTURE
+## 📁 PROJECT STRUCTURE (Actual)
 ```
-beautygo/
+djangoProject/                   # Git root
 ├── CLAUDE.md                    # ← ТЫ ЗДЕСЬ
-├── Makefile                     # Команды разработки
-├── docker-compose.yml           # Локальное окружение
-├── Dockerfile                   # Multi-stage build
-├── .env.example                 # Переменные окружения
-├── manage.py                    # Django CLI
-├── pytest.ini                   # Конфигурация тестов
-├── pyproject.toml               # Конфигурация инструментов
+├── manage.py
+├── requirements.txt             # Single requirements file
+├── Dockerfile / docker-compose.yml
+├── .env.example
+├── .flake8                      # max-line-length=120
+├── pytest.ini
 │
-├── config/                      # Настройки Django
-│   ├── __init__.py              # Celery app init
-│   ├── celery.py                # Celery + Beat schedule
-│   ├── urls.py                  # URL routing
-│   ├── wsgi.py / asgi.py
-│   └── settings/
-│       ├── base.py              # Общие настройки
-│       ├── dev.py               # Development
-│       └── prod.py              # Production
+├── djangoProject/               # Django project settings
+│   ├── settings/
+│   │   ├── base.py              # Общие настройки
+│   │   ├── dev.py               # DEBUG=True, SQLite
+│   │   └── prod.py              # PostgreSQL, Sentry
+│   ├── urls.py                  # Root URL routing
+│   └── wsgi.py
 │
-├── apps/                        # Django приложения
-│   ├── users/                   # Пользователи, аутентификация
-│   │   ├── models.py            # User, ClientProfile, OTPCode
-│   │   ├── serializers.py
-│   │   ├── views.py
-│   │   ├── services.py          # Бизнес-логика
-│   │   ├── tasks.py             # Celery tasks
-│   │   └── tests/
-│   │
-│   ├── specialists/             # Мастера
-│   │   ├── models.py            # SpecialistProfile, Schedule, Portfolio
-│   │   └── ...
-│   │
-│   ├── services/                # Услуги
-│   │   ├── models.py            # Service, ServiceCategory
-│   │   └── ...
-│   │
-│   ├── appointments/            # Записи
-│   │   ├── models.py            # Appointment
-│   │   ├── services.py          # SlotCalculator, BookingService
-│   │   └── ...
-│   │
-│   ├── reviews/                 # Отзывы
-│   │   ├── models.py            # Review
-│   │   └── ...
-│   │
-│   ├── payments/                # Платежи
-│   │   ├── models.py            # Payment, Payout
-│   │   ├── services.py          # YooKassaService
-│   │   └── ...
-│   │
-│   ├── notifications/           # Уведомления
-│   │   ├── models.py            # Notification
-│   │   ├── templates.py         # NotificationTemplate registry
-│   │   ├── services.py          # PushService, SMSService
-│   │   └── ...
-│   │
-│   ├── ai_assistant/            # AI чат
-│   │   ├── models.py            # Conversation, Message
-│   │   ├── services.py          # ClaudeService, RecommendationEngine
-│   │   ├── prompts.py           # System prompts
-│   │   └── ...
-│   │
-│   └── core/                    # Общие утилиты
-│       ├── exceptions.py        # Custom exceptions
-│       ├── permissions.py       # DRF permissions
-│       ├── pagination.py        # Custom pagination
-│       └── mixins.py            # Shared mixins
+├── users/                       # Auth, Users, Specialists, Social Auth
+│   ├── models.py                # User, Profile, SpecialistProfile, OTPCode,
+│   │                            # DeviceToken, SocialAccount, AnonymousSession
+│   ├── views.py                 # Auth views (OTP, Anonymous, Onboarding, Logout)
+│   ├── social_auth.py           # VK/Google/Apple/Yandex OAuth
+│   ├── specialists_api.py       # GET /specialists/ (public catalog for client)
+│   ├── schedule_api.py          # Working Hours & TimeOff CRUD (specialist)
+│   ├── services.py              # AuthService, OTPService, SMSService
+│   ├── serializers.py
+│   ├── permissions.py           # IsClient, IsSpecialist, IsClientApp, IsProApp
+│   ├── response.py              # success_response(), error_response()
+│   ├── middleware.py             # AppTypeMiddleware, JWTContextMiddleware
+│   ├── admin.py
+│   └── tests/
+│       ├── test_views.py        # Auth + profile tests
+│       ├── test_auth_v2.py      # Anonymous JWT + onboarding
+│       ├── test_social_auth.py  # OAuth tests
+│       ├── test_specialists_api.py  # Catalog tests
+│       ├── test_schedule_api.py # Working hours + time-off
+│       └── test_services.py     # Unit tests for services
 │
-├── requirements/
-│   ├── base.txt                 # Production dependencies
-│   └── dev.txt                  # Development dependencies
+├── services/                    # Service & Category models
+│   ├── models.py                # Service, ServiceCategory
+│   ├── views.py                 # Services CRUD (specialist), list (client)
+│   └── tests/
 │
-├── scripts/                     # Скрипты
-│   ├── entrypoint.sh
-│   ├── wait-for-it.sh
-│   └── init-db.sql
+├── appointments/                # Booking Engine (DDD)
+│   ├── models.py                # Appointment, Payment, SpecialistWorkingHours,
+│   │                            # SpecialistTimeOff, OutboxEvent
+│   ├── views.py                 # Thin views → application services
+│   ├── serializers.py
+│   ├── domain/                  # Pure Python (no Django)
+│   │   ├── value_objects.py     # TimeInterval, BookingStateMachine
+│   │   ├── exceptions.py        # BookingDomainError hierarchy
+│   │   └── policies.py          # Commission, Cancellation, Reschedule
+│   ├── application/             # Use-cases + DTOs
+│   │   ├── dto.py
+│   │   └── services/            # CreateBooking, CancelReschedule, Availability
+│   ├── infrastructure/          # Slot builder, cache, outbox
+│   └── tests/
 │
-├── fixtures/                    # Демо-данные
-│   └── demo.json
+├── reviews/                     # Reviews & Ratings
+│   ├── models.py                # Review (OneToOne → Appointment)
+│   ├── views.py                 # Create, Update, Reply, List
+│   ├── serializers.py
+│   └── tests/
 │
-├── static/                      # Статические файлы
-├── media/                       # Загруженные файлы
-└── templates/                   # Django templates (admin)
+├── payments/                    # YooKassa Payment Integration
+│   ├── services.py              # YooKassaService (create, capture, refund)
+│   ├── views.py                 # Create, Detail, Webhook, Refund
+│   ├── serializers.py           # Spec-aligned (PaymentStatus mapping)
+│   └── tests/
+│
+├── search/                      # Global search
+│   └── ...
+│
+├── scripts/                     # Utility scripts (not tracked in CI)
+└── .github/workflows/ci.yml    # flake8 → pytest → SSH deploy
 ```
 ---
 ## 📱 MOBILE STRUCTURE
@@ -387,24 +378,25 @@ X-App-Type: pro      # BeautyGO Pro (приложение мастера)
 │   └── POST   /{id}/complete/         # Завершить (мастер)
 │
 ├── reviews/
-│   └── POST   /                       # Оставить отзыв
+│   ├── POST   /                       # Оставить отзыв 🟢
+│   ├── PATCH  /{id}/                  # Редактировать отзыв 🟢
+│   └── POST   /{id}/reply/            # Ответ мастера на отзыв 🟣
 │
 ├── payments/
-│   ├── POST   /                       # Создать платёж
-│   ├── POST   /webhook/               # YooKassa webhook
-│   └── GET    /{id}/                  # Статус платежа
+│   ├── POST   /create/                # Создать платёж (YooKassa) 🟢
+│   ├── GET    /{id}/                  # Статус платежа
+│   ├── POST   /webhook/               # YooKassa webhook (AllowAny)
+│   └── POST   /{id}/refund/           # Возврат платежа 🟢
 │
-├── notifications/
-│   ├── GET    /                       # Список уведомлений
-│   ├── POST   /{id}/read/             # Пометить прочитанным
-│   └── POST   /register-device/       # Зарегистрировать FCM token
+├── search/
+│   └── GET    /                       # Глобальный поиск 🟢
 │
-├── ai/
-│   ├── POST   /chat/                  # Отправить сообщение AI
-│   ├── GET    /conversations/         # История диалогов
-│   └── GET    /conversations/{id}/    # Конкретный диалог
+├── notifications/                     # 🔜 NOT YET IMPLEMENTED
+├── ai/                                # 🔜 NOT YET IMPLEMENTED
 │
-└── health/                            # Health checks
+└── health/
+    ├── GET    /                       # Health check
+    └── GET    /ready/                 # Readiness check
 ```
 ### Request/Response Format
 **Успешный ответ:**
@@ -431,10 +423,17 @@ X-App-Type: pro      # BeautyGO Pro (приложение мастера)
 }
 ```
 ### Authentication
-- **JWT** (Access + Refresh tokens)
-- Access token: 60 минут
-- Refresh token: 7 дней
+- **JWT** (Access + Refresh tokens) via `simplejwt`
+- Access token: 15 минут (`SIMPLE_JWT.ACCESS_TOKEN_LIFETIME`)
+- Refresh token: 90 дней
+- **Anonymous JWT**: `/auth/anonymous` → `{ access_token, is_anonymous: true }`
+- **OTP verify**: `/auth/verify-otp` → `{ access_token, refresh_token, expires_in, is_new_user, onboarding_completed, user }`
 - Header: `Authorization: Bearer <token>`
+
+### API Response Field Names (Spec v2.0)
+> **ВАЖНО:** JWT token fields в ответах — `access_token` / `refresh_token` (не `access` / `refresh`)
+> Payment status mapping: internal `paid` → API `succeeded`, internal `authorized` → API `pending`
+> Payment field: `external_id` (не `provider_payment_id`)
 ---
 ## 📝 CODING STANDARDS
 ### Python Style
@@ -1105,9 +1104,63 @@ BOOKING_SLOT_GRID_MINUTES = 30      # Интервал сетки слотов
 
 ### MVP-ограничения (активировать позже)
 1. **Outbox worker не запущен** — события пишутся в БД, но не обрабатываются (нужен Celery + Redis)
-2. **Нет интеграции с YooKassa** — Payment модель создаётся, но платёжный провайдер не вызывается
-3. **LocMemCache** — заменить на django-redis для production
-4. **select_for_update() — no-op на SQLite** — concurrency тесты требуют PostgreSQL
+2. **LocMemCache** — заменить на django-redis для production
+3. **select_for_update() — no-op на SQLite** — concurrency тесты требуют PostgreSQL
+4. **Notifications** — не реализовано (Firebase FCM, SMS reminders)
+5. **AI Chat** — не реализовано (Claude integration)
+
+---
+## 💳 PAYMENTS (YooKassa) — Реализовано
+
+### Endpoints
+```
+POST /api/v1/payments/create/     🟢 Создать платёж → confirmation_url
+GET  /api/v1/payments/{id}/       ⚪ Статус платежа
+POST /api/v1/payments/webhook/    ⚪ YooKassa webhook (AllowAny)
+POST /api/v1/payments/{id}/refund/ 🟢 Полный/частичный возврат
+```
+
+### Архитектура
+- **YooKassaService** (`payments/services.py`) — обёртка над `yookassa` SDK
+- **Two-stage payments**: hold → capture (при `appointment.completed`)
+- **Idempotency**: webhook de-dup через `last_webhook_event_id` + `X-Request-Id`
+- **Idempotency**: повторный POST /create возвращает существующий pending payment
+- **Комиссия**: 8% `BOOKING_COMMISSION_PERCENT`, split-платёж если `YOOKASSA_AGENT_ID` задан
+
+### PaymentStatus Mapping (Internal → API Spec)
+| Internal | API Response |
+|----------|-------------|
+| `pending` | `pending` |
+| `authorized` | `pending` |
+| `paid` | `succeeded` |
+| `failed` | `failed` |
+| `refunded` | `refunded` |
+| `partially_refunded` | `refunded` |
+
+### Env переменные
+```
+YOOKASSA_SHOP_ID=       # YooKassa Shop ID
+YOOKASSA_SECRET_KEY=    # YooKassa Secret Key
+YOOKASSA_AGENT_ID=      # Sub-account for split payments (optional)
+```
+
+---
+## ⭐ REVIEWS & RATINGS — Реализовано
+
+### Endpoints
+```
+POST  /api/v1/reviews/               🟢 Оставить отзыв (client, completed appointment)
+PATCH /api/v1/reviews/{id}/           🟢 Редактировать текст (автор)
+POST  /api/v1/reviews/{id}/reply/     🟣 Ответ мастера
+GET   /api/v1/specialists/{id}/reviews/ ⚪ Публичный список (AllowAny)
+```
+
+### Ключевые правила
+- **OneToOne**: один отзыв на одну запись (409 `REVIEW_EXISTS` при дубликате)
+- **Rating recalculation**: синхронно в транзакции через `_recalculate_rating(specialist)`
+- **Anonymous reviews**: `is_anonymous=true` → `client_name=null` в API
+- **Moderation**: `is_hidden=true` → excluded from listing + rating calculation
+- **Pagination**: PageNumberPagination, default 20, max 100, `?sort=recent|rating`
 
 ---
 ## ⚠️ IMPORTANT NOTES
@@ -1154,4 +1207,26 @@ BOOKING_SLOT_GRID_MINUTES = 30      # Интервал сетки слотов
 - **Database Schema**: Notion
 - **Analytics Events**: Notion
 ---
-*Last updated: March 26, 2026 — Booking Engine DDD Integration*
+---
+## 📋 SPEC ALIGNMENT STATUS
+
+> Источник: **API Specification v2.0** в Notion
+
+| Секция | Статус | Примечания |
+|--------|--------|------------|
+| Auth (OTP, Anonymous, Social) | ✅ Aligned | `access_token`/`refresh_token` naming |
+| Users (/me, profile, delete) | ✅ Aligned | `otp_code` optional (spec says required — soft deviation) |
+| Specialists (catalog) | ✅ Implemented | Response wrapping via `success_response()` |
+| Services (CRUD + categories) | ✅ Implemented | |
+| Appointments (CRUD + state machine) | ✅ Implemented | Extra statuses `awaiting_payment`, `in_progress` beyond spec |
+| Working Hours + TimeOff | ✅ Implemented | `PUT/PATCH /specialists/me/schedule/` |
+| Reviews (create, edit, reply, list) | ✅ Aligned | |
+| Payments (YooKassa) | ✅ Aligned | Status mapping: `paid→succeeded` |
+| Search | ✅ Basic | |
+| Notifications | ❌ Not implemented | |
+| AI Chat (Claude) | ❌ Not implemented | |
+| Favorites | ❌ Not implemented | |
+| Analytics | ❌ Not implemented | |
+| Food Scanner / Nutrition | ❌ Not implemented | |
+
+*Last updated: April 8, 2026 — Payments + Reviews + Spec Alignment*

@@ -73,8 +73,8 @@ class TestSocialAuthVK:
         assert response.status_code == status.HTTP_200_OK
         data = response.data['data']
         assert data['is_new_user'] is True
-        assert data['access']
-        assert data['refresh']
+        assert data['access_token']
+        assert data['refresh_token']
         assert data['user']['role'] == 'client'
         assert SocialAccount.objects.filter(
             provider='vk', provider_uid='vk_001',

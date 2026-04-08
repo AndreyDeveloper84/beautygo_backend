@@ -155,13 +155,6 @@ class VerifyOTPView(APIView):
         if anonymous_token:
             _merge_anonymous_session(anonymous_token, tokens.get('user', {}).get('id'))
 
-        # Add onboarding_completed to response
-        try:
-            user = User.objects.get(phone=serializer.validated_data['phone'])
-            tokens['user']['onboarding_completed'] = user.onboarding_completed
-        except User.DoesNotExist:
-            tokens['user']['onboarding_completed'] = False
-
         return success_response(tokens)
 
 
@@ -169,16 +162,15 @@ def _merge_anonymous_session(anonymous_token: str, real_user_id) -> None:
     """
     Merge anonymous session into the real user account after OTP verification.
 
-    Decodes the anonymous refresh token, finds the ghost user, migrates any
-    related data (AI conversations), then cleans up the anonymous user.
+    Decodes the anonymous access token (from /auth/anonymous), finds the ghost
+    user, migrates any related data (AI conversations), then cleans up.
     Silently ignores invalid/expired tokens.
     """
-    from rest_framework_simplejwt.tokens import RefreshToken as JWTRefreshToken
-    from rest_framework_simplejwt.exceptions import TokenError
+    from rest_framework_simplejwt.tokens import AccessToken
 
     try:
-        refresh = JWTRefreshToken(anonymous_token)
-        anon_user_id = refresh.get(settings.SIMPLE_JWT.get('USER_ID_CLAIM', 'user_id'))
+        token = AccessToken(anonymous_token)
+        anon_user_id = token.get(settings.SIMPLE_JWT.get('USER_ID_CLAIM', 'user_id'))
         if not anon_user_id:
             return
 
@@ -195,12 +187,6 @@ def _merge_anonymous_session(anonymous_token: str, real_user_id) -> None:
                 "Merging anonymous user %s into real user %s",
                 anon_user.id, real_user.id,
             )
-
-        # Blacklist anonymous token
-        try:
-            refresh.blacklist()
-        except Exception:
-            pass
 
         # Clean up: delete anonymous session and ghost user
         try:
@@ -242,8 +228,7 @@ class AnonymousAuthView(APIView):
         if session and not session.is_expired:
             refresh = RefreshToken.for_user(session.user)
             return success_response({
-                "access": str(refresh.access_token),
-                "refresh": str(refresh),
+                "access_token": str(refresh.access_token),
                 "is_anonymous": True,
             })
 
@@ -277,8 +262,7 @@ class AnonymousAuthView(APIView):
 
         refresh = RefreshToken.for_user(anon_user)
         return success_response({
-            "access": str(refresh.access_token),
-            "refresh": str(refresh),
+            "access_token": str(refresh.access_token),
             "is_anonymous": True,
         }, status_code=201)
 

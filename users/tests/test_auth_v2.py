@@ -37,8 +37,7 @@ class TestAnonymousAuth:
 
         assert resp.status_code == 201
         data = resp.json()['data']
-        assert 'access' in data
-        assert 'refresh' in data
+        assert 'access_token' in data
         assert data['is_anonymous'] is True
 
         assert AnonymousSession.objects.filter(device_id=device_id).exists()
@@ -78,7 +77,7 @@ class TestAnonymousAuth:
         """Access token from anonymous session can authenticate requests."""
         device_id = str(uuid.uuid4())
         resp = _client().post(ANON_URL, {'device_id': device_id, 'platform': 'ios'}, format='json')
-        access = resp.json()['data']['access']
+        access = resp.json()['data']['access_token']
 
         c = _client()
         c.credentials(HTTP_AUTHORIZATION=f'Bearer {access}')
@@ -164,8 +163,8 @@ class TestVerifyOTPv2:
         resp = c.post(VERIFY_OTP_URL, {'phone': phone, 'code': '0000'}, format='json')
         assert resp.status_code == 200
         data = resp.json()['data']
-        assert 'onboarding_completed' in data['user']
-        assert data['user']['onboarding_completed'] is False
+        assert 'onboarding_completed' in data
+        assert data['onboarding_completed'] is False
 
     def test_verify_with_valid_anonymous_token_merges_session(self, settings):
         """Valid anonymous_token provided → guest user deleted after merge."""
@@ -176,18 +175,18 @@ class TestVerifyOTPv2:
         device_id = str(uuid.uuid4())
         anon_resp = _client().post(ANON_URL, {'device_id': device_id, 'platform': 'ios'}, format='json')
         assert anon_resp.status_code == 201
-        anon_refresh = anon_resp.json()['data']['refresh']
+        anon_access = anon_resp.json()['data']['access_token']
         anon_user_id = AnonymousSession.objects.get(device_id=device_id).user.id
 
         # Register real user
         phone = '+79990007777'
         _client().post(REQUEST_OTP_URL, {'phone': phone}, format='json')
 
-        # Verify OTP with anonymous_token
+        # Verify OTP with anonymous_token (the access_token from /auth/anonymous)
         resp = _client().post(VERIFY_OTP_URL, {
             'phone': phone,
             'code': '0000',
-            'anonymous_token': anon_refresh,
+            'anonymous_token': anon_access,
         }, format='json')
         assert resp.status_code == 200
 

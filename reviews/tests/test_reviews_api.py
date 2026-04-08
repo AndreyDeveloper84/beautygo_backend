@@ -156,8 +156,8 @@ class TestReviewCreate:
             'rating': 3,
         }, format='json')
 
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-        assert response.data['error']['code'] == 'REVIEW_ALREADY_EXISTS'
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert response.data['error']['code'] == 'REVIEW_EXISTS'
 
     def test_create_review_not_own_appointment(
         self, client_app, specialist_user, service, db,
@@ -278,3 +278,99 @@ class TestSpecialistReviewsList:
         url = f"{SPECIALISTS_URL}{uuid.uuid4()}/reviews/"
         response = anon_app.get(url)
         assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/v1/reviews/{id}/
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestReviewUpdate:
+
+    def test_update_text(self, client_app, client_user, specialist_user, service):
+        appt = _make_appointment(client_user, specialist_user, service)
+        review = Review.objects.create(
+            appointment=appt, client=client_user,
+            specialist=specialist_user.specialist_profile,
+            service=service, rating=5, text='Было хорошо',
+        )
+        url = f'{REVIEWS_URL}{review.id}/'
+        response = client_app.patch(url, {'text': 'Было отлично!'}, format='json')
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['text'] == 'Было отлично!'
+
+    def test_update_not_own(self, client_user, specialist_user, service, db):
+        other = User.objects.create_user(
+            username='other_upd', password='pass', role='client', phone='+79990600066',
+        )
+        other_api = APIClient()
+        other_api.defaults['HTTP_X_APP_TYPE'] = 'client'
+        other_api.force_authenticate(user=other)
+
+        appt = _make_appointment(client_user, specialist_user, service)
+        review = Review.objects.create(
+            appointment=appt, client=client_user,
+            specialist=specialist_user.specialist_profile,
+            service=service, rating=5,
+        )
+        response = other_api.patch(f'{REVIEWS_URL}{review.id}/', {'text': 'hacked'}, format='json')
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_update_not_found(self, client_app):
+        response = client_app.patch(f'{REVIEWS_URL}{uuid.uuid4()}/', {'text': 'x'}, format='json')
+        assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+# ---------------------------------------------------------------------------
+# POST /api/v1/reviews/{id}/reply/
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestReviewReply:
+
+    def test_specialist_reply(self, specialist_user, client_user, service, db):
+        pro_api = APIClient()
+        pro_api.defaults['HTTP_X_APP_TYPE'] = 'pro'
+        pro_api.force_authenticate(user=specialist_user)
+
+        appt = _make_appointment(client_user, specialist_user, service)
+        review = Review.objects.create(
+            appointment=appt, client=client_user,
+            specialist=specialist_user.specialist_profile,
+            service=service, rating=3, text='Так себе',
+        )
+        url = f'{REVIEWS_URL}{review.id}/reply/'
+        response = pro_api.post(url, {'text': 'Спасибо за отзыв!'}, format='json')
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['specialist_reply'] == 'Спасибо за отзыв!'
+
+    def test_reply_wrong_specialist(self, specialist_user, client_user, service, db):
+        other_spec = User.objects.create_user(
+            username='other_spec', password='pass', role='specialist', phone='+79990600055',
+        )
+        pro_api = APIClient()
+        pro_api.defaults['HTTP_X_APP_TYPE'] = 'pro'
+        pro_api.force_authenticate(user=other_spec)
+
+        appt = _make_appointment(client_user, specialist_user, service)
+        review = Review.objects.create(
+            appointment=appt, client=client_user,
+            specialist=specialist_user.specialist_profile,
+            service=service, rating=2,
+        )
+        response = pro_api.post(f'{REVIEWS_URL}{review.id}/reply/', {'text': 'hi'}, format='json')
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_reply_missing_text(self, specialist_user, client_user, service, db):
+        pro_api = APIClient()
+        pro_api.defaults['HTTP_X_APP_TYPE'] = 'pro'
+        pro_api.force_authenticate(user=specialist_user)
+
+        appt = _make_appointment(client_user, specialist_user, service)
+        review = Review.objects.create(
+            appointment=appt, client=client_user,
+            specialist=specialist_user.specialist_profile,
+            service=service, rating=4,
+        )
+        response = pro_api.post(f'{REVIEWS_URL}{review.id}/reply/', {}, format='json')
+        assert response.status_code == status.HTTP_400_BAD_REQUEST

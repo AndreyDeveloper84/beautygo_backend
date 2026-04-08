@@ -125,6 +125,7 @@ class TestPaymentCreate:
         assert 'payment_id' in data
         assert 'confirmation_url' in data
         assert data['confirmation_url'] == 'https://yookassa.ru/pay/test'
+        assert data['amount'] == 2000.0
 
         # Payment record created
         assert Payment.objects.filter(appointment=appt).count() == 1
@@ -221,12 +222,25 @@ class TestPaymentDetail:
         appt = _make_appointment(client_user, specialist_user, service)
         payment = Payment.objects.create(
             appointment=appt, amount=appt.price,
+            status=Payment.Status.PAID,
             provider='yookassa', provider_payment_id='pay_123',
         )
         url = f'/api/v1/payments/{payment.id}/'
         response = client_app.get(url)
         assert response.status_code == status.HTTP_200_OK
-        assert response.data['data']['id'] == str(payment.id)
+        data = response.data['data']
+        assert data['id'] == str(payment.id)
+        # Spec fields present
+        assert data['appointment_id'] == str(appt.id)
+        assert data['client_id'] == str(client_user.id)
+        assert data['external_id'] == 'pay_123'
+        assert data['status'] == 'succeeded'  # paid → succeeded
+        assert data['completed_at'] is not None
+        assert data['provider'] == 'yookassa'
+        # Internal fields NOT exposed
+        assert 'provider_payment_id' not in data
+        assert 'specialist_income' not in data
+        assert 'platform_fee' not in data
 
     def test_get_payment_not_found(self, client_app):
         response = client_app.get(f'/api/v1/payments/{uuid.uuid4()}/')

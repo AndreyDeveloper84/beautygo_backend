@@ -6,6 +6,18 @@ from rest_framework import serializers
 from .models import Review
 
 
+class ReviewUpdateSerializer(serializers.Serializer):
+    """PATCH /api/v1/reviews/{id}/ — edit text only."""
+    text = serializers.CharField(
+        required=False, allow_blank=True, max_length=1000,
+    )
+
+
+class ReviewReplySerializer(serializers.Serializer):
+    """POST /api/v1/reviews/{id}/reply/ — specialist reply."""
+    text = serializers.CharField(max_length=1000)
+
+
 class ReviewCreateSerializer(serializers.Serializer):
     """POST /api/v1/reviews/ — input validation."""
     appointment_id = serializers.UUIDField()

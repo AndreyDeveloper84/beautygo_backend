@@ -92,8 +92,8 @@ class TestVerifyOTPView:
         logger.info("Verify OTP response %s: keys=%s", response.status_code, list(response.data.get('data', {}).keys()))
         assert response.status_code == status.HTTP_200_OK
         data = response.data['data']
-        assert 'access' in data
-        assert 'refresh' in data
+        assert 'access_token' in data
+        assert 'refresh_token' in data
         assert data['user']['phone'] == client_user.phone
 
     def test_verify_otp_wrong_code(self, api_client, client_user, settings):
@@ -133,9 +133,9 @@ class TestLogoutView:
         tokens = resp.data['data']
         logger.info("Got tokens, performing logout")
         # Logout
-        api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens['access']}")
+        api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens['access_token']}")
         url = reverse('logout')
-        response = api_client.post(url, {'refresh': tokens['refresh']})
+        response = api_client.post(url, {'refresh': tokens['refresh_token']})
         logger.info("Logout response %s", response.status_code)
         assert response.status_code == status.HTTP_200_OK
 
@@ -187,7 +187,7 @@ class TestDeviceId:
         assert response.status_code == status.HTTP_200_OK
         # Decode the access token to check device_id
         import jwt
-        access = response.data['data']['access']
+        access = response.data['data']['access_token']
         payload = jwt.decode(access, options={"verify_signature": False})
         logger.info("Token payload device_id=%s", payload.get('device_id'))
         assert payload.get('device_id') == 'iphone-abc-123'
@@ -202,7 +202,7 @@ class TestDeviceId:
             'code': '0000',
             'device_id': 'device-original',
         })
-        token = resp.data['data']['access']
+        token = resp.data['data']['access_token']
         # Request with different device_id
         api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
         response = api_client.get(
@@ -223,7 +223,7 @@ class TestDeviceId:
             'phone': client_user.phone,
             'code': '0000',
         })
-        token = resp.data['data']['access']
+        token = resp.data['data']['access_token']
         api_client.credentials(HTTP_AUTHORIZATION=f"Bearer {token}")
         response = api_client.get(reverse('user-me'))
         assert response.status_code == status.HTTP_200_OK
@@ -629,8 +629,8 @@ class TestSendOTPView:
         assert response.status_code == status.HTTP_200_OK
         data = response.data['data']
         assert data['is_new_user'] is True
-        assert 'access' in data
-        assert 'refresh' in data
+        assert 'access_token' in data
+        assert 'refresh_token' in data
 
     def test_verify_otp_existing_user_not_new(
         self, api_client, client_user, settings,
@@ -669,7 +669,7 @@ class TestCompleteProfileView:
             {'phone': phone, 'code': '0000'},
             HTTP_X_APP_TYPE='client',
         )
-        token = resp.data['data']['access']
+        token = resp.data['data']['access_token']
         api_client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
         response = api_client.post(
             self.URL,

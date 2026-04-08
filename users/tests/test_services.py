@@ -154,8 +154,8 @@ class TestAuthService:
         self.service.register('+79007000005', 'client')
         tokens = self.service.verify_and_get_tokens('+79007000005', '0000')
         logger.info("Tokens received: keys=%s", list(tokens.keys()))
-        assert 'access' in tokens
-        assert 'refresh' in tokens
+        assert 'access_token' in tokens
+        assert 'refresh_token' in tokens
         assert tokens['user']['phone'] == '+79007000005'
         assert tokens['user']['is_verified'] is True
         # Check user is now verified in DB

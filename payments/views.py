@@ -75,7 +75,7 @@ class PaymentCreateView(APIView):
                 {
                     'payment_id': str(existing.id),
                     'confirmation_url': existing.provider_client_secret,
-                    'status': existing.status,
+                    'amount': float(existing.amount),
                 },
                 status_code=200,
             )
@@ -128,7 +128,7 @@ class PaymentCreateView(APIView):
             {
                 'payment_id': str(payment.id),
                 'confirmation_url': result['confirmation_url'],
-                'status': payment.status,
+                'amount': float(payment.amount),
             },
             status_code=201,
         )
