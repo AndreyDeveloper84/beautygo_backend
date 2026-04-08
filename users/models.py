@@ -16,6 +16,14 @@ class User(AbstractUser):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
     phone = models.CharField(max_length=20, unique=True, null=True, blank=True)
     is_verified = models.BooleanField(default=False)
+    is_guest = models.BooleanField(
+        default=False,
+        help_text="Anonymous (guest) user created on first app launch without registration",
+    )
+    onboarding_completed = models.BooleanField(
+        default=False,
+        help_text="User has completed the onboarding flow (name + location saved)",
+    )
     deleted_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
@@ -203,3 +211,42 @@ class DeviceToken(models.Model):
 
     def __str__(self):
         return f"{self.user.username} ({self.app_type}/{self.platform})"
+
+
+class AnonymousSession(models.Model):
+    """
+    Tracks anonymous (guest) JWT sessions created before registration.
+
+    One session per device_id. When the user signs up/logs in and provides
+    the anonymous_token, the session is merged into the real account.
+    """
+
+    class Platform(models.TextChoices):
+        IOS = "ios", "iOS"
+        ANDROID = "android", "Android"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    device_id = models.UUIDField(unique=True, db_index=True)
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='anonymous_session',
+    )
+    platform = models.CharField(max_length=10, choices=Platform.choices)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Anonymous Session'
+        verbose_name_plural = 'Anonymous Sessions'
+        indexes = [
+            models.Index(fields=['device_id']),
+            models.Index(fields=['expires_at']),
+        ]
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() > self.expires_at
+
+    def __str__(self):
+        return f"AnonSession device={self.device_id} platform={self.platform}"

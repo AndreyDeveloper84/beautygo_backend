@@ -34,9 +34,10 @@ class LoginSerializer(PhoneSerializer):
 
 
 class VerifyOTPSerializer(PhoneSerializer):
-    """Verify OTP: phone + code + optional device_id."""
+    """Verify OTP: phone + code + optional device_id + optional anonymous_token for merge."""
     code = serializers.CharField(max_length=6, min_length=4)
     device_id = serializers.CharField(max_length=255, required=False)
+    anonymous_token = serializers.CharField(required=False, allow_blank=True)
 
     def validate_code(self, value):
         if not value.isdigit():
@@ -124,19 +125,6 @@ class ClientProfileSerializer(serializers.ModelSerializer):
         return value
 
 
-# --- Account deletion ---
-
-class DeleteAccountSerializer(serializers.Serializer):
-    """Validate account deletion request."""
-    confirmation = serializers.CharField()
-    reason = serializers.CharField(required=False, default="")
-
-    def validate_confirmation(self, value):
-        if value != "DELETE":
-            raise serializers.ValidationError(
-                "Для подтверждения удаления передайте 'DELETE'"
-            )
-        return value
 
 
 # --- Social Auth serializers ---
@@ -242,3 +230,39 @@ class SpecialistProfileDetailSerializer(serializers.ModelSerializer):
 
     def get_services_count(self, obj):
         return obj.services.count()
+
+
+# --- Auth v2 serializers (DRF-173) ---
+
+class AnonymousAuthSerializer(serializers.Serializer):
+    """POST /auth/anonymous — create/retrieve anonymous session."""
+    device_id = serializers.UUIDField()
+    platform = serializers.ChoiceField(choices=['ios', 'android'])
+
+
+class OnboardingSerializer(serializers.Serializer):
+    """POST /auth/onboarding — save name + geo, complete onboarding."""
+    first_name = serializers.CharField(min_length=2, max_length=150)
+    last_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default='')
+    lat = serializers.DecimalField(
+        max_digits=9, decimal_places=6, required=False, allow_null=True,
+    )
+    lon = serializers.DecimalField(
+        max_digits=9, decimal_places=6, required=False, allow_null=True,
+    )
+
+    def validate_first_name(self, value):
+        return value.strip()
+
+
+class DeleteAccountSerializer(serializers.Serializer):
+    """DELETE /users/me — soft delete account. otp_code optional for extra verification."""
+    reason = serializers.CharField(required=False, allow_blank=True, default='')
+    otp_code = serializers.CharField(
+        max_length=6, min_length=4, required=False, allow_blank=True,
+    )
+
+    def validate_otp_code(self, value):
+        if value and not value.isdigit():
+            raise serializers.ValidationError("OTP code must be numeric.")
+        return value
