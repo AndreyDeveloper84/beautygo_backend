@@ -221,6 +221,31 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             )
         return success_response(AppointmentDetailSerializer(appointment).data)
 
+    # -- Status (spec-compliant: PATCH /appointments/{id}/status/) ----------
+
+    @action(detail=True, methods=['patch'], url_path='status')
+    def update_status(self, request: Request, pk: Any = None) -> Response:
+        """
+        PATCH /appointments/{id}/status/ — spec-compliant status update.
+        Delegates to cancel or complete based on requested status.
+        """
+        status_value = request.data.get('status')
+        if not status_value:
+            return error_response(
+                "VALIDATION_ERROR", "status field is required.", status_code=400,
+            )
+
+        if status_value == 'cancelled':
+            return self.cancel(request, pk=pk)
+        if status_value == 'completed':
+            return self.complete(request, pk=pk)
+
+        return error_response(
+            "INVALID_STATUS_TRANSITION",
+            f"Cannot transition to '{status_value}' via this endpoint.",
+            status_code=400,
+        )
+
     # -- Reschedule (via booking engine) ------------------------------------
 
     @action(detail=True, methods=['post'])

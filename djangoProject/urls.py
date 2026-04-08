@@ -20,6 +20,7 @@ urlpatterns = [
 
     # API v1
     path('api/v1/auth/', include('users.urls')),
+    path('api/v1/users/', include('users.users_urls')),
     path('api/v1/services/', include('services.urls')),
     path('api/v1/categories/', include('services.categories_urls')),
     path('api/v1/specialists/', include('users.specialists_urls')),
@@ -29,6 +30,7 @@ urlpatterns = [
 
     # Health
     path('api/v1/health/', health_check, name='health-check'),
+    path('api/v1/health/ready/', health_check, name='health-ready'),
 
     # API Documentation
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
