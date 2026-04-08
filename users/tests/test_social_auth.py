@@ -275,7 +275,7 @@ class TestBindPhone:
         ):
             response = client_app.post(
                 BIND_PHONE_URL,
-                {'phone': '+79001112233', 'code': '000000'},
+                {'phone': '+79001112233', 'code': '0000'},
                 format='json',
             )
         assert response.status_code == status.HTTP_200_OK
@@ -286,7 +286,7 @@ class TestBindPhone:
     def test_bind_phone_unauthenticated(self, client_app):
         response = client_app.post(
             BIND_PHONE_URL,
-            {'phone': '+79001112233', 'code': '000000'},
+            {'phone': '+79001112233', 'code': '0000'},
             format='json',
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
@@ -298,7 +298,7 @@ class TestBindPhone:
         client_app.force_authenticate(user=user)
         response = client_app.post(
             BIND_PHONE_URL,
-            {'phone': '+79001112233', 'code': '000000'},
+            {'phone': '+79001112233', 'code': '0000'},
             format='json',
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST

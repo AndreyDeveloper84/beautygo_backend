@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 
+from django.conf import settings
 import rest_framework.parsers
 from rest_framework import generics, permissions
 from rest_framework.request import Request
@@ -85,6 +86,39 @@ class LoginView(APIView):
             return success_response({"message": "OTP sent"})
         except AuthError as e:
             return error_response(e.code, str(e), status_code=e.status_code)
+
+
+class SendOTPView(APIView):
+    """POST /api/v1/auth/send-otp/ — Unified: register or login + send OTP."""
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request: Request) -> Response:
+        serializer = RegisterPhoneSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+
+        phone = serializer.validated_data['phone']
+        auth_service = AuthService()
+        is_new_user = not User.objects.filter(phone=phone).exists()
+        try:
+            if is_new_user:
+                auth_service.register(
+                    phone=phone,
+                    app_type=getattr(request, 'app_type', 'client'),
+                )
+            else:
+                auth_service.login(phone=phone)
+        except AuthError as e:
+            return error_response(e.code, str(e), status_code=e.status_code)
+
+        return success_response({
+            "expires_in": settings.OTP_EXPIRY_MINUTES * 60,
+            "retry_after": settings.OTP_RATE_LIMIT_SECONDS,
+            "is_new_user": is_new_user,
+        })
 
 
 class VerifyOTPView(APIView):
@@ -181,6 +215,41 @@ class SendCodeView(APIView):
             return success_response({"message": "OTP sent"})
         except AuthError as e:
             return error_response(e.code, str(e), status_code=e.status_code)
+
+
+# --- Complete Profile View ---
+
+class CompleteProfileView(APIView):
+    """POST /api/v1/auth/complete-profile/ — Complete registration for new users."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request: Request) -> Response:
+        first_name = (request.data.get('first_name') or '').strip()
+        last_name = (request.data.get('last_name') or '').strip()
+
+        if not first_name or len(first_name) < 2:
+            return error_response(
+                "VALIDATION_ERROR",
+                "first_name is required (min 2 chars)",
+                status_code=400,
+            )
+
+        user = request.user
+        user.first_name = first_name
+        user.last_name = last_name
+        user.save(update_fields=['first_name', 'last_name'])
+
+        profile, _ = Profile.objects.get_or_create(user=user)
+        profile.full_name = f"{first_name} {last_name}".strip()
+        profile.save(update_fields=['full_name'])
+
+        return success_response({
+            "id": str(user.pk),
+            "phone": user.phone,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "role": user.role,
+        })
 
 
 # --- Specialist Profile Views ---
