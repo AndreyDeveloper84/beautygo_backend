@@ -12,11 +12,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from appointments.models import Appointment
-from users.permissions import IsClient
 from users.response import error_response, success_response
 
+from users.permissions import IsClient, IsSpecialist
 from .models import Review
-from .serializers import ReviewCreateSerializer, ReviewDetailSerializer, ReviewListSerializer
+from .serializers import (
+    ReviewCreateSerializer, ReviewDetailSerializer,
+    ReviewListSerializer, ReviewReplySerializer, ReviewUpdateSerializer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +98,9 @@ class ReviewCreateView(APIView):
         # Check for duplicate
         if Review.objects.filter(appointment=appointment).exists():
             return error_response(
-                "REVIEW_ALREADY_EXISTS",
+                "REVIEW_EXISTS",
                 "A review for this appointment already exists.",
-                status_code=400,
+                status_code=409,
             )
 
         with transaction.atomic():
@@ -165,3 +168,65 @@ class SpecialistReviewsView(APIView):
                 'pages': paginator.page.paginator.num_pages,
             },
         )
+
+
+class ReviewUpdateView(APIView):
+    """
+    PATCH /api/v1/reviews/{id}/
+
+    Client edits their own review (text only).
+    """
+    permission_classes = [permissions.IsAuthenticated, IsClient]
+
+    def patch(self, request: Request, pk) -> Response:
+        try:
+            review = Review.objects.select_related('service').get(
+                id=pk, client=request.user,
+            )
+        except Review.DoesNotExist:
+            return error_response("NOT_FOUND", "Review not found.", status_code=404)
+
+        serializer = ReviewUpdateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+
+        review.text = serializer.validated_data.get('text', review.text)
+        review.save(update_fields=['text', 'updated_at'])
+
+        return success_response(ReviewDetailSerializer(review).data)
+
+
+class ReviewReplyView(APIView):
+    """
+    POST /api/v1/reviews/{id}/reply/
+
+    Specialist replies to a review about them.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsSpecialist]
+
+    def post(self, request: Request, pk) -> Response:
+        try:
+            review = Review.objects.select_related(
+                'specialist__user', 'service',
+            ).get(id=pk)
+        except Review.DoesNotExist:
+            return error_response("NOT_FOUND", "Review not found.", status_code=404)
+
+        # Only the specialist this review is about can reply
+        if review.specialist.user_id != request.user.id:
+            return error_response("FORBIDDEN", "Access denied.", status_code=403)
+
+        serializer = ReviewReplySerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+
+        review.specialist_reply = serializer.validated_data['text']
+        review.save(update_fields=['specialist_reply', 'updated_at'])
+
+        return success_response(ReviewDetailSerializer(review).data)
