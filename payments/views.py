@@ -1,0 +1,307 @@
+"""Payments API views — YooKassa integration."""
+from __future__ import annotations
+
+import logging
+from uuid import uuid4
+
+from django.db import transaction
+from rest_framework import permissions
+from rest_framework.request import Request
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from appointments.models import Appointment, Payment
+from users.permissions import IsClient
+from users.response import error_response, success_response
+
+from .serializers import PaymentCreateSerializer, PaymentDetailSerializer, PaymentRefundSerializer
+from .services import YooKassaService
+
+logger = logging.getLogger(__name__)
+
+
+def _get_yookassa() -> YooKassaService:
+    return YooKassaService()
+
+
+class PaymentCreateView(APIView):
+    """
+    POST /api/v1/payments/create
+
+    Client creates a payment for their appointment.
+    Returns confirmation_url to redirect the user to YooKassa checkout.
+    Two-stage: payment is held (not captured) until appointment is completed.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsClient]
+
+    def post(self, request: Request) -> Response:
+        serializer = PaymentCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                'VALIDATION_ERROR', 'Invalid input',
+                details=serializer.errors, status_code=400,
+            )
+
+        appointment_id = serializer.validated_data['appointment_id']
+        return_url = serializer.validated_data['return_url']
+
+        # Fetch appointment owned by this client
+        try:
+            appointment = (
+                Appointment.objects
+                .select_related('specialist', 'service')
+                .get(id=appointment_id, client=request.user)
+            )
+        except Appointment.DoesNotExist:
+            return error_response('NOT_FOUND', 'Appointment not found.', status_code=404)
+
+        # Only pending / awaiting_payment appointments can be paid
+        if appointment.status not in (
+            Appointment.Status.PENDING,
+            Appointment.Status.AWAITING_PAYMENT,
+        ):
+            return error_response(
+                'INVALID_STATUS',
+                f'Cannot pay for appointment in status "{appointment.status}".',
+                status_code=422,
+            )
+
+        # Idempotency: return existing pending payment if one exists
+        existing = appointment.payments.filter(
+            status=Payment.Status.PENDING,
+        ).order_by('-created_at').first()
+        if existing and existing.provider_payment_id:
+            return success_response(
+                {
+                    'payment_id': str(existing.id),
+                    'confirmation_url': existing.provider_client_secret,
+                    'status': existing.status,
+                },
+                status_code=200,
+            )
+
+        idempotency_key = request.META.get('HTTP_X_IDEMPOTENCY_KEY', str(uuid4()))
+        description = (
+            f'BeautyGO: {appointment.service.name} у {appointment.specialist.display_name}'
+        )
+
+        try:
+            svc = _get_yookassa()
+            result = svc.create_payment(
+                amount=appointment.price,
+                appointment_id=appointment.id,
+                description=description,
+                return_url=return_url,
+                idempotency_key=idempotency_key,
+                capture=False,  # two-stage: hold first
+            )
+        except Exception as exc:
+            logger.error('YooKassa create_payment failed: %s', exc)
+            return error_response(
+                'PAYMENT_PROVIDER_ERROR',
+                'Payment provider error. Please try again.',
+                status_code=502,
+            )
+
+        with transaction.atomic():
+            payment = Payment.objects.create(
+                appointment=appointment,
+                amount=appointment.price,
+                status=Payment.Status.PENDING,
+                specialist_income=result['specialist_income'],
+                platform_fee=result['platform_fee'],
+                provider='yookassa',
+                provider_payment_id=result['provider_payment_id'],
+                provider_client_secret=result['confirmation_url'],
+            )
+            # Move appointment to awaiting_payment
+            if appointment.status == Appointment.Status.PENDING:
+                appointment.status = Appointment.Status.AWAITING_PAYMENT
+                appointment.save(update_fields=['status'])
+
+        logger.info(
+            'Payment created: payment_id=%s appointment_id=%s amount=%s',
+            payment.id, appointment.id, payment.amount,
+        )
+
+        return success_response(
+            {
+                'payment_id': str(payment.id),
+                'confirmation_url': result['confirmation_url'],
+                'status': payment.status,
+            },
+            status_code=201,
+        )
+
+
+class PaymentDetailView(APIView):
+    """GET /api/v1/payments/{id} — payment status."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request: Request, pk) -> Response:
+        try:
+            payment = (
+                Payment.objects
+                .select_related('appointment__client', 'appointment__specialist')
+                .get(id=pk)
+            )
+        except Payment.DoesNotExist:
+            return error_response('NOT_FOUND', 'Payment not found.', status_code=404)
+
+        # Only the appointment's client or the specialist can view
+        appt = payment.appointment
+        user = request.user
+        if not (
+            appt.client_id == user.id
+            or (user.is_specialist and appt.specialist.user_id == user.id)
+        ):
+            return error_response('FORBIDDEN', 'Access denied.', status_code=403)
+
+        return success_response(PaymentDetailSerializer(payment).data)
+
+
+class PaymentWebhookView(APIView):
+    """
+    POST /api/v1/payments/webhook
+
+    YooKassa webhook receiver. Idempotent — re-delivery of the same event
+    is detected via last_webhook_event_id.
+
+    Verification strategy: re-fetch payment from YooKassa API rather than
+    trusting the webhook payload alone (recommended by YooKassa docs).
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request: Request) -> Response:
+        event = request.data.get('event')
+        obj = request.data.get('object', {})
+        provider_payment_id = obj.get('id', '')
+        event_id = request.META.get('HTTP_X_REQUEST_ID', f'{event}:{provider_payment_id}')
+
+        if not event or not provider_payment_id:
+            return Response({'status': 'ignored'}, status=200)
+
+        try:
+            payment = Payment.objects.select_related(
+                'appointment',
+            ).get(provider_payment_id=provider_payment_id)
+        except Payment.DoesNotExist:
+            # Unknown payment — could be a test notification; acknowledge silently
+            return Response({'status': 'ok'}, status=200)
+
+        # Idempotency: skip if we already processed this event
+        if payment.last_webhook_event_id == event_id:
+            return Response({'status': 'duplicate'}, status=200)
+
+        # Verify payment state against YooKassa (do not trust payload alone)
+        try:
+            svc = _get_yookassa()
+            info = svc.get_payment_info(provider_payment_id)
+        except Exception as exc:
+            logger.error('YooKassa get_payment_info failed: %s', exc)
+            # Return 200 to stop YooKassa retries; we'll reconcile later
+            return Response({'status': 'ok'}, status=200)
+
+        yookassa_status = info['status']
+
+        with transaction.atomic():
+            if event == 'payment.waiting_for_capture' and yookassa_status == 'waiting_for_capture':
+                payment.status = Payment.Status.AUTHORIZED
+                payment.appointment.status = Appointment.Status.CONFIRMED
+                payment.appointment.save(update_fields=['status'])
+
+            elif event == 'payment.succeeded' and yookassa_status == 'succeeded':
+                payment.status = Payment.Status.PAID
+
+            elif event == 'payment.canceled' and yookassa_status == 'canceled':
+                payment.status = Payment.Status.FAILED
+                if payment.appointment.status not in Appointment.TERMINAL_STATUSES:
+                    payment.appointment.status = Appointment.Status.CANCELLED
+                    payment.appointment.save(update_fields=['status'])
+
+            elif event == 'refund.succeeded':
+                refunded_val = info.get('refunded_amount', payment.amount)
+                payment.refunded_amount = refunded_val
+                if refunded_val >= payment.amount:
+                    payment.status = Payment.Status.REFUNDED
+                else:
+                    payment.status = Payment.Status.PARTIALLY_REFUNDED
+
+            payment.last_webhook_event_id = event_id
+            payment.save()
+
+        logger.info('Webhook processed: event=%s payment=%s', event, payment.id)
+        return Response({'status': 'ok'}, status=200)
+
+
+class PaymentRefundView(APIView):
+    """
+    POST /api/v1/payments/{id}/refund
+
+    Issue a full or partial refund. The appointment must be cancelled first,
+    or the specialist/admin initiates it. For MVP: only the appointment's
+    client can request a refund.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsClient]
+
+    def post(self, request: Request, pk) -> Response:
+        try:
+            payment = Payment.objects.select_related('appointment').get(id=pk)
+        except Payment.DoesNotExist:
+            return error_response('NOT_FOUND', 'Payment not found.', status_code=404)
+
+        if payment.appointment.client_id != request.user.id:
+            return error_response('FORBIDDEN', 'Access denied.', status_code=403)
+
+        if payment.status not in (Payment.Status.AUTHORIZED, Payment.Status.PAID):
+            return error_response(
+                'REFUND_NOT_ALLOWED',
+                f'Cannot refund payment in status "{payment.status}".',
+                status_code=422,
+            )
+
+        serializer = PaymentRefundSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                'VALIDATION_ERROR', 'Invalid input',
+                details=serializer.errors, status_code=400,
+            )
+
+        refund_amount = serializer.validated_data.get('amount') or payment.net_amount
+        if refund_amount > payment.net_amount:
+            return error_response(
+                'REFUND_AMOUNT_EXCEEDS_PAID',
+                'Refund amount exceeds the net paid amount.',
+                status_code=422,
+            )
+
+        idempotency_key = request.META.get('HTTP_X_IDEMPOTENCY_KEY', str(uuid4()))
+
+        try:
+            svc = _get_yookassa()
+            svc.refund_payment(
+                provider_payment_id=payment.provider_payment_id,
+                amount=refund_amount,
+                idempotency_key=idempotency_key,
+            )
+        except Exception as exc:
+            logger.error('YooKassa refund_payment failed: %s', exc)
+            return error_response(
+                'PAYMENT_PROVIDER_ERROR',
+                'Payment provider error. Please try again.',
+                status_code=502,
+            )
+
+        with transaction.atomic():
+            payment.refunded_amount += refund_amount
+            if payment.refunded_amount >= payment.amount:
+                payment.status = Payment.Status.REFUNDED
+            else:
+                payment.status = Payment.Status.PARTIALLY_REFUNDED
+            payment.save(update_fields=['status', 'refunded_amount', 'updated_at'])
+
+        logger.info(
+            'Refund issued: payment_id=%s amount=%s', payment.id, refund_amount,
+        )
+
+        return success_response(PaymentDetailSerializer(payment).data)

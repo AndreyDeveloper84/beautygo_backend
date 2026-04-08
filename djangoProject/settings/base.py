@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     'services',
     'appointments',
     'reviews',
+    'payments',
 ]
 
 AUTH_USER_MODEL = 'users.User'
@@ -283,3 +284,8 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID") or None
 APPLE_CLIENT_ID = os.environ.get("APPLE_CLIENT_ID") or None
 VK_CLIENT_SECRET = os.environ.get("VK_CLIENT_SECRET") or None
 YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID") or None
+
+# YooKassa Payment Settings
+YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
+YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
+YOOKASSA_AGENT_ID = os.environ.get("YOOKASSA_AGENT_ID", "")  # Sub-account for split payments
