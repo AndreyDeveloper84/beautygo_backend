@@ -26,6 +26,7 @@ urlpatterns = [
     path('api/v1/specialists/', include('users.specialists_urls')),
     path('api/v1/appointments/', include('appointments.urls')),
     path('api/v1/reviews/', include('reviews.urls')),
+    path('api/v1/payments/', include('payments.urls')),
     path('api/v1/search/', include('search.urls')),
 
     # Health
