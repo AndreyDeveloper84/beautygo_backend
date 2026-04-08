@@ -2,12 +2,14 @@ from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from .views import (
+    AnonymousAuthView,
     BindPhoneView,
     ClientProfileView,
     CompleteProfileView,
     LoginView,
     LogoutView,
     MasterMeView,
+    OnboardingView,
     RegisterPhoneView,
     SendCodeView,
     SendOTPView,
@@ -17,6 +19,10 @@ from .views import (
 )
 
 urlpatterns = [
+    # Auth v2 (DRF-173)
+    path('anonymous/', AnonymousAuthView.as_view(), name='anonymous-auth'),
+    path('onboarding/', OnboardingView.as_view(), name='onboarding'),
+
     # Auth endpoints (phone-based OTP)
     path('register/', RegisterPhoneView.as_view(), name='register'),
     path('login/', LoginView.as_view(), name='login'),

@@ -16,11 +16,13 @@ from .models import Profile, SpecialistProfile, User
 from .permissions import IsClient, IsClientApp, IsProApp, IsSpecialist
 from .response import error_response, success_response
 from .serializers import (
+    AnonymousAuthSerializer,
     BindPhoneSerializer,
     ClientProfileSerializer,
     DeleteAccountSerializer,
     LoginSerializer,
     LogoutSerializer,
+    OnboardingSerializer,
     ProfileSerializer,
     RegisterPhoneSerializer,
     SendCodeSerializer,
@@ -122,7 +124,12 @@ class SendOTPView(APIView):
 
 
 class VerifyOTPView(APIView):
-    """POST /api/v1/auth/verify-otp/ — Verify OTP and get JWT tokens."""
+    """POST /api/v1/auth/verify-otp/ — Verify OTP and get JWT tokens.
+
+    Accepts optional anonymous_token — if provided, merges anonymous session
+    into the authenticated account (AI chat history, etc.).
+    Returns is_new_user and onboarding_completed flags.
+    """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
@@ -140,9 +147,190 @@ class VerifyOTPView(APIView):
                 code=serializer.validated_data['code'],
                 device_id=serializer.validated_data.get('device_id'),
             )
-            return success_response(tokens)
         except AuthError as e:
             return error_response(e.code, str(e), status_code=e.status_code)
+
+        # Merge anonymous session if token provided
+        anonymous_token = serializer.validated_data.get('anonymous_token', '')
+        if anonymous_token:
+            _merge_anonymous_session(anonymous_token, tokens.get('user', {}).get('id'))
+
+        # Add onboarding_completed to response
+        try:
+            user = User.objects.get(phone=serializer.validated_data['phone'])
+            tokens['user']['onboarding_completed'] = user.onboarding_completed
+        except User.DoesNotExist:
+            tokens['user']['onboarding_completed'] = False
+
+        return success_response(tokens)
+
+
+def _merge_anonymous_session(anonymous_token: str, real_user_id) -> None:
+    """
+    Merge anonymous session into the real user account after OTP verification.
+
+    Decodes the anonymous refresh token, finds the ghost user, migrates any
+    related data (AI conversations), then cleans up the anonymous user.
+    Silently ignores invalid/expired tokens.
+    """
+    from rest_framework_simplejwt.tokens import RefreshToken as JWTRefreshToken
+    from rest_framework_simplejwt.exceptions import TokenError
+
+    try:
+        refresh = JWTRefreshToken(anonymous_token)
+        anon_user_id = refresh.get(settings.SIMPLE_JWT.get('USER_ID_CLAIM', 'user_id'))
+        if not anon_user_id:
+            return
+
+        anon_user = User.objects.filter(id=anon_user_id, is_guest=True).first()
+        if not anon_user:
+            return
+
+        real_user = User.objects.filter(id=real_user_id).first() if real_user_id else None
+
+        if real_user:
+            # Migrate AI conversations (stub — ai_assistant app not yet implemented)
+            # Conversation.objects.filter(user=anon_user).update(user=real_user)
+            logger.info(
+                "Merging anonymous user %s into real user %s",
+                anon_user.id, real_user.id,
+            )
+
+        # Blacklist anonymous token
+        try:
+            refresh.blacklist()
+        except Exception:
+            pass
+
+        # Clean up: delete anonymous session and ghost user
+        try:
+            anon_user.anonymous_session.delete()
+        except Exception:
+            pass
+        anon_user.delete()
+
+    except (TokenError, Exception) as e:
+        logger.debug("Anonymous session merge failed (ignored): %s", e)
+
+
+class AnonymousAuthView(APIView):
+    """
+    POST /api/v1/auth/anonymous/ — Issue anonymous JWT for first app launch.
+
+    Idempotent: same device_id returns the same user's token.
+    Allows browsing the catalog without registration.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request: Request) -> Response:
+        from datetime import timedelta
+        from django.utils import timezone as tz
+        from .models import AnonymousSession
+
+        serializer = AnonymousAuthSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+
+        device_id = serializer.validated_data['device_id']
+        platform = serializer.validated_data['platform']
+
+        # Idempotent: return existing session if valid
+        session = AnonymousSession.objects.filter(device_id=device_id).first()
+        if session and not session.is_expired:
+            refresh = RefreshToken.for_user(session.user)
+            return success_response({
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+                "is_anonymous": True,
+            })
+
+        # Create or reuse guest user for this device
+        if session:
+            # Session expired — reuse ghost user
+            anon_user = session.user
+        else:
+            # New device — create ghost user
+            short_id = str(device_id).replace('-', '')[:12]
+            anon_user = User.objects.create(
+                username=f"anon_{short_id}",
+                role='client',
+                is_guest=True,
+                is_verified=False,
+                is_active=True,
+            )
+
+        # TTL: 30 days
+        expires_at = tz.now() + timedelta(days=30)
+
+        # Create or update session
+        AnonymousSession.objects.update_or_create(
+            device_id=device_id,
+            defaults={
+                'user': anon_user,
+                'platform': platform,
+                'expires_at': expires_at,
+            },
+        )
+
+        refresh = RefreshToken.for_user(anon_user)
+        return success_response({
+            "access": str(refresh.access_token),
+            "refresh": str(refresh),
+            "is_anonymous": True,
+        }, status_code=201)
+
+
+class OnboardingView(APIView):
+    """
+    POST /api/v1/auth/onboarding/ — Complete onboarding after OTP verification.
+
+    Saves first_name, last_name, optional lat/lon to profile,
+    marks onboarding_completed = True on the user.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request: Request) -> Response:
+        serializer = OnboardingSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid input",
+                details=serializer.errors, status_code=400,
+            )
+
+        user = request.user
+        data = serializer.validated_data
+
+        user.first_name = data['first_name']
+        user.last_name = data.get('last_name', '')
+        user.onboarding_completed = True
+        user.save(update_fields=['first_name', 'last_name', 'onboarding_completed'])
+
+        profile, _ = Profile.objects.get_or_create(user=user)
+        profile.full_name = f"{data['first_name']} {data.get('last_name', '')}".strip()
+        update_fields = ['full_name']
+
+        lat = data.get('lat')
+        lon = data.get('lon')
+        if lat is not None:
+            profile.default_location_lat = lat
+            update_fields.append('default_location_lat')
+        if lon is not None:
+            profile.default_location_lng = lon
+            update_fields.append('default_location_lng')
+
+        profile.save(update_fields=update_fields)
+
+        return success_response({
+            "id": str(user.pk),
+            "phone": user.phone,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "role": user.role,
+            "onboarding_completed": True,
+        })
 
 
 class LogoutView(APIView):
@@ -398,6 +586,15 @@ class UserMeView(APIView):
                 "VALIDATION_ERROR", "Invalid input",
                 details=serializer.errors, status_code=400,
             )
+
+        # Optional OTP verification before deletion
+        otp_code = serializer.validated_data.get('otp_code', '')
+        if otp_code and request.user.phone:
+            try:
+                from .services import OTPService
+                OTPService().verify_otp(request.user.phone, otp_code)
+            except AuthError as e:
+                return error_response(e.code, str(e), status_code=e.status_code)
 
         from .services import AuthService
         AuthService.delete_account(
