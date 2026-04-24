@@ -259,10 +259,25 @@ class TestSpecialistDetail:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
     def test_slots_endpoint_with_service(self, client_app, active_specialist):
+        from datetime import time as dt_time, timedelta as dt_timedelta
+
         from django.utils import timezone
+
+        from appointments.models import SpecialistWorkingHours
+
         profile = active_specialist.specialist_profile
+        # Seed working hours 09:00-18:00 every day so slots can be generated.
+        for day_of_week in range(7):
+            SpecialistWorkingHours.objects.create(
+                specialist=profile,
+                day_of_week=day_of_week,
+                is_working_day=True,
+                start_time=dt_time(9, 0),
+                end_time=dt_time(18, 0),
+            )
+
         service = profile.services.first()
-        tomorrow = (timezone.localdate() + timezone.timedelta(days=1)).isoformat()
+        tomorrow = (timezone.localdate() + dt_timedelta(days=1)).isoformat()
         url = f'{SPECIALISTS_URL}{profile.pk}/slots/?service_id={service.pk}&date={tomorrow}'
         response = client_app.get(url)
         assert response.status_code == status.HTTP_200_OK
@@ -276,3 +291,126 @@ class TestSpecialistDetail:
         assert response.status_code == status.HTTP_200_OK
         assert response.data['data'] == []
         assert response.data['meta']['count'] == 0
+
+
+@pytest.mark.django_db
+class TestSlotsRespectsWorkingHours:
+    """Regression tests for ln-624 #1 — /specialists/{id}/slots/ must
+    delegate to AvailabilityQueryService so SpecialistWorkingHours and
+    SpecialistTimeOff are honoured (not hardcoded 09:00-18:00)."""
+
+    def _next_weekday(self, weekday: int):
+        """Return the next calendar date falling on the given weekday (0=Mon)."""
+        from datetime import timedelta as dt_timedelta
+        from django.utils import timezone
+        today = timezone.localdate()
+        delta = (weekday - today.weekday()) % 7 or 7
+        return today + dt_timedelta(days=delta)
+
+    def test_slots_respect_custom_working_hours(
+        self, client_app, active_specialist,
+    ):
+        """A specialist who works 14:00-20:00 must not get 09:00-13:30 slots."""
+        from datetime import time as dt_time
+        from appointments.models import SpecialistWorkingHours
+
+        profile = active_specialist.specialist_profile
+        for day_of_week in range(7):
+            SpecialistWorkingHours.objects.create(
+                specialist=profile,
+                day_of_week=day_of_week,
+                is_working_day=True,
+                start_time=dt_time(14, 0),
+                end_time=dt_time(20, 0),
+            )
+
+        service = profile.services.first()
+        target_date = self._next_weekday(0).isoformat()  # a Monday
+        url = (
+            f'{SPECIALISTS_URL}{profile.pk}/slots/'
+            f'?service_id={service.pk}&date={target_date}'
+        )
+        response = client_app.get(url)
+        assert response.status_code == status.HTTP_200_OK
+
+        slots = response.data['slots']
+        assert len(slots) > 0
+        # No slot may start before 14:00 specialist-local.
+        for slot_iso in slots:
+            hour = int(slot_iso[11:13])
+            assert hour >= 14, f"slot {slot_iso} violates 14:00 start time"
+
+    def test_slots_empty_on_non_working_day(
+        self, client_app, active_specialist,
+    ):
+        """Sunday off → /slots/ returns [] for a Sunday, not 18 fantom slots."""
+        from datetime import time as dt_time
+        from appointments.models import SpecialistWorkingHours
+
+        profile = active_specialist.specialist_profile
+        # Working Mon-Sat 10-18, Sunday off (no row created).
+        for day_of_week in range(6):
+            SpecialistWorkingHours.objects.create(
+                specialist=profile,
+                day_of_week=day_of_week,
+                is_working_day=True,
+                start_time=dt_time(10, 0),
+                end_time=dt_time(18, 0),
+            )
+
+        service = profile.services.first()
+        sunday = self._next_weekday(6).isoformat()
+        url = (
+            f'{SPECIALISTS_URL}{profile.pk}/slots/'
+            f'?service_id={service.pk}&date={sunday}'
+        )
+        response = client_app.get(url)
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['slots'] == []
+
+    def test_slots_exclude_time_off_interval(
+        self, client_app, active_specialist,
+    ):
+        """An active SpecialistTimeOff overlapping the day must remove slots."""
+        from datetime import datetime as dt_datetime, time as dt_time, timezone as dt_tz
+        from zoneinfo import ZoneInfo
+        from appointments.models import SpecialistTimeOff, SpecialistWorkingHours
+
+        profile = active_specialist.specialist_profile
+        for day_of_week in range(7):
+            SpecialistWorkingHours.objects.create(
+                specialist=profile,
+                day_of_week=day_of_week,
+                is_working_day=True,
+                start_time=dt_time(9, 0),
+                end_time=dt_time(18, 0),
+            )
+
+        tz = ZoneInfo(profile.timezone)
+        target = self._next_weekday(0)  # any working day
+        # Time-off 12:00-14:00 specialist-local on that day.
+        SpecialistTimeOff.objects.create(
+            specialist=profile,
+            start_at=dt_datetime.combine(target, dt_time(12, 0), tzinfo=tz).astimezone(dt_tz.utc),
+            end_at=dt_datetime.combine(target, dt_time(14, 0), tzinfo=tz).astimezone(dt_tz.utc),
+            reason='lunch',
+        )
+
+        service = profile.services.first()
+        url = (
+            f'{SPECIALISTS_URL}{profile.pk}/slots/'
+            f'?service_id={service.pk}&date={target.isoformat()}'
+        )
+        response = client_app.get(url)
+        assert response.status_code == status.HTTP_200_OK
+
+        slots = response.data['slots']
+        assert len(slots) > 0
+        # No slot start may fall inside 12:00-14:00.
+        for slot_iso in slots:
+            hour = int(slot_iso[11:13])
+            minute = int(slot_iso[14:16])
+            minutes_of_day = hour * 60 + minute
+            assert not (720 <= minutes_of_day < 840), (
+                f"slot {slot_iso} falls inside 12:00-14:00 time-off"
+            )
