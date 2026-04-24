@@ -763,3 +763,44 @@ class TestAuthThrottling:
                 f"/users/me/ throttled on request #{i + 1}; "
                 "auth scope should not apply here"
             )
+
+
+@pytest.mark.django_db
+class TestAuthSensitiveThrottling:
+    """Regression tests for M3+M4 — endpoints that consume an OTP must
+    throttle on the stricter ``auth_sensitive`` scope (5/min), not the
+    standard ``auth`` scope (10/min). 10 guesses/min against a 4-digit
+    OTP halves the search space every minute if unbounded."""
+
+    def test_user_me_delete_throttles_at_6th_request(
+        self, authenticated_client,
+    ):
+        """DELETE /users/me/ — path that calls consume_otp — caps at 5/min."""
+        url = reverse('user-me')
+        # 5 requests pass.
+        for i in range(5):
+            response = authenticated_client.delete(
+                url, {'otp_code': '0000'}, format='json',
+            )
+            assert response.status_code != status.HTTP_429_TOO_MANY_REQUESTS, (
+                f"DELETE /users/me/ throttled on request #{i + 1}; "
+                "expected first 5 to pass"
+            )
+        # 6th blocked.
+        response = authenticated_client.delete(
+            url, {'otp_code': '0000'}, format='json',
+        )
+        assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+
+    def test_user_me_get_not_affected(self, authenticated_client):
+        """GET /users/me/ must not adopt the sensitive scope — it would
+        break normal profile-read traffic (expected ~120/min user bucket)."""
+        url = reverse('user-me')
+        # 10 GETs >> the 5/min sensitive cap; must still pass under the
+        # default user-rate bucket.
+        for i in range(10):
+            response = authenticated_client.get(url)
+            assert response.status_code != status.HTTP_429_TOO_MANY_REQUESTS, (
+                f"GET /users/me/ throttled on request #{i + 1}; "
+                "auth_sensitive scope leaked to GET"
+            )
