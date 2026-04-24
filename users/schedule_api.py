@@ -214,11 +214,7 @@ class ScheduleView(APIView):
             )
 
         serializer = SchedulePutSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         schedule_data = serializer.validated_data['schedule']
 
@@ -256,11 +252,7 @@ class ScheduleView(APIView):
             )
 
         serializer = SchedulePatchSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         for item in serializer.validated_data['schedule']:
             SpecialistWorkingHours.objects.update_or_create(
@@ -336,11 +328,7 @@ class TimeOffListView(APIView):
             )
 
         serializer = TimeOffCreateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         start_at = serializer.validated_data['start_at']
         end_at = serializer.validated_data['end_at']
