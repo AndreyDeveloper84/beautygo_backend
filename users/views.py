@@ -484,8 +484,22 @@ class ClientProfileView(generics.RetrieveUpdateAPIView):
 # --- Account Deletion ---
 
 class UserMeView(APIView):
-    """GET/DELETE /api/v1/auth/users/me/ — Current user info & account deletion."""
+    """GET/DELETE /api/v1/auth/users/me/ — Current user info & account deletion.
+
+    DELETE optionally consumes an OTP (see `consume_otp` below). That path
+    is the same OTP-brute-force surface BindPhoneView has, so DELETE is
+    throttled on the stricter ``auth_sensitive`` bucket (5/min). GET
+    (profile read) falls through to default user-rate throttling (120/min).
+    """
     permission_classes = [permissions.IsAuthenticated]
+    throttle_scope = 'auth_sensitive'
+
+    def get_throttles(self):
+        # Apply the sensitive scope only on DELETE — GET /users/me/ is a
+        # routine profile read and the stricter cap would flag normal use.
+        if self.request.method == 'DELETE':
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
 
     def get(self, request):
         """Return current user basic info."""
@@ -548,10 +562,16 @@ class SocialAuthView(APIView):
 
 
 class BindPhoneView(APIView):
-    """POST /api/v1/auth/bind-phone/ — Bind phone to social-auth account."""
+    """POST /api/v1/auth/bind-phone/ — Bind phone to social-auth account.
+
+    Scoped on ``auth_sensitive`` (5/min) rather than the standard ``auth``
+    bucket because this endpoint consumes an OTP — a 10/min window lets an
+    attacker make 10 guesses/min against a 4-digit code in addition to the
+    per-row OTP_MAX_ATTEMPTS cap. 5/min is the guardrail.
+    """
     permission_classes = [permissions.IsAuthenticated]
     throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'auth'
+    throttle_scope = 'auth_sensitive'
 
     def post(self, request):
         serializer = BindPhoneSerializer(data=request.data)
