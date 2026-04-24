@@ -1,5 +1,7 @@
 import os
 
+from django.core.exceptions import ImproperlyConfigured
+
 from .base import *
 
 # Security
@@ -9,6 +11,27 @@ OTP_DEBUG_CODE_ENABLED = os.environ.get('OTP_DEBUG_CODE_ENABLED', '').lower() ==
 SECRET_KEY = os.environ['DJANGO_SECRET_KEY']
 
 ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',')
+
+
+# Fail-fast on OAuth audience bindings.
+#
+# Without these, social_auth.verify_google_token and verify_apple_token
+# silently skip the "aud" claim check — any id-token issued by Google/Apple
+# for ANY application would be accepted. That is the classic confused-deputy
+# attack that hands out accounts in the wrong app to whoever signed into
+# some other OAuth client.
+#
+# dev.py intentionally tolerates missing values so local work does not need
+# real OAuth credentials; prod must not.
+_REQUIRED_OAUTH_ENV = ("GOOGLE_CLIENT_ID", "APPLE_CLIENT_ID")
+_missing_oauth = [name for name in _REQUIRED_OAUTH_ENV if not os.environ.get(name)]
+if _missing_oauth:
+    raise ImproperlyConfigured(
+        "Production requires OAuth audience bindings: "
+        f"missing {', '.join(_missing_oauth)}. "
+        "Without these, Google/Apple id-tokens bypass audience validation, "
+        "enabling cross-application account takeover."
+    )
 
 # CORS
 INSTALLED_APPS += ['corsheaders']

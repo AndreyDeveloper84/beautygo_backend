@@ -113,8 +113,21 @@ class OTPService:
         from .sms import SMSService
         SMSService().send_otp(phone, code)
 
-    def verify_otp(self, phone: str, code: str) -> bool:
-        """Verify OTP code. Returns True if valid."""
+    def consume_otp(self, phone: str, code: str) -> bool:
+        """Consume an OTP code (single-use).
+
+        Not a pure check — on every call this method:
+        - increments the attempts counter on the latest valid OTP,
+        - marks the OTP as used when the code matches,
+        - raises MaxAttemptsError once OTP_MAX_ATTEMPTS is reached.
+
+        Each invocation mutates the OTP row. Never call this from a
+        health-check, idempotent retry, or anywhere that re-runs on
+        network flakes — a wrong retry burns a real OTP attempt.
+
+        Returns True if the code is valid. Raises InvalidOTPError or
+        MaxAttemptsError otherwise.
+        """
         now = timezone.now()
 
         otp = (
@@ -176,7 +189,7 @@ class AuthService:
         self, phone: str, code: str, device_id: str = None,
     ) -> dict:
         """Verify OTP and return JWT tokens."""
-        self.otp_service.verify_otp(phone, code)
+        self.otp_service.consume_otp(phone, code)
 
         user = User.objects.get(phone=phone)
 
