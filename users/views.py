@@ -572,7 +572,7 @@ class UserMeView(APIView):
         if otp_code and request.user.phone:
             try:
                 from .services import OTPService
-                OTPService().verify_otp(request.user.phone, otp_code)
+                OTPService().consume_otp(request.user.phone, otp_code)
             except AuthError as e:
                 return error_response(e.code, str(e), status_code=e.status_code)
 

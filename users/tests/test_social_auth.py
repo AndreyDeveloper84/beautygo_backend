@@ -263,7 +263,7 @@ class TestBindPhone:
 
     def test_bind_phone_success(self, client_app):
         mock_otp = MagicMock()
-        mock_otp.verify_otp.return_value = True
+        mock_otp.consume_otp.return_value = True
 
         user = User.objects.create(
             username='social_bind', role='client', phone=None,
