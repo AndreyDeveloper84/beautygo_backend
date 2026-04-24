@@ -28,6 +28,9 @@ staticfiles/
 # Secrets — MCP server config contains plaintext API tokens
 .mcp.json
 
+# Claude Code local settings
+.claude/settings.local.json
+
 # Coverage
 .coverage
 .coverage.*
@@ -37,6 +40,18 @@ coverage.xml
 # OS
 .DS_Store
 Thumbs.db
+
+# Office / LibreOffice lock files
+.~lock.*#
+
+# Binary business artifacts (PRDs, models, reports — not source)
+*.pdf
+*.xlsx
+*.docx
+*.zip
+
+# Figma exports
+figma-screens/
 
 # Distribution
 *.egg-info/

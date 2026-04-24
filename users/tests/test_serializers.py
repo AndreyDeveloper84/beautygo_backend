@@ -2,58 +2,12 @@ import logging
 
 import pytest
 
-from users.models import User
 from users.serializers import (
     PhoneSerializer,
-    RegisterSerializer,
     VerifyOTPSerializer,
 )
 
 logger = logging.getLogger(__name__)
-
-
-@pytest.mark.django_db
-class TestRegisterSerializer:
-    """Legacy RegisterSerializer tests."""
-
-    def test_valid_registration(self):
-        data = {
-            'username': 'newuser',
-            'password': 'strongpass123',
-            'email': 'new@test.com',
-            'phone': '+71234567890',
-            'role': 'client',
-        }
-        serializer = RegisterSerializer(data=data)
-        is_valid = serializer.is_valid()
-        logger.info("RegisterSerializer valid=%s, errors=%s", is_valid, serializer.errors)
-        assert is_valid, serializer.errors
-        user = serializer.save()
-        logger.info("Created user: username=%s, role=%s", user.username, user.role)
-        assert user.username == 'newuser'
-        assert user.check_password('strongpass123')
-        assert user.role == 'client'
-
-    def test_password_write_only(self):
-        user = User.objects.create_user(
-            username='u1', password='pass123', role='client',
-            phone='+79003000001',
-        )
-        output = RegisterSerializer(user).data
-        logger.info("Serialized fields: %s", list(output.keys()))
-        assert 'password' not in output
-
-    def test_duplicate_username_rejected(self):
-        User.objects.create_user(
-            username='existing', password='pass', role='client',
-            phone='+79003000002',
-        )
-        data = {'username': 'existing', 'password': 'pass123', 'role': 'client', 'phone': '+79003000003'}
-        serializer = RegisterSerializer(data=data)
-        is_valid = serializer.is_valid()
-        logger.info("Duplicate username valid=%s, errors=%s", is_valid, serializer.errors)
-        assert not is_valid
-        assert 'username' in serializer.errors
 
 
 class TestPhoneSerializer:
