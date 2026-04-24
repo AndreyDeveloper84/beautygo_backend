@@ -1,9 +1,11 @@
 """Payments API views — YooKassa integration."""
 from __future__ import annotations
 
+import ipaddress
 import logging
 from uuid import uuid4
 
+from django.conf import settings
 from django.db import transaction
 from rest_framework import permissions
 from rest_framework.exceptions import PermissionDenied
@@ -24,6 +26,45 @@ logger = logging.getLogger(__name__)
 
 def _get_yookassa() -> YooKassaService:
     return YooKassaService()
+
+
+def _client_ip(request: Request) -> str:
+    """Return the originating client IP.
+
+    Behind nginx / other reverse proxies the ``REMOTE_ADDR`` is the proxy,
+    not the real client — the real address is in ``X-Forwarded-For``. We
+    take the first element of XFF when present (that's the origin client;
+    subsequent entries are the proxy chain).
+    """
+    xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR", "")
+
+
+def _ip_in_allowlist(ip: str, allowlist: list[str]) -> bool:
+    """Return True if *ip* matches any CIDR / single-IP entry in *allowlist*.
+
+    An empty allowlist is treated as 'not configured' and returns True —
+    the caller decides whether that means permit (dev) or fail closed (prod).
+    Malformed entries are logged and skipped so one bad line in the env var
+    does not nuke webhook processing.
+    """
+    if not allowlist:
+        return True
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    for entry in allowlist:
+        try:
+            if addr in ipaddress.ip_network(entry, strict=False):
+                return True
+        except ValueError:
+            logger.warning(
+                "YOOKASSA_WEBHOOK_ALLOWED_IPS has invalid entry: %r", entry,
+            )
+    return False
 
 
 class PaymentCreateView(APIView):
@@ -167,12 +208,41 @@ class PaymentWebhookView(APIView):
     YooKassa webhook receiver. Idempotent — re-delivery of the same event
     is detected via last_webhook_event_id.
 
-    Verification strategy: re-fetch payment from YooKassa API rather than
-    trusting the webhook payload alone (recommended by YooKassa docs).
+    Verification strategy (defense-in-depth):
+    1. Source IP allowlist (``YOOKASSA_WEBHOOK_ALLOWED_IPS`` env). YooKassa
+       does not HMAC-sign webhooks; it publishes its source IP ranges and
+       expects integrators to allowlist them. Unknown sources get 403 — an
+       attacker who can't spoof YooKassa's IP can't trigger state changes
+       even with a forged payload.
+    2. Re-fetch payment from YooKassa API rather than trusting the
+       webhook payload (already in place below).
+    3. Idempotency key ``last_webhook_event_id`` guards against replay.
+    4. Scoped throttle caps amplification at 100 req/min from any single
+       source — bounds YooKassa API fan-out in a storm.
+
+    When ``YOOKASSA_WEBHOOK_ALLOWED_IPS`` is unset (dev / initial deploy)
+    the view logs a warning once and accepts all requests.
     """
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'webhook'
 
     def post(self, request: Request) -> Response:
+        allowlist = getattr(settings, "YOOKASSA_WEBHOOK_ALLOWED_IPS", [])
+        client_ip = _client_ip(request)
+        if not allowlist:
+            logger.warning(
+                "YOOKASSA_WEBHOOK_ALLOWED_IPS unset — webhook accepts all "
+                "sources (client_ip=%s). Set the env for defence in depth.",
+                client_ip,
+            )
+        elif not _ip_in_allowlist(client_ip, allowlist):
+            logger.warning(
+                "Rejected YooKassa webhook from unexpected source %s",
+                client_ip,
+            )
+            raise PermissionDenied("Source IP not allowed.")
+
         event = request.data.get('event')
         obj = request.data.get('object', {})
         provider_payment_id = obj.get('id', '')
