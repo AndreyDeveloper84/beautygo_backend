@@ -387,6 +387,65 @@ class TestPaymentWebhook:
         assert response.data['status'] == 'ignored'
 
 
+@pytest.mark.django_db
+class TestPaymentWebhookSecurity:
+    """Regression tests for H1 — YooKassa webhook must reject unexpected
+    source IPs when an allowlist is configured, and must cap amplification
+    via throttling."""
+
+    def test_rejects_unlisted_ip_when_allowlist_set(
+        self, anon_app, client_user, specialist_user, service, settings,
+    ):
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'wh_pay_sec'}},
+            format='json',
+            REMOTE_ADDR='1.2.3.4',
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data['error']['code'] == 'PERMISSION_DENIED'
+
+    def test_accepts_listed_ip(self, anon_app, settings):
+        """An IP inside the configured CIDR is not rejected for IP reason
+        (unknown payment_id → 200 'ok' from the normal flow)."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            REMOTE_ADDR='185.71.76.5',
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+    def test_respects_x_forwarded_for_when_behind_proxy(
+        self, anon_app, settings,
+    ):
+        """Real client IP lives in XFF when behind nginx; the check must
+        honour that rather than rejecting the proxy's IP."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            REMOTE_ADDR='10.0.0.1',                # nginx
+            HTTP_X_FORWARDED_FOR='185.71.76.10, 10.0.0.1',
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+    def test_empty_allowlist_permits_all(self, anon_app, settings):
+        """Dev / initial-deploy mode: unset env permits all, with a warning
+        logged (behaviour preserved from before H1)."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            REMOTE_ADDR='1.2.3.4',
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/payments/{id}/refund/
 # ---------------------------------------------------------------------------
