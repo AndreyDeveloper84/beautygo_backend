@@ -303,3 +303,103 @@ class TestBindPhone:
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert response.data['error']['code'] == 'PHONE_ALREADY_BOUND'
+
+
+class TestGoogleAudienceEnforcement:
+    """Regression tests for ln-621 #1 — Google id-tokens issued for another
+    OAuth client must be rejected when GOOGLE_CLIENT_ID is configured."""
+
+    def _fake_response(self, aud: str):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "sub": "g-user-1",
+            "aud": aud,
+            "email": "u@example.com",
+            "given_name": "Test",
+            "family_name": "User",
+        }
+        return resp
+
+    def test_rejects_mismatched_aud_when_configured(self, settings):
+        """If GOOGLE_CLIENT_ID is set, a token with different aud must fail."""
+        from users.social_auth import SocialAuthTokenError, verify_google_token
+
+        settings.GOOGLE_CLIENT_ID = "our-real-client.apps.googleusercontent.com"
+
+        with patch("users.social_auth.requests.get") as mock_get:
+            mock_get.return_value = self._fake_response(
+                aud="attacker-client.apps.googleusercontent.com",
+            )
+            with pytest.raises(SocialAuthTokenError):
+                verify_google_token("fake-token")
+
+    def test_accepts_matching_aud_when_configured(self, settings):
+        from users.social_auth import verify_google_token
+
+        settings.GOOGLE_CLIENT_ID = "our-real-client.apps.googleusercontent.com"
+
+        with patch("users.social_auth.requests.get") as mock_get:
+            mock_get.return_value = self._fake_response(
+                aud="our-real-client.apps.googleusercontent.com",
+            )
+            info = verify_google_token("fake-token")
+
+        assert info.provider == "google"
+        assert info.provider_uid == "g-user-1"
+
+
+class TestProdOAuthFailFast:
+    """Regression tests for ln-621 #1 — prod settings must refuse to import
+    without the OAuth audience env vars configured."""
+
+    def _reload_prod(self, monkeypatch, **env_overrides):
+        """Reload djangoProject.settings.prod with env overrides."""
+        import importlib
+        import sys
+
+        # Ensure the target env is applied before the module runs its
+        # top-level fail-fast check.
+        for key, value in env_overrides.items():
+            if value is None:
+                monkeypatch.delenv(key, raising=False)
+            else:
+                monkeypatch.setenv(key, value)
+
+        # Base must also be reloaded — it reads env once at import time and
+        # then prod.py inherits its values via `from .base import *`.
+        sys.modules.pop("djangoProject.settings.prod", None)
+        sys.modules.pop("djangoProject.settings.base", None)
+        return importlib.import_module("djangoProject.settings.prod")
+
+    def test_raises_when_google_client_id_missing(self, monkeypatch):
+        from django.core.exceptions import ImproperlyConfigured
+
+        with pytest.raises(ImproperlyConfigured, match="GOOGLE_CLIENT_ID"):
+            self._reload_prod(
+                monkeypatch,
+                DJANGO_SECRET_KEY="test-secret",
+                GOOGLE_CLIENT_ID=None,
+                APPLE_CLIENT_ID="apple-id",
+            )
+
+    def test_raises_when_apple_client_id_missing(self, monkeypatch):
+        from django.core.exceptions import ImproperlyConfigured
+
+        with pytest.raises(ImproperlyConfigured, match="APPLE_CLIENT_ID"):
+            self._reload_prod(
+                monkeypatch,
+                DJANGO_SECRET_KEY="test-secret",
+                GOOGLE_CLIENT_ID="google-id",
+                APPLE_CLIENT_ID=None,
+            )
+
+    def test_imports_when_both_set(self, monkeypatch):
+        module = self._reload_prod(
+            monkeypatch,
+            DJANGO_SECRET_KEY="test-secret",
+            GOOGLE_CLIENT_ID="google-id",
+            APPLE_CLIENT_ID="apple-id",
+        )
+        assert module.GOOGLE_CLIENT_ID == "google-id"
+        assert module.APPLE_CLIENT_ID == "apple-id"
