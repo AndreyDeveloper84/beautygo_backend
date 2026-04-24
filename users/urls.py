@@ -1,5 +1,6 @@
 from django.urls import path
-from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework_simplejwt.views import TokenRefreshView as _BaseTokenRefreshView
 
 from .views import (
     AnonymousAuthView,
@@ -17,6 +18,14 @@ from .views import (
     UserMeView,
     VerifyOTPView,
 )
+
+
+# Throttle refresh-token endpoint on the same 'auth' bucket as login/verify-otp.
+# SimpleJWT's TokenRefreshView otherwise inherits the default user/anon limits.
+class TokenRefreshView(_BaseTokenRefreshView):
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
+
 
 urlpatterns = [
     # Auth v2 (DRF-173)

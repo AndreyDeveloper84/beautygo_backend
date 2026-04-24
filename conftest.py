@@ -6,6 +6,21 @@ logger = logging.getLogger("test_runner")
 
 
 @pytest.fixture(autouse=True)
+def _reset_throttle_cache():
+    """Clear DRF throttle state between tests.
+
+    DRF throttles hit the Django default cache, which for dev is a
+    long-lived locmem cache shared across tests. Without a reset the 5th
+    /auth/login/ test would start hitting the 10/min auth throttle and
+    failing with 429 for reasons unrelated to what the test is checking.
+    """
+    from django.core.cache import cache
+    cache.clear()
+    yield
+    cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def log_test_lifecycle(request):
     """Auto-log start, end, and result of every test."""
     test_name = request.node.nodeid
