@@ -63,7 +63,7 @@ class TestOTPService:
 
         self.service.send_otp(self.phone)
         logger.info("Verifying OTP with correct code")
-        result = self.service.verify_otp(self.phone, '0000')
+        result = self.service.consume_otp(self.phone, '0000')
         assert result is True
         otp = OTPCode.objects.filter(phone=self.phone).first()
         logger.info("OTP after verify: is_used=%s", otp.is_used)
@@ -75,7 +75,7 @@ class TestOTPService:
         self.service.send_otp(self.phone)
         logger.info("Verifying OTP with wrong code (should fail)")
         with pytest.raises(InvalidOTPError):
-            self.service.verify_otp(self.phone, '9999')
+            self.service.consume_otp(self.phone, '9999')
         logger.info("InvalidOTPError raised as expected")
 
     def test_verify_otp_max_attempts(self, settings):
@@ -86,16 +86,16 @@ class TestOTPService:
         logger.info("Testing max attempts (limit=%d)", settings.OTP_MAX_ATTEMPTS)
         for i in range(2):
             with pytest.raises(InvalidOTPError):
-                self.service.verify_otp(self.phone, '9999')
+                self.service.consume_otp(self.phone, '9999')
             logger.info("Attempt %d: InvalidOTPError", i + 1)
         with pytest.raises(MaxAttemptsError):
-            self.service.verify_otp(self.phone, '9999')
+            self.service.consume_otp(self.phone, '9999')
         logger.info("Attempt 3: MaxAttemptsError raised")
 
     def test_verify_otp_no_code_exists(self):
         logger.info("Verifying OTP for phone with no code")
         with pytest.raises(InvalidOTPError):
-            self.service.verify_otp('+79009999999', '0000')
+            self.service.consume_otp('+79009999999', '0000')
         logger.info("InvalidOTPError raised as expected")
 
 
