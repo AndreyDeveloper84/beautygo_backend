@@ -25,14 +25,10 @@ from .application.services.cancel_reschedule_service import (
 )
 from .application.services.create_booking_service import CreateBookingService
 from .domain.exceptions import (
-    BookingDomainError,
-    BookingWindowError,
     CancellationNotAllowedError,
     InvalidStateTransitionError,
     RescheduleNotAllowedError,
-    ServiceNotActiveError,
     SlotNotAvailableError,
-    SpecialistNotActiveError,
 )
 from .models import Appointment
 from .serializers import (
@@ -111,25 +107,8 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             idempotency_key=idempotency_key,
         )
 
-        try:
-            service = self.create_booking_service_class()
-            result = service.execute(dto)
-        except (SpecialistNotActiveError, ServiceNotActiveError) as e:
-            return error_response(
-                "BUSINESS_ERROR", str(e), status_code=400,
-            )
-        except BookingWindowError as e:
-            return error_response(
-                "BOOKING_WINDOW_ERROR", str(e), status_code=400,
-            )
-        except SlotNotAvailableError as e:
-            return error_response(
-                "SLOT_NOT_AVAILABLE", str(e), status_code=409,
-            )
-        except BookingDomainError as e:
-            return error_response(
-                "BOOKING_ERROR", str(e), status_code=400,
-            )
+        service = self.create_booking_service_class()
+        result = service.execute(dto)
 
         # Reload for full serialization
         appointment = (
