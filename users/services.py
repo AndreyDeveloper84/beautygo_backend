@@ -218,6 +218,11 @@ class AuthService:
         Pure token minting — no DB writes, no OTP consumption. Optionally
         embeds a ``device_id`` claim so refresh tokens can be scoped per
         device.
+
+        Response-shape contract — callers may inject extra keys on top of
+        the returned dict (``verify_and_get_tokens`` adds ``is_new_user``).
+        When adding fields here, avoid keys that collide with those
+        wrapper-owned names.
         """
         refresh = RefreshToken.for_user(user)
         if device_id:

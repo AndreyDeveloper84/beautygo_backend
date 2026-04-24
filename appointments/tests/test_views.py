@@ -94,7 +94,11 @@ class TestAppointmentCreate:
             },
             format='json',
         )
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        # Booking service wraps missing specialist as SpecialistNotActiveError,
+        # which the central handler translates to 422 SPECIALIST_NOT_ACTIVE.
+        # Pre-R3.5 this returned 400 "BUSINESS_ERROR" — documented contract upgrade.
+        assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert response.data['error']['code'] == 'SPECIALIST_NOT_ACTIVE'
 
     def test_specialist_cannot_create(self, specialist_user, specialist, service):
         """Specialists cannot create appointments through the client endpoint."""
