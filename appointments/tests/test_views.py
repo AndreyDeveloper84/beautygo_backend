@@ -273,6 +273,18 @@ class TestSlotsEndpoint:
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
     def test_returns_slots(self, client_user, specialist, service):
+        from datetime import time as dt_time
+        from appointments.models import SpecialistWorkingHours
+
+        for day_of_week in range(7):
+            SpecialistWorkingHours.objects.create(
+                specialist=specialist,
+                day_of_week=day_of_week,
+                is_working_day=True,
+                start_time=dt_time(9, 0),
+                end_time=dt_time(18, 0),
+            )
+
         c = APIClient()
         c.defaults['HTTP_X_APP_TYPE'] = 'client'
         c.force_authenticate(user=client_user)
@@ -285,11 +297,22 @@ class TestSlotsEndpoint:
         data = response.data
         assert 'slots' in data
         assert isinstance(data['slots'], list)
-        # Tomorrow should have slots (working hours 09:00-18:00, 60-min service)
         assert len(data['slots']) > 0
 
     def test_booked_slot_excluded(self, client_user, specialist, service, appointment):
         """A slot that is already booked should not appear."""
+        from datetime import time as dt_time
+        from appointments.models import SpecialistWorkingHours
+
+        for day_of_week in range(7):
+            SpecialistWorkingHours.objects.create(
+                specialist=specialist,
+                day_of_week=day_of_week,
+                is_working_day=True,
+                start_time=dt_time(9, 0),
+                end_time=dt_time(18, 0),
+            )
+
         slot_date = appointment.start_datetime.date().isoformat()
         c = APIClient()
         c.defaults['HTTP_X_APP_TYPE'] = 'client'
@@ -300,6 +323,13 @@ class TestSlotsEndpoint:
         )
         assert response.status_code == status.HTTP_200_OK
         slots = response.data['slots']
-        # The booked slot should not be in the list
-        booked_iso = appointment.start_datetime.isoformat()
-        assert booked_iso not in slots
+        # Slot start must not overlap with the existing booking.
+        # Response is in specialist-local tz, so normalise by comparing UTC moments.
+        from datetime import datetime as dt_datetime
+        booked_start = appointment.start_datetime
+        booked_end = appointment.end_datetime
+        for slot_iso in slots:
+            slot_dt = dt_datetime.fromisoformat(slot_iso)
+            assert not (booked_start <= slot_dt < booked_end), (
+                f"slot {slot_iso} overlaps booked {booked_start}-{booked_end}"
+            )
