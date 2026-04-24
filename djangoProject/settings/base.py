@@ -65,6 +65,7 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_FILTER_BACKENDS': ('django_filters.rest_framework.DjangoFilterBackend',),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'EXCEPTION_HANDLER': 'djangoProject.exception_handler.api_exception_handler',
     # Rate limiting — see docs/REFACTORING_PLAN.md Phase 2.2. Per-IP for
     # anonymous, per-user for authenticated, plus two scoped throttles
     # applied on expensive endpoints (auth handshake, payment creation).

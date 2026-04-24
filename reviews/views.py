@@ -70,11 +70,7 @@ class ReviewCreateView(APIView):
 
     def post(self, request: Request) -> Response:
         serializer = ReviewCreateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         appointment_id = serializer.validated_data['appointment_id']
 
@@ -187,11 +183,7 @@ class ReviewUpdateView(APIView):
             return error_response("NOT_FOUND", "Review not found.", status_code=404)
 
         serializer = ReviewUpdateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         review.text = serializer.validated_data.get('text', review.text)
         review.save(update_fields=['text', 'updated_at'])
@@ -220,11 +212,7 @@ class ReviewReplyView(APIView):
             return error_response("FORBIDDEN", "Access denied.", status_code=403)
 
         serializer = ReviewReplySerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         review.specialist_reply = serializer.validated_data['text']
         review.save(update_fields=['specialist_reply', 'updated_at'])
