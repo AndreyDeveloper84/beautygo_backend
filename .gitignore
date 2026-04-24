@@ -25,6 +25,15 @@ staticfiles/
 .env
 *.env.local
 
+# Secrets — MCP server config contains plaintext API tokens
+.mcp.json
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
 # OS
 .DS_Store
 Thumbs.db
