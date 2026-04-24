@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from django.db import transaction
 from rest_framework import permissions
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -154,7 +155,7 @@ class PaymentDetailView(APIView):
             appt.client_id == user.id
             or (user.is_specialist and appt.specialist.user_id == user.id)
         ):
-            return error_response('FORBIDDEN', 'Access denied.', status_code=403)
+            raise PermissionDenied('Access denied.')
 
         return success_response(PaymentDetailSerializer(payment).data)
 
@@ -250,7 +251,7 @@ class PaymentRefundView(APIView):
             return error_response('NOT_FOUND', 'Payment not found.', status_code=404)
 
         if payment.appointment.client_id != request.user.id:
-            return error_response('FORBIDDEN', 'Access denied.', status_code=403)
+            raise PermissionDenied('Access denied.')
 
         if payment.status not in (Payment.Status.AUTHORIZED, Payment.Status.PAID):
             return error_response(
