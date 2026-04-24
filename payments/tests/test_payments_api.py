@@ -551,3 +551,34 @@ class TestPaymentRefund:
         )
         response = other_api.post(f'/api/v1/payments/{payment.id}/refund/', {}, format='json')
         assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+class TestPaymentRefundThrottle:
+    """L3 regression — refund endpoint must sit on the 'payment' 5/min
+    bucket so refund floods don't burn YooKassa API quota."""
+
+    def test_refund_throttled_at_6th_request(
+        self, client_app, client_user, specialist_user, service,
+    ):
+        appt = _make_appointment(client_user, specialist_user, service)
+        payment = Payment.objects.create(
+            appointment=appt,
+            amount=Decimal('2000.00'),
+            status=Payment.Status.AUTHORIZED,
+            provider='yookassa',
+            provider_payment_id='ref_throttle_001',
+        )
+        url = f'/api/v1/payments/{payment.id}/refund/'
+
+        # First 5 burn the bucket (any non-429 status is fine — success or
+        # business error are both not-throttled).
+        for i in range(5):
+            response = client_app.post(url, {}, format='json')
+            assert response.status_code != status.HTTP_429_TOO_MANY_REQUESTS, (
+                f"Refund throttled on request #{i + 1}; expected first 5 to pass"
+            )
+
+        # 6th hits the cap.
+        response = client_app.post(url, {}, format='json')
+        assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS

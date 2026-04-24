@@ -311,8 +311,14 @@ class PaymentRefundView(APIView):
     Issue a full or partial refund. The appointment must be cancelled first,
     or the specialist/admin initiates it. For MVP: only the appointment's
     client can request a refund.
+
+    Scoped on the same ``payment`` throttle bucket (5/min) as PaymentCreate —
+    refund floods hit YooKassa API quotas and the provider bill the same way
+    a create-payment flood does.
     """
     permission_classes = [permissions.IsAuthenticated, IsClient]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'payment'
 
     def post(self, request: Request, pk) -> Response:
         try:
