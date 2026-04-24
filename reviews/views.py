@@ -6,6 +6,7 @@ import logging
 from django.db import transaction
 from django.db.models import Avg, Count
 from rest_framework import permissions
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -209,7 +210,7 @@ class ReviewReplyView(APIView):
 
         # Only the specialist this review is about can reply
         if review.specialist.user_id != request.user.id:
-            return error_response("FORBIDDEN", "Access denied.", status_code=403)
+            raise PermissionDenied("Access denied.")
 
         serializer = ReviewReplySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
