@@ -700,3 +700,66 @@ class TestCompleteProfileView:
             self.URL, {'first_name': 'А'},
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+
+@pytest.mark.django_db
+class TestAuthThrottling:
+    """Regression tests for ln-621 #5 — auth endpoints must cap at 10/min
+    per client to prevent SMS-bombing and OTP brute force.
+
+    verify-otp is used as the primary throttle-assertion surface because
+    OTPService.send_otp has an *orthogonal* per-phone app-level rate limit
+    (OTP_RATE_LIMIT_SECONDS=60) that would also return 429, masking the
+    DRF layer we're trying to test. verify-otp has no such app-level limit.
+    """
+
+    def test_verify_otp_throttled_at_11th_request(self, api_client):
+        """11th /auth/verify-otp/ call in the same window returns 429.
+
+        Covers the OTP brute-force surface: even with a known phone, an
+        attacker can make at most 10 attempts per minute per IP.
+        """
+        url = reverse('verify-otp')
+        payload = {'phone': '+79001234567', 'code': '0000'}
+
+        for i in range(10):
+            response = api_client.post(url, payload)
+            assert response.status_code != status.HTTP_429_TOO_MANY_REQUESTS, (
+                f"Request #{i + 1} was throttled; expected first 10 to pass"
+            )
+
+        response = api_client.post(url, payload)
+        assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+
+    def test_login_throttle_uses_auth_scope_not_default(
+        self, api_client,
+    ):
+        """/auth/login/ (ScopedRateThrottle) caps before the default 30/min
+        anon throttle would. Uses distinct phones per request to bypass the
+        orthogonal OTPService per-phone cooldown.
+        """
+        url = reverse('login')
+
+        for i in range(10):
+            response = api_client.post(
+                url, {'phone': f'+7900000{i:04d}'},
+            )
+            assert response.status_code != status.HTTP_429_TOO_MANY_REQUESTS, (
+                f"Request #{i + 1} was throttled; expected first 10 to pass"
+            )
+
+        response = api_client.post(url, {'phone': '+79000000100'})
+        assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+
+    def test_non_auth_endpoint_uses_higher_limit(
+        self, authenticated_client,
+    ):
+        """A non-auth endpoint (user=120/min) must not be throttled at 15
+        requests — that would mean 'auth' scope leaked."""
+        url = reverse('user-me')
+        for i in range(15):
+            response = authenticated_client.get(url)
+            assert response.status_code != status.HTTP_429_TOO_MANY_REQUESTS, (
+                f"/users/me/ throttled on request #{i + 1}; "
+                "auth scope should not apply here"
+            )
