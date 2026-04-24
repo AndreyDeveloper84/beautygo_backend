@@ -8,6 +8,7 @@ import rest_framework.parsers
 from rest_framework import generics, permissions
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -46,6 +47,8 @@ logger = logging.getLogger(__name__)
 class RegisterPhoneView(APIView):
     """POST /api/v1/auth/register/ — Register with phone number."""
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
     def post(self, request: Request) -> Response:
         """Register new user with phone number."""
@@ -73,6 +76,8 @@ class RegisterPhoneView(APIView):
 class LoginView(APIView):
     """POST /api/v1/auth/login/ — Send OTP to phone."""
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
     def post(self, request: Request) -> Response:
         serializer = LoginSerializer(data=request.data)
@@ -93,6 +98,8 @@ class LoginView(APIView):
 class SendOTPView(APIView):
     """POST /api/v1/auth/send-otp/ — Unified: register or login + send OTP."""
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
     def post(self, request: Request) -> Response:
         serializer = RegisterPhoneSerializer(data=request.data)
@@ -131,6 +138,8 @@ class VerifyOTPView(APIView):
     Returns is_new_user and onboarding_completed flags.
     """
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
     def post(self, request):
         serializer = VerifyOTPSerializer(data=request.data)
@@ -207,6 +216,8 @@ class AnonymousAuthView(APIView):
     Allows browsing the catalog without registration.
     """
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
     def post(self, request: Request) -> Response:
         from datetime import timedelta
@@ -320,6 +331,8 @@ class OnboardingView(APIView):
 class LogoutView(APIView):
     """POST /api/v1/auth/logout/ — Blacklist refresh token."""
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
     def post(self, request):
         serializer = LogoutSerializer(data=request.data)
@@ -345,6 +358,8 @@ class LogoutView(APIView):
 class SendCodeView(APIView):
     """POST /api/v1/auth/send-code/ — Send OTP to phone (reauth)."""
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
     def post(self, request):
         serializer = SendCodeSerializer(data=request.data)
@@ -557,7 +572,7 @@ class UserMeView(APIView):
         if otp_code and request.user.phone:
             try:
                 from .services import OTPService
-                OTPService().verify_otp(request.user.phone, otp_code)
+                OTPService().consume_otp(request.user.phone, otp_code)
             except AuthError as e:
                 return error_response(e.code, str(e), status_code=e.status_code)
 
@@ -576,6 +591,8 @@ class UserMeView(APIView):
 class SocialAuthView(APIView):
     """POST /api/v1/auth/social/{provider}/ — Social auth entry point."""
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
     def post(self, request, provider):
         serializer = SocialAuthSerializer(data=request.data)
@@ -611,6 +628,8 @@ class SocialAuthView(APIView):
 class BindPhoneView(APIView):
     """POST /api/v1/auth/bind-phone/ — Bind phone to social-auth account."""
     permission_classes = [permissions.IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
     def post(self, request):
         serializer = BindPhoneSerializer(data=request.data)

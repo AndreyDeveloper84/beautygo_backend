@@ -65,6 +65,19 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_FILTER_BACKENDS': ('django_filters.rest_framework.DjangoFilterBackend',),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # Rate limiting — see docs/REFACTORING_PLAN.md Phase 2.2. Per-IP for
+    # anonymous, per-user for authenticated, plus two scoped throttles
+    # applied on expensive endpoints (auth handshake, payment creation).
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '30/min',        # SMS bombing / DDoS cover for unauth'd clients
+        'user': '120/min',       # Normal app usage
+        'auth': '10/min',        # Scoped: login, verify-otp, social, anonymous, refresh
+        'payment': '5/min',      # Scoped: POST /payments/create
+    },
 }
 
 SIMPLE_JWT = {

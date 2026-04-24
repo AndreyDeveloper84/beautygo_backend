@@ -8,6 +8,7 @@ from django.db import transaction
 from rest_framework import permissions
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from appointments.models import Appointment, Payment
@@ -33,6 +34,8 @@ class PaymentCreateView(APIView):
     Two-stage: payment is held (not captured) until appointment is completed.
     """
     permission_classes = [permissions.IsAuthenticated, IsClient]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'payment'
 
     def post(self, request: Request) -> Response:
         serializer = PaymentCreateSerializer(data=request.data)

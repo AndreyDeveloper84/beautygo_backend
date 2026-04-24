@@ -282,7 +282,7 @@ class SocialAuthService:
 
         # Verify OTP
         otp_service = OTPService()
-        if not otp_service.verify_otp(phone, code):
+        if not otp_service.consume_otp(phone, code):
             from .services import InvalidOTPError
             raise InvalidOTPError()
 
