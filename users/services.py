@@ -185,10 +185,21 @@ class AuthService:
 
         self.otp_service.send_otp(phone)
 
-    def verify_and_get_tokens(
-        self, phone: str, code: str, device_id: str = None,
-    ) -> dict:
-        """Verify OTP and return JWT tokens."""
+    def complete_otp_flow(self, phone: str, code: str) -> tuple[User, bool]:
+        """Consume the OTP code and activate the user.
+
+        Two orthogonal side effects were hidden inside verify_and_get_tokens
+        before: (1) burn an OTP + flip ``is_verified`` on first login, and
+        (2) mint JWT tokens. They're split so that callers who need a user
+        reference (session-merge, auditing, analytics) can get it without
+        minting tokens as a side effect, and so that flows that should mint
+        a new token pair for an already-authenticated user (refresh under
+        a new device_id, elevate anonymous to real) can call ``issue_tokens``
+        directly.
+
+        Returns ``(user, is_new_user)``.
+        Raises ``InvalidOTPError`` / ``MaxAttemptsError`` from the OTP layer.
+        """
         self.otp_service.consume_otp(phone, code)
 
         user = User.objects.get(phone=phone)
@@ -198,6 +209,16 @@ class AuthService:
             user.is_verified = True
             user.save(update_fields=['is_verified'])
 
+        return user, is_new_user
+
+    @staticmethod
+    def issue_tokens(user: User, device_id: str | None = None) -> dict:
+        """Issue a JWT access+refresh pair for ``user``.
+
+        Pure token minting — no DB writes, no OTP consumption. Optionally
+        embeds a ``device_id`` claim so refresh tokens can be scoped per
+        device.
+        """
         refresh = RefreshToken.for_user(user)
         if device_id:
             refresh['device_id'] = device_id
@@ -206,7 +227,6 @@ class AuthService:
             "access_token": str(refresh.access_token),
             "refresh_token": str(refresh),
             "expires_in": int(refresh.access_token.lifetime.total_seconds()),
-            "is_new_user": is_new_user,
             "onboarding_completed": user.onboarding_completed,
             "user": {
                 "id": user.pk,
@@ -215,6 +235,18 @@ class AuthService:
                 "is_verified": user.is_verified,
             },
         }
+
+    def verify_and_get_tokens(
+        self, phone: str, code: str, device_id: str = None,
+    ) -> dict:
+        """Legacy one-call entry point. Prefer ``complete_otp_flow`` +
+        ``issue_tokens`` at new call-sites; this wrapper is retained only
+        so existing VerifyOTPView code keeps working.
+        """
+        user, is_new_user = self.complete_otp_flow(phone, code)
+        payload = self.issue_tokens(user, device_id=device_id)
+        payload["is_new_user"] = is_new_user
+        return payload
 
     @staticmethod
     def delete_account(user, reason: str = "") -> None:
