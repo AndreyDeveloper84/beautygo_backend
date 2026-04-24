@@ -1,0 +1,40 @@
+[run]
+source =
+    users
+    services
+    appointments
+    reviews
+    payments
+    search
+    djangoProject
+
+omit =
+    */migrations/*
+    */tests/*
+    */test_*.py
+    */admin.py
+    */apps.py
+    */__init__.py
+    manage.py
+    */settings/*
+    */wsgi.py
+    */asgi.py
+
+branch = True
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    def __str__
+    raise NotImplementedError
+    if __name__ == .__main__.:
+    if TYPE_CHECKING:
+    @abstractmethod
+
+precision = 1
+show_missing = True
+skip_covered = False
+
+[html]
+directory = htmlcov

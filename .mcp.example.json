@@ -1,0 +1,22 @@
+{
+  "_comment": "Copy to .mcp.json and fill in your tokens. NEVER commit .mcp.json — it's in .gitignore.",
+  "mcpServers": {
+    "figma": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "figma-developer-mcp",
+        "--figma-api-key=figd_YOUR_FIGMA_TOKEN_HERE",
+        "--stdio"
+      ]
+    },
+    "notion": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@notionhq/notion-mcp-server",
+        "--token=ntn_YOUR_NOTION_TOKEN_HERE"
+      ]
+    }
+  }
+}
