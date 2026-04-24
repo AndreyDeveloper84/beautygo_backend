@@ -33,11 +33,8 @@ from .serializers import (
     SpecialistProfileUpdateSerializer,
     VerifyOTPSerializer,
 )
-from .social_auth import (
-    SocialAuthError,
-    SocialAuthService,
-)
-from .services import AuthError, AuthService
+from .social_auth import SocialAuthService
+from .services import AuthService
 
 logger = logging.getLogger(__name__)
 
@@ -53,24 +50,17 @@ class RegisterPhoneView(APIView):
     def post(self, request: Request) -> Response:
         """Register new user with phone number."""
         serializer = RegisterPhoneSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
-        try:
-            auth_service = AuthService()
-            user = auth_service.register(
-                phone=serializer.validated_data['phone'],
-                app_type=request.app_type,
-            )
-            return success_response(
-                {"phone": user.phone, "message": "OTP sent"},
-                status_code=201,
-            )
-        except AuthError as e:
-            return error_response(e.code, str(e), status_code=e.status_code)
+        auth_service = AuthService()
+        user = auth_service.register(
+            phone=serializer.validated_data['phone'],
+            app_type=request.app_type,
+        )
+        return success_response(
+            {"phone": user.phone, "message": "OTP sent"},
+            status_code=201,
+        )
 
 
 class LoginView(APIView):
@@ -81,18 +71,11 @@ class LoginView(APIView):
 
     def post(self, request: Request) -> Response:
         serializer = LoginSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
-        try:
-            auth_service = AuthService()
-            auth_service.login(phone=serializer.validated_data['phone'])
-            return success_response({"message": "OTP sent"})
-        except AuthError as e:
-            return error_response(e.code, str(e), status_code=e.status_code)
+        auth_service = AuthService()
+        auth_service.login(phone=serializer.validated_data['phone'])
+        return success_response({"message": "OTP sent"})
 
 
 class SendOTPView(APIView):
@@ -103,25 +86,18 @@ class SendOTPView(APIView):
 
     def post(self, request: Request) -> Response:
         serializer = RegisterPhoneSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         phone = serializer.validated_data['phone']
         auth_service = AuthService()
         is_new_user = not User.objects.filter(phone=phone).exists()
-        try:
-            if is_new_user:
-                auth_service.register(
-                    phone=phone,
-                    app_type=getattr(request, 'app_type', 'client'),
-                )
-            else:
-                auth_service.login(phone=phone)
-        except AuthError as e:
-            return error_response(e.code, str(e), status_code=e.status_code)
+        if is_new_user:
+            auth_service.register(
+                phone=phone,
+                app_type=getattr(request, 'app_type', 'client'),
+            )
+        else:
+            auth_service.login(phone=phone)
 
         return success_response({
             "expires_in": settings.OTP_EXPIRY_MINUTES * 60,
@@ -143,21 +119,14 @@ class VerifyOTPView(APIView):
 
     def post(self, request):
         serializer = VerifyOTPSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
-        try:
-            auth_service = AuthService()
-            tokens = auth_service.verify_and_get_tokens(
-                phone=serializer.validated_data['phone'],
-                code=serializer.validated_data['code'],
-                device_id=serializer.validated_data.get('device_id'),
-            )
-        except AuthError as e:
-            return error_response(e.code, str(e), status_code=e.status_code)
+        auth_service = AuthService()
+        tokens = auth_service.verify_and_get_tokens(
+            phone=serializer.validated_data['phone'],
+            code=serializer.validated_data['code'],
+            device_id=serializer.validated_data.get('device_id'),
+        )
 
         # Merge anonymous session if token provided
         anonymous_token = serializer.validated_data.get('anonymous_token', '')
@@ -225,11 +194,7 @@ class AnonymousAuthView(APIView):
         from .models import AnonymousSession
 
         serializer = AnonymousAuthSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         device_id = serializer.validated_data['device_id']
         platform = serializer.validated_data['platform']
@@ -289,11 +254,7 @@ class OnboardingView(APIView):
 
     def post(self, request: Request) -> Response:
         serializer = OnboardingSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         user = request.user
         data = serializer.validated_data
@@ -336,11 +297,7 @@ class LogoutView(APIView):
 
     def post(self, request):
         serializer = LogoutSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         try:
             token = RefreshToken(serializer.validated_data['refresh'])
@@ -363,11 +320,7 @@ class SendCodeView(APIView):
 
     def post(self, request):
         serializer = SendCodeSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         phone = serializer.validated_data['phone']
         if not User.objects.filter(phone=phone).exists():
@@ -376,13 +329,10 @@ class SendCodeView(APIView):
                 status_code=404,
             )
 
-        try:
-            from .services import OTPService
-            otp_service = OTPService()
-            otp_service.send_otp(phone)
-            return success_response({"message": "OTP sent"})
-        except AuthError as e:
-            return error_response(e.code, str(e), status_code=e.status_code)
+        from .services import OTPService
+        otp_service = OTPService()
+        otp_service.send_otp(phone)
+        return success_response({"message": "OTP sent"})
 
 
 # --- Complete Profile View ---
@@ -451,11 +401,7 @@ class MasterMeView(APIView):
                 status_code=400,
             )
         serializer = SpecialistProfileCreateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
         serializer.save(user=request.user)
         return success_response(serializer.data, status_code=201)
 
@@ -472,11 +418,7 @@ class MasterMeView(APIView):
         serializer = SpecialistProfileUpdateSerializer(
             profile, data=request.data, partial=True,
         )
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
         serializer.save()
         if (
             profile.status == SpecialistProfile.ProfileStatus.DRAFT
@@ -530,11 +472,7 @@ class ClientProfileView(generics.RetrieveUpdateAPIView):
         serializer = self.get_serializer(
             instance, data=request.data, partial=partial,
         )
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
         serializer.save()
         return success_response(serializer.data)
 
@@ -561,20 +499,13 @@ class UserMeView(APIView):
 
     def delete(self, request):
         serializer = DeleteAccountSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         # Optional OTP verification before deletion
         otp_code = serializer.validated_data.get('otp_code', '')
         if otp_code and request.user.phone:
-            try:
-                from .services import OTPService
-                OTPService().consume_otp(request.user.phone, otp_code)
-            except AuthError as e:
-                return error_response(e.code, str(e), status_code=e.status_code)
+            from .services import OTPService
+            OTPService().consume_otp(request.user.phone, otp_code)
 
         from .services import AuthService
         AuthService.delete_account(
@@ -596,33 +527,24 @@ class SocialAuthView(APIView):
 
     def post(self, request, provider):
         serializer = SocialAuthSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
-        try:
-            service = SocialAuthService()
-            result = service.authenticate(
-                provider=provider,
-                token=serializer.validated_data["token"],
-                app_type=getattr(request, 'app_type', 'client'),
-                device_id=serializer.validated_data.get("device_id"),
-                extra_fields={
-                    "first_name": serializer.validated_data.get(
-                        "first_name", "",
-                    ),
-                    "last_name": serializer.validated_data.get(
-                        "last_name", "",
-                    ),
-                },
-            )
-            return success_response(result, status_code=200)
-        except SocialAuthError as e:
-            return error_response(
-                e.code, e.message, status_code=e.status_code,
-            )
+        service = SocialAuthService()
+        result = service.authenticate(
+            provider=provider,
+            token=serializer.validated_data["token"],
+            app_type=getattr(request, 'app_type', 'client'),
+            device_id=serializer.validated_data.get("device_id"),
+            extra_fields={
+                "first_name": serializer.validated_data.get(
+                    "first_name", "",
+                ),
+                "last_name": serializer.validated_data.get(
+                    "last_name", "",
+                ),
+            },
+        )
+        return success_response(result, status_code=200)
 
 
 class BindPhoneView(APIView):
@@ -633,21 +555,12 @@ class BindPhoneView(APIView):
 
     def post(self, request):
         serializer = BindPhoneSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
-        try:
-            service = SocialAuthService()
-            service.bind_phone(
-                user=request.user,
-                phone=serializer.validated_data["phone"],
-                code=serializer.validated_data["code"],
-            )
-            return success_response({"message": "Phone bound successfully"})
-        except SocialAuthError as e:
-            return error_response(
-                e.code, e.message, status_code=e.status_code,
-            )
+        service = SocialAuthService()
+        service.bind_phone(
+            user=request.user,
+            phone=serializer.validated_data["phone"],
+            code=serializer.validated_data["code"],
+        )
+        return success_response({"message": "Phone bound successfully"})

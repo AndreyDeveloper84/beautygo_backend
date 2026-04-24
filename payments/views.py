@@ -39,11 +39,7 @@ class PaymentCreateView(APIView):
 
     def post(self, request: Request) -> Response:
         serializer = PaymentCreateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                'VALIDATION_ERROR', 'Invalid input',
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         appointment_id = serializer.validated_data['appointment_id']
         return_url = serializer.validated_data['return_url']
@@ -264,11 +260,7 @@ class PaymentRefundView(APIView):
             )
 
         serializer = PaymentRefundSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                'VALIDATION_ERROR', 'Invalid input',
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         refund_amount = serializer.validated_data.get('amount') or payment.net_amount
         if refund_amount > payment.net_amount:

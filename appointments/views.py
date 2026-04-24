@@ -97,11 +97,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             )
 
         serializer = AppointmentCreateSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         idempotency_key = request.META.get(
             'HTTP_X_IDEMPOTENCY_KEY', str(uuid4()),
@@ -170,11 +166,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             )
 
         serializer = AppointmentCancelSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         dto = CancelBookingDTO(
             booking_id=appointment.id,
@@ -258,11 +250,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             )
 
         serializer = AppointmentRescheduleSerializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
 
         dto = RescheduleBookingDTO(
             booking_id=appointment.id,

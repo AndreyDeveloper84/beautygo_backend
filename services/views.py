@@ -82,11 +82,7 @@ class ServiceViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
         return success_response(serializer.data, status_code=201)
 
@@ -101,11 +97,7 @@ class ServiceViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(
             instance, data=request.data, partial=partial,
         )
-        if not serializer.is_valid():
-            return error_response(
-                "VALIDATION_ERROR", "Invalid input",
-                details=serializer.errors, status_code=400,
-            )
+        serializer.is_valid(raise_exception=True)
         serializer.save()
         return success_response(serializer.data)
 
