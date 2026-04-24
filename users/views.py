@@ -340,25 +340,6 @@ class LogoutView(APIView):
             )
 
 
-# --- Legacy View (kept for compatibility) ---
-
-class RegisterView(APIView):
-    """Legacy username/password registration."""
-    def post(self, request):
-        from .serializers import RegisterSerializer
-        serializer = RegisterSerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return success_response(
-                {"message": "Регистрация прошла успешно"},
-                status_code=201,
-            )
-        return error_response(
-            "VALIDATION_ERROR", "Invalid input",
-            details=serializer.errors, status_code=400,
-        )
-
-
 # --- Send Code View ---
 
 class SendCodeView(APIView):
