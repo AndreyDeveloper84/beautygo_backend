@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime
 from typing import Any
 
+from django.core import exceptions as django_exceptions
 from django.db.models import Count, Prefetch, Q, QuerySet
-from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
 from rest_framework import permissions, serializers, viewsets
 from rest_framework.decorators import action
@@ -261,12 +261,20 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
         """
         GET /specialists/{id}/slots/?service_id=<uuid>&date=<YYYY-MM-DD>
 
-        Returns available 30-min booking slots for the given specialist,
-        service and date. Defaults to today if date not supplied.
-        Working hours are 09:00–18:00 until a WorkingHours model is added.
+        Returns available booking slots for the given specialist, service
+        and date. Defaults to today (in specialist's timezone) if date not
+        supplied.
+
+        Delegates to AvailabilityQueryService so that the specialist's real
+        SpecialistWorkingHours + SpecialistTimeOff + active bookings are
+        respected (fixes ln-624 #1).
         """
-        from appointments.models import Appointment
-        from appointments.domain.value_objects import ACTIVE_BOOKING_STATUSES
+        from zoneinfo import ZoneInfo
+
+        from appointments.application.dto import GetAvailabilityDTO
+        from appointments.application.services.availability_query_service import (
+            AvailabilityQueryService,
+        )
 
         specialist = self.get_object()
 
@@ -281,19 +289,19 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
             service = Service.objects.get(
                 id=service_id, specialist=specialist, is_active=True,
             )
-        except Service.DoesNotExist:
+        except (Service.DoesNotExist, ValueError, django_exceptions.ValidationError):
             return Response(
                 {'error': {'code': 'NOT_FOUND', 'message': 'Service not found'}},
                 status=404,
             )
 
-        # Parse date param (defaults to today in Moscow tz)
+        specialist_tz = ZoneInfo(specialist.timezone)
         date_param = request.query_params.get('date')
         try:
             slot_date: date = (
                 datetime.strptime(date_param, '%Y-%m-%d').date()
                 if date_param
-                else timezone.localdate()
+                else datetime.now(tz=specialist_tz).date()
             )
         except ValueError:
             return Response(
@@ -301,41 +309,23 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
                 status=400,
             )
 
-        # Default working window: 09:00–18:00
-        work_start = time(9, 0)
-        work_end = time(18, 0)
-        slot_interval = timedelta(minutes=30)
-        duration = timedelta(minutes=service.duration_minutes)
-
-        # Build candidate slots
-        tz = timezone.get_current_timezone()
-        slot_start = datetime.combine(slot_date, work_start, tzinfo=tz)
-        day_end = datetime.combine(slot_date, work_end, tzinfo=tz)
-        now = timezone.now()
-        min_booking = now + timedelta(hours=1)
-
-        # Fetch booked windows for this specialist on this date
-        booked = list(
-            Appointment.objects.filter(
-                specialist=specialist,
-                status__in=[s.value for s in ACTIVE_BOOKING_STATUSES],
-                start_datetime__date=slot_date,
-            ).values_list('start_datetime', 'end_datetime')
+        result = AvailabilityQueryService().get_day_availability(
+            GetAvailabilityDTO(
+                specialist_id=specialist.pk,
+                target_date=slot_date,
+                service_id=service.pk,
+            )
         )
 
-        available: list[str] = []
-        while slot_start + duration <= day_end:
-            slot_end = slot_start + duration
-            # Skip past / too-soon slots
-            if slot_start >= min_booking:
-                # Check no overlap with existing bookings
-                overlap = any(
-                    b_start < slot_end and b_end > slot_start
-                    for b_start, b_end in booked
-                )
-                if not overlap:
-                    available.append(slot_start.isoformat())
-            slot_start += slot_interval
+        # Preserve existing mobile contract: slots as ISO-8601 strings in
+        # specialist's local timezone (mobile parses them as Date objects).
+        if not result.is_working_day:
+            available: list[str] = []
+        else:
+            available = [
+                slot.start_at.astimezone(specialist_tz).isoformat()
+                for slot in result.slots
+            ]
 
         return Response({'date': slot_date.isoformat(), 'slots': available})
 
