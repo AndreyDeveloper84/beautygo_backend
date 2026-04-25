@@ -64,12 +64,19 @@ jobs:
         env:
           DJANGO_SETTINGS_MODULE: djangoProject.settings.dev
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
+          # Observability: keep SDKs explicitly inert in CI. Empty DSN
+          # = sentry no-op; human log format keeps CI output readable.
+          SENTRY_DSN: ''
+          SENTRY_ENVIRONMENT: ci
+          LOG_FORMAT: human
+          LOG_LEVEL: INFO
         run: pytest --tb=short -q
 
       - name: Django system checks
         env:
           DJANGO_SETTINGS_MODULE: djangoProject.settings.dev
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
+          SENTRY_DSN: ''
         run: python manage.py check
 
   deploy:
@@ -81,6 +88,13 @@ jobs:
     steps:
       - name: Deploy to dev server via SSH
         uses: appleboy/ssh-action@v1
+        env:
+          # Sentry config managed by CI, not by hand-editing .env on the box.
+          # SENTRY_DSN is a repo secret (GitHub → Settings → Secrets and variables
+          # → Actions); empty value = SDK no-op, safe default.
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_ENVIRONMENT: development
+          SENTRY_RELEASE: ${{ github.sha }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -88,6 +102,7 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           timeout: 300s
           command_timeout: 5m
+          envs: SENTRY_DSN,SENTRY_ENVIRONMENT,SENTRY_RELEASE
           script: |
             cd /home/taximeter/beautygo/dev
 
@@ -96,6 +111,23 @@ jobs:
 
             git fetch origin dev
             git reset --hard origin/dev
+
+            # Refresh CI-managed env vars in .env without disturbing the rest.
+            # Idempotent: drop any existing line for these keys, then append
+            # the current value. Empty SENTRY_DSN is fine — base.py treats it
+            # as "no Sentry" and skips init.
+            touch .env
+            sed -i \
+              -e '/^SENTRY_DSN=/d' \
+              -e '/^SENTRY_ENVIRONMENT=/d' \
+              -e '/^SENTRY_RELEASE=/d' \
+              .env
+            {
+              echo "SENTRY_DSN=$SENTRY_DSN"
+              echo "SENTRY_ENVIRONMENT=$SENTRY_ENVIRONMENT"
+              echo "SENTRY_RELEASE=$SENTRY_RELEASE"
+            } >> .env
+
             docker compose build
             docker compose up -d --force-recreate web
             sleep 5
