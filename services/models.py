@@ -54,6 +54,117 @@ class ServiceCategory(models.Model):
         return self.name
 
 
+class ServiceTemplate(models.Model):
+    """Предустановленный шаблон услуги, привязанный к категории.
+
+    Используется на онбординге мастера, чтобы предложить готовый список
+    популярных услуг с рекомендованной длительностью вместо пустой формы.
+    Реальные цены вычисляются через `RegionalPricing` отдельно (DRF-197).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    category = models.ForeignKey(
+        ServiceCategory,
+        on_delete=models.CASCADE,
+        related_name='templates',
+    )
+    name = models.CharField(max_length=100)
+    name_short = models.CharField(
+        max_length=40,
+        help_text="Короткое имя для чипов/списков",
+    )
+    duration_default = models.PositiveIntegerField(
+        validators=[MinValueValidator(5), MaxValueValidator(480)],
+    )
+    duration_min = models.PositiveIntegerField(
+        validators=[MinValueValidator(5), MaxValueValidator(480)],
+    )
+    duration_max = models.PositiveIntegerField(
+        validators=[MinValueValidator(5), MaxValueValidator(480)],
+    )
+    is_popular = models.BooleanField(
+        default=False,
+        help_text="Показывать в верхней части списка категории",
+    )
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('category', 'name')]
+        ordering = ['-is_popular', 'sort_order', 'name']
+        indexes = [
+            models.Index(fields=['category', 'is_popular', 'sort_order']),
+        ]
+
+    def clean(self) -> None:
+        if self.duration_min > self.duration_default:
+            raise ValidationError(
+                {'duration_min': 'duration_min must be <= duration_default.'}
+            )
+        if self.duration_max < self.duration_default:
+            raise ValidationError(
+                {'duration_max': 'duration_max must be >= duration_default.'}
+            )
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.category.name})"
+
+
+class RegionalPricing(models.Model):
+    """Рекомендованные ценовые диапазоны для шаблона в конкретном регионе.
+
+    Используется на онбординге мастера, чтобы показать реалистичную вилку.
+    Регион определяется через `services.pricing.get_region_key()` по
+    приоритету: city_input → reverse-geocoding по координатам → `default`.
+    """
+
+    DEFAULT_REGION_KEY = 'default'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    template = models.ForeignKey(
+        'ServiceTemplate',
+        on_delete=models.CASCADE,
+        related_name='regional_prices',
+    )
+    region_key = models.CharField(
+        max_length=50,
+        help_text="Нормализованный ключ региона: «penza», «moscow», «default»",
+    )
+    region_name = models.CharField(
+        max_length=100,
+        help_text="Человекочитаемое имя: «Пенза», «Москва»",
+    )
+    price_min = models.DecimalField(
+        max_digits=8, decimal_places=0,
+        validators=[MinValueValidator(1)],
+    )
+    price_max = models.DecimalField(
+        max_digits=8, decimal_places=0,
+        validators=[MinValueValidator(1)],
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('template', 'region_key')]
+        ordering = ['template', 'region_key']
+        indexes = [
+            models.Index(fields=['region_key']),
+        ]
+
+    def clean(self) -> None:
+        if self.price_min > self.price_max:
+            raise ValidationError(
+                {'price_min': 'price_min must be <= price_max.'}
+            )
+
+    def __str__(self) -> str:
+        return (
+            f"{self.template.name} — {self.region_name} "
+            f"({self.price_min:.0f}–{self.price_max:.0f} ₽)"
+        )
+
+
 class Service(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     specialist = models.ForeignKey(
