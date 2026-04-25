@@ -74,10 +74,12 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.UserRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
-        'anon': '30/min',        # SMS bombing / DDoS cover for unauth'd clients
-        'user': '120/min',       # Normal app usage
-        'auth': '10/min',        # Scoped: login, verify-otp, social, anonymous, refresh
-        'payment': '5/min',      # Scoped: POST /payments/create
+        'anon': '30/min',            # SMS bombing / DDoS cover for unauth'd clients
+        'user': '120/min',           # Normal app usage
+        'auth': '10/min',            # Scoped: login, verify-otp, social, anonymous, refresh
+        'auth_sensitive': '5/min',   # Scoped: bind-phone, account-delete-with-otp
+        'payment': '5/min',          # Scoped: POST /payments/create, refund
+        'webhook_payment': '100/min',  # Scoped: YooKassa /payments/webhook (amplification cap)
     },
 }
 
@@ -303,3 +305,27 @@ YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID") or None
 YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
 YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
 YOOKASSA_AGENT_ID = os.environ.get("YOOKASSA_AGENT_ID", "")  # Sub-account for split payments
+
+# YooKassa webhook security.
+# Comma-separated list of CIDR ranges or single IPs permitted to POST to
+# /api/v1/payments/webhook/. YooKassa publishes its source IP ranges at
+# https://yookassa.ru/developers/using-api/webhooks — copy the current list
+# into the env. If left empty in dev, the view logs a warning but still
+# accepts requests; prod.py refuses to start without it (matching the
+# Phase 2.1 OAuth fail-fast pattern).
+YOOKASSA_WEBHOOK_ALLOWED_IPS = [
+    entry.strip()
+    for entry in os.environ.get("YOOKASSA_WEBHOOK_ALLOWED_IPS", "").split(",")
+    if entry.strip()
+]
+
+# Number of trusted reverse proxies between the public internet and Django.
+# The webhook IP-allowlist check reads X-Forwarded-For at depth N from the
+# right (the IP the outermost trusted proxy received the request from);
+# anything earlier in XFF is client-controlled and ignored. Default 1 = a
+# single nginx in front of Django. Set higher only if a CDN sits before
+# nginx — getting this wrong opens spoofing (too high) or rejects real
+# traffic (too low).
+YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = int(
+    os.environ.get("YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT", "1"),
+)
