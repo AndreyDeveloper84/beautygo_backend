@@ -44,6 +44,14 @@ psycopg2-binary==2.9.10
 # Production server
 gunicorn==23.0.0
 
+# OpenAI client + httpx with proxy support.
+# api.openai.com is geo-blocked from RU; production tunnels through
+# OPENAI_PROXY (HTTP/SOCKS), wired via httpx.Client(proxy=...). httpx is
+# already a transitive dep of openai but we pin it so proxy behaviour is
+# reproducible across environments.
+openai==1.99.9
+httpx==0.28.1
+
 # Testing
 pytest==8.4.2
 pytest-django==4.11.1
