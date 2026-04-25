@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'appointments',
     'reviews',
     'payments',
+    'ai',
 ]
 
 AUTH_USER_MODEL = 'users.User'
@@ -304,6 +305,16 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID") or None
 APPLE_CLIENT_ID = os.environ.get("APPLE_CLIENT_ID") or None
 VK_CLIENT_SECRET = os.environ.get("VK_CLIENT_SECRET") or None
 YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID") or None
+
+# OpenAI / LLM. api.openai.com is geo-blocked from RU; the deployed
+# environments tunnel via OPENAI_PROXY (HTTP/SOCKS proxy with non-RU exit
+# IP). OPENAI_BASE_URL is optional — only set when routing through an
+# OpenAI-compatible gateway (e.g. ProxyAPI). Empty values leave the
+# OpenAI client unusable; fail-fast in prod.py mirrors the OAuth pattern.
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
+OPENAI_PROXY = os.environ.get("OPENAI_PROXY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
 # YooKassa Payment Settings
 YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
