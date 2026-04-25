@@ -1,12 +1,63 @@
-"""X-App-Type header and JWT context middleware."""
+"""X-App-Type, JWT context, and X-Request-ID middleware."""
 
 import logging
+import uuid
 
 from django.http import JsonResponse
 from rest_framework_simplejwt.authentication import JWTAuthentication
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 
+from core.log_filters import (
+    clear_request_id,
+    get_request_id,           # re-export for callers that already imported here
+    set_request_id,
+)
+
 logger = logging.getLogger(__name__)
+
+
+__all__ = [
+    "AppTypeMiddleware",
+    "JWTContextMiddleware",
+    "RequestIDMiddleware",
+    "get_request_id",
+]
+
+
+class RequestIDMiddleware:
+    """Stamp every request with an X-Request-ID and echo it in the response.
+
+    If the client sent ``X-Request-ID`` (incoming gateway, mobile app, retry
+    helper) we honour it so the same value links external traces to ours.
+    Otherwise we generate a UUID. The value lives on the request object,
+    in the thread-local read by ``core.log_filters.RequestIDFilter``, and
+    in the response header.
+
+    Order: this middleware sits first in MIDDLEWARE so every other layer —
+    auth, app-type guard, view, renderer, exception handler — sees the
+    same id and emits log lines under it.
+    """
+
+    HEADER = "X-Request-ID"
+    META_KEY = "HTTP_X_REQUEST_ID"
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        incoming = request.META.get(self.META_KEY, "").strip()
+        request_id = incoming or uuid.uuid4().hex
+        request.request_id = request_id
+        set_request_id(request_id)
+        try:
+            response = self.get_response(request)
+        finally:
+            # Drop the value so a thread reused for the next request without
+            # going through this middleware (test client edge cases) doesn't
+            # see a stale id.
+            clear_request_id()
+        response[self.HEADER] = request_id
+        return response
 
 
 VALID_APP_TYPES = ("client", "pro")

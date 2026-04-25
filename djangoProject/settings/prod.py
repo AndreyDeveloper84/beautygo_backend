@@ -100,31 +100,6 @@ STORAGES = {
     },
 }
 
-# Logging
-LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'verbose': {
-            'format': '{levelname} {asctime} {module} {message}',
-            'style': '{',
-        },
-    },
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-            'formatter': 'verbose',
-        },
-    },
-    'root': {
-        'handlers': ['console'],
-        'level': 'WARNING',
-    },
-    'loggers': {
-        'django': {
-            'handlers': ['console'],
-            'level': 'WARNING',
-            'propagate': False,
-        },
-    },
-}
+# Logging — switch the LOGGING dict from base.py over to JSON output.
+# Everything else (filters, loggers, handlers, levels) is inherited.
+LOGGING["handlers"]["console"]["formatter"] = "json"

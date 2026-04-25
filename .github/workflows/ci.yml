@@ -64,12 +64,19 @@ jobs:
         env:
           DJANGO_SETTINGS_MODULE: djangoProject.settings.dev
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
+          # Observability: keep SDKs explicitly inert in CI. Empty DSN
+          # = sentry no-op; human log format keeps CI output readable.
+          SENTRY_DSN: ''
+          SENTRY_ENVIRONMENT: ci
+          LOG_FORMAT: human
+          LOG_LEVEL: INFO
         run: pytest --tb=short -q
 
       - name: Django system checks
         env:
           DJANGO_SETTINGS_MODULE: djangoProject.settings.dev
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
+          SENTRY_DSN: ''
         run: python manage.py check
 
   deploy:
