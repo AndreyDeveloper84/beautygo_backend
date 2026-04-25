@@ -12,6 +12,11 @@ services:
     volumes:
       - /home/taximeter/beautygo/dev/staticfiles:/app/staticfiles
       - /home/taximeter/beautygo/dev/media:/app/media
+      # Firebase Service Account JSON. CI deploy writes the file (empty
+      # iff secret unset → PushService stays in stub mode), so the bind
+      # mount always resolves. Read-only inside the container — the
+      # process never writes back.
+      - ./firebase-admin.json:/app/firebase-admin.json:ro
     depends_on:
       db:
         condition: service_healthy
@@ -41,6 +46,8 @@ services:
       - DJANGO_SETTINGS_MODULE=djangoProject.settings.prod
       - REDIS_URL=redis://redis:6379
     command: celery -A djangoProject worker --loglevel=info --concurrency=2
+    volumes:
+      - ./firebase-admin.json:/app/firebase-admin.json:ro
     depends_on:
       db:
         condition: service_healthy
@@ -59,6 +66,8 @@ services:
     # State is kept in /tmp/celerybeat-schedule (lost on container recreate
     # but harmless — beat recomputes fire times on start).
     command: celery -A djangoProject beat --loglevel=info
+    volumes:
+      - ./firebase-admin.json:/app/firebase-admin.json:ro
     depends_on:
       db:
         condition: service_healthy
