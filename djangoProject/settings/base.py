@@ -187,6 +187,9 @@ SPECTACULAR_SETTINGS = {
 }
 
 MIDDLEWARE = [
+    # RequestIDMiddleware first so every other middleware + view + log
+    # record sees the same correlation id.
+    'users.middleware.RequestIDMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -329,3 +332,117 @@ YOOKASSA_WEBHOOK_ALLOWED_IPS = [
 YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = int(
     os.environ.get("YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT", "1"),
 )
+
+
+# ----------------------------------------------------------------------------
+# Observability (PR2 — Phase 2 Lane A)
+# ----------------------------------------------------------------------------
+#
+# Sentry SDK is wired here unconditionally; the call is a no-op when
+# SENTRY_DSN is empty (dev / CI default), so the same code path runs in
+# every environment. Don't move this to prod.py — staging deploys benefit
+# from Sentry too, and the no-op fallback keeps it inert until a DSN is
+# provisioned.
+
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+SENTRY_ENVIRONMENT = os.environ.get("SENTRY_ENVIRONMENT", "development")
+SENTRY_TRACES_SAMPLE_RATE = float(
+    os.environ.get("SENTRY_TRACES_SAMPLE_RATE", "0.1"),
+)
+SENTRY_RELEASE = os.environ.get("SENTRY_RELEASE") or None
+
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.django import DjangoIntegration
+
+    def _sentry_traces_sampler(sampling_context):
+        # Health endpoints get hit every few seconds by load balancers — they
+        # would dominate the trace quota and tell us nothing useful.
+        request = sampling_context.get("wsgi_environ") or {}
+        path = request.get("PATH_INFO", "")
+        if path.startswith("/api/v1/health"):
+            return 0.0
+        return SENTRY_TRACES_SAMPLE_RATE
+
+    def _sentry_before_send(event, hint):
+        # send_default_pii=False already strips Authorization headers,
+        # session cookies, and POST body for login forms. This hook is for
+        # forward compatibility — if we ever add a custom field that
+        # legitimately appears in events but legally cannot leave Russia
+        # (e.g. memory-arch sensitive flags), filter it here. Today: no-op.
+        return event
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=SENTRY_ENVIRONMENT,
+        release=SENTRY_RELEASE,
+        send_default_pii=False,                    # 152-ФЗ — no client PII to Sentry
+        traces_sampler=_sentry_traces_sampler,
+        before_send=_sentry_before_send,
+        integrations=[DjangoIntegration()],
+    )
+
+
+# Structured logging.
+#
+# Two output formats: human-readable (dev/local) and JSON (prod / staging).
+# The format is a setting flip rather than a code branch — dev.py and
+# prod.py override LOGGING_FORMATTER below to pick which one is active.
+# All log records carry the current X-Request-ID via the RequestIDFilter
+# (added by users.middleware) so every line traces back to one request.
+
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+LOGGING_FORMATTER = os.environ.get("LOG_FORMAT", "human")  # "human" or "json"
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {
+        "request_id": {
+            "()": "core.log_filters.RequestIDFilter",
+        },
+    },
+    "formatters": {
+        "human": {
+            "format": (
+                "%(asctime)s [%(levelname)s] [req=%(request_id)s] "
+                "%(name)s: %(message)s"
+            ),
+        },
+        "json": {
+            "()": "pythonjsonlogger.json.JsonFormatter",
+            "format": (
+                "%(asctime)s %(levelname)s %(name)s %(request_id)s "
+                "%(message)s %(pathname)s %(lineno)d"
+            ),
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": LOGGING_FORMATTER,
+            "filters": ["request_id"],
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": LOG_LEVEL,
+    },
+    "loggers": {
+        # Quiet Django framework chatter at INFO.
+        "django": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "django.request": {
+            "handlers": ["console"],
+            "level": "WARNING",        # we already log 4xx/5xx via DRF handler
+            "propagate": False,
+        },
+        # App loggers — let them inherit root level (settable via LOG_LEVEL).
+        "appointments": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
+        "users": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
+        "payments": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
+        "reviews": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
+        "services": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
+        # Pre-wire celery — PR3 starts firing tasks immediately.
+        "celery": {"handlers": ["console"], "level": "INFO", "propagate": False},
+    },
+}

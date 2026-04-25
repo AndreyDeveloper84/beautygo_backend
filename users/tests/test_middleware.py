@@ -146,3 +146,45 @@ class TestEndpointRestrictions:
         )
         logger.info("pro app → /login/ → %s", response.status_code)
         assert response.status_code != status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+class TestRequestIDMiddleware:
+    """Every request gets an id; the id propagates to logs and to the
+    response header so external traces can correlate with our log lines.
+    Goes hand-in-hand with the structured-logging config in settings."""
+
+    HEALTH_URL = '/api/v1/health/'
+
+    def test_generates_uuid_when_header_absent(self, api_client):
+        response = api_client.get(self.HEALTH_URL)
+        request_id = response.headers.get('X-Request-ID')
+        assert request_id, "Response missing X-Request-ID header"
+        # 32-char hex (uuid4().hex). Loose check: hex-only, 32 chars.
+        assert len(request_id) == 32
+        assert all(c in '0123456789abcdef' for c in request_id)
+
+    def test_respects_provided_header(self, api_client):
+        provided = 'mobile-trace-1234567890'
+        response = api_client.get(
+            self.HEALTH_URL, HTTP_X_REQUEST_ID=provided,
+        )
+        assert response.headers.get('X-Request-ID') == provided
+
+    def test_get_request_id_returns_sentinel_outside_request(self):
+        """Outside of an active request the helper must not raise — it
+        returns the '-' sentinel so the LOGGING formatter is safe in
+        management commands and startup."""
+        from core.log_filters import (
+            NO_REQUEST_SENTINEL,
+            clear_request_id,
+            get_request_id,
+        )
+
+        clear_request_id()
+        assert get_request_id() == NO_REQUEST_SENTINEL
+
+    def test_each_request_gets_distinct_id(self, api_client):
+        first = api_client.get(self.HEALTH_URL).headers['X-Request-ID']
+        second = api_client.get(self.HEALTH_URL).headers['X-Request-ID']
+        assert first != second

@@ -24,6 +24,12 @@ cryptography==44.0.0
 # Environment
 python-dotenv==1.1.1
 
+# Observability — error monitoring + structured logging.
+# Sentry SDK no-ops when SENTRY_DSN env is empty, so dev / CI stay quiet.
+# python-json-logger is the JSON formatter used by prod LOGGING config.
+sentry-sdk[django]==2.20.0
+python-json-logger==3.3.0
+
 # Database
 psycopg2-binary==2.9.10
 
