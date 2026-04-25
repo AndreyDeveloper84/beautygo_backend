@@ -1,7 +1,6 @@
 from django.conf import settings
 from django.conf.urls.static import static
 from django.contrib import admin
-from django.http import JsonResponse
 from django.urls import path, include
 from drf_spectacular.views import (
     SpectacularAPIView,
@@ -9,10 +8,7 @@ from drf_spectacular.views import (
     SpectacularRedocView,
 )
 
-
-def health_check(request):
-    """Health check endpoint."""
-    return JsonResponse({"status": "ok", "version": "1.0.0"})
+from .health import liveness, readiness
 
 
 urlpatterns = [
@@ -30,9 +26,9 @@ urlpatterns = [
     path('api/v1/payments/', include('payments.urls')),
     path('api/v1/search/', include('search.urls')),
 
-    # Health
-    path('api/v1/health/', health_check, name='health-check'),
-    path('api/v1/health/ready/', health_check, name='health-ready'),
+    # Health: liveness for loadbalancer, readiness for deploy + on-call.
+    path('api/v1/health/', liveness, name='health-check'),
+    path('api/v1/health/ready/', readiness, name='health-ready'),
 
     # API Documentation
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
