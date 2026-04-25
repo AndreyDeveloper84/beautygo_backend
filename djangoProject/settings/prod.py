@@ -11,24 +11,32 @@ SECRET_KEY = os.environ['DJANGO_SECRET_KEY']
 ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',')
 
 
-# Fail-fast on OAuth audience bindings.
+# Fail-fast on env vars whose absence silently degrades a security control
+# in code that would otherwise look like it's working.
 #
-# Without these, social_auth.verify_google_token and verify_apple_token
-# silently skip the "aud" claim check — any id-token issued by Google/Apple
-# for ANY application would be accepted. That is the classic confused-deputy
-# attack that hands out accounts in the wrong app to whoever signed into
-# some other OAuth client.
+# - GOOGLE_CLIENT_ID / APPLE_CLIENT_ID: without these,
+#   social_auth.verify_google_token / verify_apple_token skip the "aud"
+#   claim check and accept tokens issued for any other OAuth client.
+#   That's the confused-deputy account-takeover path.
+# - YOOKASSA_WEBHOOK_ALLOWED_IPS: without this, the webhook IP allowlist
+#   logs a warning but accepts every source. An attacker who can guess a
+#   provider_payment_id can replay events; the re-fetch + idempotency
+#   layers narrow blast radius but don't close it.
 #
 # dev.py intentionally tolerates missing values so local work does not need
-# real OAuth credentials; prod must not.
-_REQUIRED_OAUTH_ENV = ("GOOGLE_CLIENT_ID", "APPLE_CLIENT_ID")
-_missing_oauth = [name for name in _REQUIRED_OAUTH_ENV if not os.environ.get(name)]
-if _missing_oauth:
+# real OAuth credentials or production webhook ranges; prod must not.
+_REQUIRED_PROD_ENV = (
+    "GOOGLE_CLIENT_ID",
+    "APPLE_CLIENT_ID",
+    "YOOKASSA_WEBHOOK_ALLOWED_IPS",
+)
+_missing_prod = [name for name in _REQUIRED_PROD_ENV if not os.environ.get(name)]
+if _missing_prod:
     raise ImproperlyConfigured(
-        "Production requires OAuth audience bindings: "
-        f"missing {', '.join(_missing_oauth)}. "
-        "Without these, Google/Apple id-tokens bypass audience validation, "
-        "enabling cross-application account takeover."
+        "Production requires these security-critical env vars: "
+        f"missing {', '.join(_missing_prod)}. "
+        "Each disables a defence layer when unset; see "
+        "djangoProject/settings/base.py for what each one gates."
     )
 
 # CORS

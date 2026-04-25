@@ -387,6 +387,105 @@ class TestPaymentWebhook:
         assert response.data['status'] == 'ignored'
 
 
+@pytest.mark.django_db
+class TestPaymentWebhookSecurity:
+    """Regression tests for H1 — YooKassa webhook must reject unexpected
+    source IPs when an allowlist is configured, and must cap amplification
+    via throttling."""
+
+    def test_rejects_unlisted_ip_when_allowlist_set(
+        self, anon_app, client_user, specialist_user, service, settings,
+    ):
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'wh_pay_sec'}},
+            format='json',
+            REMOTE_ADDR='1.2.3.4',
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data['error']['code'] == 'PERMISSION_DENIED'
+
+    def test_accepts_listed_ip(self, anon_app, settings):
+        """An IP inside the configured CIDR is not rejected for IP reason
+        (unknown payment_id → 200 'ok' from the normal flow)."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            REMOTE_ADDR='185.71.76.5',
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+    def test_respects_x_forwarded_for_when_behind_proxy(
+        self, anon_app, settings,
+    ):
+        """Standard nginx-only setup (TRUSTED_PROXY_COUNT=1): nginx appends
+        the TCP source it received the request from to XFF. With YooKassa
+        sending us a request directly, that's the only XFF entry — and
+        Django reads xff[-1]."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = 1
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            REMOTE_ADDR='10.0.0.1',                # nginx
+            HTTP_X_FORWARDED_FOR='185.71.76.10',   # what nginx appended (=YooKassa IP)
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+    def test_xff_spoofing_rejected(self, anon_app, settings):
+        """Regression for the leftmost-XFF bypass: an attacker who can
+        reach nginx sets ``X-Forwarded-For: <yookassa_ip>``; nginx
+        appends its own TCP source (the attacker), so Django sees
+        ``XFF = "yookassa_ip, attacker_ip"``. Reading the leftmost
+        entry would let this through; reading the rightmost (xff[-1])
+        is the attacker's real IP, which fails the allowlist.
+        """
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = 1
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'wh_spoof'}},
+            format='json',
+            REMOTE_ADDR='10.0.0.1',                                  # nginx
+            HTTP_X_FORWARDED_FOR='185.71.76.10, 1.2.3.4',            # attacker spoof, then nginx-appended attacker IP
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data['error']['code'] == 'PERMISSION_DENIED'
+
+    def test_two_trusted_proxies_reads_correct_depth(
+        self, anon_app, settings,
+    ):
+        """CDN + nginx setup (TRUSTED_PROXY_COUNT=2): each proxy appends
+        once, so the YooKassa IP sits at index -2. xff[-1] would be the
+        CDN's IP and would fail the allowlist."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = 2
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            REMOTE_ADDR='10.0.0.1',                              # nginx
+            HTTP_X_FORWARDED_FOR='185.71.76.10, 203.0.113.5',    # YooKassa, then CDN
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+    def test_empty_allowlist_permits_all(self, anon_app, settings):
+        """Dev / initial-deploy mode: unset env permits all, with a warning
+        logged (behaviour preserved from before H1)."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            REMOTE_ADDR='1.2.3.4',
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/payments/{id}/refund/
 # ---------------------------------------------------------------------------
@@ -492,3 +591,34 @@ class TestPaymentRefund:
         )
         response = other_api.post(f'/api/v1/payments/{payment.id}/refund/', {}, format='json')
         assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+class TestPaymentRefundThrottle:
+    """L3 regression — refund endpoint must sit on the 'payment' 5/min
+    bucket so refund floods don't burn YooKassa API quota."""
+
+    def test_refund_throttled_at_6th_request(
+        self, client_app, client_user, specialist_user, service,
+    ):
+        appt = _make_appointment(client_user, specialist_user, service)
+        payment = Payment.objects.create(
+            appointment=appt,
+            amount=Decimal('2000.00'),
+            status=Payment.Status.AUTHORIZED,
+            provider='yookassa',
+            provider_payment_id='ref_throttle_001',
+        )
+        url = f'/api/v1/payments/{payment.id}/refund/'
+
+        # First 5 burn the bucket (any non-429 status is fine — success or
+        # business error are both not-throttled).
+        for i in range(5):
+            response = client_app.post(url, {}, format='json')
+            assert response.status_code != status.HTTP_429_TOO_MANY_REQUESTS, (
+                f"Refund throttled on request #{i + 1}; expected first 5 to pass"
+            )
+
+        # 6th hits the cap.
+        response = client_app.post(url, {}, format='json')
+        assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
