@@ -8,6 +8,7 @@ services:
       - .env
     environment:
       - DJANGO_SETTINGS_MODULE=djangoProject.settings.prod
+      - REDIS_URL=redis://redis:6379
     volumes:
       - /home/taximeter/beautygo/dev/staticfiles:/app/staticfiles
       - /home/taximeter/beautygo/dev/media:/app/media
@@ -15,6 +16,52 @@ services:
       db:
         condition: service_healthy
       minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  celery_worker:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=djangoProject.settings.prod
+      - REDIS_URL=redis://redis:6379
+    command: celery -A djangoProject worker --loglevel=info --concurrency=2
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  celery_beat:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DJANGO_SETTINGS_MODULE=djangoProject.settings.prod
+      - REDIS_URL=redis://redis:6379
+    # DatabaseScheduler reads schedule from django_celery_beat tables —
+    # migrations land them on first deploy.
+    command: celery -A djangoProject beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   db:
@@ -68,3 +115,4 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  redis_data:

@@ -4,6 +4,12 @@ from .base import *
 
 DEBUG = True
 
+# Default to eager Celery in dev — synchronous task execution keeps
+# `runserver` self-contained (no separate worker process). Override
+# CELERY_TASK_ALWAYS_EAGER=False in env when testing real async flow.
+if "CELERY_TASK_ALWAYS_EAGER" not in os.environ:
+    CELERY_TASK_ALWAYS_EAGER = True
+
 INSTALLED_APPS += ['corsheaders']
 MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE
 
