@@ -146,8 +146,13 @@ jobs:
             } >> .env
 
             docker compose build
-            docker compose up -d --force-recreate web
+            # Bring up the full stack — redis + celery_worker + celery_beat
+            # are new in PR3 and would otherwise sit unstarted; --force-recreate
+            # on web makes sure new env (REDIS_URL, SENTRY_*) reaches it.
+            docker compose up -d --force-recreate
             sleep 5
+            # Wait for db to be healthy before migrating; needed because
+            # django_celery_beat migrations land on this deploy.
             docker compose exec -T web python manage.py migrate --noinput || true
             docker compose ps
             echo "Deploy complete!"
