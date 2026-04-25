@@ -34,7 +34,9 @@ python-json-logger==3.3.0
 # django-celery-beat for the periodic outbox dispatcher.
 celery[redis]==5.5.3
 django-redis==5.4.0
-django-celery-beat==2.7.0
+# 2.7.0 caps Django<5.2; project is on 5.2.5, so bump to 2.8.1 which
+# adds Django 5.2 support.
+django-celery-beat==2.8.1
 
 # Database
 psycopg2-binary==2.9.10
