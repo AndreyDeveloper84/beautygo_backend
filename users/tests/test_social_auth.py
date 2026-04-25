@@ -381,6 +381,7 @@ class TestProdOAuthFailFast:
                 DJANGO_SECRET_KEY="test-secret",
                 GOOGLE_CLIENT_ID=None,
                 APPLE_CLIENT_ID="apple-id",
+                YOOKASSA_WEBHOOK_ALLOWED_IPS="185.71.76.0/27",
             )
 
     def test_raises_when_apple_client_id_missing(self, monkeypatch):
@@ -392,14 +393,31 @@ class TestProdOAuthFailFast:
                 DJANGO_SECRET_KEY="test-secret",
                 GOOGLE_CLIENT_ID="google-id",
                 APPLE_CLIENT_ID=None,
+                YOOKASSA_WEBHOOK_ALLOWED_IPS="185.71.76.0/27",
             )
 
-    def test_imports_when_both_set(self, monkeypatch):
+    def test_raises_when_yookassa_webhook_ips_missing(self, monkeypatch):
+        from django.core.exceptions import ImproperlyConfigured
+
+        with pytest.raises(
+            ImproperlyConfigured, match="YOOKASSA_WEBHOOK_ALLOWED_IPS",
+        ):
+            self._reload_prod(
+                monkeypatch,
+                DJANGO_SECRET_KEY="test-secret",
+                GOOGLE_CLIENT_ID="google-id",
+                APPLE_CLIENT_ID="apple-id",
+                YOOKASSA_WEBHOOK_ALLOWED_IPS=None,
+            )
+
+    def test_imports_when_all_required_set(self, monkeypatch):
         module = self._reload_prod(
             monkeypatch,
             DJANGO_SECRET_KEY="test-secret",
             GOOGLE_CLIENT_ID="google-id",
             APPLE_CLIENT_ID="apple-id",
+            YOOKASSA_WEBHOOK_ALLOWED_IPS="185.71.76.0/27",
         )
         assert module.GOOGLE_CLIENT_ID == "google-id"
         assert module.APPLE_CLIENT_ID == "apple-id"
+        assert module.YOOKASSA_WEBHOOK_ALLOWED_IPS == ["185.71.76.0/27"]

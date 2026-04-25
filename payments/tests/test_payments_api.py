@@ -421,15 +421,55 @@ class TestPaymentWebhookSecurity:
     def test_respects_x_forwarded_for_when_behind_proxy(
         self, anon_app, settings,
     ):
-        """Real client IP lives in XFF when behind nginx; the check must
-        honour that rather than rejecting the proxy's IP."""
+        """Standard nginx-only setup (TRUSTED_PROXY_COUNT=1): nginx appends
+        the TCP source it received the request from to XFF. With YooKassa
+        sending us a request directly, that's the only XFF entry — and
+        Django reads xff[-1]."""
         settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = 1
         response = anon_app.post(
             WEBHOOK_URL,
             {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
             format='json',
             REMOTE_ADDR='10.0.0.1',                # nginx
-            HTTP_X_FORWARDED_FOR='185.71.76.10, 10.0.0.1',
+            HTTP_X_FORWARDED_FOR='185.71.76.10',   # what nginx appended (=YooKassa IP)
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+    def test_xff_spoofing_rejected(self, anon_app, settings):
+        """Regression for the leftmost-XFF bypass: an attacker who can
+        reach nginx sets ``X-Forwarded-For: <yookassa_ip>``; nginx
+        appends its own TCP source (the attacker), so Django sees
+        ``XFF = "yookassa_ip, attacker_ip"``. Reading the leftmost
+        entry would let this through; reading the rightmost (xff[-1])
+        is the attacker's real IP, which fails the allowlist.
+        """
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = 1
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'wh_spoof'}},
+            format='json',
+            REMOTE_ADDR='10.0.0.1',                                  # nginx
+            HTTP_X_FORWARDED_FOR='185.71.76.10, 1.2.3.4',            # attacker spoof, then nginx-appended attacker IP
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data['error']['code'] == 'PERMISSION_DENIED'
+
+    def test_two_trusted_proxies_reads_correct_depth(
+        self, anon_app, settings,
+    ):
+        """CDN + nginx setup (TRUSTED_PROXY_COUNT=2): each proxy appends
+        once, so the YooKassa IP sits at index -2. xff[-1] would be the
+        CDN's IP and would fail the allowlist."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = 2
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            REMOTE_ADDR='10.0.0.1',                              # nginx
+            HTTP_X_FORWARDED_FOR='185.71.76.10, 203.0.113.5',    # YooKassa, then CDN
         )
         assert response.status_code == status.HTTP_200_OK
 

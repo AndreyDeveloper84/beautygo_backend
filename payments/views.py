@@ -29,16 +29,28 @@ def _get_yookassa() -> YooKassaService:
 
 
 def _client_ip(request: Request) -> str:
-    """Return the originating client IP.
+    """Return the IP of the outermost trusted proxy's source.
 
-    Behind nginx / other reverse proxies the ``REMOTE_ADDR`` is the proxy,
-    not the real client — the real address is in ``X-Forwarded-For``. We
-    take the first element of XFF when present (that's the origin client;
-    subsequent entries are the proxy chain).
+    Standard nginx config (``proxy_set_header X-Forwarded-For
+    $proxy_add_x_forwarded_for;``) APPENDS one entry on each pass — the
+    IP that proxy received the request from. So with N trusted proxies
+    in front of Django, the real client lives at index ``-N`` in XFF;
+    everything before it is *client-controlled and untrusted*. Reading
+    ``xff[0]`` (the leftmost entry) is the classic spoofing bypass:
+    attacker sets ``X-Forwarded-For: <victim_ip>``, our proxy appends
+    its own view, and the leftmost entry is the attacker's lie.
+
+    Falls back to ``REMOTE_ADDR`` (Django's TCP source) when XFF is
+    missing or shorter than ``YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT`` —
+    typical when Django is reached directly without a proxy in front.
     """
-    xff = request.META.get("HTTP_X_FORWARDED_FOR", "")
-    if xff:
-        return xff.split(",")[0].strip()
+    from django.conf import settings
+
+    trusted = max(1, getattr(settings, "YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT", 1))
+    xff_raw = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    xff = [s.strip() for s in xff_raw.split(",") if s.strip()]
+    if len(xff) >= trusted:
+        return xff[-trusted]
     return request.META.get("REMOTE_ADDR", "")
 
 
@@ -225,7 +237,7 @@ class PaymentWebhookView(APIView):
     """
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
-    throttle_scope = 'webhook'
+    throttle_scope = 'webhook_payment'
 
     def post(self, request: Request) -> Response:
         allowlist = getattr(settings, "YOOKASSA_WEBHOOK_ALLOWED_IPS", [])
