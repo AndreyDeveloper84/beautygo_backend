@@ -88,6 +88,13 @@ jobs:
     steps:
       - name: Deploy to dev server via SSH
         uses: appleboy/ssh-action@v1
+        env:
+          # Sentry config managed by CI, not by hand-editing .env on the box.
+          # SENTRY_DSN is a repo secret (GitHub → Settings → Secrets and variables
+          # → Actions); empty value = SDK no-op, safe default.
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          SENTRY_ENVIRONMENT: development
+          SENTRY_RELEASE: ${{ github.sha }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -95,6 +102,7 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           timeout: 300s
           command_timeout: 5m
+          envs: SENTRY_DSN,SENTRY_ENVIRONMENT,SENTRY_RELEASE
           script: |
             cd /home/taximeter/beautygo/dev
 
@@ -103,6 +111,23 @@ jobs:
 
             git fetch origin dev
             git reset --hard origin/dev
+
+            # Refresh CI-managed env vars in .env without disturbing the rest.
+            # Idempotent: drop any existing line for these keys, then append
+            # the current value. Empty SENTRY_DSN is fine — base.py treats it
+            # as "no Sentry" and skips init.
+            touch .env
+            sed -i \
+              -e '/^SENTRY_DSN=/d' \
+              -e '/^SENTRY_ENVIRONMENT=/d' \
+              -e '/^SENTRY_RELEASE=/d' \
+              .env
+            {
+              echo "SENTRY_DSN=$SENTRY_DSN"
+              echo "SENTRY_ENVIRONMENT=$SENTRY_ENVIRONMENT"
+              echo "SENTRY_RELEASE=$SENTRY_RELEASE"
+            } >> .env
+
             docker compose build
             docker compose up -d --force-recreate web
             sleep 5
