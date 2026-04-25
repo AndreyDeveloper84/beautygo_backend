@@ -42,7 +42,13 @@ logger = logging.getLogger(__name__)
 # --- Auth Views (phone-based OTP) ---
 
 class RegisterPhoneView(APIView):
-    """POST /api/v1/auth/register/ — Register with phone number."""
+    """POST /api/v1/auth/register/ — DEPRECATED.
+
+    Use ``/api/v1/auth/request-otp/`` + ``/api/v1/auth/verify-otp/``
+    (DRF-173 Auth v2). The route is wired through
+    ``LegacyRegisterPhoneView`` in ``users/urls.py`` which adds
+    ``Deprecation`` + ``Sunset`` headers and logs each call (DRF-220).
+    """
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'
@@ -64,7 +70,12 @@ class RegisterPhoneView(APIView):
 
 
 class LoginView(APIView):
-    """POST /api/v1/auth/login/ — Send OTP to phone."""
+    """POST /api/v1/auth/login/ — DEPRECATED.
+
+    Use ``/api/v1/auth/request-otp/`` (DRF-173 Auth v2). The route is
+    wired through ``LegacyLoginView`` in ``users/urls.py`` which adds
+    ``Deprecation`` + ``Sunset`` headers and logs each call (DRF-220).
+    """
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'

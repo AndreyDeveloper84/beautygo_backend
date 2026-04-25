@@ -112,6 +112,12 @@ jobs:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           SENTRY_ENVIRONMENT: development
           SENTRY_RELEASE: ${{ github.sha }}
+          # DJANGO_ENV gates prod.py fail-fast strictness. dev VPS uses prod
+          # settings (HSTS, S3 storage, JSON logs) but doesn't yet have all
+          # OAuth / YooKassa creds provisioned, so "staging" downgrades the
+          # missing-env error to a warning (see core/env_strictness.py).
+          # Real production VPS deploy step must override to "production".
+          DJANGO_ENV: staging
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -119,7 +125,7 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           timeout: 300s
           command_timeout: 5m
-          envs: SENTRY_DSN,SENTRY_ENVIRONMENT,SENTRY_RELEASE
+          envs: SENTRY_DSN,SENTRY_ENVIRONMENT,SENTRY_RELEASE,DJANGO_ENV
           script: |
             cd /home/taximeter/beautygo/dev
 
@@ -138,11 +144,13 @@ jobs:
               -e '/^SENTRY_DSN=/d' \
               -e '/^SENTRY_ENVIRONMENT=/d' \
               -e '/^SENTRY_RELEASE=/d' \
+              -e '/^DJANGO_ENV=/d' \
               .env
             {
               echo "SENTRY_DSN=$SENTRY_DSN"
               echo "SENTRY_ENVIRONMENT=$SENTRY_ENVIRONMENT"
               echo "SENTRY_RELEASE=$SENTRY_RELEASE"
+              echo "DJANGO_ENV=$DJANGO_ENV"
             } >> .env
 
             docker compose build
