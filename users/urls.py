@@ -33,7 +33,19 @@ class TokenRefreshView(_BaseTokenRefreshView):
 # Subclass keeps the canonical view's behaviour and tags every response with
 # the deprecation headers so mobile clients can migrate before the sunset.
 class LegacyMasterMeView(DeprecatedAliasMixin, MasterMeView):
-    pass
+    deprecated_path = "/auth/masters/me/"
+
+
+# Legacy /auth/register/ + /auth/login/ — moved to /auth/request-otp/ +
+# /auth/verify-otp/ (DRF-173 Auth v2). Kept live during the deprecation
+# window so mobile clients can migrate; each call logs a warning so we
+# can measure remaining traffic before removal (DRF-220).
+class LegacyRegisterPhoneView(DeprecatedAliasMixin, RegisterPhoneView):
+    deprecated_path = "/auth/register/"
+
+
+class LegacyLoginView(DeprecatedAliasMixin, LoginView):
+    deprecated_path = "/auth/login/"
 
 
 urlpatterns = [
@@ -41,9 +53,11 @@ urlpatterns = [
     path('anonymous/', AnonymousAuthView.as_view(), name='anonymous-auth'),
     path('onboarding/', OnboardingView.as_view(), name='onboarding'),
 
-    # Auth endpoints (phone-based OTP)
-    path('register/', RegisterPhoneView.as_view(), name='register'),
-    path('login/', LoginView.as_view(), name='login'),
+    # Auth endpoints (phone-based OTP).
+    # /register/ + /login/ are deprecated aliases — see LegacyRegisterPhoneView
+    # / LegacyLoginView above (DRF-220). Use /request-otp/ + /verify-otp/.
+    path('register/', LegacyRegisterPhoneView.as_view(), name='register'),
+    path('login/', LegacyLoginView.as_view(), name='login'),
     path('verify-otp/', VerifyOTPView.as_view(), name='verify-otp'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),
     path('logout/', LogoutView.as_view(), name='logout'),

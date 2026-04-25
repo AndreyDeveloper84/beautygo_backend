@@ -12,14 +12,21 @@ before the cut-off:
 Mount the alias by subclassing the canonical view and mixing this in:
 
     class LegacyMasterMeView(DeprecatedAliasMixin, MasterMeView):
+        deprecated_path = "/auth/masters/me/"
         sunset_date = "Sun, 31 May 2026 23:59:59 GMT"
 
 Then route ``/old/path/`` to ``LegacyMasterMeView``. The canonical view
-stays untouched.
+stays untouched. Setting ``deprecated_path`` makes the mixin emit a
+``logger.warning`` per request so we can track usage frequency before
+removal.
 """
 from __future__ import annotations
 
+import logging
+
 from rest_framework.views import APIView
+
+logger = logging.getLogger(__name__)
 
 # Default sunset date for endpoints renamed during the Notion API
 # Specification v2.0 alignment (DRF-208 / DRF-209). Override on the
@@ -33,10 +40,22 @@ class DeprecatedAliasMixin:
 
     Sits left of the canonical view in MRO so ``finalize_response``
     intercepts the canonical view's rendered response and tags it
-    before it leaves the framework.
+    before it leaves the framework. When ``deprecated_path`` is set,
+    each request also emits a ``logger.warning`` so deployments can
+    measure legacy traffic and time the removal cleanly.
     """
 
     sunset_date: str = DEFAULT_SUNSET_DATE
+    deprecated_path: str | None = None
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)  # type: ignore[misc]
+        if self.deprecated_path:
+            logger.warning(
+                "deprecated_endpoint_called path=%s sunset=%s",
+                self.deprecated_path,
+                self.sunset_date,
+            )
 
     def finalize_response(self, request, response, *args, **kwargs):
         # ``super()`` walks past us to the real APIView chain so the
