@@ -1,5 +1,10 @@
 # Python
 __pycache__/
+
+# Firebase Service Account — written by CI deploy from GitHub Secret.
+# Touched as an empty file in dev runs so docker-compose bind mount
+# resolves; never commit real credentials.
+firebase-admin.json
 *.py[cod]
 *$py.class
 *.so
