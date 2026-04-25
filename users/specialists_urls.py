@@ -3,11 +3,17 @@ from rest_framework.routers import DefaultRouter
 
 from .schedule_api import ScheduleView, TimeOffDetailView, TimeOffListView
 from .specialists_api import SpecialistViewSet
+from .views import MasterMeView
 
 router = DefaultRouter()
 router.register(r'', SpecialistViewSet, basename='specialists')
 
 urlpatterns = [
+    # Canonical specialist profile (DRF-209). Legacy /api/v1/auth/masters/me/
+    # stays live in users/urls.py wrapped with deprecation headers — see
+    # LegacyMasterMeView there.
+    path('me/', MasterMeView.as_view(), name='specialist-me'),
+
     # Specialist schedule management (Pro app) — must come before router patterns
     path('me/schedule/', ScheduleView.as_view(), name='specialist-schedule'),
     path('me/time-off/', TimeOffListView.as_view(), name='specialist-time-off'),

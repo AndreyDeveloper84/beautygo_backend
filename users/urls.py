@@ -2,6 +2,8 @@ from django.urls import path
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework_simplejwt.views import TokenRefreshView as _BaseTokenRefreshView
 
+from core.deprecation import DeprecatedAliasMixin
+
 from .views import (
     AnonymousAuthView,
     BindPhoneView,
@@ -27,6 +29,13 @@ class TokenRefreshView(_BaseTokenRefreshView):
     throttle_scope = 'auth'
 
 
+# Legacy /api/v1/auth/masters/me/ — moved to /api/v1/specialists/me/ (DRF-209).
+# Subclass keeps the canonical view's behaviour and tags every response with
+# the deprecation headers so mobile clients can migrate before the sunset.
+class LegacyMasterMeView(DeprecatedAliasMixin, MasterMeView):
+    pass
+
+
 urlpatterns = [
     # Auth v2 (DRF-173)
     path('anonymous/', AnonymousAuthView.as_view(), name='anonymous-auth'),
@@ -50,8 +59,11 @@ urlpatterns = [
     path('social/<str:provider>/', SocialAuthView.as_view(), name='social-auth'),
     path('bind-phone/', BindPhoneView.as_view(), name='bind-phone'),
 
-    # Specialist profile (GET/POST/PATCH)
-    path('masters/me/', MasterMeView.as_view(), name='master-me'),
+    # Specialist profile (GET/POST/PATCH).
+    # Canonical path is /api/v1/specialists/me/ (DRF-209); this entry is the
+    # deprecated alias and will be removed after the sunset date documented
+    # by DeprecatedAliasMixin.
+    path('masters/me/', LegacyMasterMeView.as_view(), name='master-me-legacy'),
 
     # Client profile (GET/PATCH)
     path('clients/me/', ClientProfileView.as_view(), name='client-profile'),
