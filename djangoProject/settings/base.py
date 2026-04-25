@@ -361,7 +361,12 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
-CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+# Default PersistentScheduler reads ``CELERY_BEAT_SCHEDULE`` directly
+# from settings, so the outbox dispatcher activates with zero
+# DB-side bootstrap. DatabaseScheduler from django_celery_beat would
+# require a one-time PeriodicTask + IntervalSchedule row creation
+# (it does not autosync the Python dict) — switch to it later when
+# we want runtime schedule edits via Django Admin.
 CELERY_BEAT_SCHEDULE = {
     "dispatch-outbox-events": {
         "task": "appointments.tasks.dispatch_outbox_events",

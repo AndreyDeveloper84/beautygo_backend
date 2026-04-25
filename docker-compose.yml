@@ -55,9 +55,10 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=djangoProject.settings.prod
       - REDIS_URL=redis://redis:6379
-    # DatabaseScheduler reads schedule from django_celery_beat tables —
-    # migrations land them on first deploy.
-    command: celery -A djangoProject beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    # Default PersistentScheduler reads CELERY_BEAT_SCHEDULE from settings.
+    # State is kept in /tmp/celerybeat-schedule (lost on container recreate
+    # but harmless — beat recomputes fire times on start).
+    command: celery -A djangoProject beat --loglevel=info
     depends_on:
       db:
         condition: service_healthy
