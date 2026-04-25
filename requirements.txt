@@ -30,6 +30,12 @@ python-dotenv==1.1.1
 sentry-sdk[django]==2.20.0
 python-json-logger==3.3.0
 
+# Async tasks — Celery + Redis broker/result backend, django-redis cache,
+# django-celery-beat for the periodic outbox dispatcher.
+celery[redis]==5.5.3
+django-redis==5.4.0
+django-celery-beat==2.7.0
+
 # Database
 psycopg2-binary==2.9.10
 
