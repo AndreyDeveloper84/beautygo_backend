@@ -16,6 +16,18 @@ except Exception:
 done
 echo "PostgreSQL is ready."
 
+# All containers built from this image share the entrypoint. Behaviour
+# branches by the CMD (compose ``command:`` field):
+#   - no command  → web mode: migrate → collectstatic → gunicorn (default).
+#   - any command → other-process mode (celery worker / celery beat / shell):
+#     wait for db (above) then exec the command as-is. Skip migrate +
+#     collectstatic — the web container is the single source of truth
+#     for those, N containers running them in parallel race each other.
+if [ "$#" -gt 0 ]; then
+    echo "Running custom command: $*"
+    exec "$@"
+fi
+
 echo "Applying migrations..."
 python manage.py migrate --noinput
 
