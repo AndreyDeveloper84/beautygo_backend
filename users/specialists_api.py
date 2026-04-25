@@ -102,6 +102,7 @@ class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
     reviews_summary = serializers.SerializerMethodField()
     recent_reviews = serializers.SerializerMethodField()
     working_hours = serializers.SerializerMethodField()
+    portfolio = serializers.SerializerMethodField()
 
     class Meta:
         model = SpecialistProfile
@@ -112,7 +113,7 @@ class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
             'rating', 'reviews_count', 'is_available',
             'services', 'services_count', 'distance_km',
             'reviews_summary', 'recent_reviews', 'working_hours',
-            'created_at',
+            'portfolio', 'created_at',
         ]
 
     def get_services(self, obj: SpecialistProfile) -> list[dict[str, Any]]:
@@ -136,6 +137,18 @@ class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
     def get_recent_reviews(self, obj: SpecialistProfile) -> list:
         # TODO(DRF-reviews): implement when Review model is added
         return []
+
+    def get_portfolio(self, obj: SpecialistProfile) -> list[dict[str, Any]]:
+        """Public portfolio listing (DRF-194). Ordering matches the model's
+        Meta.ordering — sort_order asc, created_at asc as a tiebreaker."""
+        return [
+            {
+                'id': str(item.id),
+                'image_url': item.image.url if item.image else "",
+                'sort_order': item.sort_order,
+            }
+            for item in obj.portfolio.all()
+        ]
 
     def get_working_hours(self, obj: SpecialistProfile) -> list:
         """Specialist weekly schedule from SpecialistWorkingHours model."""
@@ -354,7 +367,7 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
                 user__is_active=True,
             )
             .select_related('user')
-            .prefetch_related(active_services)
+            .prefetch_related(active_services, 'portfolio')
             .annotate(
                 active_services_count=Count(
                     'services',
