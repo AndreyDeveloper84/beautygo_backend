@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     'reviews',
     'payments',
     'ai',
+    'notifications',
 ]
 
 AUTH_USER_MODEL = 'users.User'
@@ -316,6 +317,15 @@ OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
 OPENAI_PROXY = os.environ.get("OPENAI_PROXY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 
+# Firebase Cloud Messaging — push delivery for both apps.
+# FIREBASE_CREDENTIALS_JSON: full Service Account JSON as a string (CI
+# path; GitHub Secret + .env injection). FIREBASE_CREDENTIALS_PATH: file
+# path on disk (local dev path). Either resolves the same Admin SDK
+# init. Empty values keep PushService in stub mode (logs only) — same
+# pattern as the empty-DSN Sentry no-op.
+FIREBASE_CREDENTIALS_JSON = os.environ.get("FIREBASE_CREDENTIALS_JSON", "")
+FIREBASE_CREDENTIALS_PATH = os.environ.get("FIREBASE_CREDENTIALS_PATH", "")
+
 # YooKassa Payment Settings
 YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
 YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
@@ -382,6 +392,12 @@ CELERY_BEAT_SCHEDULE = {
     "dispatch-outbox-events": {
         "task": "appointments.tasks.dispatch_outbox_events",
         "schedule": 10.0,                       # every 10 seconds
+    },
+    # 1h reminder beat. Window logic in the task itself absorbs the
+    # 5-min jitter so we don't spam-send if a tick arrives early/late.
+    "dispatch-appointment-reminders": {
+        "task": "notifications.dispatch_appointment_reminders",
+        "schedule": 300.0,                      # every 5 minutes
     },
 }
 

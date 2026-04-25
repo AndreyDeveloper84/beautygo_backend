@@ -44,6 +44,12 @@ psycopg2-binary==2.9.10
 # Production server
 gunicorn==23.0.0
 
+# Firebase Admin SDK — used by notifications.services.push for FCM
+# delivery. Empty FIREBASE_CREDENTIALS_* keeps PushService in stub mode
+# so this dep ships unconditionally without breaking environments that
+# haven't provisioned Firebase yet.
+firebase-admin==6.5.0
+
 # OpenAI client + httpx with proxy support.
 # api.openai.com is geo-blocked from RU; production tunnels through
 # OPENAI_PROXY (HTTP/SOCKS), wired via httpx.Client(proxy=...). httpx is

@@ -118,6 +118,10 @@ jobs:
           # missing-env error to a warning (see core/env_strictness.py).
           # Real production VPS deploy step must override to "production".
           DJANGO_ENV: staging
+          # Firebase Service Account JSON. Empty value → PushService runs
+          # in stub mode (logs payload, returns success) — same no-op
+          # pattern as Sentry. Set via GitHub Secrets to enable real FCM.
+          FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -125,7 +129,7 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           timeout: 300s
           command_timeout: 5m
-          envs: SENTRY_DSN,SENTRY_ENVIRONMENT,SENTRY_RELEASE,DJANGO_ENV
+          envs: SENTRY_DSN,SENTRY_ENVIRONMENT,SENTRY_RELEASE,DJANGO_ENV,FIREBASE_CREDENTIALS_JSON
           script: |
             cd /home/taximeter/beautygo/dev
 
@@ -145,13 +149,25 @@ jobs:
               -e '/^SENTRY_ENVIRONMENT=/d' \
               -e '/^SENTRY_RELEASE=/d' \
               -e '/^DJANGO_ENV=/d' \
+              -e '/^FIREBASE_CREDENTIALS_PATH=/d' \
               .env
             {
               echo "SENTRY_DSN=$SENTRY_DSN"
               echo "SENTRY_ENVIRONMENT=$SENTRY_ENVIRONMENT"
               echo "SENTRY_RELEASE=$SENTRY_RELEASE"
               echo "DJANGO_ENV=$DJANGO_ENV"
+              echo "FIREBASE_CREDENTIALS_PATH=/app/firebase-admin.json"
             } >> .env
+
+            # Firebase Service Account JSON → bind-mounted file. Touch
+            # first so the docker-compose mount succeeds even when the
+            # secret is empty (PushService treats a zero-byte file as
+            # "no creds" and falls into stub mode).
+            touch firebase-admin.json
+            chmod 600 firebase-admin.json
+            if [ -n "$FIREBASE_CREDENTIALS_JSON" ]; then
+              printf '%s' "$FIREBASE_CREDENTIALS_JSON" > firebase-admin.json
+            fi
 
             docker compose build
             # Bring up the full stack — redis + celery_worker + celery_beat
