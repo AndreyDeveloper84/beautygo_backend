@@ -1,6 +1,7 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
+from .portfolio_api import PortfolioDetailView, PortfolioListCreateView
 from .schedule_api import ScheduleView, TimeOffDetailView, TimeOffListView
 from .specialists_api import SpecialistViewSet
 from .views import MasterMeView
@@ -23,4 +24,9 @@ urlpatterns = [
     path('me/working-hours/', ScheduleView.as_view(), name='specialist-working-hours'),
     path('me/schedule/blocks/', TimeOffListView.as_view(), name='specialist-schedule-blocks'),
     path('me/schedule/blocks/<uuid:pk>/', TimeOffDetailView.as_view(), name='specialist-schedule-block-detail'),
+
+    # Portfolio (Pro app, DRF-194). Public read uses the embedded list
+    # in GET /specialists/{id}/ — see SpecialistDetailSerializer.
+    path('me/portfolio/', PortfolioListCreateView.as_view(), name='specialist-portfolio'),
+    path('me/portfolio/<uuid:pk>/', PortfolioDetailView.as_view(), name='specialist-portfolio-detail'),
 ] + router.urls

@@ -123,6 +123,45 @@ class SpecialistProfile(models.Model):
         return f"{self.display_name} ({self.get_status_display()})"
 
 
+class SpecialistPortfolio(models.Model):
+    """Portfolio image for a specialist (DRF-194).
+
+    Public listing surfaces these on the specialist detail card; the
+    Pro app manages them via /api/v1/specialists/me/portfolio/. We
+    store the file in the same storage backend the rest of the project
+    uses (django-storages → S3/Minio) and expose ``image.url`` to the
+    API as ``image_url``. There's no separate ``s3_key`` field — the
+    storage backend's ``image.name`` is the canonical key, and the
+    storage handles deletion when the model row is removed.
+
+    Per-specialist hard cap of 30 photos is enforced in the upload view,
+    not in the model — keeping the cap in code lets us tune it without
+    a migration round-trip and avoids the "constraint that needs the
+    full row count" pattern PostgreSQL doesn't express cleanly.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    specialist = models.ForeignKey(
+        SpecialistProfile,
+        on_delete=models.CASCADE,
+        related_name='portfolio',
+    )
+    image = models.ImageField(upload_to='specialists/portfolio/')
+    sort_order = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        # Stable ordering for the public listing. sort_order is the
+        # specialist-controlled axis (PATCH endpoint); created_at is
+        # the deterministic tiebreaker.
+        ordering = ['sort_order', 'created_at']
+        indexes = [
+            models.Index(fields=['specialist', 'sort_order']),
+        ]
+
+    def __str__(self) -> str:
+        return f"Portfolio #{self.id} of {self.specialist.display_name}"
+
+
 class OTPCode(models.Model):
     """OTP code for phone verification."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
