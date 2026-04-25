@@ -1,8 +1,8 @@
 import os
 
-from django.core.exceptions import ImproperlyConfigured
-
 from .base import *
+
+from core.env_strictness import enforce_required_env
 
 # Security
 DEBUG = False
@@ -23,21 +23,21 @@ ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',')
 #   provider_payment_id can replay events; the re-fetch + idempotency
 #   layers narrow blast radius but don't close it.
 #
-# dev.py intentionally tolerates missing values so local work does not need
-# real OAuth credentials or production webhook ranges; prod must not.
+# Strictness gated by DJANGO_ENV: real production raises on missing
+# values, staging / dev VPS environments downgrade to warnings so the
+# stack can boot before all credentials are provisioned. dev.py is
+# never gated this way — local work uses placeholder values freely.
 _REQUIRED_PROD_ENV = (
     "GOOGLE_CLIENT_ID",
     "APPLE_CLIENT_ID",
     "YOOKASSA_WEBHOOK_ALLOWED_IPS",
 )
 _missing_prod = [name for name in _REQUIRED_PROD_ENV if not os.environ.get(name)]
-if _missing_prod:
-    raise ImproperlyConfigured(
-        "Production requires these security-critical env vars: "
-        f"missing {', '.join(_missing_prod)}. "
-        "Each disables a defence layer when unset; see "
-        "djangoProject/settings/base.py for what each one gates."
-    )
+enforce_required_env(
+    _missing_prod,
+    "each disables a defence layer when unset; see djangoProject/settings/"
+    "base.py for what each one gates",
+)
 
 # CORS
 INSTALLED_APPS += ['corsheaders']
