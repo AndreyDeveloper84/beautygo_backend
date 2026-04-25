@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from .models import Service, ServiceCategory
+from .models import RegionalPricing, Service, ServiceCategory, ServiceTemplate
 
 
 class ServiceInline(admin.TabularInline):
@@ -14,6 +14,16 @@ class ServiceInline(admin.TabularInline):
     show_change_link = True
 
 
+class ServiceTemplateInline(admin.TabularInline):
+    model = ServiceTemplate
+    extra = 0
+    fields = (
+        'name', 'name_short', 'duration_default',
+        'duration_min', 'duration_max', 'is_popular', 'sort_order',
+    )
+    show_change_link = True
+
+
 @admin.register(ServiceCategory)
 class ServiceCategoryAdmin(admin.ModelAdmin):
     list_display = ('name', 'parent', 'slug', 'icon', 'sort_order', 'is_active')
@@ -21,6 +31,38 @@ class ServiceCategoryAdmin(admin.ModelAdmin):
     search_fields = ('name', 'slug')
     prepopulated_fields = {'slug': ('name',)}
     ordering = ('sort_order', 'name')
+    inlines = [ServiceTemplateInline]
+
+
+class RegionalPricingInline(admin.TabularInline):
+    model = RegionalPricing
+    extra = 0
+    fields = ('region_key', 'region_name', 'price_min', 'price_max')
+    ordering = ('region_key',)
+
+
+@admin.register(ServiceTemplate)
+class ServiceTemplateAdmin(admin.ModelAdmin):
+    list_display = (
+        'name', 'category', 'duration_default',
+        'is_popular', 'sort_order',
+    )
+    list_filter = ('category', 'is_popular')
+    search_fields = ('name', 'name_short', 'category__name')
+    list_editable = ('is_popular', 'sort_order')
+    ordering = ('category', '-is_popular', 'sort_order', 'name')
+    inlines = [RegionalPricingInline]
+
+
+@admin.register(RegionalPricing)
+class RegionalPricingAdmin(admin.ModelAdmin):
+    list_display = (
+        'template', 'region_key', 'region_name',
+        'price_min', 'price_max',
+    )
+    list_filter = ('region_key', 'template__category')
+    search_fields = ('template__name', 'region_key', 'region_name')
+    ordering = ('template__category', 'template', 'region_key')
 
 
 @admin.register(Service)
