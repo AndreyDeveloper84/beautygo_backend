@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'drf_spectacular',
     'rest_framework_simplejwt.token_blacklist',
     'storages',
+    'django_celery_beat',  # DB-backed periodic schedule storage
     'users',
     'services',
     'appointments',
@@ -332,6 +333,59 @@ YOOKASSA_WEBHOOK_ALLOWED_IPS = [
 YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = int(
     os.environ.get("YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT", "1"),
 )
+
+
+# ----------------------------------------------------------------------------
+# Async tasks — Celery + Redis (PR3 — Phase 2 Lane A)
+# ----------------------------------------------------------------------------
+#
+# Single REDIS_URL drives both the broker (db 0) and the cache (db 1).
+# Splitting into two DBs prevents Celery state and cache evictions from
+# stepping on each other under load. Self-hosted Redis on the dev VPS
+# (per project owner, 2026-04-25); managed migration is a future option.
+#
+# CELERY_TASK_ALWAYS_EAGER=True runs every task synchronously in the
+# caller's process. Tests turn it on; dev defaults to True for the same
+# reason (no separate worker process needed for routine work). Set the
+# env to False locally when explicitly testing async flows.
+
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
+
+CELERY_BROKER_URL = f"{REDIS_URL}/0"
+CELERY_RESULT_BACKEND = f"{REDIS_URL}/0"
+CELERY_TASK_ALWAYS_EAGER = (
+    os.environ.get("CELERY_TASK_ALWAYS_EAGER", "False").lower() == "true"
+)
+CELERY_TASK_EAGER_PROPAGATES = True            # in eager mode, fail loud
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+CELERY_BEAT_SCHEDULE = {
+    "dispatch-outbox-events": {
+        "task": "appointments.tasks.dispatch_outbox_events",
+        "schedule": 10.0,                       # every 10 seconds
+    },
+}
+
+# Django default cache → Redis (db 1). SlotCacheService and any future
+# `cache.set` / `cache.get` go through here. With this in place
+# throttle counters become process-wide instead of per-worker.
+CACHES = {
+    "default": {
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": f"{REDIS_URL}/1",
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "IGNORE_EXCEPTIONS": True,          # cache outage degrades, not fails
+            "SOCKET_CONNECT_TIMEOUT": 2,
+            "SOCKET_TIMEOUT": 2,
+        },
+        "KEY_PREFIX": "ayla",
+    },
+}
+DJANGO_REDIS_IGNORE_EXCEPTIONS = True
 
 
 # ----------------------------------------------------------------------------
