@@ -486,6 +486,89 @@ class TestPaymentWebhookSecurity:
         assert response.status_code == status.HTTP_200_OK
 
 
+@pytest.mark.django_db
+class TestWebhookBasicAuth:
+    """Basic Auth as second authentication layer (Phase A.2 — refactor).
+
+    YooKassa supports `https://user:pass@host/...` URLs in their webhook
+    config. When YOOKASSA_WEBHOOK_BASIC_AUTH_USER/PASS are set, the view
+    rejects requests without matching credentials. When unset, behaviour
+    is unchanged (IP allowlist + re-fetch alone).
+    """
+
+    def _build_basic_auth_header(self, user: str, password: str) -> str:
+        import base64
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+        return f"Basic {token}"
+
+    def test_passes_when_creds_correct(self, anon_app, settings):
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_USER = 'yookassa'
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = 'secret-pass-1'
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            HTTP_AUTHORIZATION=self._build_basic_auth_header(
+                'yookassa', 'secret-pass-1',
+            ),
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+    def test_rejects_when_creds_wrong(self, anon_app, settings):
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_USER = 'yookassa'
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = 'secret-pass-1'
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            HTTP_AUTHORIZATION=self._build_basic_auth_header(
+                'yookassa', 'wrong-pass',
+            ),
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_rejects_when_creds_required_but_missing(
+        self, anon_app, settings,
+    ):
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_USER = 'yookassa'
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = 'secret-pass-1'
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_skips_when_creds_unset(self, anon_app, settings):
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_USER = ''
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = ''
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+        )
+        assert response.status_code == status.HTTP_200_OK
+
+    def test_malformed_basic_header_rejected(self, anon_app, settings):
+        """Header starts with ``Basic`` but the rest is not valid base64 —
+        view returns 403 (not 500). Using ``Bearer`` would trip JWT auth
+        layer first → 401 before our check runs."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_USER = 'yookassa'
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = 'secret-pass-1'
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            HTTP_AUTHORIZATION='Basic !!!not-valid-base64!!!',
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
 # ---------------------------------------------------------------------------
 # POST /api/v1/payments/{id}/refund/
 # ---------------------------------------------------------------------------
