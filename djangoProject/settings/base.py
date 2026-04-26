@@ -88,6 +88,7 @@ REST_FRAMEWORK = {
         'auth_sensitive': '5/min',   # Scoped: bind-phone, account-delete-with-otp
         'payment': '5/min',          # Scoped: POST /payments/create, refund
         'webhook_payment': '100/min',  # Scoped: YooKassa /payments/webhook (amplification cap)
+        'ai_chat': '30/min',         # Scoped: AI chat send/action endpoints
     },
 }
 
@@ -321,6 +322,21 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "")
 OPENAI_PROXY = os.environ.get("OPENAI_PROXY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+# AI Chat guardrails. Daily token cap is per-user (or per-guest-user) and
+# tracked in Redis at key `ai:tokens:{user_id}:{YYYY-MM-DD}`. Anonymous
+# message cap is enforced via Message.objects count, not Redis.
+AI_MAX_TOKENS_PER_USER_PER_DAY = int(
+    os.environ.get("AI_MAX_TOKENS_PER_USER_PER_DAY", "50000")
+)
+AI_ANON_MESSAGE_CAP = int(os.environ.get("AI_ANON_MESSAGE_CAP", "5"))
+AI_HISTORY_WINDOW = int(os.environ.get("AI_HISTORY_WINDOW", "10"))
+AI_SPECIALIST_CONTEXT_LIMIT = int(
+    os.environ.get("AI_SPECIALIST_CONTEXT_LIMIT", "20")
+)
+AI_SPECIALIST_MIN_RATING = float(
+    os.environ.get("AI_SPECIALIST_MIN_RATING", "4.0")
+)
 
 # Firebase Cloud Messaging — push delivery for both apps.
 # FIREBASE_CREDENTIALS_JSON: full Service Account JSON as a string (CI
