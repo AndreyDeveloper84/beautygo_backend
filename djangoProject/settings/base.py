@@ -360,6 +360,21 @@ YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = int(
     os.environ.get("YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT", "1"),
 )
 
+# Optional Basic Auth as a second authentication layer on top of the IP
+# allowlist. YooKassa supports Basic Auth on webhook URLs (set in their
+# dashboard under "Webhooks → URL"). When both env vars are present, the
+# view rejects requests without a matching `Authorization: Basic ...`
+# header — closes the gap "spoof IP within VPC → forge payment.succeeded".
+# Per YooKassa docs (https://yookassa.ru/developers/using-api/webhooks),
+# they do NOT HMAC-sign webhooks; IP allowlist + Basic Auth + payment
+# re-fetch is the canonical defense-in-depth combination.
+YOOKASSA_WEBHOOK_BASIC_AUTH_USER = os.environ.get(
+    "YOOKASSA_WEBHOOK_BASIC_AUTH_USER", "",
+)
+YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = os.environ.get(
+    "YOOKASSA_WEBHOOK_BASIC_AUTH_PASS", "",
+)
+
 
 # ----------------------------------------------------------------------------
 # Async tasks — Celery + Redis (PR3 — Phase 2 Lane A)
