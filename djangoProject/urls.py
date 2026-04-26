@@ -27,6 +27,7 @@ urlpatterns = [
     path('api/v1/search/', include('search.urls')),
     path('api/v1/devices/', include('users.devices_urls')),
     path('api/v1/ai/', include('ai.urls', namespace='ai')),
+    path('api/v1/nutrition/', include('nutrition.urls', namespace='nutrition')),
 
     # Health: liveness for loadbalancer, readiness for deploy + on-call.
     path('api/v1/health/', liveness, name='health-check'),
