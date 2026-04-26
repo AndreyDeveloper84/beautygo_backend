@@ -43,7 +43,7 @@ from ai.models import Conversation, Message
 from ai.prompts import render_system_prompt
 from ai.redaction import redact_pii
 from ai.services.llm_client import get_openai_client
-from ai.tools import TOOL_DEFINITIONS, ActionType
+from ai.tools import TOOL_DEFINITIONS
 from ai.tools_handlers import dispatch_tool_call
 
 logger = logging.getLogger(__name__)
