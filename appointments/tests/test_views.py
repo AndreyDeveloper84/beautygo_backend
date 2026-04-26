@@ -128,7 +128,8 @@ class TestAppointmentList:
         c.force_authenticate(user=client_user)
         response = c.get('/api/v1/appointments/')
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data['data']) == 1
+        assert response.data['data']['count'] == 1
+        assert len(response.data['data']['results']) == 1
 
     def test_client_does_not_see_others(self, appointment):
         other = __import__('users.models', fromlist=['User']).User.objects.create_user(
@@ -140,7 +141,7 @@ class TestAppointmentList:
         c.force_authenticate(user=other)
         response = c.get('/api/v1/appointments/')
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data['data']) == 0
+        assert response.data['data']['count'] == 0
 
     def test_specialist_sees_own_appointments(self, specialist_user, appointment):
         c = APIClient()
@@ -148,7 +149,7 @@ class TestAppointmentList:
         c.force_authenticate(user=specialist_user)
         response = c.get('/api/v1/appointments/')
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data['data']) == 1
+        assert response.data['data']['count'] == 1
 
     def test_filter_by_status(self, client_user, appointment):
         c = APIClient()
@@ -156,7 +157,7 @@ class TestAppointmentList:
         c.force_authenticate(user=client_user)
         response = c.get('/api/v1/appointments/?status=cancelled')
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data['data']) == 0
+        assert response.data['data']['count'] == 0
 
 
 @pytest.mark.django_db

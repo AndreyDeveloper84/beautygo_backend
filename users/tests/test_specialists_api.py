@@ -78,14 +78,14 @@ class TestSpecialistList:
     ):
         response = client_app.get(SPECIALISTS_URL)
         assert response.status_code == status.HTTP_200_OK
-        names = [s['display_name'] for s in response.data]
+        names = [s['display_name'] for s in response.data['results']]
         assert 'Елена Мастер' in names
         assert 'Черновик Мастер' not in names
 
     def test_includes_services_preview(self, client_app, active_specialist):
         response = client_app.get(SPECIALISTS_URL)
         assert response.status_code == status.HTTP_200_OK
-        specialist = response.data[0]
+        specialist = response.data['results'][0]
         assert 'services_preview' in specialist
         assert len(specialist['services_preview']) == 2
         assert specialist['services_count'] == 2
@@ -94,7 +94,7 @@ class TestSpecialistList:
         self, client_app, active_specialist,
     ):
         response = client_app.get(SPECIALISTS_URL)
-        specialist = response.data[0]
+        specialist = response.data['results'][0]
         assert float(specialist['rating']) == 4.8
         assert specialist['reviews_count'] == 25
 
@@ -109,31 +109,31 @@ class TestSpecialistList:
             SPECIALISTS_URL, {'category_id': cat.pk},
         )
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 1
+        assert response.data['count'] == 1
 
     def test_filter_by_min_rating(self, client_app, active_specialist):
         response = client_app.get(
             SPECIALISTS_URL, {'min_rating': 4.5},
         )
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 1
+        assert response.data['count'] == 1
 
         response = client_app.get(
             SPECIALISTS_URL, {'min_rating': 5.0},
         )
-        assert len(response.data) == 0
+        assert response.data['count'] == 0
 
     def test_filter_by_price_range(self, client_app, active_specialist):
         response = client_app.get(
             SPECIALISTS_URL, {'max_price': 1000},
         )
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 0
+        assert response.data['count'] == 0
 
         response = client_app.get(
             SPECIALISTS_URL, {'max_price': 2000},
         )
-        assert len(response.data) == 1
+        assert response.data['count'] == 1
 
     def test_geo_filter(self, client_app, active_specialist):
         # Kazan center — should find specialist at Bauman 1
@@ -142,14 +142,14 @@ class TestSpecialistList:
             {'lat': '55.796', 'lon': '49.106', 'radius': '5'},
         )
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 1
+        assert response.data['count'] == 1
 
         # Moscow — too far
         response = client_app.get(
             SPECIALISTS_URL,
             {'lat': '55.755', 'lon': '37.617', 'radius': '5'},
         )
-        assert len(response.data) == 0
+        assert response.data['count'] == 0
 
     def test_distance_in_response(self, client_app, active_specialist):
         response = client_app.get(
@@ -157,8 +157,8 @@ class TestSpecialistList:
             {'lat': '55.796', 'lon': '49.106'},
         )
         assert response.status_code == status.HTTP_200_OK
-        assert response.data[0]['distance_km'] is not None
-        assert response.data[0]['distance_km'] < 1.0
+        assert response.data['results'][0]['distance_km'] is not None
+        assert response.data['results'][0]['distance_km'] < 1.0
 
     def test_ordering_by_rating(self, client_app, active_specialist, db):
         user2 = User.objects.create_user(
@@ -174,8 +174,8 @@ class TestSpecialistList:
         response = client_app.get(
             SPECIALISTS_URL, {'ordering': '-rating'},
         )
-        assert response.data[0]['display_name'] == 'Елена Мастер'
-        assert response.data[1]['display_name'] == 'Новичок'
+        assert response.data['results'][0]['display_name'] == 'Елена Мастер'
+        assert response.data['results'][1]['display_name'] == 'Новичок'
 
     def test_unauthenticated_denied(self):
         client = APIClient()
@@ -245,6 +245,8 @@ class TestSpecialistDetail:
         assert response.status_code == status.HTTP_404_NOT_FOUND
 
     def test_services_endpoint(self, client_app, active_specialist):
+        # `/specialists/{id}/services/` is an @action returning a bare list
+        # (not paginated) — keeps mobile contract stable.
         profile = active_specialist.specialist_profile
         url = f'{SPECIALISTS_URL}{profile.pk}/services/'
         response = client_app.get(url)
