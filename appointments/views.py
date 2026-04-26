@@ -76,12 +76,15 @@ class AppointmentViewSet(viewsets.GenericViewSet):
     # -- List ----------------------------------------------------------------
 
     def list(self, request: Request) -> Response:
+        from core.pagination import paginated_success_response
+
         qs = self.get_queryset()
         status_filter = request.query_params.get('status')
         if status_filter:
             qs = qs.filter(status=status_filter)
-        serializer = AppointmentListSerializer(qs, many=True)
-        return success_response(serializer.data)
+        return paginated_success_response(
+            qs, AppointmentListSerializer, request,
+        )
 
     # -- Create (via booking engine) ----------------------------------------
 
