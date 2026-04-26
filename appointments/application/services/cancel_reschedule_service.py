@@ -189,8 +189,14 @@ class RescheduleBookingService:
                 "booking_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
                 "client_id": str(appointment.client_id),
+                # Use the same start_at/end_at field names as booking.created
+                # / booking.cancelled events so handle_booking_rescheduled →
+                # _invalidate_slots_from_payload finds the *new* date for
+                # cache invalidation. old_start_at handled separately by
+                # the same handler. Without this, new-date slots stayed
+                # stale after a reschedule (#12 in REFACTOR_PRIORITIZATION).
+                "start_at": new_interval.start_at.isoformat(),
+                "end_at": new_interval.end_at.isoformat(),
                 "old_start_at": old_start_at.isoformat(),
-                "new_start_at": new_interval.start_at.isoformat(),
-                "new_end_at": new_interval.end_at.isoformat(),
             },
         )

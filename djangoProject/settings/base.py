@@ -68,6 +68,11 @@ REST_FRAMEWORK = {
     ),
     'DEFAULT_FILTER_BACKENDS': ('django_filters.rest_framework.DjangoFilterBackend',),
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # Pagination — see core/pagination.py. Wired here so any GenericViewSet
+    # / ListAPIView gets it for free; views with custom list() overrides
+    # (appointments, services-pro) call core.pagination.paginated_success_response.
+    'DEFAULT_PAGINATION_CLASS': 'core.pagination.DefaultPagination',
+    'PAGE_SIZE': 20,
     'EXCEPTION_HANDLER': 'djangoProject.exception_handler.api_exception_handler',
     # Rate limiting — see docs/REFACTORING_PLAN.md Phase 2.2. Per-IP for
     # anonymous, per-user for authenticated, plus two scoped throttles
@@ -353,6 +358,21 @@ YOOKASSA_WEBHOOK_ALLOWED_IPS = [
 # traffic (too low).
 YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = int(
     os.environ.get("YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT", "1"),
+)
+
+# Optional Basic Auth as a second authentication layer on top of the IP
+# allowlist. YooKassa supports Basic Auth on webhook URLs (set in their
+# dashboard under "Webhooks → URL"). When both env vars are present, the
+# view rejects requests without a matching `Authorization: Basic ...`
+# header — closes the gap "spoof IP within VPC → forge payment.succeeded".
+# Per YooKassa docs (https://yookassa.ru/developers/using-api/webhooks),
+# they do NOT HMAC-sign webhooks; IP allowlist + Basic Auth + payment
+# re-fetch is the canonical defense-in-depth combination.
+YOOKASSA_WEBHOOK_BASIC_AUTH_USER = os.environ.get(
+    "YOOKASSA_WEBHOOK_BASIC_AUTH_USER", "",
+)
+YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = os.environ.get(
+    "YOOKASSA_WEBHOOK_BASIC_AUTH_PASS", "",
 )
 
 

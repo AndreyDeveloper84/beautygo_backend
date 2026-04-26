@@ -28,6 +28,40 @@ def _get_yookassa() -> YooKassaService:
     return YooKassaService()
 
 
+def _verify_basic_auth(request: Request) -> bool:
+    """Verify the Authorization: Basic header against the configured creds.
+
+    Returns True when:
+    - either env var (user OR pass) is empty (no auth configured — skip), OR
+    - the header is present AND base64-decoded creds match the env values
+
+    Returns False when creds are configured but the header is missing or
+    doesn't match. Constant-time comparison via secrets.compare_digest to
+    avoid the timing side-channel that ``==`` on user-controlled strings
+    introduces.
+    """
+    import base64
+    import secrets
+
+    expected_user = getattr(settings, "YOOKASSA_WEBHOOK_BASIC_AUTH_USER", "")
+    expected_pass = getattr(settings, "YOOKASSA_WEBHOOK_BASIC_AUTH_PASS", "")
+    if not expected_user or not expected_pass:
+        return True
+
+    auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+    if not auth_header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(auth_header[len("Basic "):]).decode("utf-8")
+        user, _, password = decoded.partition(":")
+    except (ValueError, UnicodeDecodeError):
+        return False
+
+    user_ok = secrets.compare_digest(user, expected_user)
+    pass_ok = secrets.compare_digest(password, expected_pass)
+    return user_ok and pass_ok
+
+
 def _client_ip(request: Request) -> str:
     """Return the IP of the outermost trusted proxy's source.
 
@@ -254,6 +288,16 @@ class PaymentWebhookView(APIView):
                 client_ip,
             )
             raise PermissionDenied("Source IP not allowed.")
+
+        # Basic Auth — second layer on top of the IP allowlist. YooKassa
+        # supports `https://user:pass@host/...` URLs in their webhook
+        # config; we verify here. When the env is unset we skip silently
+        # (dev mode); prod.py enforces both env vars present.
+        if not _verify_basic_auth(request):
+            logger.warning(
+                "Rejected YooKassa webhook — invalid Basic Auth credentials"
+            )
+            raise PermissionDenied("Invalid credentials.")
 
         event = request.data.get('event')
         obj = request.data.get('object', {})

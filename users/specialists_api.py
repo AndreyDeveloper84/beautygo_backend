@@ -151,11 +151,16 @@ class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
         ]
 
     def get_working_hours(self, obj: SpecialistProfile) -> list:
-        """Specialist weekly schedule from SpecialistWorkingHours model."""
-        from appointments.models import SpecialistWorkingHours
-        hours = SpecialistWorkingHours.objects.filter(
-            specialist=obj,
-        ).order_by('day_of_week')
+        """Specialist weekly schedule from prefetched SpecialistWorkingHours.
+
+        Uses ``obj.working_hours.all()`` to consume the queryset's prefetch
+        instead of issuing a fresh query per specialist (N+1). Sorting in
+        Python — the prefetch returns the related set already loaded.
+        """
+        hours = sorted(
+            obj.working_hours.all(),
+            key=lambda wh: wh.day_of_week,
+        )
         return [
             {
                 'day_of_week': wh.day_of_week,
@@ -367,7 +372,7 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
                 user__is_active=True,
             )
             .select_related('user')
-            .prefetch_related(active_services, 'portfolio')
+            .prefetch_related(active_services, 'portfolio', 'working_hours')
             .annotate(
                 active_services_count=Count(
                     'services',

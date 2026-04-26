@@ -76,9 +76,13 @@ class ServiceViewSet(viewsets.ModelViewSet):
         )
 
     def list(self, request, *args, **kwargs):
+        from core.pagination import paginated_success_response
+
         qs = self.filter_queryset(self.get_queryset())
-        serializer = self.get_serializer(qs, many=True)
-        return success_response(serializer.data)
+        return paginated_success_response(
+            qs, self.get_serializer_class(), request,
+            serializer_context=self.get_serializer_context(),
+        )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)

@@ -61,10 +61,10 @@ class TestServiceViewSet:
             price='500', duration_minutes=30,
         )
         response = authenticated_specialist.get('/api/v1/services/')
-        logger.info("Specialist sees %d services", len(response.data['data']))
+        logger.info("Specialist sees %d services", response.data['data']['count'])
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data['data']) == 1
-        assert response.data['data'][0]['name'] == 'Mine'
+        assert response.data['data']['count'] == 1
+        assert response.data['data']['results'][0]['name'] == 'Mine'
 
     def test_create_service_with_category(
         self, authenticated_specialist,
@@ -141,8 +141,8 @@ class TestServicePublicViewSet:
         )
         response = authenticated_client.get(self.URL)
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 1
-        assert response.data[0]['name'] == 'Active'
+        assert response.data['count'] == 1
+        assert response.data['results'][0]['name'] == 'Active'
 
     def test_includes_specialist_info(
         self, authenticated_client, specialist_user,
@@ -154,7 +154,7 @@ class TestServicePublicViewSet:
         )
         response = authenticated_client.get(self.URL)
         assert response.status_code == status.HTTP_200_OK
-        info = response.data[0]['specialist_info']
+        info = response.data['results'][0]['specialist_info']
         assert info['display_name'] == 'Елена Мастер'
         assert float(info['rating']) == 4.8
         assert info['reviews_count'] == 25
@@ -189,8 +189,8 @@ class TestServicePublicViewSet:
             self.URL, {'category': cat.pk},
         )
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 1
-        assert response.data[0]['name'] == 'Маникюр'
+        assert response.data['count'] == 1
+        assert response.data['results'][0]['name'] == 'Маникюр'
 
     def test_filter_by_price_range(
         self, authenticated_client, specialist_user,
@@ -208,8 +208,8 @@ class TestServicePublicViewSet:
             self.URL, {'min_price': 1000, 'max_price': 5000},
         )
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 1
-        assert response.data[0]['name'] == 'Expensive'
+        assert response.data['count'] == 1
+        assert response.data['results'][0]['name'] == 'Expensive'
 
     def test_ordering_by_price(
         self, authenticated_client, specialist_user,
@@ -227,8 +227,8 @@ class TestServicePublicViewSet:
             self.URL, {'ordering': 'price'},
         )
         assert response.status_code == status.HTTP_200_OK
-        assert response.data[0]['name'] == 'A'
-        assert response.data[1]['name'] == 'B'
+        assert response.data['results'][0]['name'] == 'A'
+        assert response.data['results'][1]['name'] == 'B'
 
     def test_unauthenticated_denied(self, client_api_client):
         """Unauthenticated user cannot access public search."""
@@ -251,8 +251,8 @@ class TestServicePublicViewSet:
             self.URL, {'name': 'маникюр'},
         )
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 1
-        assert 'маникюр' in response.data[0]['name'].lower()
+        assert response.data['count'] == 1
+        assert 'маникюр' in response.data['results'][0]['name'].lower()
 
     def test_readonly_no_post(self, authenticated_client):
         """Public API is read-only — POST not allowed."""
@@ -277,7 +277,7 @@ class TestServiceCategoryAPI:
         logger.info("GET categories → %s, count=%d",
                     response.status_code, len(response.data))
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 2
+        assert response.data['count'] == 2
 
     def test_categories_with_children(self):
         parent = ServiceCategory.objects.create(name='Ногти', sort_order=1)
@@ -291,8 +291,8 @@ class TestServiceCategoryAPI:
         client.defaults['HTTP_X_APP_TYPE'] = 'client'
         response = client.get(self.URL)
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 1  # only root
-        assert len(response.data[0]['children']) == 2
+        assert response.data['count'] == 1  # only root
+        assert len(response.data['results'][0]['children']) == 2
 
     def test_inactive_categories_hidden(self):
         ServiceCategory.objects.create(
@@ -305,8 +305,8 @@ class TestServiceCategoryAPI:
         client.defaults['HTTP_X_APP_TYPE'] = 'client'
         response = client.get(self.URL)
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 1
-        assert response.data[0]['name'] == 'Активная'
+        assert response.data['count'] == 1
+        assert response.data['results'][0]['name'] == 'Активная'
 
     def test_categories_from_fixture(self):
         """Verify fixture loaded correctly."""
@@ -317,7 +317,7 @@ class TestServiceCategoryAPI:
         response = client.get(self.URL)
         assert response.status_code == status.HTTP_200_OK
         # 7 root categories from fixture
-        root_names = [c['name'] for c in response.data]
+        root_names = [c['name'] for c in response.data['results']]
         assert 'Ногтевой сервис' in root_names
         assert 'Волосы' in root_names
         assert 'Массаж' in root_names
@@ -335,7 +335,7 @@ class TestCategoriesAPI:
         client.defaults['HTTP_X_APP_TYPE'] = 'client'
         response = client.get(self.URL)
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 2
+        assert response.data['count'] == 2
 
     def test_filter_by_parent_id(self):
         parent = ServiceCategory.objects.create(name='Ногти', sort_order=1)
@@ -349,12 +349,12 @@ class TestCategoriesAPI:
         client.defaults['HTTP_X_APP_TYPE'] = 'client'
         # Root only (default)
         response = client.get(self.URL)
-        assert len(response.data) == 1
+        assert response.data['count'] == 1
         # Children of parent
         response = client.get(self.URL, {'parent_id': parent.pk})
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data) == 2
-        names = [c['name'] for c in response.data]
+        assert response.data['count'] == 2
+        names = [c['name'] for c in response.data['results']]
         assert 'Маникюр' in names
         assert 'Педикюр' in names
 
@@ -381,8 +381,8 @@ class TestCategoriesAPI:
         client.defaults['HTTP_X_APP_TYPE'] = 'client'
         response = client.get(self.URL)
         assert response.status_code == status.HTTP_200_OK
-        assert 'specialists_count' in response.data[0]
-        assert response.data[0]['specialists_count'] == 0
+        assert 'specialists_count' in response.data['results'][0]
+        assert response.data['results'][0]['specialists_count'] == 0
 
     def test_detail_view(self):
         cat = ServiceCategory.objects.create(name='Detailable')

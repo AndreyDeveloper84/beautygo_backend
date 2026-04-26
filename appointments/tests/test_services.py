@@ -291,6 +291,32 @@ class TestRescheduleBookingService:
         assert appt.start_datetime == new_start
         assert OutboxEvent.objects.filter(topic="booking.rescheduled").count() == 1
 
+    def test_reschedule_emits_event_with_start_at_for_cache_invalidation(
+        self, client_user, specialist, service,
+    ):
+        """Regression for Phase A.5 (REFACTOR_PRIORITIZATION) — payload uses
+        the same ``start_at`` field name as booking.created so the outbox
+        handler ``_invalidate_slots_from_payload`` finds the new date and
+        invalidates cache. Without this, new-date slots stayed stale after
+        a reschedule because the handler was reading ``start_at`` while the
+        old payload used ``new_start_at``.
+        """
+        appt = self._create_confirmed_appointment(client_user, specialist, service)
+        new_start = _future_utc(72)
+
+        dto = RescheduleBookingDTO(
+            booking_id=appt.id,
+            initiator_user_id=client_user.id,
+            new_start_at=new_start,
+        )
+        RescheduleBookingService().execute(dto)
+
+        event = OutboxEvent.objects.get(topic="booking.rescheduled")
+        assert "start_at" in event.payload, "missing start_at — cache won't invalidate"
+        assert "end_at" in event.payload
+        assert "old_start_at" in event.payload
+        assert event.payload["start_at"] == new_start.isoformat()
+
     def test_cannot_reschedule_pending(self, client_user, specialist, service):
         start = _future_utc(48)
         appt = Appointment.objects.create(
