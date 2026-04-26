@@ -90,6 +90,7 @@ REST_FRAMEWORK = {
         'payment': '5/min',          # Scoped: POST /payments/create, refund
         'webhook_payment': '100/min',  # Scoped: YooKassa /payments/webhook (amplification cap)
         'ai_chat': '30/min',         # Scoped: AI chat send/action endpoints
+        'food_scan': '10/min',       # Scoped: POST /nutrition/scan (vision API cost cap)
     },
 }
 
