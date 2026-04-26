@@ -77,17 +77,27 @@ class FoodScanView(APIView):
                 user=request.user,
             )
         except AllProvidersFailedError as exc:
-            scan.error_code = "FOOD_API_UNAVAILABLE"
+            # Per spec v2.0 §FOOD SCANNER, distinguish "vendor worked but
+            # image isn't food / not recognisable" (400 FOOD_NOT_RECOGNIZED)
+            # from "vendor unreachable" (503 FOOD_API_UNAVAILABLE).
+            if exc.is_low_confidence_only:
+                error_code = "FOOD_NOT_RECOGNIZED"
+                http_status = status.HTTP_400_BAD_REQUEST
+                msg = "Не удалось распознать блюдо на фото"
+            else:
+                error_code = "FOOD_API_UNAVAILABLE"
+                http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+                msg = "Сервис распознавания временно недоступен"
+
+            scan.error_code = error_code
             scan.error_message = str(exc)[:500]
             scan.save()
             logger.warning(
-                "nutrition.scan.all_providers_failed user=%s err=%s",
-                request.user.id, exc,
+                "nutrition.scan.all_providers_failed user=%s code=%s err=%s",
+                request.user.id, error_code, exc,
             )
             return error_response(
-                "FOOD_API_UNAVAILABLE",
-                "Сервис распознавания временно недоступен",
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                error_code, msg, status_code=http_status,
             )
 
         scan.dish_name = outcome.result.dish_name

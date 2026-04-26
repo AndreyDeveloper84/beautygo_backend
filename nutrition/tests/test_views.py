@@ -211,7 +211,9 @@ class TestSuccess:
 
 
 class TestAllProvidersFailed:
-    def test_returns_503_and_persists_error_row(self, auth_client, client_user):
+    def test_unavailable_returns_503_and_persists_error_row(
+        self, auth_client, client_user,
+    ):
         router_mock = MagicMock()
         router_mock.scan.side_effect = AllProvidersFailedError(
             ProviderUnavailable("openai 503"),
@@ -226,9 +228,80 @@ class TestAllProvidersFailed:
             )
         assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
         assert resp.json()["error"]["code"] == "FOOD_API_UNAVAILABLE"
-
-        # Audit row stored even on failure — for debugging + cost attribution.
-        failed = FoodScan.objects.filter(
+        assert FoodScan.objects.filter(
             user=client_user, error_code="FOOD_API_UNAVAILABLE",
+        ).count() == 1
+
+    def test_all_low_confidence_returns_400_food_not_recognized(
+        self, auth_client, client_user,
+    ):
+        # Per spec v2.0 §FOOD SCANNER: vendor worked but image isn't
+        # recognisable → 400 FOOD_NOT_RECOGNIZED, not 503.
+        from nutrition.providers.base import LowConfidenceError, ScanResult
+
+        partial = ScanResult(
+            dish_name="??", confidence=0.2, portion_g=None,
+            ingredients=[], provider="openai", latency_ms=300,
         )
-        assert failed.count() == 1
+        router_mock = MagicMock()
+        router_mock.scan.side_effect = AllProvidersFailedError(
+            LowConfidenceError("openai 0.2", partial=partial),
+            LowConfidenceError("yandex 0.3", partial=partial),
+        )
+        with patch(
+            "nutrition.views.FoodScannerRouter",
+            return_value=router_mock,
+        ):
+            resp = auth_client.post(
+                SCAN_URL, {"image": _upload()}, format="multipart",
+            )
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert resp.json()["error"]["code"] == "FOOD_NOT_RECOGNIZED"
+        assert FoodScan.objects.filter(
+            user=client_user, error_code="FOOD_NOT_RECOGNIZED",
+        ).count() == 1
+
+    def test_mixed_low_confidence_and_timeout_returns_503(
+        self, auth_client, client_user,
+    ):
+        from nutrition.providers.base import LowConfidenceError, ProviderTimeout
+
+        router_mock = MagicMock()
+        router_mock.scan.side_effect = AllProvidersFailedError(
+            LowConfidenceError("openai 0.2"),
+            ProviderTimeout("yandex slow"),
+        )
+        with patch(
+            "nutrition.views.FoodScannerRouter",
+            return_value=router_mock,
+        ):
+            resp = auth_client.post(
+                SCAN_URL, {"image": _upload()}, format="multipart",
+            )
+        # Mixed = we can't say "image not recognisable", default to 503.
+        assert resp.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+
+
+class TestResponseShape:
+    def test_includes_beauty_insights_field_as_null_in_mvp(self, auth_client):
+        from nutrition.providers.base import ScanResult
+        from nutrition.services.food_scanner_router import RouterResult
+
+        router_mock = MagicMock()
+        router_mock.scan.return_value = RouterResult(
+            result=ScanResult(
+                dish_name="Борщ", confidence=0.9, portion_g=300,
+                ingredients=[], provider="openai", latency_ms=400,
+            ),
+            primary_provider_name="openai",
+        )
+        with patch(
+            "nutrition.views.FoodScannerRouter",
+            return_value=router_mock,
+        ):
+            resp = auth_client.post(
+                SCAN_URL, {"image": _upload()}, format="multipart",
+            )
+        body = resp.json()["data"]
+        assert "beauty_insights" in body
+        assert body["beauty_insights"] is None

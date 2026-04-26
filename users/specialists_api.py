@@ -347,12 +347,9 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({'date': slot_date.isoformat(), 'slots': available})
 
-    @action(detail=True, methods=['get'], url_path='reviews',
-            permission_classes=[permissions.AllowAny])
-    def reviews(self, request, pk=None):
-        """GET /specialists/{id}/reviews/ — delegates to SpecialistReviewsView."""
-        from reviews.views import SpecialistReviewsView
-        return SpecialistReviewsView().get(request, specialist_id=pk)
+    # GET /specialists/{id}/reviews/ — wired directly in users/specialists_urls.py
+    # to SpecialistReviewsView (reviews app), avoiding the cross-app late import
+    # and the per-action permission_classes override that used to live here.
 
     def get_queryset(self) -> QuerySet:
         active_services = Prefetch(
