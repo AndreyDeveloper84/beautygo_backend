@@ -202,6 +202,22 @@ class Service(models.Model):
 
     class Meta:
         ordering = ['sort_order', 'name']
+        # Composite indexes for the catalog filter patterns:
+        # - filter by specialist + category + active state (catalog browse)
+        # - filter by specialist + price range (price slider, "от-до")
+        # Plain indexes on (specialist) and (category) alone aren't enough —
+        # the planner needs combined coverage for the WHERE/AND chains the
+        # catalog generates from query params.
+        indexes = [
+            models.Index(
+                fields=['specialist', 'category', 'is_active'],
+                name='svc_spec_cat_active_idx',
+            ),
+            models.Index(
+                fields=['specialist', 'price'],
+                name='svc_spec_price_idx',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.name} — {self.specialist.display_name}"
