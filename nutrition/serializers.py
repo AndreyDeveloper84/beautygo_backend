@@ -48,6 +48,10 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
 
     scan_id = serializers.UUIDField(source="id", read_only=True)
     provider = serializers.CharField(source="provider_used", read_only=True)
+    # Per spec v2.0 §FOOD SCANNER — beauty_insights field present in
+    # response shape, nullable. Slice 3+ will populate when nutrition
+    # lookup runs and we have data to derive vitamin deficits etc.
+    beauty_insights = serializers.SerializerMethodField()
 
     class Meta:
         model = FoodScan
@@ -58,8 +62,12 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
             "portion_g",
             "ingredients",
             "nutrition",
+            "beauty_insights",
             "provider",
             "latency_ms",
             "created_at",
         ]
         read_only_fields = fields
+
+    def get_beauty_insights(self, obj: FoodScan):  # noqa: ARG002 — Slice 3+ fills this
+        return None
