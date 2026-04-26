@@ -1,0 +1,110 @@
+"""Nutrition API views — Food Scanner endpoint (Slice 2).
+
+Routes:
+  POST /api/v1/nutrition/scan/   → FoodScanView.post
+
+Slices 3-5 will add:
+  POST /nutrition/food-log/, GET /nutrition/summary/
+  POST /nutrition/water/, etc.
+
+X-App-Type: client only — Pro app doesn't show nutrition features.
+"""
+from __future__ import annotations
+
+import logging
+
+from django.core.files.base import ContentFile
+from rest_framework import permissions, status
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.request import Request
+from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
+from rest_framework.views import APIView
+
+from users.permissions import IsClient, IsClientApp
+from users.response import error_response, success_response
+
+from nutrition.models import FoodScan
+from nutrition.serializers import (
+    FoodScanResponseSerializer,
+    ScanRequestSerializer,
+)
+from nutrition.services.food_scanner_router import (
+    AllProvidersFailedError,
+    FoodScannerRouter,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class FoodScanView(APIView):
+    """POST /api/v1/nutrition/scan/."""
+
+    permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
+    parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan"
+
+    def post(self, request: Request) -> Response:
+        serializer = ScanRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Невалидные данные",
+                details=serializer.errors,
+            )
+
+        image_file = serializer.validated_data["image"]
+        portion_multiplier = serializer.validated_data.get("portion_multiplier") or 1.0
+
+        # Read once — providers and storage both want bytes; ImageField
+        # streams from request body so we must materialise before two
+        # reads. 10 MiB cap is enforced in the serializer.
+        image_bytes = image_file.read()
+
+        scan = FoodScan(user=request.user)
+        scan.image.save(
+            f"{scan.id}.jpg",
+            ContentFile(image_bytes),
+            save=False,
+        )
+
+        router = FoodScannerRouter()
+        try:
+            outcome = router.scan(
+                image_bytes,
+                portion_multiplier=portion_multiplier,
+                user=request.user,
+            )
+        except AllProvidersFailedError as exc:
+            scan.error_code = "FOOD_API_UNAVAILABLE"
+            scan.error_message = str(exc)[:500]
+            scan.save()
+            logger.warning(
+                "nutrition.scan.all_providers_failed user=%s err=%s",
+                request.user.id, exc,
+            )
+            return error_response(
+                "FOOD_API_UNAVAILABLE",
+                "Сервис распознавания временно недоступен",
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        scan.dish_name = outcome.result.dish_name
+        scan.confidence = outcome.result.confidence
+        scan.portion_g = outcome.result.portion_g
+        scan.ingredients = outcome.result.ingredients
+        scan.provider_used = outcome.result.provider
+        scan.provider_fallback_from = (
+            outcome.primary_provider_name
+            if outcome.primary_failed_with
+            else ""
+        )
+        scan.latency_ms = outcome.result.latency_ms
+        scan.raw_response = outcome.result.raw_response
+        scan.save()
+
+        return success_response(
+            FoodScanResponseSerializer(scan).data,
+            status_code=status.HTTP_200_OK,
+        )
