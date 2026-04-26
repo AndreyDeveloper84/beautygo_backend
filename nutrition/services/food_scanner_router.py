@@ -51,7 +51,20 @@ class RouterResult:
 
 
 class AllProvidersFailedError(Exception):
-    """Both primary and fallback failed — view returns 503 FOOD_SCAN_UNAVAILABLE."""
+    """Both primary and fallback failed.
+
+    ``is_low_confidence_only`` lets the view distinguish two failure modes
+    per Notion API Spec v2.0 §FOOD SCANNER:
+
+    - All providers returned a result but with confidence below threshold
+      (vendor worked, image just isn't recognisable) → view returns
+      400 ``FOOD_NOT_RECOGNIZED``
+    - Any provider failed with timeout / unavailable / config error
+      (vendor down or unreachable) → view returns 503 ``FOOD_API_UNAVAILABLE``
+
+    Mixed cases (one low-confidence + one timeout) classify as 503 — we
+    don't know whether retrying primary would have succeeded.
+    """
 
     def __init__(self, primary_err: Exception, fallback_err: Exception | None) -> None:
         self.primary_err = primary_err
@@ -60,6 +73,15 @@ class AllProvidersFailedError(Exception):
             f"primary={type(primary_err).__name__}({primary_err}) "
             f"fallback={type(fallback_err).__name__ if fallback_err else 'not_attempted'}"
         )
+
+    @property
+    def is_low_confidence_only(self) -> bool:
+        """All attempted providers returned a low-confidence result."""
+        if not isinstance(self.primary_err, LowConfidenceError):
+            return False
+        if self.fallback_err is None:
+            return True
+        return isinstance(self.fallback_err, LowConfidenceError)
 
 
 class FoodScannerRouter:

@@ -1,6 +1,8 @@
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 
+from reviews.views import SpecialistReviewsView
+
 from .portfolio_api import PortfolioDetailView, PortfolioListCreateView
 from .schedule_api import ScheduleView, TimeOffDetailView, TimeOffListView
 from .specialists_api import SpecialistViewSet
@@ -10,6 +12,16 @@ router = DefaultRouter()
 router.register(r'', SpecialistViewSet, basename='specialists')
 
 urlpatterns = [
+    # Canonical reviews-by-specialist endpoint per spec v2.0. Used to live
+    # as a permission-bypass @action on SpecialistViewSet that late-imported
+    # reviews.views — moved here to keep the cross-app dependency at the
+    # routing layer where it's visible.
+    path(
+        '<uuid:specialist_id>/reviews/',
+        SpecialistReviewsView.as_view(),
+        name='specialist-reviews',
+    ),
+
     # Canonical specialist profile (DRF-209). Legacy /api/v1/auth/masters/me/
     # stays live in users/urls.py wrapped with deprecation headers — see
     # LegacyMasterMeView there.
