@@ -8,12 +8,11 @@ import pytest
 
 from ai.application.services.action_service import ActionService
 from ai.exceptions import AIInvalidAction, AINotOwner
-from ai.models import Conversation, Message
+from ai.models import Message
 from ai.tests.factories import make_conversation, make_user
 from ai.tools import ActionType
-from appointments.application.dto import CreateBookingDTO
+from appointments.application.dto import BookingResultDTO, CreateBookingDTO
 from appointments.domain.exceptions import SlotNotAvailableError
-from appointments.application.dto import BookingResultDTO
 
 
 pytestmark = pytest.mark.django_db

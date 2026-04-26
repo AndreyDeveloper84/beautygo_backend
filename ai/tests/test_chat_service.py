@@ -1,22 +1,16 @@
 """Unit tests for ChatService."""
 from __future__ import annotations
 
-import json
-from unittest.mock import patch
-
 import pytest
 
-from ai.application.services.chat_service import (
-    ChatRequestContext,
-    ChatService,
-)
+from ai.application.services.chat_service import ChatService
 from ai.exceptions import (
     AIAnonymousLimitExceeded,
     AIDailyLimitExceeded,
     AIUnavailable,
 )
 from ai.models import Conversation, Message
-from ai.tests.factories import make_conversation, make_message, make_specialist
+from ai.tests.factories import make_conversation, make_message
 from ai.tools import ActionType
 
 

@@ -35,14 +35,12 @@ from ai.application.services.chat_service import (
     ChatService,
 )
 from ai.exceptions import (
-    AIAnonymousLimitExceeded,
-    AIDailyLimitExceeded,
     AIInvalidAction,
     AINotOwner,
     AIRateLimitExceeded,
     AIUnavailable,
 )
-from ai.models import Conversation, Message
+from ai.models import Conversation
 from ai.serializers import (
     ActionRequestSerializer,
     ChatRequestSerializer,

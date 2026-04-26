@@ -6,11 +6,10 @@ import uuid as _uuid
 import pytest
 from rest_framework.test import APIClient
 
-from ai.models import Conversation, Message
+from ai.models import Message
 from ai.tests.factories import (
     make_conversation,
     make_message,
-    make_specialist,
     make_user,
 )
 
