@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'payments',
     'ai',
     'notifications',
+    'nutrition',
 ]
 
 AUTH_USER_MODEL = 'users.User'
@@ -390,6 +391,23 @@ YOOKASSA_WEBHOOK_BASIC_AUTH_USER = os.environ.get(
 YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = os.environ.get(
     "YOOKASSA_WEBHOOK_BASIC_AUTH_PASS", "",
 )
+
+
+# ----------------------------------------------------------------------------
+# Food Scanner — Plan Y+ multi-vendor router (docs/FOOD_SCANNER_DECISION.md)
+# ----------------------------------------------------------------------------
+# Yandex Cloud Foundation Models — Vision provider. Used as fallback for
+# OpenAI Vision (primary) when OpenAI 5xx / timeout / low-confidence.
+# Yandex serves from RU jurisdiction → 152-ФЗ-friendly path. Provision
+# the API key + folder via Yandex Cloud console; both must be present
+# for the provider to come online (else it raises ProviderUnavailable).
+YANDEX_VISION_API_KEY = os.environ.get("YANDEX_VISION_API_KEY", "")
+YANDEX_VISION_FOLDER_ID = os.environ.get("YANDEX_VISION_FOLDER_ID", "")
+
+# Router primary / fallback vendor selection. Slice 2 will read these.
+# Keep names lowercase short tokens so env diffs stay readable.
+FOOD_SCANNER_PRIMARY = os.environ.get("FOOD_SCANNER_PRIMARY", "openai")
+FOOD_SCANNER_FALLBACK = os.environ.get("FOOD_SCANNER_FALLBACK", "yandex")
 
 
 # ----------------------------------------------------------------------------
