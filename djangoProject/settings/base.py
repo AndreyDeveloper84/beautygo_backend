@@ -340,6 +340,12 @@ AI_SPECIALIST_MIN_RATING = float(
     os.environ.get("AI_SPECIALIST_MIN_RATING", "4.0")
 )
 
+# RecommendationEngine cache TTL (seconds). 5 min per DRF-105 contract.
+# Cache invalidates implicitly via filter-hash key change when client
+# location / category / price filter shifts; explicit invalidation is
+# overkill for an advisory ranker.
+AI_REC_CACHE_TTL = int(os.environ.get("AI_REC_CACHE_TTL", "300"))
+
 # Firebase Cloud Messaging — push delivery for both apps.
 # FIREBASE_CREDENTIALS_JSON: full Service Account JSON as a string (CI
 # path; GitHub Secret + .env injection). FIREBASE_CREDENTIALS_PATH: file
