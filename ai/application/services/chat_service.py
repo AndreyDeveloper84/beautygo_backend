@@ -208,7 +208,20 @@ class ChatService:
                     if profile.default_location_lng is not None
                     else None
                 )
-        return self._context_builder.build(client_lat=lat, client_lon=lon)
+        # Pass client_id + city so RecommendationEngine can apply the
+        # history (10%) and city-filter components of the score.
+        client_id = (
+            actor.id if not getattr(actor, "is_guest", False) else None
+        )
+        city = None
+        if hasattr(actor, "profile") and getattr(actor, "profile", None):
+            city = getattr(actor.profile, "city", "") or None
+        return self._context_builder.build(
+            client_id=client_id,
+            client_lat=lat,
+            client_lon=lon,
+            city=city,
+        )
 
     def _load_recent_history(
         self, conversation: Conversation, *, exclude_id: UUID | None
