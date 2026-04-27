@@ -91,6 +91,18 @@ class TestAuth:
         # Specialist hits IsClient guard → 403
         assert resp.status_code == 403
 
+    def test_anonymous_guest_returns_403(self):
+        """Regression — surfaced 2026-04-27 dev-VPS smoke test:
+        anonymous users (is_guest=True, role='client') was reaching /home/
+        because IsClient only checked role. Now IsClient also rejects
+        is_guest=True. Anon-friendly home (browse mode) is a separate
+        product decision — this endpoint stays gated."""
+        guest = make_user(role="client", is_guest=True)
+        c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"
+        c.force_authenticate(user=guest)
+        assert c.get(HOME_URL).status_code == 403
+
 
 # ---------------------------------------------------------------------------
 # Section shape
