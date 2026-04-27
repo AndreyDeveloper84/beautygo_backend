@@ -1,32 +1,37 @@
 """SpecialistContextBuilder — load top-N candidate specialists for the LLM prompt.
 
-Spec v2.0 §AI ASSISTANT requires specialists to be limited to the active
-catalog. We pull top-N by rating with optional distance ordering and
-hand the LLM a compact summary so it can pick from real IDs only.
+Thin adapter over ``RecommendationEngine`` (DRF-105) — kept for backward
+compatibility with the AI Chat call sites that don't need the full
+weighted scoring API. The chat layer treats the recommended candidates
+as a flat candidate set; ranking quality comes from the engine.
 
-Filter chain:
-  status=active + is_available=True + is_booking_enabled=True
-  + rating >= AI_SPECIALIST_MIN_RATING (default 4.0)
+Filter chain (per spec v2.0 §AI ASSISTANT):
+  status=active + is_available + is_booking_enabled
+  + rating >= AI_SPECIALIST_MIN_RATING
   + (optional) within ~25 km of client location
-  ORDER BY rating DESC, reviews_count DESC
-  LIMIT AI_SPECIALIST_CONTEXT_LIMIT (default 20)
-
-Returns a structured DTO. The LLM gets a short summary string; the
-view layer keeps the full IDs for tool_handlers to validate against.
+  weighted by RecommendationEngine
+  LIMIT AI_SPECIALIST_CONTEXT_LIMIT
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from decimal import Decimal
-from math import asin, cos, radians, sin, sqrt
-from typing import Iterable
+from typing import TYPE_CHECKING
 from uuid import UUID
 
 from django.conf import settings
 
-from users.models import SpecialistProfile
+from ai.application.services.recommendation_engine import (
+    RecommendationEngine,
+    RecommendationQuery,
+    ScoredSpecialist,
+)
+
+if TYPE_CHECKING:  # pragma: no cover
+    pass
 
 
+# Backward-compat DTO — chat_service & tools_handlers use this shape.
 @dataclass(frozen=True)
 class SpecialistCandidate:
     id: UUID
@@ -36,6 +41,24 @@ class SpecialistCandidate:
     address: str
     distance_km: float | None
     services_preview: list[str]
+    # Newer fields surfaced from the engine — optional so older callers
+    # that construct candidates by hand keep working.
+    score: float = 0.0
+    match_reasons: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_scored(cls, s: ScoredSpecialist) -> "SpecialistCandidate":
+        return cls(
+            id=s.id,
+            display_name=s.display_name,
+            rating=s.rating,
+            reviews_count=s.reviews_count,
+            address=s.address,
+            distance_km=s.distance_km,
+            services_preview=s.services_preview,
+            score=s.score,
+            match_reasons=s.match_reasons,
+        )
 
 
 @dataclass(frozen=True)
@@ -60,32 +83,20 @@ class SpecialistContext:
                 if c.services_preview
                 else ""
             )
+            score_hint = f" | score={c.score:.2f}" if c.score > 0 else ""
             lines.append(
                 f"- {c.id} | {c.display_name} | ★{c.rating} "
-                f"({c.reviews_count} отз.){distance}{services}"
+                f"({c.reviews_count} отз.){distance}{services}{score_hint}"
             )
         return "\n".join(lines)
-
-
-def _haversine_km(
-    lat1: float, lon1: float, lat2: float, lon2: float
-) -> float:
-    """Great-circle distance in km. Used only for ordering, not display."""
-    r = 6371.0
-    dlat = radians(lat2 - lat1)
-    dlon = radians(lon2 - lon1)
-    a = (
-        sin(dlat / 2) ** 2
-        + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
-    )
-    return 2 * r * asin(sqrt(a))
 
 
 class SpecialistContextBuilder:
     """Builds candidate specialist list for the LLM system prompt.
 
-    Cheap call (single ORM query + Python sort). Safe to run on every
-    chat turn — caching deferred until usage shows it as hot path.
+    Thin wrapper around RecommendationEngine. Caching, scoring, and
+    filtering live in the engine; this layer only translates between
+    chat-side and engine-side shapes.
     """
 
     def __init__(
@@ -93,84 +104,33 @@ class SpecialistContextBuilder:
         *,
         limit: int | None = None,
         min_rating: float | None = None,
+        engine: RecommendationEngine | None = None,
     ) -> None:
         self._limit = limit or settings.AI_SPECIALIST_CONTEXT_LIMIT
         self._min_rating = (
             min_rating if min_rating is not None else settings.AI_SPECIALIST_MIN_RATING
         )
+        self._engine = engine or RecommendationEngine()
 
     def build(
         self,
         *,
+        client_id: UUID | None = None,
         client_lat: float | None = None,
         client_lon: float | None = None,
+        city: str | None = None,
     ) -> SpecialistContext:
-        qs = SpecialistProfile.objects.filter(
-            status=SpecialistProfile.ProfileStatus.ACTIVE,
-            is_available=True,
-            is_booking_enabled=True,
-            rating__gte=self._min_rating,
-        ).order_by("-rating", "-reviews_count")[: self._limit * 2]
-        # Pull 2x limit so we have room to re-sort by distance without
-        # going back to the DB.
-
-        candidates = list(qs)
-        scored = self._score_with_distance(candidates, client_lat, client_lon)
-        scored.sort(key=self._sort_key)
-        top = scored[: self._limit]
+        query = RecommendationQuery(
+            client_id=client_id,
+            client_lat=client_lat,
+            client_lon=client_lon,
+            city=city,
+            min_rating=self._min_rating,
+            limit=self._limit,
+        )
+        result = self._engine.recommend(query)
         return SpecialistContext(
-            candidates=[self._to_candidate(s, d) for s, d in top]
-        )
-
-    @staticmethod
-    def _score_with_distance(
-        specialists: Iterable[SpecialistProfile],
-        client_lat: float | None,
-        client_lon: float | None,
-    ) -> list[tuple[SpecialistProfile, float | None]]:
-        out: list[tuple[SpecialistProfile, float | None]] = []
-        for s in specialists:
-            distance: float | None = None
-            if (
-                client_lat is not None
-                and client_lon is not None
-                and s.location_lat is not None
-                and s.location_lng is not None
-            ):
-                distance = _haversine_km(
-                    client_lat,
-                    client_lon,
-                    float(s.location_lat),
-                    float(s.location_lng),
-                )
-            out.append((s, distance))
-        return out
-
-    @staticmethod
-    def _sort_key(item: tuple[SpecialistProfile, float | None]) -> tuple:
-        s, d = item
-        # Ordering: distance ascending (None last), then rating desc, reviews desc.
-        return (
-            0 if d is not None else 1,
-            d if d is not None else 0.0,
-            -float(s.rating),
-            -s.reviews_count,
-        )
-
-    @staticmethod
-    def _to_candidate(
-        s: SpecialistProfile, distance_km: float | None
-    ) -> SpecialistCandidate:
-        services = [
-            svc.name
-            for svc in s.services.filter(is_active=True).order_by("price")[:3]
-        ] if hasattr(s, "services") else []
-        return SpecialistCandidate(
-            id=s.id,
-            display_name=s.display_name,
-            rating=s.rating,
-            reviews_count=s.reviews_count,
-            address=s.address,
-            distance_km=distance_km,
-            services_preview=services,
+            candidates=[
+                SpecialistCandidate.from_scored(s) for s in result.candidates
+            ]
         )
