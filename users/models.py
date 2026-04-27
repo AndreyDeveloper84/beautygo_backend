@@ -252,6 +252,108 @@ class DeviceToken(models.Model):
         return f"{self.user.username} ({self.app_type}/{self.platform})"
 
 
+class UserPersonalContext(models.Model):
+    """Minimum-lovable subset of AI personalization context (DRF-174 reduced).
+
+    Per CEO scope reduction (project_m4_scope_reduction) the full personal
+    context — life events, address tracking, behavioural inference, data
+    provenance flags, sensitive-zone encryption — is deferred to Phase 6
+    (post-pilot, when we have real usage patterns to drive design). This
+    model keeps only the fields that:
+
+    1. Mobile can collect through obvious UI prompts (Phase 3 onboarding
+       + chat clarification questions).
+    2. AI Chat can use as a system prompt hint without inferring anything.
+    3. Don't need cross-table extraction logic.
+
+    Schema decisions:
+
+    - Fields use ``JSONField(default=list)`` for the multi-select cases —
+      simple, no extra tables, easy to evolve. When the catalogue of
+      valid values stabilises post-pilot, migrate to lookup tables.
+    - All fields are optional (`blank=True` / `default=...`). The user
+      builds context incrementally; absence of a value means "not asked
+      yet" and AI Chat should treat it as no preference.
+    - ``OneToOneField`` to User: every active user gets at most one
+      context row, lazy-created on first PATCH (not via signal — avoids
+      a row for every guest who never personalises).
+    """
+
+    class TimeSlot(models.TextChoices):
+        EARLY_MORNING = "early_morning", "До 9 утра"
+        MORNING = "morning", "Утро (9-12)"
+        AFTERNOON = "afternoon", "День (12-17)"
+        EVENING = "evening", "Вечер (17-21)"
+        LATE_EVENING = "late_evening", "После 21"
+
+    class DietType(models.TextChoices):
+        OMNIVORE = "omnivore", "Всеядное"
+        VEGETARIAN = "vegetarian", "Вегетарианство"
+        VEGAN = "vegan", "Веганство"
+        KETO = "keto", "Кето"
+        HALAL = "halal", "Халяль"
+        KOSHER = "kosher", "Кошер"
+        OTHER = "other", "Другое"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="personal_context",
+    )
+
+    # --- Location preferences ---
+    preferred_districts = models.JSONField(
+        default=list, blank=True,
+        help_text="Список названий районов / станций метро где удобно "
+                  "записываться. Mobile shows top-3, full list in profile.",
+    )
+
+    # --- Schedule preferences ---
+    preferred_time_slots = models.JSONField(
+        default=list, blank=True,
+        help_text="Список ключей TimeSlot — какие окна удобнее. Validated "
+                  "in serializer against TimeSlot choices.",
+    )
+
+    # --- Budget preferences ---
+    price_range_min = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+    )
+    price_range_max = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+    )
+
+    # --- Dietary preference (for nutrition/food scanner — Phase 5+) ---
+    diet_type = models.CharField(
+        max_length=20, choices=DietType.choices, blank=True, default="",
+    )
+
+    # --- Health-relevant beauty preferences ---
+    skin_sensitivities = models.JSONField(
+        default=list, blank=True,
+        help_text="Free-form list of allergens / sensitivities (no clinical "
+                  "diagnosis — just user-stated preferences for vendors).",
+    )
+
+    # --- Behavioural preference ---
+    prefers_flexible_cancellation = models.BooleanField(
+        default=False,
+        help_text="If True, AI Chat softly biases toward specialists with "
+                  "lenient cancellation policies (Phase 6 hookup).",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "User Personal Context"
+        verbose_name_plural = "User Personal Contexts"
+
+    def __str__(self) -> str:
+        return f"PersonalContext for {self.user_id}"
+
+
 class AnonymousSession(models.Model):
     """
     Tracks anonymous (guest) JWT sessions created before registration.
