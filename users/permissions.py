@@ -22,12 +22,26 @@ class IsProApp(permissions.BasePermission):
 
 
 class IsClient(permissions.BasePermission):
-    """Allow access only to users with role=client."""
+    """Allow access only to **registered** users with role=client.
+
+    Anonymous users (created via ``POST /auth/anonymous``) carry an
+    ``is_guest=True`` flag and a default ``role='client'`` so they can
+    browse the catalogue. Endpoints guarded by ``IsClient`` — payments,
+    reviews, food scanner, home screen, personal context — are for
+    registered accounts only; anon must verify OTP first to merge into
+    a real account.
+
+    Surfaced by smoke-test against dev VPS 2026-04-27: anon was reaching
+    /home/ and /personal-context/ because the original check only looked
+    at role. The Gate model in spec v2.0 treats those as gated actions.
+    """
 
     def has_permission(self, request: Any, view: Any) -> bool:
+        user = request.user
         return (
-            request.user.is_authenticated
-            and request.user.role == 'client'
+            user.is_authenticated
+            and user.role == 'client'
+            and not getattr(user, 'is_guest', False)
         )
 
 

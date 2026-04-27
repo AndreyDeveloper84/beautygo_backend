@@ -53,6 +53,17 @@ class TestAuth:
         c.force_authenticate(user=spec)
         assert c.get(URL).status_code == 403
 
+    def test_anonymous_guest_returns_403(self):
+        """Regression — surfaced 2026-04-27 dev-VPS smoke test:
+        anonymous users (is_guest=True, role='client') was reaching this
+        endpoint because IsClient only checked role. Now IsClient also
+        rejects is_guest=True, matching the Gate model in spec v2.0."""
+        guest = make_user(role="client", is_guest=True)
+        c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"
+        c.force_authenticate(user=guest)
+        assert c.get(URL).status_code == 403
+
 
 # ---------------------------------------------------------------------------
 # GET — defaults + auto-creation behaviour
