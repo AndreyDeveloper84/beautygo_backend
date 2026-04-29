@@ -32,6 +32,9 @@ from nutrition.serializers import (
     NutritionSummaryQuerySerializer,
     NutritionSummaryResponseSerializer,
     ScanRequestSerializer,
+    WaterLogCreateSerializer,
+    WaterLogResponseSerializer,
+    WaterTodayResponseSerializer,
 )
 from nutrition.services.food_log_service import (
     CreateFoodLogInput,
@@ -46,6 +49,10 @@ from nutrition.services.food_scanner_router import (
 )
 from nutrition.services.nutrition_lookup import NutritionLookup
 from nutrition.services.nutrition_summary_service import NutritionSummaryService
+from nutrition.services.water_service import (
+    WaterLogCreatedResponse,
+    WaterService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -229,5 +236,94 @@ class NutritionSummaryView(APIView):
         )
         return success_response(
             NutritionSummaryResponseSerializer(summary).data,
+            status_code=status.HTTP_200_OK,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Water tracker (Slice 4)
+# ---------------------------------------------------------------------------
+
+
+class WaterLogCreateView(APIView):
+    """POST /api/v1/nutrition/water/ — log a glass of water."""
+
+    permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "water"
+
+    def post(self, request: Request) -> Response:
+        from django.utils import timezone
+
+        from nutrition.models import WaterLog
+
+        serializer = WaterLogCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Невалидные данные",
+                details=serializer.errors,
+            )
+
+        log = WaterLog.objects.create(
+            user=request.user,
+            amount_ml=serializer.validated_data["amount_ml"],
+            logged_at=timezone.now(),
+        )
+        agg = WaterService().aggregate_for_today(request.user.id)
+        return success_response(
+            WaterLogResponseSerializer(
+                WaterLogCreatedResponse(aggregate=agg, log_id=log.id)
+            ).data,
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
+class WaterLogDeleteView(APIView):
+    """DELETE /api/v1/nutrition/water/{id}/ — undo a glass.
+
+    Returns the same WaterLogResponse shape so the mobile UI can
+    update its progress ring without a follow-up GET.
+    """
+
+    permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "water"
+
+    def delete(self, request: Request, pk) -> Response:
+        from nutrition.models import WaterLog
+
+        try:
+            log = WaterLog.objects.get(id=pk, user=request.user)
+        except WaterLog.DoesNotExist:
+            # 404 (no existence leak) — same pattern as scan ownership.
+            return error_response(
+                "NOT_FOUND",
+                "Запись не найдена",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        deleted_id = log.id
+        log.delete()
+        agg = WaterService().aggregate_for_today(request.user.id)
+        return success_response(
+            WaterLogResponseSerializer(
+                WaterLogCreatedResponse(aggregate=agg, log_id=deleted_id)
+            ).data,
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class WaterTodayView(APIView):
+    """GET /api/v1/nutrition/water/today/ — list today's glasses."""
+
+    permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "water"
+
+    def get(self, request: Request) -> Response:
+        today = WaterService().today_logs(request.user.id)
+        return success_response(
+            WaterTodayResponseSerializer(today).data,
             status_code=status.HTTP_200_OK,
         )
