@@ -52,6 +52,23 @@ EVENT_HANDLERS: dict[str, EventHandler] = {
 }
 
 
+# Bind real notification handlers from the notifications app over the stub
+# log handlers above. Two-stage init lets us keep _log_handler as the
+# documented fallback for any topic that hasn't been wired yet — adding a
+# new app that responds to outbox events is just an `EVENT_HANDLERS.update`
+# from that app's module.
+def _register_notification_handlers() -> None:
+    try:
+        from notifications.outbox_handlers import BOOKING_HANDLERS
+    except ImportError:  # pragma: no cover — notifications app missing
+        logger.exception("outbox.notifications_handlers_import_failed")
+        return
+    EVENT_HANDLERS.update(BOOKING_HANDLERS)
+
+
+_register_notification_handlers()
+
+
 # Max times a single event will go through the dispatcher before we stop
 # touching it. After this it stays in DB with a non-empty ``last_error`` —
 # ops can replay manually via a future management command. The bookkeeping
