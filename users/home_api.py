@@ -146,9 +146,33 @@ class HomeView(APIView):
 
     @staticmethod
     def _favorite_specialists(user) -> list[dict[str, Any]]:
-        # Favorites model is pending DRF-72 — return empty until then.
-        # Frontend handles `[]` already (renders empty-state card).
-        return []
+        """Top-N most recently favourited specialists for the home card.
+
+        Mirrors the SpecialistListItem shape from /favorites/specialists/
+        but trimmed for the card view (no services_preview /
+        services_count to keep the home payload light). Anonymous users
+        return empty since favourites require auth — the home view
+        accepts unauth users for the catalog.
+        """
+        if not getattr(user, "is_authenticated", False):
+            return []
+        from .models import SpecialistProfile
+
+        specialists = (
+            SpecialistProfile.objects
+            .filter(favorited_by__user=user)
+            .order_by("-favorited_by__created_at")[:LIMIT_FAVORITES]
+        )
+        return [
+            {
+                "id": str(s.id),
+                "display_name": s.display_name,
+                "avatar": s.avatar.url if s.avatar else None,
+                "rating": float(s.rating or 0),
+                "reviews_count": s.reviews_count,
+            }
+            for s in specialists
+        ]
 
     def _popular_categories(self) -> list[dict[str, Any]]:
         cached = default_cache.get(CACHE_KEY_POPULAR_CATEGORIES)
