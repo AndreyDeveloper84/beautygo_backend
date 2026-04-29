@@ -364,6 +364,15 @@ YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
 YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
 YOOKASSA_AGENT_ID = os.environ.get("YOOKASSA_AGENT_ID", "")  # Sub-account for split payments
 
+# 54-ФЗ fiscal receipt — VAT code per OFD reference table.
+#   1 — без НДС (default for самозанятые / УСН — pilot starts here)
+#   2 — НДС 0%
+#   3 — НДС 10%
+#   4 — НДС 20%
+# Switch when the merchant moves to OSNO. Wrong code surfaces as a
+# YooKassa validation error at create_payment time, not in production.
+YOOKASSA_VAT_CODE = int(os.environ.get("YOOKASSA_VAT_CODE", "1"))
+
 # YooKassa webhook security.
 # Comma-separated list of CIDR ranges or single IPs permitted to POST to
 # /api/v1/payments/webhook/. YooKassa publishes its source IP ranges at
