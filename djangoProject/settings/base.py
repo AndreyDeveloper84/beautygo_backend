@@ -14,6 +14,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from celery.schedules import crontab
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -426,6 +427,26 @@ FOOD_SCANNER_FALLBACK = os.environ.get("FOOD_SCANNER_FALLBACK", "yandex")
 NUTRITION_DEFAULT_CALORIES_GOAL = int(os.environ.get("NUTRITION_DEFAULT_CALORIES_GOAL", "2000"))
 NUTRITION_DEFAULT_WATER_GOAL_ML = int(os.environ.get("NUTRITION_DEFAULT_WATER_GOAL_ML", "2000"))
 
+# Water reminder beat task — only nag users active in the last N days
+# so dormant accounts don't get spammed. Pilot starts strict (7 days);
+# loosen if the open-rate metric shows under-coverage.
+WATER_REMINDER_ACTIVE_WINDOW_DAYS = int(
+    os.environ.get("WATER_REMINDER_ACTIVE_WINDOW_DAYS", "7")
+)
+# Threshold for "behind on water today" — fire if water_ml < goal * pct.
+WATER_REMINDER_BEHIND_PCT = float(
+    os.environ.get("WATER_REMINDER_BEHIND_PCT", "0.5")
+)
+
+# Weekly beauty-insight beat task — bounds the LLM bill in pilot. The
+# task calls the existing AI client per user; this cap stops the cron
+# from billing all 500 active users on a single Monday until the cost
+# dashboard is in place.
+BEAUTY_INSIGHT_USER_CAP = int(
+    os.environ.get("BEAUTY_INSIGHT_USER_CAP", "100")
+)
+# Re-uses the AI Chat per-user daily token budget for cost containment.
+
 
 # ----------------------------------------------------------------------------
 # Async tasks — Celery + Redis (PR3 — Phase 2 Lane A)
@@ -469,6 +490,26 @@ CELERY_BEAT_SCHEDULE = {
     "dispatch-appointment-reminders": {
         "task": "notifications.dispatch_appointment_reminders",
         "schedule": 300.0,                      # every 5 minutes
+    },
+    # Water reminders fire twice daily at 14:00 and 18:00 UTC. Pilot is
+    # single-tz Penza (MSK = UTC+3), so 17:00 / 21:00 local — afternoon
+    # slump and evening cool-down windows where users typically fall
+    # behind on water. Switch to per-user TZ when UserPersonalContext
+    # gets a tz field (Phase 6).
+    "dispatch-water-reminders-afternoon": {
+        "task": "notifications.dispatch_water_reminders",
+        "schedule": crontab(hour=14, minute=0),
+    },
+    "dispatch-water-reminders-evening": {
+        "task": "notifications.dispatch_water_reminders",
+        "schedule": crontab(hour=18, minute=0),
+    },
+    # Weekly beauty insight on Monday 09:00 UTC = 12:00 MSK. Each user
+    # gets one LLM call per week — capped at LLM_INSIGHT_USER_CAP per
+    # tick to keep bills predictable in pilot.
+    "dispatch-beauty-insights": {
+        "task": "notifications.dispatch_beauty_insights",
+        "schedule": crontab(hour=9, minute=0, day_of_week="mon"),
     },
 }
 

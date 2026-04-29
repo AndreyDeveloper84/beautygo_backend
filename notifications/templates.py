@@ -105,6 +105,104 @@ TEMPLATES: dict[str, NotificationTemplate] = {
         push_body="Оплата {amount} ₽ за {service_name} прошла успешно",
         deep_link="appointment/{appointment_id}",
     ),
+    # --- Slice N4 additions -----------------------------------------------
+    # New strings use the Ayla brand (per CLAUDE.md Brand Migration Status).
+    # The five templates above predate the rebrand and are migrated as a
+    # separate ticket so this slice stays focused on event coverage.
+    "appointment_confirmed_client": NotificationTemplate(
+        id="appointment_confirmed_client",
+        app_type="client",
+        channel=Notification.Channel.PUSH,
+        push_title="Запись подтверждена",
+        push_body="{specialist_name} подтвердил(а) запись на {date_time}",
+        deep_link="appointment/{appointment_id}",
+    ),
+    "appointment_cancelled_specialist": NotificationTemplate(
+        id="appointment_cancelled_specialist",
+        app_type="pro",
+        channel=Notification.Channel.PUSH,
+        push_title="Запись отменена",
+        push_body="{client_name} отменил(а) запись на {date_time}",
+        deep_link="appointment/{appointment_id}",
+    ),
+    "appointment_rescheduled_client": NotificationTemplate(
+        id="appointment_rescheduled_client",
+        app_type="client",
+        channel=Notification.Channel.PUSH,
+        push_title="Запись перенесена",
+        push_body="С {old_date_time} на {date_time}",
+        deep_link="appointment/{appointment_id}",
+    ),
+    "appointment_rescheduled_specialist": NotificationTemplate(
+        id="appointment_rescheduled_specialist",
+        app_type="pro",
+        channel=Notification.Channel.PUSH,
+        push_title="Запись перенесена",
+        push_body="{client_name}: с {old_date_time} на {date_time}",
+        deep_link="appointment/{appointment_id}",
+    ),
+    "booking_no_show_specialist": NotificationTemplate(
+        id="booking_no_show_specialist",
+        app_type="pro",
+        channel=Notification.Channel.PUSH,
+        push_title="Клиент не пришёл",
+        push_body="{client_name} не пришёл(ла) на запись {date_time}",
+        deep_link="appointment/{appointment_id}",
+    ),
+    "review_request": NotificationTemplate(
+        id="review_request",
+        app_type="client",
+        channel=Notification.Channel.PUSH,
+        push_title="Оцените мастера",
+        push_body=(
+            "Поделитесь впечатлением от {service_name} у {specialist_name}"
+        ),
+        deep_link="appointment/{appointment_id}/review",
+    ),
+    "payment_refunded": NotificationTemplate(
+        id="payment_refunded",
+        app_type="client",
+        channel=Notification.Channel.PUSH,
+        push_title="Возврат оформлен",
+        # ``is_partial`` is bool in the context; Python format spec
+        # renders True/False — fine for MVP, mobile shows the body
+        # verbatim. Two templates would be cleaner but doubles the
+        # surface for tone reviews.
+        push_body="Возврат {amount} ₽ за {service_name} оформлен",
+        deep_link="appointment/{appointment_id}",
+    ),
+    "payment_failed": NotificationTemplate(
+        id="payment_failed",
+        app_type="client",
+        channel=Notification.Channel.PUSH,
+        push_title="Оплата не прошла",
+        push_body="Оплата за {service_name} не прошла. Попробуйте ещё раз",
+        deep_link="appointment/{appointment_id}",
+    ),
+    # Retention reminders (M5 retention; beat tasks defined in
+    # notifications/tasks.py). Context: water_ml, water_goal_ml.
+    "water_reminder": NotificationTemplate(
+        id="water_reminder",
+        app_type="client",
+        channel=Notification.Channel.PUSH,
+        push_title="Время выпить воды",
+        push_body=(
+            "Сегодня выпито {water_ml} мл из {water_goal_ml}. Не забывай!"
+        ),
+        deep_link="day",
+    ),
+    # Context: insight_text (LLM-generated short summary).
+    "beauty_insight": NotificationTemplate(
+        id="beauty_insight",
+        app_type="client",
+        channel=Notification.Channel.PUSH,
+        push_title="Совет недели от Ayla",
+        push_body="{insight_text}",
+        deep_link="profile/insights",
+    ),
+    # `booking_suggestion` template is intentionally absent until
+    # UserPersonalContext expands (DRF-174 follow-up). The trigger
+    # heuristic without context is too noisy.
 }
 
 
