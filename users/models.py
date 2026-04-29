@@ -252,6 +252,61 @@ class DeviceToken(models.Model):
         return f"{self.user.username} ({self.app_type}/{self.platform})"
 
 
+class FavoriteSpecialist(models.Model):
+    """A client's saved-favourite specialist (DRF-72).
+
+    Per Notion API Spec v2.0 §FAVORITES:
+        POST /favorites/specialists/{id}/   — add (idempotent)
+        DELETE /favorites/specialists/{id}/ — remove (idempotent)
+        GET /favorites/specialists/         — list
+
+    Why a flat per-row model instead of a JSONField list on Profile:
+    - DELETE / list / count queries stay indexable (one row per (user,
+      specialist) pair).
+    - Future "save reason" / "label" / "notification preference" fields
+      get a natural home without migrating a JSON blob.
+    - The home screen card on /api/v1/home/ orders favourites by
+      ``-created_at`` to surface the most recently saved at the top —
+      a JSONField list would be ambiguous on order.
+
+    Cascade rules:
+    - User deleted: rows go too — favourites belong to the user.
+    - SpecialistProfile deleted: rows go too — keeping orphan favourites
+      for a deleted master shows empty cards on the home screen.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="favorite_specialists",
+    )
+    specialist = models.ForeignKey(
+        "users.SpecialistProfile",
+        on_delete=models.CASCADE,
+        related_name="favorited_by",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Favorite Specialist"
+        verbose_name_plural = "Favorite Specialists"
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "specialist"],
+                name="unique_favorite_per_user_specialist",
+            ),
+        ]
+        indexes = [
+            # Home screen and /favorites/specialists/ list queries.
+            models.Index(fields=["user", "-created_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user_id} ❤ {self.specialist_id}"
+
+
 class UserPersonalContext(models.Model):
     """Minimum-lovable subset of AI personalization context (DRF-174 reduced).
 
