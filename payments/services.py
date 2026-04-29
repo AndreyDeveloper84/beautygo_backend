@@ -8,6 +8,8 @@ from typing import Any
 
 from django.conf import settings
 
+from .exceptions import PaymentClientError, PaymentConfigError
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,14 +21,23 @@ class YooKassaService:
     """
     Thin wrapper around the yookassa SDK.
 
-    All public methods raise YooKassaError on SDK / API failure.
-    Call sites must catch this and return an appropriate HTTP response.
+    Public methods raise:
+    - PaymentConfigError when YOOKASSA_SHOP_ID / SECRET_KEY are empty
+      (startup-time wiring bug)
+    - PaymentClientError on any SDK / HTTP failure (transient provider
+      issue)
+    Call sites map these to 503 / 502 respectively.
     """
 
     def __init__(self):
         import yookassa
         shop_id = getattr(settings, 'YOOKASSA_SHOP_ID', '')
         secret_key = getattr(settings, 'YOOKASSA_SECRET_KEY', '')
+        if not shop_id or not secret_key:
+            raise PaymentConfigError(
+                "YooKassa credentials not configured "
+                "(YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY are empty)"
+            )
         yookassa.Configuration.configure(shop_id, secret_key)
         self._payment_cls = yookassa.Payment
         self._refund_cls = yookassa.Refund
@@ -100,7 +111,12 @@ class YooKassaService:
                 'amount': {'value': str(specialist_income), 'currency': 'RUB'},
             }]
 
-        payment = self._payment_cls.create(payload, idempotency_key)
+        try:
+            payment = self._payment_cls.create(payload, idempotency_key)
+        except Exception as exc:  # noqa: BLE001 — wrap SDK + transport
+            raise PaymentClientError(
+                f"YooKassa create_payment failed: {exc}"
+            ) from exc
 
         confirmation_url = ''
         if hasattr(payment, 'confirmation') and payment.confirmation:
@@ -125,11 +141,16 @@ class YooKassaService:
         idempotency_key: str,
     ) -> None:
         """Capture a previously held payment."""
-        self._payment_cls.capture(
-            provider_payment_id,
-            {'amount': {'value': str(amount), 'currency': 'RUB'}},
-            idempotency_key,
-        )
+        try:
+            self._payment_cls.capture(
+                provider_payment_id,
+                {'amount': {'value': str(amount), 'currency': 'RUB'}},
+                idempotency_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise PaymentClientError(
+                f"YooKassa capture_payment failed: {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------
     # Refund
@@ -142,13 +163,18 @@ class YooKassaService:
         idempotency_key: str,
     ) -> dict[str, Any]:
         """Create a refund for a payment."""
-        refund = self._refund_cls.create(
-            {
-                'payment_id': provider_payment_id,
-                'amount': {'value': str(amount), 'currency': 'RUB'},
-            },
-            idempotency_key,
-        )
+        try:
+            refund = self._refund_cls.create(
+                {
+                    'payment_id': provider_payment_id,
+                    'amount': {'value': str(amount), 'currency': 'RUB'},
+                },
+                idempotency_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise PaymentClientError(
+                f"YooKassa refund_payment failed: {exc}"
+            ) from exc
         return {'refund_id': refund.id, 'status': refund.status}
 
     # ------------------------------------------------------------------
@@ -157,7 +183,12 @@ class YooKassaService:
 
     def get_payment_info(self, provider_payment_id: str) -> dict[str, Any]:
         """Fetch current payment state from YooKassa."""
-        payment = self._payment_cls.find_one(provider_payment_id)
+        try:
+            payment = self._payment_cls.find_one(provider_payment_id)
+        except Exception as exc:  # noqa: BLE001
+            raise PaymentClientError(
+                f"YooKassa find_one failed: {exc}"
+            ) from exc
         return {
             'provider_payment_id': payment.id,
             'status': payment.status,

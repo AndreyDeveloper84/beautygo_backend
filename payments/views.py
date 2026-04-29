@@ -18,6 +18,7 @@ from appointments.models import Appointment, OutboxEvent, Payment
 from users.permissions import IsClient
 from users.response import error_response, success_response
 
+from .exceptions import PaymentClientError, PaymentConfigError
 from .serializers import PaymentCreateSerializer, PaymentDetailSerializer, PaymentRefundSerializer
 from .services import YooKassaService, build_appointment_receipt
 
@@ -188,7 +189,14 @@ class PaymentCreateView(APIView):
                 capture=False,  # two-stage: hold first
                 receipt=receipt,
             )
-        except Exception as exc:
+        except PaymentConfigError as exc:
+            logger.error('YooKassa not configured: %s', exc)
+            return error_response(
+                'SERVICE_UNAVAILABLE',
+                'Payment provider not configured.',
+                status_code=503,
+            )
+        except PaymentClientError as exc:
             logger.error('YooKassa create_payment failed: %s', exc)
             return error_response(
                 'PAYMENT_PROVIDER_ERROR',
@@ -329,7 +337,7 @@ class PaymentWebhookView(APIView):
         try:
             svc = _get_yookassa()
             info = svc.get_payment_info(provider_payment_id)
-        except Exception as exc:
+        except (PaymentClientError, PaymentConfigError) as exc:
             logger.error('YooKassa get_payment_info failed: %s', exc)
             # Return 200 to stop YooKassa retries; we'll reconcile later
             return Response({'status': 'ok'}, status=200)
@@ -442,7 +450,14 @@ class PaymentRefundView(APIView):
                 amount=refund_amount,
                 idempotency_key=idempotency_key,
             )
-        except Exception as exc:
+        except PaymentConfigError as exc:
+            logger.error('YooKassa not configured: %s', exc)
+            return error_response(
+                'SERVICE_UNAVAILABLE',
+                'Payment provider not configured.',
+                status_code=503,
+            )
+        except PaymentClientError as exc:
             logger.error('YooKassa refund_payment failed: %s', exc)
             return error_response(
                 'PAYMENT_PROVIDER_ERROR',
