@@ -77,3 +77,70 @@ class FoodScan(models.Model):
 
     def __str__(self) -> str:
         return f"{self.dish_name or '?'} ({self.provider_used}, conf={self.confidence:.2f})"
+
+
+class FoodLog(models.Model):
+    """User's food diary entry — one row per meal logged.
+
+    Spec: Notion API Spec v2.0 §FOOD SCANNER + NUTRITION
+          POST /nutrition/food-log → FoodLogEntry response.
+
+    Two creation paths, both via the same POST /nutrition/food-log:
+    - **scan_id path**: links to a prior FoodScan; macros are derived
+      from FoodScan.nutrition × portion_multiplier
+    - **manual path**: caller supplies ``dish_name``; macros are
+      looked up via NutritionLookup against a 100g baseline ×
+      portion_multiplier (see Slice 3b notes in services).
+
+    Macros are **snapshot** at log time — if a seed entry or scan
+    nutrition is later corrected, existing log rows are unaffected.
+    The mobile diary stays stable.
+    """
+
+    class MealType(models.TextChoices):
+        BREAKFAST = "breakfast", "Завтрак"
+        LUNCH = "lunch", "Обед"
+        DINNER = "dinner", "Ужин"
+        SNACK = "snack", "Перекус"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="food_logs",
+    )
+    # Optional link to the scan this log came from (manual entries
+    # leave it null). PROTECT would be wrong — if the user deletes a
+    # scan we keep the log because the macros are already snapshotted.
+    scan = models.ForeignKey(
+        FoodScan,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="food_logs",
+    )
+
+    dish_name = models.CharField(max_length=200)
+    portion_multiplier = models.FloatField(default=1.0)
+
+    # Snapshotted macros — match the spec FoodLogEntry response shape.
+    calories = models.FloatField(default=0.0)
+    protein_g = models.FloatField(default=0.0)
+    fat_g = models.FloatField(default=0.0)
+    carbs_g = models.FloatField(default=0.0)
+
+    meal_type = models.CharField(max_length=16, choices=MealType.choices)
+    logged_at = models.DateTimeField()
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Food Log"
+        verbose_name_plural = "Food Logs"
+        ordering = ["-logged_at"]
+        indexes = [
+            # Daily summary query: filter by user + logged_at date range.
+            models.Index(fields=["user", "-logged_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.dish_name} ({self.meal_type}, {self.calories:.0f} kcal)"

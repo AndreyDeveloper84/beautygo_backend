@@ -26,8 +26,17 @@ from users.response import error_response, success_response
 
 from nutrition.models import FoodScan
 from nutrition.serializers import (
+    FoodLogCreateSerializer,
+    FoodLogEntrySerializer,
     FoodScanResponseSerializer,
     ScanRequestSerializer,
+)
+from nutrition.services.food_log_service import (
+    CreateFoodLogInput,
+    DishNotRecognizedError,
+    FoodLogService,
+    InvalidInputError,
+    ScanNotOwnedError,
 )
 from nutrition.services.food_scanner_router import (
     AllProvidersFailedError,
@@ -129,4 +138,60 @@ class FoodScanView(APIView):
         return success_response(
             FoodScanResponseSerializer(scan).data,
             status_code=status.HTTP_200_OK,
+        )
+
+
+class FoodLogCreateView(APIView):
+    """POST /api/v1/nutrition/food-log/ — log a meal to the diary.
+
+    Per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION. Two creation
+    paths handled by FoodLogService — see service module for details.
+    """
+
+    permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_log"
+
+    def post(self, request: Request) -> Response:
+        serializer = FoodLogCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Невалидные данные",
+                details=serializer.errors,
+            )
+        v = serializer.validated_data
+        try:
+            log = FoodLogService().create(CreateFoodLogInput(
+                user_id=request.user.id,
+                portion_multiplier=v["portion_multiplier"],
+                meal_type=v["meal_type"],
+                scan_id=v.get("scan_id"),
+                dish_name=v.get("dish_name"),
+                logged_at=v.get("logged_at"),
+            ))
+        except InvalidInputError as exc:
+            return error_response(
+                "VALIDATION_ERROR", str(exc),
+            )
+        except ScanNotOwnedError:
+            # Use 404 to avoid leaking whether the scan exists at all.
+            return error_response(
+                "SCAN_NOT_FOUND",
+                "Сканирование не найдено",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        except DishNotRecognizedError as exc:
+            logger.info(
+                "nutrition.food_log.not_recognized user=%s err=%s",
+                request.user.id, exc,
+            )
+            return error_response(
+                "FOOD_NOT_RECOGNIZED",
+                "Не удалось определить макросы блюда",
+            )
+
+        return success_response(
+            FoodLogEntrySerializer(log).data,
+            status_code=status.HTTP_201_CREATED,
         )

@@ -141,6 +141,7 @@ class ErrorCode(str, Enum):
     # --- Food Scanner (spec §Food Scanner) ---
     FOOD_NOT_RECOGNIZED = "FOOD_NOT_RECOGNIZED"
     FOOD_API_UNAVAILABLE = "FOOD_API_UNAVAILABLE"
+    SCAN_NOT_FOUND = "SCAN_NOT_FOUND"
 
     # --- File upload (spec §Файл изображения) ---
     FILE_TOO_LARGE = "FILE_TOO_LARGE"

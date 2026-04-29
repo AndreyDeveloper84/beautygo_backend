@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from nutrition.models import FoodScan
+from nutrition.models import FoodLog, FoodScan
 
 
 # 10 MiB — same cap used by the portfolio uploader; the mobile client
@@ -92,3 +92,51 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
 
     def get_beauty_insights(self, obj: FoodScan):  # noqa: ARG002 — Slice 3+ fills this
         return None
+
+
+# ---------------------------------------------------------------------------
+# Food log (Slice 3b)
+# ---------------------------------------------------------------------------
+
+
+class FoodLogCreateSerializer(serializers.Serializer):
+    """Per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION FoodLogRequest.
+
+    One of ``scan_id`` / ``dish_name`` is required; both is allowed
+    (scan_id wins in the service). Validation runs cheap field checks
+    here; ownership and dish-resolvability are checked downstream by
+    FoodLogService.
+    """
+
+    scan_id = serializers.UUIDField(required=False)
+    dish_name = serializers.CharField(
+        required=False, allow_blank=False, max_length=200,
+    )
+    portion_multiplier = serializers.FloatField(min_value=0.1, max_value=20.0)
+    meal_type = serializers.ChoiceField(choices=FoodLog.MealType.choices)
+    logged_at = serializers.DateTimeField(required=False)
+
+    def validate(self, attrs):
+        if not attrs.get("scan_id") and not attrs.get("dish_name"):
+            raise serializers.ValidationError(
+                "Either scan_id or dish_name must be provided."
+            )
+        return attrs
+
+
+class FoodLogEntrySerializer(serializers.ModelSerializer):
+    """Per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION FoodLogEntry."""
+
+    class Meta:
+        model = FoodLog
+        fields = [
+            "id",
+            "dish_name",
+            "calories",
+            "protein_g",
+            "fat_g",
+            "carbs_g",
+            "meal_type",
+            "logged_at",
+        ]
+        read_only_fields = fields
