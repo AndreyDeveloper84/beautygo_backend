@@ -140,3 +140,36 @@ class FoodLogEntrySerializer(serializers.ModelSerializer):
             "logged_at",
         ]
         read_only_fields = fields
+
+
+# ---------------------------------------------------------------------------
+# Daily summary (Slice 3c)
+# ---------------------------------------------------------------------------
+
+
+class NutritionSummaryQuerySerializer(serializers.Serializer):
+    """Query string for GET /nutrition/summary/."""
+
+    date = serializers.DateField(required=False, format="%Y-%m-%d")
+
+
+class NutritionSummaryResponseSerializer(serializers.Serializer):
+    """Response shape per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION
+    NutritionSummaryResponse.
+
+    Stubbed fields: ``water_ml`` (0) and ``water_goal_ml`` (settings
+    default) until Slice 4; ``vitamin_deficits`` ({}) until Slice 3a'.
+    """
+
+    date = serializers.DateField(format="%Y-%m-%d")
+    calories_total = serializers.FloatField(source="totals.calories")
+    calories_goal = serializers.IntegerField()
+    protein_g = serializers.FloatField(source="totals.protein_g")
+    fat_g = serializers.FloatField(source="totals.fat_g")
+    carbs_g = serializers.FloatField(source="totals.carbs_g")
+    water_ml = serializers.IntegerField()
+    water_goal_ml = serializers.IntegerField()
+    entries = FoodLogEntrySerializer(many=True)
+    vitamin_deficits = serializers.DictField(
+        child=serializers.FloatField(),
+    )
