@@ -296,3 +296,92 @@ def test_booking_handlers_registered_in_event_handlers():
 
     for topic, handler in outbox_handlers.BOOKING_HANDLERS.items():
         assert apt_tasks.EVENT_HANDLERS[topic] is handler
+
+
+def test_payment_handlers_registered():
+    """N2 wires payment topics to real handlers — no more _log_handler."""
+    from appointments import tasks as apt_tasks
+
+    assert (
+        apt_tasks.EVENT_HANDLERS[OutboxEvent.Topic.PAYMENT_CONFIRMED]
+        is outbox_handlers.handle_payment_confirmed
+    )
+    assert (
+        apt_tasks.EVENT_HANDLERS[OutboxEvent.Topic.PAYMENT_REFUNDED]
+        is outbox_handlers.handle_payment_refunded
+    )
+
+
+# ---------------------------------------------------------------------------
+# payment.confirmed / payment.refunded
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def payment(db, appointment):
+    from appointments.models import Payment
+
+    return Payment.objects.create(
+        appointment=appointment,
+        amount=appointment.price,
+        status=Payment.Status.PAID,
+        specialist_income=appointment.price,
+        platform_fee="0",
+        provider="yookassa",
+    )
+
+
+@pytest.mark.django_db
+class TestPaymentConfirmed:
+    def test_sends_payment_paid_to_client(self, payment, client_user):
+        event = OutboxEvent.objects.create(
+            topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
+            payload={
+                "payment_id": str(payment.id),
+                "appointment_id": str(payment.appointment_id),
+                "amount": str(payment.amount),
+            },
+        )
+        outbox_handlers.handle_payment_confirmed(event)
+        rows = Notification.objects.filter(
+            user=client_user, template_id="payment_paid",
+        )
+        assert rows.count() == 1
+        n = rows.first()
+        assert "Маникюр" in n.body
+        assert str(payment.amount) in n.body or "1500" in n.body
+
+    def test_missing_payment_logs_and_skips(self, db):
+        event = OutboxEvent.objects.create(
+            topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
+            payload={
+                "payment_id": "00000000-0000-0000-0000-000000000000",
+            },
+        )
+        outbox_handlers.handle_payment_confirmed(event)
+        assert Notification.objects.count() == 0
+
+    def test_missing_payment_id_logs_and_skips(self, db):
+        event = OutboxEvent.objects.create(
+            topic=OutboxEvent.Topic.PAYMENT_CONFIRMED, payload={},
+        )
+        outbox_handlers.handle_payment_confirmed(event)
+        assert Notification.objects.count() == 0
+
+
+@pytest.mark.django_db
+class TestPaymentRefunded:
+    def test_template_pending_no_notification_until_n4(self, payment):
+        # `payment_refunded` template lands in Slice N4. Until then the
+        # handler is a logged no-op.
+        event = OutboxEvent.objects.create(
+            topic=OutboxEvent.Topic.PAYMENT_REFUNDED,
+            payload={
+                "payment_id": str(payment.id),
+                "appointment_id": str(payment.appointment_id),
+                "amount": str(payment.amount),
+                "is_partial": False,
+            },
+        )
+        outbox_handlers.handle_payment_refunded(event)
+        assert Notification.objects.count() == 0

@@ -276,6 +276,96 @@ def handle_booking_no_show(event: OutboxEvent) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Payment handlers
+# ---------------------------------------------------------------------------
+
+
+def _load_payment(event: OutboxEvent):
+    """Reload the Payment + appointment context referenced by the event.
+
+    Same defensive shape as ``_load_appointment``: returns None and logs
+    on missing/malformed data so the dispatcher doesn't retry forever.
+    """
+    from appointments.models import Payment  # lazy: avoid import at module load
+
+    payment_id = event.payload.get("payment_id")
+    if not payment_id:
+        logger.warning(
+            "outbox.handler.missing_payment_id topic=%s event_id=%s",
+            event.topic, event.id,
+        )
+        return None
+    try:
+        return (
+            Payment.objects
+            .select_related(
+                "appointment__client",
+                "appointment__specialist",
+                "appointment__service",
+            )
+            .get(id=payment_id)
+        )
+    except (Payment.DoesNotExist, ValueError, TypeError, ValidationError) as exc:
+        logger.warning(
+            "outbox.handler.payment_missing topic=%s payment_id=%s err=%s",
+            event.topic, payment_id, exc,
+        )
+        return None
+
+
+def _payment_context(payment, event: OutboxEvent) -> dict:
+    """Template context for payment notifications. The amount in the
+    payload may be the full payment or a partial refund — the
+    PAYMENT_REFUNDED writer puts the refunded amount there, the
+    PAYMENT_CONFIRMED writer puts the captured amount."""
+    appointment = payment.appointment
+    return {
+        "payment_id": str(payment.id),
+        "appointment_id": str(appointment.id),
+        "amount": str(event.payload.get("amount") or payment.amount),
+        "service_name": (
+            appointment.service.name
+            if appointment.service_id else ""
+        ),
+        "specialist_name": (
+            appointment.specialist.display_name
+            if appointment.specialist_id else ""
+        ),
+        "is_partial": event.payload.get("is_partial", False),
+    }
+
+
+def handle_payment_confirmed(event: OutboxEvent) -> None:
+    """Push the 'оплата прошла' notification to the client."""
+    payment = _load_payment(event)
+    if payment is None:
+        return
+    _send_if_template_exists(
+        user=payment.appointment.client,
+        template_id="payment_paid",
+        context=_payment_context(payment, event),
+        event_id=event.id,
+    )
+
+
+def handle_payment_refunded(event: OutboxEvent) -> None:
+    """Push the refund-confirmation notification to the client.
+
+    Template ``payment_refunded`` lands in Slice N4 — until then this
+    is a logged no-op so the topic isn't an unknown_topic error.
+    """
+    payment = _load_payment(event)
+    if payment is None:
+        return
+    _send_if_template_exists(
+        user=payment.appointment.client,
+        template_id="payment_refunded",
+        context=_payment_context(payment, event),
+        event_id=event.id,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Registry — appointments.tasks imports this and merges into EVENT_HANDLERS
 # ---------------------------------------------------------------------------
 
@@ -287,6 +377,8 @@ BOOKING_HANDLERS: dict[str, EventHandler] = {
     OutboxEvent.Topic.BOOKING_RESCHEDULED: handle_booking_rescheduled,
     OutboxEvent.Topic.BOOKING_COMPLETED: handle_booking_completed,
     OutboxEvent.Topic.BOOKING_NO_SHOW: handle_booking_no_show,
+    OutboxEvent.Topic.PAYMENT_CONFIRMED: handle_payment_confirmed,
+    OutboxEvent.Topic.PAYMENT_REFUNDED: handle_payment_refunded,
 }
 
 
@@ -299,5 +391,7 @@ __all__ = [
     "handle_booking_rescheduled",
     "handle_booking_completed",
     "handle_booking_no_show",
+    "handle_payment_confirmed",
+    "handle_payment_refunded",
     "Notification",  # convenience for test imports
 ]
