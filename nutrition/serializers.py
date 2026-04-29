@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from nutrition.models import FoodLog, FoodScan
+from nutrition.models import FoodLog, FoodScan, WaterLog
 
 
 # 10 MiB — same cap used by the portfolio uploader; the mobile client
@@ -173,3 +173,57 @@ class NutritionSummaryResponseSerializer(serializers.Serializer):
     vitamin_deficits = serializers.DictField(
         child=serializers.FloatField(),
     )
+
+
+# ---------------------------------------------------------------------------
+# Water tracker (Slice 4)
+# ---------------------------------------------------------------------------
+
+
+# Spec v2.0 §FOOD SCANNER+NUTRITION: 150 | 200 | 250 | 350 | 500.
+# Free-form amounts are out of scope (mobile UI is fixed buttons).
+WATER_AMOUNT_CHOICES = (150, 200, 250, 350, 500)
+
+
+class WaterLogCreateSerializer(serializers.Serializer):
+    """POST /nutrition/water — fixed-amount glass entry."""
+
+    amount_ml = serializers.IntegerField()
+
+    def validate_amount_ml(self, value: int) -> int:
+        if value not in WATER_AMOUNT_CHOICES:
+            raise serializers.ValidationError(
+                f"amount_ml must be one of {sorted(WATER_AMOUNT_CHOICES)}"
+            )
+        return value
+
+
+class WaterLogResponseSerializer(serializers.Serializer):
+    """POST/DELETE response — aggregate + the affected log id.
+
+    Per spec ``WaterLogResponse``: water_ml, water_goal_ml, water_pct,
+    log_id. Source is a ``WaterLogCreatedResponse`` dataclass so the
+    view doesn't need to assemble dicts inline.
+    """
+
+    water_ml = serializers.IntegerField(source="aggregate.water_ml")
+    water_goal_ml = serializers.IntegerField(source="aggregate.water_goal_ml")
+    water_pct = serializers.IntegerField(source="aggregate.water_pct")
+    log_id = serializers.UUIDField()
+
+
+class WaterTodayLogSerializer(serializers.ModelSerializer):
+    """One row in WaterTodayResponse.logs[]."""
+
+    class Meta:
+        model = WaterLog
+        fields = ["id", "amount_ml", "logged_at"]
+        read_only_fields = fields
+
+
+class WaterTodayResponseSerializer(serializers.Serializer):
+    """GET /water/today response shape per spec WaterTodayResponse."""
+
+    logs = WaterTodayLogSerializer(many=True)
+    water_ml = serializers.IntegerField(source="aggregate.water_ml")
+    water_goal_ml = serializers.IntegerField(source="aggregate.water_goal_ml")

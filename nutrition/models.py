@@ -144,3 +144,44 @@ class FoodLog(models.Model):
 
     def __str__(self) -> str:
         return f"{self.dish_name} ({self.meal_type}, {self.calories:.0f} kcal)"
+
+
+class WaterLog(models.Model):
+    """One row per glass of water the user tapped in the app.
+
+    Spec: Notion API Spec v2.0 §FOOD SCANNER+NUTRITION
+          POST /nutrition/water (amount_ml ∈ {150, 200, 250, 350, 500}),
+          DELETE /nutrition/water/{id}, GET /nutrition/water/today.
+
+    Why one row per glass instead of a single per-day counter:
+    - Spec returns ``logs[]`` from /water/today for "undo last" UX
+    - Mistakes happen ("oh I double-tapped 250") and DELETE needs an id
+    - Future timeline / habit views read individual events naturally
+    - Aggregation is a single SUM — cheap
+
+    No ``portion_multiplier`` or unit conversion: amount is stored
+    in millilitres, validated against the fixed set at the serializer
+    layer. Free-form amounts are out of scope (spec is restrictive).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="water_logs",
+    )
+    amount_ml = models.PositiveIntegerField()
+    logged_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Water Log"
+        verbose_name_plural = "Water Logs"
+        ordering = ["-logged_at"]
+        indexes = [
+            # Same shape as FoodLog — daily aggregate range scan.
+            models.Index(fields=["user", "-logged_at"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.amount_ml}ml @ {self.logged_at:%Y-%m-%d %H:%M}"

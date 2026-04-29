@@ -31,6 +31,7 @@ from django.conf import settings
 from django.db.models import Sum
 
 from nutrition.models import FoodLog
+from nutrition.services.water_service import WaterService
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,9 @@ class NutritionSummary:
 
 class NutritionSummaryService:
     """Aggregates FoodLog rows for one user on one calendar day."""
+
+    def __init__(self, water_service: WaterService | None = None) -> None:
+        self._water_service = water_service or WaterService()
 
     def summary(self, *, user_id: int, day: date) -> NutritionSummary:
         start = datetime.combine(day, time.min, tzinfo=timezone.utc)
@@ -81,13 +85,15 @@ class NutritionSummaryService:
             carbs_g=_round1(agg["carbs_g"]),
         )
 
+        # Slice 4: water aggregate now lives — drops the stub.
+        water = self._water_service.aggregate_for_day(user_id, day)
+
         return NutritionSummary(
             date=day,
             totals=totals,
             calories_goal=settings.NUTRITION_DEFAULT_CALORIES_GOAL,
-            # Slice 4 will replace these stubs with WaterLog aggregates.
-            water_ml=0,
-            water_goal_ml=settings.NUTRITION_DEFAULT_WATER_GOAL_ML,
+            water_ml=water.water_ml,
+            water_goal_ml=water.water_goal_ml,
             entries=list(qs),
             # Slice 3a' (OFF/USDA fallback) will populate when the seed
             # carries vitamin data; the per-100g seed dictionary doesn't

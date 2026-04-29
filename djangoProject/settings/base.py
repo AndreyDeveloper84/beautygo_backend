@@ -93,6 +93,7 @@ REST_FRAMEWORK = {
         'food_scan': '10/min',       # Scoped: POST /nutrition/scan (vision API cost cap)
         'food_log': '60/min',        # Scoped: POST /nutrition/food-log (no upstream cost; user typing speed)
         'nutrition_summary': '120/min',  # Scoped: GET /nutrition/summary (cheap aggregate; mobile may poll)
+        'water': '60/min',           # Scoped: water tracker tap-buttons; user can't tap faster than this
     },
 }
 
