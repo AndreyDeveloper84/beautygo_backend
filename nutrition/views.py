@@ -33,6 +33,7 @@ from nutrition.services.food_scanner_router import (
     AllProvidersFailedError,
     FoodScannerRouter,
 )
+from nutrition.services.nutrition_lookup import NutritionLookup
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,17 @@ class FoodScanView(APIView):
         )
         scan.latency_ms = outcome.result.latency_ms
         scan.raw_response = outcome.result.raw_response
+
+        # Slice 3a: seed-only lookup. Misses leave nutrition=null and the
+        # mobile client shows "уточните порцию вручную". OFF/USDA HTTP
+        # fallback ships in 3a'.
+        facts = NutritionLookup().lookup(
+            outcome.result.dish_name,
+            ingredients=outcome.result.ingredients,
+            portion_g=outcome.result.portion_g,
+        )
+        scan.nutrition = facts.to_dict() if facts is not None else None
+
         scan.save()
 
         return success_response(

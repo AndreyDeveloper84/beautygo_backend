@@ -160,12 +160,35 @@ class TestSuccess:
         assert body["confidence"] == 0.9
         assert body["portion_g"] == 300
         assert body["provider"] == "openai"
-        assert body["nutrition"] is None  # Slice 3 will populate
+        # Slice 3a: seed hit on "Борщ" populates nutrition.
+        assert body["nutrition"] is not None
+        assert body["nutrition"]["matched_dish"] == "борщ"
+        assert body["nutrition"]["source"] == "seed_ru"
+        assert body["nutrition"]["kcal"] == 147.0  # 49 kcal/100g × 300g
 
         scan = FoodScan.objects.get(id=body["scan_id"])
         assert scan.user_id == client_user.id
         assert scan.provider_used == "openai"
         assert scan.provider_fallback_from == ""
+        assert scan.nutrition["matched_dish"] == "борщ"
+
+    def test_nutrition_null_when_dish_not_in_seed(self, auth_client):
+        # Provider returns a dish we have no entry for → nutrition stays
+        # null, scan still 200 (mobile shows "уточните вручную").
+        router_mock = MagicMock()
+        router_mock.scan.return_value = RouterResult(
+            result=_scan_result(dish="суши с лососем"),
+            primary_provider_name="openai",
+        )
+        with patch(
+            "nutrition.views.FoodScannerRouter",
+            return_value=router_mock,
+        ):
+            resp = auth_client.post(
+                SCAN_URL, {"image": _upload()}, format="multipart",
+            )
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["data"]["nutrition"] is None
 
     def test_fallback_records_primary_in_provider_fallback_from(
         self, auth_client,
