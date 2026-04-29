@@ -1,37 +1,60 @@
-# CLAUDE.md — BeautyGO Project Intelligence
-> **Этот файл — источник истины для AI-ассистентов, работающих с проектом BeautyGO.**
+# CLAUDE.md — Ayla Project Intelligence
+> **Этот файл — источник истины для AI-ассистентов, работающих с проектом Ayla.**
 > Прочитай его полностью перед выполнением любых задач.
 ---
 ## 📋 QUICK REFERENCE
 ```
-Проект:     BeautyGO — AI-powered beauty services booking platform
-Архитектура: Two Apps (BeautyGO 🟢 + BeautyGO Pro 🟣)
-Mobile:     React Native + Shared Package (@beautygo/shared)
+Проект:     Ayla — AI Life Assistant (beauty as entry, daily-hook через food + memory)
+Позиционир: "AI, который помнит. Всегда." (long-term personal memory = главное преимущество)
+Архитектура: Two Apps (Ayla 🟢 + Ayla Pro 🟣)
+Пилот:      Пенза → Казахстан (Phase 5)
+Mobile:     React Native + Shared Package (@beautygo/shared, переименование pending)
 Backend:    Python 3.12+ / Django 5.0 + DRF
 Database:   PostgreSQL 16
 Cache:      Redis 7
-AI:         Claude Sonnet 4 (Anthropic)
+AI:         Claude Sonnet 4 (Anthropic) + OpenAI GPT-4 Vision (food scanning)
 Запуск:     make up (Docker) или make init (первый раз)
 Тесты:      make test
 Lint:       make lint
 ```
+
+> ⚠️ **Ребрендинг 2026-03-30:** BeautyGO → Ayla. Бренд в PRD/Notion = Ayla; код, NPM-пакет (`@beautygo/shared`) и mobile-репо (`beautygo-mobile`) — миграция pending. См. секцию **Brand Migration Status** ниже.
 ### 🔑 Key Headers
 ```http
-X-App-Type: client   # 🟢 BeautyGO requests
-X-App-Type: pro      # 🟣 BeautyGO Pro requests
+X-App-Type: client   # 🟢 Ayla requests
+X-App-Type: pro      # 🟣 Ayla Pro requests
 ```
 ---
 ## 🎯 PROJECT OVERVIEW
 ### Что это?
-BeautyGO — мобильное приложение для бронирования бьюти-услуг в России с AI-ассистентом.
-**Ключевая проблема**: 47% клиентов откладывают запись к мастеру из-за "паралича выбора" — слишком много мастеров, непонятно кого выбрать.
-**Решение**: AI-ассистент (Claude), который понимает потребности клиента и рекомендует идеального мастера с объяснением почему.
+**Ayla** — AI-ассистент качества жизни для женщин 20–45, где beauty-запись является точкой входа и основной монетизацией, а **ежедневный retention строится на AI-фичах заботы о себе**: трекинге питания (Food Scanner), анализе внешности (AI-аватар), персональных рекомендациях.
+
+**Ключевая проблема:** 47% клиентов откладывают запись к мастеру из-за «паралича выбора»; одновременно booking-приложения открывают раз в месяц, что не даёт построить ежедневную ценность.
+
+**Решение:** AI-ассистент с **долгосрочной личной памятью** (UserPersonalContext). Каждый следующий разговор умнее предыдущего — пользователь не объясняет дважды. Beauty — первая вертикаль; далее health → fitness → nutrition.
+
+### 🌟 Vision & Killer Scenario
+**Vision:** «AI, который помнит. Всегда.»
+**Promise:** Стань лучшей версией себя — Ayla помнит тебя и помогает каждый день.
+
+**Killer Scenario v3.0:**
+> Утром пользователь фотографирует завтрак → Ayla помнит, что на прошлой неделе был дефицит витамина D → рекомендует массаж с аргановым маслом у Анны (уже знает, что она любимый мастер) → записывается в 1 тап. Вечером обновляет аватар и видит: за месяц кожа стала ровнее. Делится прогрессом в Telegram.
+
+**Long-term Vision:** персональный AI-консьерж качества жизни для женщин СНГ. Beauty — первая вертикаль, доказывающая модель.
+
+### 📍 Pilot & Roadmap (по PRD v3.0)
+- **Phase 0 (апрель 2026):** Booking flow в Пензе. 20–50 первых пользователей, 15–20 мастеров.
+- **Phase 1 (апрель 2026):** AI Food Scanner. Целевая метрика — ежедневный hook.
+- **Phase 2 (май 2026):** AI-аватар + рекомендации. **Pre-deferred** до валидации (см. `docs/HYPOTHESIS_VALIDATION_PLAN_2026-04.md`).
+- **Phase 3 (май 2026):** Ayla Pro полнофункциональный + геолокация + реферал.
+- **Phase 4 (июнь 2026):** монетизация (Premium ₽299/мес + 8% commission).
+- **Phase 5 (июль–август 2026):** Казахстан + Kaspi Pay + investor meeting.
 ### 📱 Two Apps Architecture
 > **⚠️ ВАЖНО**: Проект состоит из ДВУХ отдельных мобильных приложений!
 | Приложение | Bundle ID | Аудитория | X-App-Type |
 |------------|-----------|-----------|------------|
-| 🟢 **BeautyGO** | `ru.beautygo.client` | Клиенты | `client` |
-| 🟣 **BeautyGO Pro** | `ru.beautygo.pro` | Мастера | `pro` |
+| 🟢 **Ayla** | `ru.ayla.client` | Клиенты | `client` |
+| 🟣 **Ayla Pro** | `ru.ayla.pro` | Мастера | `pro` |
 **Почему два приложения:**
 - Разные user journeys (поиск vs управление)
 - Разный UX (AI-first vs dashboard)
@@ -45,22 +68,41 @@ BeautyGO — мобильное приложение для бронирован
 ### Пользователи
 | Роль | Приложение | Описание |
 |------|------------|----------|
-| **Client** | 🟢 BeautyGO | Ищет и бронирует услуги через AI |
-| **Specialist** | 🟣 BeautyGO Pro | Управляет расписанием, услугами, клиентами |
+| **Client** | 🟢 Ayla | Ищет и бронирует услуги через AI |
+| **Specialist** | 🟣 Ayla Pro | Управляет расписанием, услугами, клиентами |
 | **Admin** | Web Dashboard | Администратор системы |
 ### Ключевые фичи
-1. **AI Chat** — диалог с Claude для подбора мастера
+**MVP (Phase 0–1):**
+1. **AI Chat** — диалог с Claude для подбора мастера + intent parsing
 2. **Smart Booking** — бронирование через чат или вручную
 3. **Slot Management** — автоматический расчёт доступных слотов
-4. **Payments** — онлайн-оплата через YooKassa
+4. **Payments** — онлайн-оплата через YooKassa (8% комиссия)
 5. **Notifications** — Push (Firebase) + SMS (SMS.RU)
 6. **Reviews** — отзывы и рейтинги
+7. **AI Food Scanner** — фото еды → анализ + рекомендации (daily-hook)
+
+**Phase 2+ (после валидации гипотез):**
+8. **AI-аватар** — анализ внешности + прогресс-таймлайн (deferred до Test 2 results)
+9. **UserPersonalContext (Memory)** — долгосрочная личная память; **load-bearing для North Star**
+10. **Геолокация + Яндекс.Маршруты** — «успеешь ли?» + ежедневник
+11. **Реферальная программа** — ₽300×2 за приглашение
+
+### 5-tab Bottom Navigation (Ayla Client App, по PRD v3.0)
+| # | Таб | Содержание | Частота открытия |
+|---|-----|------------|-------------------|
+| 1 | 🏠 **Главная** | Каталог мастеров + AI-поиск | При каждом запуске |
+| 2 | 🍽️ **Питание** | Food Scanner + дневник (FAB-кнопка в центре) | 3× в день |
+| 3 | ✨ **Я** | AI-аватар + рекомендации + прогресс | Несколько раз в неделю |
+| 4 | 📅 **День** | Записи + сводка питания + время в пути | Каждое утро |
+| 5 | 👤 **Профиль** | Настройки, рефералы, избранные мастера | Редко |
+
+> Табы отсортированы по убыванию частоты слева направо. Таб **«День»** заменяет пассивный список «Записей»: ежедневник, а не reminder раз в месяц.
 ---
 ## 🏗️ ARCHITECTURE
 ### High-Level
 ```
 ┌─────────────────┐     ┌─────────────────┐
-│  🟢 BeautyGO    │     │  🟣 BeautyGO    │
+│  🟢 Ayla    │     │  🟣 Ayla    │
 │  (Client App)   │     │     Pro         │
 │  React Native   │     │  React Native   │
 └────────┬────────┘     └────────┬────────┘
@@ -195,7 +237,7 @@ beautygo-mobile/
 │       └── tsconfig.json
 │
 ├── apps/
-│   ├── client/                  # 🟢 BeautyGO (Client App)
+│   ├── client/                  # 🟢 Ayla (Client App)
 │   │   ├── src/
 │   │   │   ├── screens/
 │   │   │   │   ├── AIChat/      # AI Assistant UI
@@ -204,11 +246,11 @@ beautygo-mobile/
 │   │   │   │   └── Profile/     # Client profile
 │   │   │   ├── navigation/
 │   │   │   └── App.tsx
-│   │   ├── ios/                 # Bundle: ru.beautygo.client
-│   │   ├── android/             # Package: ru.beautygo.client
+│   │   ├── ios/                 # Bundle: ru.ayla.client
+│   │   ├── android/             # Package: ru.ayla.client
 │   │   └── package.json
 │   │
-│   └── pro/                     # 🟣 BeautyGO Pro (Specialist App)
+│   └── pro/                     # 🟣 Ayla Pro (Specialist App)
 │       ├── src/
 │       │   ├── screens/
 │       │   │   ├── Dashboard/   # Home dashboard
@@ -218,8 +260,8 @@ beautygo-mobile/
 │       │   │   └── Analytics/   # Stats & reports
 │       │   ├── navigation/
 │       │   └── App.tsx
-│       ├── ios/                 # Bundle: ru.beautygo.pro
-│       ├── android/             # Package: ru.beautygo.pro
+│       ├── ios/                 # Bundle: ru.ayla.pro
+│       ├── android/             # Package: ru.ayla.pro
 │       └── package.json
 │
 ├── package.json                 # Yarn workspaces root
@@ -242,9 +284,9 @@ export const createApiClient = (appType: AppType): AxiosInstance => {
   });
   return client;
 };
-// Использование в BeautyGO (Client)
+// Использование в Ayla (Client)
 const api = createApiClient('client');
-// Использование в BeautyGO Pro
+// Использование в Ayla Pro
 const api = createApiClient('pro');
 ```
 ---
@@ -298,8 +340,8 @@ class Role(TextChoices):
     ADMIN = "admin"
 # App type (для X-App-Type header и DeviceToken)
 class AppType(TextChoices):
-    CLIENT = "client"       # 🟢 BeautyGO
-    PRO = "pro"             # 🟣 BeautyGO Pro
+    CLIENT = "client"       # 🟢 Ayla
+    PRO = "pro"             # 🟣 Ayla Pro
 # Appointment status (Booking Engine state machine)
 class AppointmentStatus(TextChoices):
     PENDING = "pending"                   # Ожидает подтверждения
@@ -327,8 +369,8 @@ class DevicePlatform(TextChoices):
 ### X-App-Type Header
 > **ОБЯЗАТЕЛЬНО** для всех запросов!
 ```http
-X-App-Type: client   # BeautyGO (клиентское приложение)
-X-App-Type: pro      # BeautyGO Pro (приложение мастера)
+X-App-Type: client   # Ayla (клиентское приложение)
+X-App-Type: pro      # Ayla Pro (приложение мастера)
 ```
 **Middleware проверяет**:
 - Наличие заголовка (403 если отсутствует)
@@ -337,8 +379,8 @@ X-App-Type: pro      # BeautyGO Pro (приложение мастера)
 ### API Маркировка
 | Маркер | Приложение | Endpoints |
 |--------|------------|-----------|
-| 🟢 | BeautyGO (Client) | AI Chat, Search, Booking (client), Payments, Reviews |
-| 🟣 | BeautyGO Pro | Schedule, Services CRUD, Analytics, Manual Booking |
+| 🟢 | Ayla (Client) | AI Chat, Search, Booking (client), Payments, Reviews |
+| 🟣 | Ayla Pro | Schedule, Services CRUD, Analytics, Manual Booking |
 | ⚪ | Shared | Auth, Profile, Notifications, Appointments (read) |
 ### URL Structure
 ```
@@ -841,7 +883,7 @@ class ClaudeService:
 
     def _get_system_prompt(self, context: dict) -> str:
         """Build system prompt with context."""
-        return f"""Ты — AI-ассистент BeautyGO, помогаешь клиентам найти идеального мастера красоты.
+        return f"""Ты — AI-ассистент Ayla, помогаешь клиентам найти идеального мастера красоты.
 КОНТЕКСТ:
 - Город клиента: {context.get('city', 'Не указан')}
 - Предпочтения: {context.get('preferences', 'Не указаны')}
@@ -925,6 +967,71 @@ RECOMMENDATION_PROMPT = """
 """
 ```
 ---
+## 🧠 PERSONALIZATION ENGINE (UserPersonalContext)
+
+> **Load-bearing для North Star «AI который помнит. Всегда.»** Без памяти Ayla = обычный booking + AI search → недифференцируемый продукт. Полная архитектура: Notion `334b0dab295581d587cfeaf49efd2d5b` или `docs/PRODUCT_AUDIT_2026-04.md` Section 1.9/1.11.
+
+### Три источника данных
+| Источник | Метод | Доля данных |
+|----------|-------|-------------|
+| **Явные вопросы** | AI задаёт органично, 1 вопрос/сессия, cooldown 24ч | ~30% |
+| **Поведенческие паттерны** | Celery-task раз в сутки анализирует историю | ~50% |
+| **Контекстуальные сигналы** | Claude structured-extraction из текста чата | ~20% |
+
+### Три уровня деликатности
+- 🟢 **Зелёная зона** — упоминать открыто (адрес работы, бюджет, любимый мастер, диета);
+- 🟡 **Жёлтая зона** — использовать молча, не называть источник (наличие детей, занятость, паттерны партнёра);
+- 🔴 **Красная зона** — только локально, retention 90 дней (беременность, хронические заболевания).
+
+### 8 anti-spam правил
+1. Одно поле за сессию;  2. Не на первом взаимодействии (только со 2–3 запроса);
+3. Cooldown 24ч;  4. Skip 2 раза → пауза 30 дней;
+5. Данные уже есть → молчать;  6. Органично или никак;
+7. Объяснять зачем («подберу рядом с офисом — где работаешь?»);  8. Skip без наказания.
+
+### Метрики персонализации
+| Метрика | Цель |
+|---------|------|
+| Context fill rate (полей за первый месяц) | ≥ 5 |
+| Question answer rate | ≥ 60% |
+| Context usage rate (запросов с применением контекста) | ≥ 60% |
+| Skip rate | ≤ 30% |
+| Booking conversion lift при наличии контекста | +15% |
+
+### API endpoints (М3+)
+```
+GET    /api/v1/users/me/personal-context/         # Получить весь контекст
+PATCH  /api/v1/users/me/personal-context/         # Обновить поля
+DELETE /api/v1/users/me/personal-context/{field}/ # Удалить поле
+POST   /api/v1/users/me/personal-context/skip/    # Пропустить вопрос
+DELETE /api/v1/users/me/personal-context/         # Очистить весь контекст (152-ФЗ право)
+```
+
+### 152-ФЗ соответствие
+- Все поля шифруются at-rest;
+- Красная зона не возвращается в GET по умолчанию (требует явного подтверждения);
+- Логи доступа к красной зоне ведутся отдельно;
+- Команда «Забудь мой адрес работы» + кнопка в профиле = полное удаление поля;
+- Кнопка «Очистить историю Ayla» = total wipe.
+
+### Status (2026-04-27)
+🔴 **Не реализовано.** Перенесено в M3 P0 после PM-аудита 2026-04-27 — **load-bearing для всей стратегии Ayla.** Без UserPersonalContext к M4-pilot vision не доедет.
+
+---
+
+## 🍽️ AI FOOD SCANNER
+
+> **Daily-hook для retention.** Гипотеза H1: «≥2.5 фото-сканов еды/день у активного пользователя в дни 8–14». Валидируется в Test 1 cheap-validation (`docs/HYPOTHESIS_VALIDATION_PLAN_2026-04.md`), результат к 2026-05-13.
+
+**Vendor decision:** multi-vendor (OpenAI Vision + Yandex Vision) на M5, self-host ViT в Phase 6. Slice 1 готов (memory: `project_food_scanner_decision`).
+
+**Метрики MVP:**
+- ≥1 скан/день минимум, 2.5 average (после валидации H1);
+- Точность распознавания русских блюд (борщ, винегрет, плов) — критическая для retention;
+- Витаминные инсайты + рекомендации связанные с beauty (дефицит витамина D → рекомендация мастера с аргановым массажем).
+
+---
+
 ## 💰 PAYMENTS (YooKassa)
 ### Payment Flow
 ```
@@ -976,29 +1083,29 @@ class YooKassaWebhookView(APIView):
 # apps/notifications/templates.py
 # Deep Links для разных приложений
 DEEP_LINKS = {
-    "client": "beautygo-client://",   # 🟢 BeautyGO
-    "pro": "beautygo-pro://",         # 🟣 BeautyGO Pro
+    "client": "ayla-client://",   # 🟢 Ayla
+    "pro": "ayla-pro://",         # 🟣 Ayla Pro
 }
 TEMPLATES = {
     "appointment_created_client": NotificationTemplate(
         id="appointment_created_client",
-        app_type="client",  # 🟢 Только в BeautyGO
+        app_type="client",  # 🟢 Только в Ayla
         channel=Channel.BOTH,
         priority=Priority.HIGH,
         push_title="✅ Запись подтверждена!",
         push_body="{{service_name}} у {{specialist_name}}, {{date_time}}",
-        sms_text="BeautyGO: Вы записаны на {{service_name}} {{date_time}}. {{address}}",
-        deep_link="beautygo-client://appointment/{{appointment_id}}",
+        sms_text="Ayla: Вы записаны на {{service_name}} {{date_time}}. {{address}}",
+        deep_link="ayla-client://appointment/{{appointment_id}}",
     ),
     "appointment_created_specialist": NotificationTemplate(
         id="appointment_created_specialist",
-        app_type="pro",  # 🟣 Только в BeautyGO Pro
+        app_type="pro",  # 🟣 Только в Ayla Pro
         channel=Channel.BOTH,
         priority=Priority.HIGH,
         push_title="📅 Новая запись!",
         push_body="{{client_name}} на {{service_name}}, {{date_time}}",
-        sms_text="BeautyGO Pro: Новая запись на {{date_time}}",
-        deep_link="beautygo-pro://appointment/{{appointment_id}}",
+        sms_text="Ayla Pro: Новая запись на {{date_time}}",
+        deep_link="ayla-pro://appointment/{{appointment_id}}",
     ),
     # ... other templates
 }
@@ -1167,7 +1274,7 @@ GET   /api/v1/specialists/{id}/reviews/ ⚪ Публичный список (All
 ### Two Apps Architecture Rules
 1. **X-App-Type обязателен** — каждый запрос должен содержать header
 2. **Проверяй доступ endpoint** — не все endpoints доступны обоим приложениям
-3. **Deep links разные** — `beautygo-client://` vs `beautygo-pro://`
+3. **Deep links разные** — `ayla-client://` vs `ayla-pro://`
 4. **DeviceToken.app_type** — один токен ≠ оба приложения
 5. **Analytics app_type** — передавай со ВСЕМИ событиями
 ### Что НЕЛЬЗЯ делать
@@ -1210,7 +1317,7 @@ GET   /api/v1/specialists/{id}/reviews/ ⚪ Публичный список (All
 ---
 ## 📋 SPEC ALIGNMENT STATUS
 
-> Источник: **API Specification v2.0** в Notion
+> Источник: **API Specification v2.0** в Notion + **PRD v3.0 (Ayla)**
 
 | Секция | Статус | Примечания |
 |--------|--------|------------|
@@ -1223,13 +1330,55 @@ GET   /api/v1/specialists/{id}/reviews/ ⚪ Публичный список (All
 | Reviews (create, edit, reply, list) | ✅ Aligned | |
 | Payments (YooKassa) | ✅ Aligned | Status mapping: `paid→succeeded` |
 | Search | ✅ Basic | |
-| Notifications | ❌ Not implemented | |
-| AI Chat (Claude) | ❌ Not implemented | |
+| Notifications | ❌ Not implemented | M3 P0 |
+| AI Chat (Claude) | ❌ Not implemented | M3 P0; план в `docs/AI_CHAT_PLAN.md` |
+| **UserPersonalContext (Memory)** | ❌ **Not implemented** | **M3 P0 — load-bearing для North Star, добавлено после PM-аудита 2026-04-27** |
 | Favorites | ❌ Not implemented | |
 | Analytics | ❌ Not implemented | |
-| Food Scanner / Nutrition | ❌ Not implemented | |
+| Food Scanner / Nutrition | 🟡 Slice 1 done | M3+; см. Test 1 валидация H1 |
+| AI-аватар + прогресс | 🟠 Pre-deferred | Phase 2 (Месяц 5+) после Test 2 валидации H5 |
 
-*Last updated: April 8, 2026 — Payments + Reviews + Spec Alignment*
+*Last updated: April 27, 2026 — Ayla rebrand + PM Audit Phase 1 + Hypothesis Validation decision*
+
+---
+
+## 🏷️ BRAND MIGRATION STATUS (BeautyGO → Ayla)
+
+> Ребрендинг утверждён 2026-03-30 (Notion: Brand Vision Document). Каноническое название продукта — **Ayla**, но миграция кода/инфры — поэтапная.
+
+### ✅ Уже мигрировано (canonical в этом файле)
+- Название продукта в документации, PRD, App Store positioning;
+- Bundle IDs target: `ru.ayla.client` / `ru.ayla.pro`;
+- Deep links target: `ayla-client://` / `ayla-pro://`;
+- App Store/Google Play: «Ayla — AI Self-Care» / «Ayla Pro — для мастеров»;
+- Vision/positioning: «AI, который помнит. Всегда.»;
+- Pilot city: Пенза (был Казань);
+- Audience: 20–45 (был 22–40).
+
+### 🟡 Pending миграция (актуальное состояние кода)
+| Идентификатор | Текущее значение | Target | Когда мигрировать |
+|---------------|------------------|--------|-------------------|
+| Mobile репо | `beautygo-mobile` | `ayla-mobile` | Перед M4-pilot launch |
+| NPM пакет | `@beautygo/shared` | `@ayla/shared` | Вместе с mobile rename |
+| Bundle ID iOS / Android (mobile) | `ru.beautygo.*` | `ru.ayla.*` | До публикации в App Store |
+| Deep links в коде | `beautygo-*://` | `ayla-*://` | Вместе с bundle ID |
+| Backend репо | `djangoProject` (path: `ayla/djangoproject`) | `ayla-backend` | Низкий приоритет, после launch |
+| Notification template strings (`payments/services.py`, `notifications/`) | «BeautyGO: …», «BeautyGO Pro: …» | «Ayla: …», «Ayla Pro: …» | Pre-launch QA сweepa |
+| `.env`, settings: `BEAUTYGO_*` env vars (если есть) | префикс BEAUTYGO | префикс AYLA или общий | По мере встречи |
+
+### 📝 Правила в новом коде
+1. **Любая новая user-facing строка** (push, SMS, email, UI) — пишется как **«Ayla»** / **«Ayla Pro»**;
+2. **Любые новые URL/идентификаторы** — `ayla.*` / `ru.ayla.*` / `ayla-*://`;
+3. **Существующий код** не переписываем «по пути» — только в рамках выделенных rebrand-тикетов;
+4. **PR-ревью**: блокировать введение нового кода с «BeautyGO» бренд-строками или `beautygo` URL/identifiers;
+5. **Commits**: сообщения коммитов на английском, нейтрально (`feat(ai): add personal context`), без «BeautyGO» в новых коммитах.
+
+### 📌 Что не нужно мигрировать
+- Имена тестовых файлов / fixtures (если они не user-facing);
+- Исторические commits (history immutable);
+- Имя Linear-проекта пока решает PO — обновляется отдельно.
+
+---
 
 ## Skill routing
 

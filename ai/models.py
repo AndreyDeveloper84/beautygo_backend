@@ -27,6 +27,8 @@ class Conversation(models.Model):
         on_delete=models.CASCADE,
         related_name="conversations",
     )
+    # tenant_id — bare UUID for now; FK to tenants.Tenant added in DRF-242.
+    tenant_id = models.UUIDField(null=True, blank=True, db_index=True)
     is_active = models.BooleanField(default=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
     last_message_at = models.DateTimeField(null=True, blank=True)
@@ -39,6 +41,7 @@ class Conversation(models.Model):
         indexes = [
             models.Index(fields=["user", "-last_message_at"]),
             models.Index(fields=["is_active", "-last_message_at"]),
+            models.Index(fields=["tenant_id", "is_active", "-last_message_at"]),
         ]
 
     def __str__(self) -> str:
