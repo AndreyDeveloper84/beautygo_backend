@@ -29,6 +29,8 @@ from nutrition.serializers import (
     FoodLogCreateSerializer,
     FoodLogEntrySerializer,
     FoodScanResponseSerializer,
+    NutritionSummaryQuerySerializer,
+    NutritionSummaryResponseSerializer,
     ScanRequestSerializer,
 )
 from nutrition.services.food_log_service import (
@@ -43,6 +45,7 @@ from nutrition.services.food_scanner_router import (
     FoodScannerRouter,
 )
 from nutrition.services.nutrition_lookup import NutritionLookup
+from nutrition.services.nutrition_summary_service import NutritionSummaryService
 
 logger = logging.getLogger(__name__)
 
@@ -194,4 +197,37 @@ class FoodLogCreateView(APIView):
         return success_response(
             FoodLogEntrySerializer(log).data,
             status_code=status.HTTP_201_CREATED,
+        )
+
+
+class NutritionSummaryView(APIView):
+    """GET /api/v1/nutrition/summary/?date=YYYY-MM-DD — daily diary summary.
+
+    Per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION. ``date`` defaults
+    to today (UTC). See NutritionSummaryService for day-boundary
+    semantics and stubbed fields (water + vitamins).
+    """
+
+    permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "nutrition_summary"
+
+    def get(self, request: Request) -> Response:
+        from datetime import datetime, timezone as dt_tz
+
+        q = NutritionSummaryQuerySerializer(data=request.query_params)
+        if not q.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Невалидный параметр date — ожидается YYYY-MM-DD",
+                details=q.errors,
+            )
+        day = q.validated_data.get("date") or datetime.now(dt_tz.utc).date()
+
+        summary = NutritionSummaryService().summary(
+            user_id=request.user.id, day=day,
+        )
+        return success_response(
+            NutritionSummaryResponseSerializer(summary).data,
+            status_code=status.HTTP_200_OK,
         )

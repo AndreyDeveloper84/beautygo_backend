@@ -92,6 +92,7 @@ REST_FRAMEWORK = {
         'ai_chat': '30/min',         # Scoped: AI chat send/action endpoints
         'food_scan': '10/min',       # Scoped: POST /nutrition/scan (vision API cost cap)
         'food_log': '60/min',        # Scoped: POST /nutrition/food-log (no upstream cost; user typing speed)
+        'nutrition_summary': '120/min',  # Scoped: GET /nutrition/summary (cheap aggregate; mobile may poll)
     },
 }
 
@@ -416,6 +417,13 @@ YANDEX_VISION_FOLDER_ID = os.environ.get("YANDEX_VISION_FOLDER_ID", "")
 # Keep names lowercase short tokens so env diffs stay readable.
 FOOD_SCANNER_PRIMARY = os.environ.get("FOOD_SCANNER_PRIMARY", "openai")
 FOOD_SCANNER_FALLBACK = os.environ.get("FOOD_SCANNER_FALLBACK", "yandex")
+
+# Nutrition summary defaults — per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION
+# GET /nutrition/summary. UserPersonalContext doesn't carry per-user goals
+# yet (DRF-174 reduced scope) so the daily summary uses these flat defaults.
+# Override at the env level if a particular pilot wants different anchors.
+NUTRITION_DEFAULT_CALORIES_GOAL = int(os.environ.get("NUTRITION_DEFAULT_CALORIES_GOAL", "2000"))
+NUTRITION_DEFAULT_WATER_GOAL_ML = int(os.environ.get("NUTRITION_DEFAULT_WATER_GOAL_ML", "2000"))
 
 
 # ----------------------------------------------------------------------------
