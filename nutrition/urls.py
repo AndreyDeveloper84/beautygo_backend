@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from django.urls import path
 
-from nutrition.views import FoodScanView
+from nutrition.views import FoodLogCreateView, FoodScanView
 
 
 app_name = "nutrition"
@@ -14,4 +14,5 @@ app_name = "nutrition"
 
 urlpatterns = [
     path("scan/", FoodScanView.as_view(), name="food-scan"),
+    path("food-log/", FoodLogCreateView.as_view(), name="food-log-create"),
 ]
