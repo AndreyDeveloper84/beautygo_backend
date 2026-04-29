@@ -75,18 +75,29 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
     def get_nutrition(self, obj: FoodScan):
         """Transform rich internal JSON → spec FoodScanResponse.nutrition shape.
 
-        Returns null when the seed lookup missed (mobile prompts manual
-        entry). Vitamins is empty map for now — seed has no vitamin data;
-        Slice 3a' OFF/USDA lookup will populate.
+        Returns null when:
+        - The seed/lookup missed (no internal JSON), OR
+        - The lookup matched a dish but the provider didn't estimate
+          portion size, leaving per-portion totals null.
+
+        In both cases mobile prompts manual entry. Vitamins is an empty
+        map for now — seed has no vitamin data; Slice 3a'' OFF/USDA
+        lookup will populate.
         """
         n = obj.nutrition
         if not n:
             return None
+        kcal = n.get("kcal")
+        protein = n.get("protein_g")
+        fat = n.get("fat_g")
+        carbs = n.get("carbs_g")
+        if all(v is None for v in (kcal, protein, fat, carbs)):
+            return None
         return {
-            "calories": n.get("kcal"),
-            "protein_g": n.get("protein_g"),
-            "fat_g": n.get("fat_g"),
-            "carbs_g": n.get("carbs_g"),
+            "calories": kcal,
+            "protein_g": protein,
+            "fat_g": fat,
+            "carbs_g": carbs,
             "vitamins": {},
         }
 

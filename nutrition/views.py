@@ -1,19 +1,23 @@
-"""Nutrition API views — Food Scanner endpoint (Slice 2).
+"""Nutrition API views.
 
 Routes:
-  POST /api/v1/nutrition/scan/   → FoodScanView.post
-
-Slices 3-5 will add:
-  POST /nutrition/food-log/, GET /nutrition/summary/
-  POST /nutrition/water/, etc.
+  POST   /api/v1/nutrition/scan/        → FoodScanView (Slice 2)
+  POST   /api/v1/nutrition/food-log/    → FoodLogCreateView (Slice 3b)
+  GET    /api/v1/nutrition/summary/     → NutritionSummaryView (Slice 3c)
+  POST   /api/v1/nutrition/water/       → WaterLogCreateView (Slice 4)
+  DELETE /api/v1/nutrition/water/{id}/  → WaterLogDeleteView (Slice 4)
+  GET    /api/v1/nutrition/water/today/ → WaterTodayView (Slice 4)
 
 X-App-Type: client only — Pro app doesn't show nutrition features.
 """
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone as dt_tz
+from uuid import UUID
 
 from django.core.files.base import ContentFile
+from django.utils import timezone
 from rest_framework import permissions, status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.request import Request
@@ -24,7 +28,7 @@ from rest_framework.views import APIView
 from users.permissions import IsClient, IsClientApp
 from users.response import error_response, success_response
 
-from nutrition.models import FoodScan
+from nutrition.models import FoodScan, WaterLog
 from nutrition.serializers import (
     FoodLogCreateSerializer,
     FoodLogEntrySerializer,
@@ -171,6 +175,10 @@ class FoodLogCreateView(APIView):
                 details=serializer.errors,
             )
         v = serializer.validated_data
+        # Caller provides X-Idempotency-Key (UUID) on retries to prevent
+        # duplicate diary entries when mobile re-sends after a flaky
+        # network. Absent header = no de-dup, every POST creates new.
+        idempotency_key = request.META.get("HTTP_X_IDEMPOTENCY_KEY") or None
         try:
             log = FoodLogService().create(CreateFoodLogInput(
                 user_id=request.user.id,
@@ -179,6 +187,7 @@ class FoodLogCreateView(APIView):
                 scan_id=v.get("scan_id"),
                 dish_name=v.get("dish_name"),
                 logged_at=v.get("logged_at"),
+                idempotency_key=idempotency_key,
             ))
         except InvalidInputError as exc:
             return error_response(
@@ -220,8 +229,6 @@ class NutritionSummaryView(APIView):
     throttle_scope = "nutrition_summary"
 
     def get(self, request: Request) -> Response:
-        from datetime import datetime, timezone as dt_tz
-
         q = NutritionSummaryQuerySerializer(data=request.query_params)
         if not q.is_valid():
             return error_response(
@@ -253,10 +260,6 @@ class WaterLogCreateView(APIView):
     throttle_scope = "water"
 
     def post(self, request: Request) -> Response:
-        from django.utils import timezone
-
-        from nutrition.models import WaterLog
-
         serializer = WaterLogCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(
@@ -271,11 +274,14 @@ class WaterLogCreateView(APIView):
             logged_at=timezone.now(),
         )
         agg = WaterService().aggregate_for_today(request.user.id)
+        # Per spec v2.0 §FOOD SCANNER+NUTRITION POST /nutrition/water:
+        # Response 200, not 201. Glasses are user-counter increments,
+        # not first-class created resources, so spec returns 200.
         return success_response(
             WaterLogResponseSerializer(
                 WaterLogCreatedResponse(aggregate=agg, log_id=log.id)
             ).data,
-            status_code=status.HTTP_201_CREATED,
+            status_code=status.HTTP_200_OK,
         )
 
 
@@ -290,9 +296,7 @@ class WaterLogDeleteView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "water"
 
-    def delete(self, request: Request, pk) -> Response:
-        from nutrition.models import WaterLog
-
+    def delete(self, request: Request, pk: UUID) -> Response:
         try:
             log = WaterLog.objects.get(id=pk, user=request.user)
         except WaterLog.DoesNotExist:
@@ -304,8 +308,12 @@ class WaterLogDeleteView(APIView):
             )
 
         deleted_id = log.id
+        # Aggregate for the deleted log's day (UTC), not "today" — so
+        # the mobile UI showing yesterday's diary updates correctly when
+        # the user undoes a glass from a past day.
+        deleted_day = log.logged_at.astimezone(dt_tz.utc).date()
         log.delete()
-        agg = WaterService().aggregate_for_today(request.user.id)
+        agg = WaterService().aggregate_for_day(request.user.id, deleted_day)
         return success_response(
             WaterLogResponseSerializer(
                 WaterLogCreatedResponse(aggregate=agg, log_id=deleted_id)
