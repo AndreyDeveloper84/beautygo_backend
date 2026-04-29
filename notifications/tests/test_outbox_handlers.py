@@ -179,22 +179,19 @@ class TestBookingCancelled:
             user=client_user, template_id="appointment_cancelled",
         ) == 1
 
-    def test_specialist_template_pending_until_n4(
+    def test_sends_specialist_template(
         self, appointment, specialist_user,
     ):
-        # The specialist-side template is added in Slice N4. Until then
-        # the handler logs "template_pending" and continues — no
-        # Notification row, but no exception either.
+        # Slice N4 added the specialist-side template; both sides fire.
         event = _make_event(
             OutboxEvent.Topic.BOOKING_CANCELLED, appointment,
             initiator_role="specialist",
         )
         outbox_handlers.handle_booking_cancelled(event)
-        # Specialist row is absent because template doesn't exist yet.
         assert _notif_count(
             user=specialist_user,
             template_id="appointment_cancelled_specialist",
-        ) == 0
+        ) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -204,48 +201,35 @@ class TestBookingCancelled:
 
 @pytest.mark.django_db
 class TestBookingRescheduled:
-    def test_no_rows_until_n4_templates(self, appointment):
-        # Both rescheduled templates land in Slice N4. Handler is a
-        # no-op today, but it MUST be registered so the topic isn't
-        # an unknown_topic error.
+    def test_sends_to_both_sides(
+        self, appointment, client_user, specialist_user,
+    ):
         event = _make_event(
             OutboxEvent.Topic.BOOKING_RESCHEDULED, appointment,
             old_start_at="2026-04-30T10:00:00Z",
         )
         outbox_handlers.handle_booking_rescheduled(event)
-        assert Notification.objects.count() == 0
+        assert _notif_count(
+            user=client_user, template_id="appointment_rescheduled_client",
+        ) == 1
+        assert _notif_count(
+            user=specialist_user,
+            template_id="appointment_rescheduled_specialist",
+        ) == 1
 
-    def test_old_start_at_parsed_into_context_when_template_exists(
-        self, appointment, client_user, monkeypatch,
+    def test_old_start_at_parsed_into_context(
+        self, appointment, client_user,
     ):
-        # Inject a temporary template into the registry so we can assert
-        # that old_date_time is rendered. The template added here mirrors
-        # the shape Slice N4 will ship.
-        from notifications import templates as tmpl_mod
-
-        tmpl_mod.TEMPLATES["appointment_rescheduled_client"] = (
-            tmpl_mod.NotificationTemplate(
-                id="appointment_rescheduled_client",
-                app_type="client",
-                channel=Notification.Channel.PUSH,
-                push_title="Запись перенесена",
-                push_body="С {old_date_time} на {date_time}",
-                deep_link="appointment/{appointment_id}",
-            )
+        event = _make_event(
+            OutboxEvent.Topic.BOOKING_RESCHEDULED, appointment,
+            old_start_at="2026-04-30T10:00:00+00:00",
         )
-        try:
-            event = _make_event(
-                OutboxEvent.Topic.BOOKING_RESCHEDULED, appointment,
-                old_start_at="2026-04-30T10:00:00+00:00",
-            )
-            outbox_handlers.handle_booking_rescheduled(event)
-            n = Notification.objects.get(
-                user=client_user,
-                template_id="appointment_rescheduled_client",
-            )
-            assert "10:00 30.04" in n.body
-        finally:
-            tmpl_mod.TEMPLATES.pop("appointment_rescheduled_client", None)
+        outbox_handlers.handle_booking_rescheduled(event)
+        n = Notification.objects.get(
+            user=client_user,
+            template_id="appointment_rescheduled_client",
+        )
+        assert "10:00 30.04" in n.body
 
 
 # ---------------------------------------------------------------------------
@@ -255,20 +239,33 @@ class TestBookingRescheduled:
 
 @pytest.mark.django_db
 class TestFutureTopics:
-    def test_completed_is_noop_without_template(self, appointment):
+    """Topics whose writers don't exist yet but whose handlers + templates
+    do. When the writer lands (Slice N5+), no handler change is needed."""
+
+    def test_completed_sends_review_request(
+        self, appointment, client_user,
+    ):
         event = _make_event(OutboxEvent.Topic.BOOKING_COMPLETED, appointment)
         outbox_handlers.handle_booking_completed(event)
-        assert Notification.objects.count() == 0
+        assert _notif_count(
+            user=client_user, template_id="review_request",
+        ) == 1
 
-    def test_no_show_is_noop_without_template(self, appointment):
+    def test_no_show_notifies_specialist(
+        self, appointment, specialist_user,
+    ):
         event = _make_event(OutboxEvent.Topic.BOOKING_NO_SHOW, appointment)
         outbox_handlers.handle_booking_no_show(event)
-        assert Notification.objects.count() == 0
+        assert _notif_count(
+            user=specialist_user, template_id="booking_no_show_specialist",
+        ) == 1
 
-    def test_confirmed_is_noop_without_template(self, appointment):
+    def test_confirmed_sends_to_client(self, appointment, client_user):
         event = _make_event(OutboxEvent.Topic.BOOKING_CONFIRMED, appointment)
         outbox_handlers.handle_booking_confirmed(event)
-        assert Notification.objects.count() == 0
+        assert _notif_count(
+            user=client_user, template_id="appointment_confirmed_client",
+        ) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -371,9 +368,7 @@ class TestPaymentConfirmed:
 
 @pytest.mark.django_db
 class TestPaymentRefunded:
-    def test_template_pending_no_notification_until_n4(self, payment):
-        # `payment_refunded` template lands in Slice N4. Until then the
-        # handler is a logged no-op.
+    def test_sends_payment_refunded_to_client(self, payment, client_user):
         event = OutboxEvent.objects.create(
             topic=OutboxEvent.Topic.PAYMENT_REFUNDED,
             payload={
@@ -384,4 +379,8 @@ class TestPaymentRefunded:
             },
         )
         outbox_handlers.handle_payment_refunded(event)
-        assert Notification.objects.count() == 0
+        rows = Notification.objects.filter(
+            user=client_user, template_id="payment_refunded",
+        )
+        assert rows.count() == 1
+        assert "Маникюр" in rows.first().body
