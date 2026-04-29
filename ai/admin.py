@@ -25,12 +25,12 @@ class MessageInline(admin.TabularInline):
 @admin.register(Conversation)
 class ConversationAdmin(admin.ModelAdmin):
     list_display = (
-        "id", "user", "is_active", "last_message_at", "created_at",
+        "id", "user", "tenant_id", "is_active", "last_message_at", "created_at",
     )
-    list_filter = ("is_active",)
+    list_filter = ("is_active", "tenant_id")
     search_fields = ("id", "user__username", "user__phone")
     readonly_fields = (
-        "id", "user", "is_active", "deleted_at",
+        "id", "user", "tenant_id", "is_active", "deleted_at",
         "last_message_at", "created_at",
     )
     inlines = [MessageInline]

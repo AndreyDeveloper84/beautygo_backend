@@ -10,6 +10,7 @@ from rest_framework.test import APIClient
 
 from nutrition.models import FoodScan
 from nutrition.providers.base import ProviderUnavailable, ScanResult
+from nutrition.serializers import FoodScanResponseSerializer
 from nutrition.services.food_scanner_router import (
     AllProvidersFailedError,
     RouterResult,
@@ -160,12 +161,63 @@ class TestSuccess:
         assert body["confidence"] == 0.9
         assert body["portion_g"] == 300
         assert body["provider"] == "openai"
-        assert body["nutrition"] is None  # Slice 3 will populate
+        # Per spec v2.0 §FOOD SCANNER: nutrition response shape is
+        # {calories, protein_g, fat_g, carbs_g, vitamins}. Internal
+        # storage on FoodScan.nutrition is richer (per-100g, source,
+        # matched_dish) for analytics and Slice 3b derivation.
+        assert body["nutrition"] == {
+            "calories": 147.0,        # 49 kcal/100g × 300g
+            "protein_g": pytest.approx(4.8, rel=1e-2),
+            "fat_g": pytest.approx(6.6, rel=1e-2),
+            "carbs_g": pytest.approx(20.1, rel=1e-2),
+            "vitamins": {},
+        }
 
         scan = FoodScan.objects.get(id=body["scan_id"])
         assert scan.user_id == client_user.id
         assert scan.provider_used == "openai"
         assert scan.provider_fallback_from == ""
+        # DB still keeps the rich internal shape with matched_dish.
+        assert scan.nutrition["matched_dish"] == "борщ"
+        assert scan.nutrition["source"] == "seed_ru"
+
+    def test_nutrition_null_when_all_totals_are_null(self, auth_client, client_user):
+        # If lookup matched a dish but per-portion totals are null
+        # (provider didn't estimate portion_g), serializer collapses to
+        # null instead of {calories: null, protein_g: null, ...} so the
+        # mobile UI cleanly prompts manual entry.
+        scan = FoodScan.objects.create(
+            user=client_user, dish_name="борщ",
+            confidence=0.9, portion_g=None,
+            provider_used=FoodScan.Provider.OPENAI,
+            nutrition={
+                "matched_dish": "борщ", "source": "seed_ru",
+                "portion_g": None, "kcal_per_100g": 49,
+                "protein_g_per_100g": 1.6, "fat_g_per_100g": 2.2,
+                "carbs_g_per_100g": 6.7,
+                "kcal": None, "protein_g": None, "fat_g": None, "carbs_g": None,
+            },
+        )
+        body = FoodScanResponseSerializer(scan).data
+        assert body["nutrition"] is None
+
+    def test_nutrition_null_when_dish_not_in_seed(self, auth_client):
+        # Provider returns a dish we have no entry for → nutrition stays
+        # null, scan still 200 (mobile shows "уточните вручную").
+        router_mock = MagicMock()
+        router_mock.scan.return_value = RouterResult(
+            result=_scan_result(dish="суши с лососем"),
+            primary_provider_name="openai",
+        )
+        with patch(
+            "nutrition.views.FoodScannerRouter",
+            return_value=router_mock,
+        ):
+            resp = auth_client.post(
+                SCAN_URL, {"image": _upload()}, format="multipart",
+            )
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["data"]["nutrition"] is None
 
     def test_fallback_records_primary_in_provider_fallback_from(
         self, auth_client,

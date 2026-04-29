@@ -66,3 +66,15 @@ factory-boy==3.3.3
 Faker==37.4.0
 freezegun==1.5.5
 yookassa==3.10.0
+
+# AI orchestration shared package (Linear DRF-236, DRF-237).
+# Repo: https://github.com/AndreyDeveloper84/ayla-ai-core (private)
+#
+# NOT INSTALLED HERE — Ayla пока не импортирует ayla_ai_core в коде;
+# package добавится сюда в DRF-241 (REST endpoints поверх AIConcierge).
+# Если добавим раньше — CI ломается из-за отсутствия sibling-папки в runner'ах.
+#
+# DEV-ONLY: для локального тестирования shared package с Ayla —
+#   pip install -e ../../ayla-ai-core
+# (после клонирования ayla-ai-core в PycharmProjects/ayla-ai-core)
+# Roadmap: docs/BOT_CODE_AUDIT_2026-04.md Section 4 + 5.
