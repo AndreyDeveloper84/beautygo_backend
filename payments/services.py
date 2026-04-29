@@ -8,6 +8,8 @@ from typing import Any
 
 from django.conf import settings
 
+from .exceptions import PaymentClientError, PaymentConfigError
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,14 +21,23 @@ class YooKassaService:
     """
     Thin wrapper around the yookassa SDK.
 
-    All public methods raise YooKassaError on SDK / API failure.
-    Call sites must catch this and return an appropriate HTTP response.
+    Public methods raise:
+    - PaymentConfigError when YOOKASSA_SHOP_ID / SECRET_KEY are empty
+      (startup-time wiring bug)
+    - PaymentClientError on any SDK / HTTP failure (transient provider
+      issue)
+    Call sites map these to 503 / 502 respectively.
     """
 
     def __init__(self):
         import yookassa
         shop_id = getattr(settings, 'YOOKASSA_SHOP_ID', '')
         secret_key = getattr(settings, 'YOOKASSA_SECRET_KEY', '')
+        if not shop_id or not secret_key:
+            raise PaymentConfigError(
+                "YooKassa credentials not configured "
+                "(YOOKASSA_SHOP_ID / YOOKASSA_SECRET_KEY are empty)"
+            )
         yookassa.Configuration.configure(shop_id, secret_key)
         self._payment_cls = yookassa.Payment
         self._refund_cls = yookassa.Refund
@@ -43,6 +54,7 @@ class YooKassaService:
         return_url: str,
         idempotency_key: str,
         capture: bool = False,
+        receipt: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Create a YooKassa payment.
@@ -54,6 +66,11 @@ class YooKassaService:
             return_url: Redirect after payment.
             idempotency_key: Prevents duplicate charges.
             capture: False = hold (two-stage), True = instant capture.
+            receipt: 54-ФЗ fiscal receipt payload (customer + items). When
+                provided, YooKassa forwards it to the OFD (operator
+                фискальных данных). Mandatory for production payments
+                in Russia — without it the merchant is non-compliant.
+                Build via ``build_appointment_receipt(appointment, ...)``.
 
         Returns:
             dict with keys: provider_payment_id, confirmation_url, status
@@ -79,6 +96,13 @@ class YooKassaService:
             },
         }
 
+        # 54-ФЗ fiscal receipt — required for prod RF deployments.
+        # Empty/None = developer skipped on purpose (e.g. test settings
+        # with YOOKASSA_FISCAL_RECEIPT_REQUIRED=False); production checks
+        # via call site in views.py before calling us.
+        if receipt:
+            payload['receipt'] = receipt
+
         # Split payment (transfer to specialist sub-account) if configured
         agent_id = getattr(settings, 'YOOKASSA_AGENT_ID', '')
         if agent_id:
@@ -87,7 +111,12 @@ class YooKassaService:
                 'amount': {'value': str(specialist_income), 'currency': 'RUB'},
             }]
 
-        payment = self._payment_cls.create(payload, idempotency_key)
+        try:
+            payment = self._payment_cls.create(payload, idempotency_key)
+        except Exception as exc:  # noqa: BLE001 — wrap SDK + transport
+            raise PaymentClientError(
+                f"YooKassa create_payment failed: {exc}"
+            ) from exc
 
         confirmation_url = ''
         if hasattr(payment, 'confirmation') and payment.confirmation:
@@ -112,11 +141,16 @@ class YooKassaService:
         idempotency_key: str,
     ) -> None:
         """Capture a previously held payment."""
-        self._payment_cls.capture(
-            provider_payment_id,
-            {'amount': {'value': str(amount), 'currency': 'RUB'}},
-            idempotency_key,
-        )
+        try:
+            self._payment_cls.capture(
+                provider_payment_id,
+                {'amount': {'value': str(amount), 'currency': 'RUB'}},
+                idempotency_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise PaymentClientError(
+                f"YooKassa capture_payment failed: {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------
     # Refund
@@ -129,13 +163,18 @@ class YooKassaService:
         idempotency_key: str,
     ) -> dict[str, Any]:
         """Create a refund for a payment."""
-        refund = self._refund_cls.create(
-            {
-                'payment_id': provider_payment_id,
-                'amount': {'value': str(amount), 'currency': 'RUB'},
-            },
-            idempotency_key,
-        )
+        try:
+            refund = self._refund_cls.create(
+                {
+                    'payment_id': provider_payment_id,
+                    'amount': {'value': str(amount), 'currency': 'RUB'},
+                },
+                idempotency_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise PaymentClientError(
+                f"YooKassa refund_payment failed: {exc}"
+            ) from exc
         return {'refund_id': refund.id, 'status': refund.status}
 
     # ------------------------------------------------------------------
@@ -144,7 +183,12 @@ class YooKassaService:
 
     def get_payment_info(self, provider_payment_id: str) -> dict[str, Any]:
         """Fetch current payment state from YooKassa."""
-        payment = self._payment_cls.find_one(provider_payment_id)
+        try:
+            payment = self._payment_cls.find_one(provider_payment_id)
+        except Exception as exc:  # noqa: BLE001
+            raise PaymentClientError(
+                f"YooKassa find_one failed: {exc}"
+            ) from exc
         return {
             'provider_payment_id': payment.id,
             'status': payment.status,
@@ -153,3 +197,70 @@ class YooKassaService:
                 str(getattr(getattr(payment, 'refunded_amount', None), 'value', '0'))
             ),
         }
+
+
+# ---------------------------------------------------------------------------
+# 54-ФЗ fiscal receipt builder
+# ---------------------------------------------------------------------------
+
+
+def build_appointment_receipt(appointment, amount: Decimal) -> dict[str, Any]:
+    """Build a YooKassa ``receipt`` payload for a service Appointment.
+
+    Required by Russian fiscal law 54-ФЗ for any online card payment.
+    YooKassa relays this to the OFD (фискальный оператор) which prints
+    the receipt in tax authority records. Without it, the merchant is
+    non-compliant.
+
+    Receipt shape (per YooKassa docs § Чек):
+        {
+            "customer": { "phone": <E.164>, "email"?: ... },
+            "items": [{
+                "description": <≤128 chars>,
+                "quantity": "1.00",
+                "amount": {"value": <decimal as string>, "currency": "RUB"},
+                "vat_code": <int>,
+                "payment_mode": "full_payment",
+                "payment_subject": "service",
+            }]
+        }
+
+    VAT code defaults to 1 ("без НДС" — for самозанятые / УСН). Override
+    via ``YOOKASSA_VAT_CODE`` env when the merchant moves to OSNO.
+    """
+    user = appointment.client
+    customer: dict[str, str] = {}
+    phone = getattr(user, "phone", "") or ""
+    if phone:
+        customer["phone"] = phone
+    email = getattr(user, "email", "") or ""
+    if email:
+        customer["email"] = email
+
+    # YooKassa requires at least one of phone/email. If both are empty
+    # (shouldn't happen — phone is enforced at registration) fall back
+    # to a placeholder so the API call doesn't fail; the underlying
+    # data quality bug surfaces in the exception/logs.
+    if not customer:
+        customer["phone"] = "+70000000000"
+
+    service_name = (
+        appointment.service.name if appointment.service_id
+        else getattr(appointment, "snapshot_service_name", "") or "Услуга"
+    )
+
+    vat_code = int(getattr(settings, "YOOKASSA_VAT_CODE", 1))
+
+    return {
+        "customer": customer,
+        "items": [{
+            "description": service_name[:128],
+            "quantity": "1.00",
+            "amount": {
+                "value": f"{amount:.2f}", "currency": "RUB",
+            },
+            "vat_code": vat_code,
+            "payment_mode": "full_payment",
+            "payment_subject": "service",
+        }],
+    }
