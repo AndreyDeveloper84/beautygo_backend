@@ -308,6 +308,8 @@ class TestPaymentWebhook:
         assert appt.status == Appointment.Status.CONFIRMED
 
     def test_webhook_payment_succeeded(self, anon_app, client_user, specialist_user, service):
+        from appointments.models import OutboxEvent
+
         payment, _ = self._create_payment_with_appointment(client_user, specialist_user, service)
         payment.status = Payment.Status.AUTHORIZED
         payment.save()
@@ -330,6 +332,16 @@ class TestPaymentWebhook:
         assert response.status_code == 200
         payment.refresh_from_db()
         assert payment.status == Payment.Status.PAID
+
+        # N2: webhook writes a PAYMENT_CONFIRMED OutboxEvent in the same
+        # transaction so the notifications dispatcher fires the
+        # `payment_paid` push within one beat (~10s).
+        events = OutboxEvent.objects.filter(
+            topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
+        )
+        assert events.count() == 1
+        assert events.first().payload['payment_id'] == str(payment.id)
+        assert events.first().payload['appointment_id'] == str(payment.appointment_id)
 
     def test_webhook_payment_canceled(self, anon_app, client_user, specialist_user, service):
         payment, appt = self._create_payment_with_appointment(client_user, specialist_user, service)
@@ -372,6 +384,83 @@ class TestPaymentWebhook:
 
         assert response.status_code == 200
         assert response.data['status'] == 'duplicate'
+
+    def test_webhook_refund_succeeded_writes_outbox(
+        self, anon_app, client_user, specialist_user, service,
+    ):
+        """Refund webhook writes a PAYMENT_REFUNDED OutboxEvent so the
+        notifications dispatcher can push the refund-confirmation."""
+        from appointments.models import OutboxEvent
+
+        payment, _ = self._create_payment_with_appointment(
+            client_user, specialist_user, service,
+        )
+        payment.status = Payment.Status.PAID
+        payment.save()
+
+        mock_info = {
+            'provider_payment_id': 'wh_pay_001',
+            'status': 'succeeded',
+            'refunded_amount': payment.amount,
+        }
+        with patch(
+            'payments.views._get_yookassa',
+            return_value=MagicMock(
+                get_payment_info=MagicMock(return_value=mock_info),
+            ),
+        ):
+            response = anon_app.post(WEBHOOK_URL, {
+                'event': 'refund.succeeded',
+                'object': {'id': 'wh_pay_001'},
+            }, format='json')
+
+        assert response.status_code == 200
+        payment.refresh_from_db()
+        assert payment.status == Payment.Status.REFUNDED
+
+        events = OutboxEvent.objects.filter(
+            topic=OutboxEvent.Topic.PAYMENT_REFUNDED,
+        )
+        assert events.count() == 1
+        evt = events.first()
+        assert evt.payload['payment_id'] == str(payment.id)
+        assert evt.payload['is_partial'] is False
+
+    def test_webhook_partial_refund_marks_outbox_partial(
+        self, anon_app, client_user, specialist_user, service,
+    ):
+        from appointments.models import OutboxEvent
+
+        payment, _ = self._create_payment_with_appointment(
+            client_user, specialist_user, service,
+        )
+        payment.status = Payment.Status.PAID
+        payment.save()
+
+        # Refund less than full amount.
+        partial = payment.amount / Decimal('2')
+        mock_info = {
+            'provider_payment_id': 'wh_pay_001',
+            'status': 'succeeded',
+            'refunded_amount': partial,
+        }
+        with patch(
+            'payments.views._get_yookassa',
+            return_value=MagicMock(
+                get_payment_info=MagicMock(return_value=mock_info),
+            ),
+        ):
+            anon_app.post(WEBHOOK_URL, {
+                'event': 'refund.succeeded',
+                'object': {'id': 'wh_pay_001'},
+            }, format='json')
+
+        payment.refresh_from_db()
+        assert payment.status == Payment.Status.PARTIALLY_REFUNDED
+        evt = OutboxEvent.objects.get(
+            topic=OutboxEvent.Topic.PAYMENT_REFUNDED,
+        )
+        assert evt.payload['is_partial'] is True
 
     def test_webhook_unknown_payment(self, anon_app):
         response = anon_app.post(WEBHOOK_URL, {

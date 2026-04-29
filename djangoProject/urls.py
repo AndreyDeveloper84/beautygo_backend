@@ -28,6 +28,7 @@ urlpatterns = [
     path('api/v1/devices/', include('users.devices_urls')),
     path('api/v1/ai/', include('ai.urls', namespace='ai')),
     path('api/v1/nutrition/', include('nutrition.urls', namespace='nutrition')),
+    path('api/v1/notifications/', include('notifications.urls', namespace='notifications')),
     path(
         'api/v1/home/',
         __import__('users.home_api', fromlist=['HomeView']).HomeView.as_view(),
