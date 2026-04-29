@@ -210,6 +210,39 @@ class TestPaymentCreate:
         assert response.status_code == status.HTTP_502_BAD_GATEWAY
         assert response.data['error']['code'] == 'PAYMENT_PROVIDER_ERROR'
 
+    def test_create_payment_passes_fiscal_receipt(
+        self, client_app, client_user, specialist_user, service,
+    ):
+        """54-ФЗ: each create_payment must include a receipt payload so
+        YooKassa relays it to the OFD. Without this the merchant is
+        non-compliant in production RF deployments."""
+        appt = _make_appointment(client_user, specialist_user, service)
+        mock_create = _mock_yookassa_create()
+        with patch(
+            'payments.views._get_yookassa',
+            return_value=MagicMock(create_payment=mock_create),
+        ):
+            response = client_app.post(CREATE_URL, {
+                'appointment_id': str(appt.id),
+            }, format='json')
+
+        assert response.status_code == status.HTTP_201_CREATED
+        # Receipt was passed to YooKassaService.create_payment.
+        kwargs = mock_create.call_args.kwargs
+        assert "receipt" in kwargs
+        receipt = kwargs["receipt"]
+        # Customer must have at least phone (User.phone is mandatory).
+        assert receipt["customer"]["phone"] == client_user.phone
+        # Item description carries the service name capped at 128 chars.
+        item = receipt["items"][0]
+        assert item["description"] == "Маникюр"
+        assert item["amount"]["value"] == "2000.00"
+        assert item["amount"]["currency"] == "RUB"
+        assert item["payment_subject"] == "service"
+        assert item["payment_mode"] == "full_payment"
+        # Default VAT code from settings (1 = без НДС for samozanyatye).
+        assert item["vat_code"] == 1
+
 
 # ---------------------------------------------------------------------------
 # GET /api/v1/payments/{id}/

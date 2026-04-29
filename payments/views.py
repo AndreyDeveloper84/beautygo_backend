@@ -19,7 +19,7 @@ from users.permissions import IsClient
 from users.response import error_response, success_response
 
 from .serializers import PaymentCreateSerializer, PaymentDetailSerializer, PaymentRefundSerializer
-from .services import YooKassaService
+from .services import YooKassaService, build_appointment_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +172,11 @@ class PaymentCreateView(APIView):
             f'BeautyGO: {appointment.service.name} у {appointment.specialist.display_name}'
         )
 
+        # 54-ФЗ receipt — mandatory for production payments in RF.
+        # Always built; the YooKassaService skips the field only when
+        # caller passes None (never the case here).
+        receipt = build_appointment_receipt(appointment, appointment.price)
+
         try:
             svc = _get_yookassa()
             result = svc.create_payment(
@@ -181,6 +186,7 @@ class PaymentCreateView(APIView):
                 return_url=return_url,
                 idempotency_key=idempotency_key,
                 capture=False,  # two-stage: hold first
+                receipt=receipt,
             )
         except Exception as exc:
             logger.error('YooKassa create_payment failed: %s', exc)
