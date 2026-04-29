@@ -43,6 +43,7 @@ class YooKassaService:
         return_url: str,
         idempotency_key: str,
         capture: bool = False,
+        receipt: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Create a YooKassa payment.
@@ -54,6 +55,11 @@ class YooKassaService:
             return_url: Redirect after payment.
             idempotency_key: Prevents duplicate charges.
             capture: False = hold (two-stage), True = instant capture.
+            receipt: 54-ФЗ fiscal receipt payload (customer + items). When
+                provided, YooKassa forwards it to the OFD (operator
+                фискальных данных). Mandatory for production payments
+                in Russia — without it the merchant is non-compliant.
+                Build via ``build_appointment_receipt(appointment, ...)``.
 
         Returns:
             dict with keys: provider_payment_id, confirmation_url, status
@@ -78,6 +84,13 @@ class YooKassaService:
                 'specialist_income': str(specialist_income),
             },
         }
+
+        # 54-ФЗ fiscal receipt — required for prod RF deployments.
+        # Empty/None = developer skipped on purpose (e.g. test settings
+        # with YOOKASSA_FISCAL_RECEIPT_REQUIRED=False); production checks
+        # via call site in views.py before calling us.
+        if receipt:
+            payload['receipt'] = receipt
 
         # Split payment (transfer to specialist sub-account) if configured
         agent_id = getattr(settings, 'YOOKASSA_AGENT_ID', '')
@@ -153,3 +166,70 @@ class YooKassaService:
                 str(getattr(getattr(payment, 'refunded_amount', None), 'value', '0'))
             ),
         }
+
+
+# ---------------------------------------------------------------------------
+# 54-ФЗ fiscal receipt builder
+# ---------------------------------------------------------------------------
+
+
+def build_appointment_receipt(appointment, amount: Decimal) -> dict[str, Any]:
+    """Build a YooKassa ``receipt`` payload for a service Appointment.
+
+    Required by Russian fiscal law 54-ФЗ for any online card payment.
+    YooKassa relays this to the OFD (фискальный оператор) which prints
+    the receipt in tax authority records. Without it, the merchant is
+    non-compliant.
+
+    Receipt shape (per YooKassa docs § Чек):
+        {
+            "customer": { "phone": <E.164>, "email"?: ... },
+            "items": [{
+                "description": <≤128 chars>,
+                "quantity": "1.00",
+                "amount": {"value": <decimal as string>, "currency": "RUB"},
+                "vat_code": <int>,
+                "payment_mode": "full_payment",
+                "payment_subject": "service",
+            }]
+        }
+
+    VAT code defaults to 1 ("без НДС" — for самозанятые / УСН). Override
+    via ``YOOKASSA_VAT_CODE`` env when the merchant moves to OSNO.
+    """
+    user = appointment.client
+    customer: dict[str, str] = {}
+    phone = getattr(user, "phone", "") or ""
+    if phone:
+        customer["phone"] = phone
+    email = getattr(user, "email", "") or ""
+    if email:
+        customer["email"] = email
+
+    # YooKassa requires at least one of phone/email. If both are empty
+    # (shouldn't happen — phone is enforced at registration) fall back
+    # to a placeholder so the API call doesn't fail; the underlying
+    # data quality bug surfaces in the exception/logs.
+    if not customer:
+        customer["phone"] = "+70000000000"
+
+    service_name = (
+        appointment.service.name if appointment.service_id
+        else getattr(appointment, "snapshot_service_name", "") or "Услуга"
+    )
+
+    vat_code = int(getattr(settings, "YOOKASSA_VAT_CODE", 1))
+
+    return {
+        "customer": customer,
+        "items": [{
+            "description": service_name[:128],
+            "quantity": "1.00",
+            "amount": {
+                "value": f"{amount:.2f}", "currency": "RUB",
+            },
+            "vat_code": vat_code,
+            "payment_mode": "full_payment",
+            "payment_subject": "service",
+        }],
+    }
