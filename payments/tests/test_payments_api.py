@@ -198,10 +198,16 @@ class TestPaymentCreate:
     def test_create_payment_provider_error(
         self, client_app, client_user, specialist_user, service,
     ):
+        from payments.exceptions import PaymentClientError
+
         appt = _make_appointment(client_user, specialist_user, service)
         with patch(
             'payments.views._get_yookassa',
-            return_value=MagicMock(create_payment=MagicMock(side_effect=Exception('API error'))),
+            return_value=MagicMock(
+                create_payment=MagicMock(
+                    side_effect=PaymentClientError('upstream 500'),
+                ),
+            ),
         ):
             response = client_app.post(CREATE_URL, {
                 'appointment_id': str(appt.id),
@@ -209,6 +215,26 @@ class TestPaymentCreate:
 
         assert response.status_code == status.HTTP_502_BAD_GATEWAY
         assert response.data['error']['code'] == 'PAYMENT_PROVIDER_ERROR'
+
+    def test_create_payment_config_error_returns_503(
+        self, client_app, client_user, specialist_user, service,
+    ):
+        """PaymentConfigError (missing creds) maps to 503 — distinct
+        from 502 transient provider failures so ops alerts route
+        correctly."""
+        from payments.exceptions import PaymentConfigError
+
+        appt = _make_appointment(client_user, specialist_user, service)
+        with patch(
+            'payments.views._get_yookassa',
+            side_effect=PaymentConfigError('SHOP_ID empty'),
+        ):
+            response = client_app.post(CREATE_URL, {
+                'appointment_id': str(appt.id),
+            }, format='json')
+
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        assert response.data['error']['code'] == 'SERVICE_UNAVAILABLE'
 
     def test_create_payment_passes_fiscal_receipt(
         self, client_app, client_user, specialist_user, service,
