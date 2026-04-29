@@ -26,6 +26,7 @@ urlpatterns = [
     path('api/v1/payments/', include('payments.urls')),
     path('api/v1/search/', include('search.urls')),
     path('api/v1/devices/', include('users.devices_urls')),
+    path('api/v1/favorites/', include('users.favorites_urls', namespace='favorites')),
     path('api/v1/ai/', include('ai.urls', namespace='ai')),
     path('api/v1/nutrition/', include('nutrition.urls', namespace='nutrition')),
     path('api/v1/notifications/', include('notifications.urls', namespace='notifications')),
