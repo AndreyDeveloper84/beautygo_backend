@@ -42,12 +42,15 @@ class ScanRequestSerializer(serializers.Serializer):
 class FoodScanResponseSerializer(serializers.ModelSerializer):
     """Response shape per Notion API Spec v2.0 §FOOD SCANNER FoodScanResponse.
 
-    Nutrition lookup is Slice 3 — until then ``nutrition`` returns null
-    and the mobile client falls back to manual portion entry.
+    The DB ``FoodScan.nutrition`` field stores a richer dataclass JSON
+    (per-100g values, matched_dish, source, ...) for analytics, replay,
+    and Slice 3b's FoodLog derivation. The wire response is the lean
+    spec shape: ``{calories, protein_g, fat_g, carbs_g, vitamins}``.
     """
 
     scan_id = serializers.UUIDField(source="id", read_only=True)
     provider = serializers.CharField(source="provider_used", read_only=True)
+    nutrition = serializers.SerializerMethodField()
     # Per spec v2.0 §FOOD SCANNER — beauty_insights field present in
     # response shape, nullable. Slice 3+ will populate when nutrition
     # lookup runs and we have data to derive vitamin deficits etc.
@@ -68,6 +71,24 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = fields
+
+    def get_nutrition(self, obj: FoodScan):
+        """Transform rich internal JSON → spec FoodScanResponse.nutrition shape.
+
+        Returns null when the seed lookup missed (mobile prompts manual
+        entry). Vitamins is empty map for now — seed has no vitamin data;
+        Slice 3a' OFF/USDA lookup will populate.
+        """
+        n = obj.nutrition
+        if not n:
+            return None
+        return {
+            "calories": n.get("kcal"),
+            "protein_g": n.get("protein_g"),
+            "fat_g": n.get("fat_g"),
+            "carbs_g": n.get("carbs_g"),
+            "vitamins": {},
+        }
 
     def get_beauty_insights(self, obj: FoodScan):  # noqa: ARG002 — Slice 3+ fills this
         return None

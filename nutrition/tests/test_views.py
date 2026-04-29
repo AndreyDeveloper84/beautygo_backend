@@ -160,17 +160,25 @@ class TestSuccess:
         assert body["confidence"] == 0.9
         assert body["portion_g"] == 300
         assert body["provider"] == "openai"
-        # Slice 3a: seed hit on "Борщ" populates nutrition.
-        assert body["nutrition"] is not None
-        assert body["nutrition"]["matched_dish"] == "борщ"
-        assert body["nutrition"]["source"] == "seed_ru"
-        assert body["nutrition"]["kcal"] == 147.0  # 49 kcal/100g × 300g
+        # Per spec v2.0 §FOOD SCANNER: nutrition response shape is
+        # {calories, protein_g, fat_g, carbs_g, vitamins}. Internal
+        # storage on FoodScan.nutrition is richer (per-100g, source,
+        # matched_dish) for analytics and Slice 3b derivation.
+        assert body["nutrition"] == {
+            "calories": 147.0,        # 49 kcal/100g × 300g
+            "protein_g": pytest.approx(4.8, rel=1e-2),
+            "fat_g": pytest.approx(6.6, rel=1e-2),
+            "carbs_g": pytest.approx(20.1, rel=1e-2),
+            "vitamins": {},
+        }
 
         scan = FoodScan.objects.get(id=body["scan_id"])
         assert scan.user_id == client_user.id
         assert scan.provider_used == "openai"
         assert scan.provider_fallback_from == ""
+        # DB still keeps the rich internal shape with matched_dish.
         assert scan.nutrition["matched_dish"] == "борщ"
+        assert scan.nutrition["source"] == "seed_ru"
 
     def test_nutrition_null_when_dish_not_in_seed(self, auth_client):
         # Provider returns a dish we have no entry for → nutrition stays
