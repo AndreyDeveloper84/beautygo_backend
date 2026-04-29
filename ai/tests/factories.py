@@ -77,8 +77,13 @@ def make_specialist(
     return SpecialistProfile.objects.get(user=user)
 
 
-def make_conversation(*, user: User, is_active: bool = True) -> Conversation:
-    return Conversation.objects.create(user=user, is_active=is_active)
+def make_conversation(
+    *,
+    user: User,
+    is_active: bool = True,
+    tenant_id: uuid.UUID | None = None,
+) -> Conversation:
+    return Conversation.objects.create(user=user, is_active=is_active, tenant_id=tenant_id)
 
 
 def make_message(
