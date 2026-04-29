@@ -14,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from appointments.models import Appointment, Payment
+from appointments.models import Appointment, OutboxEvent, Payment
 from users.permissions import IsClient
 from users.response import error_response, success_response
 
@@ -331,6 +331,9 @@ class PaymentWebhookView(APIView):
         yookassa_status = info['status']
 
         with transaction.atomic():
+            outbox_topic: str | None = None
+            outbox_payload: dict = {}
+
             if event == 'payment.waiting_for_capture' and yookassa_status == 'waiting_for_capture':
                 payment.status = Payment.Status.AUTHORIZED
                 payment.appointment.status = Appointment.Status.CONFIRMED
@@ -338,6 +341,12 @@ class PaymentWebhookView(APIView):
 
             elif event == 'payment.succeeded' and yookassa_status == 'succeeded':
                 payment.status = Payment.Status.PAID
+                outbox_topic = OutboxEvent.Topic.PAYMENT_CONFIRMED
+                outbox_payload = {
+                    'payment_id': str(payment.id),
+                    'appointment_id': str(payment.appointment_id),
+                    'amount': str(payment.amount),
+                }
 
             elif event == 'payment.canceled' and yookassa_status == 'canceled':
                 payment.status = Payment.Status.FAILED
@@ -352,9 +361,24 @@ class PaymentWebhookView(APIView):
                     payment.status = Payment.Status.REFUNDED
                 else:
                     payment.status = Payment.Status.PARTIALLY_REFUNDED
+                outbox_topic = OutboxEvent.Topic.PAYMENT_REFUNDED
+                outbox_payload = {
+                    'payment_id': str(payment.id),
+                    'appointment_id': str(payment.appointment_id),
+                    'amount': str(refunded_val),
+                    'is_partial': refunded_val < payment.amount,
+                }
 
             payment.last_webhook_event_id = event_id
             payment.save()
+
+            # Outbox write inside the same transaction as the Payment
+            # update — guarantees event-or-nothing semantics. The
+            # dispatcher beat task picks it up within ~10s.
+            if outbox_topic is not None:
+                OutboxEvent.objects.create(
+                    topic=outbox_topic, payload=outbox_payload,
+                )
 
         logger.info('Webhook processed: event=%s payment=%s', event, payment.id)
         return Response({'status': 'ok'}, status=200)
@@ -422,11 +446,25 @@ class PaymentRefundView(APIView):
 
         with transaction.atomic():
             payment.refunded_amount += refund_amount
+            is_partial = payment.refunded_amount < payment.amount
             if payment.refunded_amount >= payment.amount:
                 payment.status = Payment.Status.REFUNDED
             else:
                 payment.status = Payment.Status.PARTIALLY_REFUNDED
             payment.save(update_fields=['status', 'refunded_amount', 'updated_at'])
+
+            # Refund initiated by the client (or admin) — fire the same
+            # PAYMENT_REFUNDED topic as the webhook path so notification
+            # handlers don't care about the trigger source.
+            OutboxEvent.objects.create(
+                topic=OutboxEvent.Topic.PAYMENT_REFUNDED,
+                payload={
+                    'payment_id': str(payment.id),
+                    'appointment_id': str(payment.appointment_id),
+                    'amount': str(refund_amount),
+                    'is_partial': is_partial,
+                },
+            )
 
         logger.info(
             'Refund issued: payment_id=%s amount=%s', payment.id, refund_amount,
