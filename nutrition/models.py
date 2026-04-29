@@ -131,6 +131,16 @@ class FoodLog(models.Model):
     meal_type = models.CharField(max_length=16, choices=MealType.choices)
     logged_at = models.DateTimeField()
 
+    # Mobile retries on flaky network can double-POST the same meal —
+    # caller passes X-Idempotency-Key header, we de-dup. Same pattern as
+    # Appointment.idempotency_key (appointments/models.py). UUID-shaped
+    # in practice; column-wide uniqueness is fine because UUIDs don't
+    # collide across users.
+    idempotency_key = models.CharField(
+        max_length=100, unique=True, null=True, blank=True,
+        help_text="Client-provided UUID for duplicate prevention.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

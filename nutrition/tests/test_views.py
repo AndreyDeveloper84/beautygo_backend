@@ -10,6 +10,7 @@ from rest_framework.test import APIClient
 
 from nutrition.models import FoodScan
 from nutrition.providers.base import ProviderUnavailable, ScanResult
+from nutrition.serializers import FoodScanResponseSerializer
 from nutrition.services.food_scanner_router import (
     AllProvidersFailedError,
     RouterResult,
@@ -179,6 +180,26 @@ class TestSuccess:
         # DB still keeps the rich internal shape with matched_dish.
         assert scan.nutrition["matched_dish"] == "борщ"
         assert scan.nutrition["source"] == "seed_ru"
+
+    def test_nutrition_null_when_all_totals_are_null(self, auth_client, client_user):
+        # If lookup matched a dish but per-portion totals are null
+        # (provider didn't estimate portion_g), serializer collapses to
+        # null instead of {calories: null, protein_g: null, ...} so the
+        # mobile UI cleanly prompts manual entry.
+        scan = FoodScan.objects.create(
+            user=client_user, dish_name="борщ",
+            confidence=0.9, portion_g=None,
+            provider_used=FoodScan.Provider.OPENAI,
+            nutrition={
+                "matched_dish": "борщ", "source": "seed_ru",
+                "portion_g": None, "kcal_per_100g": 49,
+                "protein_g_per_100g": 1.6, "fat_g_per_100g": 2.2,
+                "carbs_g_per_100g": 6.7,
+                "kcal": None, "protein_g": None, "fat_g": None, "carbs_g": None,
+            },
+        )
+        body = FoodScanResponseSerializer(scan).data
+        assert body["nutrition"] is None
 
     def test_nutrition_null_when_dish_not_in_seed(self, auth_client):
         # Provider returns a dish we have no entry for → nutrition stays

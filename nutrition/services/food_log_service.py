@@ -56,6 +56,7 @@ class CreateFoodLogInput:
     scan_id: Optional[UUID] = None
     dish_name: Optional[str] = None
     logged_at: Optional[datetime] = None
+    idempotency_key: Optional[str] = None
 
 
 class FoodLogServiceError(Exception):
@@ -90,6 +91,18 @@ class FoodLogService:
                 "One of scan_id or dish_name must be provided"
             )
 
+        # Idempotency check — return the prior log if the same key was
+        # already used by THIS user. Cross-user key collision is
+        # astronomically unlikely for UUIDs, but the user_id filter
+        # makes the intent explicit and defends against caller bugs.
+        if data.idempotency_key:
+            prior = FoodLog.objects.filter(
+                user_id=data.user_id,
+                idempotency_key=data.idempotency_key,
+            ).first()
+            if prior is not None:
+                return prior
+
         if data.scan_id is not None:
             return self._create_from_scan(data)
         return self._create_manual(data)
@@ -112,21 +125,33 @@ class FoodLogService:
                 "the original recognition missed and macros aren't derivable"
             )
 
+        n = scan.nutrition
+        # Scan dict may exist but per-portion totals can be null when the
+        # vision provider returned a dish without a portion_g estimate
+        # (NutritionFacts leaves totals=None in that branch). Snapshotting
+        # would silently produce a "0 kcal" diary entry — treat as
+        # not-recognized so the mobile UI prompts manual portion entry.
+        if any(n.get(field) is None for field in ("kcal", "protein_g", "fat_g", "carbs_g")):
+            raise DishNotRecognizedError(
+                f"Scan {data.scan_id} has nutrition snapshot with missing "
+                "per-portion totals — provider didn't estimate portion size"
+            )
+
         # Scan's nutrition snapshot already contains totals at the
         # provider's portion estimate. Multiplier scales those totals.
         m = data.portion_multiplier
-        n = scan.nutrition
         return FoodLog.objects.create(
             user_id=data.user_id,
             scan=scan,
             dish_name=scan.dish_name or n.get("matched_dish", ""),
             portion_multiplier=m,
-            calories=_scale(n.get("kcal"), m),
-            protein_g=_scale(n.get("protein_g"), m),
-            fat_g=_scale(n.get("fat_g"), m),
-            carbs_g=_scale(n.get("carbs_g"), m),
+            calories=_scale(n["kcal"], m),
+            protein_g=_scale(n["protein_g"], m),
+            fat_g=_scale(n["fat_g"], m),
+            carbs_g=_scale(n["carbs_g"], m),
             meal_type=data.meal_type,
             logged_at=data.logged_at or timezone.now(),
+            idempotency_key=data.idempotency_key,
         )
 
     def _create_manual(self, data: CreateFoodLogInput) -> FoodLog:
@@ -153,16 +178,14 @@ class FoodLogService:
             carbs_g=_scale(facts.carbs_g, m),
             meal_type=data.meal_type,
             logged_at=data.logged_at or timezone.now(),
+            idempotency_key=data.idempotency_key,
         )
 
 
-def _scale(value: float | None, multiplier: float) -> float:
+def _scale(value: float, multiplier: float) -> float:
     """Scale a macro value by a portion multiplier.
 
-    Treats None (which can happen when scan.nutrition has portion_g=None
-    and per-portion totals weren't computed) as zero — log entry will
-    show 0 and the user can correct via portion adjustment.
+    Caller guarantees value is non-None (partial-null snapshots are
+    rejected upstream as DishNotRecognizedError).
     """
-    if value is None:
-        return 0.0
     return round(value * multiplier, 1)

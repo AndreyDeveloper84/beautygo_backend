@@ -118,7 +118,7 @@ class TestCreateValidation:
         resp = auth_client.post(
             CREATE_URL, {"amount_ml": amount}, format="json",
         )
-        assert resp.status_code == status.HTTP_201_CREATED
+        assert resp.status_code == status.HTTP_200_OK
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +131,7 @@ class TestCreateHappyPath:
         resp = auth_client.post(
             CREATE_URL, {"amount_ml": 250}, format="json",
         )
-        assert resp.status_code == status.HTTP_201_CREATED, resp.json()
+        assert resp.status_code == status.HTTP_200_OK, resp.json()
         body = resp.json()["data"]
         assert set(body.keys()) == {
             "water_ml", "water_goal_ml", "water_pct", "log_id",
@@ -211,6 +211,26 @@ class TestDelete:
         from uuid import uuid4
         resp = auth_client.delete(f"/api/v1/nutrition/water/{uuid4()}/")
         assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_delete_yesterday_log_returns_yesterdays_aggregate(
+        self, auth_client, client_user,
+    ):
+        # User undoes a glass from yesterday — response aggregate should
+        # reflect yesterday's totals (post-delete), not today's, so the
+        # mobile UI on yesterday's diary view updates correctly.
+        from datetime import timedelta
+        yest = datetime.now(dt_tz.utc) - timedelta(days=1)
+        yest = yest.replace(hour=12, minute=0, second=0, microsecond=0)
+        kept = _make_water(user=client_user, amount=250, when=yest)
+        deleted = _make_water(user=client_user, amount=350, when=yest)
+        # Today's log so we can verify the response is NOT today's totals.
+        _make_water(user=client_user, amount=500)
+        resp = auth_client.delete(f"/api/v1/nutrition/water/{deleted.id}/")
+        assert resp.status_code == status.HTTP_200_OK
+        body = resp.json()["data"]
+        # Yesterday: 250 (kept) remains after deleting 350.
+        assert body["water_ml"] == 250
+        assert WaterLog.objects.filter(id=kept.id).count() == 1
 
 
 # ---------------------------------------------------------------------------
