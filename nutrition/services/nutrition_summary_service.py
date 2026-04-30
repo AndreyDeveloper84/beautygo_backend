@@ -25,10 +25,11 @@ Day boundaries:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 from django.conf import settings
 from django.db.models import Sum
+from django.db.models.functions import TruncDate
 
 from nutrition.models import FoodLog
 from nutrition.services.water_service import WaterService
@@ -40,6 +41,32 @@ class SummaryTotals:
     protein_g: float
     fat_g: float
     carbs_g: float
+
+
+@dataclass(frozen=True)
+class WeeklyDeficits:
+    """Aggregate signals over the trailing N days for cross-domain hints (DRF-248).
+
+    Used by InternalDeficitsView → AIConcierge prompt enrichment. Designed to
+    stay agnostic of vitamin data (vitamin lookups not yet wired — see
+    docs/FOOD_SCANNER_DECISION.md). Protein is the only signal we can compute
+    reliably from current FoodLog rows.
+
+    Fields:
+        days_observed: number of distinct calendar days (UTC) with ≥1 FoodLog
+            in the window. 0 means the user hasn't logged anything — caller
+            should NOT inject a hint (no signal).
+        protein_avg_pct_goal: average of (daily_protein / goal) across
+            observed days. ``None`` when days_observed == 0.
+        protein_low_streak_days: count of trailing consecutive days
+            (ending at the window's last day) where daily protein was
+            below ``settings.FOOD_DEFICIT_PROTEIN_THRESHOLD_PCT`` of goal.
+            Days with no logs break the streak.
+    """
+
+    days_observed: int
+    protein_avg_pct_goal: float | None
+    protein_low_streak_days: int
 
 
 @dataclass(frozen=True)
@@ -99,6 +126,67 @@ class NutritionSummaryService:
             # carries vitamin data; the per-100g seed dictionary doesn't
             # currently include vitamin breakdowns.
             vitamin_deficits={},
+        )
+
+
+    def weekly_deficits(self, *, user_id, days: int = 7) -> WeeklyDeficits:
+        """Compute trailing-N-day deficit signals for cross-domain bridge (DRF-248).
+
+        Window is ``days`` UTC calendar days ending today. Pure DB aggregation
+        — single query, indexed scan on FoodLog.(user, -logged_at).
+        """
+        today = datetime.now(timezone.utc).date()
+        window_start = today - timedelta(days=days - 1)
+        start_dt = datetime.combine(window_start, time.min, tzinfo=timezone.utc)
+        end_dt = datetime.combine(today, time.max, tzinfo=timezone.utc)
+
+        per_day = (
+            FoodLog.objects
+            .filter(user_id=user_id, logged_at__gte=start_dt, logged_at__lte=end_dt)
+            .annotate(day=TruncDate("logged_at", tzinfo=timezone.utc))
+            .values("day")
+            .annotate(protein_total=Sum("protein_g"))
+            .order_by("day")
+        )
+        per_day_list = list(per_day)
+        days_observed = len(per_day_list)
+        if days_observed == 0:
+            return WeeklyDeficits(
+                days_observed=0,
+                protein_avg_pct_goal=None,
+                protein_low_streak_days=0,
+            )
+
+        goal = float(settings.NUTRITION_DEFAULT_PROTEIN_GOAL_G or 0.0)
+        threshold_pct = float(settings.FOOD_DEFICIT_PROTEIN_THRESHOLD_PCT or 0.0)
+        if goal <= 0:
+            return WeeklyDeficits(
+                days_observed=days_observed,
+                protein_avg_pct_goal=None,
+                protein_low_streak_days=0,
+            )
+
+        protein_pcts: dict[date, float] = {
+            row["day"]: float(row["protein_total"] or 0.0) / goal
+            for row in per_day_list
+        }
+        avg_pct = sum(protein_pcts.values()) / len(protein_pcts)
+
+        # Streak: walk backward from today; break on first day that is
+        # either missing (no logs that day) or above threshold.
+        streak = 0
+        cursor = today
+        while cursor >= window_start:
+            pct = protein_pcts.get(cursor)
+            if pct is None or pct >= threshold_pct:
+                break
+            streak += 1
+            cursor = cursor - timedelta(days=1)
+
+        return WeeklyDeficits(
+            days_observed=days_observed,
+            protein_avg_pct_goal=round(avg_pct, 3),
+            protein_low_streak_days=streak,
         )
 
 
