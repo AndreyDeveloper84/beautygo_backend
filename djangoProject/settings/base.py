@@ -94,7 +94,9 @@ REST_FRAMEWORK = {
         'food_scan': '10/min',       # Scoped: POST /nutrition/scan (vision API cost cap)
         'food_log': '60/min',        # Scoped: POST /nutrition/food-log (no upstream cost; user typing speed)
         'nutrition_summary': '120/min',  # Scoped: GET /nutrition/summary (cheap aggregate; mobile may poll)
-        'food_scan_internal': '60/min',  # Scoped: service-to-service /nutrition/internal/scan/ — looser than client-app rate; bot fans out across many BotUsers
+        # Scoped: service-to-service /nutrition/internal/* — looser than
+        # client-app rate; bot fans out across many BotUsers.
+        'food_scan_internal': '60/min',
         'water': '60/min',           # Scoped: water tracker tap-buttons; user can't tap faster than this
     },
 }
