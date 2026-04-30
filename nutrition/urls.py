@@ -9,6 +9,7 @@ from django.urls import path
 from nutrition.views import (
     FoodLogCreateView,
     FoodScanView,
+    InternalDeficitsView,
     InternalFoodLogView,
     InternalFoodScanView,
     InternalSummaryView,
@@ -48,5 +49,10 @@ urlpatterns = [
         "internal/summary/",
         InternalSummaryView.as_view(),
         name="internal-nutrition-summary",
+    ),
+    path(
+        "internal/deficits/",
+        InternalDeficitsView.as_view(),
+        name="internal-nutrition-deficits",
     ),
 ]
