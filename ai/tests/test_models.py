@@ -4,6 +4,8 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from django.db import IntegrityError
+from django.utils import timezone
 
 from ai.models import Conversation, Message
 from ai.tests.factories import make_conversation, make_message, make_user
@@ -38,12 +40,15 @@ class TestConversationModel:
         assert conv.tenant_id is None
 
     def test_filter_by_tenant_id(self):
+        # Each (user, tenant_id) pair must be unique among active rows
+        # — see ai_conversation_one_active_per_user_tenant constraint.
+        # So we use distinct users to seed the same tenant_id twice.
         tid = uuid.uuid4()
-        user = make_user()
-        make_conversation(user=user, tenant_id=tid)
-        make_conversation(user=user, tenant_id=tid)
-        make_conversation(user=user, tenant_id=uuid.uuid4())
-        make_conversation(user=user, tenant_id=None)
+        u1, u2, u3 = make_user(), make_user(), make_user()
+        make_conversation(user=u1, tenant_id=tid)
+        make_conversation(user=u2, tenant_id=tid)
+        make_conversation(user=u3, tenant_id=uuid.uuid4())
+        make_conversation(user=u3, tenant_id=None)
         assert Conversation.objects.filter(tenant_id=tid).count() == 2
 
     def test_multiple_conversations_per_user(self):
@@ -132,3 +137,81 @@ class TestMessageModel:
         msg = make_message(conversation=conv, content="Привет, мир!")
         assert "user" in str(msg)
         assert "Привет" in str(msg)
+
+
+# ---------------------------------------------------------------------------
+# DRF-240 deltas — soft-delete + active-uniqueness + analytics index
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestSoftDelete:
+    def test_default_manager_hides_deleted(self):
+        user = make_user()
+        keep = make_conversation(user=user)
+        gone = make_conversation(user=user)
+        # gone has is_active=False so the partial unique constraint
+        # doesn't fire; we only test the manager filter here.
+        gone.is_active = False
+        gone.save(update_fields=["is_active"])
+        gone.deleted_at = timezone.now()
+        gone.save(update_fields=["deleted_at"])
+
+        ids = set(Conversation.objects.values_list("id", flat=True))
+        assert keep.id in ids
+        assert gone.id not in ids
+
+    def test_all_objects_includes_deleted(self):
+        user = make_user()
+        conv = make_conversation(user=user)
+        conv.mark_deleted()
+        assert Conversation.all_objects.filter(id=conv.id).exists()
+
+    def test_mark_deleted_sets_fields(self):
+        user = make_user()
+        conv = make_conversation(user=user)
+        assert conv.is_active is True
+        conv.mark_deleted()
+        conv.refresh_from_db()
+        assert conv.is_active is False
+        assert conv.deleted_at is not None
+
+
+@pytest.mark.django_db
+class TestActiveConversationUniqueness:
+    def test_constraint_present_in_meta(self):
+        names = [c.name for c in Conversation._meta.constraints]
+        assert "ai_conversation_one_active_per_user_tenant" in names
+
+    def test_two_active_same_user_same_tenant_rejected(self):
+        user = make_user()
+        tid = uuid.uuid4()
+        make_conversation(user=user, tenant_id=tid, is_active=True)
+        with pytest.raises(IntegrityError):
+            make_conversation(user=user, tenant_id=tid, is_active=True)
+
+    def test_inactive_does_not_block_new_active(self):
+        user = make_user()
+        old = make_conversation(user=user, is_active=True)
+        old.is_active = False
+        old.save(update_fields=["is_active"])
+        # Same user can have a new active conversation now.
+        make_conversation(user=user, is_active=True)
+        assert (
+            Conversation.objects.filter(user=user, is_active=True).count() == 1
+        )
+
+    def test_soft_deleted_does_not_block_new_active(self):
+        user = make_user()
+        first = make_conversation(user=user)
+        first.mark_deleted()
+        # Soft-deleted row is is_active=False AND deleted_at IS NOT NULL,
+        # so the partial unique condition doesn't match — new active OK.
+        make_conversation(user=user, is_active=True)
+
+
+@pytest.mark.django_db
+class TestMessageActionTypeIndex:
+    def test_role_action_type_index_present(self):
+        index_fields = [tuple(idx.fields) for idx in Message._meta.indexes]
+        assert ("role", "action_type") in index_fields
