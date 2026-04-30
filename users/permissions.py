@@ -1,7 +1,9 @@
 """Custom permission classes for BeautyGO API."""
 
+from hmac import compare_digest
 from typing import Any
 
+from django.conf import settings
 from rest_framework import permissions
 
 
@@ -53,3 +55,29 @@ class IsSpecialist(permissions.BasePermission):
             request.user.is_authenticated
             and request.user.role == 'specialist'
         )
+
+
+class IsServiceAccount(permissions.BasePermission):
+    """Allow only service-to-service calls authenticated by a shared secret.
+
+    Used for `/api/v1/nutrition/internal/*` endpoints — MAX bot calls Ayla
+    on behalf of a BotUser. Caller passes `X-Service-Token` header; we compare
+    against `settings.NUTRITION_SERVICE_TOKEN` in constant time.
+
+    Caller MUST also pass `X-External-User-ID` (e.g. `bot:12345`) so the view
+    can resolve to a ProxyUser via `users.services.resolve_external_user`.
+    Validation of the header presence is done by the view, not here — this
+    permission only guards the auth boundary.
+    """
+
+    message = "Service-to-service auth required"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        expected = getattr(settings, "NUTRITION_SERVICE_TOKEN", "") or ""
+        if not expected:
+            # Misconfigured deployment — fail closed.
+            return False
+        provided = request.META.get("HTTP_X_SERVICE_TOKEN", "")
+        if not provided:
+            return False
+        return compare_digest(provided, expected)

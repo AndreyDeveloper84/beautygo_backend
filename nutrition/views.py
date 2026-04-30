@@ -25,8 +25,9 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from users.permissions import IsClient, IsClientApp
+from users.permissions import IsClient, IsClientApp, IsServiceAccount
 from users.response import error_response, success_response
+from users.services import InvalidExternalUserIDError, resolve_external_user
 
 from nutrition.models import FoodScan, WaterLog
 from nutrition.serializers import (
@@ -140,6 +141,107 @@ class FoodScanView(APIView):
         # Slice 3a: seed-only lookup. Misses leave nutrition=null and the
         # mobile client shows "уточните порцию вручную". OFF/USDA HTTP
         # fallback ships in 3a'.
+        facts = NutritionLookup().lookup(
+            outcome.result.dish_name,
+            ingredients=outcome.result.ingredients,
+            portion_g=outcome.result.portion_g,
+        )
+        scan.nutrition = facts.to_dict() if facts is not None else None
+
+        scan.save()
+
+        return success_response(
+            FoodScanResponseSerializer(scan).data,
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class InternalFoodScanView(APIView):
+    """POST /api/v1/nutrition/internal/scan/ — service-to-service food scan.
+
+    DRF-246. Mirrors `FoodScanView` but authenticates via shared service token
+    (`X-Service-Token`) and resolves the actor from `X-External-User-ID`
+    (e.g. `bot:12345`). Used by the MAX bot to scan on behalf of a BotUser
+    that has not yet been migrated to a real Ayla account.
+
+    Lazy ProxyUser creation: first call for a given external_user_id creates
+    a `User(is_proxy=True, role='client')`. Subsequent calls reuse it.
+    """
+
+    permission_classes = [IsServiceAccount]
+    parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def post(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+
+        serializer = ScanRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Невалидные данные",
+                details=serializer.errors,
+            )
+
+        image_file = serializer.validated_data["image"]
+        portion_multiplier = serializer.validated_data.get("portion_multiplier") or 1.0
+
+        image_bytes = image_file.read()
+
+        scan = FoodScan(user=user)
+        scan.image.save(
+            f"{scan.id}.jpg",
+            ContentFile(image_bytes),
+            save=False,
+        )
+
+        router = FoodScannerRouter()
+        try:
+            outcome = router.scan(
+                image_bytes,
+                portion_multiplier=portion_multiplier,
+                user=user,
+            )
+        except AllProvidersFailedError as exc:
+            if exc.is_low_confidence_only:
+                error_code = "FOOD_NOT_RECOGNIZED"
+                http_status = status.HTTP_400_BAD_REQUEST
+                msg = "Не удалось распознать блюдо на фото"
+            else:
+                error_code = "FOOD_API_UNAVAILABLE"
+                http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+                msg = "Сервис распознавания временно недоступен"
+
+            scan.error_code = error_code
+            scan.error_message = str(exc)[:500]
+            scan.save()
+            logger.warning(
+                "nutrition.internal_scan.all_providers_failed user=%s ext=%s code=%s err=%s",
+                user.id, external_user_id, error_code, exc,
+            )
+            return error_response(error_code, msg, status_code=http_status)
+
+        scan.dish_name = outcome.result.dish_name
+        scan.confidence = outcome.result.confidence
+        scan.portion_g = outcome.result.portion_g
+        scan.ingredients = outcome.result.ingredients
+        scan.provider_used = outcome.result.provider
+        scan.provider_fallback_from = (
+            outcome.primary_provider_name
+            if outcome.primary_failed_with
+            else ""
+        )
+        scan.latency_ms = outcome.result.latency_ms
+        scan.raw_response = outcome.result.raw_response
+
         facts = NutritionLookup().lookup(
             outcome.result.dish_name,
             ingredients=outcome.result.ingredients,

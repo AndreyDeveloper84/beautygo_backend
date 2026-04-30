@@ -2,6 +2,7 @@
 
 import logging
 import random
+import re
 from datetime import timedelta
 
 from django.conf import settings
@@ -11,6 +12,39 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .models import OTPCode, User
 
 logger = logging.getLogger(__name__)
+
+
+# --- Proxy user resolution (DRF-246) ---
+
+_EXTERNAL_USER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*:[A-Za-z0-9_-]{1,64}$")
+
+
+class InvalidExternalUserIDError(ValueError):
+    """Raised when X-External-User-ID does not match `<source>:<id>` shape."""
+
+
+def resolve_external_user(external_user_id: str) -> User:
+    """Resolve `<source>:<id>` (e.g. `bot:12345`) to a User, lazily creating.
+
+    Used by service-to-service endpoints (e.g. nutrition/internal/scan/) when
+    the caller acts on behalf of an external identity that does not yet have
+    an Ayla account. The created User has `is_proxy=True`, `role='client'`,
+    `is_guest=False`. Phase C migration links proxy → real account by setting
+    `User.linked_proxy_id` and migrating data.
+
+    Format: `<source>:<id>` where source is lowercase alphanumeric (e.g. `bot`,
+    `formula`), id is up to 64 chars of alphanumeric/underscore/hyphen.
+    Stored as `username` directly (already unique on AbstractUser).
+    """
+    if not external_user_id or not _EXTERNAL_USER_ID_RE.match(external_user_id):
+        raise InvalidExternalUserIDError(
+            f"external_user_id must match '<source>:<id>', got {external_user_id!r}"
+        )
+    user, _ = User.objects.get_or_create(
+        username=external_user_id,
+        defaults={"role": "client", "is_proxy": True, "is_guest": False},
+    )
+    return user
 
 
 # --- Custom Exceptions ---
