@@ -25,7 +25,8 @@ class MessageInline(admin.TabularInline):
 @admin.register(Conversation)
 class ConversationAdmin(admin.ModelAdmin):
     list_display = (
-        "id", "user", "tenant_id", "is_active", "last_message_at", "created_at",
+        "id", "user", "tenant_id", "is_active", "deleted_at",
+        "last_message_at", "created_at",
     )
     list_filter = ("is_active", "tenant_id")
     search_fields = ("id", "user__username", "user__phone")
@@ -34,6 +35,11 @@ class ConversationAdmin(admin.ModelAdmin):
         "last_message_at", "created_at",
     )
     inlines = [MessageInline]
+
+    def get_queryset(self, request):
+        # Admin needs visibility into soft-deleted rows for audit /
+        # billing-dispute investigation. Default manager hides them.
+        return Conversation.all_objects.all()
 
     def has_add_permission(self, request):
         return False
