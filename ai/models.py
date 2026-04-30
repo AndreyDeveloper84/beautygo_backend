@@ -18,6 +18,17 @@ import uuid
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
+
+
+class _ConversationManager(models.Manager):
+    """Default manager — hides soft-deleted rows.
+
+    Use `Conversation.all_objects` to include soft-deleted (admin only).
+    """
+
+    def get_queryset(self):
+        return super().get_queryset().filter(deleted_at__isnull=True)
 
 
 class Conversation(models.Model):
@@ -34,6 +45,9 @@ class Conversation(models.Model):
     last_message_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    objects = _ConversationManager()
+    all_objects = models.Manager()
+
     class Meta:
         verbose_name = "AI Conversation"
         verbose_name_plural = "AI Conversations"
@@ -43,9 +57,33 @@ class Conversation(models.Model):
             models.Index(fields=["is_active", "-last_message_at"]),
             models.Index(fields=["tenant_id", "is_active", "-last_message_at"]),
         ]
+        constraints = [
+            # ConversationStore.resolve_active_conversation contract
+            # (ayla-ai-core orchestrator) requires exactly one active
+            # conversation per (user, tenant). Without this two parallel
+            # POST /ai/chat/ from the same user race-condition into two
+            # active rows. Postgres-only partial unique — SQLite tests
+            # fall back to app-side check in resolve_active_conversation.
+            models.UniqueConstraint(
+                fields=["user", "tenant_id"],
+                condition=models.Q(is_active=True, deleted_at__isnull=True),
+                name="ai_conversation_one_active_per_user_tenant",
+            ),
+        ]
 
     def __str__(self) -> str:
         return f"Conversation {self.id} (user={self.user_id})"
+
+    def mark_deleted(self) -> None:
+        """Soft-delete: hide from default manager + close the conversation.
+
+        Used by the «Очистить историю Ayla» 152-ФЗ workflow. Messages
+        cascade-hide via the FK + admin-only `Conversation.all_objects`
+        for audit access.
+        """
+        self.is_active = False
+        self.deleted_at = timezone.now()
+        self.save(update_fields=["is_active", "deleted_at"])
 
 
 class Message(models.Model):
@@ -88,6 +126,12 @@ class Message(models.Model):
         ordering = ["created_at"]
         indexes = [
             models.Index(fields=["conversation", "created_at"]),
+            # Analytics workload — see BOT_CODE_AUDIT_2026-04 §1.6:
+            # "SELECT action_type, COUNT(*) FROM messages WHERE
+            # role='assistant' GROUP BY action_type" runs on every
+            # ops dashboard. Composite (role, action_type) because
+            # 99% of these queries pin role='assistant' first.
+            models.Index(fields=["role", "action_type"]),
         ]
 
     def __str__(self) -> str:
