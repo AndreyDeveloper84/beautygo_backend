@@ -20,6 +20,14 @@ class User(AbstractUser):
         default=False,
         help_text="Anonymous (guest) user created on first app launch without registration",
     )
+    is_proxy = models.BooleanField(
+        default=False,
+        help_text=(
+            "Proxy user created via service-to-service auth (e.g. MAX bot calling "
+            "Ayla nutrition API on behalf of a BotUser). Username is namespaced "
+            "(e.g. 'bot:12345'). Phase C migration links proxy to a real account."
+        ),
+    )
     onboarding_completed = models.BooleanField(
         default=False,
         help_text="User has completed the onboarding flow (name + location saved)",

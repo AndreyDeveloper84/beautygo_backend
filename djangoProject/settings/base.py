@@ -94,6 +94,7 @@ REST_FRAMEWORK = {
         'food_scan': '10/min',       # Scoped: POST /nutrition/scan (vision API cost cap)
         'food_log': '60/min',        # Scoped: POST /nutrition/food-log (no upstream cost; user typing speed)
         'nutrition_summary': '120/min',  # Scoped: GET /nutrition/summary (cheap aggregate; mobile may poll)
+        'food_scan_internal': '60/min',  # Scoped: service-to-service /nutrition/internal/scan/ — looser than client-app rate; bot fans out across many BotUsers
         'water': '60/min',           # Scoped: water tracker tap-buttons; user can't tap faster than this
     },
 }
@@ -428,6 +429,12 @@ YANDEX_VISION_FOLDER_ID = os.environ.get("YANDEX_VISION_FOLDER_ID", "")
 # Keep names lowercase short tokens so env diffs stay readable.
 FOOD_SCANNER_PRIMARY = os.environ.get("FOOD_SCANNER_PRIMARY", "openai")
 FOOD_SCANNER_FALLBACK = os.environ.get("FOOD_SCANNER_FALLBACK", "yandex")
+
+# Service-to-service token for /api/v1/nutrition/internal/* endpoints (DRF-246).
+# Used by the MAX bot to call nutrition API on behalf of a BotUser. Empty
+# value disables internal endpoints (IsServiceAccount fails closed) — set
+# in dev/staging/prod env, rotate quarterly.
+NUTRITION_SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN", "")
 
 # Nutrition summary defaults — per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION
 # GET /nutrition/summary. UserPersonalContext doesn't carry per-user goals

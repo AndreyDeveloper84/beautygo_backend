@@ -25,8 +25,9 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from users.permissions import IsClient, IsClientApp
+from users.permissions import IsClient, IsClientApp, IsServiceAccount
 from users.response import error_response, success_response
+from users.services import InvalidExternalUserIDError, resolve_external_user
 
 from nutrition.models import FoodScan, WaterLog
 from nutrition.serializers import (
@@ -155,6 +156,147 @@ class FoodScanView(APIView):
         )
 
 
+class InternalFoodScanView(APIView):
+    """POST /api/v1/nutrition/internal/scan/ — service-to-service food scan.
+
+    DRF-246. Mirrors `FoodScanView` but authenticates via shared service token
+    (`X-Service-Token`) and resolves the actor from `X-External-User-ID`
+    (e.g. `bot:12345`). Used by the MAX bot to scan on behalf of a BotUser
+    that has not yet been migrated to a real Ayla account.
+
+    Lazy ProxyUser creation: first call for a given external_user_id creates
+    a `User(is_proxy=True, role='client')`. Subsequent calls reuse it.
+    """
+
+    permission_classes = [IsServiceAccount]
+    parser_classes = [MultiPartParser, FormParser]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def post(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+
+        serializer = ScanRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Невалидные данные",
+                details=serializer.errors,
+            )
+
+        image_file = serializer.validated_data["image"]
+        portion_multiplier = serializer.validated_data.get("portion_multiplier") or 1.0
+
+        image_bytes = image_file.read()
+
+        scan = FoodScan(user=user)
+        scan.image.save(
+            f"{scan.id}.jpg",
+            ContentFile(image_bytes),
+            save=False,
+        )
+
+        router = FoodScannerRouter()
+        try:
+            outcome = router.scan(
+                image_bytes,
+                portion_multiplier=portion_multiplier,
+                user=user,
+            )
+        except AllProvidersFailedError as exc:
+            if exc.is_low_confidence_only:
+                error_code = "FOOD_NOT_RECOGNIZED"
+                http_status = status.HTTP_400_BAD_REQUEST
+                msg = "Не удалось распознать блюдо на фото"
+            else:
+                error_code = "FOOD_API_UNAVAILABLE"
+                http_status = status.HTTP_503_SERVICE_UNAVAILABLE
+                msg = "Сервис распознавания временно недоступен"
+
+            scan.error_code = error_code
+            scan.error_message = str(exc)[:500]
+            scan.save()
+            logger.warning(
+                "nutrition.internal_scan.all_providers_failed user=%s ext=%s code=%s err=%s",
+                user.id, external_user_id, error_code, exc,
+            )
+            return error_response(error_code, msg, status_code=http_status)
+
+        scan.dish_name = outcome.result.dish_name
+        scan.confidence = outcome.result.confidence
+        scan.portion_g = outcome.result.portion_g
+        scan.ingredients = outcome.result.ingredients
+        scan.provider_used = outcome.result.provider
+        scan.provider_fallback_from = (
+            outcome.primary_provider_name
+            if outcome.primary_failed_with
+            else ""
+        )
+        scan.latency_ms = outcome.result.latency_ms
+        scan.raw_response = outcome.result.raw_response
+
+        facts = NutritionLookup().lookup(
+            outcome.result.dish_name,
+            ingredients=outcome.result.ingredients,
+            portion_g=outcome.result.portion_g,
+        )
+        scan.nutrition = facts.to_dict() if facts is not None else None
+
+        scan.save()
+
+        return success_response(
+            FoodScanResponseSerializer(scan).data,
+            status_code=status.HTTP_200_OK,
+        )
+
+
+def _create_food_log_for(user, serializer_data: dict, request: Request) -> Response:
+    """Shared body for FoodLogCreateView + InternalFoodLogView (DRF-247).
+
+    Identical persistence path; only auth/actor differ. Returns the same
+    response envelope so both client-app and bot consumers can deserialise
+    with `FoodLogEntrySerializer`.
+    """
+    idempotency_key = request.META.get("HTTP_X_IDEMPOTENCY_KEY") or None
+    try:
+        log = FoodLogService().create(CreateFoodLogInput(
+            user_id=user.id,
+            portion_multiplier=serializer_data["portion_multiplier"],
+            meal_type=serializer_data["meal_type"],
+            scan_id=serializer_data.get("scan_id"),
+            dish_name=serializer_data.get("dish_name"),
+            logged_at=serializer_data.get("logged_at"),
+            idempotency_key=idempotency_key,
+        ))
+    except InvalidInputError as exc:
+        return error_response("VALIDATION_ERROR", str(exc))
+    except ScanNotOwnedError:
+        return error_response(
+            "SCAN_NOT_FOUND",
+            "Сканирование не найдено",
+            status_code=status.HTTP_404_NOT_FOUND,
+        )
+    except DishNotRecognizedError as exc:
+        logger.info(
+            "nutrition.food_log.not_recognized user=%s err=%s", user.id, exc,
+        )
+        return error_response(
+            "FOOD_NOT_RECOGNIZED",
+            "Не удалось определить макросы блюда",
+        )
+    return success_response(
+        FoodLogEntrySerializer(log).data,
+        status_code=status.HTTP_201_CREATED,
+    )
+
+
 class FoodLogCreateView(APIView):
     """POST /api/v1/nutrition/food-log/ — log a meal to the diary.
 
@@ -174,45 +316,74 @@ class FoodLogCreateView(APIView):
                 "Невалидные данные",
                 details=serializer.errors,
             )
-        v = serializer.validated_data
-        # Caller provides X-Idempotency-Key (UUID) on retries to prevent
-        # duplicate diary entries when mobile re-sends after a flaky
-        # network. Absent header = no de-dup, every POST creates new.
-        idempotency_key = request.META.get("HTTP_X_IDEMPOTENCY_KEY") or None
+        return _create_food_log_for(request.user, serializer.validated_data, request)
+
+
+class InternalFoodLogView(APIView):
+    """POST /api/v1/nutrition/internal/food-log/ — service-to-service log.
+
+    DRF-247. Mirrors `FoodLogCreateView` but authenticates via service token
+    + resolves actor from `X-External-User-ID`. Used by the MAX bot when a
+    user clicks «Записать в дневник» in a scan card.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def post(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
-            log = FoodLogService().create(CreateFoodLogInput(
-                user_id=request.user.id,
-                portion_multiplier=v["portion_multiplier"],
-                meal_type=v["meal_type"],
-                scan_id=v.get("scan_id"),
-                dish_name=v.get("dish_name"),
-                logged_at=v.get("logged_at"),
-                idempotency_key=idempotency_key,
-            ))
-        except InvalidInputError as exc:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
             return error_response(
-                "VALIDATION_ERROR", str(exc),
-            )
-        except ScanNotOwnedError:
-            # Use 404 to avoid leaking whether the scan exists at all.
-            return error_response(
-                "SCAN_NOT_FOUND",
-                "Сканирование не найдено",
-                status_code=status.HTTP_404_NOT_FOUND,
-            )
-        except DishNotRecognizedError as exc:
-            logger.info(
-                "nutrition.food_log.not_recognized user=%s err=%s",
-                request.user.id, exc,
-            )
-            return error_response(
-                "FOOD_NOT_RECOGNIZED",
-                "Не удалось определить макросы блюда",
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
             )
 
+        serializer = FoodLogCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Невалидные данные",
+                details=serializer.errors,
+            )
+        return _create_food_log_for(user, serializer.validated_data, request)
+
+
+class InternalSummaryView(APIView):
+    """GET /api/v1/nutrition/internal/summary/?date=YYYY-MM-DD — daily totals.
+
+    DRF-247. Mirrors `NutritionSummaryView` for service-to-service callers.
+    Bot uses this to render the `/дневник` command.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def get(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+
+        q = NutritionSummaryQuerySerializer(data=request.query_params)
+        if not q.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Невалидный параметр date — ожидается YYYY-MM-DD",
+                details=q.errors,
+            )
+        day = q.validated_data.get("date") or datetime.now(dt_tz.utc).date()
+        summary = NutritionSummaryService().summary(user_id=user.id, day=day)
         return success_response(
-            FoodLogEntrySerializer(log).data,
-            status_code=status.HTTP_201_CREATED,
+            NutritionSummaryResponseSerializer(summary).data,
+            status_code=status.HTTP_200_OK,
         )
 
 
