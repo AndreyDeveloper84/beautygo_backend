@@ -56,7 +56,7 @@ def _scan_result(dish: str = "Борщ", confidence: float = 0.9) -> ScanResult:
     )
 
 
-def _post(client: APIClient, *, token: str, external_id: str, **extra) -> "Response":
+def _post(client: APIClient, *, token: str, external_id: str, **extra):
     headers = {
         "HTTP_X_SERVICE_TOKEN": token,
         "HTTP_X_EXTERNAL_USER_ID": external_id,
