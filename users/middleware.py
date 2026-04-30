@@ -70,6 +70,9 @@ EXCLUDED_PATH_PREFIXES = (
     "/api/v1/health/",
     "/static/",
     "/media/",
+    # Service-to-service endpoints (DRF-246/247) — auth via X-Service-Token,
+    # not X-App-Type. The MAX bot is neither client nor pro.
+    "/api/v1/nutrition/internal/",
 )
 
 
