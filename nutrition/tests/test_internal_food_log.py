@@ -62,7 +62,8 @@ def scan_with_nutrition(proxy_user):
 
 
 class TestInternalFoodLog:
-    def test_missing_service_token_returns_403(self):
+    def test_missing_service_token_returns_401(self):
+        """DRF returns 401 NotAuthenticated when no auth was provided."""
         c = APIClient()
         resp = c.post(
             LOG_URL,
@@ -70,7 +71,7 @@ class TestInternalFoodLog:
             format="json",
             HTTP_X_EXTERNAL_USER_ID="bot:777",
         )
-        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        assert resp.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_logs_from_scan_with_idempotency(self, scan_with_nutrition):
         c = APIClient()

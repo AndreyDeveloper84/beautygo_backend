@@ -75,7 +75,10 @@ def _post(client: APIClient, *, token: str, external_id: str, **extra) -> "Respo
 
 
 class TestServiceAccountAuth:
-    def test_missing_token_returns_403(self):
+    def test_missing_token_returns_401(self):
+        """DRF returns 401 NotAuthenticated when permission fails for an
+        unauthenticated request — there's no JWT to evaluate against
+        IsServiceAccount, so the request is treated as unauthenticated."""
         c = APIClient()
         resp = c.post(
             INTERNAL_URL,
@@ -83,15 +86,17 @@ class TestServiceAccountAuth:
             format="multipart",
             HTTP_X_EXTERNAL_USER_ID="bot:12345",
         )
-        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        assert resp.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_wrong_token_returns_403(self):
+    def test_wrong_token_returns_401(self):
         c = APIClient()
         resp = _post(c, token="not-the-token", external_id="bot:12345")
-        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        assert resp.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_jwt_user_auth_does_not_grant_access(self):
-        """Regular IsClient JWT must NOT bypass IsServiceAccount."""
+        """Regular IsClient JWT must NOT bypass IsServiceAccount.
+        Authenticated via JWT but missing X-Service-Token → 403 (the
+        request IS authenticated, just not authorized for this endpoint)."""
         u = User.objects.create_user(
             username="real-client", password="x", role="client",
             phone="+79991110000",
@@ -112,7 +117,7 @@ class TestServiceAccountAuth:
         settings.NUTRITION_SERVICE_TOKEN = ""
         c = APIClient()
         resp = _post(c, token="", external_id="bot:12345")
-        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        assert resp.status_code == status.HTTP_401_UNAUTHORIZED
 
 
 # ---------------------------------------------------------------------------
