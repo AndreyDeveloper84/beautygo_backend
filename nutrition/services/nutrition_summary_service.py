@@ -128,7 +128,6 @@ class NutritionSummaryService:
             vitamin_deficits={},
         )
 
-
     def weekly_deficits(self, *, user_id, days: int = 7) -> WeeklyDeficits:
         """Compute trailing-N-day deficit signals for cross-domain bridge (DRF-248).
 
