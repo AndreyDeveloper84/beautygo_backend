@@ -52,6 +52,7 @@ from nutrition.services.food_scanner_router import (
     AllProvidersFailedError,
     FoodScannerRouter,
 )
+from nutrition.services.deficit_hints import build_deficit_hint
 from nutrition.services.nutrition_lookup import NutritionLookup
 from nutrition.services.nutrition_summary_service import NutritionSummaryService
 from nutrition.services.water_service import (
@@ -504,5 +505,58 @@ class WaterTodayView(APIView):
         today = WaterService().today_logs(request.user.id)
         return success_response(
             WaterTodayResponseSerializer(today).data,
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class InternalDeficitsView(APIView):
+    """GET /api/v1/nutrition/internal/deficits/?days=7 — cross-domain bridge (DRF-248).
+
+    Service-to-service. Returns aggregated deficit signals + an optional
+    soft hint string the bot's AIConcierge feeds into ``render_system_prompt``
+    via the ``extra_hint`` kwarg. Empty hint = nothing fired (caller still
+    gets 200 so it can deterministically decide).
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def get(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+
+        try:
+            days = int(request.query_params.get("days", "7"))
+        except (TypeError, ValueError):
+            return error_response(
+                "VALIDATION_ERROR",
+                "Параметр days должен быть целым числом 1..14",
+            )
+        if days < 1 or days > 14:
+            return error_response(
+                "VALIDATION_ERROR",
+                "Параметр days должен быть в диапазоне 1..14",
+            )
+
+        deficits = NutritionSummaryService().weekly_deficits(
+            user_id=user.id, days=days,
+        )
+        hint_result = build_deficit_hint(deficits)
+
+        return success_response(
+            {
+                "days_observed": deficits.days_observed,
+                "protein_avg_pct_goal": deficits.protein_avg_pct_goal,
+                "protein_low_streak_days": deficits.protein_low_streak_days,
+                "hint": hint_result.hint,
+                "fired_keys": hint_result.fired_keys,
+            },
             status_code=status.HTTP_200_OK,
         )
