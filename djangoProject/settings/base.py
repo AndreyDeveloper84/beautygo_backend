@@ -438,6 +438,28 @@ FOOD_SCANNER_FALLBACK = os.environ.get("FOOD_SCANNER_FALLBACK", "yandex")
 # in dev/staging/prod env, rotate quarterly.
 NUTRITION_SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN", "")
 
+# ----------------------------------------------------------------------------
+# Cross-domain bridge defaults (DRF-248)
+# ----------------------------------------------------------------------------
+# WeeklyDeficits.protein_low_streak_days uses these. Soft defaults — flat
+# numbers without per-user goals because UserPersonalContext doesn't carry
+# nutrition targets yet (DRF-174 reduced scope, see PRD). Override per-env
+# if a pilot wants different anchors.
+NUTRITION_DEFAULT_PROTEIN_GOAL_G = int(
+    os.environ.get("NUTRITION_DEFAULT_PROTEIN_GOAL_G", "80")
+)
+# Daily protein < threshold * goal counts the day as "low". 0.6 = 48 g/day at
+# the 80 g goal. Conservative — we'd rather under-fire hints than push food
+# talk into unrelated bookings.
+FOOD_DEFICIT_PROTEIN_THRESHOLD_PCT = float(
+    os.environ.get("FOOD_DEFICIT_PROTEIN_THRESHOLD_PCT", "0.6")
+)
+# Streak length needed to fire a hint. 3 days = roughly the smallest signal
+# that's not statistical noise on a self-reported diary.
+FOOD_DEFICIT_MIN_STREAK_DAYS = int(
+    os.environ.get("FOOD_DEFICIT_MIN_STREAK_DAYS", "3")
+)
+
 # Nutrition summary defaults — per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION
 # GET /nutrition/summary. UserPersonalContext doesn't carry per-user goals
 # yet (DRF-174 reduced scope) so the daily summary uses these flat defaults.
