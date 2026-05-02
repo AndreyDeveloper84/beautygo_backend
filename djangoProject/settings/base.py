@@ -216,9 +216,18 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'users.middleware.JWTContextMiddleware',
+    # TenantContextMiddleware — DRF-242.4. After JWT so user is resolved
+    # before tenant header is parsed; before view auth so IsTenantMember
+    # has request.tenant available. Permissive in this rollout phase
+    # (missing/unknown header → request.tenant=None); 242.5 will tighten.
+    'users.middleware.TenantContextMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+# Multi-tenant defaults (DRF-242.4). Backfill command uses these when no
+# CLI flags are given. MULTI_TENANT_STRICT lands in DRF-242.5.
+MULTI_TENANT_DEFAULT_SLUG = os.environ.get("MULTI_TENANT_DEFAULT_SLUG", "formula")
 
 ROOT_URLCONF = 'djangoProject.urls'
 
