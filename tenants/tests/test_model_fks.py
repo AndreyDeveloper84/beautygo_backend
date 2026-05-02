@@ -63,25 +63,30 @@ class TestUserTenantFK:
 
 
 class TestSpecialistProfileTenantFK:
+    """SpecialistProfile is auto-created by users.signals.post_save when a
+    User with role='specialist' is saved. So tests fetch the existing
+    profile and assign the tenant rather than instantiating a new one
+    (which would trip the UNIQUE constraint on user_id)."""
+
     def test_specialist_can_be_assigned_a_tenant(self, tenant):
-        from users.models import SpecialistProfile, User
+        from users.models import User
         u = User.objects.create_user(
             username="spec", phone="+79991110021", role="specialist",
         )
-        sp = SpecialistProfile.objects.create(
-            user=u, display_name="X", tenant=tenant,
-        )
+        sp = u.specialist_profile
+        sp.tenant = tenant
+        sp.save(update_fields=["tenant"])
         sp.refresh_from_db()
         assert sp.tenant_id == tenant.id
 
     def test_tenant_delete_protected_when_specialists_reference_it(self, tenant):
-        from users.models import SpecialistProfile, User
+        from users.models import User
         u = User.objects.create_user(
             username="spec2", phone="+79991110022", role="specialist",
         )
-        SpecialistProfile.objects.create(
-            user=u, display_name="X", tenant=tenant,
-        )
+        sp = u.specialist_profile
+        sp.tenant = tenant
+        sp.save(update_fields=["tenant"])
         with pytest.raises(ProtectedError):
             tenant.delete()
 
@@ -96,7 +101,7 @@ class TestAppointmentTenantFK:
         from datetime import datetime, timedelta, timezone as dt_tz
         from appointments.models import Appointment
         from services.models import Service
-        from users.models import SpecialistProfile, User
+        from users.models import User
 
         client = User.objects.create_user(
             username="ac1", phone="+79991110031", role="client",
@@ -104,9 +109,8 @@ class TestAppointmentTenantFK:
         spec_user = User.objects.create_user(
             username="as1", phone="+79991110032", role="specialist",
         )
-        spec = SpecialistProfile.objects.create(
-            user=spec_user, display_name="S1",
-        )
+        # Signal auto-created the profile — fetch it.
+        spec = spec_user.specialist_profile
         svc = Service.objects.create(
             specialist=spec, name="Test", price=1000, duration_minutes=60,
         )
