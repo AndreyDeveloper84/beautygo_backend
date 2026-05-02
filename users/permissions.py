@@ -57,6 +57,48 @@ class IsSpecialist(permissions.BasePermission):
         )
 
 
+class IsTenantMember(permissions.BasePermission):
+    """Allow only callers whose user belongs to ``request.tenant`` (DRF-242.4).
+
+    Used together with ``TenantContextMiddleware`` (which resolves the
+    ``X-Tenant`` header into ``request.tenant``). The permission compares
+    the resolved tenant against ``request.user.tenant`` and rejects the
+    mismatch case — preventing one tenant's authenticated user from
+    reaching another tenant's data simply by changing the header.
+
+    Behavior matrix:
+    | request.tenant | user.tenant | result                |
+    |----------------|-------------|------------------------|
+    | None           | any         | True (legacy / strict-mode-off path) |
+    | T1             | None        | False (user not yet backfilled — 403 protects against escalation) |
+    | T1             | T1          | True                   |
+    | T1             | T2          | False                  |
+
+    Anonymous users (no JWT) are rejected — combine with ``IsAuthenticated``
+    if you need to express "must-be-authenticated AND must-match-tenant".
+    DRF-242.5's ``MULTI_TENANT_STRICT`` will tighten the None/None and
+    None/T1 rows once the backfill has run.
+    """
+
+    message = "Доступ к ресурсам этого тенанта запрещён"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        user = request.user
+        if not user or not getattr(user, "is_authenticated", False):
+            return False
+        request_tenant = getattr(request, "tenant", None)
+        user_tenant_id = getattr(user, "tenant_id", None)
+        # No header → caller didn't ask for tenant scope. Permissive in
+        # rollout phase; 242.5 will require the header on /api/v1/* paths.
+        if request_tenant is None:
+            return True
+        # Header set, but user has no tenant assigned — fail (prevents
+        # un-backfilled users from accessing tenant-scoped data).
+        if user_tenant_id is None:
+            return False
+        return request_tenant.id == user_tenant_id
+
+
 class IsServiceAccount(permissions.BasePermission):
     """Allow only service-to-service calls authenticated by a shared secret.
 
