@@ -36,6 +36,17 @@ class FoodScan(models.Model):
         on_delete=models.CASCADE,
         related_name="food_scans",
     )
+    # tenant FK — DRF-242.3. Denormalized from user.tenant for query
+    # performance: nutrition analytics queries scope by tenant first.
+    # null=True until 242.4 backfill. PROTECT prevents orphan scans on
+    # accidental tenant deletion.
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="food_scans",
+    )
     image = models.ImageField(upload_to=_scan_image_path)
 
     # Recognition result (from provider).
