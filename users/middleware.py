@@ -1,4 +1,4 @@
-"""X-App-Type, JWT context, and X-Request-ID middleware."""
+"""X-App-Type, JWT context, X-Request-ID, and X-Tenant middleware."""
 
 import logging
 import uuid
@@ -20,6 +20,7 @@ __all__ = [
     "AppTypeMiddleware",
     "JWTContextMiddleware",
     "RequestIDMiddleware",
+    "TenantContextMiddleware",
     "get_request_id",
 ]
 
@@ -158,5 +159,82 @@ class JWTContextMiddleware:
                 pass
             except Exception:
                 logger.exception("Unexpected error in JWTContextMiddleware")
+
+        return self.get_response(request)
+
+
+class TenantContextMiddleware:
+    """Resolve X-Tenant header → request.tenant (DRF-242.4).
+
+    Reads the ``X-Tenant`` request header (slug, e.g. ``formula``), looks
+    up the matching ``tenants.Tenant`` (active rows only via the default
+    manager), and attaches the instance to ``request.tenant``. Missing
+    or unknown header → ``request.tenant = None``; this is intentionally
+    permissive for the rollout phase. DRF-242.5 will introduce the
+    ``MULTI_TENANT_STRICT`` setting that flips missing-header to 400.
+
+    Excluded prefixes (no header expected):
+    - /admin/                — Django admin uses session auth, not tenant scope.
+    - /api/schema/, /docs/, /redoc/  — OpenAPI surfaces.
+    - /api/v1/health/        — load balancer probes.
+    - /api/v1/nutrition/internal/  — service-to-service path; bot resolves
+      its own external_user_id, not via header.
+    - /static/, /media/      — file serving.
+
+    Why a separate request attribute instead of overriding request.user.tenant:
+    - The header explicitly states *which* tenant the caller is acting in,
+      not which tenant the user belongs to. For most users the two match,
+      but the ``IsTenantMember`` permission needs both halves of the
+      comparison to detect mismatch (header says X, user belongs to Y →
+      403).
+    - Anonymous / pre-login requests still need a tenant context for
+      tenant-scoped catalogue endpoints (e.g. ``/specialists/``).
+
+    Header is case-insensitive at the WSGI layer; Django normalises it to
+    ``HTTP_X_TENANT``. Empty string is treated as missing.
+    """
+
+    EXCLUDED_PATH_PREFIXES = (
+        "/admin",
+        "/api/schema/",
+        "/api/docs/",
+        "/api/redoc/",
+        "/api/v1/health/",
+        "/api/v1/nutrition/internal/",
+        "/static/",
+        "/media/",
+    )
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        request.tenant = None
+
+        path = request.path
+        if any(path.startswith(p) for p in self.EXCLUDED_PATH_PREFIXES):
+            return self.get_response(request)
+
+        slug = (request.META.get("HTTP_X_TENANT") or "").strip()
+        if not slug:
+            return self.get_response(request)
+
+        # Local import to avoid app-loading order issues — middleware is
+        # imported during settings bootstrap, before INSTALLED_APPS is
+        # fully populated.
+        from tenants.models import Tenant
+
+        try:
+            request.tenant = Tenant.objects.get(slug=slug)
+        except Tenant.DoesNotExist:
+            # Unknown / inactive slug → leave request.tenant=None. The
+            # IsTenantMember permission turns this into a 403 for any
+            # endpoint that requires a tenant context. Logging at INFO
+            # because most occurrences will be misconfigured clients,
+            # not attacks.
+            logger.info(
+                "tenant.middleware.unknown_slug slug=%s path=%s",
+                slug, path,
+            )
 
         return self.get_response(request)
