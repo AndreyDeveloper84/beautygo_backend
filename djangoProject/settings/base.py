@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     'ai',
     'notifications',
     'nutrition',
+    'tenants',
 ]
 
 AUTH_USER_MODEL = 'users.User'
