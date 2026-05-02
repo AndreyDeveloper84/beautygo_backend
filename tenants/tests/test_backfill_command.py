@@ -47,7 +47,7 @@ class TestBackfillTenantsCommand:
         assert "[dry-run] would create" in out.getvalue()
 
     def test_backfills_user_and_specialist_profile(self, out):
-        from users.models import SpecialistProfile, User
+        from users.models import User  # SpecialistProfile reached via reverse accessor
 
         client = User.objects.create_user(
             username="legacyclient", phone="+79991110051", role="client",
