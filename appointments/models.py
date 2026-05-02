@@ -44,6 +44,16 @@ class Appointment(models.Model):
         on_delete=models.PROTECT,
         related_name='appointments',
     )
+    # tenant FK — DRF-242.3. Denormalized from specialist.tenant for query
+    # performance: scoping middleware filters bookings by tenant before
+    # any join. null=True until 242.4 backfill.
+    tenant = models.ForeignKey(
+        'tenants.Tenant',
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name='appointments',
+    )
     service = models.ForeignKey(
         'services.Service',
         on_delete=models.PROTECT,
