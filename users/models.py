@@ -32,6 +32,17 @@ class User(AbstractUser):
         default=False,
         help_text="User has completed the onboarding flow (name + location saved)",
     )
+    # tenant FK — DRF-242.3. null=True for legacy / single-tenant rows
+    # (no backfill yet; that lives in DRF-242.4 with the feature flag).
+    # PROTECT because dropping a tenant must not orphan its users —
+    # admin must reassign / soft-delete first.
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="users",
+    )
     deleted_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
@@ -85,6 +96,16 @@ class SpecialistProfile(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="specialist_profile",
+    )
+    # tenant FK — DRF-242.3. Denormalized from user.tenant for query
+    # performance — every Pro app queryset filters by tenant before
+    # loading the user. null=True until 242.4 backfill.
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="specialist_profiles",
     )
     display_name = models.CharField(max_length=255)
     avatar = models.ImageField(
