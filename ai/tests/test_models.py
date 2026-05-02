@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from ai.models import Conversation, Message
 from ai.tests.factories import make_conversation, make_message, make_user
+from tenants.models import Tenant
 
 
 @pytest.mark.django_db
@@ -22,34 +23,47 @@ class TestConversationModel:
         user = make_user()
         conv = make_conversation(user=user)
         assert conv.is_active is True
-        assert conv.tenant_id is None
+        assert conv.tenant is None
+        assert conv.tenant_id is None  # FK column accessor still works
         assert conv.deleted_at is None
         assert conv.last_message_at is None
 
-    def test_tenant_id_stored_and_retrieved(self):
+    def test_tenant_fk_stored_and_retrieved(self):
         user = make_user()
-        tid = uuid.uuid4()
-        conv = make_conversation(user=user, tenant_id=tid)
+        tenant = Tenant.objects.create(slug="formula", name="Формула тела")
+        conv = make_conversation(user=user, tenant=tenant)
         conv.refresh_from_db()
-        assert conv.tenant_id == tid
+        assert conv.tenant_id == tenant.id
+        assert conv.tenant.slug == "formula"
 
-    def test_tenant_id_nullable(self):
+    def test_tenant_nullable(self):
         user = make_user()
-        conv = make_conversation(user=user, tenant_id=None)
+        conv = make_conversation(user=user, tenant=None)
         conv.refresh_from_db()
-        assert conv.tenant_id is None
+        assert conv.tenant is None
 
-    def test_filter_by_tenant_id(self):
-        # Each (user, tenant_id) pair must be unique among active rows
+    def test_filter_by_tenant(self):
+        # Each (user, tenant) pair must be unique among active rows
         # — see ai_conversation_one_active_per_user_tenant constraint.
-        # So we use distinct users to seed the same tenant_id twice.
-        tid = uuid.uuid4()
+        # So we use distinct users to seed the same tenant twice.
+        t1 = Tenant.objects.create(slug="t1", name="T1")
+        t2 = Tenant.objects.create(slug="t2", name="T2")
         u1, u2, u3 = make_user(), make_user(), make_user()
-        make_conversation(user=u1, tenant_id=tid)
-        make_conversation(user=u2, tenant_id=tid)
-        make_conversation(user=u3, tenant_id=uuid.uuid4())
-        make_conversation(user=u3, tenant_id=None)
-        assert Conversation.objects.filter(tenant_id=tid).count() == 2
+        make_conversation(user=u1, tenant=t1)
+        make_conversation(user=u2, tenant=t1)
+        make_conversation(user=u3, tenant=t2)
+        make_conversation(user=u3, tenant=None)
+        assert Conversation.objects.filter(tenant=t1).count() == 2
+
+    def test_tenant_protect_blocks_delete_with_active_conversations(self):
+        """PROTECT semantics: dropping a tenant must fail if conversations
+        reference it — admin must reassign / soft-delete history first."""
+        from django.db.models.deletion import ProtectedError
+        user = make_user()
+        tenant = Tenant.objects.create(slug="proto", name="P")
+        make_conversation(user=user, tenant=tenant)
+        with pytest.raises(ProtectedError):
+            tenant.delete()
 
     def test_multiple_conversations_per_user(self):
         user = make_user()
@@ -185,10 +199,10 @@ class TestActiveConversationUniqueness:
 
     def test_two_active_same_user_same_tenant_rejected(self):
         user = make_user()
-        tid = uuid.uuid4()
-        make_conversation(user=user, tenant_id=tid, is_active=True)
+        tenant = Tenant.objects.create(slug="uniqctx", name="U")
+        make_conversation(user=user, tenant=tenant, is_active=True)
         with pytest.raises(IntegrityError):
-            make_conversation(user=user, tenant_id=tid, is_active=True)
+            make_conversation(user=user, tenant=tenant, is_active=True)
 
     def test_inactive_does_not_block_new_active(self):
         user = make_user()
