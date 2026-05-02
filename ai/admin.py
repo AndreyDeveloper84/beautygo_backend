@@ -25,15 +25,16 @@ class MessageInline(admin.TabularInline):
 @admin.register(Conversation)
 class ConversationAdmin(admin.ModelAdmin):
     list_display = (
-        "id", "user", "tenant_id", "is_active", "deleted_at",
+        "id", "user", "tenant", "is_active", "deleted_at",
         "last_message_at", "created_at",
     )
-    list_filter = ("is_active", "tenant_id")
-    search_fields = ("id", "user__username", "user__phone")
+    list_filter = ("is_active", "tenant")
+    search_fields = ("id", "user__username", "user__phone", "tenant__slug")
     readonly_fields = (
-        "id", "user", "tenant_id", "is_active", "deleted_at",
+        "id", "user", "tenant", "is_active", "deleted_at",
         "last_message_at", "created_at",
     )
+    raw_id_fields = ("tenant",)
     inlines = [MessageInline]
 
     def get_queryset(self, request):
