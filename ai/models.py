@@ -38,8 +38,20 @@ class Conversation(models.Model):
         on_delete=models.CASCADE,
         related_name="conversations",
     )
-    # tenant_id — bare UUID for now; FK to tenants.Tenant added in DRF-242.
-    tenant_id = models.UUIDField(null=True, blank=True, db_index=True)
+    # tenant FK — DRF-242.2 conversion of the original tenant_id UUIDField
+    # (DRF-240). The DB column stays `tenant_id` because Django's FK column
+    # naming default matches the original column name, so call sites that
+    # read/write `obj.tenant_id` (raw UUID) keep working — Django exposes
+    # both `obj.tenant` (Tenant instance, lazy-loaded) and `obj.tenant_id`
+    # (raw FK column value). PROTECT: dropping a tenant must not silently
+    # delete user conversations — it's a billing/legal incident path.
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="conversations",
+    )
     is_active = models.BooleanField(default=True)
     deleted_at = models.DateTimeField(null=True, blank=True)
     last_message_at = models.DateTimeField(null=True, blank=True)
@@ -55,7 +67,7 @@ class Conversation(models.Model):
         indexes = [
             models.Index(fields=["user", "-last_message_at"]),
             models.Index(fields=["is_active", "-last_message_at"]),
-            models.Index(fields=["tenant_id", "is_active", "-last_message_at"]),
+            models.Index(fields=["tenant", "is_active", "-last_message_at"]),
         ]
         constraints = [
             # ConversationStore.resolve_active_conversation contract
@@ -65,7 +77,7 @@ class Conversation(models.Model):
             # active rows. Postgres-only partial unique — SQLite tests
             # fall back to app-side check in resolve_active_conversation.
             models.UniqueConstraint(
-                fields=["user", "tenant_id"],
+                fields=["user", "tenant"],
                 condition=models.Q(is_active=True, deleted_at__isnull=True),
                 name="ai_conversation_one_active_per_user_tenant",
             ),

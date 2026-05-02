@@ -81,9 +81,16 @@ def make_conversation(
     *,
     user: User,
     is_active: bool = True,
-    tenant_id: uuid.UUID | None = None,
+    tenant=None,
 ) -> Conversation:
-    return Conversation.objects.create(user=user, is_active=is_active, tenant_id=tenant_id)
+    """Create a Conversation. ``tenant`` is a Tenant instance or None.
+
+    DRF-242.2 changed Conversation.tenant_id (UUIDField) → tenant (FK).
+    Callers that previously passed `tenant_id=uuid.uuid4()` (random UUID)
+    must now create a Tenant first via tenants.tests fixtures or pass
+    ``tenant=None``.
+    """
+    return Conversation.objects.create(user=user, is_active=is_active, tenant=tenant)
 
 
 def make_message(
