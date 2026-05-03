@@ -67,14 +67,16 @@ Faker==37.4.0
 freezegun==1.5.5
 yookassa==3.10.0
 
-# AI orchestration shared package (Linear DRF-236, DRF-237).
+# AI orchestration shared package (DRF-236..239 in ayla-ai-core, DRF-241 here).
 # Repo: https://github.com/AndreyDeveloper84/ayla-ai-core (private)
 #
-# NOT INSTALLED HERE — Ayla пока не импортирует ayla_ai_core в коде;
-# package добавится сюда в DRF-241 (REST endpoints поверх AIConcierge).
-# Если добавим раньше — CI ломается из-за отсутствия sibling-папки в runner'ах.
+# Slice A wires this in as infrastructure: ai/stores.py + ai/concierge_factory.py
+# import from ayla_ai_core. Slice B will replace local ai/tools.py / prompts.py /
+# tools_handlers.py with the shared versions.
 #
-# DEV-ONLY: для локального тестирования shared package с Ayla —
-#   pip install -e ../../ayla-ai-core
-# (после клонирования ayla-ai-core в PycharmProjects/ayla-ai-core)
-# Roadmap: docs/BOT_CODE_AUDIT_2026-04.md Section 4 + 5.
+# CI auth: this is a private repo. The runner needs read access via either
+#   (a) deploy key on the repo + GIT_SSH_COMMAND with the key, or
+#   (b) a personal access token: https://${GH_TOKEN}@github.com/...
+# Local dev: `pip install -e ../../ayla-ai-core` keeps a faster iteration loop;
+# the editable install satisfies the same requirement (`ayla-ai-core>=0.5.1`).
+ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@v0.5.1
