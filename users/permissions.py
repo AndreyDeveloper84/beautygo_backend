@@ -88,8 +88,12 @@ class IsTenantMember(permissions.BasePermission):
             return False
         request_tenant = getattr(request, "tenant", None)
         user_tenant_id = getattr(user, "tenant_id", None)
-        # No header → caller didn't ask for tenant scope. Permissive in
-        # rollout phase; 242.5 will require the header on /api/v1/* paths.
+        # No header → caller didn't ask for tenant scope.
+        # - Permissive (rollout): allow through, view-side scoping will
+        #   limit data to the user's tenant via queryset filters.
+        # - Strict (DRF-242.5): the middleware already 400'd before we
+        #   got here on tenant-required paths, so a None at this point
+        #   means we're on an opt-out path — still permissive.
         if request_tenant is None:
             return True
         # Header set, but user has no tenant assigned — fail (prevents
