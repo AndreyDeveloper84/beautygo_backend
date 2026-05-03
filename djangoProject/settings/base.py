@@ -226,8 +226,29 @@ MIDDLEWARE = [
 ]
 
 # Multi-tenant defaults (DRF-242.4). Backfill command uses these when no
-# CLI flags are given. MULTI_TENANT_STRICT lands in DRF-242.5.
+# CLI flags are given.
 MULTI_TENANT_DEFAULT_SLUG = os.environ.get("MULTI_TENANT_DEFAULT_SLUG", "formula")
+
+# DRF-242.5 — strict-mode toggle. When False (rollout default) the
+# middleware leaves ``request.tenant=None`` on missing/unknown header,
+# and ``IsTenantMember`` is permissive in that case. When True, the
+# middleware returns 400 ``TENANT_REQUIRED`` for /api/v1/* requests
+# without an ``X-Tenant`` header (excluded paths still pass through),
+# and ``IsTenantMember`` rejects the no-tenant case.
+#
+# Rollout sequence (see docs/MULTI_TENANT.md §Rollout):
+#   1. Run ``manage.py backfill_tenants`` on prod (idempotent, safe).
+#   2. Verify zero ``user.tenant_id IS NULL`` rows for active accounts.
+#   3. Flip MULTI_TENANT_STRICT=True via env on dev → smoke /api/v1/*.
+#   4. Same on staging → 24h soak.
+#   5. Same on prod.
+#
+# Rollback: set MULTI_TENANT_STRICT=False, restart workers — no migration
+# rollback needed because the underlying schema is identical to the
+# permissive mode.
+MULTI_TENANT_STRICT = os.environ.get("MULTI_TENANT_STRICT", "false").lower() in (
+    "1", "true", "yes", "on",
+)
 
 ROOT_URLCONF = 'djangoProject.urls'
 
