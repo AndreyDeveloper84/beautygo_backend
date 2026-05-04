@@ -64,6 +64,17 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
+      - name: Configure git auth for private dependency
+        # requirements.txt pulls ayla-ai-core from a sibling private repo
+        # (AndreyDeveloper84/ayla-ai-core). The default GITHUB_TOKEN only
+        # has read access to the current repo, so cloning siblings needs
+        # the same deploy token used by the deploy step. URL-rewriting
+        # makes pip's git clone authenticate transparently.
+        env:
+          GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
+        run: |
+          git config --global url."https://${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
