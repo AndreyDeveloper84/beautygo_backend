@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from nutrition.models import FoodLog, FoodScan, WaterLog
+from nutrition.models import Beverage, FoodLog, FoodScan, WaterLog
 
 
 # 10 MiB — same cap used by the portfolio uploader; the mobile client
@@ -238,3 +238,28 @@ class WaterTodayResponseSerializer(serializers.Serializer):
     logs = WaterTodayLogSerializer(many=True)
     water_ml = serializers.IntegerField(source="aggregate.water_ml")
     water_goal_ml = serializers.IntegerField(source="aggregate.water_goal_ml")
+
+
+# ---------------------------------------------------------------------------
+# Beverage catalog (DRF-301)
+# ---------------------------------------------------------------------------
+
+
+class BeverageCatalogItemSerializer(serializers.ModelSerializer):
+    """Single row in GET /internal/beverages/.
+
+    Spec §2.5: only UI metadata is exposed — the bot doesn't need the
+    macro coefficients, those are applied server-side by POST /water/.
+    """
+
+    class Meta:
+        model = Beverage
+        fields = [
+            "slug",
+            "name_ru",
+            "category",
+            "aliases",
+            "default_serving_ml",
+            "default_serving_label",
+        ]
+        read_only_fields = fields
