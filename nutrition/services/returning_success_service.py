@@ -20,7 +20,6 @@ Eating-disorder mode: returns ``{detected: false}`` unconditionally
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone as dt_tz
 

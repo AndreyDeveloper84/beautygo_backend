@@ -12,11 +12,9 @@ Sits between the views and ``NutritionProfile``/``compute_norms``. Owns:
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from datetime import datetime, timedelta, timezone as dt_tz
 from typing import Any
 
-from django.conf import settings
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 

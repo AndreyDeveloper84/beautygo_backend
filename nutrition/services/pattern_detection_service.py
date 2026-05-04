@@ -26,7 +26,6 @@ a time), medium = ``secondary`` (queued), below threshold = ``hidden``
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone as dt_tz
 from typing import Any

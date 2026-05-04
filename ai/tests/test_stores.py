@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from ayla_ai_core.orchestrator import ConversationStore
 
-from ai.models import Conversation, Message
+from ai.models import Conversation
 from ai.stores import DjangoConversationStore
 from ai.tests.factories import make_conversation, make_message, make_user
 
