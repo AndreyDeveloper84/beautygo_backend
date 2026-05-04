@@ -101,6 +101,7 @@ class FoodScanView(APIView):
 
         image_file = serializer.validated_data["image"]
         portion_multiplier = serializer.validated_data.get("portion_multiplier") or 1.0
+        caption = serializer.validated_data.get("caption") or ""
 
         # Read once — providers and storage both want bytes; ImageField
         # streams from request body so we must materialise before two
@@ -120,6 +121,7 @@ class FoodScanView(APIView):
                 image_bytes,
                 portion_multiplier=portion_multiplier,
                 user=request.user,
+                caption=caption,
             )
         except AllProvidersFailedError as exc:
             # Per spec v2.0 §FOOD SCANNER, distinguish "vendor worked but
@@ -213,6 +215,7 @@ class InternalFoodScanView(APIView):
 
         image_file = serializer.validated_data["image"]
         portion_multiplier = serializer.validated_data.get("portion_multiplier") or 1.0
+        caption = serializer.validated_data.get("caption") or ""
 
         image_bytes = image_file.read()
 
@@ -229,6 +232,7 @@ class InternalFoodScanView(APIView):
                 image_bytes,
                 portion_multiplier=portion_multiplier,
                 user=user,
+                caption=caption,
             )
         except AllProvidersFailedError as exc:
             if exc.is_low_confidence_only:
@@ -400,7 +404,10 @@ class InternalSummaryView(APIView):
                 details=q.errors,
             )
         day = q.validated_data.get("date") or datetime.now(dt_tz.utc).date()
-        summary = NutritionSummaryService().summary(user_id=user.id, day=day)
+        with_comment = bool(q.validated_data.get("with_comment", False))
+        summary = NutritionSummaryService().summary(
+            user_id=user.id, day=day, with_comment=with_comment,
+        )
         return success_response(
             NutritionSummaryResponseSerializer(summary).data,
             status_code=status.HTTP_200_OK,
@@ -428,9 +435,10 @@ class NutritionSummaryView(APIView):
                 details=q.errors,
             )
         day = q.validated_data.get("date") or datetime.now(dt_tz.utc).date()
+        with_comment = bool(q.validated_data.get("with_comment", False))
 
         summary = NutritionSummaryService().summary(
-            user_id=request.user.id, day=day,
+            user_id=request.user.id, day=day, with_comment=with_comment,
         )
         return success_response(
             NutritionSummaryResponseSerializer(summary).data,

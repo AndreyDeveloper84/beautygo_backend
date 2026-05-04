@@ -36,7 +36,7 @@ class _FakeProvider:
         self.side_effect = side_effect
         self.scan_calls = 0
 
-    def scan(self, image_bytes, *, portion_multiplier=1.0, user=None):
+    def scan(self, image_bytes, *, portion_multiplier=1.0, user=None, caption=""):
         self.scan_calls += 1
         if self.side_effect is not None:
             raise self.side_effect

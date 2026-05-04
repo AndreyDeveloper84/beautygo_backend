@@ -71,6 +71,7 @@ class OpenAIVisionProvider(FoodScannerProvider):
         *,
         portion_multiplier: float = 1.0,
         user=None,
+        caption: str = "",
     ) -> ScanResult:
         if not getattr(settings, "OPENAI_API_KEY", ""):
             raise ProviderUnavailable("OPENAI_API_KEY is not configured")
@@ -78,12 +79,24 @@ class OpenAIVisionProvider(FoodScannerProvider):
         b64 = base64.b64encode(image_bytes).decode("ascii")
         image_url = f"data:image/jpeg;base64,{b64}"
 
+        # Caption (DRF-303) is sanitised + truncated before going into the
+        # prompt — caller-supplied free text shouldn't unbalance the JSON
+        # contract. 280 chars is the conservative ceiling Tweet-style; the
+        # bot UX caps inputs at ~200.
+        user_text = "Что на фото? Верни JSON по схеме."
+        clean_caption = (caption or "").strip()[:280]
+        if clean_caption:
+            user_text += (
+                f"\n\nПодпись пользователя (учти контекст порции/варианта): "
+                f"{clean_caption}"
+            )
+
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Что на фото? Верни JSON по схеме."},
+                    {"type": "text", "text": user_text},
                     {"type": "image_url", "image_url": {"url": image_url}},
                 ],
             },

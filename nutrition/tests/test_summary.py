@@ -119,13 +119,16 @@ class TestEmptyDay:
         resp = auth_client.get(URL, {"date": "2026-04-29"})
         assert resp.status_code == status.HTTP_200_OK
         body = resp.json()["data"]
-        # Spec NutritionSummaryResponse keys
+        # Spec NutritionSummaryResponse keys (DRF-303 added ai_comment).
         assert set(body.keys()) == {
             "date", "calories_total", "calories_goal",
             "protein_g", "fat_g", "carbs_g",
             "water_ml", "water_goal_ml",
             "entries", "vitamin_deficits",
+            "ai_comment",
         }
+        # Backwards compat: ai_comment is null when caller didn't ask.
+        assert body["ai_comment"] is None
         assert body["date"] == "2026-04-29"
         assert body["calories_total"] == 0
         assert body["protein_g"] == 0

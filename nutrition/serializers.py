@@ -18,11 +18,17 @@ ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 class ScanRequestSerializer(serializers.Serializer):
-    """multipart/form-data: image (required) + portion_multiplier (optional)."""
+    """multipart/form-data: image (required) + portion_multiplier + caption."""
 
     image = serializers.ImageField()
     portion_multiplier = serializers.FloatField(
         required=False, default=1.0, min_value=0.1, max_value=10.0,
+    )
+    # DRF-303: optional user note ("это в гостях у мамы, половина порции").
+    # Steerable providers thread it into the vision prompt so portion /
+    # variant cues are respected. 280-char ceiling is enforced server-side.
+    caption = serializers.CharField(
+        required=False, allow_blank=True, max_length=280,
     )
 
     def validate_image(self, value):
@@ -162,6 +168,9 @@ class NutritionSummaryQuerySerializer(serializers.Serializer):
     """Query string for GET /nutrition/summary/."""
 
     date = serializers.DateField(required=False, format="%Y-%m-%d")
+    # DRF-303 §4.2: opt-in AI-generated daily comment. Default false
+    # preserves backwards compat for existing mobile / bot callers.
+    with_comment = serializers.BooleanField(required=False, default=False)
 
 
 class NutritionSummaryResponseSerializer(serializers.Serializer):
@@ -170,6 +179,7 @@ class NutritionSummaryResponseSerializer(serializers.Serializer):
 
     Stubbed fields: ``water_ml`` (0) and ``water_goal_ml`` (settings
     default) until Slice 4; ``vitamin_deficits`` ({}) until Slice 3a'.
+    DRF-303 adds ``ai_comment`` — null when the caller didn't ask.
     """
 
     date = serializers.DateField(format="%Y-%m-%d")
@@ -184,6 +194,7 @@ class NutritionSummaryResponseSerializer(serializers.Serializer):
     vitamin_deficits = serializers.DictField(
         child=serializers.FloatField(),
     )
+    ai_comment = serializers.CharField(allow_null=True, required=False)
 
 
 # ---------------------------------------------------------------------------
