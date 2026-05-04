@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from nutrition.models import Beverage, WaterEntry
+from nutrition.models import Beverage, NutritionProfile, WaterEntry
 
 
 @admin.register(Beverage)
@@ -55,6 +55,53 @@ class BeverageAdmin(admin.ModelAdmin):
         ("Метаданные", {
             "fields": ("created_at", "updated_at"),
         }),
+    )
+
+
+@admin.register(NutritionProfile)
+class NutritionProfileAdmin(admin.ModelAdmin):
+    list_display = (
+        "user",
+        "gender",
+        "age",
+        "weight_kg",
+        "height_cm",
+        "goal",
+        "pace",
+        "goal_overridden_by",
+        "daily_kcal",
+        "updated_at",
+    )
+    list_filter = ("gender", "goal", "pace", "goal_overridden_by")
+    search_fields = ("user__username",)
+    readonly_fields = (
+        "bmr", "daily_kcal", "daily_protein_g", "daily_fat_g",
+        "daily_carbs_g", "daily_water_ml",
+        "goal_overridden_by", "last_overrides_applied",
+        "onboarded_at", "first_food_logged_at", "weekly_summary_unlocked_at",
+        "created_at", "updated_at",
+    )
+    raw_id_fields = ("user", "tenant")
+    fieldsets = (
+        (None, {"fields": ("user", "tenant", "timezone")}),
+        ("Анкета", {"fields": (
+            "gender", "age", "height_cm", "weight_kg", "weight_range",
+            "activity_coefficient", "goal", "pace", "diet_preference",
+        )}),
+        ("Health flags", {"fields": ("health_flags",)}),
+        ("Computed нормы", {"fields": (
+            "bmr", "daily_kcal", "daily_protein_g", "daily_fat_g",
+            "daily_carbs_g", "daily_water_ml",
+        )}),
+        ("Override audit", {"fields": (
+            "goal_overridden_by", "bmi_warning_overridden_at",
+            "last_overrides_applied",
+        )}),
+        ("Жизненный цикл", {"fields": (
+            "disclaimer_acked", "onboarded_at",
+            "first_food_logged_at", "weekly_summary_unlocked_at",
+            "created_at", "updated_at",
+        )}),
     )
 
 

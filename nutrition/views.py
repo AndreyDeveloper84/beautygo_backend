@@ -35,6 +35,8 @@ from nutrition.serializers import (
     FoodLogCreateSerializer,
     FoodLogEntrySerializer,
     FoodScanResponseSerializer,
+    NutritionProfileResponseSerializer,
+    NutritionProfileUpsertSerializer,
     NutritionSummaryQuerySerializer,
     NutritionSummaryResponseSerializer,
     ScanRequestSerializer,
@@ -44,6 +46,10 @@ from nutrition.serializers import (
     WaterLogResponseSerializer,
     WaterTodayResponseSerializer,
     WaterTodayResponseSerializerV3,
+)
+from nutrition.services.profile_upsert_service import (
+    get_profile_response,
+    upsert_profile,
 )
 from nutrition.services.food_log_service import (
     CreateFoodLogInput,
@@ -573,6 +579,70 @@ class InternalDeficitsView(APIView):
             },
             status_code=status.HTTP_200_OK,
         )
+
+
+class InternalProfileView(APIView):
+    """GET / POST /api/v1/nutrition/internal/profile/ (DRF-300).
+
+    GET returns the full profile envelope or ``{exists: false}`` when no
+    profile exists yet — the bot prefers a single status code over
+    branching on 404.
+
+    POST is PATCH-semantic: only fields present in the body mutate.
+    Idempotency-Key (24-hour cache) makes POST safe to retry — the
+    cached response is returned verbatim and no additional patch runs.
+
+    Override audit (eating_disorder / pregnancy / breastfeeding / BMR
+    floor ladder) is computed in nutrition_profile_service.compute_norms
+    and surfaced in ``overrides_applied`` so the bot can render the
+    «учла важное» panel.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def _resolve(self, request):
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return None, error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            ), external_user_id
+        return user, None, external_user_id
+
+    def get(self, request: Request) -> Response:
+        user, err, external_user_id = self._resolve(request)
+        if err is not None:
+            return err
+        return success_response(
+            get_profile_response(user, external_user_id),
+            status_code=status.HTTP_200_OK,
+        )
+
+    def post(self, request: Request) -> Response:
+        user, err, external_user_id = self._resolve(request)
+        if err is not None:
+            return err
+
+        serializer = NutritionProfileUpsertSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Невалидные данные",
+                details=serializer.errors,
+            )
+
+        idem = request.META.get("HTTP_IDEMPOTENCY_KEY") or None
+        response = upsert_profile(
+            user=user,
+            external_user_id=external_user_id,
+            payload=serializer.validated_data,
+            idempotency_key=idem,
+        )
+        return success_response(response, status_code=status.HTTP_200_OK)
 
 
 class InternalWaterCreateView(APIView):
