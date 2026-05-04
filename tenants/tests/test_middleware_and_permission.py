@@ -81,6 +81,67 @@ class TestTenantContextMiddleware:
 
 
 # ---------------------------------------------------------------------------
+# Strict-mode middleware (DRF-242.5)
+# ---------------------------------------------------------------------------
+
+
+class TestTenantContextMiddlewareStrictMode:
+    def test_strict_mode_missing_header_returns_400(self, settings):
+        settings.MULTI_TENANT_STRICT = True
+        request = RequestFactory().get("/api/v1/specialists/")
+        # Downstream view should NEVER be called — middleware short-circuits.
+        downstream_called = []
+        def downstream(r):
+            downstream_called.append(True)
+            return ("ok", None)
+        response = _call(request, response_func=downstream)
+        assert downstream_called == []
+        assert response.status_code == 400
+        body = response.content.decode()
+        assert "TENANT_REQUIRED" in body
+
+    def test_strict_mode_known_header_passes_through(self, settings):
+        settings.MULTI_TENANT_STRICT = True
+        Tenant.objects.create(slug="formula", name="F")
+        request = RequestFactory().get(
+            "/api/v1/specialists/", HTTP_X_TENANT="formula",
+        )
+        response = _call(request)
+        assert request.tenant is not None
+        # _call returns the downstream tuple — strict didn't 400.
+        assert response[0] == "ok"
+
+    def test_strict_mode_unknown_slug_returns_400(self, settings):
+        settings.MULTI_TENANT_STRICT = True
+        request = RequestFactory().get(
+            "/api/v1/specialists/", HTTP_X_TENANT="ghost",
+        )
+        response = _call(request)
+        assert response.status_code == 400
+
+    def test_strict_mode_excluded_path_passes_through(self, settings):
+        settings.MULTI_TENANT_STRICT = True
+        # /api/v1/health/ is in EXCLUDED_PATH_PREFIXES — strict shouldn't 400.
+        request = RequestFactory().get("/api/v1/health/")
+        response = _call(request)
+        assert response[0] == "ok"
+
+    def test_strict_mode_auth_path_opt_out(self, settings):
+        settings.MULTI_TENANT_STRICT = True
+        # /api/v1/auth/* is the registration handshake — pre-tenant. Must
+        # pass through without a header so mobile clients can register.
+        request = RequestFactory().post("/api/v1/auth/login/")
+        response = _call(request)
+        assert response[0] == "ok"
+
+    def test_strict_mode_off_missing_header_passes(self, settings):
+        settings.MULTI_TENANT_STRICT = False
+        request = RequestFactory().get("/api/v1/specialists/")
+        response = _call(request)
+        assert response[0] == "ok"
+
+
+# ---------------------------------------------------------------------------
 # Permission
 # ---------------------------------------------------------------------------
 
