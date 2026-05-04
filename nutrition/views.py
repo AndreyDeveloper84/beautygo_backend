@@ -40,6 +40,7 @@ from nutrition.serializers import (
     NutritionSummaryQuerySerializer,
     NutritionSummaryResponseSerializer,
     PatternDetectionResponseSerializer,
+    ReturningSuccessResponseSerializer,
     ScanRequestSerializer,
     WaterEntryCreateSerializer,
     WaterEntryResponseSerializer,
@@ -49,6 +50,7 @@ from nutrition.serializers import (
     WaterTodayResponseSerializerV3,
 )
 from nutrition.services.pattern_detection_service import detect_patterns
+from nutrition.services.returning_success_service import detect_returning_success
 from nutrition.services.profile_upsert_service import (
     get_profile_response,
     upsert_profile,
@@ -587,6 +589,40 @@ class InternalDeficitsView(APIView):
                 "hint": hint_result.hint,
                 "fired_keys": hint_result.fired_keys,
             },
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class InternalReturningSuccessView(APIView):
+    """GET /api/v1/nutrition/internal/insights/returning_success/ (DRF-305).
+
+    Service-to-service. Detects users who fell off (3+ consecutive days
+    <60% of kcal goal) and have come back (2+ consecutive days in
+    [80, 110]% of goal, ending today). The bot's nudge engine fires the
+    ``returning_success`` message off this signal — never reinforced
+    with numbers; we surface only the boolean + the streak counts the
+    bot needs for templating.
+
+    Eating-disorder users always receive ``{detected: false}`` (spec
+    §3.2 + §10) — numeric improvement is not framed as success here.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def get(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+        insight = detect_returning_success(user_id=user.id)
+        return success_response(
+            ReturningSuccessResponseSerializer(insight).data,
             status_code=status.HTTP_200_OK,
         )
 
