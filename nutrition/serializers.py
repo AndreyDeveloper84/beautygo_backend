@@ -272,6 +272,15 @@ class PatternDetectionResponseSerializer(serializers.Serializer):
     patterns = DetectedPatternSerializer(many=True)
 
 
+class ReturningSuccessResponseSerializer(serializers.Serializer):
+    """GET /internal/insights/returning_success/ (DRF-305 §3.2)."""
+
+    detected = serializers.BooleanField()
+    failure_streak_days = serializers.IntegerField(required=False)
+    recovery_days = serializers.IntegerField(required=False)
+    since_recovery_started = serializers.CharField(allow_null=True, required=False)
+
+
 # ---------------------------------------------------------------------------
 # Nutrition profile — Phase 3 (DRF-300)
 # ---------------------------------------------------------------------------
