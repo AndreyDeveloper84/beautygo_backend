@@ -561,6 +561,12 @@ CELERY_BEAT_SCHEDULE = {
         "task": "notifications.dispatch_beauty_insights",
         "schedule": crontab(hour=9, minute=0, day_of_week="mon"),
     },
+    # DRF-302: hard-delete WaterEntry rows soft-deleted >90 days ago.
+    # Once a day at 03:00 UTC — quiet window for any tenant.
+    "purge-deleted-water-entries": {
+        "task": "nutrition.purge_deleted_water_entries",
+        "schedule": crontab(hour=3, minute=0),
+    },
 }
 
 # Django default cache → Redis (db 1). SlotCacheService and any future
