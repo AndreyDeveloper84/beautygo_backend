@@ -208,7 +208,22 @@ class TenantContextMiddleware:
     def __init__(self, get_response):
         self.get_response = get_response
 
+    # Paths that REQUIRE a tenant header in strict mode (DRF-242.5).
+    # Subset of /api/v1/* — auth and anonymous endpoints stay open so
+    # mobile clients can register / verify-otp without a tenant context
+    # (the registration flow is what assigns the tenant in the first place).
+    STRICT_REQUIRED_PREFIXES = (
+        "/api/v1/",
+    )
+    STRICT_OPT_OUT_PREFIXES = (
+        # Auth handshake — pre-tenant. Includes /auth/login/, /verify-otp/,
+        # /register/, /anonymous/, /token/refresh/, /logout/, /social/, etc.
+        "/api/v1/auth/",
+    )
+
     def __call__(self, request):
+        from django.conf import settings
+
         request.tenant = None
 
         path = request.path
@@ -216,25 +231,42 @@ class TenantContextMiddleware:
             return self.get_response(request)
 
         slug = (request.META.get("HTTP_X_TENANT") or "").strip()
-        if not slug:
-            return self.get_response(request)
 
-        # Local import to avoid app-loading order issues — middleware is
-        # imported during settings bootstrap, before INSTALLED_APPS is
-        # fully populated.
-        from tenants.models import Tenant
+        if slug:
+            # Local import to avoid app-loading order issues — middleware
+            # is imported during settings bootstrap, before INSTALLED_APPS
+            # is fully populated.
+            from tenants.models import Tenant
 
-        try:
-            request.tenant = Tenant.objects.get(slug=slug)
-        except Tenant.DoesNotExist:
-            # Unknown / inactive slug → leave request.tenant=None. The
-            # IsTenantMember permission turns this into a 403 for any
-            # endpoint that requires a tenant context. Logging at INFO
-            # because most occurrences will be misconfigured clients,
-            # not attacks.
-            logger.info(
-                "tenant.middleware.unknown_slug slug=%s path=%s",
-                slug, path,
+            try:
+                request.tenant = Tenant.objects.get(slug=slug)
+            except Tenant.DoesNotExist:
+                # Unknown / inactive slug → leave request.tenant=None.
+                # In strict mode this falls through to the 400 below.
+                logger.info(
+                    "tenant.middleware.unknown_slug slug=%s path=%s",
+                    slug, path,
+                )
+
+        # Strict mode (DRF-242.5): /api/v1/* requires a valid X-Tenant
+        # except for auth handshake. Returns 400 instead of letting the
+        # permission layer 403 — distinguishes "you forgot the header"
+        # from "you don't belong to this tenant".
+        if (
+            getattr(settings, "MULTI_TENANT_STRICT", False)
+            and request.tenant is None
+            and any(path.startswith(p) for p in self.STRICT_REQUIRED_PREFIXES)
+            and not any(path.startswith(p) for p in self.STRICT_OPT_OUT_PREFIXES)
+        ):
+            return JsonResponse(
+                {"error": {
+                    "code": "TENANT_REQUIRED",
+                    "message": (
+                        "Заголовок X-Tenant обязателен. "
+                        "Если вы не знаете свой tenant, обратитесь в поддержку."
+                    ),
+                }},
+                status=400,
             )
 
         return self.get_response(request)
