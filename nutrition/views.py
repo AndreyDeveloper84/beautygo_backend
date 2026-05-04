@@ -29,8 +29,9 @@ from users.permissions import IsClient, IsClientApp, IsServiceAccount
 from users.response import error_response, success_response
 from users.services import InvalidExternalUserIDError, resolve_external_user
 
-from nutrition.models import FoodScan, WaterLog
+from nutrition.models import Beverage, FoodScan, WaterLog
 from nutrition.serializers import (
+    BeverageCatalogItemSerializer,
     FoodLogCreateSerializer,
     FoodLogEntrySerializer,
     FoodScanResponseSerializer,
@@ -560,3 +561,38 @@ class InternalDeficitsView(APIView):
             },
             status_code=status.HTTP_200_OK,
         )
+
+
+class InternalBeveragesView(APIView):
+    """GET /api/v1/nutrition/internal/beverages/ — beverage catalog (DRF-301).
+
+    Service-to-service. Returns the active catalog so the MAX bot can
+    do alias-based free-text matching ("выпила кофе" → kofe_chernyi)
+    and render UI labels («+200 мл (чашка)»).
+
+    Cache-Control: max-age=3600 — content changes ≤ once a day, the
+    bot is free to cache for an hour. No vary on user; the catalog is
+    tenant-agnostic.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def get(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+
+        qs = Beverage.objects.filter(is_active=True).order_by("category", "name_ru")
+        resp = success_response(
+            {"beverages": BeverageCatalogItemSerializer(qs, many=True).data},
+            status_code=status.HTTP_200_OK,
+        )
+        resp["Cache-Control"] = "max-age=3600"
+        return resp
