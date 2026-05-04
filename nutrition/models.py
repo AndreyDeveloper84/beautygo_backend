@@ -206,3 +206,82 @@ class WaterLog(models.Model):
 
     def __str__(self) -> str:
         return f"{self.amount_ml}ml @ {self.logged_at:%Y-%m-%d %H:%M}"
+
+
+class Beverage(models.Model):
+    """Catalog row for the Phase 3 water/beverage tracker (DRF-301).
+
+    Spec: docs/plans/maxbot-phase3-ayla-spec.md §2.5 + §8.
+
+    Two consumers read this table:
+    - GET /api/v1/nutrition/internal/beverages/ (autocomplete + free-text
+      parser in the MAX bot — only UI metadata is exposed on the wire)
+    - POST /api/v1/nutrition/internal/water/ (DRF-302) — uses
+      water_coefficient + per-100ml macros to compute hydration and
+      kcal/macros for the WaterEntry row.
+
+    Sources for seed numbers:
+    - USDA FoodData Central (kcal, protein, fat, carbs, sugar, caffeine)
+    - Beverage Hydration Index, Maughan et al. 2016 — water_coefficient
+    - Скурихин-Тутельян «Химический состав российских пищевых продуктов»
+      for RU staples (бульон, ряженка, морс, квас).
+
+    water_coefficient is signed: 1.0 = pure water; <1.0 mild diuretic
+    (coffee, tea); negative for strong alcohol (net dehydration). The
+    POST /water/ handler clamps the resulting water_ml at row level, not
+    here — the catalog stores raw physiology.
+    """
+
+    class Category(models.TextChoices):
+        WATER = "water", "Вода"
+        TEA = "tea", "Чай"
+        COFFEE = "coffee", "Кофе"
+        JUICE = "juice", "Сок"
+        SODA = "soda", "Газировка"
+        MILK = "milk", "Молочное"
+        ALCOHOL = "alcohol", "Алкоголь"
+        BROTH = "broth", "Бульон"
+        SPORT = "sport", "Спортивное"
+        OTHER = "other", "Прочее"
+
+    slug = models.SlugField(max_length=64, unique=True)
+    name_ru = models.CharField(max_length=120)
+    category = models.CharField(max_length=16, choices=Category.choices)
+
+    water_coefficient = models.FloatField(
+        help_text="Доля от объёма, идущая в гидратацию. 1.0 = вода. "
+        "Может быть отрицательной для крепкого алкоголя.",
+    )
+    kcal_per_100ml = models.FloatField(default=0.0)
+    protein_g_per_100ml = models.FloatField(default=0.0)
+    fat_g_per_100ml = models.FloatField(default=0.0)
+    carbs_g_per_100ml = models.FloatField(default=0.0)
+    sugar_g_per_100ml = models.FloatField(default=0.0)
+    caffeine_mg_per_100ml = models.FloatField(default=0.0)
+
+    # Free-text aliases for parser ("кофе" / "coffee" / "americano" → kofe_chernyi).
+    # JSONField list[str], lowercased on save (see save() override).
+    aliases = models.JSONField(default=list, blank=True)
+
+    default_serving_ml = models.PositiveIntegerField(default=250)
+    default_serving_label = models.CharField(max_length=32, default="стакан")
+
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Beverage"
+        verbose_name_plural = "Beverages"
+        ordering = ["category", "name_ru"]
+        indexes = [
+            models.Index(fields=["category", "is_active"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name_ru} ({self.category})"
+
+    def save(self, *args, **kwargs):
+        if self.aliases:
+            self.aliases = [a.strip().lower() for a in self.aliases if a and a.strip()]
+        super().save(*args, **kwargs)
