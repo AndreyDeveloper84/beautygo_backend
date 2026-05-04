@@ -16,7 +16,7 @@ from django.core.management import call_command
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from nutrition.models import Beverage, FoodLog, WaterEntry
+from nutrition.models import FoodLog, WaterEntry
 from nutrition.services.water_entry_service import (
     NutritionContext,
     purge_deleted_water_entries,
