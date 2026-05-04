@@ -96,6 +96,7 @@ class FoodScannerProvider(ABC):
         *,
         portion_multiplier: float = 1.0,
         user=None,
+        caption: str = "",
     ) -> ScanResult:
         """Recognise dish in ``image_bytes``.
 
@@ -108,6 +109,12 @@ class FoodScannerProvider(ABC):
             user: ``users.models.User`` instance — passed for future
                 provider routing per user preferences (Phase 6). Not
                 used in MVP.
+            caption: Optional free-text user note about the photo (DRF-303).
+                Steerable providers (OpenAI Vision) inject it into the
+                vision prompt so portion / variant cues («это половина
+                порции у мамы») are respected. Non-steerable providers
+                (Yandex Vision) must accept the kwarg for interface
+                consistency and ignore it.
 
         Returns:
             ScanResult populated with recognition fields. Nutrition lookup

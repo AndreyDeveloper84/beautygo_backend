@@ -79,6 +79,10 @@ class NutritionSummary:
     water_goal_ml: int
     entries: list[FoodLog]
     vitamin_deficits: dict[str, float]
+    # DRF-303 §4.2 — present only when the caller asked with_comment=true.
+    # ``None`` distinguishes "not requested" from "requested but empty"
+    # downstream renderers.
+    ai_comment: str | None = None
 
 
 class NutritionSummaryService:
@@ -87,7 +91,9 @@ class NutritionSummaryService:
     def __init__(self, water_service: WaterService | None = None) -> None:
         self._water_service = water_service or WaterService()
 
-    def summary(self, *, user_id: int, day: date) -> NutritionSummary:
+    def summary(
+        self, *, user_id: int, day: date, with_comment: bool = False,
+    ) -> NutritionSummary:
         start = datetime.combine(day, time.min, tzinfo=timezone.utc)
         end = datetime.combine(day, time.max, tzinfo=timezone.utc)
 
@@ -114,18 +120,44 @@ class NutritionSummaryService:
 
         # Slice 4: water aggregate now lives — drops the stub.
         water = self._water_service.aggregate_for_day(user_id, day)
+        entries = list(qs)
+        calories_goal = settings.NUTRITION_DEFAULT_CALORIES_GOAL
+
+        ai_comment: str | None = None
+        if with_comment:
+            # Local import — keeps the LLM client out of every summary
+            # request and avoids import cycles with the profile module.
+            from nutrition.services.ai_comment_service import (
+                AICommentService,
+                SummaryFacts,
+            )
+            ai_comment = AICommentService().comment_for(
+                user_id=user_id,
+                day=day,
+                facts=SummaryFacts(
+                    calories_total=totals.calories,
+                    calories_goal=calories_goal,
+                    protein_g=totals.protein_g,
+                    fat_g=totals.fat_g,
+                    carbs_g=totals.carbs_g,
+                    water_ml=water.water_ml,
+                    water_goal_ml=water.water_goal_ml,
+                    entries_count=len(entries),
+                ),
+            )
 
         return NutritionSummary(
             date=day,
             totals=totals,
-            calories_goal=settings.NUTRITION_DEFAULT_CALORIES_GOAL,
+            calories_goal=calories_goal,
             water_ml=water.water_ml,
             water_goal_ml=water.water_goal_ml,
-            entries=list(qs),
+            entries=entries,
             # Slice 3a' (OFF/USDA fallback) will populate when the seed
             # carries vitamin data; the per-100g seed dictionary doesn't
             # currently include vitamin breakdowns.
             vitamin_deficits={},
+            ai_comment=ai_comment,
         )
 
     def weekly_deficits(self, *, user_id, days: int = 7) -> WeeklyDeficits:

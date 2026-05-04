@@ -68,6 +68,10 @@ class YandexVisionProvider(FoodScannerProvider):
         *,
         portion_multiplier: float = 1.0,
         user=None,
+        caption: str = "",  # accepted for interface parity (DRF-303); Yandex
+        # Vision currently has no per-call user-prompt steering, so the
+        # hint is dropped here. When/if Yandex adds steerable input the
+        # injection point is _build_payload().
     ) -> ScanResult:
         api_key = getattr(settings, "YANDEX_VISION_API_KEY", "")
         folder_id = getattr(settings, "YANDEX_VISION_FOLDER_ID", "")
