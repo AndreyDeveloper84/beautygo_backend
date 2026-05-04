@@ -91,6 +91,7 @@ class TestTenantContextMiddlewareStrictMode:
         request = RequestFactory().get("/api/v1/specialists/")
         # Downstream view should NEVER be called — middleware short-circuits.
         downstream_called = []
+
         def downstream(r):
             downstream_called.append(True)
             return ("ok", None)

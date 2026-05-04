@@ -35,7 +35,6 @@ from nutrition.serializers import (
     FoodLogCreateSerializer,
     FoodLogEntrySerializer,
     FoodScanResponseSerializer,
-    NutritionProfileResponseSerializer,
     NutritionProfileUpsertSerializer,
     NutritionSummaryQuerySerializer,
     NutritionSummaryResponseSerializer,
