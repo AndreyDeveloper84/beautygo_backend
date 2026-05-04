@@ -20,10 +20,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from django.core.cache import cache
 from PIL import Image
-from rest_framework import status
 from rest_framework.test import APIClient
 
-from nutrition.models import FoodLog
 from nutrition.providers.openai_vision import OpenAIVisionProvider
 from nutrition.services.ai_comment_service import (
     AICommentService,
@@ -86,7 +84,8 @@ class TestOpenAIVisionCaption:
             '{"dish_name": "Паста", "confidence": 0.9, '
             '"portion_g": 200, "ingredients": []}'
         )
-        choice = MagicMock(); choice.message = msg
+        choice = MagicMock()
+        choice.message = msg
         patch_openai_client.chat.completions.create.return_value = MagicMock(
             choices=[choice],
         )
@@ -103,11 +102,13 @@ class TestOpenAIVisionCaption:
 
     def test_no_caption_omits_hint(self, settings, patch_openai_client):
         settings.OPENAI_API_KEY = "test-key"
-        msg = MagicMock(); msg.content = (
+        msg = MagicMock()
+        msg.content = (
             '{"dish_name": "x", "confidence": 0.9, '
             '"portion_g": null, "ingredients": []}'
         )
-        choice = MagicMock(); choice.message = msg
+        choice = MagicMock()
+        choice.message = msg
         patch_openai_client.chat.completions.create.return_value = MagicMock(
             choices=[choice],
         )
@@ -120,11 +121,13 @@ class TestOpenAIVisionCaption:
 
     def test_caption_truncated_at_280_chars(self, settings, patch_openai_client):
         settings.OPENAI_API_KEY = "test-key"
-        msg = MagicMock(); msg.content = (
+        msg = MagicMock()
+        msg.content = (
             '{"dish_name": "x", "confidence": 0.9, '
             '"portion_g": null, "ingredients": []}'
         )
-        choice = MagicMock(); choice.message = msg
+        choice = MagicMock()
+        choice.message = msg
         patch_openai_client.chat.completions.create.return_value = MagicMock(
             choices=[choice],
         )
@@ -211,8 +214,10 @@ class TestLlmHappyPath:
             user=proxy_user, goal="lose", pace="moderate",
         )
         client = MagicMock()
-        msg = MagicMock(); msg.content = "Хороший день — почти в норму."
-        choice = MagicMock(); choice.message = msg
+        msg = MagicMock()
+        msg.content = "Хороший день — почти в норму."
+        choice = MagicMock()
+        choice.message = msg
         client.chat.completions.create.return_value = MagicMock(
             choices=[choice],
         )
@@ -247,8 +252,10 @@ class TestLlmFallback:
         NutritionProfile.objects.create(user=proxy_user, goal="lose")
         client = MagicMock()
         # First response too long; retry also too long → fallback.
-        msg = MagicMock(); msg.content = "x" * 500
-        choice = MagicMock(); choice.message = msg
+        msg = MagicMock()
+        msg.content = "x" * 500
+        choice = MagicMock()
+        choice.message = msg
         client.chat.completions.create.return_value = MagicMock(choices=[choice])
         svc = AICommentService(llm_client_factory=lambda: client)
         out = svc.comment_for(
@@ -296,8 +303,10 @@ class TestSummaryWithCommentEndpoint:
     ):
         from nutrition.models import NutritionProfile
         NutritionProfile.objects.create(user=proxy_user, goal="lose")
-        msg = MagicMock(); msg.content = "Хороший день, почти в норме."
-        choice = MagicMock(); choice.message = msg
+        msg = MagicMock()
+        msg.content = "Хороший день, почти в норме."
+        choice = MagicMock()
+        choice.message = msg
         client = MagicMock()
         client.chat.completions.create.return_value = MagicMock(choices=[choice])
         mock_factory.return_value = client
