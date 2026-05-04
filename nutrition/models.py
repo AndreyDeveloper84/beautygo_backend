@@ -208,6 +208,111 @@ class WaterLog(models.Model):
         return f"{self.amount_ml}ml @ {self.logged_at:%Y-%m-%d %H:%M}"
 
 
+class WaterEntry(models.Model):
+    """One row per drink the user logs through the Phase 3 tracker (DRF-302).
+
+    Spec: docs/plans/maxbot-phase3-ayla-spec.md §2 (POST/DELETE/GET /water/).
+
+    Distinct from ``WaterLog`` (the Slice 4 fixed-button mobile entry) —
+    ``WaterEntry`` is bot-driven, supports any beverage (coffee, kefir,
+    beer), tracks macros and caffeine, and supports soft-delete + restore
+    within a 15-minute window. The two coexist until WaterLog can be
+    folded in (Phase 3 cleanup pass).
+
+    Macros (kcal/protein/...) are *snapshotted* at log time via
+    ``Beverage × ml/100`` so future catalog corrections don't retroactively
+    change yesterday's diary. This mirrors the FoodLog snapshot policy.
+
+    Soft-delete via ``deleted_at`` + ``deleted_reason``. The linked
+    ``food_log`` is hard-deleted on soft-delete and re-created from the
+    snapshot fields on restore — a bot-only constraint, the FoodLog
+    table itself doesn't need a soft-delete column.
+    """
+
+    class DeletedReason(models.TextChoices):
+        USER_UNDO = "user_undo", "Пользователь отменил"
+        ADMIN = "admin", "Удалено администратором"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="water_entries",
+    )
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="water_entries",
+    )
+    beverage = models.ForeignKey(
+        "Beverage",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="entries",
+        help_text="Null = pure water entry (тапнули кнопку без выбора напитка).",
+    )
+
+    ts = models.DateTimeField()
+    ml = models.PositiveIntegerField()
+
+    # Hydration delivered. Float because water_coefficient can be 1.50 (milk)
+    # or negative (vodka). Aggregation in /water/today clamps the daily
+    # total at 0; here we store raw physiology.
+    water_ml = models.FloatField()
+
+    kcal = models.FloatField(default=0.0)
+    protein_g = models.FloatField(default=0.0)
+    fat_g = models.FloatField(default=0.0)
+    carbs_g = models.FloatField(default=0.0)
+    sugar_g = models.FloatField(default=0.0)
+    caffeine_mg = models.FloatField(default=0.0)
+
+    # When kcal>0 we mirror into FoodLog so /summary/ daily totals stay
+    # accurate. SET_NULL because we hard-delete the FoodLog on undo and
+    # re-create on restore — see WaterEntryService.
+    food_log = models.ForeignKey(
+        FoodLog,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="water_entries",
+    )
+
+    # 50 / 100 / 150 — set once when this entry crossed the threshold for
+    # the day; null otherwise. Per-day per-threshold idempotency rule
+    # (spec §2.1) is enforced by WaterEntryService at write time, not by
+    # a unique constraint, because soft-deleting a milestone entry should
+    # NOT free the threshold up (the user already saw the message).
+    milestone_threshold = models.PositiveSmallIntegerField(null=True, blank=True)
+
+    idempotency_key = models.CharField(
+        max_length=100, unique=True, null=True, blank=True,
+        help_text="UUID5(user, ts, ml, slug) — POST /water/ dedup.",
+    )
+
+    deleted_at = models.DateTimeField(null=True, blank=True)
+    deleted_reason = models.CharField(
+        max_length=24, choices=DeletedReason.choices, blank=True, default="",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Water Entry"
+        verbose_name_plural = "Water Entries"
+        ordering = ["-ts"]
+        indexes = [
+            models.Index(fields=["user", "-ts"]),
+            models.Index(fields=["user", "deleted_at"]),
+        ]
+
+    def __str__(self) -> str:
+        bev = self.beverage.slug if self.beverage_id else "water"
+        return f"{self.ml}ml {bev} @ {self.ts:%Y-%m-%d %H:%M}"
+
+
 class Beverage(models.Model):
     """Catalog row for the Phase 3 water/beverage tracker (DRF-301).
 

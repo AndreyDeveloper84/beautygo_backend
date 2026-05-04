@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from nutrition.models import Beverage
+from nutrition.models import Beverage, WaterEntry
 
 
 @admin.register(Beverage)
@@ -56,3 +56,22 @@ class BeverageAdmin(admin.ModelAdmin):
             "fields": ("created_at", "updated_at"),
         }),
     )
+
+
+@admin.register(WaterEntry)
+class WaterEntryAdmin(admin.ModelAdmin):
+    list_display = (
+        "ts",
+        "user",
+        "ml",
+        "water_ml",
+        "beverage",
+        "kcal",
+        "milestone_threshold",
+        "deleted_at",
+    )
+    list_filter = ("deleted_reason", "milestone_threshold")
+    search_fields = ("user__username", "beverage__slug")
+    readonly_fields = ("created_at",)
+    raw_id_fields = ("user", "tenant", "beverage", "food_log")
+    date_hierarchy = "ts"
