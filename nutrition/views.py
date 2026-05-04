@@ -13,7 +13,7 @@ X-App-Type: client only — Pro app doesn't show nutrition features.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone as dt_tz
+from datetime import datetime, timedelta, timezone as dt_tz
 from uuid import UUID
 
 from django.core.files.base import ContentFile
@@ -38,9 +38,12 @@ from nutrition.serializers import (
     NutritionSummaryQuerySerializer,
     NutritionSummaryResponseSerializer,
     ScanRequestSerializer,
+    WaterEntryCreateSerializer,
+    WaterEntryResponseSerializer,
     WaterLogCreateSerializer,
     WaterLogResponseSerializer,
     WaterTodayResponseSerializer,
+    WaterTodayResponseSerializerV3,
 )
 from nutrition.services.food_log_service import (
     CreateFoodLogInput,
@@ -56,6 +59,15 @@ from nutrition.services.food_scanner_router import (
 from nutrition.services.deficit_hints import build_deficit_hint
 from nutrition.services.nutrition_lookup import NutritionLookup
 from nutrition.services.nutrition_summary_service import NutritionSummaryService
+from nutrition.services.water_entry_service import (
+    CreateWaterInput,
+    EntryNotFoundError,
+    InvalidMlError,
+    RestoreWindowExpiredError,
+    UnknownBeverageError,
+    WaterEntryService,
+    RESTORE_WINDOW_MINUTES,
+)
 from nutrition.services.water_service import (
     WaterLogCreatedResponse,
     WaterService,
@@ -559,6 +571,174 @@ class InternalDeficitsView(APIView):
                 "hint": hint_result.hint,
                 "fired_keys": hint_result.fired_keys,
             },
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class InternalWaterCreateView(APIView):
+    """POST /api/v1/nutrition/internal/water/ — log a beverage (DRF-302).
+
+    Service-to-service. Request:
+      - ``ml`` (10..3000)
+      - ``beverage_slug`` (optional — null = pure water)
+      - ``ts`` (optional — defaults to now())
+
+    Idempotency: ``Idempotency-Key`` header is the canonical
+    UUID5(user, ts, ml, slug). Replays return the original response.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def post(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+
+        serializer = WaterEntryCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Невалидные данные",
+                details=serializer.errors,
+            )
+
+        idem = request.META.get("HTTP_IDEMPOTENCY_KEY") or None
+        try:
+            resp = WaterEntryService().create(CreateWaterInput(
+                user_id=user.id,
+                ml=serializer.validated_data["ml"],
+                beverage_slug=serializer.validated_data.get("beverage_slug") or None,
+                ts=serializer.validated_data.get("ts"),
+                idempotency_key=idem,
+            ))
+        except InvalidMlError as exc:
+            return error_response("VALIDATION_ERROR", str(exc))
+        except UnknownBeverageError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"Неизвестный напиток: {exc}",
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return success_response(
+            WaterEntryResponseSerializer(resp).data,
+            status_code=status.HTTP_201_CREATED,
+        )
+
+
+class InternalWaterDeleteView(APIView):
+    """DELETE /api/v1/nutrition/internal/water/{entry_id}/ — soft-delete."""
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def delete(self, request: Request, pk: UUID) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+
+        try:
+            entry = WaterEntryService().soft_delete(user.id, pk)
+        except EntryNotFoundError:
+            return error_response(
+                "NOT_FOUND",
+                "Запись не найдена",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Recompute today's running total without the deleted row so the
+        # bot UI can update its progress without a follow-up GET.
+        today_resp = WaterEntryService().today(user.id)
+        return success_response(
+            {
+                "entry_id": str(entry.id),
+                "deleted": True,
+                "today_total_water_ml": today_resp.today_total_water_ml,
+                "restore_window_expires_at": (
+                    entry.deleted_at
+                    + timedelta(minutes=RESTORE_WINDOW_MINUTES)
+                ).isoformat(),
+            },
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class InternalWaterRestoreView(APIView):
+    """POST /api/v1/nutrition/internal/water/{entry_id}/restore/."""
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def post(self, request: Request, pk: UUID) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+
+        try:
+            entry = WaterEntryService().restore(user.id, pk)
+        except EntryNotFoundError:
+            return error_response(
+                "NOT_FOUND",
+                "Запись не найдена",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        except RestoreWindowExpiredError:
+            return error_response(
+                "RESTORE_WINDOW_EXPIRED",
+                "Окно для восстановления истекло (15 минут)",
+                status_code=status.HTTP_410_GONE,
+            )
+
+        today_resp = WaterEntryService().today(user.id)
+        return success_response(
+            {
+                "entry_id": str(entry.id),
+                "restored": True,
+                "today_total_water_ml": today_resp.today_total_water_ml,
+            },
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class InternalWaterTodayView(APIView):
+    """GET /api/v1/nutrition/internal/water/today/ (spec §2.4)."""
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def get(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+
+        resp = WaterEntryService().today(user.id)
+        return success_response(
+            WaterTodayResponseSerializerV3(resp).data,
             status_code=status.HTTP_200_OK,
         )
 
