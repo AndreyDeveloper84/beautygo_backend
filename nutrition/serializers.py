@@ -252,6 +252,27 @@ class WaterTodayResponseSerializer(serializers.Serializer):
 
 
 # ---------------------------------------------------------------------------
+# Pattern detection — Phase 3 (DRF-304)
+# ---------------------------------------------------------------------------
+
+
+class DetectedPatternSerializer(serializers.Serializer):
+    slug = serializers.CharField()
+    name_ru = serializers.CharField()
+    count = serializers.IntegerField()
+    active_window_days = serializers.IntegerField()
+    severity = serializers.CharField()
+    recent_dates = serializers.ListField(child=serializers.CharField())
+    advice_template_args = serializers.DictField()
+    display_hint = serializers.CharField()
+
+
+class PatternDetectionResponseSerializer(serializers.Serializer):
+    active_days = serializers.IntegerField()
+    patterns = DetectedPatternSerializer(many=True)
+
+
+# ---------------------------------------------------------------------------
 # Nutrition profile — Phase 3 (DRF-300)
 # ---------------------------------------------------------------------------
 
