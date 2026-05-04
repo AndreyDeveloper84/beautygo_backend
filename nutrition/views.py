@@ -39,6 +39,7 @@ from nutrition.serializers import (
     NutritionProfileUpsertSerializer,
     NutritionSummaryQuerySerializer,
     NutritionSummaryResponseSerializer,
+    PatternDetectionResponseSerializer,
     ScanRequestSerializer,
     WaterEntryCreateSerializer,
     WaterEntryResponseSerializer,
@@ -47,6 +48,7 @@ from nutrition.serializers import (
     WaterTodayResponseSerializer,
     WaterTodayResponseSerializerV3,
 )
+from nutrition.services.pattern_detection_service import detect_patterns
 from nutrition.services.profile_upsert_service import (
     get_profile_response,
     upsert_profile,
@@ -585,6 +587,38 @@ class InternalDeficitsView(APIView):
                 "hint": hint_result.hint,
                 "fired_keys": hint_result.fired_keys,
             },
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class InternalPatternsView(APIView):
+    """GET /api/v1/nutrition/internal/patterns/ — behavioural patterns (DRF-304).
+
+    Service-to-service. Returns the seven detector outputs with severity
+    + display_hint. Cache: 12h per-user (spec §13) — Phase 3.3 nudges
+    fire at most once per cycle, so staler-but-cheaper is fine.
+
+    Health-flag suppression is applied inside the service: ED users
+    don't see frequent_alcohol / low_protein / meal_skips; pregnant
+    users don't see frequent_alcohol (clinical, not nudge).
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def get(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+        result = detect_patterns(user_id=user.id)
+        return success_response(
+            PatternDetectionResponseSerializer(result).data,
             status_code=status.HTTP_200_OK,
         )
 

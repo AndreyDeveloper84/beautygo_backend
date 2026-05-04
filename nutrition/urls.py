@@ -13,6 +13,7 @@ from nutrition.views import (
     InternalDeficitsView,
     InternalFoodLogView,
     InternalFoodScanView,
+    InternalPatternsView,
     InternalProfileView,
     InternalSummaryView,
     InternalWaterCreateView,
@@ -71,6 +72,12 @@ urlpatterns = [
         "internal/profile/",
         InternalProfileView.as_view(),
         name="internal-nutrition-profile",
+    ),
+    # Phase 3.3 pattern detection (DRF-304)
+    path(
+        "internal/patterns/",
+        InternalPatternsView.as_view(),
+        name="internal-nutrition-patterns",
     ),
     # Phase 3 water tracker (DRF-302). The /today/ route must precede
     # /<uuid>/ so the resolver doesn't try to coerce "today" to UUID.
