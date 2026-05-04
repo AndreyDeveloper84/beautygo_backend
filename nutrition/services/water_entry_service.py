@@ -54,8 +54,39 @@ class NutritionContext:
 
 
 def _load_nutrition_context(user_id: int) -> NutritionContext:
-    daily = getattr(settings, "NUTRITION_DEFAULT_WATER_GOAL_ML", 2000)
-    return NutritionContext(daily_water_ml=int(daily))
+    """Read NutritionProfile (DRF-300) when present, fall back to defaults.
+
+    The profile is optional — pre-onboarding users still log water and we
+    want sensible behaviour (no eating-disorder strip, UTC, settings
+    default norm). Once DRF-300 lands the profile, all four fields here
+    pick up the real values and the rest of the service Just Works.
+    """
+    from nutrition.models import NutritionProfile  # local import to avoid cycle
+
+    default_norm = int(getattr(settings, "NUTRITION_DEFAULT_WATER_GOAL_ML", 2000))
+
+    try:
+        profile = NutritionProfile.objects.only(
+            "timezone", "daily_water_ml", "health_flags",
+        ).get(user_id=user_id)
+    except NutritionProfile.DoesNotExist:
+        return NutritionContext(daily_water_ml=default_norm)
+
+    tz = dt_tz.utc
+    if profile.timezone and profile.timezone != "UTC":
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(profile.timezone)
+        except Exception:
+            tz = dt_tz.utc
+
+    flags = profile.health_flags or {}
+    return NutritionContext(
+        timezone=tz,
+        daily_water_ml=int(profile.daily_water_ml or default_norm),
+        pregnant=bool(flags.get("pregnant")),
+        eating_disorder=bool(flags.get("eating_disorder")),
+    )
 
 
 # ---------------------------------------------------------------------------

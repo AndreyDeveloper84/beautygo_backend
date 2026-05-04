@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from nutrition.models import Beverage, FoodLog, FoodScan, WaterLog
+from nutrition.models import Beverage, FoodLog, FoodScan, NutritionProfile, WaterLog
 
 
 # 10 MiB — same cap used by the portfolio uploader; the mobile client
@@ -238,6 +238,105 @@ class WaterTodayResponseSerializer(serializers.Serializer):
     logs = WaterTodayLogSerializer(many=True)
     water_ml = serializers.IntegerField(source="aggregate.water_ml")
     water_goal_ml = serializers.IntegerField(source="aggregate.water_goal_ml")
+
+
+# ---------------------------------------------------------------------------
+# Nutrition profile — Phase 3 (DRF-300)
+# ---------------------------------------------------------------------------
+
+
+_HEALTH_FLAG_KEYS = {
+    "pregnant", "breastfeeding",
+    "diabetes_t1", "diabetes_t2", "prediabetes",
+    "hypertension", "gi_problems", "thyroid", "menopause",
+    "eating_disorder", "meds",
+    "allergies", "allergies_vague",
+    "gender_skipped", "age_skipped", "height_skipped", "weight_skipped",
+}
+
+
+class DisclaimerAckSerializer(serializers.Serializer):
+    ts = serializers.DateTimeField()
+    version = serializers.CharField(max_length=16)
+    screen = serializers.CharField(max_length=64)
+
+
+class NutritionProfileUpsertSerializer(serializers.Serializer):
+    """POST /internal/profile/ request — every field optional (PATCH semantics).
+
+    Validation per spec §1.2: age 16-99, height 120-220, weight 30-200.
+    """
+
+    gender = serializers.ChoiceField(
+        choices=NutritionProfile.Gender.choices, required=False, allow_blank=True,
+    )
+    age = serializers.IntegerField(min_value=16, max_value=99, required=False)
+    height_cm = serializers.IntegerField(
+        min_value=120, max_value=220, required=False,
+    )
+    weight_kg = serializers.FloatField(
+        min_value=30, max_value=200, required=False,
+    )
+    weight_range = serializers.CharField(required=False, allow_blank=True, max_length=16)
+    activity_coefficient = serializers.FloatField(
+        min_value=1.0, max_value=2.5, required=False,
+    )
+    goal = serializers.ChoiceField(
+        choices=NutritionProfile.Goal.choices, required=False, allow_blank=True,
+    )
+    pace = serializers.ChoiceField(
+        choices=NutritionProfile.Pace.choices, required=False, allow_blank=True,
+    )
+    diet_preference = serializers.CharField(
+        required=False, allow_blank=True, max_length=32,
+    )
+    timezone = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    health_flags = serializers.DictField(required=False)
+    _skipped_fields = serializers.ListField(
+        child=serializers.CharField(), required=False,
+    )
+    disclaimer_acked = DisclaimerAckSerializer(required=False)
+    complete = serializers.BooleanField(required=False, default=False)
+
+    def validate_health_flags(self, value: dict) -> dict:
+        unknown = set(value.keys()) - _HEALTH_FLAG_KEYS
+        if unknown:
+            raise serializers.ValidationError(
+                f"Unknown health_flags keys: {sorted(unknown)}"
+            )
+        return value
+
+
+class NutritionProfileResponseSerializer(serializers.Serializer):
+    """Wire shape of GET / POST /internal/profile/ (spec §1.1)."""
+
+    external_user_id = serializers.CharField()
+    exists = serializers.BooleanField()
+
+    gender = serializers.CharField(allow_null=True, allow_blank=True)
+    age = serializers.IntegerField(allow_null=True)
+    height_cm = serializers.IntegerField(allow_null=True)
+    weight_kg = serializers.FloatField(allow_null=True)
+    weight_range = serializers.CharField(allow_null=True, allow_blank=True)
+    activity_coefficient = serializers.FloatField()
+    goal = serializers.CharField(allow_null=True, allow_blank=True)
+    pace = serializers.CharField(allow_null=True, allow_blank=True)
+    diet_preference = serializers.CharField()
+
+    norms = serializers.DictField(child=serializers.IntegerField())
+    health_flags = serializers.DictField()
+
+    goal_overridden_by = serializers.CharField(allow_null=True, allow_blank=True)
+    bmi_warning_overridden_at = serializers.DateTimeField(allow_null=True)
+    overrides_applied = serializers.ListField(child=serializers.DictField())
+
+    disclaimer_acked = serializers.JSONField(allow_null=True)
+    onboarded_at = serializers.DateTimeField(allow_null=True)
+    first_food_logged_at = serializers.DateTimeField(allow_null=True)
+    weekly_summary_unlocked_at = serializers.DateTimeField(allow_null=True)
+
+    created_at = serializers.DateTimeField()
+    updated_at = serializers.DateTimeField()
 
 
 # ---------------------------------------------------------------------------
