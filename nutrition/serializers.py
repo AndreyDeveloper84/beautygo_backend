@@ -241,6 +241,67 @@ class WaterTodayResponseSerializer(serializers.Serializer):
 
 
 # ---------------------------------------------------------------------------
+# Water tracker — Phase 3 (DRF-302)
+# ---------------------------------------------------------------------------
+
+
+class WaterEntryCreateSerializer(serializers.Serializer):
+    """POST /internal/water/ request body (spec §2.1)."""
+
+    ml = serializers.IntegerField(min_value=10, max_value=3000)
+    beverage_slug = serializers.CharField(
+        required=False, allow_null=True, allow_blank=True, max_length=64,
+    )
+    ts = serializers.DateTimeField(required=False)
+
+
+class WaterEntryResponseSerializer(serializers.Serializer):
+    """POST /internal/water/ response shape (spec §2.1)."""
+
+    entry_id = serializers.UUIDField()
+    ml = serializers.IntegerField()
+    water_ml = serializers.IntegerField()
+    beverage_name = serializers.CharField(allow_null=True)
+    beverage_label = serializers.CharField(allow_null=True)
+    kcal = serializers.FloatField()
+    protein_g = serializers.FloatField()
+    fat_g = serializers.FloatField()
+    carbs_g = serializers.FloatField()
+    caffeine_mg = serializers.FloatField()
+    today_total_water_ml = serializers.IntegerField()
+    today_norm_water_ml = serializers.IntegerField()
+    today_progress_pct = serializers.IntegerField()
+    milestone_text = serializers.CharField(allow_null=True)
+    alcohol_recovery_hint = serializers.BooleanField()
+    caffeine_warning = serializers.CharField(allow_null=True)
+    ts = serializers.DateTimeField()
+
+
+class WaterTodayEntrySerializer(serializers.Serializer):
+    entry_id = serializers.UUIDField()
+    ts = serializers.DateTimeField()
+    ml = serializers.IntegerField()
+    water_ml = serializers.IntegerField()
+    beverage_slug = serializers.CharField(allow_null=True)
+    beverage_name = serializers.CharField(allow_null=True)
+    deleted = serializers.BooleanField()
+
+
+class WaterTodayResponseSerializerV3(serializers.Serializer):
+    """GET /internal/water/today/ (spec §2.4) — distinct from the Slice 4
+    WaterTodayResponseSerializer above (mobile fixed-button glasses)."""
+
+    date = serializers.DateField(format="%Y-%m-%d")
+    entries = WaterTodayEntrySerializer(many=True)
+    today_total_water_ml = serializers.IntegerField()
+    today_norm_water_ml = serializers.IntegerField()
+    today_kcal_from_beverages = serializers.FloatField()
+    today_caffeine_mg = serializers.FloatField()
+    today_total_coffee_cups = serializers.IntegerField()
+    today_total_tea_cups = serializers.IntegerField()
+
+
+# ---------------------------------------------------------------------------
 # Beverage catalog (DRF-301)
 # ---------------------------------------------------------------------------
 
