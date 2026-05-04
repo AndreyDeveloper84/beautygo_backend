@@ -208,6 +208,136 @@ class WaterLog(models.Model):
         return f"{self.amount_ml}ml @ {self.logged_at:%Y-%m-%d %H:%M}"
 
 
+class NutritionProfile(models.Model):
+    """User nutrition profile (DRF-300).
+
+    Spec: docs/plans/maxbot-phase3-ayla-spec.md §1.
+
+    1:1 with ``settings.AUTH_USER_MODEL``. The bot reads this on every
+    user message to render health-aware system-prompt cues; the mobile
+    client reads it for the Phase 3 onboarding screen and the daily
+    summary's "учла важное" panel.
+
+    Stored norms (``daily_kcal``, ``daily_protein_g``, ...) are the
+    post-override values returned by GET /profile/. The pre-override
+    breakdown lives in ``last_overrides_applied`` JSON so the bot can
+    explain *why* a goal got coerced (pregnancy/breastfeeding/BMR floor/
+    eating_disorder ladder).
+
+    All recalculation is pure-math (Mifflin-St Jeor + activity ×
+    goal_factor + override ladder). No LLM, no external API.
+    """
+
+    class Gender(models.TextChoices):
+        FEMALE = "female", "Женский"
+        MALE = "male", "Мужской"
+
+    class Goal(models.TextChoices):
+        LOSE = "lose", "Похудеть"
+        MAINTAIN = "maintain", "Поддерживать"
+        GAIN = "gain", "Набрать"
+        TONE = "tone", "Подтянуть"
+
+    class Pace(models.TextChoices):
+        GENTLE = "gentle", "Мягкий"
+        MODERATE = "moderate", "Средний"
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="nutrition_profile",
+        primary_key=True,
+    )
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="nutrition_profiles",
+    )
+
+    # Anthropometry
+    gender = models.CharField(
+        max_length=8, choices=Gender.choices, blank=True, default="",
+    )
+    age = models.PositiveSmallIntegerField(null=True, blank=True)
+    height_cm = models.PositiveSmallIntegerField(null=True, blank=True)
+    weight_kg = models.FloatField(null=True, blank=True)
+    weight_range = models.CharField(
+        max_length=16, blank=True, default="",
+        help_text='"65-75" если ввели только диапазон.',
+    )
+    timezone = models.CharField(max_length=64, blank=True, default="UTC")
+
+    # Goals
+    activity_coefficient = models.FloatField(default=1.4)
+    goal = models.CharField(
+        max_length=12, choices=Goal.choices, blank=True, default="",
+    )
+    pace = models.CharField(
+        max_length=12, choices=Pace.choices, blank=True, default="",
+    )
+    diet_preference = models.CharField(max_length=32, blank=True, default="none")
+
+    # Health flags + skipped markers + allergies
+    health_flags = models.JSONField(default=dict, blank=True)
+
+    # Computed norms (post-override)
+    bmr = models.PositiveIntegerField(default=0)
+    daily_kcal = models.PositiveIntegerField(default=0)
+    daily_protein_g = models.PositiveSmallIntegerField(default=0)
+    daily_fat_g = models.PositiveSmallIntegerField(default=0)
+    daily_carbs_g = models.PositiveSmallIntegerField(default=0)
+    daily_water_ml = models.PositiveIntegerField(default=0)
+
+    # Override audit
+    goal_overridden_by = models.CharField(max_length=24, blank=True, default="")
+    bmi_warning_overridden_at = models.DateTimeField(null=True, blank=True)
+    last_overrides_applied = models.JSONField(default=list, blank=True)
+
+    # Disclaimer ack {ts, version, screen}
+    disclaimer_acked = models.JSONField(null=True, blank=True)
+
+    # Lifecycle markers
+    onboarded_at = models.DateTimeField(null=True, blank=True)
+    first_food_logged_at = models.DateTimeField(null=True, blank=True)
+    weekly_summary_unlocked_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Nutrition Profile"
+        verbose_name_plural = "Nutrition Profiles"
+
+    def __str__(self) -> str:
+        return f"NutritionProfile(user={self.user_id}, goal={self.goal or '?'})"
+
+
+class ProfileIdempotencyKey(models.Model):
+    """24-hour replay cache for POST /internal/profile/ (DRF-300).
+
+    Stores the (key, response) tuple per user so a retried upsert with
+    the same Idempotency-Key returns the cached response and never
+    double-applies the patch. ``ttl`` cleanup is a cheap delete by
+    expires_at — there's no Celery beat for it; the next write past TTL
+    overwrites in place.
+    """
+
+    key = models.CharField(max_length=128, primary_key=True)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="profile_idempotency_keys",
+    )
+    response = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        indexes = [models.Index(fields=["expires_at"])]
+
+
 class WaterEntry(models.Model):
     """One row per drink the user logs through the Phase 3 tracker (DRF-302).
 
