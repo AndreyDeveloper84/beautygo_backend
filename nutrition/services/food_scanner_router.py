@@ -121,6 +121,7 @@ class FoodScannerRouter:
         *,
         portion_multiplier: float = 1.0,
         user=None,
+        caption: str = "",
     ) -> RouterResult:
         # Capture primary failure into a function-scoped name. The `as`
         # binding inside `except` is cleared at end of the block in
@@ -133,6 +134,7 @@ class FoodScannerRouter:
                 image_bytes,
                 portion_multiplier=portion_multiplier,
                 user=user,
+                caption=caption,
             )
             return RouterResult(
                 result=result,
@@ -157,6 +159,7 @@ class FoodScannerRouter:
                 image_bytes,
                 portion_multiplier=portion_multiplier,
                 user=user,
+                caption=caption,
             )
             return RouterResult(
                 result=result,
