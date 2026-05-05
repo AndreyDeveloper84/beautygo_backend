@@ -165,13 +165,19 @@ class TestSuccess:
         # {calories, protein_g, fat_g, carbs_g, vitamins}. Internal
         # storage on FoodScan.nutrition is richer (per-100g, source,
         # matched_dish) for analytics and Slice 3b derivation.
-        assert body["nutrition"] == {
-            "calories": 147.0,        # 49 kcal/100g × 300g
-            "protein_g": pytest.approx(4.8, rel=1e-2),
-            "fat_g": pytest.approx(6.6, rel=1e-2),
-            "carbs_g": pytest.approx(20.1, rel=1e-2),
-            "vitamins": {},
-        }
+        # DRF-260 enriched борщ with micronutrients from Скурихин,
+        # so vitamins is no longer empty for this dish — assert the
+        # macros and the presence of vitamin keys, not the exact map.
+        nutrition = body["nutrition"]
+        assert nutrition["calories"] == 147.0       # 49 kcal/100g × 300g
+        assert nutrition["protein_g"] == pytest.approx(4.8, rel=1e-2)
+        assert nutrition["fat_g"] == pytest.approx(6.6, rel=1e-2)
+        assert nutrition["carbs_g"] == pytest.approx(20.1, rel=1e-2)
+        # Vitamins map is sparse (DRF-264) — only non-null keys land.
+        # Borscht seed populates iron, fiber, vit C, calcium, magnesium.
+        vitamins = nutrition["vitamins"]
+        assert vitamins.get("iron_mg") is not None
+        assert vitamins.get("fiber_g") is not None
 
         scan = FoodScan.objects.get(id=body["scan_id"])
         assert scan.user_id == client_user.id
