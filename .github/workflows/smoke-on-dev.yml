@@ -118,18 +118,39 @@ jobs:
 
             if [ "$PYTEST_RC" -ne 0 ]; then
               echo "=== send Telegram alert (token from VPS .env) ==="
+              # Diag: confirm where .env lives + which TELEGRAM_* keys
+              # are actually present (KEY NAMES ONLY — values redacted).
+              for ENV_PATH in ./.env ../.env /home/taximeter/.env /etc/ayla/.env; do
+                if [ -f "$ENV_PATH" ]; then
+                  echo "  found: $ENV_PATH ($(wc -l < "$ENV_PATH") lines, $(file -b "$ENV_PATH"))"
+                  echo "  TELEGRAM_/BOT_ keys present:"
+                  grep -E '^(export +)?(TELEGRAM_|BOT_|TG_)' "$ENV_PATH" 2>/dev/null \
+                    | sed 's/=.*/=<redacted>/' | sed 's/^/    /'
+                fi
+              done
+
               # Source .env without exporting noise into our shell scope.
-              # The .env on this box already has the bot token used by
-              # other domain notifications — reuse it instead of pushing
-              # the same secret into GitHub.
+              # First try the dir we cd'd into; fall back to common spots.
               set +e
-              set -a; . ./.env 2>/dev/null; set +a
+              for ENV_PATH in ./.env ../.env /home/taximeter/.env /etc/ayla/.env; do
+                if [ -f "$ENV_PATH" ]; then
+                  # Strip CRLF line endings before sourcing (a known Windows-
+                  # editor leak that gives values trailing \r and breaks
+                  # curl. tr is fine on a copy in /tmp.)
+                  TMP_ENV=$(mktemp)
+                  tr -d '\r' < "$ENV_PATH" > "$TMP_ENV"
+                  set -a; . "$TMP_ENV" 2>/dev/null; set +a
+                  rm -f "$TMP_ENV"
+                fi
+              done
               # Try common variable names so we don't care which one the
               # box uses.
               TG_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-${TG_BOT_TOKEN:-${BOT_TOKEN:-${TELEGRAM_TOKEN:-}}}}"
               TG_CHAT_ID="${TELEGRAM_CHAT_ID:-${TG_CHAT_ID:-${TELEGRAM_ALERT_CHAT_ID:-${SMOKE_ALERT_CHAT_ID:-}}}}"
+              echo "  resolved token: $([ -n "$TG_BOT_TOKEN" ] && echo present || echo MISSING) ($(printf '%s' "$TG_BOT_TOKEN" | wc -c) chars)"
+              echo "  resolved chat:  $([ -n "$TG_CHAT_ID" ] && echo present || echo MISSING)"
               if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
-                echo "  No telegram token/chat_id in .env — skipping (set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID to enable)."
+                echo "  No telegram token/chat_id resolved — skipping."
               else
                 SHA_SHORT=$(git rev-parse --short HEAD)
                 MSG="🔥 *Smoke tests on dev VPS — failed*%0A"
