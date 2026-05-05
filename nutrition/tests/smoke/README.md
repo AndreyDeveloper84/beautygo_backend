@@ -33,8 +33,10 @@ pytest nutrition/tests/smoke::test_phase_3_smoke::TestSection5Patterns
   parts of §9 that work without VPS (rate-limit, idempotency, helpers).
 - **Skipped with explanation**: P1/P4/P5 (deploy/env state on VPS),
   4.2 real OpenAI logs (we mock the client and assert the prompt
-  built around the caption), 9.6 migrations rollback (run from CLI:
-  `manage.py migrate nutrition 0005` then forward), 9.7 Sentry.
+  built around the caption), 5.13 latency budget (needs VPS-side
+  trace), 9.1 ERROR/CRITICAL log scan (read `docker compose logs`
+  manually), 9.6 migrations rollback (run from CLI: `manage.py
+  migrate nutrition 0005` then forward), 9.7 Sentry.
 - Time-sensitive scenarios (§5 patterns, §6 returning success) inject
   past-dated rows directly via `FoodLog.objects.create(logged_at=...)`
   — no `freezegun` dependency.
