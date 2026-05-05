@@ -275,3 +275,65 @@ class TestProgressiveEndpoint:
         body = resp.json().get("data", resp.json())
         assert body["period"] == 7
         assert body["unlocked"] is True
+
+
+@pytest.mark.django_db
+class TestVitaminDRDAFallback:
+    """LB-4 regression: RDA must fall back to settings, not 1 IU."""
+
+    def test_no_profile_rda_field_uses_settings_default(
+        self, progressive_user, settings,
+    ):
+        # Profile lacks daily_vitamin_d_iu (DRF-265 not merged here).
+        # Without LB-4 fix, fallback was `or 1` → 20000% percentages.
+        settings.NUTRITION_DEFAULT_VITAMIN_D_IU = 600
+        # Seed user with 600 IU/day vitamin D × 14 days.
+        for d in range(14):
+            FoodLog.objects.create(
+                user=progressive_user, dish_name=f"d{d}",
+                calories=500, protein_g=20, fat_g=10, carbs_g=50,
+                meal_type="lunch",
+                logged_at=datetime.now(timezone.utc) - timedelta(days=d),
+                vitamin_d_iu=600.0,
+            )
+        result = NutritionSummaryService().progressive(
+            user=progressive_user, period=14,
+        )
+        # 600 IU/day vs 600 IU RDA → 100% per week. Without LB-4 fix,
+        # this was 60000% (600 / 1 × 100).
+        for pct in result.trends["vitamin_d_pct_rda_per_week"]:
+            assert 80 <= pct <= 120, (
+                f"LB-4: vit D % unexpectedly {pct} — fallback "
+                "still not honoring settings default"
+            )
+
+
+@pytest.mark.django_db
+class TestLateDinnerTimezoneFix:
+    """LB-3 regression: 22:00 MSK dinner must count as late_dinner."""
+
+    def test_msk_22_dinner_counts(self, progressive_user, settings):
+        settings.NUTRITION_DEFAULT_VITAMIN_D_IU = 600
+        # 22:00 MSK = 19:00 UTC. Old code filtered hour >= 21 UTC,
+        # which excluded this. New code filters hour >= 18 UTC (MSK
+        # offset 3). 19 >= 18 → counted.
+        # Anchor at "yesterday 19:00 UTC" then walk back so all logs
+        # are strictly in the past regardless of test-run clock time.
+        anchor = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+            hour=19, minute=0, second=0, microsecond=0,
+        )
+        for d in range(14):
+            FoodLog.objects.create(
+                user=progressive_user, dish_name=f"dinner d{d}",
+                calories=500, protein_g=20, fat_g=10, carbs_g=50,
+                meal_type="dinner",
+                logged_at=anchor - timedelta(days=d),
+            )
+        # Profile is required by progressive() for unlocked path.
+        result = NutritionSummaryService().progressive(
+            user=progressive_user, period=14,
+        )
+        # All 14 days had a 22:00 MSK dinner — count must be > 0.
+        assert result.habits["late_dinner_count_in_period"] > 0, (
+            "LB-3: 22:00 MSK dinners (= 19:00 UTC) didn't count"
+        )
