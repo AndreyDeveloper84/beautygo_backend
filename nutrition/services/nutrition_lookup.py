@@ -122,10 +122,20 @@ def _normalize(text: str) -> str:
 
 
 class NutritionLookup:
-    """Looks up macros for a dish name.
+    """Three-layer lookup chain: seed → USDA → AI estimate (DRF-261).
 
-    MVP: seed-only (``nutrition.data.ru_dishes_seed``). HTTP fallback
-    arrives in Slice 3a'.
+    Order is cheapest-first. Each layer can be skipped via DI.
+
+    1. Local seed (``nutrition.data.ru_dishes_seed``) — RU dishes from
+       Скурихин-Тутельян.
+    2. USDA FoodData Central — free, cached.
+       ``USDAUnavailableError`` falls through to AI.
+    3. AI estimator (gpt-4o-mini) — last resort. Tagged
+       ``micronutrients_source="ai_estimate"`` so Track E pattern engine
+       can downweight low-confidence data.
+
+    USDA + AI are optional — when omitted, behaviour matches the
+    legacy seed-only version. Existing call sites keep working.
     """
 
     SOURCE_SEED = "seed_ru"
@@ -135,9 +145,16 @@ class NutritionLookup:
         *,
         dish_macros: dict[str, DishMacros] | None = None,
         aliases: dict[str, str] | None = None,
+        usda_lookup=None,
+        ai_estimator=None,
     ) -> None:
         self._dish_macros = dish_macros if dish_macros is not None else DISH_MACROS
         self._aliases = aliases if aliases is not None else ALIASES
+        # USDA + AI passed by DI. Tests inject mocks; production wires
+        # real instances via a factory (future). Not constructing here
+        # avoids importing httpx / openai when nobody asked for them.
+        self._usda = usda_lookup
+        self._ai = ai_estimator
 
     def lookup(
         self,
@@ -146,12 +163,38 @@ class NutritionLookup:
         ingredients: Iterable[str] = (),
         portion_g: float | None = None,
     ) -> NutritionFacts | None:
-        """Return facts for ``dish_name``, or None if not in any source."""
+        """Return facts for ``dish_name``, or None if all layers miss."""
+        # Layer 1 — seed.
         canonical = self._resolve_canonical(dish_name, ingredients)
-        if canonical is None:
-            return None
-        macros = self._dish_macros[canonical]
-        return self._build_facts(canonical, macros, portion_g)
+        if canonical is not None:
+            macros = self._dish_macros[canonical]
+            return self._build_facts(canonical, macros, portion_g)
+
+        # Layer 2 — USDA.
+        if self._usda is not None:
+            try:
+                facts = self._usda.lookup(dish_name, portion_g=portion_g)
+                if facts is not None:
+                    return facts
+            except Exception as exc:  # noqa: BLE001 — duck-type on class name
+                if exc.__class__.__name__ != "USDAUnavailableError":
+                    raise
+                # Outage → fall through to AI estimator.
+
+        # Layer 3 — AI estimator.
+        if self._ai is not None:
+            try:
+                return self._ai.estimate(
+                    dish_name,
+                    ingredients=tuple(ingredients),
+                    portion_g=portion_g,
+                )
+            except Exception as exc:  # noqa: BLE001 — duck-type
+                if exc.__class__.__name__ != "EstimatorError":
+                    raise
+                # Bad LLM response → clean miss for the caller.
+
+        return None
 
     # ------------------------------------------------------------------
     # internals

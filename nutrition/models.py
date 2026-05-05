@@ -302,6 +302,47 @@ class NutritionOutboxEvent(models.Model):
         return f"{self.topic} → {self.external_user_id} ({self.status})"
 
 
+class USDAFoodCache(models.Model):
+    """Local cache of USDA FoodData Central API responses (DRF-261).
+
+    Track E micronutrient lookup chain: seed → USDA → AI estimate. The
+    USDA API is free but rate-limited at 1000 req/hour. This table
+    keys responses by the normalized search term so a popular dish
+    («яблоко», «apple») hits HTTP exactly once and serves all later
+    lookups from disk.
+
+    Schema is intentionally minimal: the full USDA payload is huge
+    (100+ nutrients per food), so we store only what the parser
+    extracted into ``data`` — already shaped like ``NutritionFacts``
+    fields. ``fdc_id`` is preserved for audit + future re-fetch by ID.
+    """
+
+    fdc_id = models.PositiveIntegerField(
+        unique=True,
+        help_text="USDA FoodData Central ID (foundation, branded, etc).",
+    )
+    description = models.CharField(max_length=300)
+    # Normalized search term that hit this row — case-folded, stripped.
+    # Used as the cache key by USDALookup; multiple terms can resolve to
+    # the same fdc_id but only one row exists per fdc_id (unique above).
+    search_key = models.CharField(max_length=200, db_index=True)
+    data = models.JSONField(
+        help_text="Parsed nutrient profile (kcal/protein/.../iron_mg per 100g).",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "USDA Food Cache"
+        verbose_name_plural = "USDA Food Cache"
+        indexes = [
+            models.Index(fields=["search_key"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.fdc_id} {self.description[:60]}"
+
+
 class NutritionProfile(models.Model):
     """User nutrition profile (DRF-300).
 
