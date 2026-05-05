@@ -71,10 +71,15 @@ jobs:
             # ship stale bytecode into the container.
             find ./nutrition ./djangoProject ./ai ./tenants \
               -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
-            docker compose cp ./nutrition     web:/app/nutrition
-            docker compose cp ./djangoProject web:/app/djangoProject
-            docker compose cp ./ai            web:/app/ai
-            docker compose cp ./tenants       web:/app/tenants
+            # Trailing /. means "copy contents of src into dst" (overwrite
+            # dst's contents). Without it, when dst exists as a dir docker
+            # cp creates dst/<src-basename>/ instead — last run silently
+            # produced /app/nutrition/nutrition/tests/smoke/ rather than
+            # overwriting /app/nutrition/.
+            docker compose cp ./nutrition/.     web:/app/nutrition
+            docker compose cp ./djangoProject/. web:/app/djangoProject
+            docker compose cp ./ai/.            web:/app/ai
+            docker compose cp ./tenants/.       web:/app/tenants
             echo
 
             echo "=== container view of smoke dir ==="
