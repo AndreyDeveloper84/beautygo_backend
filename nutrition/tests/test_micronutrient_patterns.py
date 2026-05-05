@@ -253,6 +253,80 @@ class TestEatingDisorderSuppression:
 
 
 @pytest.mark.django_db
+class TestLowSeverityVisible:
+    """LB-5 regression: low_omega3 / low_calcium MUST NOT be hidden.
+
+    Earlier `_force_severity(_, "low")` produced display_hint="hidden",
+    silently dropping these patterns from UI rendering and engine
+    consumption. Fix maps "low" → "secondary" in `_display_hint`.
+    """
+
+    def test_low_omega3_display_hint_not_hidden(self, user_with_profile):
+        for d in range(15):
+            _seed_log(user_with_profile, days_ago=d, omega3_g=0.1)
+
+        patterns = _patterns_by_slug(user_with_profile)
+        assert "low_omega3" in patterns
+        assert patterns["low_omega3"].severity == "low"
+        # Must be visible — secondary at minimum, not hidden.
+        assert patterns["low_omega3"].display_hint != "hidden"
+        assert patterns["low_omega3"].display_hint == "secondary"
+
+    def test_low_calcium_display_hint_not_hidden(self, user_with_profile):
+        for d in range(15):
+            _seed_log(user_with_profile, days_ago=d, calcium_mg=200)
+
+        patterns = _patterns_by_slug(user_with_profile)
+        assert "low_calcium" in patterns
+        assert patterns["low_calcium"].display_hint == "secondary"
+
+
+@pytest.mark.django_db
+class TestQualityGateScopedPerMicronutrient:
+    """LB-6 regression: AI-estimate snacks without iron must NOT block iron detector."""
+
+    def test_ai_macros_only_does_not_block_iron_gate(self, user_with_profile):
+        # 7 USDA-source rows with iron data (real deficit at 3 mg < 9 mg threshold).
+        for d in range(7):
+            _seed_log(
+                user_with_profile, days_ago=d, iron_mg=3,
+                source="rospotrebnadzor",
+            )
+        # 5 AI-estimate snacks WITHOUT iron data — 0 votes the iron
+        # gate before fix: 5/12 = 42% AI → blocks. After fix: only
+        # rows with iron count → 0/7 = 0% AI → gate passes.
+        for d in range(5):
+            _seed_log(
+                user_with_profile, days_ago=d + 7, iron_mg=None,
+                source="ai_estimate",
+            )
+
+        patterns = _patterns_by_slug(user_with_profile)
+        assert "low_iron" in patterns, (
+            "LB-6: iron detector blocked by AI-estimate snacks "
+            "that don't carry iron data"
+        )
+
+    def test_ai_with_actual_iron_still_blocks_iron_gate(
+        self, user_with_profile,
+    ):
+        # 4 AI-estimate iron + 3 USDA iron = 4/7 = 57% AI > 40% → block.
+        # Confirms gate still fires when AI rows DO carry the micro.
+        for d in range(4):
+            _seed_log(
+                user_with_profile, days_ago=d, iron_mg=2,
+                source="ai_estimate",
+            )
+        for d in range(3):
+            _seed_log(
+                user_with_profile, days_ago=d + 4, iron_mg=2,
+                source="rospotrebnadzor",
+            )
+        patterns = _patterns_by_slug(user_with_profile)
+        assert "low_iron" not in patterns
+
+
+@pytest.mark.django_db
 class TestNoFalsePositiveOnEmptyData:
     """No micronutrient logs → no patterns. Doesn't crash."""
 

@@ -142,8 +142,7 @@ class DailyFoodStats:
     last_meal_dt: datetime | None = None
     has_evening_sweets: bool = False
     weekday: int = 0  # 0..6
-    # DRF-262: micronutrient daily totals + AI-estimate row counter for
-    # the quality gate. Track E detectors read these.
+    # DRF-262: micronutrient daily totals.
     total_vitamin_d_iu: float = 0.0
     total_iron_mg: float = 0.0
     total_omega3_g: float = 0.0
@@ -151,6 +150,21 @@ class DailyFoodStats:
     total_vitamin_b12_mcg: float = 0.0
     total_rows: int = 0
     ai_estimate_rows: int = 0
+    # DRF-262 LB-6 fix: per-micronutrient row counters for the quality
+    # gate. Each detector now scopes its gate to rows that actually
+    # carry the micronutrient it cares about — AI-estimate snacks
+    # without iron data no longer "vote" against the iron detector's
+    # gate. Increment when the corresponding column is non-null.
+    rows_with_vitamin_d: int = 0
+    rows_with_iron: int = 0
+    rows_with_omega3: int = 0
+    rows_with_calcium: int = 0
+    rows_with_b12: int = 0
+    ai_rows_with_vitamin_d: int = 0
+    ai_rows_with_iron: int = 0
+    ai_rows_with_omega3: int = 0
+    ai_rows_with_calcium: int = 0
+    ai_rows_with_b12: int = 0
 
 
 @dataclass
@@ -286,8 +300,33 @@ def _collect_food_stats(
         s.total_calcium_mg += float(row.get("calcium_mg") or 0.0)
         s.total_vitamin_b12_mcg += float(row.get("vitamin_b12_mcg") or 0.0)
         s.total_rows += 1
-        if row.get("micronutrients_source") == "ai_estimate":
+        is_ai = row.get("micronutrients_source") == "ai_estimate"
+        if is_ai:
             s.ai_estimate_rows += 1
+        # DRF-262 LB-6 fix: per-micronutrient counters. A row "votes"
+        # against the gate of micronutrient X only if it actually
+        # carries an X value. Otherwise an AI-estimate snack with
+        # only macros falsely blocks every detector.
+        if row.get("vitamin_d_iu") is not None:
+            s.rows_with_vitamin_d += 1
+            if is_ai:
+                s.ai_rows_with_vitamin_d += 1
+        if row.get("iron_mg") is not None:
+            s.rows_with_iron += 1
+            if is_ai:
+                s.ai_rows_with_iron += 1
+        if row.get("omega3_g") is not None:
+            s.rows_with_omega3 += 1
+            if is_ai:
+                s.ai_rows_with_omega3 += 1
+        if row.get("calcium_mg") is not None:
+            s.rows_with_calcium += 1
+            if is_ai:
+                s.ai_rows_with_calcium += 1
+        if row.get("vitamin_b12_mcg") is not None:
+            s.rows_with_b12 += 1
+            if is_ai:
+                s.ai_rows_with_b12 += 1
     return stats
 
 
@@ -550,15 +589,31 @@ def _rda(profile: NutritionProfile | None, key: str) -> float:
     return float(_DEFAULT_RDA[key])
 
 
-def _quality_gate_ok(food_stats: dict, window: list) -> bool:
-    """Return True if AI-estimate share over the window is ≤ limit."""
-    rows = sum(food_stats.get(d).total_rows for d in window if food_stats.get(d))
+def _quality_gate_ok(food_stats: dict, window: list, micro: str) -> bool:
+    """Return True if AI-estimate share is ≤ limit for the given micro.
+
+    DRF-262 LB-6 fix: scoped per-micronutrient. Earlier version divided
+    total AI rows by total rows, so an AI-estimate snack with only
+    macros (no iron data) would still vote against the iron gate.
+    Now each detector cares only about rows that actually carry its
+    micronutrient.
+
+    ``micro`` ∈ {"vitamin_d", "iron", "omega3", "calcium", "b12"}.
+    """
+    rows_attr = f"rows_with_{micro}"
+    ai_attr = f"ai_rows_with_{micro}"
+    rows = sum(
+        getattr(food_stats[d], rows_attr) for d in window
+        if d in food_stats
+    )
     if rows == 0:
-        # No data — caller treats as "no pattern" elsewhere.
+        # No data with this micronutrient — caller's threshold check
+        # short-circuits anyway (low_days = []), so gate-pass here
+        # is harmless and avoids spurious blocks.
         return True
     ai_rows = sum(
-        food_stats.get(d).ai_estimate_rows for d in window
-        if food_stats.get(d)
+        getattr(food_stats[d], ai_attr) for d in window
+        if d in food_stats
     )
     return (ai_rows / rows) <= AI_ESTIMATE_WINDOW_LIMIT
 
@@ -568,7 +623,7 @@ def _detect_low_vitamin_d(*, food_stats, water_stats, profile, today):
     if rda <= 0:
         return None
     window = [today - timedelta(days=i) for i in range(LOW_VITAMIN_D_WINDOW)]
-    if not _quality_gate_ok(food_stats, window):
+    if not _quality_gate_ok(food_stats, window, "vitamin_d"):
         return None
     threshold = rda * LOW_VITAMIN_D_PCT_RDA
     low_days = [
@@ -597,7 +652,7 @@ def _detect_low_iron(*, food_stats, water_stats, profile, today):
     if rda <= 0:
         return None
     window = [today - timedelta(days=i) for i in range(LOW_IRON_WINDOW)]
-    if not _quality_gate_ok(food_stats, window):
+    if not _quality_gate_ok(food_stats, window, "iron"):
         return None
     threshold = rda * LOW_IRON_PCT_RDA
     low_days = [
@@ -626,7 +681,7 @@ def _detect_low_omega3(*, food_stats, water_stats, profile, today):
     if rda <= 0:
         return None
     window = [today - timedelta(days=i) for i in range(LOW_OMEGA3_WINDOW)]
-    if not _quality_gate_ok(food_stats, window):
+    if not _quality_gate_ok(food_stats, window, "omega3"):
         return None
     threshold = rda * LOW_OMEGA3_PCT_RDA
     low_days = [
@@ -657,7 +712,7 @@ def _detect_low_calcium(*, food_stats, water_stats, profile, today):
     if rda <= 0:
         return None
     window = [today - timedelta(days=i) for i in range(LOW_CALCIUM_WINDOW)]
-    if not _quality_gate_ok(food_stats, window):
+    if not _quality_gate_ok(food_stats, window, "calcium"):
         return None
     threshold = rda * LOW_CALCIUM_PCT_RDA
     low_days = [
@@ -687,7 +742,7 @@ def _detect_low_b12(*, food_stats, water_stats, profile, today):
     if rda <= 0:
         return None
     window = [today - timedelta(days=i) for i in range(LOW_B12_WINDOW)]
-    if not _quality_gate_ok(food_stats, window):
+    if not _quality_gate_ok(food_stats, window, "b12"):
         return None
     threshold = rda * LOW_B12_PCT_RDA
     low_days = [
@@ -792,9 +847,16 @@ def _severity(count: int, window: int, threshold: int) -> str:
 
 
 def _display_hint(severity: str) -> str:
+    # DRF-262 LB-5 fix: severity="low" must NOT map to "hidden". Track E
+    # micronutrient detectors (low_omega3, low_calcium) intentionally
+    # ship at low severity — chronic but not urgent — and the
+    # cross-domain rule engine still needs them visible. Map low →
+    # "secondary" so they queue behind primary patterns rather than
+    # being silently dropped.
     return {
         "high": "primary",
         "medium": "secondary",
+        "low": "secondary",
     }.get(severity, "hidden")
 
 
