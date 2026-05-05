@@ -123,20 +123,42 @@ class USDALookup:
     # ------------------------------------------------------------------
 
     def _read_cache(self, key: str) -> dict | None:
+        # DRF-261 LB-1 fix: search_key stays unique per row, but multiple
+        # normalized terms can resolve to the same fdc_id. We accumulate
+        # aliases in data["search_aliases"] and check them in Python —
+        # JSON __contains is not portable across SQLite/Postgres backends.
         row = USDAFoodCache.objects.filter(search_key=key).first()
-        return row.data if row else None
+        if row:
+            return row.data
+        for candidate in USDAFoodCache.objects.only("data").iterator():
+            aliases = (candidate.data or {}).get("search_aliases") or []
+            if key in aliases:
+                return candidate.data
+        return None
 
     def _write_cache(self, key: str, parsed: dict) -> None:
-        # update_or_create on fdc_id (the unique field) so different
-        # search terms that resolve to the same food don't duplicate.
-        USDAFoodCache.objects.update_or_create(
+        # DRF-261 LB-1 fix: NEVER overwrite search_key on existing
+        # cache row. Earlier behavior caused alias drift — a second
+        # search term resolving to the same fdc_id would clobber the
+        # first term, breaking subsequent reads of the original key.
+        #
+        # Instead: get_or_create keeps search_key immutable for an
+        # existing row; we accumulate aliases in data["search_aliases"]
+        # so future reads find the row via either column.
+        row, created = USDAFoodCache.objects.get_or_create(
             fdc_id=parsed["fdc_id"],
             defaults={
                 "description": parsed["description"],
                 "search_key": key,
-                "data": parsed,
+                "data": {**parsed, "search_aliases": [key]},
             },
         )
+        if not created and key not in (row.data.get("search_aliases") or []):
+            # Append alias to existing row without touching search_key.
+            aliases = list(row.data.get("search_aliases") or [])
+            aliases.append(key)
+            row.data = {**parsed, "search_aliases": aliases}
+            row.save(update_fields=["data", "updated_at"])
 
     # ------------------------------------------------------------------
     # HTTP
@@ -153,10 +175,21 @@ class USDALookup:
         except httpx.HTTPError as exc:
             raise USDAUnavailableError(f"http: {exc}") from exc
 
+        # DRF-261 LB-2 fix: classify auth + rate-limit errors loudly
+        # so we don't silently bleed money into the AI estimator
+        # fallback when our API key breaks or we exceed quota.
+        if response.status_code in (401, 403):
+            raise USDAUnavailableError(
+                f"auth error {response.status_code} — check USDA_API_KEY",
+            )
+        if response.status_code == 429:
+            raise USDAUnavailableError(
+                f"rate limit {response.status_code} — quota exceeded",
+            )
         if response.status_code >= 500:
             raise USDAUnavailableError(f"5xx: {response.status_code}")
 
-        # 4xx: caller bug or malformed query — treat as miss, not outage.
+        # Other 4xx: caller bug or malformed query — treat as miss.
         if response.status_code >= 400:
             return None
 
