@@ -41,6 +41,7 @@ from ai.exceptions import (
     AIUnavailable,
 )
 from ai.models import Conversation, Message
+from ai.personal_context_hint import format_personal_context_hint
 from ai.redaction import redact_pii
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,7 @@ class ChatService:
         # template (new vs returning client). Guests get 0; the lookup
         # for authenticated users is cheap (indexed on client_id).
         bookings_count = self._get_bookings_count(actor)
+        personal_context_hint = self._build_personal_context_hint(actor)
 
         def _render(core_context):
             return render_ayla_system_prompt(
@@ -191,9 +193,30 @@ class ChatService:
                 today=today,
                 client_name=client_name,
                 bookings_count=bookings_count,
+                extra_hint=personal_context_hint,
             )
 
         return _render
+
+    @staticmethod
+    def _build_personal_context_hint(actor) -> str:
+        """Load `actor.personal_context` (DRF-174) and render the hint.
+
+        Guests skip — the row is keyed on a real User and would never be
+        populated for them. Authenticated users without a row return ""
+        (lazy creation: row appears on first PATCH from mobile).
+        """
+        if getattr(actor, "is_guest", False):
+            return ""
+        # OneToOneField raises DoesNotExist when there's no row — we use
+        # the "personal_context" related accessor here. Catching Django's
+        # ObjectDoesNotExist (the parent class) keeps the import light.
+        from django.core.exceptions import ObjectDoesNotExist
+        try:
+            ctx = actor.personal_context
+        except ObjectDoesNotExist:
+            return ""
+        return format_personal_context_hint(ctx)
 
     @staticmethod
     def _get_bookings_count(actor) -> int:

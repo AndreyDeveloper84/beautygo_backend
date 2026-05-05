@@ -316,3 +316,68 @@ class TestPersistence:
         )
         key = ChatService._daily_tokens_key(client_user.id)
         assert cache.get(key) == 30
+
+
+# ---------------------------------------------------------------------------
+# DRF-230 — UserPersonalContext wired into the system prompt
+# ---------------------------------------------------------------------------
+
+
+class TestPersonalContextInjection:
+    def _system_prompt_sent(self, patch_openai) -> str:
+        sent = patch_openai.chat.completions.create.call_args.kwargs[
+            "messages"
+        ]
+        # System prompt is always the first message in the LLM call.
+        assert sent[0]["role"] == "system"
+        return sent[0]["content"]
+
+    def test_no_personal_context_row_skips_block(
+        self, patch_openai, fake_completion, client_user, specialist_a
+    ):
+        patch_openai.chat.completions.create.return_value = fake_completion()
+        ChatService().send_message(
+            actor=client_user, conversation_id=None, message_text="hi"
+        )
+        prompt = self._system_prompt_sent(patch_openai)
+        # The advisory wrapper from ayla-ai-core renders only when
+        # `extra_hint` is non-empty. Without a personal_context row, the
+        # block is omitted entirely.
+        assert "ИЗВЕСТНЫЕ ПРЕДПОЧТЕНИЯ КЛИЕНТА" not in prompt
+
+    def test_personal_context_fields_injected_into_prompt(
+        self, patch_openai, fake_completion, client_user, specialist_a
+    ):
+        from decimal import Decimal
+
+        from users.models import UserPersonalContext
+
+        UserPersonalContext.objects.create(
+            user=client_user,
+            preferred_districts=["Тверская"],
+            preferred_time_slots=["evening"],
+            price_range_max=Decimal("5000"),
+            diet_type="vegetarian",
+        )
+        patch_openai.chat.completions.create.return_value = fake_completion()
+        ChatService().send_message(
+            actor=client_user, conversation_id=None, message_text="hi"
+        )
+        prompt = self._system_prompt_sent(patch_openai)
+        assert "ИЗВЕСТНЫЕ ПРЕДПОЧТЕНИЯ КЛИЕНТА" in prompt
+        assert "Тверская" in prompt
+        assert "вечер (17–21)" in prompt
+        assert "до 5000 ₽" in prompt
+        assert "вегетарианство" in prompt
+
+    def test_guest_skips_personal_context_lookup(
+        self, patch_openai, fake_completion, guest_user, specialist_a
+    ):
+        # Guest users never have a personal_context row keyed on a real
+        # User; even if one somehow existed, we shouldn't query for it.
+        patch_openai.chat.completions.create.return_value = fake_completion()
+        ChatService().send_message(
+            actor=guest_user, conversation_id=None, message_text="hi"
+        )
+        prompt = self._system_prompt_sent(patch_openai)
+        assert "ИЗВЕСТНЫЕ ПРЕДПОЧТЕНИЯ КЛИЕНТА" not in prompt
