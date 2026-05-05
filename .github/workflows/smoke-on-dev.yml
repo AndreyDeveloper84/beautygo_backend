@@ -109,3 +109,37 @@ jobs:
             docker compose exec -T web pytest nutrition/tests/smoke ${PYTEST_ARGS:-"-v --tb=short"}
         env:
           PYTEST_ARGS: ${{ inputs.pytest_args }}
+
+      - name: Notify Telegram on failure
+        # Fires only when the smoke step ended in failure() — explicit so
+        # cancelled/timed-out jobs also alert (worth investigating, not
+        # ignored). continue-on-error keeps the workflow's overall result
+        # honest: if the smoke step failed we want the run red, not
+        # masked by a green telegram step.
+        if: failure() || cancelled()
+        continue-on-error: true
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_TRIGGER: ${{ github.event_name }}
+          RUN_SHA: ${{ github.sha }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+            echo "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set — skipping alert."
+            exit 0
+          fi
+          # HTML parse mode so we get a clickable link without escaping
+          # the URL piece-by-piece. Body is short on purpose — anyone
+          # paged opens the run for the actual report.
+          MSG="<b>🔥 Smoke tests on dev VPS — ${JOB_STATUS}</b>%0A"
+          MSG="${MSG}Trigger: <code>${RUN_TRIGGER}</code>%0A"
+          MSG="${MSG}Commit: <code>${RUN_SHA:0:7}</code>%0A"
+          MSG="${MSG}<a href=\"${RUN_URL}\">Open run →</a>"
+          curl -sS -o /dev/null -X POST \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TG_CHAT_ID}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" \
+            -d "text=${MSG}"
