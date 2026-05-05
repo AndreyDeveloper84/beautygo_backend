@@ -118,6 +118,11 @@ jobs:
               echo "(check repo Settings → Environments → dev → secrets)"
               exit 1
             fi
+            # The python:3.12-slim base image strips git to keep the
+            # production image lean. pip install with a git+https URL
+            # needs `git version` to work, so install git first.
+            # Idempotent — apt-get is a no-op once installed.
+            docker compose exec -T web bash -c "command -v git >/dev/null || (apt-get update -qq && apt-get install -y --no-install-recommends git)"
             docker compose exec -T -e GH_DEPLOY_TOKEN="$GH_DEPLOY_TOKEN" web \
               pip install --quiet --upgrade \
               "ayla-ai-core @ git+https://${GH_DEPLOY_TOKEN}@github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0"
