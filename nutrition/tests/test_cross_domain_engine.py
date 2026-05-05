@@ -298,6 +298,25 @@ class TestEngineCooldowns:
         with _patch_patterns([_active_pattern()]), _patch_supply_ok():
             assert CrossDomainEngine().evaluate(user=cd_user, surface="bot") is None
 
+    def test_double_skip_pause_catches_dismissal_outside_30d_window(
+        self, cd_user, active_rule,
+    ):
+        """LB-7 regression: previously the dismissal-recency window was
+        hard-coded to 30 days, but the pause itself is 60 — so a second
+        dismissal at day 40 escaped the count and the 60-day pause
+        silently lifted. We choose distances outside the 30+7 rule
+        cooldown so this test isolates the double-skip path.
+        """
+        # Both dismissals past the 37d (30+7 skip) rule cooldown so the
+        # rule_cooldown gate alone does NOT block. Both still inside the
+        # 60d double-skip window, so the pause MUST block.
+        self._shown(cd_user, active_rule, days_ago=55, seen=True,
+                    action="dismissed")
+        self._shown(cd_user, active_rule, days_ago=40, seen=True,
+                    action="dismissed")
+        with _patch_patterns([_active_pattern()]), _patch_supply_ok():
+            assert CrossDomainEngine().evaluate(user=cd_user, surface="bot") is None
+
     def test_auto_confirm_5min_treats_unseen_as_seen(
         self, cd_user, active_rule,
     ):
@@ -340,3 +359,58 @@ class TestEngineSupplyCheck:
         # Stub supply as missing.
         with _patch_patterns([_active_pattern()]), _patch_supply_ok(ok=False):
             assert CrossDomainEngine().evaluate(user=cd_user, surface="bot") is None
+
+
+@pytest.mark.django_db
+class TestAppointmentSetNullOnDelete:
+    """LB-8 regression: deleting an attributed appointment must NOT
+    delete the shown row (it's the analytics record). PROTECT used to
+    block the appointment delete entirely; SET_NULL preserves the row
+    and zeros the FK so funnel attribution stays auditable.
+    """
+
+    def test_appointment_delete_preserves_shown_row(
+        self, cd_user, active_rule,
+    ):
+        from appointments.models import Appointment
+        from services.models import Service, ServiceCategory
+        from users.models import SpecialistProfile
+
+        category = ServiceCategory.objects.create(
+            slug="massage-argan-oil", name="Massage",
+            sort_order=1, is_active=True,
+        )
+        specialist_user = User.objects.create_user(
+            username="lb8_specialist", password="x",
+            role="specialist", phone="+79991110001",
+        )
+        # Specialist profile may be auto-created by post_save signal.
+        spec, _ = SpecialistProfile.objects.get_or_create(
+            user=specialist_user,
+            defaults={"display_name": "Test", "bio": "t"},
+        )
+        service = Service.objects.create(
+            specialist=spec, category=category, name="Argan",
+            price=1000, duration_minutes=60, is_active=True,
+        )
+        appointment = Appointment.objects.create(
+            client=cd_user, specialist=spec, service=service,
+            start_datetime=datetime.now(timezone.utc) + timedelta(days=2),
+            end_datetime=datetime.now(timezone.utc) + timedelta(days=2, hours=1),
+            price=1000, status="pending",
+        )
+        shown = CrossDomainShownRule.objects.create(
+            user=cd_user, rule=active_rule,
+            nutrition_trigger="low_vitamin_d",
+            service_category_slug="massage-argan-oil",
+            shown_at=datetime.now(timezone.utc),
+            surface="bot", appointment=appointment,
+        )
+
+        # The whole point of SET_NULL: appointment.delete() succeeds
+        # without raising, and shown row survives with appointment=None.
+        appointment.delete()
+
+        shown.refresh_from_db()
+        assert shown.appointment_id is None
+        assert CrossDomainShownRule.objects.filter(pk=shown.pk).exists()

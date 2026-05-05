@@ -201,12 +201,19 @@ class CrossDomainEngine:
 
         # Per-rule + skip extension.
         if same_rule:
+            # DRF-263 LB-7: previously the recency window was hard-coded
+            # to 30 days, but the pause itself is 60 — so a second
+            # dismissal at day 35 escaped the count and the 60-day pause
+            # never triggered. Use double_skip_pause_days as the window
+            # so the two values stay coupled.
+            window_days = rule.double_skip_pause_days
             recent_dismissals = [
                 h for h in same_rule
                 if h.user_action == "dismissed"
-                and (now - self._effective_seen_at(h)).days < 30
+                and (now - self._effective_seen_at(h)).days < window_days
             ]
-            # Double-skip pause: 60 days after two dismissals.
+            # Double-skip pause: ``double_skip_pause_days`` after two
+            # dismissals within the same window.
             if len(recent_dismissals) >= 2:
                 last = max(self._effective_seen_at(h) for h in recent_dismissals)
                 if (now - last).days < rule.double_skip_pause_days:

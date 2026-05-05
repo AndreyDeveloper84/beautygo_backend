@@ -766,11 +766,14 @@ class CrossDomainShownRule(models.Model):
     )
 
     # Conversion attribution — set on POST /convert/ when the user
-    # actually books. PROTECT — we don't want a deleted appointment
-    # to lose the attribution row.
+    # actually books. DRF-263 LB-8: SET_NULL preserves the attribution
+    # row even when the appointment is deleted (GDPR purges, admin
+    # cleanups, test fixtures). PROTECT would block the appointment
+    # delete itself — wrong for an analytics row that must outlive the
+    # booking it once tracked.
     appointment = models.ForeignKey(
         "appointments.Appointment",
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name="cross_domain_attributions",
     )
