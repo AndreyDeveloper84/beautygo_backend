@@ -34,6 +34,21 @@ class DishMacros:
     fat_g_per_100g: float
     carbs_g_per_100g: float
 
+    # DRF-260: optional micronutrients per 100g.
+    # All default None — existing seed entries stay valid; only top-N
+    # curated dishes carry real values from Скурихин-Тутельян.
+    # Pattern engine reads these to detect deficits across rolling
+    # windows; AI-estimated values are flagged via micronutrients_source.
+    vitamin_d_iu_per_100g: float | None = None
+    vitamin_b12_mcg_per_100g: float | None = None
+    vitamin_c_mg_per_100g: float | None = None
+    iron_mg_per_100g: float | None = None
+    calcium_mg_per_100g: float | None = None
+    magnesium_mg_per_100g: float | None = None
+    omega3_g_per_100g: float | None = None
+    fiber_g_per_100g: float | None = None
+    micronutrients_source: str = "unknown"
+
 
 # ---------------------------------------------------------------------------
 # Canonical dish → macros per 100g
@@ -41,7 +56,15 @@ class DishMacros:
 
 DISH_MACROS: dict[str, DishMacros] = {
     # --- Soups -------------------------------------------------------------
-    "борщ":           DishMacros(49,  1.6, 2.2, 6.7),
+    # Борщ — расширен Track E (DRF-260) micronutrients из Скурихин-Тутельян:
+    # бо ́льшая часть железа из свеклы, fiber из всех овощей, vit C из капусты.
+    "борщ":           DishMacros(
+        49,  1.6, 2.2, 6.7,
+        iron_mg_per_100g=0.6, fiber_g_per_100g=1.7,
+        vitamin_c_mg_per_100g=5.0, calcium_mg_per_100g=29.0,
+        magnesium_mg_per_100g=18.0,
+        micronutrients_source="rospotrebnadzor",
+    ),
     "щи":             DishMacros(32,  1.4, 1.5, 4.1),
     "солянка":        DishMacros(72,  4.7, 4.5, 3.4),
     "окрошка":        DishMacros(53,  2.8, 2.4, 5.4),
