@@ -636,3 +636,156 @@ class Beverage(models.Model):
         if self.aliases:
             self.aliases = [a.strip().lower() for a in self.aliases if a and a.strip()]
         super().save(*args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# DRF-263: Track E cross-domain rule engine
+# ---------------------------------------------------------------------------
+
+
+class CrossDomainRule(models.Model):
+    """Catalogue row mapping a nutrition trigger to a beauty service.
+
+    The cross-domain rule engine evaluates these rules against a user's
+    active patterns (DRF-262) and surfaces a top-1 recommendation. Each
+    rule has its own cooldown windows (PO-approved 2026-05-05: hybrid
+    30/14/7d) so we can tune per-rule based on engagement data.
+
+    Activation gate: ``is_active=True`` AND ``legal_reviewed=True`` —
+    both must be true. Default is False on both, so a rule lands
+    inert until a curator reviews and flips them. This is a hard
+    requirement under the «Реклама медицинских услуг» constraint
+    (CLAUDE.md «Запрещённые действия»).
+    """
+
+    SURFACE_BOT = "bot"
+    SURFACE_MOBILE = "mobile"
+
+    rule_id = models.SlugField(max_length=128, unique=True)
+    nutrition_trigger = models.CharField(
+        max_length=64,
+        help_text="Pattern slug from detect_patterns (e.g. low_vitamin_d).",
+    )
+    service_category_slug = models.CharField(
+        max_length=64,
+        help_text="ServiceCategory.slug the rule recommends.",
+    )
+    service_modifier = models.CharField(
+        max_length=128, blank=True, default="",
+        help_text="Optional sub-tag like 'argan_oil' for matching.",
+    )
+
+    insight_text_template = models.TextField()
+    rationale_text = models.TextField()
+    disclaimer_text = models.TextField()
+
+    min_data_points = models.PositiveSmallIntegerField(
+        default=3,
+        help_text="Pattern must have ≥N data points before we activate.",
+    )
+
+    # Cooldown windows (PO-approved 2026-05-05).
+    cooldown_rule_days = models.PositiveSmallIntegerField(default=30)
+    cooldown_trigger_days = models.PositiveSmallIntegerField(default=14)
+    cooldown_category_days = models.PositiveSmallIntegerField(default=7)
+    skip_extend_days = models.PositiveSmallIntegerField(default=7)
+    double_skip_pause_days = models.PositiveSmallIntegerField(default=60)
+
+    # Health-flag exclusions, e.g. ["pregnant", "eating_disorder"].
+    excluded_health_flags = models.JSONField(default=list, blank=True)
+
+    # Activation gates — both must be True for the engine to use the rule.
+    legal_reviewed = models.BooleanField(default=False)
+    legal_review_date = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=False)
+
+    # Premium gating (PO-approved 2026-05-05: ships False, toggle in admin).
+    requires_premium = models.BooleanField(default=False)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Cross-Domain Rule"
+        verbose_name_plural = "Cross-Domain Rules"
+        indexes = [
+            models.Index(fields=["nutrition_trigger", "is_active"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.rule_id} ({self.nutrition_trigger}→{self.service_category_slug})"
+
+
+class CrossDomainShownRule(models.Model):
+    """History of cross-domain recommendations served to a user (DRF-263).
+
+    The cooldown engine reads these rows to decide whether a rule is
+    eligible. Rows are immutable except for ``user_action`` and
+    ``seen_at`` / ``appointment`` (set on /seen/ and /convert/).
+
+    Auto-confirm-5min: a row counts as "seen" when ``seen_at`` is non-
+    null OR ``shown_at + 5 minutes`` has passed. Defends against client
+    crashes between the engine GET and the surface's explicit POST /seen/.
+    """
+
+    SURFACE_CHOICES = (
+        ("bot", "MAX Bot"),
+        ("mobile", "Mobile app"),  # reserved for Phase 5+
+    )
+
+    USER_ACTION_CHOICES = (
+        ("none", "No action"),
+        ("dismissed", "Dismissed"),
+        ("paused_7d", "Paused 7 days"),
+        ("converted", "Converted to booking"),
+        ("explained", "Asked Откуда ты знаешь"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="cross_domain_shown",
+    )
+    rule = models.ForeignKey(
+        CrossDomainRule,
+        on_delete=models.PROTECT,
+        related_name="shown_rules",
+    )
+
+    # Snapshot at show time so cooldown lookups don't have to JOIN
+    # CrossDomainRule (and so a rule rename never breaks attribution).
+    nutrition_trigger = models.CharField(max_length=64)
+    service_category_slug = models.CharField(max_length=64)
+
+    shown_at = models.DateTimeField()
+    seen_at = models.DateTimeField(null=True, blank=True)
+    surface = models.CharField(max_length=12, choices=SURFACE_CHOICES)
+    user_action = models.CharField(
+        max_length=16, choices=USER_ACTION_CHOICES, default="none",
+    )
+
+    # Conversion attribution — set on POST /convert/ when the user
+    # actually books. PROTECT — we don't want a deleted appointment
+    # to lose the attribution row.
+    appointment = models.ForeignKey(
+        "appointments.Appointment",
+        on_delete=models.PROTECT,
+        null=True, blank=True,
+        related_name="cross_domain_attributions",
+    )
+
+    class Meta:
+        verbose_name = "Cross-Domain Shown Rule"
+        verbose_name_plural = "Cross-Domain Shown Rules"
+        ordering = ["-shown_at"]
+        indexes = [
+            # Cooldown queries — sub-ms reads needed.
+            models.Index(fields=["user", "-shown_at"]),
+            models.Index(fields=["user", "rule"]),
+            models.Index(fields=["user", "nutrition_trigger"]),
+            models.Index(fields=["user", "service_category_slug"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.rule.rule_id} → user {self.user_id} ({self.user_action})"
