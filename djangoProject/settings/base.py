@@ -100,7 +100,10 @@ REST_FRAMEWORK = {
         # client-app rate; bot fans out across many BotUsers.
         'food_scan_internal': '60/min',
         'water': '60/min',           # Scoped: water tracker tap-buttons; user can't tap faster than this
-        'analytics_event': '300/min',  # Scoped: POST /analytics/event/. Mobile may batch-emit on session-start (foreground/background); higher than `user` so analytics doesn't compete with normal app traffic.
+        # Scoped: POST /analytics/event/. Mobile may batch-emit on session
+        # foreground/background; higher than `user` so analytics doesn't
+        # compete with normal app traffic.
+        'analytics_event': '300/min',
     },
 }
 
