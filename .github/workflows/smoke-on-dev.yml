@@ -73,10 +73,14 @@ jobs:
             #                        for DRF-302/306, MIDDLEWARE for DRF-242.4)
             # - ai/, tenants/     — peripheral models the smoke tests'
             #                        request-resolution path imports
+            # - analytics/        — DRF-160 added to INSTALLED_APPS;
+            #                        Django startup imports it before
+            #                        any request runs. Without this the
+            #                        whole web container ImportErrors.
             #
             # Strip __pycache__/.pyc on the host side first so we don't
             # ship stale bytecode into the container.
-            find ./nutrition ./djangoProject ./ai ./tenants \
+            find ./nutrition ./djangoProject ./ai ./tenants ./analytics \
               -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
             # Trailing /. means "copy contents of src into dst" (overwrite
             # dst's contents). Without it, when dst exists as a dir docker
@@ -87,6 +91,10 @@ jobs:
             docker compose cp ./djangoProject/. web:/app/djangoProject
             docker compose cp ./ai/.            web:/app/ai
             docker compose cp ./tenants/.       web:/app/tenants
+            # `analytics/` doesn't exist in the running image — create
+            # the dir before cp'ing into it (cp -L wouldn't help).
+            docker compose exec -T web mkdir -p /app/analytics
+            docker compose cp ./analytics/.     web:/app/analytics
             echo
 
             echo "=== container view of smoke dir ==="
