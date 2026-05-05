@@ -923,3 +923,256 @@ class InternalBeveragesView(APIView):
         )
         resp["Cache-Control"] = "max-age=3600"
         return resp
+
+
+# ---------------------------------------------------------------------------
+# DRF-267 — /internal/insights/cross_domain/ views
+# ---------------------------------------------------------------------------
+
+
+def _cd_resolve_user(request: Request):
+    """Resolve external_user_id → User. Shared across cross_domain views."""
+    external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+    return resolve_external_user(external_user_id)
+
+
+class InternalCrossDomainView(APIView):
+    """GET /api/v1/nutrition/internal/insights/cross_domain/ (DRF-267).
+
+    Returns top-1 cross-domain recommendation for the user or
+    ``{has_recommendation: false}`` when no rule fires. Engine writes
+    a CrossDomainShownRule row inline (PO-approved 2026-05-05).
+    Auto-confirm-5min covers surfaces that never POST /seen/.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def get(self, request: Request) -> Response:
+        try:
+            user = _cd_resolve_user(request)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+        from nutrition.services.cross_domain_engine import CrossDomainEngine
+        rec = CrossDomainEngine().evaluate(user=user, surface="bot")
+        if rec is None:
+            return success_response(
+                {"has_recommendation": False},
+                status_code=status.HTTP_200_OK,
+            )
+        return success_response(
+            {
+                "has_recommendation": True,
+                "shown_id": rec.shown_id,
+                "rule_id": rec.rule_id,
+                "nutrition_trigger": rec.nutrition_trigger,
+                "service_category_slug": rec.service_category_slug,
+                "insight_text": rec.insight_text,
+                "rationale_text": rec.rationale_text,
+                "disclaimer_text": rec.disclaimer_text,
+                "data_points": rec.data_points,
+                "severity": rec.severity,
+            },
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class InternalCrossDomainSeenView(APIView):
+    """POST /api/v1/nutrition/internal/insights/cross_domain/{id}/seen/.
+
+    Idempotent: first call sets seen_at = now(); subsequent calls leave
+    it unchanged. Surface-side bookkeeping that activates cooldown
+    immediately (overrides 5-min auto-confirm).
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def post(self, request: Request, shown_id) -> Response:
+        try:
+            user = _cd_resolve_user(request)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+        from nutrition.models import CrossDomainShownRule
+        try:
+            shown = CrossDomainShownRule.objects.get(
+                id=shown_id, user=user,
+            )
+        except CrossDomainShownRule.DoesNotExist:
+            return error_response(
+                "NOT_FOUND", "Cross-domain row not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        if shown.seen_at is None:
+            shown.seen_at = timezone.now()
+            shown.save(update_fields=["seen_at"])
+        return success_response(
+            {"shown_id": str(shown.id), "seen_at": shown.seen_at.isoformat()},
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class InternalCrossDomainDismissView(APIView):
+    """POST /api/v1/nutrition/internal/insights/cross_domain/{id}/dismiss/.
+
+    Body: ``{"action": "dismissed" | "paused_7d"}``. Sets
+    ``user_action`` for cooldown engine to read (skip-extend +7 days
+    for dismissed; double-skip → 60-day pause; paused_7d treated like
+    dismissed but with shorter intent semantics).
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def post(self, request: Request, shown_id) -> Response:
+        try:
+            user = _cd_resolve_user(request)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+        from nutrition.serializers import (
+            CrossDomainDismissRequestSerializer,
+        )
+        ser = CrossDomainDismissRequestSerializer(data=request.data)
+        if not ser.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Invalid action — must be dismissed | paused_7d",
+                details=ser.errors,
+            )
+        from nutrition.models import CrossDomainShownRule
+        try:
+            shown = CrossDomainShownRule.objects.get(
+                id=shown_id, user=user,
+            )
+        except CrossDomainShownRule.DoesNotExist:
+            return error_response(
+                "NOT_FOUND", "Cross-domain row not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        shown.user_action = ser.validated_data["action"]
+        shown.save(update_fields=["user_action"])
+        return success_response(
+            {"shown_id": str(shown.id), "user_action": shown.user_action},
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class InternalCrossDomainConvertView(APIView):
+    """POST /api/v1/nutrition/internal/insights/cross_domain/{id}/convert/.
+
+    Body: ``{"appointment_id": uuid}``. Marks the row as converted and
+    attaches the Appointment for revenue attribution. Validates the
+    appointment belongs to the same user (prevents cross-user spoofing).
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def post(self, request: Request, shown_id) -> Response:
+        try:
+            user = _cd_resolve_user(request)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+        from nutrition.serializers import (
+            CrossDomainConvertRequestSerializer,
+        )
+        ser = CrossDomainConvertRequestSerializer(data=request.data)
+        if not ser.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "appointment_id required",
+                details=ser.errors,
+            )
+        from nutrition.models import CrossDomainShownRule
+        try:
+            shown = CrossDomainShownRule.objects.get(
+                id=shown_id, user=user,
+            )
+        except CrossDomainShownRule.DoesNotExist:
+            return error_response(
+                "NOT_FOUND", "Cross-domain row not found",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        from appointments.models import Appointment
+        try:
+            appt = Appointment.objects.get(
+                id=ser.validated_data["appointment_id"],
+                client=user,
+            )
+        except Appointment.DoesNotExist:
+            return error_response(
+                "NOT_FOUND", "Appointment not found for this user",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        shown.user_action = "converted"
+        shown.appointment = appt
+        shown.save(update_fields=["user_action", "appointment"])
+        return success_response(
+            {
+                "shown_id": str(shown.id),
+                "appointment_id": str(appt.id),
+                "user_action": "converted",
+            },
+            status_code=status.HTTP_200_OK,
+        )
+
+
+class InternalCrossDomainHistoryView(APIView):
+    """GET /api/v1/nutrition/internal/insights/cross_domain/history/?limit=20.
+
+    Transparency UI source. Returns user's recent CrossDomainShownRule
+    rows newest-first. Default limit 20, max 100.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    def get(self, request: Request) -> Response:
+        try:
+            user = _cd_resolve_user(request)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+        try:
+            limit = int(request.query_params.get("limit", "20"))
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, 100))
+
+        from nutrition.models import CrossDomainShownRule
+        from nutrition.serializers import (
+            CrossDomainHistoryEntrySerializer,
+        )
+        rows = (
+            CrossDomainShownRule.objects
+            .filter(user=user)
+            .select_related("rule")
+            .order_by("-shown_at")[:limit]
+        )
+        return success_response(
+            {
+                "history": CrossDomainHistoryEntrySerializer(
+                    rows, many=True,
+                ).data,
+            },
+            status_code=status.HTTP_200_OK,
+        )
