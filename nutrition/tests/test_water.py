@@ -249,10 +249,15 @@ class TestToday:
         assert body["water_goal_ml"] == 2000
 
     def test_lists_today_logs_in_order(self, auth_client, client_user):
-        now = datetime.now(dt_tz.utc)
-        _make_water(user=client_user, amount=250, when=now - timedelta(hours=2))
-        _make_water(user=client_user, amount=350, when=now - timedelta(hours=1))
-        _make_water(user=client_user, amount=200, when=now)
+        # Anchor inside today's UTC day so a CI run near midnight doesn't
+        # straddle the day boundary and drop the earliest entry into
+        # yesterday — surfaced 2026-05-05 when CI ran at 01:14 UTC.
+        today_noon = datetime.now(dt_tz.utc).replace(
+            hour=12, minute=0, second=0, microsecond=0,
+        )
+        _make_water(user=client_user, amount=250, when=today_noon)
+        _make_water(user=client_user, amount=350, when=today_noon + timedelta(hours=1))
+        _make_water(user=client_user, amount=200, when=today_noon + timedelta(hours=2))
         resp = auth_client.get(TODAY_URL)
         body = resp.json()["data"]
         assert body["water_ml"] == 800
