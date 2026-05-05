@@ -228,12 +228,19 @@ class TestToDict:
         f = NutritionLookup().lookup("борщ", portion_g=300)
         assert f is not None
         d = f.to_dict()
-        assert set(d.keys()) == {
+        # DRF-260: NutritionFacts gained 16 micronutrient fields plus
+        # micronutrients_source. Verify the macro core stays present and
+        # the new fields are addressable; full coverage of micronutrient
+        # behaviour lives in test_micronutrients_schema.py.
+        assert {
             "matched_dish", "source", "portion_g",
             "kcal_per_100g", "protein_g_per_100g",
             "fat_g_per_100g", "carbs_g_per_100g",
             "kcal", "protein_g", "fat_g", "carbs_g",
-        }
+            "vitamin_d_iu", "iron_mg", "fiber_g",
+            "vitamin_d_iu_per_100g", "iron_mg_per_100g",
+            "micronutrients_source",
+        } <= set(d.keys())
 
     def test_to_dict_serializable(self):
         import json
