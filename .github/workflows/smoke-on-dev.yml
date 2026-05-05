@@ -24,6 +24,13 @@ on:
         description: 'Extra pytest args (e.g. -k test_3_ for water-only)'
         required: false
         default: '-v --tb=short'
+  schedule:
+    # Daily at 04:00 UTC (07:00 MSK) — runs an hour after the
+    # nutrition.purge_water_entries Celery beat (03:00 UTC), so any
+    # purge regression surfaces in the same morning report.
+    # Cron-only triggers respect the workflow definition on the default
+    # branch (master), so this duplicates to master via the sync PR.
+    - cron: '0 4 * * *'
 
 jobs:
   smoke:
