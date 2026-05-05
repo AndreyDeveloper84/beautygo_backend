@@ -10,6 +10,19 @@ DEBUG = True
 if "CELERY_TASK_ALWAYS_EAGER" not in os.environ:
     CELERY_TASK_ALWAYS_EAGER = True
 
+# Multi-tenant strict mode ON by default in dev (DRF-242.5 rollout step
+# 1/3 — dev → staging → prod, see docs/MULTI_TENANT.md §Rollout).
+# Catches missing X-Tenant headers loud and early during mobile-side
+# integration. base.py defaults to permissive for safety; we flip it
+# here so production stays opt-in via env var and local dev catches
+# header drift before staging.
+#
+# Rollback path: set MULTI_TENANT_STRICT=false in env on the affected
+# box and restart workers. Auth + health + nutrition-internal paths
+# stay open in strict mode (see TenantContextMiddleware constants).
+if "MULTI_TENANT_STRICT" not in os.environ:
+    MULTI_TENANT_STRICT = True
+
 INSTALLED_APPS += ['corsheaders']
 MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE
 
