@@ -67,13 +67,17 @@ class TestToCoreContext:
 
 
 class TestBuildContextForActor:
-    def test_returns_core_context_for_user_with_no_specialists(self):
+    def test_returns_local_context_for_user_with_no_specialists(self):
+        # Slice B: returns the *local* SpecialistContext (with score /
+        # distance / match_reasons metadata) so the local dispatcher can
+        # produce rich action_data. The factory derives the ayla-ai-core
+        # core context from this object before handing it to AIConcierge
+        # (see TestGetConcierge::test_concierge_uses_local_context_through_factory).
         user = make_user(city="Penza")
-        core = build_specialist_context_for_actor(user)
-        assert isinstance(core, SpecialistContext)
-        # No active specialists in DB → empty candidates, but the type
-        # contract is preserved (AIConcierge would still accept it).
-        assert core.candidates == []
+        local = build_specialist_context_for_actor(user)
+        assert isinstance(local, LocalSpecialistContext)
+        # No active specialists in DB → empty candidates list.
+        assert local.candidates == []
 
 
 # ---------------------------------------------------------------------------
@@ -113,21 +117,46 @@ class TestRenderPrompt:
 
 class TestGetConcierge:
     @patch("ai.concierge_factory.get_async_openai_client")
-    def test_returns_aiconcierge_with_uuid_tools(self, mock_client):
+    def test_returns_aiconcierge_with_local_tool_definitions(self, mock_client):
+        # Slice B (variant d): Ayla keeps its own tool_definitions per
+        # API spec v2.0 (`show_specialists` / `specialist_ids`) and
+        # injects the local dispatcher via ayla-ai-core 0.6.0's
+        # tool_dispatcher hook. The bot keeps its own naming locally too;
+        # shared package is infra-only.
         mock_client.return_value = MagicMock()
         user = make_user()
         c = get_concierge_for(user)
         assert isinstance(c, AIConcierge)
-        # Tool wire-format must be UUID strings (not int) for Ayla.
         defs = c._tool_definitions  # noqa: SLF001 — tested implementation seam
-        master_id_schema = defs[0]["function"]["parameters"]["properties"]["master_ids"]
-        assert master_id_schema["items"]["type"] == "string"
+        first_tool_name = defs[0]["function"]["name"]
+        assert first_tool_name == "show_specialists"
+        # Wire-format is UUID string (not int) — JSON Schema items.type=string.
+        spec_ids = defs[0]["function"]["parameters"]["properties"][
+            "specialist_ids"
+        ]
+        assert spec_ids["items"]["type"] == "string"
 
     @patch("ai.concierge_factory.get_async_openai_client")
-    def test_action_type_constants_match_wire_format(self, mock_client):
-        # Sanity: ayla-ai-core's ActionType set is what Slice B will
-        # surface to mobile. Document the breaking change up-front.
+    def test_concierge_has_tool_dispatcher_injected(self, mock_client):
+        # The factory injects Ayla's local dispatch_tool_call so the
+        # default ayla-ai-core dispatcher (which knows show_masters, not
+        # show_specialists) is bypassed.
+        mock_client.return_value = MagicMock()
+        user = make_user()
+        c = get_concierge_for(user)
+        assert c._tool_dispatcher is not None  # noqa: SLF001
+
+    @patch("ai.concierge_factory.get_async_openai_client")
+    def test_wire_format_diverges_from_shared_package_intentionally(
+        self, mock_client,
+    ):
+        # Sanity: shared ayla-ai-core uses bot-Формула naming
+        # (show_masters / master_id). Ayla diverges per API spec v2.0
+        # and keeps the divergence behind the tool_dispatcher hook —
+        # converting wire-format would otherwise need a Notion-spec
+        # change + mobile coordination + LLM retraining of the bot's
+        # ~30 days of `show_masters` traffic.
         assert ActionType.SHOW_MASTERS == "show_masters"
-        assert ActionType.SHOW_MY_BOOKINGS == "show_my_bookings"
-        # Local ai/tools.py still uses "show_specialists" / "show_appointments";
-        # Slice B aligns them by replacing local tools.py with shared imports.
+        # Ayla's local equivalent — verify divergence is by design.
+        from ai.tools import ActionType as AylaActionType
+        assert AylaActionType.SHOW_SPECIALISTS == "show_specialists"

@@ -137,16 +137,22 @@ class TestAvailability:
 
 
 class TestPIIRedaction:
-    def test_phone_redacted_in_outgoing_messages_but_raw_in_db(
+    def test_phone_redacted_in_outgoing_messages_and_in_db(
         self, patch_openai, fake_completion, client_user, specialist_a
     ):
+        # DRF-241 Slice B policy change: redaction happens before
+        # persistence (privacy-by-default — local DB / replicas don't
+        # carry raw phone numbers / emails). Same redacted text reaches
+        # the LLM and the Message row. The audit-friendly "raw in DB,
+        # redacted to LLM" policy needs a `pii_redactor` hook in
+        # AIConcierge — tracked as a follow-up shared-package bump.
         patch_openai.chat.completions.create.return_value = fake_completion()
         raw = "Позвони +79991234567 завтра"
         ChatService().send_message(
             actor=client_user, conversation_id=None, message_text=raw
         )
 
-        # Inspect what was sent to OpenAI.
+        # The LLM call sees redacted text.
         sent_messages = patch_openai.chat.completions.create.call_args.kwargs[
             "messages"
         ]
@@ -155,11 +161,16 @@ class TestPIIRedaction:
         assert "+79991234567" not in last["content"]
         assert "[PHONE]" in last["content"]
 
-        # Raw stays in DB.
-        stored = Message.objects.filter(
+        # The DB row also stores redacted (no raw phone leaks).
+        with_phone = Message.objects.filter(
             role=Message.Role.USER, content__icontains="79991234567"
         ).first()
-        assert stored is not None
+        assert with_phone is None
+        # And there IS a redacted user message persisted.
+        redacted = Message.objects.filter(
+            role=Message.Role.USER, content__icontains="[PHONE]"
+        ).first()
+        assert redacted is not None
 
 
 # ---------------------------------------------------------------------------
