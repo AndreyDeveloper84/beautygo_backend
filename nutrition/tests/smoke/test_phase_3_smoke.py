@@ -1274,7 +1274,12 @@ class TestSection8CrossFeature:
         """8.2 — после смены профиля POST /water/ использует новую норму.
 
         Verifies the WaterContext loader actually re-reads the profile
-        rather than caching a stale daily_water_ml.
+        rather than caching a stale daily_water_ml. We change weight_kg
+        (not just goal) because daily_water_ml is computed as
+        ``WATER_ML_PER_KG × weight_kg + flag adjustments`` — independent
+        of goal. Without a weight delta, before == after and the
+        endpoint assertion would hold even for a broken stale-cache
+        loader, masking the regression.
         """
         client_api.post(URL_PROFILE, {
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
@@ -1283,12 +1288,22 @@ class TestSection8CrossFeature:
         before = NutritionProfile.objects.get(user=proxy_user).daily_water_ml
         assert before > 0  # recompute happened on initial POST
 
-        # Switch goal — recompute must run again.
-        client_api.post(URL_PROFILE, {"goal": "lose"}, format="json", **headers)
+        # Bump weight to force a *different* daily_water_ml (30 ml/kg ×
+        # 80 = 2400 vs 30 × 70 = 2100). Now the endpoint can't pass by
+        # accidentally returning a stale cached norm.
+        client_api.post(
+            URL_PROFILE, {"weight_kg": 80.0, "goal": "lose"},
+            format="json", **headers,
+        )
         after = NutritionProfile.objects.get(user=proxy_user).daily_water_ml
         assert after > 0
+        assert after != before, (
+            "weight change must change the computed water norm — "
+            "otherwise this test can't distinguish a correct loader "
+            "from a stale-cache loader"
+        )
 
-        # The endpoint must surface the *current* norm — not a cached one.
+        # The endpoint must surface the *current* norm.
         water_resp = client_api.post(
             URL_WATER, {"ml": 250}, format="json", **headers,
         )
