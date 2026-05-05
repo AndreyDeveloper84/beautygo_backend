@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from rest_framework.test import APIClient
@@ -84,15 +84,23 @@ def fake_tool_call():
 
 @pytest.fixture
 def patch_openai(settings):
-    """Patch get_openai_client to return a Mock with a configurable response.
+    """Patch the async OpenAI client used by AIConcierge for the chat path.
 
-    Returns the mock client — set ``.return_value`` on
-    ``mock.chat.completions.create`` to control behaviour.
+    AIConcierge calls ``await client.chat.completions.create(...)`` —
+    the mocked ``create`` is an AsyncMock so tests can still set
+    ``patch_openai.chat.completions.create.return_value`` (or
+    ``side_effect``) the same way as before.
+
+    Patches `ai.concierge_factory.get_async_openai_client` (DRF-241
+    Slice B): the factory is the single seam where the OpenAI client
+    enters the AIConcierge instance, so one patch covers all
+    chat_service / concierge paths.
     """
     settings.OPENAI_API_KEY = "test-key"
     mock_client = MagicMock()
+    mock_client.chat.completions.create = AsyncMock()
     with patch(
-        "ai.application.services.chat_service.get_openai_client",
+        "ai.concierge_factory.get_async_openai_client",
         return_value=mock_client,
     ):
         yield mock_client
