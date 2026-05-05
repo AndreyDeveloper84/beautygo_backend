@@ -9,7 +9,12 @@ from __future__ import annotations
 
 from django.contrib import admin
 
-from nutrition.models import Beverage, NutritionProfile, WaterEntry
+from nutrition.models import (
+    Beverage,
+    NutritionOutboxEvent,
+    NutritionProfile,
+    WaterEntry,
+)
 
 
 @admin.register(Beverage)
@@ -122,3 +127,31 @@ class WaterEntryAdmin(admin.ModelAdmin):
     readonly_fields = ("created_at",)
     raw_id_fields = ("user", "tenant", "beverage", "food_log")
     date_hierarchy = "ts"
+
+
+@admin.register(NutritionOutboxEvent)
+class NutritionOutboxEventAdmin(admin.ModelAdmin):
+    list_display = (
+        "topic",
+        "external_user_id",
+        "status",
+        "retry_count",
+        "next_retry_at",
+        "created_at",
+        "delivered_at",
+    )
+    list_filter = ("status", "topic")
+    search_fields = ("external_user_id", "id")
+    readonly_fields = ("id", "created_at", "delivered_at")
+    date_hierarchy = "created_at"
+    actions = ("requeue_dlq",)
+
+    @admin.action(description="Requeue selected DLQ events for delivery")
+    def requeue_dlq(self, request, queryset):
+        n = queryset.filter(status=NutritionOutboxEvent.Status.DLQ).update(
+            status=NutritionOutboxEvent.Status.PENDING,
+            retry_count=0,
+            next_retry_at=None,
+            last_error="",
+        )
+        self.message_user(request, f"Requeued {n} DLQ events")

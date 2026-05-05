@@ -24,6 +24,7 @@ from nutrition.services.nutrition_profile_service import (
     ProfileInputs,
     compute_norms,
 )
+from nutrition.services.outbox_service import enqueue_profile_updated
 
 
 IDEMPOTENCY_TTL_HOURS = 24
@@ -100,6 +101,16 @@ def upsert_profile(
 
     response = _serialize(profile, external_user_id, exists=True)
     _cache_set(idempotency_key or "", user.id, response)
+    enqueue_profile_updated(
+        external_user_id=external_user_id,
+        profile_payload={
+            "goal": response["goal"],
+            "pace": response["pace"],
+            "norms": response["norms"],
+            "goal_overridden_by": response["goal_overridden_by"],
+            "onboarded_at": response["onboarded_at"],
+        },
+    )
     return response
 
 

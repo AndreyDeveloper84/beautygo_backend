@@ -24,6 +24,10 @@ from django.db import transaction
 from django.db.models import Sum
 
 from nutrition.models import Beverage, FoodLog, WaterEntry
+from nutrition.services.outbox_service import (
+    enqueue_milestone_reached,
+    enqueue_water_logged,
+)
 
 
 CAFFEINE_PREGNANT_THRESHOLD_MG = 200
@@ -231,8 +235,44 @@ class WaterEntryService:
                 milestone_threshold=milestone,
                 idempotency_key=payload.idempotency_key,
             )
+            external_user_id = self._external_user_id_for(payload.user_id)
+            if external_user_id:
+                enqueue_water_logged(
+                    external_user_id=external_user_id,
+                    entry_payload={
+                        "entry_id": str(entry.id),
+                        "ml": entry.ml,
+                        "water_ml": int(entry.water_ml),
+                        "beverage_slug": beverage.slug if beverage else None,
+                        "ts": entry.ts.isoformat(),
+                    },
+                )
+                if milestone is not None:
+                    enqueue_milestone_reached(
+                        external_user_id=external_user_id,
+                        threshold=milestone,
+                        day=entry.ts.date().isoformat(),
+                        today_total_water_ml=int(new_total),
+                    )
 
         return self._build_response(entry)
+
+    def _external_user_id_for(self, user_id: int) -> str | None:
+        """Look up external_user_id (e.g. ``bot:NNN``) for outbox payloads.
+
+        Tied to the ProxyUser pattern (DRF-246) — service-to-service
+        callers create proxy users whose ``username`` is the external id.
+        Returns None for non-proxy users (mobile path) so client-app
+        traffic doesn't fan out to the bot.
+        """
+        try:
+            from users.models import User
+            user = User.objects.only("username", "is_proxy").get(id=user_id)
+        except Exception:  # noqa: BLE001
+            return None
+        if not getattr(user, "is_proxy", False):
+            return None
+        return user.username or None
 
     # ------------------------------------------------------------------
     # DELETE /water/{id}/

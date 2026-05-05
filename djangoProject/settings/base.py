@@ -588,6 +588,13 @@ CELERY_BEAT_SCHEDULE = {
         "task": "nutrition.purge_deleted_water_entries",
         "schedule": crontab(hour=3, minute=0),
     },
+    # DRF-306: webhook delivery for the nutrition outbox.
+    # Same 10s cadence as the appointments outbox dispatcher — keeps
+    # cross-system events near-real-time without a dedicated worker.
+    "deliver-nutrition-outbox-events": {
+        "task": "nutrition.deliver_outbox_events",
+        "schedule": 10.0,
+    },
 }
 
 # Django default cache → Redis (db 1). SlotCacheService and any future
