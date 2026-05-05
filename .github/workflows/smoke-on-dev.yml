@@ -55,12 +55,26 @@ jobs:
             git rev-parse --short HEAD
             echo
 
-            echo "=== docker cp host → container (smoke tests + migrations) ==="
+            echo "=== docker cp host → container (sync source under test) ==="
             # The Dockerfile-built image lags the host repo because rebuild
-            # fails on private-dep auth. Push the bits we need into the
-            # already-running container instead.
-            docker compose cp ./nutrition/tests/smoke web:/app/nutrition/tests/smoke
-            docker compose cp ./nutrition/migrations web:/app/nutrition/migrations
+            # fails on private-dep auth (see workflow header). Push every
+            # path the smoke suite touches into the running container:
+            #
+            # - nutrition/        — models, services, views, admin, migrations,
+            #                        the smoke tests themselves
+            # - djangoProject/    — settings/ (CELERY_BEAT_SCHEDULE additions
+            #                        for DRF-302/306, MIDDLEWARE for DRF-242.4)
+            # - ai/, tenants/     — peripheral models the smoke tests'
+            #                        request-resolution path imports
+            #
+            # Strip __pycache__/.pyc on the host side first so we don't
+            # ship stale bytecode into the container.
+            find ./nutrition ./djangoProject ./ai ./tenants \
+              -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+            docker compose cp ./nutrition     web:/app/nutrition
+            docker compose cp ./djangoProject web:/app/djangoProject
+            docker compose cp ./ai            web:/app/ai
+            docker compose cp ./tenants       web:/app/tenants
             echo
 
             echo "=== container view of smoke dir ==="
