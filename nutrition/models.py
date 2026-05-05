@@ -208,6 +208,68 @@ class WaterLog(models.Model):
         return f"{self.amount_ml}ml @ {self.logged_at:%Y-%m-%d %H:%M}"
 
 
+class NutritionOutboxEvent(models.Model):
+    """Transactional outbox for cross-system webhooks (DRF-306).
+
+    Spec: docs/plans/maxbot-phase3-ayla-spec.md §5.1 + linear-issues §DRF-306.
+
+    Domain code writes ``NutritionOutboxEvent`` rows in the same DB
+    transaction as the change that emitted them (profile upsert, water
+    log, milestone reach, scan recognise, pattern fire). The Celery
+    delivery worker polls pending rows, POSTs them to the receiver
+    (MAX bot's webhook endpoint) with an HMAC-SHA256 signature header,
+    and runs an exponential-backoff retry ladder. After
+    ``MAX_RETRIES`` failed attempts the row moves to DLQ and an admin
+    alert is logged.
+
+    Independent of ``appointments.OutboxEvent`` — that one carries
+    booking-domain topics for in-process handlers, this one carries
+    nutrition-domain topics for an HTTP receiver.
+    """
+
+    class Topic(models.TextChoices):
+        PROFILE_UPDATED = "profile_updated", "Профиль обновлён"
+        WATER_LOGGED = "water_logged", "Записан напиток"
+        MILESTONE_REACHED = "milestone_reached", "Milestone достигнут"
+        PATTERN_DETECTED = "pattern_detected", "Паттерн обнаружен"
+        RECOGNITION_COMPLETED = "recognition_completed", "Распознавание завершено"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Ожидает доставки"
+        DELIVERED = "delivered", "Доставлено"
+        DLQ = "dlq", "Dead-letter (не доставлено)"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    topic = models.CharField(max_length=32, choices=Topic.choices)
+    external_user_id = models.CharField(
+        max_length=64,
+        help_text="bot:NNN form — receiver scopes incoming events by this.",
+    )
+    payload = models.JSONField(default=dict)
+
+    status = models.CharField(
+        max_length=12, choices=Status.choices, default=Status.PENDING,
+    )
+    retry_count = models.PositiveSmallIntegerField(default=0)
+    next_retry_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.TextField(blank=True, default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Nutrition Outbox Event"
+        verbose_name_plural = "Nutrition Outbox Events"
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["status", "next_retry_at"]),
+            models.Index(fields=["topic", "external_user_id"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.topic} → {self.external_user_id} ({self.status})"
+
+
 class NutritionProfile(models.Model):
     """User nutrition profile (DRF-300).
 
