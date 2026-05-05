@@ -123,9 +123,14 @@ jobs:
               for ENV_PATH in ./.env ../.env /home/taximeter/.env /etc/ayla/.env; do
                 if [ -f "$ENV_PATH" ]; then
                   echo "  found: $ENV_PATH ($(wc -l < "$ENV_PATH") lines, $(file -b "$ENV_PATH"))"
-                  echo "  TELEGRAM_/BOT_ keys present:"
-                  grep -E '^(export +)?(TELEGRAM_|BOT_|TG_)' "$ENV_PATH" 2>/dev/null \
-                    | sed 's/=.*/=<redacted>/' | sed 's/^/    /'
+                  echo "  ALL key names (values redacted, comments excluded):"
+                  # Strip CRLF + BOM, drop comments and blank lines, show
+                  # only the LHS of each KEY=VALUE so we can see exactly
+                  # what the file contains without leaking secrets.
+                  tr -d '\r' < "$ENV_PATH" \
+                    | sed '1s/^\xEF\xBB\xBF//' \
+                    | grep -vE '^[[:space:]]*(#|$)' \
+                    | sed -nE 's/^[[:space:]]*(export +)?([A-Za-z_][A-Za-z0-9_]*)=.*/    \2/p'
                 fi
               done
 
