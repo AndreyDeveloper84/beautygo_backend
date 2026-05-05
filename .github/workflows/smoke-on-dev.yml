@@ -36,6 +36,13 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     environment: dev
+    env:
+      # GH_DEPLOY_TOKEN read access on the AndreyDeveloper84/ayla-ai-core
+      # private repo. Forwarded via `envs:` into the SSH action's shell so
+      # the inline `pip install` can clone the dep into the running web
+      # container. ci.yml uses the same secret for its own pip install at
+      # runner boot time.
+      GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
     steps:
       - name: Run smoke suite on dev VPS
         uses: appleboy/ssh-action@v1
@@ -46,7 +53,7 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           timeout: 300s
           command_timeout: 15m
-          envs: PYTEST_ARGS,GITHUB_RUN_ID
+          envs: PYTEST_ARGS,GITHUB_RUN_ID,GH_DEPLOY_TOKEN
           script: |
             set -o pipefail
             cd /home/taximeter/beautygo/dev
@@ -95,6 +102,27 @@ jobs:
             # the dir before cp'ing into it (cp -L wouldn't help).
             docker compose exec -T web mkdir -p /app/analytics
             docker compose cp ./analytics/.     web:/app/analytics
+            echo
+
+            echo "=== ensure ayla-ai-core is installed in running container ==="
+            # The image on this VPS pre-dates DRF-241 Slice A (PR #57), which
+            # added `ayla-ai-core` to requirements.txt. Rebuilding the image
+            # requires GH_DEPLOY_TOKEN inside the docker build context — not
+            # plumbed yet. Until that gap is closed, install the dep at run
+            # time into the already-running web container. Idempotent: if the
+            # pin matches, pip is a no-op. If it's missing or behind, pip
+            # upgrades it without touching the image. Pinned to v0.6.0 (the
+            # tool_dispatcher hook landed in PR #5 there).
+            if [ -z "$GH_DEPLOY_TOKEN" ]; then
+              echo "GH_DEPLOY_TOKEN missing — repo is private, pip install will fail"
+              echo "(check repo Settings → Environments → dev → secrets)"
+              exit 1
+            fi
+            docker compose exec -T -e GH_DEPLOY_TOKEN="$GH_DEPLOY_TOKEN" web \
+              pip install --quiet --upgrade \
+              "ayla-ai-core @ git+https://${GH_DEPLOY_TOKEN}@github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0"
+            docker compose exec -T web python -c \
+              "import ayla_ai_core; print('ayla_ai_core', ayla_ai_core.__version__)"
             echo
 
             echo "=== container view of smoke dir ==="
