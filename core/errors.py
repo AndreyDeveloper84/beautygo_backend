@@ -147,6 +147,9 @@ class ErrorCode(str, Enum):
     FILE_TOO_LARGE = "FILE_TOO_LARGE"
     INVALID_FILE_TYPE = "INVALID_FILE_TYPE"
 
+    # --- Analytics (project — not in spec, mobile-side codegen target) ---
+    UNKNOWN_EVENT_NAME = "UNKNOWN_EVENT_NAME"
+
     # --- Resource ---
     NOT_FOUND = "NOT_FOUND"
 
