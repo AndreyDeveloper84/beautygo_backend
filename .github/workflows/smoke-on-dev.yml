@@ -1,0 +1,59 @@
+name: Smoke tests on dev VPS
+
+# One-shot remote-runner: SSHes into the dev box and runs the Phase 3
+# smoke suite against the deployed `web` container. Triggered manually
+# from the Actions UI or `gh workflow run smoke-on-dev.yml --ref dev`.
+#
+# We don't make this part of the main CI pipeline because:
+# - it talks to the live dev DB / live Redis (not idempotent)
+# - it costs SSH minutes
+# - it's a "is the box healthy" check, not a "did the diff break things"
+#   check (which `ci.yml` already covers in-process)
+#
+# Use after a non-trivial dev deploy or before promoting dev → main.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pytest_args:
+        description: 'Extra pytest args (e.g. -k test_3_ for water-only)'
+        required: false
+        default: '-v --tb=short'
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    environment: dev    # mirrors the deploy job — pulls VPS_HOST / VPS_USER / VPS_SSH_KEY / VPS_PORT
+    steps:
+      - name: Run smoke suite on dev VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          timeout: 300s
+          command_timeout: 10m
+          envs: PYTEST_ARGS
+          script_stop: false      # don't bail on non-zero exit — we want the full pytest report
+          script: |
+            set -o pipefail
+            cd /home/taximeter/beautygo/dev
+
+            echo "=== branch + commit ==="
+            git rev-parse --abbrev-ref HEAD
+            git rev-parse --short HEAD
+            echo
+
+            echo "=== migrations status ==="
+            docker compose exec -T web python manage.py showmigrations nutrition | tail -10
+            echo
+
+            echo "=== ensure beverages seeded ==="
+            docker compose exec -T web python manage.py seed_beverages
+            echo
+
+            echo "=== smoke suite ==="
+            docker compose exec -T web pytest nutrition/tests/smoke ${PYTEST_ARGS:-"-v --tb=short"}
+        env:
+          PYTEST_ARGS: ${{ inputs.pytest_args }}
