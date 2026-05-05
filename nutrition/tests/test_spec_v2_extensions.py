@@ -197,10 +197,13 @@ class TestFoodScanBeautyInsights:
         assert "vitamin_deficits" in bi
         assert "beauty_impact" in bi
         assert "recommendation" in bi
-        # vitamin_deficits is a string array per spec v2.0
+        # vitamin_deficits is a string array per spec v2.0.
+        # LB-9 regression: list must contain the nutrient name
+        # ("vitamin_d"), NOT the internal pattern slug ("low_vitamin_d").
+        # Mobile/bot consume this verbatim — leaking ``low_`` ruins the UI.
         assert isinstance(bi["vitamin_deficits"], list)
-        assert "vitamin_d" in bi["vitamin_deficits"][0] or \
-               bi["vitamin_deficits"] == ["low_vitamin_d"]
+        assert bi["vitamin_deficits"] == ["vitamin_d"]
+        assert "low_" not in bi["vitamin_deficits"][0]
 
 
 @pytest.mark.django_db

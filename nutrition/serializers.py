@@ -39,6 +39,20 @@ def evaluate_for_scan(scan: FoodScan):
     return CrossDomainEngine().evaluate(user=scan.user, surface="bot")
 
 
+def _deficit_slug(trigger: str) -> str:
+    """Normalize a pattern trigger slug to a deficit nutrient name.
+
+    DRF-264 LB-9: spec v2.0 §FoodScanResponse.beauty_insights expects
+    ``vitamin_deficits`` to list nutrient names (e.g. ``"vitamin_d"``,
+    ``"iron"``, ``"omega_3"``), not internal pattern slugs. The pattern
+    detector produces ``"low_vitamin_d"`` etc.; strip the ``"low_"``
+    prefix once at the wire boundary.
+    """
+    if trigger.startswith("low_"):
+        return trigger[len("low_"):]
+    return trigger
+
+
 # 10 MiB — same cap used by the portfolio uploader; the mobile client
 # should compress before sending but the server is the only enforcer
 # the user can't disable.
@@ -156,7 +170,7 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
         if rec is None:
             return None
         return {
-            "vitamin_deficits": [rec.nutrition_trigger],
+            "vitamin_deficits": [_deficit_slug(rec.nutrition_trigger)],
             "beauty_impact": rec.rationale_text,
             "recommendation": rec.insight_text,
         }
