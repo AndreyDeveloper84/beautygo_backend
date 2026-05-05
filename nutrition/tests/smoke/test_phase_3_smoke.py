@@ -448,15 +448,16 @@ class TestSection3Water:
     def test_3_12_caffeine_warning_when_pregnant(
         self, client_api, headers, proxy_user, seed_beverages,
     ):
-        """3.12 — pregnant + ≥200 мг кофеина → caffeine_warning."""
+        """3.12 — pregnant + 600мл espresso (~1080 мг кофеина) → caffeine_warning."""
         NutritionProfile.objects.create(
             user=proxy_user, daily_kcal=2000, daily_water_ml=2000,
             daily_protein_g=100, health_flags={"pregnant": True},
         )
-        # 200 ml espresso × 180 mg/100ml = 360 mg — выше порога 200
+        # Faithful to checklist 3.12: 600 ml espresso × 180 mg/100ml = 1080 mg
+        # — well over the 200 mg pregnancy threshold.
         resp = client_api.post(
             URL_WATER,
-            {"ml": 200, "beverage_slug": "espresso"},
+            {"ml": 600, "beverage_slug": "espresso"},
             format="json", **headers,
         )
         assert resp.json()["data"]["caffeine_warning"] is not None
@@ -947,13 +948,32 @@ class TestSection5Patterns:
     def test_5_12_cache_persists_for_12h(
         self, client_api, headers, proxy_user, profile_default, add_water_at,
     ):
-        """5.12 — повторный GET возвращает кешированное значение."""
+        """5.12 — повторный GET возвращает кешированное значение.
+
+        Two-pronged check: (a) cache key is populated after first call,
+        (b) the cached snapshot is what the second call returns even
+        though new data has been written that would change a fresh
+        recompute.
+        """
+        from django.core.cache import cache
+        from nutrition.services.pattern_detection_service import detect_patterns
+
         client_api.get(URL_PATTERNS, **headers)
-        # Mutate the underlying data — cache shouldn't be invalidated.
+        cache_key = f"nutrition.patterns:{proxy_user.id}"
+        cached_snapshot = cache.get(cache_key)
+        assert cached_snapshot is not None, "first call did not populate cache"
+        assert cached_snapshot.active_days == 0
+
+        # Add data that *would* bump active_days if the second call recomputed.
         add_water_at(proxy_user, days_ago=0, ml=250)
+        # Sanity: a forced recompute would now see the new row.
+        fresh = detect_patterns(user_id=proxy_user.id, force=True)
+        assert fresh.active_days >= 1
+        # Restore cached snapshot (force=True overwrote it) and confirm
+        # the endpoint still returns the stale value.
+        cache.set(cache_key, cached_snapshot, 12 * 60 * 60)
         resp = client_api.get(URL_PATTERNS, **headers)
-        body = resp.json()["data"]
-        assert body["active_days"] == 0
+        assert resp.json()["data"]["active_days"] == 0
 
 
 # ===========================================================================
@@ -1032,15 +1052,34 @@ class TestSection6ReturningSuccess:
     def test_6_7_cache_persists(
         self, client_api, headers, proxy_user, profile_default, add_food_at,
     ):
-        """6.7 — повтор GET возвращает кешированный результат."""
+        """6.7 — повтор GET возвращает кешированный результат.
+
+        Two-pronged check (mirrors §5.12 fix): confirm the cache key is
+        populated, then write data that *would* flip detected=True on a
+        fresh recompute, and assert the cached snapshot still wins.
+        """
+        from django.core.cache import cache
+        from nutrition.services.returning_success_service import (
+            detect_returning_success,
+        )
+
         client_api.get(URL_RETURNING_SUCCESS, **headers)
-        # Mutate.
+        cache_key = f"nutrition.returning_success:{proxy_user.id}"
+        cached_snapshot = cache.get(cache_key)
+        assert cached_snapshot is not None, "first call did not populate cache"
+        assert cached_snapshot.detected is False
+
+        # Inject a real returning-success signal.
         for i in (4, 3, 2):
             add_food_at(proxy_user, days_ago=i, kcal=800)
         for i in (1, 0):
             add_food_at(proxy_user, days_ago=i, kcal=1900)
+        # Sanity: forced recompute would now detect.
+        fresh = detect_returning_success(user_id=proxy_user.id, force=True)
+        assert fresh.detected is True
+        cache.set(cache_key, cached_snapshot, 12 * 60 * 60)
         body = client_api.get(URL_RETURNING_SUCCESS, **headers).json()["data"]
-        assert body["detected"] is False  # cached "no signal" snapshot
+        assert body["detected"] is False  # cached "no signal" wins
 
 
 # ===========================================================================
@@ -1232,19 +1271,28 @@ class TestSection8CrossFeature:
     def test_8_2_profile_change_updates_water_norm(
         self, client_api, headers, proxy_user, seed_beverages,
     ):
-        """8.2 — пересчёт daily_water_ml после смены профиля влияет на milestone."""
-        # Initial: maintain (norm computed in service).
+        """8.2 — после смены профиля POST /water/ использует новую норму.
+
+        Verifies the WaterContext loader actually re-reads the profile
+        rather than caching a stale daily_water_ml.
+        """
         client_api.post(URL_PROFILE, {
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "goal": "maintain",
         }, format="json", **headers)
-        first_norm = NutritionProfile.objects.get(user=proxy_user).daily_water_ml
-        # Switch to lose — new computation (different bonus structure).
+        before = NutritionProfile.objects.get(user=proxy_user).daily_water_ml
+        assert before > 0  # recompute happened on initial POST
+
+        # Switch goal — recompute must run again.
         client_api.post(URL_PROFILE, {"goal": "lose"}, format="json", **headers)
-        second_norm = NutritionProfile.objects.get(user=proxy_user).daily_water_ml
-        # Norm doesn't have to change, but the recompute MUST run — verify
-        # by checking updated_at.
-        assert second_norm == first_norm or second_norm != first_norm  # no-op smoke
+        after = NutritionProfile.objects.get(user=proxy_user).daily_water_ml
+        assert after > 0
+
+        # The endpoint must surface the *current* norm — not a cached one.
+        water_resp = client_api.post(
+            URL_WATER, {"ml": 250}, format="json", **headers,
+        )
+        assert water_resp.json()["data"]["today_norm_water_ml"] == after
 
     def test_8_3_scan_caption_then_summary_with_comment_round_trip(
         self, client_api, headers, proxy_user, settings, patch_openai_client,
@@ -1329,13 +1377,11 @@ class TestSection9Observability:
         assert counters == {"delivered": 0, "retried": 0, "dlq": 0, "skipped": 0}
 
     def test_9_4_throttle_food_scan_internal_scope_enforced(
-        self, settings, client_api, headers, profile_default, seed_beverages,
+        self, override_throttle_rate, client_api, headers,
+        profile_default, seed_beverages,
     ):
         """9.4 — после превышения food_scan_internal scope — 429."""
-        settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["food_scan_internal"] = "3/min"
-        # Patch the throttle scope cache to clean state.
-        from rest_framework.throttling import SimpleRateThrottle
-        SimpleRateThrottle.cache.clear()
+        override_throttle_rate("food_scan_internal", "3/min")
         statuses = []
         for _ in range(5):
             r = client_api.get(URL_BEVERAGES, **headers)
@@ -1343,14 +1389,42 @@ class TestSection9Observability:
         assert status.HTTP_429_TOO_MANY_REQUESTS in statuses
 
     def test_9_5_profile_endpoint_under_same_throttle_scope(
-        self, settings, client_api, headers, proxy_user,
+        self, override_throttle_rate, client_api, headers, proxy_user,
     ):
         """9.5 — /internal/profile/ под тем же throttle scope."""
-        settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["food_scan_internal"] = "3/min"
-        from rest_framework.throttling import SimpleRateThrottle
-        SimpleRateThrottle.cache.clear()
+        override_throttle_rate("food_scan_internal", "3/min")
         statuses = []
         for _ in range(5):
             r = client_api.get(URL_PROFILE, **headers)
             statuses.append(r.status_code)
         assert status.HTTP_429_TOO_MANY_REQUESTS in statuses
+
+
+@pytest.fixture
+def override_throttle_rate(settings):
+    """Override a DRF throttle rate with proper teardown.
+
+    Plain ``settings.REST_FRAMEWORK[...][scope] = rate`` mutates a nested
+    dict pytest-django doesn't restore — only the top-level REST_FRAMEWORK
+    key is snapshotted. We mutate in place (so DRF's ``api_settings`` —
+    which caches a reference to the old dict — actually picks up the new
+    rate) and explicitly restore the original value in teardown.
+    """
+    from rest_framework.throttling import SimpleRateThrottle
+    rates = settings.REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]
+    saved: dict[str, str] = {}
+
+    def _apply(scope: str, rate: str) -> None:
+        if scope not in saved:
+            saved[scope] = rates.get(scope)
+        rates[scope] = rate
+        SimpleRateThrottle.cache.clear()
+
+    yield _apply
+
+    for scope, original in saved.items():
+        if original is None:
+            rates.pop(scope, None)
+        else:
+            rates[scope] = original
+    SimpleRateThrottle.cache.clear()
