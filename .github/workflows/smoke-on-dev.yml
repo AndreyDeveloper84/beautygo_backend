@@ -10,7 +10,11 @@ name: Smoke tests on dev VPS
 # - it's a "is the box healthy" check, not a "did the diff break things"
 #   check (which `ci.yml` already covers in-process)
 #
-# Use after a non-trivial dev deploy or before promoting dev → main.
+# The job ALSO refreshes the box first (git pull + rebuild + migrate)
+# because the deploy job's `docker compose build` can use stale layer
+# cache — our first run hit a container image that was missing the
+# smoke directory and migration 0009. Pulling + --no-cache rebuild +
+# migrate before the test run guarantees the box matches origin/dev.
 
 on:
   workflow_dispatch:
@@ -19,6 +23,10 @@ on:
         description: 'Extra pytest args (e.g. -k test_3_ for water-only)'
         required: false
         default: '-v --tb=short'
+      skip_redeploy:
+        description: 'Skip the rebuild step (faster, but trusts the box is current)'
+        required: false
+        default: 'false'
 
 jobs:
   smoke:
@@ -33,20 +41,48 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
           timeout: 300s
-          command_timeout: 10m
-          envs: PYTEST_ARGS
-          script_stop: false      # don't bail on non-zero exit — we want the full pytest report
+          command_timeout: 15m
+          envs: PYTEST_ARGS,SKIP_REDEPLOY
           script: |
             set -o pipefail
             cd /home/taximeter/beautygo/dev
 
-            echo "=== branch + commit ==="
+            echo "=== branch + commit (before refresh) ==="
             git rev-parse --abbrev-ref HEAD
             git rev-parse --short HEAD
             echo
 
+            if [ "$SKIP_REDEPLOY" != "true" ]; then
+              echo "=== refreshing box (git pull + build + migrate) ==="
+              git fetch origin dev
+              git reset --hard origin/dev
+              # Rebuild without cache so new files (tests, migrations) are
+              # actually copied into the image. The deploy job's `compose
+              # build` can hit cached layers when only python source files
+              # changed; --no-cache costs an extra minute and avoids ghost
+              # missing-file failures.
+              docker compose build --no-cache web
+              docker compose up -d --force-recreate web
+              # Wait for web to come back up.
+              sleep 5
+              docker compose exec -T web python manage.py migrate --noinput
+              echo
+            else
+              echo "=== skip_redeploy=true, using existing container ==="
+              echo
+            fi
+
+            echo "=== branch + commit (after refresh) ==="
+            git rev-parse --short HEAD
+            echo
+
+            echo "=== container view of smoke dir ==="
+            docker compose exec -T web ls -la nutrition/tests/smoke/ || \
+              echo "WARNING: nutrition/tests/smoke/ missing in container"
+            echo
+
             echo "=== migrations status ==="
-            docker compose exec -T web python manage.py showmigrations nutrition | tail -10
+            docker compose exec -T web python manage.py showmigrations nutrition | tail -12
             echo
 
             echo "=== ensure beverages seeded ==="
@@ -57,3 +93,4 @@ jobs:
             docker compose exec -T web pytest nutrition/tests/smoke ${PYTEST_ARGS:-"-v --tb=short"}
         env:
           PYTEST_ARGS: ${{ inputs.pytest_args }}
+          SKIP_REDEPLOY: ${{ inputs.skip_redeploy }}
