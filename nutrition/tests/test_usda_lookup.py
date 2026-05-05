@@ -204,6 +204,28 @@ class TestUSDALookupCache:
 
         assert mock_httpx_post.post.call_count == 1
 
+    def test_alias_aware_cache_does_not_overwrite_search_key(self, settings):
+        """LB-1 regression: two distinct terms resolving to same fdc_id
+        must NOT overwrite each other's search_key — both reads hit cache.
+        """
+        settings.USDA_API_KEY = "test-key"
+        # Both searches return the same fdc_id (USDA's normalized result).
+        with patch("nutrition.services.usda_lookup.httpx.Client") as MockClient:
+            instance = MockClient.return_value.__enter__.return_value
+            instance.post.return_value = httpx.Response(
+                200, json=SAMPLE_USDA_RESPONSE,
+                request=httpx.Request("POST", "https://x"),
+            )
+            lookup = USDALookup()
+            lookup.lookup("chicken breast", portion_g=100)
+            lookup.lookup("breast of chicken", portion_g=100)
+            # Lookup the original key again — must hit cache, not HTTP.
+            instance.post.reset_mock()
+            facts = lookup.lookup("chicken breast", portion_g=100)
+            assert facts is not None
+            # Cache hit for the original key.
+            instance.post.assert_not_called()
+
 
 @pytest.mark.django_db
 class TestUSDALookupMisses:
@@ -261,6 +283,44 @@ class TestUSDALookupErrors:
             )
             lookup = USDALookup()
             assert lookup.lookup("apple", portion_g=100) is None
+
+    def test_401_raises_unavailable(self, settings):
+        # LB-2 regression: 401 must not silently fall through to AI.
+        settings.USDA_API_KEY = "test-key"
+        with patch("nutrition.services.usda_lookup.httpx.Client") as MockClient:
+            instance = MockClient.return_value.__enter__.return_value
+            instance.post.return_value = httpx.Response(
+                401, json={"error": "bad key"},
+                request=httpx.Request("POST", "https://x"),
+            )
+            lookup = USDALookup()
+            with pytest.raises(USDAUnavailableError, match="auth"):
+                lookup.lookup("apple", portion_g=100)
+
+    def test_403_raises_unavailable(self, settings):
+        settings.USDA_API_KEY = "test-key"
+        with patch("nutrition.services.usda_lookup.httpx.Client") as MockClient:
+            instance = MockClient.return_value.__enter__.return_value
+            instance.post.return_value = httpx.Response(
+                403, json={"error": "forbidden"},
+                request=httpx.Request("POST", "https://x"),
+            )
+            lookup = USDALookup()
+            with pytest.raises(USDAUnavailableError, match="auth"):
+                lookup.lookup("apple", portion_g=100)
+
+    def test_429_raises_unavailable(self, settings):
+        # LB-2 regression: rate limit must surface loudly, not fall to AI.
+        settings.USDA_API_KEY = "test-key"
+        with patch("nutrition.services.usda_lookup.httpx.Client") as MockClient:
+            instance = MockClient.return_value.__enter__.return_value
+            instance.post.return_value = httpx.Response(
+                429, json={"error": "rate limit"},
+                request=httpx.Request("POST", "https://x"),
+            )
+            lookup = USDALookup()
+            with pytest.raises(USDAUnavailableError, match="rate limit"):
+                lookup.lookup("apple", portion_g=100)
 
     def test_no_api_key_raises_at_construction(self, settings):
         # Loud failure beats silent fallback when the key isn't configured.
