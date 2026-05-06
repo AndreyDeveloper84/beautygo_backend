@@ -162,6 +162,15 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
     profile.daily_fat_g = norms.daily_fat_g
     profile.daily_carbs_g = norms.daily_carbs_g
     profile.daily_water_ml = norms.daily_water_ml
+    # DRF-265: micronutrient RDA — recomputed on every upsert.
+    profile.daily_vitamin_d_iu = norms.daily_vitamin_d_iu
+    profile.daily_vitamin_b12_mcg = norms.daily_vitamin_b12_mcg
+    profile.daily_vitamin_c_mg = norms.daily_vitamin_c_mg
+    profile.daily_iron_mg = norms.daily_iron_mg
+    profile.daily_calcium_mg = norms.daily_calcium_mg
+    profile.daily_magnesium_mg = norms.daily_magnesium_mg
+    profile.daily_omega3_g = norms.daily_omega3_g
+    profile.daily_fiber_g = norms.daily_fiber_g
     profile.goal = norms.goal
     profile.pace = norms.pace
     profile.goal_overridden_by = norms.goal_overridden_by
@@ -195,6 +204,15 @@ def _serialize(
             "daily_fat_g": profile.daily_fat_g,
             "daily_carbs_g": profile.daily_carbs_g,
             "daily_water_ml": profile.daily_water_ml,
+            # DRF-265: micronutrient RDA targets.
+            "daily_vitamin_d_iu": profile.daily_vitamin_d_iu,
+            "daily_vitamin_b12_mcg": profile.daily_vitamin_b12_mcg,
+            "daily_vitamin_c_mg": profile.daily_vitamin_c_mg,
+            "daily_iron_mg": profile.daily_iron_mg,
+            "daily_calcium_mg": profile.daily_calcium_mg,
+            "daily_magnesium_mg": profile.daily_magnesium_mg,
+            "daily_omega3_g": profile.daily_omega3_g,
+            "daily_fiber_g": profile.daily_fiber_g,
         },
         "health_flags": profile.health_flags or {},
         "goal_overridden_by": profile.goal_overridden_by or None,
