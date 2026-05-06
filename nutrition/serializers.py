@@ -10,6 +10,98 @@ from rest_framework import serializers
 from nutrition.models import Beverage, FoodLog, FoodScan, NutritionProfile, WaterLog
 
 
+# DRF-264: Track E micronutrient keys that appear in
+# FoodScan.nutrition JSON (DRF-260 added these). Exposed in the
+# response under ``nutrition.vitamins``. Sparse map: only non-null
+# keys land in the wire payload.
+_VITAMIN_KEYS = (
+    "vitamin_d_iu",
+    "vitamin_b12_mcg",
+    "vitamin_c_mg",
+    "iron_mg",
+    "calcium_mg",
+    "magnesium_mg",
+    "omega3_g",
+    "fiber_g",
+)
+
+
+def evaluate_for_scan(scan: FoodScan):
+    """Wrapper around CrossDomainEngine.evaluate for serializer use.
+
+    Local helper kept out of the serializer class so tests can patch
+    it without touching engine internals. Returns a
+    ``CrossDomainRecommendation`` or ``None``.
+    """
+    # Local import — keeps engine + pattern detection out of the
+    # import graph for callers that only need serializers.
+    from nutrition.services.cross_domain_engine import CrossDomainEngine
+    return CrossDomainEngine().evaluate(user=scan.user, surface="bot")
+
+
+def _deficit_slug(trigger: str) -> str:
+    """Normalize a pattern trigger slug to a deficit nutrient name.
+
+    DRF-264 LB-9: spec v2.0 §FoodScanResponse.beauty_insights expects
+    ``vitamin_deficits`` to list nutrient names (e.g. ``"vitamin_d"``,
+    ``"iron"``, ``"omega_3"``), not internal pattern slugs. The pattern
+    detector produces ``"low_vitamin_d"`` etc.; strip the ``"low_"``
+    prefix once at the wire boundary.
+    """
+    if trigger.startswith("low_"):
+        return trigger[len("low_"):]
+    return trigger
+
+
+# DRF-267 — /internal/insights/cross_domain/ serializers
+
+
+class CrossDomainInsightResponseSerializer(serializers.Serializer):
+    """GET /internal/insights/cross_domain/ — engine output or null."""
+
+    has_recommendation = serializers.BooleanField()
+    shown_id = serializers.CharField(required=False)
+    rule_id = serializers.CharField(required=False)
+    nutrition_trigger = serializers.CharField(required=False)
+    service_category_slug = serializers.CharField(required=False)
+    insight_text = serializers.CharField(required=False)
+    rationale_text = serializers.CharField(required=False)
+    disclaimer_text = serializers.CharField(required=False)
+    data_points = serializers.IntegerField(required=False)
+    severity = serializers.CharField(required=False)
+
+
+class CrossDomainDismissRequestSerializer(serializers.Serializer):
+    """POST /dismiss/{id}/ body — must specify dismissed | paused_7d."""
+
+    action = serializers.ChoiceField(choices=["dismissed", "paused_7d"])
+
+
+class CrossDomainConvertRequestSerializer(serializers.Serializer):
+    """POST /convert/{id}/ body — appointment_id for attribution."""
+
+    appointment_id = serializers.UUIDField()
+
+
+class CrossDomainHistoryEntrySerializer(serializers.Serializer):
+    """One row of GET /history/."""
+
+    shown_id = serializers.CharField(source="id")
+    rule_id = serializers.CharField(source="rule.rule_id")
+    nutrition_trigger = serializers.CharField()
+    service_category_slug = serializers.CharField()
+    shown_at = serializers.DateTimeField()
+    seen_at = serializers.DateTimeField(allow_null=True)
+    user_action = serializers.CharField()
+    surface = serializers.CharField()
+
+
+class CrossDomainHistoryResponseSerializer(serializers.Serializer):
+    """GET /history/?limit=20 — transparency UI."""
+
+    history = CrossDomainHistoryEntrySerializer(many=True)
+
+
 # 10 MiB — same cap used by the portfolio uploader; the mobile client
 # should compress before sending but the server is the only enforcer
 # the user can't disable.
@@ -81,14 +173,11 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
     def get_nutrition(self, obj: FoodScan):
         """Transform rich internal JSON → spec FoodScanResponse.nutrition shape.
 
-        Returns null when:
-        - The seed/lookup missed (no internal JSON), OR
-        - The lookup matched a dish but the provider didn't estimate
-          portion size, leaving per-portion totals null.
-
-        In both cases mobile prompts manual entry. Vitamins is an empty
-        map for now — seed has no vitamin data; Slice 3a'' OFF/USDA
-        lookup will populate.
+        Returns null when the seed/lookup missed entirely. DRF-264
+        populates ``vitamins`` from the eight Track E micronutrient
+        keys in ``FoodScan.nutrition`` (DRF-260 added these). Sparse:
+        null values are omitted to keep the wire payload small and
+        avoid mobile-render artefacts ("0 mg" for unknown).
         """
         n = obj.nutrition
         if not n:
@@ -99,16 +188,41 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
         carbs = n.get("carbs_g")
         if all(v is None for v in (kcal, protein, fat, carbs)):
             return None
+
+        # DRF-264: build sparse vitamins map from per-portion micros.
+        vitamins = {
+            key: n[key] for key in _VITAMIN_KEYS
+            if n.get(key) is not None
+        }
+
         return {
             "calories": kcal,
             "protein_g": protein,
             "fat_g": fat,
             "carbs_g": carbs,
-            "vitamins": {},
+            "vitamins": vitamins,
         }
 
-    def get_beauty_insights(self, obj: FoodScan):  # noqa: ARG002 — Slice 3+ fills this
-        return None
+    def get_beauty_insights(self, obj: FoodScan):
+        """DRF-264: spec v2.0 §FoodScanResponse.beauty_insights.
+
+        Calls CrossDomainEngine.evaluate to inline a top-1 cross-domain
+        recommendation when the user has an active deficit pattern. The
+        engine writes a CrossDomainShownRule row on success — inline
+        cooldown bookkeeping (PO-approved 2026-05-05). Auto-confirm-5min
+        handles the case where mobile/bot never POSTs /seen/.
+
+        Returns ``null`` (not empty dict) when no active pattern, no
+        rule matches, cooldown blocks, or eating-disorder mode.
+        """
+        rec = evaluate_for_scan(obj)
+        if rec is None:
+            return None
+        return {
+            "vitamin_deficits": [_deficit_slug(rec.nutrition_trigger)],
+            "beauty_impact": rec.rationale_text,
+            "recommendation": rec.insight_text,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +285,27 @@ class NutritionSummaryQuerySerializer(serializers.Serializer):
     # DRF-303 §4.2: opt-in AI-generated daily comment. Default false
     # preserves backwards compat for existing mobile / bot callers.
     with_comment = serializers.BooleanField(required=False, default=False)
+    # DRF-266: ?period=7|14|28 swaps to ProgressiveSummaryResponseSerializer
+    # (multi-week trends). Absence keeps the legacy single-day shape.
+    period = serializers.ChoiceField(
+        required=False, choices=[7, 14, 28],
+    )
+
+
+class ProgressiveSummaryResponseSerializer(serializers.Serializer):
+    """DRF-266 — 14d/28d progressive view shape.
+
+    Distinct from ``NutritionSummaryResponseSerializer`` — different
+    semantics (trends vs snapshot). Bot view picks one based on
+    presence of ``?period=`` in the query.
+    """
+
+    period = serializers.IntegerField()
+    unlocked = serializers.BooleanField()
+    commitment_days = serializers.IntegerField()
+    trends = serializers.DictField()
+    habits = serializers.DictField()
+    goal_progress = serializers.DictField(allow_null=True)
 
 
 class NutritionSummaryResponseSerializer(serializers.Serializer):

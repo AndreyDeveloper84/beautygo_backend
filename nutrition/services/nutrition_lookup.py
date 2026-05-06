@@ -47,6 +47,11 @@ class NutritionFacts:
     Per-100g values are always populated. Per-portion totals are
     populated only when ``portion_g`` is known — otherwise None and
     the mobile client shows "укажите порцию" with the per-100g hint.
+
+    DRF-260 adds 8 optional micronutrients (per-100g + per-portion) plus
+    a ``micronutrients_source`` tag. Defaults to None / "unknown" so the
+    existing macro-only call sites stay valid; the cross-domain rule
+    engine reads these fields when they're populated.
     """
 
     matched_dish: str
@@ -60,6 +65,29 @@ class NutritionFacts:
     protein_g: float | None
     fat_g: float | None
     carbs_g: float | None
+
+    # DRF-260: micronutrients per 100g.
+    vitamin_d_iu_per_100g: float | None = None
+    vitamin_b12_mcg_per_100g: float | None = None
+    vitamin_c_mg_per_100g: float | None = None
+    iron_mg_per_100g: float | None = None
+    calcium_mg_per_100g: float | None = None
+    magnesium_mg_per_100g: float | None = None
+    omega3_g_per_100g: float | None = None
+    fiber_g_per_100g: float | None = None
+
+    # DRF-260: per-portion totals (None when portion_g is None).
+    vitamin_d_iu: float | None = None
+    vitamin_b12_mcg: float | None = None
+    vitamin_c_mg: float | None = None
+    iron_mg: float | None = None
+    calcium_mg: float | None = None
+    magnesium_mg: float | None = None
+    omega3_g: float | None = None
+    fiber_g: float | None = None
+
+    # DRF-260: provenance tag — read by Track E pattern engine.
+    micronutrients_source: str = "unknown"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -94,10 +122,20 @@ def _normalize(text: str) -> str:
 
 
 class NutritionLookup:
-    """Looks up macros for a dish name.
+    """Three-layer lookup chain: seed → USDA → AI estimate (DRF-261).
 
-    MVP: seed-only (``nutrition.data.ru_dishes_seed``). HTTP fallback
-    arrives in Slice 3a'.
+    Order is cheapest-first. Each layer can be skipped via DI.
+
+    1. Local seed (``nutrition.data.ru_dishes_seed``) — RU dishes from
+       Скурихин-Тутельян.
+    2. USDA FoodData Central — free, cached.
+       ``USDAUnavailableError`` falls through to AI.
+    3. AI estimator (gpt-4o-mini) — last resort. Tagged
+       ``micronutrients_source="ai_estimate"`` so Track E pattern engine
+       can downweight low-confidence data.
+
+    USDA + AI are optional — when omitted, behaviour matches the
+    legacy seed-only version. Existing call sites keep working.
     """
 
     SOURCE_SEED = "seed_ru"
@@ -107,9 +145,16 @@ class NutritionLookup:
         *,
         dish_macros: dict[str, DishMacros] | None = None,
         aliases: dict[str, str] | None = None,
+        usda_lookup=None,
+        ai_estimator=None,
     ) -> None:
         self._dish_macros = dish_macros if dish_macros is not None else DISH_MACROS
         self._aliases = aliases if aliases is not None else ALIASES
+        # USDA + AI passed by DI. Tests inject mocks; production wires
+        # real instances via a factory (future). Not constructing here
+        # avoids importing httpx / openai when nobody asked for them.
+        self._usda = usda_lookup
+        self._ai = ai_estimator
 
     def lookup(
         self,
@@ -118,12 +163,38 @@ class NutritionLookup:
         ingredients: Iterable[str] = (),
         portion_g: float | None = None,
     ) -> NutritionFacts | None:
-        """Return facts for ``dish_name``, or None if not in any source."""
+        """Return facts for ``dish_name``, or None if all layers miss."""
+        # Layer 1 — seed.
         canonical = self._resolve_canonical(dish_name, ingredients)
-        if canonical is None:
-            return None
-        macros = self._dish_macros[canonical]
-        return self._build_facts(canonical, macros, portion_g)
+        if canonical is not None:
+            macros = self._dish_macros[canonical]
+            return self._build_facts(canonical, macros, portion_g)
+
+        # Layer 2 — USDA.
+        if self._usda is not None:
+            try:
+                facts = self._usda.lookup(dish_name, portion_g=portion_g)
+                if facts is not None:
+                    return facts
+            except Exception as exc:  # noqa: BLE001 — duck-type on class name
+                if exc.__class__.__name__ != "USDAUnavailableError":
+                    raise
+                # Outage → fall through to AI estimator.
+
+        # Layer 3 — AI estimator.
+        if self._ai is not None:
+            try:
+                return self._ai.estimate(
+                    dish_name,
+                    ingredients=tuple(ingredients),
+                    portion_g=portion_g,
+                )
+            except Exception as exc:  # noqa: BLE001 — duck-type
+                if exc.__class__.__name__ != "EstimatorError":
+                    raise
+                # Bad LLM response → clean miss for the caller.
+
+        return None
 
     # ------------------------------------------------------------------
     # internals
@@ -179,12 +250,22 @@ class NutritionLookup:
     ) -> NutritionFacts:
         if portion_g is None or portion_g <= 0:
             kcal = protein = fat = carbs = None
+            ratio = None
         else:
             ratio = portion_g / 100.0
             kcal = round(macros.kcal_per_100g * ratio, 1)
             protein = round(macros.protein_g_per_100g * ratio, 1)
             fat = round(macros.fat_g_per_100g * ratio, 1)
             carbs = round(macros.carbs_g_per_100g * ratio, 1)
+
+        # DRF-260: scale micronutrients the same way macros are scaled.
+        # ``ratio`` is None when portion_g is unknown — totals stay None
+        # too, and the mobile client falls back to per-100g hints.
+        def _scale_micro(value: float | None) -> float | None:
+            if value is None or ratio is None:
+                return None
+            return round(value * ratio, 2)
+
         return NutritionFacts(
             matched_dish=canonical,
             source=self.SOURCE_SEED,
@@ -197,4 +278,23 @@ class NutritionLookup:
             protein_g=protein,
             fat_g=fat,
             carbs_g=carbs,
+            # Per-100g micronutrients pass through verbatim.
+            vitamin_d_iu_per_100g=macros.vitamin_d_iu_per_100g,
+            vitamin_b12_mcg_per_100g=macros.vitamin_b12_mcg_per_100g,
+            vitamin_c_mg_per_100g=macros.vitamin_c_mg_per_100g,
+            iron_mg_per_100g=macros.iron_mg_per_100g,
+            calcium_mg_per_100g=macros.calcium_mg_per_100g,
+            magnesium_mg_per_100g=macros.magnesium_mg_per_100g,
+            omega3_g_per_100g=macros.omega3_g_per_100g,
+            fiber_g_per_100g=macros.fiber_g_per_100g,
+            # Per-portion totals scaled by ratio.
+            vitamin_d_iu=_scale_micro(macros.vitamin_d_iu_per_100g),
+            vitamin_b12_mcg=_scale_micro(macros.vitamin_b12_mcg_per_100g),
+            vitamin_c_mg=_scale_micro(macros.vitamin_c_mg_per_100g),
+            iron_mg=_scale_micro(macros.iron_mg_per_100g),
+            calcium_mg=_scale_micro(macros.calcium_mg_per_100g),
+            magnesium_mg=_scale_micro(macros.magnesium_mg_per_100g),
+            omega3_g=_scale_micro(macros.omega3_g_per_100g),
+            fiber_g=_scale_micro(macros.fiber_g_per_100g),
+            micronutrients_source=macros.micronutrients_source,
         )
