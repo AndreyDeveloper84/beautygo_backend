@@ -6,7 +6,9 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('nutrition', '0009_nutrition_outbox_event'),
+        # B-3 cumulative chain: 0010 (DRF-260) → 0011 (DRF-261 USDA cache)
+        # → 0012 (this — RDA norms on NutritionProfile).
+        ('nutrition', '0011_usda_food_cache'),
     ]
 
     operations = [
