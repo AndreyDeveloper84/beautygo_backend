@@ -47,6 +47,11 @@ class NutritionFacts:
     Per-100g values are always populated. Per-portion totals are
     populated only when ``portion_g`` is known — otherwise None and
     the mobile client shows "укажите порцию" with the per-100g hint.
+
+    DRF-260 adds 8 optional micronutrients (per-100g + per-portion) plus
+    a ``micronutrients_source`` tag. Defaults to None / "unknown" so the
+    existing macro-only call sites stay valid; the cross-domain rule
+    engine reads these fields when they're populated.
     """
 
     matched_dish: str
@@ -60,6 +65,29 @@ class NutritionFacts:
     protein_g: float | None
     fat_g: float | None
     carbs_g: float | None
+
+    # DRF-260: micronutrients per 100g.
+    vitamin_d_iu_per_100g: float | None = None
+    vitamin_b12_mcg_per_100g: float | None = None
+    vitamin_c_mg_per_100g: float | None = None
+    iron_mg_per_100g: float | None = None
+    calcium_mg_per_100g: float | None = None
+    magnesium_mg_per_100g: float | None = None
+    omega3_g_per_100g: float | None = None
+    fiber_g_per_100g: float | None = None
+
+    # DRF-260: per-portion totals (None when portion_g is None).
+    vitamin_d_iu: float | None = None
+    vitamin_b12_mcg: float | None = None
+    vitamin_c_mg: float | None = None
+    iron_mg: float | None = None
+    calcium_mg: float | None = None
+    magnesium_mg: float | None = None
+    omega3_g: float | None = None
+    fiber_g: float | None = None
+
+    # DRF-260: provenance tag — read by Track E pattern engine.
+    micronutrients_source: str = "unknown"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -179,12 +207,22 @@ class NutritionLookup:
     ) -> NutritionFacts:
         if portion_g is None or portion_g <= 0:
             kcal = protein = fat = carbs = None
+            ratio = None
         else:
             ratio = portion_g / 100.0
             kcal = round(macros.kcal_per_100g * ratio, 1)
             protein = round(macros.protein_g_per_100g * ratio, 1)
             fat = round(macros.fat_g_per_100g * ratio, 1)
             carbs = round(macros.carbs_g_per_100g * ratio, 1)
+
+        # DRF-260: scale micronutrients the same way macros are scaled.
+        # ``ratio`` is None when portion_g is unknown — totals stay None
+        # too, and the mobile client falls back to per-100g hints.
+        def _scale_micro(value: float | None) -> float | None:
+            if value is None or ratio is None:
+                return None
+            return round(value * ratio, 2)
+
         return NutritionFacts(
             matched_dish=canonical,
             source=self.SOURCE_SEED,
@@ -197,4 +235,23 @@ class NutritionLookup:
             protein_g=protein,
             fat_g=fat,
             carbs_g=carbs,
+            # Per-100g micronutrients pass through verbatim.
+            vitamin_d_iu_per_100g=macros.vitamin_d_iu_per_100g,
+            vitamin_b12_mcg_per_100g=macros.vitamin_b12_mcg_per_100g,
+            vitamin_c_mg_per_100g=macros.vitamin_c_mg_per_100g,
+            iron_mg_per_100g=macros.iron_mg_per_100g,
+            calcium_mg_per_100g=macros.calcium_mg_per_100g,
+            magnesium_mg_per_100g=macros.magnesium_mg_per_100g,
+            omega3_g_per_100g=macros.omega3_g_per_100g,
+            fiber_g_per_100g=macros.fiber_g_per_100g,
+            # Per-portion totals scaled by ratio.
+            vitamin_d_iu=_scale_micro(macros.vitamin_d_iu_per_100g),
+            vitamin_b12_mcg=_scale_micro(macros.vitamin_b12_mcg_per_100g),
+            vitamin_c_mg=_scale_micro(macros.vitamin_c_mg_per_100g),
+            iron_mg=_scale_micro(macros.iron_mg_per_100g),
+            calcium_mg=_scale_micro(macros.calcium_mg_per_100g),
+            magnesium_mg=_scale_micro(macros.magnesium_mg_per_100g),
+            omega3_g=_scale_micro(macros.omega3_g_per_100g),
+            fiber_g=_scale_micro(macros.fiber_g_per_100g),
+            micronutrients_source=macros.micronutrients_source,
         )
