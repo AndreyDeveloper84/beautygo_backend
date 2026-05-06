@@ -10,6 +10,11 @@ from nutrition.views import (
     FoodLogCreateView,
     FoodScanView,
     InternalBeveragesView,
+    InternalCrossDomainConvertView,
+    InternalCrossDomainDismissView,
+    InternalCrossDomainHistoryView,
+    InternalCrossDomainSeenView,
+    InternalCrossDomainView,
     InternalDeficitsView,
     InternalFoodLogView,
     InternalFoodScanView,
@@ -107,5 +112,33 @@ urlpatterns = [
         "internal/water/<uuid:pk>/",
         InternalWaterDeleteView.as_view(),
         name="internal-water-delete",
+    ),
+    # DRF-267 — cross-domain insight endpoints. The /history/ route
+    # must precede /<uuid:shown_id>/ subresource routes so the resolver
+    # doesn't try to coerce "history" to UUID (same pattern as water/today).
+    path(
+        "internal/insights/cross_domain/history/",
+        InternalCrossDomainHistoryView.as_view(),
+        name="internal-cross-domain-history",
+    ),
+    path(
+        "internal/insights/cross_domain/<uuid:shown_id>/seen/",
+        InternalCrossDomainSeenView.as_view(),
+        name="internal-cross-domain-seen",
+    ),
+    path(
+        "internal/insights/cross_domain/<uuid:shown_id>/dismiss/",
+        InternalCrossDomainDismissView.as_view(),
+        name="internal-cross-domain-dismiss",
+    ),
+    path(
+        "internal/insights/cross_domain/<uuid:shown_id>/convert/",
+        InternalCrossDomainConvertView.as_view(),
+        name="internal-cross-domain-convert",
+    ),
+    path(
+        "internal/insights/cross_domain/",
+        InternalCrossDomainView.as_view(),
+        name="internal-cross-domain",
     ),
 ]
