@@ -425,6 +425,18 @@ class NutritionProfile(models.Model):
     daily_carbs_g = models.PositiveSmallIntegerField(default=0)
     daily_water_ml = models.PositiveIntegerField(default=0)
 
+    # DRF-265: micronutrient RDA targets — recomputed on every upsert from
+    # gender/age + health_flags via nutrition_profile_service.compute_rda.
+    # Pattern engine (Track E) compares per-day intake against these.
+    daily_vitamin_d_iu = models.PositiveSmallIntegerField(default=0)
+    daily_vitamin_b12_mcg = models.FloatField(default=0.0)
+    daily_vitamin_c_mg = models.PositiveSmallIntegerField(default=0)
+    daily_iron_mg = models.FloatField(default=0.0)
+    daily_calcium_mg = models.PositiveSmallIntegerField(default=0)
+    daily_magnesium_mg = models.PositiveSmallIntegerField(default=0)
+    daily_omega3_g = models.FloatField(default=0.0)
+    daily_fiber_g = models.PositiveSmallIntegerField(default=0)
+
     # Override audit
     goal_overridden_by = models.CharField(max_length=24, blank=True, default="")
     bmi_warning_overridden_at = models.DateTimeField(null=True, blank=True)
