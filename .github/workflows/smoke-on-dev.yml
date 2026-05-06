@@ -24,11 +24,25 @@ on:
         description: 'Extra pytest args (e.g. -k test_3_ for water-only)'
         required: false
         default: '-v --tb=short'
+  schedule:
+    # Daily at 04:00 UTC (07:00 MSK) — runs an hour after the
+    # nutrition.purge_water_entries Celery beat (03:00 UTC), so any
+    # purge regression surfaces in the same morning report.
+    # Cron-only triggers respect the workflow definition on the default
+    # branch (master), so this duplicates to master via the sync PR.
+    - cron: '0 4 * * *'
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
     environment: dev
+    env:
+      # GH_DEPLOY_TOKEN read access on the AndreyDeveloper84/ayla-ai-core
+      # private repo. Forwarded via `envs:` into the SSH action's shell so
+      # the inline `pip install` can clone the dep into the running web
+      # container. ci.yml uses the same secret for its own pip install at
+      # runner boot time.
+      GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
     steps:
       - name: Run smoke suite on dev VPS
         uses: appleboy/ssh-action@v1
@@ -39,7 +53,7 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           timeout: 300s
           command_timeout: 15m
-          envs: PYTEST_ARGS
+          envs: PYTEST_ARGS,GITHUB_RUN_ID,GH_DEPLOY_TOKEN
           script: |
             set -o pipefail
             cd /home/taximeter/beautygo/dev
@@ -66,10 +80,14 @@ jobs:
             #                        for DRF-302/306, MIDDLEWARE for DRF-242.4)
             # - ai/, tenants/     — peripheral models the smoke tests'
             #                        request-resolution path imports
+            # - analytics/        — DRF-160 added to INSTALLED_APPS;
+            #                        Django startup imports it before
+            #                        any request runs. Without this the
+            #                        whole web container ImportErrors.
             #
             # Strip __pycache__/.pyc on the host side first so we don't
             # ship stale bytecode into the container.
-            find ./nutrition ./djangoProject ./ai ./tenants \
+            find ./nutrition ./djangoProject ./ai ./tenants ./analytics \
               -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
             # Trailing /. means "copy contents of src into dst" (overwrite
             # dst's contents). Without it, when dst exists as a dir docker
@@ -80,6 +98,36 @@ jobs:
             docker compose cp ./djangoProject/. web:/app/djangoProject
             docker compose cp ./ai/.            web:/app/ai
             docker compose cp ./tenants/.       web:/app/tenants
+            # `analytics/` doesn't exist in the running image — create
+            # the dir before cp'ing into it (cp -L wouldn't help).
+            docker compose exec -T web mkdir -p /app/analytics
+            docker compose cp ./analytics/.     web:/app/analytics
+            echo
+
+            echo "=== ensure ayla-ai-core is installed in running container ==="
+            # The image on this VPS pre-dates DRF-241 Slice A (PR #57), which
+            # added `ayla-ai-core` to requirements.txt. Rebuilding the image
+            # requires GH_DEPLOY_TOKEN inside the docker build context — not
+            # plumbed yet. Until that gap is closed, install the dep at run
+            # time into the already-running web container. Idempotent: if the
+            # pin matches, pip is a no-op. If it's missing or behind, pip
+            # upgrades it without touching the image. Pinned to v0.6.0 (the
+            # tool_dispatcher hook landed in PR #5 there).
+            if [ -z "$GH_DEPLOY_TOKEN" ]; then
+              echo "GH_DEPLOY_TOKEN missing — repo is private, pip install will fail"
+              echo "(check repo Settings → Environments → dev → secrets)"
+              exit 1
+            fi
+            # The python:3.12-slim base image strips git to keep the
+            # production image lean. pip install with a git+https URL
+            # needs `git version` to work, so install git first.
+            # Idempotent — apt-get is a no-op once installed.
+            docker compose exec -T web bash -c "command -v git >/dev/null || (apt-get update -qq && apt-get install -y --no-install-recommends git)"
+            docker compose exec -T -e GH_DEPLOY_TOKEN="$GH_DEPLOY_TOKEN" web \
+              pip install --quiet --upgrade \
+              "ayla-ai-core @ git+https://${GH_DEPLOY_TOKEN}@github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0"
+            docker compose exec -T web python -c \
+              "import ayla_ai_core; print('ayla_ai_core', ayla_ai_core.__version__)"
             echo
 
             echo "=== container view of smoke dir ==="
@@ -99,6 +147,75 @@ jobs:
             echo
 
             echo "=== smoke suite ==="
+            # Capture exit code without short-circuiting the script — we
+            # want the alert step below to fire whether pytest passed or
+            # failed, then re-exit with the original code so the workflow
+            # conclusion stays honest.
+            set +e
             docker compose exec -T web pytest nutrition/tests/smoke ${PYTEST_ARGS:-"-v --tb=short"}
+            PYTEST_RC=$?
+            set -e
+            echo "pytest exit=$PYTEST_RC"
+
+            if [ "$PYTEST_RC" -ne 0 ]; then
+              echo "=== send Telegram alert (token from VPS .env) ==="
+              # Diag: confirm where .env lives + which TELEGRAM_* keys
+              # are actually present (KEY NAMES ONLY — values redacted).
+              for ENV_PATH in ./.env ../.env /home/taximeter/.env /etc/ayla/.env; do
+                if [ -f "$ENV_PATH" ]; then
+                  echo "  found: $ENV_PATH ($(wc -l < "$ENV_PATH") lines, $(file -b "$ENV_PATH"))"
+                  echo "  ALL key names (values redacted, comments excluded):"
+                  # Strip CRLF + BOM, drop comments and blank lines, show
+                  # only the LHS of each KEY=VALUE so we can see exactly
+                  # what the file contains without leaking secrets.
+                  tr -d '\r' < "$ENV_PATH" \
+                    | sed '1s/^\xEF\xBB\xBF//' \
+                    | grep -vE '^[[:space:]]*(#|$)' \
+                    | sed -nE 's/^[[:space:]]*(export +)?([A-Za-z_][A-Za-z0-9_]*)=.*/    \2/p'
+                fi
+              done
+
+              # Source .env without exporting noise into our shell scope.
+              # First try the dir we cd'd into; fall back to common spots.
+              set +e
+              for ENV_PATH in ./.env ../.env /home/taximeter/.env /etc/ayla/.env; do
+                if [ -f "$ENV_PATH" ]; then
+                  # Strip CRLF line endings before sourcing (a known Windows-
+                  # editor leak that gives values trailing \r and breaks
+                  # curl. tr is fine on a copy in /tmp.)
+                  TMP_ENV=$(mktemp)
+                  tr -d '\r' < "$ENV_PATH" > "$TMP_ENV"
+                  set -a; . "$TMP_ENV" 2>/dev/null; set +a
+                  rm -f "$TMP_ENV"
+                fi
+              done
+              # Try common variable names so we don't care which one the
+              # box uses.
+              TG_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-${TG_BOT_TOKEN:-${BOT_TOKEN:-${TELEGRAM_TOKEN:-}}}}"
+              TG_CHAT_ID="${TELEGRAM_CHAT_ID:-${TG_CHAT_ID:-${TELEGRAM_ALERT_CHAT_ID:-${SMOKE_ALERT_CHAT_ID:-}}}}"
+              echo "  resolved token: $([ -n "$TG_BOT_TOKEN" ] && echo present || echo MISSING) ($(printf '%s' "$TG_BOT_TOKEN" | wc -c) chars)"
+              echo "  resolved chat:  $([ -n "$TG_CHAT_ID" ] && echo present || echo MISSING)"
+              if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
+                echo "  No telegram token/chat_id resolved — skipping."
+              else
+                SHA_SHORT=$(git rev-parse --short HEAD)
+                MSG="🔥 *Smoke tests on dev VPS — failed*%0A"
+                MSG="${MSG}Commit: \`${SHA_SHORT}\`%0A"
+                MSG="${MSG}pytest exit: \`${PYTEST_RC}\`%0A"
+                MSG="${MSG}[Open run](https://github.com/AndreyDeveloper84/beautygo_backend/actions/runs/${GITHUB_RUN_ID:-unknown})"
+                curl -sS -o /tmp/tg_resp.json -X POST \
+                  "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+                  -d "chat_id=${TG_CHAT_ID}" \
+                  -d "parse_mode=Markdown" \
+                  -d "disable_web_page_preview=true" \
+                  --data-urlencode "text=${MSG}"
+                echo "  telegram response: $(head -c 200 /tmp/tg_resp.json 2>/dev/null)"
+                rm -f /tmp/tg_resp.json
+              fi
+              set -e
+            fi
+
+            exit $PYTEST_RC
         env:
           PYTEST_ARGS: ${{ inputs.pytest_args }}
+          GITHUB_RUN_ID: ${{ github.run_id }}

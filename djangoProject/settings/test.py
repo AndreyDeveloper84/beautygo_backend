@@ -15,6 +15,15 @@ Integration tests that need real Redis can override via env or use the
 from .dev import *  # noqa: F401,F403
 
 
+# DRF-242.5: dev.py turns strict tenant mode on by default. Unit tests
+# use APIClient without an X-Tenant header — middleware would 400 every
+# /api/v1/* call before the view runs, breaking ~350 pre-existing tests
+# wholesale. Strict-mode-specific tests in tenants/tests/test_middleware
+# _and_permission.py flip the flag per-test via the ``settings`` fixture
+# so they keep covering the strict path.
+MULTI_TENANT_STRICT = False
+
+
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",

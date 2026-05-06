@@ -5,14 +5,25 @@ where Ayla-specific dependencies (Django ORM store, recommendation-engine
 context builder, async OpenAI client, brand voice) get injected into the
 generic AIConcierge from ayla-ai-core.
 
-`AIConcierge` itself is stateless — one instance per request is fine and
-keeps the closure-over-actor pattern simple (context_builder reads
-actor's profile, location, history). If pooling becomes a perf concern
-later, lift `openai_client` and `store` into module-level singletons —
-those are pickle-clean and request-independent.
+Wire-format note (DRF-241 Slice B):
+Ayla keeps its own `ai/tools.py` (`show_specialists` / `specialist_id`)
+because the public API spec v2.0 § AI ASSISTANT and the mobile contract
+were written against those names. The bot uses bot-Формула naming
+(`show_masters` / `master_id`) and is not migrating to shared dispatch
+this quarter (Phase 2.4 added `recommend_services` not in shared).
+ayla-ai-core 0.6.0 introduced `tool_dispatcher` DI for exactly this case:
+each consumer keeps its own dispatcher + handlers, the orchestrator stays
+generic.
+
+`AIConcierge` itself is stateless — one instance per request is fine. The
+context-builder + dispatcher form a small closure over `actor` so the
+recommendation engine's geo / history filters and ownership checks work
+the same way the previous local pipeline did.
 """
 from __future__ import annotations
 
+import json
+import logging
 from datetime import date
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -22,9 +33,7 @@ from ayla_ai_core import (
     AYLA_MARKETPLACE_VOICE,
     SpecialistCandidate,
     SpecialistContext,
-    _safe_uuid,
     build_specialist_context_from_candidates,
-    build_tool_definitions,
     render_system_prompt,
 )
 
@@ -34,6 +43,8 @@ from ai.application.services.specialist_context_builder import (
 )
 from ai.services.llm_client import get_async_openai_client
 from ai.stores import DjangoConversationStore
+from ai.tools import TOOL_DEFINITIONS
+from ai.tools_handlers import dispatch_tool_call as ayla_dispatch_tool_call
 
 if TYPE_CHECKING:  # pragma: no cover
     from users.models import User
@@ -45,6 +56,9 @@ __all__ = [
     "render_ayla_system_prompt",
     "to_core_specialist_context",
 ]
+
+
+logger = logging.getLogger(__name__)
 
 
 def to_core_specialist_context(
@@ -59,7 +73,7 @@ def to_core_specialist_context(
 
     services_preview on the local side is just names without IDs, so the
     service-level anti-hallucination on `confirm_booking` is no-op for
-    Ayla today. Slice B will surface real service IDs through the
+    Ayla today. A later slice will surface real service IDs through the
     recommendation engine so layer-2 validation kicks in.
     """
     candidates = [
@@ -74,13 +88,14 @@ def to_core_specialist_context(
     return build_specialist_context_from_candidates(candidates)
 
 
-def build_specialist_context_for_actor(actor: "User") -> SpecialistContext[UUID]:
-    """Build the per-request candidate set for the LLM context.
+def build_specialist_context_for_actor(actor: "User") -> LocalSpecialistContext:
+    """Build the per-request candidate set carrying recommendation metadata.
 
-    Closure-friendly: AIConcierge expects `Callable[[], SpecialistContext]`,
-    so the caller wraps this in a lambda that captures `actor`. Reads
-    profile location + city like the local chat_service did so the
-    recommendation engine's geo-filter still applies.
+    Returns the **local** SpecialistContext (with score, distance, reasons)
+    so handlers in `ai/tools_handlers.py` keep producing rich `action_data`
+    (specifically `handle_show_specialists` reads `match_reasons`). The
+    factory derives the ayla-ai-core core context from this object before
+    handing it to AIConcierge.
     """
     builder = SpecialistContextBuilder()
     profile = getattr(actor, "profile", None)
@@ -99,10 +114,9 @@ def build_specialist_context_for_actor(actor: "User") -> SpecialistContext[UUID]
             else None
         )
     client_id = actor.id if not getattr(actor, "is_guest", False) else None
-    local = builder.build(
+    return builder.build(
         client_id=client_id, client_lat=lat, client_lon=lon, city=city,
     )
-    return to_core_specialist_context(local)
 
 
 def render_ayla_system_prompt(
@@ -132,16 +146,49 @@ def render_ayla_system_prompt(
 def get_concierge_for(actor: "User") -> AIConcierge:
     """Build a per-request AIConcierge instance bound to this actor.
 
-    Why per-request: `context_builder` closes over `actor` to apply geo +
-    history filters. `AIConcierge` itself is stateless (state lives in
-    `store`), so building one per call is cheap. Profile this if request
-    rate climbs — likely candidate for an LRU keyed on (user_id, profile
-    revision).
+    The local `SpecialistContext` (with reasons / score / distance) is
+    built once per request inside `context_builder` and shared with
+    `tool_dispatcher` via a tiny shared dict. The dispatcher closes over
+    `actor` to thread `client_id` into Ayla's local handlers — anonymous
+    users get a clarification fallback for `show_appointments`, same
+    semantics as before AIConcierge wiring.
     """
+    # Shared per-request slot — context_builder writes the local context,
+    # tool_dispatcher reads it. AIConcierge calls context_builder before
+    # dispatcher within send_message(), so the read is always populated.
+    state: dict[str, LocalSpecialistContext | None] = {"local_context": None}
+
+    def context_builder() -> SpecialistContext[UUID]:
+        local = build_specialist_context_for_actor(actor)
+        state["local_context"] = local
+        return to_core_specialist_context(local)
+
+    def tool_dispatcher(tool_call, _core_context):
+        local_context = state["local_context"]
+        if local_context is None:  # pragma: no cover — defensive
+            logger.error("ai.dispatcher.missing_local_context")
+            local_context = LocalSpecialistContext(candidates=[])
+
+        name = getattr(tool_call.function, "name", "") or ""
+        raw_args = getattr(tool_call.function, "arguments", "") or "{}"
+        try:
+            args = json.loads(raw_args)
+        except (json.JSONDecodeError, ValueError):
+            args = {}
+
+        client_id = (
+            actor.id if not getattr(actor, "is_guest", False) else None
+        )
+        return ayla_dispatch_tool_call(
+            name, args,
+            context=local_context,
+            client_id=client_id,
+        )
+
     return AIConcierge(
         openai_client=get_async_openai_client(),
         store=DjangoConversationStore(),
-        context_builder=lambda: build_specialist_context_for_actor(actor),
-        tool_definitions=build_tool_definitions("string"),
-        id_parser=_safe_uuid,
+        context_builder=context_builder,
+        tool_definitions=TOOL_DEFINITIONS,
+        tool_dispatcher=tool_dispatcher,
     )
