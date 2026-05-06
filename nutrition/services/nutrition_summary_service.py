@@ -85,6 +85,23 @@ class NutritionSummary:
     ai_comment: str | None = None
 
 
+@dataclass(frozen=True)
+class ProgressiveSummary:
+    """DRF-266 — 14d/28d retention summary.
+
+    Distinct shape from ``NutritionSummary``: trends over time instead
+    of a single-day snapshot. The bot serialiser switches between the
+    two on the presence/absence of ``period`` in the query string.
+    """
+
+    period: int                      # 7 / 14 / 28
+    unlocked: bool                   # commitment_days >= period
+    commitment_days: int
+    trends: dict                     # per-7-day-bucket averages, empty when locked
+    habits: dict                     # streaks + counters
+    goal_progress: dict | None       # only for goal in {lose, gain}
+
+
 class NutritionSummaryService:
     """Aggregates FoodLog rows for one user on one calendar day."""
 
@@ -225,3 +242,172 @@ def _round1(value: float | None) -> float:
     if value is None:
         return 0.0
     return round(float(value), 1)
+
+
+# ---------------------------------------------------------------------------
+# DRF-266 — progressive summary
+# ---------------------------------------------------------------------------
+
+
+def _add_progressive_method():
+    """Bolt the progressive method onto NutritionSummaryService.
+
+    Defined as a free function then attached to keep the original class
+    body untouched — easier to review the diff.
+    """
+    from nutrition.services.commitment_service import get_commitment_days
+
+    def progressive(
+        self, *, user, period: int,
+    ) -> ProgressiveSummary:
+        """Return per-week bucket trends over the trailing ``period`` days.
+
+        ``period`` ∈ {7, 14, 28}. Locked (unlocked=False) when commitment
+        is below the threshold — bot then renders a teaser «ещё N дней».
+        """
+        if period not in (7, 14, 28):
+            raise ValueError(f"period must be 7/14/28, got {period}")
+
+        commitment = get_commitment_days(user)
+        # period=7 is the default weekly view — always unlocked, no
+        # commitment gate. Track E retention play (14d/28d) only kicks
+        # in for the longer windows where trend data becomes meaningful.
+        unlocked = period == 7 or commitment >= period
+
+        if not unlocked:
+            return ProgressiveSummary(
+                period=period, unlocked=False,
+                commitment_days=commitment,
+                trends={}, habits={}, goal_progress=None,
+            )
+
+        # Aggregate per-week buckets. Each bucket = 7 calendar days
+        # ending today, today-7, today-14, ... up to ``period``.
+        today = datetime.now(timezone.utc).date()
+        weeks = period // 7
+        bucket_kcal: list[float] = []
+        bucket_protein: list[float] = []
+        bucket_omega3: list[float] = []
+        bucket_vitamin_d: list[float] = []
+
+        # Pull profile RDA once outside the loop. DRF-266 LB-4 fix:
+        # falling back to 1 IU produced 20000% percentages for any
+        # user whose profile predates DRF-265 (where daily_vitamin_d_iu
+        # is set). Use settings default 600 IU instead — matches USDA
+        # adult RDA. After DRF-265 lands, profile-side value takes over
+        # automatically because we read it first.
+        profile = getattr(user, "nutrition_profile", None)
+        from django.conf import settings as dj_settings
+        rda_vitamin_d = (
+            getattr(profile, "daily_vitamin_d_iu", 0)
+            or getattr(dj_settings, "NUTRITION_DEFAULT_VITAMIN_D_IU", 600)
+        ) if profile else getattr(
+            dj_settings, "NUTRITION_DEFAULT_VITAMIN_D_IU", 600,
+        )
+
+        for w in range(weeks):
+            week_end = today - timedelta(days=w * 7)
+            week_start = week_end - timedelta(days=6)
+            qs = FoodLog.objects.filter(
+                user=user,
+                logged_at__date__gte=week_start,
+                logged_at__date__lte=week_end,
+            )
+            agg = qs.aggregate(
+                kcal=Sum("calories"),
+                protein=Sum("protein_g"),
+                omega3=Sum("omega3_g"),
+                vitamin_d=Sum("vitamin_d_iu"),
+            )
+            # Per-day average — divide weekly total by 7.
+            bucket_kcal.append(_round1((agg["kcal"] or 0) / 7))
+            bucket_protein.append(_round1((agg["protein"] or 0) / 7))
+            bucket_omega3.append(_round1((agg["omega3"] or 0) / 7))
+            # Vitamin D as % of RDA (already daily-averaged).
+            avg_vd = (agg["vitamin_d"] or 0) / 7
+            bucket_vitamin_d.append(round((avg_vd / rda_vitamin_d) * 100, 1))
+
+        # Order: oldest week first, newest last (matches mobile chart UX).
+        trends = {
+            "calories_avg_per_week": list(reversed(bucket_kcal)),
+            "protein_g_avg_per_week": list(reversed(bucket_protein)),
+            "omega3_g_avg_per_week": list(reversed(bucket_omega3)),
+            "vitamin_d_pct_rda_per_week": list(reversed(bucket_vitamin_d)),
+        }
+
+        habits = _compute_habits(user, period)
+        goal_progress = _compute_goal_progress(profile)
+
+        return ProgressiveSummary(
+            period=period, unlocked=True,
+            commitment_days=commitment,
+            trends=trends, habits=habits, goal_progress=goal_progress,
+        )
+
+    NutritionSummaryService.progressive = progressive
+
+
+def _compute_habits(user, period: int) -> dict:
+    """Streak counters used by mobile UX («21 день подряд завтрак»).
+
+    DRF-266 LB-3 fix: late_dinner_count was using `logged_at__hour__gte=21`
+    in **UTC** hours. Penza pilot is MSK (UTC+3) — 22:00 MSK is 19:00
+    UTC, so the original filter never matched real late dinners. Now
+    we count any dinner whose logged_at, viewed in user's local
+    timezone (defaulting to MSK for the Penza pilot), is past 21:00.
+
+    When UserPersonalContext.timezone lands, swap MSK_OFFSET for the
+    user's stored TZ. Also sync this helper with pattern_detection_service
+    where late_dinner uses the same threshold.
+    """
+    today = datetime.now(timezone.utc).date()
+
+    # DRF-266 LB-3 fix + M2 review fix: collapse N+1 EXISTS queries
+    # into a single distinct-days aggregate.
+    breakfast_days = set(
+        FoodLog.objects
+        .filter(
+            user=user, meal_type="breakfast",
+            logged_at__date__gte=today - timedelta(days=period),
+        )
+        .annotate(day=TruncDate("logged_at", tzinfo=timezone.utc))
+        .values_list("day", flat=True)
+        .distinct()
+    )
+    breakfast_streak = 0
+    cursor = today
+    while cursor in breakfast_days:
+        breakfast_streak += 1
+        cursor -= timedelta(days=1)
+        if (today - cursor).days >= period:
+            break
+
+    # LB-3: pilot timezone is MSK (UTC+3). 21:00 local = 18:00 UTC.
+    # When UserPersonalContext.timezone lands, switch to per-user.
+    LATE_DINNER_LOCAL_HOUR = 21
+    PILOT_TZ_OFFSET_HOURS = 3  # MSK
+    late_dinner_utc_hour = LATE_DINNER_LOCAL_HOUR - PILOT_TZ_OFFSET_HOURS
+    late_dinner_count = FoodLog.objects.filter(
+        user=user, meal_type="dinner",
+        logged_at__date__gte=today - timedelta(days=period - 1),
+        logged_at__hour__gte=late_dinner_utc_hour,
+    ).count()
+
+    return {
+        "breakfast_logged_streak_days": breakfast_streak,
+        "late_dinner_count_in_period": late_dinner_count,
+    }
+
+
+def _compute_goal_progress(profile) -> dict | None:
+    """Only goal=lose/gain return a progress block. tone/maintain → None."""
+    if profile is None or profile.goal not in ("lose", "gain"):
+        return None
+    return {
+        "type": "weight_loss" if profile.goal == "lose" else "weight_gain",
+        "current_kcal_target": profile.daily_kcal,
+        "current_protein_target": profile.daily_protein_g,
+    }
+
+
+_add_progressive_method()

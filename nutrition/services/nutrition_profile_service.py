@@ -102,6 +102,18 @@ class ComputedNorms:
     goal_overridden_by: str
     overrides_applied: list[dict[str, Any]] = field(default_factory=list)
 
+    # DRF-265: micronutrient RDA targets (USDA / NIH ODS-derived).
+    # Filled by compute_rda(); pure ints/floats — no override audit
+    # because RDA adjustments are deterministic (age/gender/flags-driven).
+    daily_vitamin_d_iu: int = 0
+    daily_vitamin_b12_mcg: float = 0.0
+    daily_vitamin_c_mg: int = 0
+    daily_iron_mg: float = 0.0
+    daily_calcium_mg: int = 0
+    daily_magnesium_mg: int = 0
+    daily_omega3_g: float = 0.0
+    daily_fiber_g: int = 0
+
 
 # ---------------------------------------------------------------------------
 # Public surface
@@ -186,6 +198,12 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
     protein_g += bonus_protein_g
     daily_water_ml = _water_target(weight_kg, flags)
 
+    rda = compute_rda(
+        gender=gender,
+        age=age,
+        health_flags=flags,
+    )
+
     return ComputedNorms(
         bmr=int(round(bmr)),
         daily_kcal=int(round(daily_kcal)),
@@ -197,6 +215,15 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
         pace=pace,
         goal_overridden_by=overridden_by,
         overrides_applied=overrides,
+        # DRF-265: RDA layer — independent of macro override ladder.
+        daily_vitamin_d_iu=rda["vitamin_d_iu"],
+        daily_vitamin_b12_mcg=rda["vitamin_b12_mcg"],
+        daily_vitamin_c_mg=rda["vitamin_c_mg"],
+        daily_iron_mg=rda["iron_mg"],
+        daily_calcium_mg=rda["calcium_mg"],
+        daily_magnesium_mg=rda["magnesium_mg"],
+        daily_omega3_g=rda["omega3_g"],
+        daily_fiber_g=rda["fiber_g"],
     )
 
 
@@ -240,4 +267,133 @@ def _water_target(weight_kg: float, flags: dict) -> float:
         base += 300
     if flags.get("breastfeeding"):
         base += 700
+    return base
+
+
+# ---------------------------------------------------------------------------
+# DRF-265: RDA (recommended daily allowance) for micronutrients
+# ---------------------------------------------------------------------------
+
+
+# Baseline RDA tables. Values from USDA / NIH ODS reference intakes.
+# Keyed by ``(gender, age_band)``. Age bands kept coarse on purpose —
+# pattern engine doesn't need single-year granularity, and mobile UX
+# already only collects an integer year.
+
+# Adolescent: 14-18, Adult: 19-50 (women's iron drops at 50 → menopause),
+# Mature: 51-64 (post-menstrual women), Senior: 65+.
+_AGE_BANDS = ("adolescent", "adult", "mature", "senior")
+
+
+def _age_band(age: int) -> str:
+    if age < 19:
+        return "adolescent"
+    if age < 51:
+        return "adult"
+    if age < 65:
+        return "mature"
+    return "senior"
+
+
+_BASE_RDA: dict[tuple[str, str], dict] = {
+    # Adult women 19-50.
+    ("female", "adult"): {
+        "vitamin_d_iu": 600, "vitamin_b12_mcg": 2.4,
+        "vitamin_c_mg": 75, "iron_mg": 18,
+        "calcium_mg": 1000, "magnesium_mg": 310,
+        "omega3_g": 1.1, "fiber_g": 25,
+    },
+    # Adult men 19-50 — iron drops, magnesium up.
+    ("male", "adult"): {
+        "vitamin_d_iu": 600, "vitamin_b12_mcg": 2.4,
+        "vitamin_c_mg": 90, "iron_mg": 8,
+        "calcium_mg": 1000, "magnesium_mg": 400,
+        "omega3_g": 1.6, "fiber_g": 38,
+    },
+    # Adolescent girls 14-18 — calcium up for bone development, iron 15.
+    ("female", "adolescent"): {
+        "vitamin_d_iu": 600, "vitamin_b12_mcg": 2.4,
+        "vitamin_c_mg": 65, "iron_mg": 15,
+        "calcium_mg": 1300, "magnesium_mg": 360,
+        "omega3_g": 1.1, "fiber_g": 26,
+    },
+    # Adolescent boys 14-18.
+    ("male", "adolescent"): {
+        "vitamin_d_iu": 600, "vitamin_b12_mcg": 2.4,
+        "vitamin_c_mg": 75, "iron_mg": 11,
+        "calcium_mg": 1300, "magnesium_mg": 410,
+        "omega3_g": 1.6, "fiber_g": 38,
+    },
+    # Mature women 51-64 — iron drops to 8 (menopause), bone preservation.
+    ("female", "mature"): {
+        "vitamin_d_iu": 600, "vitamin_b12_mcg": 2.4,
+        "vitamin_c_mg": 75, "iron_mg": 8,
+        "calcium_mg": 1200, "magnesium_mg": 320,
+        "omega3_g": 1.1, "fiber_g": 21,
+    },
+    ("male", "mature"): {
+        "vitamin_d_iu": 600, "vitamin_b12_mcg": 2.4,
+        "vitamin_c_mg": 90, "iron_mg": 8,
+        "calcium_mg": 1000, "magnesium_mg": 420,
+        "omega3_g": 1.6, "fiber_g": 30,
+    },
+    # Senior 65+ — vitamin D up to 800, women's calcium 1200.
+    ("female", "senior"): {
+        "vitamin_d_iu": 800, "vitamin_b12_mcg": 2.4,
+        "vitamin_c_mg": 75, "iron_mg": 8,
+        "calcium_mg": 1200, "magnesium_mg": 320,
+        "omega3_g": 1.1, "fiber_g": 21,
+    },
+    ("male", "senior"): {
+        "vitamin_d_iu": 800, "vitamin_b12_mcg": 2.4,
+        "vitamin_c_mg": 90, "iron_mg": 8,
+        "calcium_mg": 1200, "magnesium_mg": 420,
+        "omega3_g": 1.6, "fiber_g": 30,
+    },
+}
+
+
+def compute_rda(
+    *, gender: str, age: int, health_flags: dict,
+) -> dict[str, Any]:
+    """Compute micronutrient RDA targets for the user.
+
+    Pure-math mirror of ``compute_norms`` (kcal/protein/...). Reads
+    age + gender as the base index, then layers pregnancy, breastfeeding,
+    and dietary flags on top. No LLM, no external calls.
+    """
+    band = _age_band(age)
+    base = dict(_BASE_RDA.get((gender, band), _BASE_RDA[("female", "adult")]))
+
+    # Pregnancy — bumps iron, omega-3, fibre. Calcium stays at 1000
+    # (USDA RDA for pregnancy in women 19-50). Pregnancy ≫ flag wins
+    # over breastfeeding when both are set (rare but possible).
+    if health_flags.get("pregnant"):
+        base["iron_mg"] = 27
+        base["calcium_mg"] = 1000
+        base["omega3_g"] = 1.4
+        base["fiber_g"] = 28
+        base["vitamin_c_mg"] = 85
+
+    elif health_flags.get("breastfeeding"):
+        # Breastfeeding bumps calcium / vit C / omega-3, drops iron
+        # (no menstrual loss → 9 mg).
+        base["calcium_mg"] = 1000
+        base["vitamin_c_mg"] = 120
+        base["omega3_g"] = 1.3
+        base["iron_mg"] = 9
+
+    # Dietary restriction — vegan multiplier on B12 & iron.
+    # Non-heme iron from plants is ~1.8× less bioavailable; B12 doesn't
+    # come from plant foods at all, so requirement is ~doubled to push
+    # supplementation guidance.
+    if health_flags.get("vegan"):
+        base["vitamin_b12_mcg"] = 4.0
+        base["iron_mg"] = round(base["iron_mg"] * 1.8)
+    elif health_flags.get("vegetarian"):
+        base["vitamin_b12_mcg"] = 3.0
+        # Vegetarians who eat eggs/dairy still get heme-adjacent iron;
+        # we apply a milder ×1.3 bump.
+        base["iron_mg"] = round(base["iron_mg"] * 1.3, 1)
+
     return base
