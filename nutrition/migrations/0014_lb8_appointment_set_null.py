@@ -7,8 +7,10 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
+        # B-3 cumulative chain: 0013 (DRF-263 CrossDomainRule renumbered)
+        # → 0014 (this — LB-8 appointment SET_NULL).
         ('appointments', '0004_appointment_tenant_fk'),
-        ('nutrition', '0011_cross_domain_rule'),
+        ('nutrition', '0013_cross_domain_rule'),
     ]
 
     operations = [

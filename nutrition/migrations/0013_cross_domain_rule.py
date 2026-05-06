@@ -9,8 +9,10 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
+        # B-3 cumulative chain: 0010 (DRF-260) → 0011 (DRF-261 USDA cache)
+        # → 0012 (DRF-265 RDA norms) → 0013 (this — CrossDomainRule).
         ('appointments', '0004_appointment_tenant_fk'),
-        ('nutrition', '0010_micronutrients'),
+        ('nutrition', '0012_profile_micronutrient_norms'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
