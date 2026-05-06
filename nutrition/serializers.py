@@ -171,6 +171,27 @@ class NutritionSummaryQuerySerializer(serializers.Serializer):
     # DRF-303 §4.2: opt-in AI-generated daily comment. Default false
     # preserves backwards compat for existing mobile / bot callers.
     with_comment = serializers.BooleanField(required=False, default=False)
+    # DRF-266: ?period=7|14|28 swaps to ProgressiveSummaryResponseSerializer
+    # (multi-week trends). Absence keeps the legacy single-day shape.
+    period = serializers.ChoiceField(
+        required=False, choices=[7, 14, 28],
+    )
+
+
+class ProgressiveSummaryResponseSerializer(serializers.Serializer):
+    """DRF-266 — 14d/28d progressive view shape.
+
+    Distinct from ``NutritionSummaryResponseSerializer`` — different
+    semantics (trends vs snapshot). Bot view picks one based on
+    presence of ``?period=`` in the query.
+    """
+
+    period = serializers.IntegerField()
+    unlocked = serializers.BooleanField()
+    commitment_days = serializers.IntegerField()
+    trends = serializers.DictField()
+    habits = serializers.DictField()
+    goal_progress = serializers.DictField(allow_null=True)
 
 
 class NutritionSummaryResponseSerializer(serializers.Serializer):

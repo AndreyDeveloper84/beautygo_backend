@@ -379,10 +379,14 @@ class InternalFoodLogView(APIView):
 
 
 class InternalSummaryView(APIView):
-    """GET /api/v1/nutrition/internal/summary/?date=YYYY-MM-DD — daily totals.
+    """GET /api/v1/nutrition/internal/summary/ — daily or progressive.
 
-    DRF-247. Mirrors `NutritionSummaryView` for service-to-service callers.
-    Bot uses this to render the `/дневник` command.
+    DRF-247: ?date=YYYY-MM-DD → single-day NutritionSummaryResponseSerializer.
+    DRF-266: ?period=7|14|28 → multi-week ProgressiveSummaryResponseSerializer.
+
+    The two query params are mutually exclusive at the response level —
+    presence of ``period`` switches the entire shape. Bot uses date= for
+    `/дневник`, period= for the weekly progress unlock UX.
     """
 
     permission_classes = [IsServiceAccount]
@@ -403,9 +407,25 @@ class InternalSummaryView(APIView):
         if not q.is_valid():
             return error_response(
                 "VALIDATION_ERROR",
-                "Невалидный параметр date — ожидается YYYY-MM-DD",
+                "Невалидный параметр date / period",
                 details=q.errors,
             )
+
+        # DRF-266 — progressive shape on ?period=.
+        period = q.validated_data.get("period")
+        if period is not None:
+            from nutrition.serializers import (
+                ProgressiveSummaryResponseSerializer,
+            )
+            progressive = NutritionSummaryService().progressive(
+                user=user, period=period,
+            )
+            return success_response(
+                ProgressiveSummaryResponseSerializer(progressive).data,
+                status_code=status.HTTP_200_OK,
+            )
+
+        # Legacy single-day shape.
         day = q.validated_data.get("date") or datetime.now(dt_tz.utc).date()
         with_comment = bool(q.validated_data.get("with_comment", False))
         summary = NutritionSummaryService().summary(
