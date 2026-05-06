@@ -149,6 +149,10 @@ class FoodLogService:
             protein_g=_scale(n["protein_g"], m),
             fat_g=_scale(n["fat_g"], m),
             carbs_g=_scale(n["carbs_g"], m),
+            # DRF-260: micronutrient snapshot — only when scan supplied
+            # them. Older scans return None across the board, which is
+            # fine: pattern engine treats unknowns as low-quality data.
+            **_micronutrient_snapshot_from_dict(n, m),
             meal_type=data.meal_type,
             logged_at=data.logged_at or timezone.now(),
             idempotency_key=data.idempotency_key,
@@ -176,6 +180,9 @@ class FoodLogService:
             protein_g=_scale(facts.protein_g, m),
             fat_g=_scale(facts.fat_g, m),
             carbs_g=_scale(facts.carbs_g, m),
+            # DRF-260: snapshot micronutrients from NutritionFacts when
+            # populated; defaults to None + source=unknown otherwise.
+            **_micronutrient_snapshot_from_facts(facts, m),
             meal_type=data.meal_type,
             logged_at=data.logged_at or timezone.now(),
             idempotency_key=data.idempotency_key,
@@ -189,3 +196,57 @@ def _scale(value: float, multiplier: float) -> float:
     rejected upstream as DishNotRecognizedError).
     """
     return round(value * multiplier, 1)
+
+
+# DRF-260: micronutrient snapshot helpers.
+#
+# Both paths (scan / manual) end up calling FoodLog.objects.create with
+# eight micronutrient kwargs + ``micronutrients_source``. Centralise the
+# read-and-scale logic so the two code paths can't drift.
+
+_MICRONUTRIENT_FIELDS = (
+    "vitamin_d_iu",
+    "vitamin_b12_mcg",
+    "vitamin_c_mg",
+    "iron_mg",
+    "calcium_mg",
+    "magnesium_mg",
+    "omega3_g",
+    "fiber_g",
+)
+
+
+def _scale_micro(value, multiplier: float):
+    if value is None:
+        return None
+    return round(float(value) * multiplier, 2)
+
+
+def _micronutrient_snapshot_from_facts(facts, multiplier: float) -> dict:
+    """Snapshot from a ``NutritionFacts`` dataclass (manual lookup path).
+
+    NutritionFacts already exposes per-portion totals (vitamin_d_iu,
+    iron_mg, ...) computed against ``portion_g`` from the seed. The
+    user-supplied ``portion_multiplier`` scales those totals further —
+    e.g. user logs 1.5× of a 100g baseline → multiplier=1.5.
+    """
+    out: dict = {"micronutrients_source": facts.micronutrients_source}
+    for field in _MICRONUTRIENT_FIELDS:
+        out[field] = _scale_micro(getattr(facts, field, None), multiplier)
+    return out
+
+
+def _micronutrient_snapshot_from_dict(nutrition: dict, multiplier: float) -> dict:
+    """Snapshot from a ``FoodScan.nutrition`` JSON (scan path).
+
+    Older scans don't carry micronutrients — every field stays None and
+    ``micronutrients_source`` defaults to "unknown" so pattern engine
+    correctly excludes the row from deficit-window quality math.
+    """
+    out: dict = {
+        "micronutrients_source":
+            nutrition.get("micronutrients_source") or "unknown",
+    }
+    for field in _MICRONUTRIENT_FIELDS:
+        out[field] = _scale_micro(nutrition.get(field), multiplier)
+    return out

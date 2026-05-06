@@ -114,6 +114,17 @@ class FoodLog(models.Model):
         DINNER = "dinner", "Ужин"
         SNACK = "snack", "Перекус"
 
+    class MicronutrientSource(models.TextChoices):
+        # Track E (DRF-260): which source filled the row's vitamins/minerals.
+        # Pattern engine (DRF-262/309) skips windows where >40% of entries
+        # are AI-estimated, because hallucinated micronutrients become
+        # bogus deficit signals — and those drive cross-domain rules.
+        USDA_FULL = "usda_full", "USDA full data"
+        USDA_PARTIAL = "usda_partial", "USDA partial"
+        ROSPOTREBNADZOR = "rospotrebnadzor", "Скурихин-Тутельян"
+        AI_ESTIMATE = "ai_estimate", "Estimated by LLM"
+        UNKNOWN = "unknown", "No data"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -138,6 +149,27 @@ class FoodLog(models.Model):
     protein_g = models.FloatField(default=0.0)
     fat_g = models.FloatField(default=0.0)
     carbs_g = models.FloatField(default=0.0)
+
+    # DRF-260: Track E micronutrient snapshot.
+    # All nullable for backwards compatibility — existing logs stay valid
+    # with all eight set to None and ``micronutrients_source="unknown"``.
+    # The cross-domain rule engine (Track E) skips windows where >40% of
+    # entries are AI-estimated, so the source field is load-bearing.
+    vitamin_d_iu = models.FloatField(null=True, blank=True)
+    vitamin_b12_mcg = models.FloatField(null=True, blank=True)
+    vitamin_c_mg = models.FloatField(null=True, blank=True)
+    iron_mg = models.FloatField(null=True, blank=True)
+    calcium_mg = models.FloatField(null=True, blank=True)
+    magnesium_mg = models.FloatField(null=True, blank=True)
+    omega3_g = models.FloatField(null=True, blank=True)
+    fiber_g = models.FloatField(null=True, blank=True)
+    micronutrients_source = models.CharField(
+        max_length=20,
+        choices=MicronutrientSource.choices,
+        default=MicronutrientSource.UNKNOWN,
+        help_text="Where the row's vitamins/minerals came from. "
+                  "Track E pattern engine reads this to filter low-quality data.",
+    )
 
     meal_type = models.CharField(max_length=16, choices=MealType.choices)
     logged_at = models.DateTimeField()
@@ -462,6 +494,17 @@ class WaterEntry(models.Model):
     sugar_g = models.FloatField(default=0.0)
     caffeine_mg = models.FloatField(default=0.0)
 
+    # DRF-260: Track E micronutrient snapshot from Beverage.* per-100ml ×
+    # ml/100. All nullable; only juices/milk/broth carry meaningful values.
+    vitamin_d_iu = models.FloatField(null=True, blank=True)
+    vitamin_b12_mcg = models.FloatField(null=True, blank=True)
+    vitamin_c_mg = models.FloatField(null=True, blank=True)
+    iron_mg = models.FloatField(null=True, blank=True)
+    calcium_mg = models.FloatField(null=True, blank=True)
+    magnesium_mg = models.FloatField(null=True, blank=True)
+    omega3_g = models.FloatField(null=True, blank=True)
+    fiber_g = models.FloatField(null=True, blank=True)
+
     # When kcal>0 we mirror into FoodLog so /summary/ daily totals stay
     # accurate. SET_NULL because we hard-delete the FoodLog on undo and
     # re-create on restore — see WaterEntryService.
@@ -555,6 +598,17 @@ class Beverage(models.Model):
     carbs_g_per_100ml = models.FloatField(default=0.0)
     sugar_g_per_100ml = models.FloatField(default=0.0)
     caffeine_mg_per_100ml = models.FloatField(default=0.0)
+
+    # DRF-260: Track E micronutrients per 100ml. Most water/tea rows leave
+    # these null; juices/milk/broth populate them from USDA + Скурихин.
+    vitamin_d_iu_per_100ml = models.FloatField(null=True, blank=True)
+    vitamin_b12_mcg_per_100ml = models.FloatField(null=True, blank=True)
+    vitamin_c_mg_per_100ml = models.FloatField(null=True, blank=True)
+    iron_mg_per_100ml = models.FloatField(null=True, blank=True)
+    calcium_mg_per_100ml = models.FloatField(null=True, blank=True)
+    magnesium_mg_per_100ml = models.FloatField(null=True, blank=True)
+    omega3_g_per_100ml = models.FloatField(null=True, blank=True)
+    fiber_g_per_100ml = models.FloatField(null=True, blank=True)
 
     # Free-text aliases for parser ("кофе" / "coffee" / "americano" → kofe_chernyi).
     # JSONField list[str], lowercased on save (see save() override).
