@@ -53,6 +53,55 @@ def _deficit_slug(trigger: str) -> str:
     return trigger
 
 
+# DRF-267 — /internal/insights/cross_domain/ serializers
+
+
+class CrossDomainInsightResponseSerializer(serializers.Serializer):
+    """GET /internal/insights/cross_domain/ — engine output or null."""
+
+    has_recommendation = serializers.BooleanField()
+    shown_id = serializers.CharField(required=False)
+    rule_id = serializers.CharField(required=False)
+    nutrition_trigger = serializers.CharField(required=False)
+    service_category_slug = serializers.CharField(required=False)
+    insight_text = serializers.CharField(required=False)
+    rationale_text = serializers.CharField(required=False)
+    disclaimer_text = serializers.CharField(required=False)
+    data_points = serializers.IntegerField(required=False)
+    severity = serializers.CharField(required=False)
+
+
+class CrossDomainDismissRequestSerializer(serializers.Serializer):
+    """POST /dismiss/{id}/ body — must specify dismissed | paused_7d."""
+
+    action = serializers.ChoiceField(choices=["dismissed", "paused_7d"])
+
+
+class CrossDomainConvertRequestSerializer(serializers.Serializer):
+    """POST /convert/{id}/ body — appointment_id for attribution."""
+
+    appointment_id = serializers.UUIDField()
+
+
+class CrossDomainHistoryEntrySerializer(serializers.Serializer):
+    """One row of GET /history/."""
+
+    shown_id = serializers.CharField(source="id")
+    rule_id = serializers.CharField(source="rule.rule_id")
+    nutrition_trigger = serializers.CharField()
+    service_category_slug = serializers.CharField()
+    shown_at = serializers.DateTimeField()
+    seen_at = serializers.DateTimeField(allow_null=True)
+    user_action = serializers.CharField()
+    surface = serializers.CharField()
+
+
+class CrossDomainHistoryResponseSerializer(serializers.Serializer):
+    """GET /history/?limit=20 — transparency UI."""
+
+    history = CrossDomainHistoryEntrySerializer(many=True)
+
+
 # 10 MiB — same cap used by the portfolio uploader; the mobile client
 # should compress before sending but the server is the only enforcer
 # the user can't disable.
