@@ -60,6 +60,8 @@ class Command(BaseCommand):
         from ai.models import Conversation
         from nutrition.models import FoodScan
         from appointments.models import Appointment
+        from services.models import Service, ServiceCategory
+        from reviews.models import Review
 
         tenant = Tenant.all_objects.filter(slug=slug).first()
         if tenant is None:
@@ -125,6 +127,36 @@ class Command(BaseCommand):
                         tenant_id=a.specialist.tenant_id,
                     )
             steps.append(("Appointment", count))
+
+            # 6. ServiceCategory has no parent FK to scope from — assign
+            #    every legacy row to the default tenant. Multi-tenant
+            #    deployments will need a separate per-row attribution
+            #    pass before flipping strict mode on.
+            cat_qs = ServiceCategory.objects.filter(tenant__isnull=True)
+            count = cat_qs.count()
+            if not dry_run and count:
+                cat_qs.update(tenant=tenant)
+            steps.append(("ServiceCategory", count))
+
+            # 7. Service inherits from specialist.tenant (DRF-242.6).
+            svc_qs = Service.objects.filter(tenant__isnull=True)
+            count = svc_qs.count()
+            if not dry_run and count:
+                for s in svc_qs.select_related("specialist").only("id", "specialist__tenant_id"):
+                    Service.objects.filter(pk=s.pk).update(
+                        tenant_id=s.specialist.tenant_id,
+                    )
+            steps.append(("Service", count))
+
+            # 8. Review inherits from specialist.tenant (DRF-242.6).
+            review_qs = Review.objects.filter(tenant__isnull=True)
+            count = review_qs.count()
+            if not dry_run and count:
+                for r in review_qs.select_related("specialist").only("id", "specialist__tenant_id"):
+                    Review.objects.filter(pk=r.pk).update(
+                        tenant_id=r.specialist.tenant_id,
+                    )
+            steps.append(("Review", count))
 
             if dry_run:
                 # Roll the whole atomic block back even though we didn't
