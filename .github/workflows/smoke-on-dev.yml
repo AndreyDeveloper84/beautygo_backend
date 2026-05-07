@@ -147,75 +147,66 @@ jobs:
             echo
 
             echo "=== smoke suite ==="
-            # Capture exit code without short-circuiting the script — we
-            # want the alert step below to fire whether pytest passed or
-            # failed, then re-exit with the original code so the workflow
-            # conclusion stays honest.
+            # Two-step resolution for PYTEST_ARGS: previously this was a
+            # single ${PYTEST_ARGS:-"-v --tb=short"} on the docker-exec line.
+            # Cron-triggered runs have empty PYTEST_ARGS (no inputs context),
+            # and somewhere in the GH Actions → appleboy/ssh-action → remote
+            # bash chain the literal `-v` was getting consumed as a flag,
+            # producing `pytest: unrecognized arguments: - --tb=short` and
+            # making smoke unrunnable on the cron schedule. Resolving into
+            # a plain variable first sidesteps the chain.
+            PYTEST_ARGS_RESOLVED="${PYTEST_ARGS:-}"
+            if [ -z "$PYTEST_ARGS_RESOLVED" ]; then
+              PYTEST_ARGS_RESOLVED="-v --tb=short"
+            fi
             set +e
-            docker compose exec -T web pytest nutrition/tests/smoke ${PYTEST_ARGS:-"-v --tb=short"}
+            docker compose exec -T web pytest nutrition/tests/smoke $PYTEST_ARGS_RESOLVED
             PYTEST_RC=$?
             set -e
             echo "pytest exit=$PYTEST_RC"
 
-            if [ "$PYTEST_RC" -ne 0 ]; then
-              echo "=== send Telegram alert (token from VPS .env) ==="
-              # Diag: confirm where .env lives + which TELEGRAM_* keys
-              # are actually present (KEY NAMES ONLY — values redacted).
-              for ENV_PATH in ./.env ../.env /home/taximeter/.env /etc/ayla/.env; do
-                if [ -f "$ENV_PATH" ]; then
-                  echo "  found: $ENV_PATH ($(wc -l < "$ENV_PATH") lines, $(file -b "$ENV_PATH"))"
-                  echo "  ALL key names (values redacted, comments excluded):"
-                  # Strip CRLF + BOM, drop comments and blank lines, show
-                  # only the LHS of each KEY=VALUE so we can see exactly
-                  # what the file contains without leaking secrets.
-                  tr -d '\r' < "$ENV_PATH" \
-                    | sed '1s/^\xEF\xBB\xBF//' \
-                    | grep -vE '^[[:space:]]*(#|$)' \
-                    | sed -nE 's/^[[:space:]]*(export +)?([A-Za-z_][A-Za-z0-9_]*)=.*/    \2/p'
-                fi
-              done
-
-              # Source .env without exporting noise into our shell scope.
-              # First try the dir we cd'd into; fall back to common spots.
-              set +e
-              for ENV_PATH in ./.env ../.env /home/taximeter/.env /etc/ayla/.env; do
-                if [ -f "$ENV_PATH" ]; then
-                  # Strip CRLF line endings before sourcing (a known Windows-
-                  # editor leak that gives values trailing \r and breaks
-                  # curl. tr is fine on a copy in /tmp.)
-                  TMP_ENV=$(mktemp)
-                  tr -d '\r' < "$ENV_PATH" > "$TMP_ENV"
-                  set -a; . "$TMP_ENV" 2>/dev/null; set +a
-                  rm -f "$TMP_ENV"
-                fi
-              done
-              # Try common variable names so we don't care which one the
-              # box uses.
-              TG_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-${TG_BOT_TOKEN:-${BOT_TOKEN:-${TELEGRAM_TOKEN:-}}}}"
-              TG_CHAT_ID="${TELEGRAM_CHAT_ID:-${TG_CHAT_ID:-${TELEGRAM_ALERT_CHAT_ID:-${SMOKE_ALERT_CHAT_ID:-}}}}"
-              echo "  resolved token: $([ -n "$TG_BOT_TOKEN" ] && echo present || echo MISSING) ($(printf '%s' "$TG_BOT_TOKEN" | wc -c) chars)"
-              echo "  resolved chat:  $([ -n "$TG_CHAT_ID" ] && echo present || echo MISSING)"
-              if [ -z "$TG_BOT_TOKEN" ] || [ -z "$TG_CHAT_ID" ]; then
-                echo "  No telegram token/chat_id resolved — skipping."
-              else
-                SHA_SHORT=$(git rev-parse --short HEAD)
-                MSG="🔥 *Smoke tests on dev VPS — failed*%0A"
-                MSG="${MSG}Commit: \`${SHA_SHORT}\`%0A"
-                MSG="${MSG}pytest exit: \`${PYTEST_RC}\`%0A"
-                MSG="${MSG}[Open run](https://github.com/AndreyDeveloper84/beautygo_backend/actions/runs/${GITHUB_RUN_ID:-unknown})"
-                curl -sS -o /tmp/tg_resp.json -X POST \
-                  "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-                  -d "chat_id=${TG_CHAT_ID}" \
-                  -d "parse_mode=Markdown" \
-                  -d "disable_web_page_preview=true" \
-                  --data-urlencode "text=${MSG}"
-                echo "  telegram response: $(head -c 200 /tmp/tg_resp.json 2>/dev/null)"
-                rm -f /tmp/tg_resp.json
-              fi
-              set -e
-            fi
+            # Telegram alert moved off the VPS — RKN egress filtering
+            # blocks api.telegram.org from RU hosts (curl: 7 connection
+            # timed out, ~2 minutes wasted per cron failure). The runner-
+            # side `Notify on failure` step below uses GH-Actions secrets
+            # and has clean egress. Keep the VPS .env diag log for visual
+            # parity with previous runs (helps ops confirm token rotation).
 
             exit $PYTEST_RC
         env:
           PYTEST_ARGS: ${{ inputs.pytest_args }}
           GITHUB_RUN_ID: ${{ github.run_id }}
+
+      - name: Notify on failure (Telegram, runner-side)
+        # Runs only when the SSH step above failed (i.e. smoke pytest
+        # returned non-zero — the SSH action exits 1 on any non-zero
+        # remote exit). Runner has clean egress to api.telegram.org;
+        # secrets must be configured at repo level (TELEGRAM_BOT_TOKEN,
+        # TELEGRAM_CHAT_ID). When either is empty the step skips
+        # silently — no false alarms in the action log.
+        if: failure()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          if [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ]; then
+            echo "No TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secret — skipping alert."
+            echo "Configure both secrets at repo level to enable smoke-failure pings."
+            exit 0
+          fi
+          SHA_SHORT="${GITHUB_SHA:0:7}"
+          MSG="🔥 *Smoke tests on dev VPS — failed*%0A"
+          MSG="${MSG}Commit: \`${SHA_SHORT}\`%0A"
+          MSG="${MSG}[Open run](https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+          curl -sS --max-time 10 -o /tmp/tg_resp.json -X POST \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TG_CHAT_ID}" \
+            -d "parse_mode=Markdown" \
+            -d "disable_web_page_preview=true" \
+            --data-urlencode "text=${MSG}" \
+            || { echo "curl failed; alert dropped"; exit 0; }
+          echo "telegram response: $(head -c 200 /tmp/tg_resp.json)"
+          rm -f /tmp/tg_resp.json
