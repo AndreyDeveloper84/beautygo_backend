@@ -362,6 +362,59 @@ class TestEngineSupplyCheck:
 
 
 @pytest.mark.django_db
+class TestRolloutGate:
+    """DRF-288 — internal allowlist gate.
+
+    Until ``CROSS_DOMAIN_ENABLED=True`` for global rollout, only users in
+    ``CROSS_DOMAIN_INTERNAL_USERNAMES`` see recommendations. Mirrors the
+    bot-side ``CROSS_DOMAIN_INTERNAL_ACCOUNTS`` gate. Skip happens
+    *before* any DB write so a non-internal user never gets a
+    CrossDomainShownRule row.
+    """
+
+    def test_returns_none_when_global_off_and_user_not_in_allowlist(
+        self, cd_user, active_rule, settings,
+    ):
+        settings.CROSS_DOMAIN_ENABLED = False
+        settings.CROSS_DOMAIN_INTERNAL_USERNAMES = ["bot:9999"]  # not cd_user
+        with _patch_patterns([_active_pattern()]), _patch_supply_ok():
+            rec = CrossDomainEngine().evaluate(user=cd_user, surface="bot")
+        assert rec is None
+        # No shown row written for gated user.
+        assert not CrossDomainShownRule.objects.filter(user=cd_user).exists()
+
+    def test_returns_recommendation_when_user_in_allowlist(
+        self, cd_user, active_rule, settings,
+    ):
+        settings.CROSS_DOMAIN_ENABLED = False
+        settings.CROSS_DOMAIN_INTERNAL_USERNAMES = [cd_user.username]
+        with _patch_patterns([_active_pattern()]), _patch_supply_ok():
+            rec = CrossDomainEngine().evaluate(user=cd_user, surface="bot")
+        assert rec is not None
+        assert CrossDomainShownRule.objects.filter(user=cd_user).exists()
+
+    def test_global_flag_overrides_allowlist(
+        self, cd_user, active_rule, settings,
+    ):
+        # Global on → any user passes regardless of allowlist contents.
+        settings.CROSS_DOMAIN_ENABLED = True
+        settings.CROSS_DOMAIN_INTERNAL_USERNAMES = []
+        with _patch_patterns([_active_pattern()]), _patch_supply_ok():
+            rec = CrossDomainEngine().evaluate(user=cd_user, surface="bot")
+        assert rec is not None
+
+    def test_empty_allowlist_with_global_off_blocks_everyone(
+        self, cd_user, active_rule, settings,
+    ):
+        # Misconfigured prod (CROSS_DOMAIN_ENABLED=False AND empty
+        # allowlist) fails closed — nobody gets recommendations.
+        settings.CROSS_DOMAIN_ENABLED = False
+        settings.CROSS_DOMAIN_INTERNAL_USERNAMES = []
+        with _patch_patterns([_active_pattern()]), _patch_supply_ok():
+            assert CrossDomainEngine().evaluate(user=cd_user, surface="bot") is None
+
+
+@pytest.mark.django_db
 class TestAppointmentSetNullOnDelete:
     """LB-8 regression: deleting an attributed appointment must NOT
     delete the shown row (it's the analytics record). PROTECT used to

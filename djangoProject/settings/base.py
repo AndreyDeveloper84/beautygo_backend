@@ -474,6 +474,19 @@ FOOD_SCANNER_FALLBACK = os.environ.get("FOOD_SCANNER_FALLBACK", "yandex")
 # in dev/staging/prod env, rotate quarterly.
 NUTRITION_SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN", "")
 
+# DRF-288 — Cross-domain (Track E) production rollout gate.
+# Default closed: when CROSS_DOMAIN_ENABLED is False, the engine only
+# evaluates for usernames in CROSS_DOMAIN_INTERNAL_USERNAMES (5 internal
+# accounts during shadow mode). Flip CROSS_DOMAIN_ENABLED=True for full
+# rollout (Sprint B B-15). Mirrors the bot-side
+# CROSS_DOMAIN_INTERNAL_ACCOUNTS gate.
+CROSS_DOMAIN_ENABLED = os.environ.get("CROSS_DOMAIN_ENABLED", "0") in {"1", "true", "True"}
+CROSS_DOMAIN_INTERNAL_USERNAMES = [
+    name.strip()
+    for name in os.environ.get("CROSS_DOMAIN_INTERNAL_USERNAMES", "").split(",")
+    if name.strip()
+]
+
 # ----------------------------------------------------------------------------
 # Cross-domain bridge defaults (DRF-248)
 # ----------------------------------------------------------------------------
