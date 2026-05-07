@@ -51,6 +51,15 @@ PERSONAL_CONTEXT_FIELD_SET = "personal_context_field_set"
 PERSONAL_CONTEXT_FIELD_CLEARED = "personal_context_field_cleared"
 CONTEXT_QUESTION_SKIPPED = "context_question_skipped"
 
+# DRF-230 PR 3 — PersonalizationEngine event surface. Lets BI track
+# how often we ask, how often the user answers, and how often the
+# context actually steered a recommendation (the proof the engine
+# pays its UX cost).
+PROFILE_QUESTION_SHOWN = "profile_question_shown"
+PROFILE_QUESTION_ANSWERED = "profile_question_answered"
+PROFILE_QUESTION_SKIPPED = "profile_question_skipped"
+CONTEXT_USED_IN_RECOMMENDATION = "context_used_in_recommendation"
+
 # ── App lifecycle ──
 APP_OPENED = "app_opened"
 ONBOARDING_STARTED = "onboarding_started"
@@ -80,6 +89,8 @@ EVENT_NAMES: frozenset[str] = frozenset({
     WATER_LOGGED, DAILY_SUMMARY_VIEWED,
     PERSONAL_CONTEXT_FIELD_SET, PERSONAL_CONTEXT_FIELD_CLEARED,
     CONTEXT_QUESTION_SKIPPED,
+    PROFILE_QUESTION_SHOWN, PROFILE_QUESTION_ANSWERED,
+    PROFILE_QUESTION_SKIPPED, CONTEXT_USED_IN_RECOMMENDATION,
     APP_OPENED, ONBOARDING_STARTED, ONBOARDING_COMPLETED,
     PUSH_RECEIVED, PUSH_TAPPED,
     PRO_DASHBOARD_VIEWED, PRO_BOOKING_VIEWED, PRO_BOOKING_ACTIONED,
