@@ -4,6 +4,11 @@ from rest_framework_simplejwt.views import TokenRefreshView as _BaseTokenRefresh
 
 from core.deprecation import DeprecatedAliasMixin
 
+from .personal_context_views import (
+    UserPersonalContextFieldDeleteView,
+    UserPersonalContextSkipView,
+    UserPersonalContextView,
+)
 from .views import (
     AnonymousAuthView,
     BindPhoneView,
@@ -81,4 +86,21 @@ urlpatterns = [
 
     # Client profile (GET/PATCH)
     path('clients/me/', ClientProfileView.as_view(), name='client-profile'),
+
+    # DRF-230 — UserPersonalContext (M3 P0, North Star memory).
+    path(
+        'users/me/personal-context/skip/',
+        UserPersonalContextSkipView.as_view(),
+        name='personal-context-skip',
+    ),
+    path(
+        'users/me/personal-context/<str:field>/',
+        UserPersonalContextFieldDeleteView.as_view(),
+        name='personal-context-field-delete',
+    ),
+    path(
+        'users/me/personal-context/',
+        UserPersonalContextView.as_view(),
+        name='personal-context',
+    ),
 ]
