@@ -19,6 +19,7 @@ import logging
 from uuid import UUID
 
 from django.utils import timezone
+from drf_spectacular.utils import extend_schema
 from rest_framework import permissions, status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.request import Request
@@ -231,6 +232,7 @@ class ConversationListView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsClientApp]
     pagination_class = _ConversationsPagination
 
+    @extend_schema(operation_id="ai_conversations_list")
     def get(self, request: Request) -> Response:
         if getattr(request.user, "is_guest", False):
             return error_response(
@@ -274,6 +276,7 @@ class ConversationDetailView(APIView):
         ).first()
         return conv
 
+    @extend_schema(operation_id="ai_conversations_retrieve")
     def get(self, request: Request, conversation_id: UUID) -> Response:
         conv = self._get_owned(request, conversation_id)
         if conv is None:
