@@ -427,6 +427,42 @@ class UserPersonalContext(models.Model):
                   "lenient cancellation policies (Phase 6 hookup).",
     )
 
+    # --- DRF-230 — North Star memory fields (added 2026-05-07) ---
+    workplace_district = models.CharField(
+        max_length=80, blank=True, default="",
+        help_text="Free-form district / metro station near workplace.",
+    )
+    home_district = models.CharField(
+        max_length=80, blank=True, default="",
+        help_text="Free-form district / metro station near home.",
+    )
+    favorite_masters = models.JSONField(
+        default=list, blank=True,
+        help_text="List of SpecialistProfile.id strings rebooked >=3 times.",
+    )
+    min_rating_preference = models.FloatField(
+        null=True, blank=True,
+        help_text="Minimum specialist rating (0.0-5.0).",
+    )
+    busy_days = models.JSONField(
+        default=list, blank=True,
+        help_text="ISO weekday short names ('mon','tue',...) the user avoids.",
+    )
+
+    # --- DRF-230 service fields (PersonalizationEngine bookkeeping) ---
+    skipped_questions = models.JSONField(
+        default=dict, blank=True,
+        help_text="Per-field {count:int, last_at:isoformat}. Skip x2 -> pause.",
+    )
+    last_asked_at = models.JSONField(
+        default=dict, blank=True,
+        help_text="Per-field last-asked timestamp for 24h cooldown.",
+    )
+    data_sources = models.JSONField(
+        default=dict, blank=True,
+        help_text="Per-field provenance: explicit / inferred / signal.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
