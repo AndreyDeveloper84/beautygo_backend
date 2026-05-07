@@ -191,6 +191,13 @@ SPECTACULAR_SETTINGS = {
     'TITLE': 'BeautyGO API',
     'DESCRIPTION': 'REST API для платформы бронирования бьюти-услуг BeautyGO',
     'VERSION': '1.0.0',
+    # DRF-242.8: document the X-Tenant header on every tenant-scoped op.
+    # Hook lives in tenants/openapi.py — runs after view introspection
+    # so it sees the final path list (including dynamic urlpatterns).
+    'POSTPROCESSING_HOOKS': [
+        'drf_spectacular.hooks.postprocess_schema_enums',
+        'tenants.openapi.add_x_tenant_header',
+    ],
     'SERVERS': [
         {'url': 'http://localhost:8000/api/v1', 'description': 'Development'},
         {'url': 'https://api.beautygo.ru/api/v1', 'description': 'Production'},
