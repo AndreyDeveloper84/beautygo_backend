@@ -24,7 +24,7 @@ from django.contrib.auth import get_user_model
 from appointments.models import Appointment
 from services.models import Service, ServiceCategory
 from users.models import SpecialistProfile, UserPersonalContext
-from users.services.personal_context_inference import (
+from users.personal_context_inference import (
     BUSY_DAYS_MIN_HISTORY,
     FAVORITE_MIN_COMPLETED,
     infer_for_active_users,

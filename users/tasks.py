@@ -9,7 +9,7 @@ import logging
 
 from celery import shared_task
 
-from users.services.personal_context_inference import (
+from users.personal_context_inference import (
     infer_for_active_users,
     infer_for_user,
 )
