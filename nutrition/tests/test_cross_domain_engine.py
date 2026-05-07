@@ -366,7 +366,7 @@ class TestRolloutGate:
     """DRF-288 — internal allowlist gate.
 
     Until ``CROSS_DOMAIN_ENABLED=True`` for global rollout, only users in
-    ``CROSS_DOMAIN_INTERNAL_USERNAMES`` see recommendations. Mirrors the
+    ``CROSS_DOMAIN_INTERNAL_ACCOUNTS`` see recommendations. Mirrors the
     bot-side ``CROSS_DOMAIN_INTERNAL_ACCOUNTS`` gate. Skip happens
     *before* any DB write so a non-internal user never gets a
     CrossDomainShownRule row.
@@ -376,7 +376,7 @@ class TestRolloutGate:
         self, cd_user, active_rule, settings,
     ):
         settings.CROSS_DOMAIN_ENABLED = False
-        settings.CROSS_DOMAIN_INTERNAL_USERNAMES = ["bot:9999"]  # not cd_user
+        settings.CROSS_DOMAIN_INTERNAL_ACCOUNTS = ["bot:9999"]  # not cd_user
         with _patch_patterns([_active_pattern()]), _patch_supply_ok():
             rec = CrossDomainEngine().evaluate(user=cd_user, surface="bot")
         assert rec is None
@@ -387,7 +387,7 @@ class TestRolloutGate:
         self, cd_user, active_rule, settings,
     ):
         settings.CROSS_DOMAIN_ENABLED = False
-        settings.CROSS_DOMAIN_INTERNAL_USERNAMES = [cd_user.username]
+        settings.CROSS_DOMAIN_INTERNAL_ACCOUNTS = [cd_user.username]
         with _patch_patterns([_active_pattern()]), _patch_supply_ok():
             rec = CrossDomainEngine().evaluate(user=cd_user, surface="bot")
         assert rec is not None
@@ -398,7 +398,7 @@ class TestRolloutGate:
     ):
         # Global on → any user passes regardless of allowlist contents.
         settings.CROSS_DOMAIN_ENABLED = True
-        settings.CROSS_DOMAIN_INTERNAL_USERNAMES = []
+        settings.CROSS_DOMAIN_INTERNAL_ACCOUNTS = []
         with _patch_patterns([_active_pattern()]), _patch_supply_ok():
             rec = CrossDomainEngine().evaluate(user=cd_user, surface="bot")
         assert rec is not None
@@ -409,7 +409,7 @@ class TestRolloutGate:
         # Misconfigured prod (CROSS_DOMAIN_ENABLED=False AND empty
         # allowlist) fails closed — nobody gets recommendations.
         settings.CROSS_DOMAIN_ENABLED = False
-        settings.CROSS_DOMAIN_INTERNAL_USERNAMES = []
+        settings.CROSS_DOMAIN_INTERNAL_ACCOUNTS = []
         with _patch_patterns([_active_pattern()]), _patch_supply_ok():
             assert CrossDomainEngine().evaluate(user=cd_user, surface="bot") is None
 
