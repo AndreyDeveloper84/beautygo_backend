@@ -203,6 +203,37 @@ On Postgres prod tables with significant volume, prefer
 to opt into concurrent index creation if any of the tenant-scoped
 tables grow beyond ~100k rows.
 
+## JWT tenant_id claim (DRF-242.8)
+
+Access tokens carry a ``tenant_id`` claim — stringified UUID of the
+user's current tenant, or ``null`` if unset:
+
+```json
+{
+  "user_id": "...",
+  "role": "client",
+  "tenant_id": "9b1c..."
+}
+```
+
+Wired by ``AuthService.issue_tokens`` and re-resolved on every refresh
+by ``TenantAwareTokenRefreshSerializer``. The latter re-queries
+``User.tenant_id`` at refresh time so admin-driven tenant moves
+propagate without forcing re-login (max staleness =
+``ACCESS_TOKEN_LIFETIME`` = 15 min).
+
+``TenantContextMiddleware`` reads this claim as a fallback when the
+``X-Tenant`` header is missing — explicit header always wins.
+
+## OpenAPI X-Tenant header
+
+``tenants.openapi.add_x_tenant_header`` (a drf-spectacular
+postprocessing hook) injects the parameter on every tenant-scoped
+operation. Excluded path prefixes mirror the middleware list so the
+schema and runtime stay in sync. Wired via
+``SPECTACULAR_SETTINGS['POSTPROCESSING_HOOKS']`` in
+``djangoProject/settings/base.py``.
+
 ## Default tenants (seeded by migration)
 
 `tenants/migrations/0003_seed_default_tenants.py` creates two tenants

@@ -261,6 +261,13 @@ class AuthService:
         refresh = RefreshToken.for_user(user)
         if device_id:
             refresh['device_id'] = device_id
+        # DRF-242.8: embed user's tenant in the access token so
+        # TenantContextMiddleware can fall back to it when the mobile
+        # client forgets the X-Tenant header. Stored as string so the
+        # JWT JSON payload stays portable; null when user has no tenant.
+        refresh['tenant_id'] = (
+            str(user.tenant_id) if user.tenant_id else None
+        )
 
         return {
             "access_token": str(refresh.access_token),
