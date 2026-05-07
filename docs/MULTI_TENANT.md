@@ -56,6 +56,9 @@ schema migration.
 | `ai.Conversation` | DRF-242.2 | nullable, PROTECT, db_column=`tenant_id` | Re-typed from the original DRF-240 placeholder UUIDField. Column name preserved so `conv.tenant_id` reads keep working. |
 | `appointments.Appointment` | DRF-242.3 | nullable, PROTECT | Denormalised from `specialist.tenant`. Reporting stays single-table-scan. |
 | `nutrition.FoodScan` | DRF-242.3 | nullable, PROTECT | Denormalised from `user.tenant`. Nutrition analytics scope by tenant first. |
+| `services.ServiceCategory` | DRF-242.6 | nullable, PROTECT, related_name="service_categories" | Each tenant curates its own taxonomy — beauty salon vs wellness studio have different category trees. |
+| `services.Service` | DRF-242.6 | nullable, PROTECT, related_name="services" | Denormalised from `specialist.tenant`. Marketplace catalog filter avoids JOIN to SpecialistProfile. |
+| `reviews.Review` | DRF-242.6 | nullable, PROTECT, related_name="reviews" | Denormalised from `appointment.specialist.tenant`. Per-tenant aggregates avoid 3-hop JOIN. |
 
 `on_delete=PROTECT` everywhere: dropping a Tenant must not silently
 delete user accounts, booking history, or audit trails. Admins must
@@ -64,11 +67,17 @@ reassign or soft-delete data first.
 ## Denormalisation invariant
 
 ```
-Conversation.tenant_id  == Conversation.user.tenant_id
+Conversation.tenant_id      == Conversation.user.tenant_id
 SpecialistProfile.tenant_id == SpecialistProfile.user.tenant_id
-FoodScan.tenant_id      == FoodScan.user.tenant_id
-Appointment.tenant_id   == Appointment.specialist.tenant_id
+FoodScan.tenant_id          == FoodScan.user.tenant_id
+Appointment.tenant_id       == Appointment.specialist.tenant_id
+Service.tenant_id           == Service.specialist.tenant_id
+Review.tenant_id            == Review.appointment.specialist.tenant_id
 ```
+
+`ServiceCategory.tenant_id` has no parent to inherit from — backfill
+assigns every legacy row to the default tenant; new categories must set
+`tenant` explicitly at creation.
 
 **Not enforced at the DB level** — keep flexibility for future cross-tenant
 shares (e.g. a master who works at two locations). The `backfill_tenants`
