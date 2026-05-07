@@ -4,6 +4,8 @@ from rest_framework_simplejwt.views import TokenRefreshView as _BaseTokenRefresh
 
 from core.deprecation import DeprecatedAliasMixin
 
+from .auth_serializers import TenantAwareTokenRefreshSerializer
+
 from .personal_context_views import (
     UserPersonalContextFieldDeleteView,
     UserPersonalContextSkipView,
@@ -29,9 +31,12 @@ from .views import (
 
 # Throttle refresh-token endpoint on the same 'auth' bucket as login/verify-otp.
 # SimpleJWT's TokenRefreshView otherwise inherits the default user/anon limits.
+# DRF-242.8: serializer_class swap re-resolves user.tenant_id on every
+# refresh so admin-driven tenant moves propagate without re-login.
 class TokenRefreshView(_BaseTokenRefreshView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'
+    serializer_class = TenantAwareTokenRefreshSerializer
 
 
 # Legacy /api/v1/auth/masters/me/ — moved to /api/v1/specialists/me/ (DRF-209).

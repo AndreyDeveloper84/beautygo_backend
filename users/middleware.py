@@ -232,12 +232,12 @@ class TenantContextMiddleware:
 
         slug = (request.META.get("HTTP_X_TENANT") or "").strip()
 
-        if slug:
-            # Local import to avoid app-loading order issues — middleware
-            # is imported during settings bootstrap, before INSTALLED_APPS
-            # is fully populated.
-            from tenants.models import Tenant
+        # Local import to avoid app-loading order issues — middleware
+        # is imported during settings bootstrap, before INSTALLED_APPS
+        # is fully populated.
+        from tenants.models import Tenant
 
+        if slug:
             try:
                 request.tenant = Tenant.objects.get(slug=slug)
             except Tenant.DoesNotExist:
@@ -247,6 +247,21 @@ class TenantContextMiddleware:
                     "tenant.middleware.unknown_slug slug=%s path=%s",
                     slug, path,
                 )
+        else:
+            # DRF-242.8: fall back to the JWT ``tenant_id`` claim when
+            # the mobile client forgets the X-Tenant header. The claim
+            # is re-resolved on every refresh, so it can't drift more
+            # than ACCESS_TOKEN_LIFETIME from the live row. Header takes
+            # precedence: explicit caller intent beats inferred state.
+            tenant_id = self._jwt_tenant_id(request)
+            if tenant_id:
+                try:
+                    request.tenant = Tenant.objects.get(pk=tenant_id)
+                except (Tenant.DoesNotExist, ValueError):
+                    logger.info(
+                        "tenant.middleware.unknown_jwt_tenant id=%s path=%s",
+                        tenant_id, path,
+                    )
 
         # Strict mode (DRF-242.5): /api/v1/* requires a valid X-Tenant
         # except for auth handshake. Returns 400 instead of letting the
@@ -270,3 +285,33 @@ class TenantContextMiddleware:
             )
 
         return self.get_response(request)
+
+    @staticmethod
+    def _jwt_tenant_id(request) -> str | None:
+        """Extract ``tenant_id`` claim from the validated JWT, if any.
+
+        Reads the same Authorization header SimpleJWT uses, decodes
+        without DB lookup (the user check is the auth backend's job),
+        and returns the raw claim value. Returns None for any decode
+        error or missing claim — middleware should silently fall back
+        to permissive mode in that case, mirroring the unknown-slug
+        branch above.
+        """
+        auth = request.META.get("HTTP_AUTHORIZATION", "")
+        if not auth.startswith("Bearer "):
+            return None
+        raw_token = auth[len("Bearer "):].strip()
+        if not raw_token:
+            return None
+        # Local import — same app-loading-order rationale as Tenant above.
+        from rest_framework_simplejwt.exceptions import (
+            InvalidToken,
+            TokenError,
+        )
+        from rest_framework_simplejwt.tokens import AccessToken
+
+        try:
+            token = AccessToken(raw_token)
+        except (InvalidToken, TokenError):
+            return None
+        return token.get("tenant_id")
