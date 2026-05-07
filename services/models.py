@@ -21,6 +21,19 @@ class ServiceCategory(models.Model):
     icon = models.CharField(max_length=50, blank=True)
     sort_order = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
+    # tenant FK — DRF-242.6. Categories are tenant-scoped because each
+    # marketplace tenant curates its own taxonomy (a beauty salon's
+    # "Маникюр" tree differs from a wellness studio's).
+    # null=True for legacy / single-tenant rows; backfill in management
+    # command. PROTECT to prevent silent loss of taxonomy on tenant
+    # deletion — admin must reassign first.
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="service_categories",
+    )
 
     class Meta:
         ordering = ['sort_order', 'name']
@@ -177,6 +190,17 @@ class Service(models.Model):
         on_delete=models.SET_NULL,
         null=True, blank=True,
         related_name='services',
+    )
+    # tenant FK — DRF-242.6. Denormalised from specialist.tenant so
+    # marketplace listing queries can filter by tenant_id without JOIN
+    # to SpecialistProfile. Invariant maintained by backfill + service
+    # layer (see docs/MULTI_TENANT.md).
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="services",
     )
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True)

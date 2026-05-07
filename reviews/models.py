@@ -53,6 +53,18 @@ class Review(models.Model):
         help_text="Hidden by moderation — excluded from rating",
     )
 
+    # tenant FK — DRF-242.6. Denormalised from appointment.specialist.tenant
+    # so per-tenant aggregates (avg rating, review counts) avoid a 3-hop JOIN.
+    # PROTECT against silent data loss on tenant delete; invariant maintained
+    # by backfill + service layer.
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="reviews",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
