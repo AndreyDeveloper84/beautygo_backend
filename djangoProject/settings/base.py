@@ -620,6 +620,14 @@ CELERY_BEAT_SCHEDULE = {
         "task": "nutrition.deliver_outbox_events",
         "schedule": 10.0,
     },
+    # DRF-230 PR 2: nightly UserPersonalContext refresh from booking
+    # history. 03:00 UTC = 06:00 MSK — quiet window before the morning
+    # slot. Idempotent; the task itself skips fields the user
+    # explicitly typed so it never overrides intent.
+    "infer-user-personal-context": {
+        "task": "users.infer_user_patterns",
+        "schedule": crontab(hour=3, minute=0),
+    },
 }
 
 # Django default cache → Redis (db 1). SlotCacheService and any future
