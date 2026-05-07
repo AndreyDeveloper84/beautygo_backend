@@ -1,6 +1,15 @@
 services:
   web:
-    build: .
+    build:
+      context: .
+      args:
+        # Forwards GH_DEPLOY_TOKEN from the host env into the build so
+        # `pip install -r requirements.txt` can clone the private
+        # ayla-ai-core repo (DRF-242 post-merge ops fix, 2026-05-07).
+        # Empty / unset on host = Dockerfile skips git config; build
+        # still succeeds for any future requirements.txt that has no
+        # git+https deps.
+        GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
     restart: unless-stopped
     ports:
       - "127.0.0.1:8000:8000"
