@@ -143,34 +143,34 @@ jobs:
 
             if [ "$DRY_RUN" = "false" ] && [ "$BF_RC" -eq 0 ]; then
               echo "=== verify zero unbackfilled active rows ==="
-              # Stream Python source into ``shell`` over stdin and strip
-              # the 14-space YAML indent first. The previous form passed
-              # a heredoc to ``-c "..."``, where the leading YAML spaces
-              # became part of the Python source and tripped
-              # IndentationError. ``sed`` dedents before pipe; the body
-              # below is intentionally indented to match the YAML script
-              # column so the workflow YAML stays well-formed.
-              sed -e 's/^              //' <<'PY' | docker compose exec -T web python manage.py shell
-              from django.contrib.auth import get_user_model
-              from users.models import SpecialistProfile
-              from ai.models import Conversation
-              from nutrition.models import FoodScan
-              from appointments.models import Appointment
-              from services.models import Service, ServiceCategory
-              from reviews.models import Review
+              # Body lines + ``PY`` terminator are intentionally at the
+              # YAML script-base column (12 spaces). After YAML strips
+              # the common 12-column indent, they render flush-left in
+              # the shell, which (a) makes ``PY`` a valid heredoc
+              # terminator (must be column 0) and (b) hands Python clean
+              # source with no leading indent. Internal Python blocks use
+              # their own four-space indent on top of column 0.
+              docker compose exec -T web python manage.py shell <<'PY'
+            from django.contrib.auth import get_user_model
+            from users.models import SpecialistProfile
+            from ai.models import Conversation
+            from nutrition.models import FoodScan
+            from appointments.models import Appointment
+            from services.models import Service, ServiceCategory
+            from reviews.models import Review
 
-              User = get_user_model()
-              for label, qs in [
-                  ("User",              User.objects.filter(tenant__isnull=True, is_active=True)),
-                  ("SpecialistProfile", SpecialistProfile.objects.filter(tenant__isnull=True)),
-                  ("Conversation",      Conversation.all_objects.filter(tenant__isnull=True)),
-                  ("FoodScan",          FoodScan.objects.filter(tenant__isnull=True)),
-                  ("Appointment",       Appointment.objects.filter(tenant__isnull=True)),
-                  ("ServiceCategory",   ServiceCategory.objects.filter(tenant__isnull=True)),
-                  ("Service",           Service.objects.filter(tenant__isnull=True)),
-                  ("Review",            Review.objects.filter(tenant__isnull=True)),
-              ]:
-                  print(f"  {label}: tenant__isnull active rows = {qs.count()}")
+            User = get_user_model()
+            for label, qs in [
+                ("User",              User.objects.filter(tenant__isnull=True, is_active=True)),
+                ("SpecialistProfile", SpecialistProfile.objects.filter(tenant__isnull=True)),
+                ("Conversation",      Conversation.all_objects.filter(tenant__isnull=True)),
+                ("FoodScan",          FoodScan.objects.filter(tenant__isnull=True)),
+                ("Appointment",       Appointment.objects.filter(tenant__isnull=True)),
+                ("ServiceCategory",   ServiceCategory.objects.filter(tenant__isnull=True)),
+                ("Service",           Service.objects.filter(tenant__isnull=True)),
+                ("Review",            Review.objects.filter(tenant__isnull=True)),
+            ]:
+                print(f"  {label}: tenant__isnull active rows = {qs.count()}")
             PY
             fi
 
