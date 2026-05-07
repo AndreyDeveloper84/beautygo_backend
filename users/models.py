@@ -45,6 +45,22 @@ class User(AbstractUser):
     )
     deleted_at = models.DateTimeField(null=True, blank=True)
 
+    class Meta(AbstractUser.Meta):
+        # Composite indexes — DRF-242.7. Tenant-first scoping is the
+        # dominant access pattern: every list endpoint filters by
+        # request.tenant before any other predicate, so the index
+        # ordering matches the WHERE clause prefix.
+        indexes = [
+            models.Index(
+                fields=["tenant", "is_active"],
+                name="user_tenant_active_idx",
+            ),
+            models.Index(
+                fields=["tenant", "role"],
+                name="user_tenant_role_idx",
+            ),
+        ]
+
     def __str__(self):
         return f"{self.username} ({self.role})"
 
@@ -147,6 +163,22 @@ class SpecialistProfile(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # Composite indexes — DRF-242.7. Pro-app dashboards filter by
+        # tenant first, then by status (verification queue) or
+        # is_available (active masters). Without these, the planner
+        # falls back to a tenant-only scan plus app-side filter.
+        indexes = [
+            models.Index(
+                fields=["tenant", "status"],
+                name="sp_tenant_status_idx",
+            ),
+            models.Index(
+                fields=["tenant", "is_available"],
+                name="sp_tenant_available_idx",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.display_name} ({self.get_status_display()})"

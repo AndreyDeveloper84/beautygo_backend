@@ -38,6 +38,13 @@ class ServiceCategory(models.Model):
     class Meta:
         ordering = ['sort_order', 'name']
         verbose_name_plural = 'Service Categories'
+        # Tenant-scoped taxonomy lookup — DRF-242.7.
+        indexes = [
+            models.Index(
+                fields=['tenant', 'is_active'],
+                name='svccat_tenant_active_idx',
+            ),
+        ]
 
     def clean(self) -> None:
         """Validate parent: no cycles, max depth 2 (root → subcategory)."""
@@ -240,6 +247,13 @@ class Service(models.Model):
             models.Index(
                 fields=['specialist', 'price'],
                 name='svc_spec_price_idx',
+            ),
+            # Marketplace listing — DRF-242.7. Filter tenant first to
+            # narrow the candidate set before any specialist/category
+            # predicates kick in.
+            models.Index(
+                fields=['tenant', 'is_active'],
+                name='svc_tenant_active_idx',
             ),
         ]
 
