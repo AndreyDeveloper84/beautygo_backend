@@ -14,7 +14,7 @@ Three surfaces exercised here:
 from __future__ import annotations
 
 import pytest
-from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
+from rest_framework_simplejwt.tokens import AccessToken
 
 from tenants.models import Tenant
 from tenants.openapi import add_x_tenant_header
