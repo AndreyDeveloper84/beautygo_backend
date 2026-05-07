@@ -113,26 +113,29 @@ urlpatterns = [
         InternalWaterDeleteView.as_view(),
         name="internal-water-delete",
     ),
-    # DRF-267 — cross-domain insight endpoints. The /history/ route
-    # must precede /<uuid:shown_id>/ subresource routes so the resolver
-    # doesn't try to coerce "history" to UUID (same pattern as water/today).
+    # DRF-267 + LB-10 (DRF-269) — cross-domain insight endpoints.
+    # URL form: /{action}/{shown_id}/ — the maxbot
+    # NutritionClient._post_cross_domain_action constructs paths in
+    # that order, so the backend matches it. The /history/ route
+    # precedes the action routes so the resolver doesn't try to coerce
+    # "history" to UUID (same pattern as water/today).
     path(
         "internal/insights/cross_domain/history/",
         InternalCrossDomainHistoryView.as_view(),
         name="internal-cross-domain-history",
     ),
     path(
-        "internal/insights/cross_domain/<uuid:shown_id>/seen/",
+        "internal/insights/cross_domain/seen/<uuid:shown_id>/",
         InternalCrossDomainSeenView.as_view(),
         name="internal-cross-domain-seen",
     ),
     path(
-        "internal/insights/cross_domain/<uuid:shown_id>/dismiss/",
+        "internal/insights/cross_domain/dismiss/<uuid:shown_id>/",
         InternalCrossDomainDismissView.as_view(),
         name="internal-cross-domain-dismiss",
     ),
     path(
-        "internal/insights/cross_domain/<uuid:shown_id>/convert/",
+        "internal/insights/cross_domain/convert/<uuid:shown_id>/",
         InternalCrossDomainConvertView.as_view(),
         name="internal-cross-domain-convert",
     ),
