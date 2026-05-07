@@ -3,9 +3,9 @@
 Five service-to-service routes (X-Service-Token + X-External-User-ID):
 
 - GET    /internal/insights/cross_domain/                  — top-1 rec
-- POST   /internal/insights/cross_domain/{shown_id}/seen/      — confirm
-- POST   /internal/insights/cross_domain/{shown_id}/dismiss/   — skip / pause
-- POST   /internal/insights/cross_domain/{shown_id}/convert/   — booking
+- POST   /internal/insights/cross_domain/seen/{shown_id}/      — confirm
+- POST   /internal/insights/cross_domain/dismiss/{shown_id}/   — skip / pause
+- POST   /internal/insights/cross_domain/convert/{shown_id}/   — booking
 - GET    /internal/insights/cross_domain/history/?limit=20    — transparency UI
 
 GET reuses CrossDomainEngine. /seen/ /dismiss/ /convert/ are simple
@@ -121,11 +121,13 @@ class TestGetCrossDomainInsight:
 
         assert resp.status_code == 200
         body = resp.json().get("data", resp.json())
-        assert body["has_recommendation"] is True
-        assert body["rule_id"] == "vit_d_to_argan_ep"
-        assert body["nutrition_trigger"] == "low_vitamin_d"
-        assert "shown_id" in body
-        assert body["data_points"] == 5
+        # LB-10: nested envelope matches maxbot NutritionClient parser.
+        assert body["has_insight"] is True
+        insight = body["insight"]
+        assert insight["rule_slug"] == "vit_d_to_argan_ep"
+        assert insight["nutrition_trigger"] == "low_vitamin_d"
+        assert "shown_id" in insight
+        assert insight["data_points"] == 5
 
     def test_returns_no_recommendation_when_engine_yields_none(
         self, cd_endpoint_user, vitamin_d_rule,
@@ -141,7 +143,9 @@ class TestGetCrossDomainInsight:
             )
         assert resp.status_code == 200
         body = resp.json().get("data", resp.json())
-        assert body["has_recommendation"] is False
+        # LB-10: nested envelope; flag is has_insight, no `insight` key.
+        assert body["has_insight"] is False
+        assert "insight" not in body
 
     def test_unauthorized_without_service_token(
         self, cd_endpoint_user,
@@ -172,7 +176,7 @@ class TestPostSeen:
         client = _service_client(cd_endpoint_user)
         resp = client.post(
             f"/api/v1/nutrition/internal/insights/cross_domain/"
-            f"{shown.id}/seen/",
+            f"seen/{shown.id}/",
         )
         assert resp.status_code == 200, resp.content
         shown.refresh_from_db()
@@ -189,13 +193,13 @@ class TestPostSeen:
         client = _service_client(cd_endpoint_user)
         client.post(
             f"/api/v1/nutrition/internal/insights/cross_domain/"
-            f"{shown.id}/seen/",
+            f"seen/{shown.id}/",
         )
         first_seen = CrossDomainShownRule.objects.get(id=shown.id).seen_at
 
         client.post(
             f"/api/v1/nutrition/internal/insights/cross_domain/"
-            f"{shown.id}/seen/",
+            f"seen/{shown.id}/",
         )
         second_seen = CrossDomainShownRule.objects.get(id=shown.id).seen_at
         assert first_seen == second_seen
@@ -204,7 +208,7 @@ class TestPostSeen:
         client = _service_client(cd_endpoint_user)
         resp = client.post(
             f"/api/v1/nutrition/internal/insights/cross_domain/"
-            f"{uuid4()}/seen/",
+            f"seen/{uuid4()}/",
         )
         assert resp.status_code == 404
 
@@ -224,7 +228,7 @@ class TestPostSeen:
         client = _service_client(cd_endpoint_user)  # auth as cd_endpoint_user
         resp = client.post(
             f"/api/v1/nutrition/internal/insights/cross_domain/"
-            f"{shown.id}/seen/",
+            f"seen/{shown.id}/",
         )
         assert resp.status_code == 404
 
@@ -245,7 +249,7 @@ class TestPostDismiss:
         client = _service_client(cd_endpoint_user)
         resp = client.post(
             f"/api/v1/nutrition/internal/insights/cross_domain/"
-            f"{shown.id}/dismiss/",
+            f"dismiss/{shown.id}/",
             {"action": "dismissed"},
             format="json",
         )
@@ -263,7 +267,7 @@ class TestPostDismiss:
         client = _service_client(cd_endpoint_user)
         resp = client.post(
             f"/api/v1/nutrition/internal/insights/cross_domain/"
-            f"{shown.id}/dismiss/",
+            f"dismiss/{shown.id}/",
             {"action": "paused_7d"},
             format="json",
         )
@@ -281,7 +285,7 @@ class TestPostDismiss:
         client = _service_client(cd_endpoint_user)
         resp = client.post(
             f"/api/v1/nutrition/internal/insights/cross_domain/"
-            f"{shown.id}/dismiss/",
+            f"dismiss/{shown.id}/",
             {"action": "bogus"},
             format="json",
         )
@@ -329,7 +333,7 @@ class TestPostConvert:
         client = _service_client(cd_endpoint_user)
         resp = client.post(
             f"/api/v1/nutrition/internal/insights/cross_domain/"
-            f"{shown.id}/convert/",
+            f"convert/{shown.id}/",
             {"appointment_id": str(appt.id)},
             format="json",
         )

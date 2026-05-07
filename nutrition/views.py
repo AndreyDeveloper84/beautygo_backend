@@ -960,9 +960,15 @@ class InternalCrossDomainView(APIView):
     """GET /api/v1/nutrition/internal/insights/cross_domain/ (DRF-267).
 
     Returns top-1 cross-domain recommendation for the user or
-    ``{has_recommendation: false}`` when no rule fires. Engine writes
-    a CrossDomainShownRule row inline (PO-approved 2026-05-05).
+    ``{has_insight: false}`` when no rule fires. Engine writes a
+    CrossDomainShownRule row inline (PO-approved 2026-05-05).
     Auto-confirm-5min covers surfaces that never POST /seen/.
+
+    LB-10 (DRF-269): wire format aligned to maxbot
+    ``NutritionClient.get_cross_domain_insights`` parser — nested
+    ``{has_insight, insight: {...}}`` envelope, ``rule_slug`` alias
+    for ``rule_id``. The bot is already deployed with this parser
+    shape across other B-* tickets.
     """
 
     permission_classes = [IsServiceAccount]
@@ -981,21 +987,23 @@ class InternalCrossDomainView(APIView):
         rec = CrossDomainEngine().evaluate(user=user, surface="bot")
         if rec is None:
             return success_response(
-                {"has_recommendation": False},
+                {"has_insight": False},
                 status_code=status.HTTP_200_OK,
             )
         return success_response(
             {
-                "has_recommendation": True,
-                "shown_id": rec.shown_id,
-                "rule_id": rec.rule_id,
-                "nutrition_trigger": rec.nutrition_trigger,
-                "service_category_slug": rec.service_category_slug,
-                "insight_text": rec.insight_text,
-                "rationale_text": rec.rationale_text,
-                "disclaimer_text": rec.disclaimer_text,
-                "data_points": rec.data_points,
-                "severity": rec.severity,
+                "has_insight": True,
+                "insight": {
+                    "shown_id": rec.shown_id,
+                    "rule_slug": rec.rule_id,
+                    "nutrition_trigger": rec.nutrition_trigger,
+                    "service_category_slug": rec.service_category_slug,
+                    "insight_text": rec.insight_text,
+                    "rationale_text": rec.rationale_text,
+                    "disclaimer_text": rec.disclaimer_text,
+                    "data_points": rec.data_points,
+                    "severity": rec.severity,
+                },
             },
             status_code=status.HTTP_200_OK,
         )
