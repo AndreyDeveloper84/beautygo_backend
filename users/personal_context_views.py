@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 
+from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
@@ -167,6 +168,7 @@ class UserPersonalContextView(APIView):
             status_code=status.HTTP_200_OK,
         )
 
+    @extend_schema(operation_id="personal_context_wipe")
     def delete(self, request: Request) -> Response:
         # 152-ФЗ total wipe — delete the row entirely. Next GET will
         # lazy-create a fresh empty one.
@@ -204,6 +206,7 @@ class UserPersonalContextFieldDeleteView(APIView):
         "busy_days": list,
     }
 
+    @extend_schema(operation_id="personal_context_field_reset")
     def delete(self, request: Request, field: str) -> Response:
         if field not in self._FIELD_DEFAULTS:
             return error_response(
