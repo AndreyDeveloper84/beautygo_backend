@@ -38,6 +38,11 @@ from rest_framework.views import APIView
 
 from users.models import UserPersonalContext
 from users.response import error_response, success_response
+from users.personal_context_events import (
+    emit_question_answered,
+    emit_question_skipped,
+)
+from users.personalization_engine import mark_skipped
 
 logger = logging.getLogger("users.personal_context")
 
@@ -135,9 +140,30 @@ class UserPersonalContextView(APIView):
                 "VALIDATION_ERROR", "Invalid context update",
                 details=serializer.errors,
             )
+        # DRF-230 PR 3 — fire profile_question_answered for each
+        # green-zone field present in the body so BI tracks user-typed
+        # data per field. Service fields filtered out in serializer
+        # already (read-only), so request.data may carry them but they
+        # won't reach .save().
+        answered_fields = [
+            f for f in (request.data or {})
+            if f in _GREEN_ZONE_FIELDS
+        ]
         serializer.save()
+        # Stamp data_sources["<field>"] = "explicit" for every answered
+        # field so the inference task and the engine know the user
+        # owns it. Done in code (not serializer) because data_sources
+        # is read-only on the wire.
+        if answered_fields:
+            sources = dict(ctx.data_sources or {})
+            for f in answered_fields:
+                sources[f] = "explicit"
+            ctx.data_sources = sources
+            ctx.save(update_fields=["data_sources", "updated_at"])
+        for f in answered_fields:
+            emit_question_answered(request.user, field=f, surface="api")
         return success_response(
-            serializer.data,
+            UserPersonalContextSerializer(ctx).data,
             status_code=status.HTTP_200_OK,
         )
 
@@ -210,22 +236,19 @@ class UserPersonalContextSkipView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request: Request) -> Response:
-        from datetime import datetime, timezone
         field = (request.data or {}).get("field")
         if not field or field not in UserPersonalContextFieldDeleteView._FIELD_DEFAULTS:
             return error_response(
                 "VALIDATION_ERROR",
                 "Body must include 'field' matching a user-resettable name.",
             )
-        ctx = _get_or_create_context(request.user)
-        skipped = dict(ctx.skipped_questions or {})
-        entry = dict(skipped.get(field) or {})
-        entry["count"] = int(entry.get("count", 0)) + 1
-        entry["last_at"] = datetime.now(timezone.utc).isoformat()
-        skipped[field] = entry
-        ctx.skipped_questions = skipped
-        ctx.save(update_fields=["skipped_questions", "updated_at"])
+        # DRF-230 PR 3 — delegate counter logic to the engine and emit
+        # the analytics event from one place.
+        count = mark_skipped(request.user, field)
+        emit_question_skipped(
+            request.user, field=field, surface="api", skip_count=count,
+        )
         return success_response(
-            {"field": field, "count": entry["count"]},
+            {"field": field, "count": count},
             status_code=status.HTTP_200_OK,
         )
