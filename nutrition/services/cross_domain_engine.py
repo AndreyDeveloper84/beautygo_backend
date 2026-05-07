@@ -56,17 +56,20 @@ def _user_in_rollout_allowlist(user) -> bool:
     """DRF-288 — gate access to cross-domain recommendations.
 
     Returns True when:
-    - ``settings.CROSS_DOMAIN_ENABLED`` is True (global rollout, all users), OR
-    - ``user.username`` matches an entry in ``settings.CROSS_DOMAIN_INTERNAL_USERNAMES``.
+    - ``settings.CROSS_DOMAIN_ENABLED`` is True (global rollout, all
+      users), OR
+    - ``user.username`` matches an entry in
+      ``settings.CROSS_DOMAIN_INTERNAL_ACCOUNTS``.
 
-    The latter list usually holds proxy usernames like ``bot:NNN`` —
-    matches the maxbot side gate (``CROSS_DOMAIN_INTERNAL_ACCOUNTS``)
-    one-for-one. If the global flag is off and the user is not in the
-    list, the engine returns None without writing any state.
+    The allowlist holds ProxyUser usernames like ``"bot:12345"`` (per
+    ``external_user_id_for()`` convention). The bot side reads the same
+    env var name (``CROSS_DOMAIN_INTERNAL_ACCOUNTS``) but with raw
+    ``max_user_id`` ints — drift between the two is a config-only issue
+    (fail-closed: feature off for the affected user, no data corruption).
     """
     if getattr(settings, "CROSS_DOMAIN_ENABLED", False):
         return True
-    allowlist = getattr(settings, "CROSS_DOMAIN_INTERNAL_USERNAMES", []) or []
+    allowlist = getattr(settings, "CROSS_DOMAIN_INTERNAL_ACCOUNTS", []) or []
     if not allowlist:
         return False
     return getattr(user, "username", None) in set(allowlist)

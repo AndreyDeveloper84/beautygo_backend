@@ -476,14 +476,21 @@ NUTRITION_SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN", "")
 
 # DRF-288 — Cross-domain (Track E) production rollout gate.
 # Default closed: when CROSS_DOMAIN_ENABLED is False, the engine only
-# evaluates for usernames in CROSS_DOMAIN_INTERNAL_USERNAMES (5 internal
-# accounts during shadow mode). Flip CROSS_DOMAIN_ENABLED=True for full
-# rollout (Sprint B B-15). Mirrors the bot-side
-# CROSS_DOMAIN_INTERNAL_ACCOUNTS gate.
+# evaluates for accounts listed in CROSS_DOMAIN_INTERNAL_ACCOUNTS (5
+# internal accounts during shadow mode). Flip CROSS_DOMAIN_ENABLED=True
+# for full rollout (Sprint B B-15).
+#
+# Env var name MIRRORS the bot-side variable so a single ops note keeps
+# both sides aligned. Value formats differ by side:
+#   - mysite (bot):  "12345,67890"            (raw max_user_id ints)
+#   - Ayla  (here):  "bot:12345,bot:67890"    (ProxyUser usernames per
+#                                              external_user_id_for())
+# Drift between the two = feature off for misconfigured users (bot GET
+# returns has_insight:false). No data corruption — fail-closed by design.
 CROSS_DOMAIN_ENABLED = os.environ.get("CROSS_DOMAIN_ENABLED", "0") in {"1", "true", "True"}
-CROSS_DOMAIN_INTERNAL_USERNAMES = [
+CROSS_DOMAIN_INTERNAL_ACCOUNTS = [
     name.strip()
-    for name in os.environ.get("CROSS_DOMAIN_INTERNAL_USERNAMES", "").split(",")
+    for name in os.environ.get("CROSS_DOMAIN_INTERNAL_ACCOUNTS", "").split(",")
     if name.strip()
 ]
 
