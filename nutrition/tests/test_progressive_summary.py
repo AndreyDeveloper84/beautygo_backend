@@ -63,10 +63,12 @@ def progressive_user(db):
 def _seed_food_logs(user, days_back: int, per_day: int = 1, kcal: float = 500):
     """Create N daily FoodLogs going back from now.
 
-    Anchor each log at ``now - d days - i hours`` so every entry is
-    strictly in the past. Avoids the off-by-one where seeding "today
-    14:00 UTC" while the test machine clock is at 11:00 UTC pushes
-    today's row outside ``logged_at__lte=now()`` filters.
+    Anchor each log at ``now - d days - i minutes``. Subtracting only
+    minutes (not hours) keeps every per_day entry on the same calendar
+    date as its parent ``d`` — earlier seeding used ``- i hours`` which
+    pushed the i=1, i=2 entries onto the previous calendar day when
+    the test ran near midnight UTC, inflating distinct-day counts by
+    one (observed in CI 2026-05-07T00:19 UTC: assert 11 == 10).
     """
     now = datetime.now(timezone.utc)
     for d in range(days_back):
@@ -76,7 +78,7 @@ def _seed_food_logs(user, days_back: int, per_day: int = 1, kcal: float = 500):
                 user=user, dish_name=f"Test {d}-{i}",
                 calories=kcal, protein_g=20, fat_g=10, carbs_g=50,
                 meal_type="lunch",
-                logged_at=day_anchor - timedelta(hours=i),
+                logged_at=day_anchor - timedelta(minutes=i),
             )
 
 
