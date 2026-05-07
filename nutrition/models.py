@@ -84,6 +84,13 @@ class FoodScan(models.Model):
         indexes = [
             models.Index(fields=["user", "-created_at"]),
             models.Index(fields=["provider_used"]),
+            # Tenant-scoped — DRF-242.7. Per-tenant nutrition analytics
+            # walk recent scans descending; tenant-prefixed index lets
+            # the planner skip the global created_at range scan.
+            models.Index(
+                fields=["tenant", "-created_at"],
+                name="fs_tenant_created_idx",
+            ),
         ]
 
     def __str__(self) -> str:

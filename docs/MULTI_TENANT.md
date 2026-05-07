@@ -176,14 +176,53 @@ In strict mode, additionally opted out:
 3. Mobile client sends `X-Tenant: newco` on every `/api/v1/*` request.
 4. SpecialistProfile / Appointment / FoodScan / Conversation inherit from `user.tenant` via service-layer save() validators (DRF-242.6+ — not yet implemented; backfill handles existing rows).
 
+## Composite indexes (DRF-242.7)
+
+Tenant-prefixed composite indexes on the hottest scoped surfaces — the
+planner picks these whenever a query starts `WHERE tenant_id = ...`.
+Index ordering matches the dominant access pattern: tenant first, then
+the secondary filter (status, role, time window).
+
+| Model | Index | Pattern |
+|---|---|---|
+| `users.User` | `(tenant, is_active)` | Auth list endpoints |
+| `users.User` | `(tenant, role)` | Pro/client app role-scoped lists |
+| `users.SpecialistProfile` | `(tenant, status)` | Verification queue |
+| `users.SpecialistProfile` | `(tenant, is_available)` | Active masters list |
+| `appointments.Appointment` | `(tenant, status)` | Per-tenant ops dashboards |
+| `appointments.Appointment` | `(tenant, -start_datetime)` | Recent bookings |
+| `nutrition.FoodScan` | `(tenant, -created_at)` | Tenant nutrition analytics |
+| `services.Service` | `(tenant, is_active)` | Marketplace listing |
+| `services.ServiceCategory` | `(tenant, is_active)` | Tenant taxonomy lookup |
+| `reviews.Review` | `(tenant, -created_at)` | Per-tenant moderation |
+| `ai.Conversation` | `(tenant, is_active, -last_message_at)` | Already in DRF-242.2 |
+
+On Postgres prod tables with significant volume, prefer
+`CREATE INDEX CONCURRENTLY` to avoid blocking writes — Django's
+`AddIndex` operation locks the table briefly. Use `RunSQL` migrations
+to opt into concurrent index creation if any of the tenant-scoped
+tables grow beyond ~100k rows.
+
+## Default tenants (seeded by migration)
+
+`tenants/migrations/0003_seed_default_tenants.py` creates two tenants
+on every fresh `migrate`:
+
+- `formula-tela` (Формула тела) — origin tenant for the bot. ProxyUsers
+  and existing FoodScans stay attributable here.
+- `ayla-marketplace` (Ayla Marketplace) — default for new mobile-app
+  users until they join a specific tenant.
+
+Idempotent (`get_or_create`), so re-running on an env that already
+created them via the `backfill_tenants` command is a no-op.
+
 ## Pending follow-ups (post-DRF-242)
 
-- **DRF-242.6** (not ticketed) — service-layer save() validators that
-  enforce the denormalisation invariant on new rows. Until then, any
-  service code that creates these models MUST set `tenant` explicitly
-  to match the parent.
-- **DRF-242.7** (not ticketed) — viewset-level queryset filtering helper
-  (`TenantScopedViewSetMixin`) so queries auto-`.filter(tenant=request.tenant)`.
+- **Service-layer save() validators** — enforce the denormalisation
+  invariant on new rows. Until then, any service code creating tenant-
+  scoped models MUST set `tenant` explicitly to match the parent.
+- **`TenantScopedViewSetMixin`** — viewset-level queryset filtering
+  helper so queries auto-`.filter(tenant=request.tenant)`.
 - **Phase C** — bot ProxyUser → real Ayla User migration. `User.linked_proxy_id`
   + `/api/v1/auth/link-proxy/` endpoint.
 - **Tenant subscription / billing** — separate model under `tenants/`.

@@ -76,6 +76,12 @@ class Review(models.Model):
             models.Index(fields=['specialist', 'is_hidden', '-created_at'],
                          name='review_specialist_listing_idx'),
             models.Index(fields=['client'], name='review_client_idx'),
+            # Per-tenant review aggregates — DRF-242.7. Marketplace
+            # admin pulls recent reviews by tenant for moderation.
+            models.Index(
+                fields=['tenant', '-created_at'],
+                name='review_tenant_created_idx',
+            ),
         ]
 
     def __str__(self) -> str:

@@ -135,6 +135,16 @@ class Appointment(models.Model):
                 fields=['status', 'start_datetime'],
                 name='appt_status_time_idx',
             ),
+            # Tenant-scoped composite indexes — DRF-242.7. Marketplace
+            # reporting filters by tenant before status / time window.
+            models.Index(
+                fields=['tenant', 'status'],
+                name='appt_tenant_status_idx',
+            ),
+            models.Index(
+                fields=['tenant', '-start_datetime'],
+                name='appt_tenant_starttime_idx',
+            ),
         ]
 
     def clean(self) -> None:
