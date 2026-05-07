@@ -1,0 +1,143 @@
+name: Verify OpenAPI schema on dev VPS
+
+# One-shot remote-runner: dumps the deployed OpenAPI schema and asserts
+# the DRF-242.8 X-Tenant header is documented on tenant-scoped paths.
+# Same source-sync trick as ``backfill-tenants-on-dev.yml`` /
+# ``smoke-on-dev.yml`` (the running container's image lags the host
+# repo until the docker-build auth gap is closed).
+
+on:
+  workflow_dispatch:
+    inputs:
+      print_paths:
+        description: 'How many tenant-scoped paths to print as evidence (0 = just count)'
+        required: false
+        default: '5'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
+    steps:
+      - name: Dump schema + grep X-Tenant on dev VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          timeout: 120s
+          command_timeout: 5m
+          envs: PRINT_PATHS,GITHUB_RUN_ID,GH_DEPLOY_TOKEN
+          script: |
+            set -o pipefail
+            cd /home/taximeter/beautygo/dev
+
+            echo "=== branch + commit on host ==="
+            git rev-parse --abbrev-ref HEAD
+            git rev-parse --short HEAD
+            echo
+
+            echo "=== git pull origin/dev ==="
+            git fetch origin dev
+            git reset --hard origin/dev
+            git rev-parse --short HEAD
+            echo
+
+            # Strip __pycache__ before sync so we don't ship stale .pyc.
+            find ./tenants ./users ./services ./reviews ./appointments \
+                 ./nutrition ./ai ./djangoProject \
+              -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
+            echo "=== docker cp host → container ==="
+            docker compose cp ./tenants/.       web:/app/tenants
+            docker compose cp ./users/.         web:/app/users
+            docker compose cp ./services/.      web:/app/services
+            docker compose cp ./reviews/.       web:/app/reviews
+            docker compose cp ./appointments/.  web:/app/appointments
+            docker compose cp ./nutrition/.     web:/app/nutrition
+            docker compose cp ./ai/.            web:/app/ai
+            docker compose cp ./djangoProject/. web:/app/djangoProject
+            echo
+
+            echo "=== ensure ayla-ai-core in running container ==="
+            if [ -z "$GH_DEPLOY_TOKEN" ]; then
+              echo "GH_DEPLOY_TOKEN missing"
+              exit 1
+            fi
+            docker compose exec -T web bash -c "command -v git >/dev/null || (apt-get update -qq && apt-get install -y --no-install-recommends git)"
+            docker compose exec -T -e GH_DEPLOY_TOKEN="$GH_DEPLOY_TOKEN" web \
+              pip install --quiet --upgrade \
+              "ayla-ai-core @ git+https://${GH_DEPLOY_TOKEN}@github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0"
+            echo
+
+            echo "=== migrations ==="
+            docker compose exec -T web python manage.py migrate --noinput
+            echo
+
+            echo "=== dump OpenAPI schema (drf-spectacular) ==="
+            docker compose exec -T web python manage.py spectacular \
+              --file /tmp/schema.yml --validate
+            docker compose exec -T web wc -l /tmp/schema.yml
+            echo
+
+            echo "=== count X-Tenant header occurrences ==="
+            X_TENANT_COUNT=$(docker compose exec -T web grep -c "X-Tenant" /tmp/schema.yml || true)
+            echo "X-Tenant occurrences: $X_TENANT_COUNT"
+            echo
+
+            # DRF-242.8: hook should add X-Tenant on every tenant-scoped
+            # operation. We expect at least one match per tenant-scoped
+            # path. Below 1 = hook didn't run / postprocessing not wired.
+            if [ "$X_TENANT_COUNT" -lt 1 ]; then
+              echo "FAIL: X-Tenant header missing from OpenAPI schema"
+              echo "  → check tenants.openapi.add_x_tenant_header is in"
+              echo "    SPECTACULAR_SETTINGS['POSTPROCESSING_HOOKS']"
+              exit 1
+            fi
+
+            echo "=== sample paths with X-Tenant (first $PRINT_PATHS) ==="
+            docker compose exec -T web grep -B 5 "X-Tenant" /tmp/schema.yml \
+              | grep -E "^\s+/api" | head -n "$PRINT_PATHS" || true
+            echo
+
+            echo "=== verify auth/health/internal paths are EXCLUDED ==="
+            # Sanity: the hook should NOT add X-Tenant to /auth/*,
+            # /health/, /nutrition/internal/* — those are pre-tenant or
+            # service-to-service. Check by extracting the path block of
+            # ``/api/v1/auth/login/`` or similar and confirming X-Tenant
+            # isn't there.
+            docker compose exec -T web python - <<'PY'
+            import yaml
+            with open('/tmp/schema.yml') as f:
+                schema = yaml.safe_load(f)
+            paths = schema.get('paths', {})
+            excluded_prefixes = ('/api/v1/auth/', '/api/v1/health/', '/api/v1/nutrition/internal/')
+            leaks = []
+            for path, ops in paths.items():
+                if not any(path.startswith(p) for p in excluded_prefixes):
+                    continue
+                for method, op in ops.items():
+                    if not isinstance(op, dict):
+                        continue
+                    params = op.get('parameters', [])
+                    for p in params:
+                        if p.get('name') == 'X-Tenant' and p.get('in') == 'header':
+                            leaks.append(f'{method.upper()} {path}')
+            if leaks:
+                print(f'FAIL: {len(leaks)} excluded paths leaked X-Tenant header:')
+                for entry in leaks:
+                    print(f'  - {entry}')
+                raise SystemExit(1)
+            print('OK: no X-Tenant on auth/health/internal paths')
+            PY
+
+            echo
+            echo "=== summary ==="
+            echo "  X-Tenant occurrences in schema: $X_TENANT_COUNT"
+            echo "  excluded-paths leak check: PASS"
+        env:
+          PRINT_PATHS: ${{ inputs.print_paths }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
