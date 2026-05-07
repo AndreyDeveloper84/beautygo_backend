@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db.models import QuerySet
+from drf_spectacular.utils import extend_schema
 from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.request import Request
@@ -75,6 +76,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
 
     # -- List ----------------------------------------------------------------
 
+    @extend_schema(operation_id="appointments_list")
     def list(self, request: Request) -> Response:
         from core.pagination import paginated_success_response
 
@@ -127,6 +129,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
 
     # -- Retrieve ------------------------------------------------------------
 
+    @extend_schema(operation_id="appointments_retrieve")
     def retrieve(self, request: Request, pk: Any = None) -> Response:
         try:
             appointment = self.get_queryset().get(pk=pk)
