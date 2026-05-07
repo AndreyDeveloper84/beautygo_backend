@@ -143,7 +143,14 @@ jobs:
 
             if [ "$DRY_RUN" = "false" ] && [ "$BF_RC" -eq 0 ]; then
               echo "=== verify zero unbackfilled active rows ==="
-              docker compose exec -T web python manage.py shell -c "
+              # Stream Python source into ``shell`` over stdin and strip
+              # the 14-space YAML indent first. The previous form passed
+              # a heredoc to ``-c "..."``, where the leading YAML spaces
+              # became part of the Python source and tripped
+              # IndentationError. ``sed`` dedents before pipe; the body
+              # below is intentionally indented to match the YAML script
+              # column so the workflow YAML stays well-formed.
+              sed -e 's/^              //' <<'PY' | docker compose exec -T web python manage.py shell
               from django.contrib.auth import get_user_model
               from users.models import SpecialistProfile
               from ai.models import Conversation
@@ -154,17 +161,17 @@ jobs:
 
               User = get_user_model()
               for label, qs in [
-                  ('User',              User.objects.filter(tenant__isnull=True, is_active=True)),
-                  ('SpecialistProfile', SpecialistProfile.objects.filter(tenant__isnull=True)),
-                  ('Conversation',      Conversation.all_objects.filter(tenant__isnull=True)),
-                  ('FoodScan',          FoodScan.objects.filter(tenant__isnull=True)),
-                  ('Appointment',       Appointment.objects.filter(tenant__isnull=True)),
-                  ('ServiceCategory',   ServiceCategory.objects.filter(tenant__isnull=True)),
-                  ('Service',           Service.objects.filter(tenant__isnull=True)),
-                  ('Review',            Review.objects.filter(tenant__isnull=True)),
+                  ("User",              User.objects.filter(tenant__isnull=True, is_active=True)),
+                  ("SpecialistProfile", SpecialistProfile.objects.filter(tenant__isnull=True)),
+                  ("Conversation",      Conversation.all_objects.filter(tenant__isnull=True)),
+                  ("FoodScan",          FoodScan.objects.filter(tenant__isnull=True)),
+                  ("Appointment",       Appointment.objects.filter(tenant__isnull=True)),
+                  ("ServiceCategory",   ServiceCategory.objects.filter(tenant__isnull=True)),
+                  ("Service",           Service.objects.filter(tenant__isnull=True)),
+                  ("Review",            Review.objects.filter(tenant__isnull=True)),
               ]:
-                  print(f'  {label}: tenant__isnull active rows = {qs.count()}')
-              "
+                  print(f"  {label}: tenant__isnull active rows = {qs.count()}")
+              PY
             fi
 
             exit $BF_RC
