@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from django.conf import settings
 from django.db import transaction
 
 from nutrition.models import (
@@ -49,6 +50,26 @@ AUTO_CONFIRM_MINUTES = 5
 
 # Score boosts for ranking.
 FAVORITE_SPECIALIST_BOOST = 1.5
+
+
+def _user_in_rollout_allowlist(user) -> bool:
+    """DRF-288 — gate access to cross-domain recommendations.
+
+    Returns True when:
+    - ``settings.CROSS_DOMAIN_ENABLED`` is True (global rollout, all users), OR
+    - ``user.username`` matches an entry in ``settings.CROSS_DOMAIN_INTERNAL_USERNAMES``.
+
+    The latter list usually holds proxy usernames like ``bot:NNN`` —
+    matches the maxbot side gate (``CROSS_DOMAIN_INTERNAL_ACCOUNTS``)
+    one-for-one. If the global flag is off and the user is not in the
+    list, the engine returns None without writing any state.
+    """
+    if getattr(settings, "CROSS_DOMAIN_ENABLED", False):
+        return True
+    allowlist = getattr(settings, "CROSS_DOMAIN_INTERNAL_USERNAMES", []) or []
+    if not allowlist:
+        return False
+    return getattr(user, "username", None) in set(allowlist)
 
 
 @dataclass(frozen=True)
@@ -72,6 +93,15 @@ class CrossDomainEngine:
     def evaluate(
         self, *, user, surface: str = "bot",
     ) -> CrossDomainRecommendation | None:
+        # DRF-288 — internal-only gate. Until the global rollout flag
+        # ``CROSS_DOMAIN_ENABLED`` flips True, only users in the
+        # internal allowlist see recommendations. Other users short-
+        # circuit before any DB writes (no CrossDomainShownRule created,
+        # no detect_patterns cache work). Bot's mirror gate also skips
+        # the GET, but we fail-closed here for safety.
+        if not _user_in_rollout_allowlist(user):
+            return None
+
         # Eating-disorder gate — global, no exceptions.
         profile = NutritionProfile.objects.filter(user=user).first()
         flags = (profile.health_flags or {}) if profile else {}

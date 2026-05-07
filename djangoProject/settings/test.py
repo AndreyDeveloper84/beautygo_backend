@@ -24,6 +24,12 @@ from .dev import *  # noqa: F401,F403
 MULTI_TENANT_STRICT = False
 
 
+# DRF-288 — open the cross-domain (Track E) rollout gate for tests by
+# default. Per-test overrides via ``override_settings(...)`` or pytest's
+# ``settings`` fixture exercise the gate explicitly in TestRolloutGate.
+CROSS_DOMAIN_ENABLED = True
+
+
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
