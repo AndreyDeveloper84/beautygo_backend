@@ -1,0 +1,124 @@
+name: Backfill tenants on dev VPS
+
+# One-shot remote-runner: SSHes into the dev box and runs the
+# ``manage.py backfill_tenants`` management command inside the running
+# ``web`` container. Manually triggered via workflow_dispatch — never
+# scheduled. Idempotent (the command itself is) so re-running is safe.
+#
+# Why a workflow instead of an inline SSH:
+# - VPS_HOST / VPS_USER / VPS_SSH_KEY / VPS_PORT are GitHub Secrets,
+#   not exposed locally. Centralising the access path keeps the secret
+#   surface in one place.
+# - Auditable run history per dispatch (who triggered, when, what flags).
+#
+# Default is ``dry_run=true`` because the *first* run is the one where
+# we want zero side effects. Operator flips to false after they've
+# eyeballed the projected counts.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run only (true = report counts, no writes; false = actually backfill)'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      slug:
+        description: 'Default tenant slug for legacy rows that have no parent (overrides settings)'
+        required: false
+        default: ''
+      name:
+        description: 'Default tenant name (only used if slug does not exist yet)'
+        required: false
+        default: ''
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Run backfill_tenants on dev VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          timeout: 120s
+          command_timeout: 10m
+          envs: DRY_RUN,TENANT_SLUG,TENANT_NAME,GITHUB_RUN_ID
+          script: |
+            set -o pipefail
+            cd /home/taximeter/beautygo/dev
+
+            echo "=== branch + commit on host ==="
+            git rev-parse --abbrev-ref HEAD
+            git rev-parse --short HEAD
+            echo
+
+            # Build the argv. We avoid passing empty --slug / --name
+            # because the management command interprets an empty string
+            # as "this is the slug" and would try to create a tenant
+            # with slug="".
+            ARGS=()
+            if [ "$DRY_RUN" = "true" ]; then
+              ARGS+=("--dry-run")
+            fi
+            if [ -n "$TENANT_SLUG" ]; then
+              ARGS+=("--slug" "$TENANT_SLUG")
+            fi
+            if [ -n "$TENANT_NAME" ]; then
+              ARGS+=("--name" "$TENANT_NAME")
+            fi
+
+            echo "=== resolved args ==="
+            printf '  %s\n' "${ARGS[@]}"
+            echo
+
+            echo "=== migrations status (sanity — must show all applied) ==="
+            docker compose exec -T web python manage.py showmigrations tenants services reviews 2>&1 | tail -30
+            echo
+
+            echo "=== backfill_tenants ${ARGS[*]} ==="
+            set +e
+            docker compose exec -T web python manage.py backfill_tenants "${ARGS[@]}"
+            BF_RC=$?
+            set -e
+            echo "backfill exit=$BF_RC"
+            echo
+
+            if [ "$DRY_RUN" = "false" ] && [ "$BF_RC" -eq 0 ]; then
+              echo "=== verify zero unbackfilled active rows ==="
+              docker compose exec -T web python manage.py shell -c "
+              from django.contrib.auth import get_user_model
+              from users.models import SpecialistProfile
+              from ai.models import Conversation
+              from nutrition.models import FoodScan
+              from appointments.models import Appointment
+              from services.models import Service, ServiceCategory
+              from reviews.models import Review
+
+              User = get_user_model()
+              for label, qs in [
+                  ('User',              User.objects.filter(tenant__isnull=True, is_active=True)),
+                  ('SpecialistProfile', SpecialistProfile.objects.filter(tenant__isnull=True)),
+                  ('Conversation',      Conversation.all_objects.filter(tenant__isnull=True)),
+                  ('FoodScan',          FoodScan.objects.filter(tenant__isnull=True)),
+                  ('Appointment',       Appointment.objects.filter(tenant__isnull=True)),
+                  ('ServiceCategory',   ServiceCategory.objects.filter(tenant__isnull=True)),
+                  ('Service',           Service.objects.filter(tenant__isnull=True)),
+                  ('Review',            Review.objects.filter(tenant__isnull=True)),
+              ]:
+                  print(f'  {label}: tenant__isnull active rows = {qs.count()}')
+              "
+            fi
+
+            exit $BF_RC
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          TENANT_SLUG: ${{ inputs.slug }}
+          TENANT_NAME: ${{ inputs.name }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
