@@ -11,6 +11,16 @@ name: Backfill tenants on dev VPS
 #   surface in one place.
 # - Auditable run history per dispatch (who triggered, when, what flags).
 #
+# Why we sync source + reinstall ayla-ai-core in the running container
+# (mirrors smoke-on-dev.yml):
+# - The Dockerfile runs ``pip install -r requirements.txt``, which clones
+#   private ``ayla-ai-core`` from GitHub. The VPS docker build context
+#   has no GH_DEPLOY_TOKEN, so a clean rebuild fails at pip install.
+# - Until that auth gap is closed, we ``docker cp`` the host repo into
+#   the running container and ``pip install`` the dep at runtime —
+#   surgical, no image rebuild needed. This guarantees the container
+#   sees the latest migrations / models / management commands.
+#
 # Default is ``dry_run=true`` because the *first* run is the one where
 # we want zero side effects. Operator flips to false after they've
 # eyeballed the projected counts.
@@ -39,6 +49,9 @@ jobs:
   backfill:
     runs-on: ubuntu-latest
     environment: dev
+    env:
+      # Same private-dep auth secret used by ci.yml and smoke-on-dev.yml.
+      GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
     steps:
       - name: Run backfill_tenants on dev VPS
         uses: appleboy/ssh-action@v1
@@ -49,20 +62,66 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           timeout: 120s
           command_timeout: 10m
-          envs: DRY_RUN,TENANT_SLUG,TENANT_NAME,GITHUB_RUN_ID
+          envs: DRY_RUN,TENANT_SLUG,TENANT_NAME,GITHUB_RUN_ID,GH_DEPLOY_TOKEN
           script: |
             set -o pipefail
             cd /home/taximeter/beautygo/dev
 
-            echo "=== branch + commit on host ==="
+            echo "=== branch + commit on host (before sync) ==="
             git rev-parse --abbrev-ref HEAD
             git rev-parse --short HEAD
             echo
 
-            # Build the argv. We avoid passing empty --slug / --name
-            # because the management command interprets an empty string
-            # as "this is the slug" and would try to create a tenant
-            # with slug="".
+            echo "=== git pull origin/dev (host repo) ==="
+            git fetch origin dev
+            git reset --hard origin/dev
+            git rev-parse --short HEAD
+            echo
+
+            # Strip __pycache__/.pyc on host so we don't ship stale
+            # bytecode into the container.
+            find ./tenants ./users ./services ./reviews ./appointments \
+                 ./nutrition ./ai ./djangoProject \
+              -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
+            echo "=== docker cp host → container (sync source) ==="
+            # Trailing /. = "copy contents of src into dst" (overwrite),
+            # not creating dst/<src-basename>/. Same gotcha as
+            # smoke-on-dev.yml.
+            docker compose cp ./tenants/.       web:/app/tenants
+            docker compose cp ./users/.         web:/app/users
+            docker compose cp ./services/.      web:/app/services
+            docker compose cp ./reviews/.       web:/app/reviews
+            docker compose cp ./appointments/.  web:/app/appointments
+            docker compose cp ./nutrition/.     web:/app/nutrition
+            docker compose cp ./ai/.            web:/app/ai
+            docker compose cp ./djangoProject/. web:/app/djangoProject
+            echo
+
+            echo "=== ensure ayla-ai-core is installed in running container ==="
+            if [ -z "$GH_DEPLOY_TOKEN" ]; then
+              echo "GH_DEPLOY_TOKEN missing — repo is private, pip install will fail"
+              echo "(check repo Settings → Environments → dev → secrets)"
+              exit 1
+            fi
+            # python:3.12-slim base image strips git; install if missing.
+            docker compose exec -T web bash -c "command -v git >/dev/null || (apt-get update -qq && apt-get install -y --no-install-recommends git)"
+            docker compose exec -T -e GH_DEPLOY_TOKEN="$GH_DEPLOY_TOKEN" web \
+              pip install --quiet --upgrade \
+              "ayla-ai-core @ git+https://${GH_DEPLOY_TOKEN}@github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0"
+            echo
+
+            echo "=== apply pending migrations ==="
+            docker compose exec -T web python manage.py migrate --noinput
+            echo
+
+            echo "=== migrations status (sanity — must show new ones) ==="
+            docker compose exec -T web python manage.py showmigrations tenants services reviews users 2>&1 | tail -40
+            echo
+
+            # Build backfill argv. Empty --slug / --name are skipped
+            # because the management command would interpret an empty
+            # string as "this is the slug" and try slug="".
             ARGS=()
             if [ "$DRY_RUN" = "true" ]; then
               ARGS+=("--dry-run")
@@ -73,14 +132,6 @@ jobs:
             if [ -n "$TENANT_NAME" ]; then
               ARGS+=("--name" "$TENANT_NAME")
             fi
-
-            echo "=== resolved args ==="
-            printf '  %s\n' "${ARGS[@]}"
-            echo
-
-            echo "=== migrations status (sanity — must show all applied) ==="
-            docker compose exec -T web python manage.py showmigrations tenants services reviews 2>&1 | tail -30
-            echo
 
             echo "=== backfill_tenants ${ARGS[*]} ==="
             set +e
