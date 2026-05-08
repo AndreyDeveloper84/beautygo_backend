@@ -6,6 +6,7 @@ import math
 
 from django.db import connection
 from django.db.models import Q, QuerySet
+from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import permissions, serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -95,7 +96,20 @@ class GlobalSearchView(APIView):
     Uses PostgreSQL full-text search when available, falls back to icontains for SQLite.
     """
     permission_classes = [permissions.IsAuthenticated]
+    serializer_class = SearchSpecialistSerializer
 
+    @extend_schema(
+        responses={
+            200: inline_serializer(
+                name="GlobalSearchResponse",
+                fields={
+                    "specialists": SearchSpecialistSerializer(many=True),
+                    "services": SearchServiceSerializer(many=True),
+                    "query": serializers.CharField(),
+                },
+            ),
+        },
+    )
     def get(self, request: Request) -> Response:
         q = request.query_params.get('q', '').strip()
         if not q or len(q) < 2:

@@ -7,7 +7,8 @@ from uuid import uuid4
 
 from django.conf import settings
 from django.db import transaction
-from rest_framework import permissions
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from rest_framework import permissions, serializers as drf_serializers
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -125,7 +126,33 @@ class PaymentCreateView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsClient]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'payment'
+    serializer_class = PaymentCreateSerializer
 
+    @extend_schema(
+        request=PaymentCreateSerializer,
+        responses={
+            200: inline_serializer(
+                name="PaymentCreateExistingResponse",
+                fields={
+                    "payment_id": drf_serializers.UUIDField(),
+                    "confirmation_url": drf_serializers.URLField(),
+                    "amount": drf_serializers.FloatField(),
+                },
+            ),
+            201: inline_serializer(
+                name="PaymentCreateResponse",
+                fields={
+                    "payment_id": drf_serializers.UUIDField(),
+                    "confirmation_url": drf_serializers.URLField(),
+                    "amount": drf_serializers.FloatField(),
+                },
+            ),
+            404: OpenApiResponse(description="Appointment not found"),
+            422: OpenApiResponse(description="Invalid appointment status"),
+            502: OpenApiResponse(description="Payment provider error"),
+            503: OpenApiResponse(description="Payment provider not configured"),
+        },
+    )
     def post(self, request: Request) -> Response:
         serializer = PaymentCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -238,7 +265,14 @@ class PaymentCreateView(APIView):
 class PaymentDetailView(APIView):
     """GET /api/v1/payments/{id} — payment status."""
     permission_classes = [permissions.IsAuthenticated]
+    serializer_class = PaymentDetailSerializer
 
+    @extend_schema(
+        responses={
+            200: PaymentDetailSerializer,
+            404: OpenApiResponse(description="Payment not found"),
+        },
+    )
     def get(self, request: Request, pk) -> Response:
         try:
             payment = (
@@ -287,6 +321,22 @@ class PaymentWebhookView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'webhook_payment'
 
+    @extend_schema(
+        tags=["webhook"],
+        request=inline_serializer(
+            name="YooKassaWebhookEvent",
+            fields={
+                "event": drf_serializers.CharField(),
+                "object": drf_serializers.DictField(),
+            },
+        ),
+        responses={
+            200: inline_serializer(
+                name="YooKassaWebhookAck",
+                fields={"status": drf_serializers.CharField()},
+            ),
+        },
+    )
     def post(self, request: Request) -> Response:
         allowlist = getattr(settings, "YOOKASSA_WEBHOOK_ALLOWED_IPS", [])
         client_ip = _client_ip(request)
@@ -413,7 +463,18 @@ class PaymentRefundView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsClient]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'payment'
+    serializer_class = PaymentRefundSerializer
 
+    @extend_schema(
+        request=PaymentRefundSerializer,
+        responses={
+            200: PaymentDetailSerializer,
+            404: OpenApiResponse(description="Payment not found"),
+            422: OpenApiResponse(description="Refund not allowed or amount exceeds paid"),
+            502: OpenApiResponse(description="Payment provider error"),
+            503: OpenApiResponse(description="Payment provider not configured"),
+        },
+    )
     def post(self, request: Request, pk) -> Response:
         try:
             payment = Payment.objects.select_related('appointment').get(id=pk)

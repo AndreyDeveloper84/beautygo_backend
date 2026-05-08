@@ -12,7 +12,8 @@ from __future__ import annotations
 from uuid import UUID
 
 from django.core.cache import cache
-from rest_framework import permissions
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from rest_framework import permissions, serializers as drf_serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -65,6 +66,34 @@ class ServiceTemplatesListView(APIView):
     """🟣 Pro only — templates with recommended regional pricing."""
     permission_classes = [permissions.IsAuthenticated, IsProApp]
 
+    @extend_schema(
+        responses={
+            200: inline_serializer(
+                name="ServiceTemplatesListResponse",
+                fields={
+                    "region": drf_serializers.CharField(),
+                    "region_name": drf_serializers.CharField(),
+                    "templates": inline_serializer(
+                        name="ServiceTemplateItem",
+                        fields={
+                            "id": drf_serializers.UUIDField(),
+                            "name": drf_serializers.CharField(),
+                            "name_short": drf_serializers.CharField(allow_null=True),
+                            "duration_default": drf_serializers.IntegerField(),
+                            "duration_min": drf_serializers.IntegerField(),
+                            "duration_max": drf_serializers.IntegerField(),
+                            "is_popular": drf_serializers.BooleanField(),
+                            "recommended_price_min": drf_serializers.IntegerField(allow_null=True),
+                            "recommended_price_max": drf_serializers.IntegerField(allow_null=True),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            400: OpenApiResponse(description="Validation error: missing or invalid category_id"),
+            404: OpenApiResponse(description="Category not found"),
+        },
+    )
     def get(self, request: Request) -> Response:
         category_id_raw = request.query_params.get('category_id')
         if not category_id_raw:
@@ -175,6 +204,18 @@ class SupportedRegionsView(APIView):
     """🟣 Pro only — list of supported regions for manual city selection."""
     permission_classes = [permissions.IsAuthenticated, IsProApp]
 
+    @extend_schema(
+        responses={
+            200: inline_serializer(
+                name="SupportedRegionItem",
+                fields={
+                    "key": drf_serializers.CharField(),
+                    "name": drf_serializers.CharField(),
+                },
+                many=True,
+            ),
+        },
+    )
     def get(self, request: Request) -> Response:
         rows = (
             RegionalPricing.objects
