@@ -51,7 +51,23 @@ jobs:
                  ./nutrition ./ai ./djangoProject \
               -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
+            # Strip __pycache__ on host side first, including the new
+            # apps so we don't ship stale .pyc into the container.
+            find ./tenants ./users ./services ./reviews ./appointments \
+                 ./nutrition ./ai ./djangoProject ./analytics \
+                 ./notifications ./payments ./search \
+              -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
+
             echo "=== docker cp host → container ==="
+            # Every Django app whose views.py spectacular walks must be
+            # synced — otherwise the running container generates the
+            # schema from the old image, which lags whatever we just
+            # merged. The schema verification workflow is checking the
+            # MERGED code, so it has to see the merged code.
+            #
+            # Per-app directories are explicit (not wildcard) because
+            # docker compose cp ./.: web:/app would also copy host-only
+            # noise (.git, node_modules, .venv if present).
             docker compose cp ./tenants/.       web:/app/tenants
             docker compose cp ./users/.         web:/app/users
             docker compose cp ./services/.      web:/app/services
@@ -60,6 +76,15 @@ jobs:
             docker compose cp ./nutrition/.     web:/app/nutrition
             docker compose cp ./ai/.            web:/app/ai
             docker compose cp ./djangoProject/. web:/app/djangoProject
+            # Apps added 2026-05-08 (DRF-242.8 follow-up): without these
+            # the container's analytics/notifications/payments/search
+            # views.py stay on the pre-PR-#123 image and spectacular
+            # surfaces 36 stale "unable to guess serializer" errors.
+            docker compose exec -T web mkdir -p /app/analytics /app/notifications /app/payments /app/search
+            docker compose cp ./analytics/.     web:/app/analytics
+            docker compose cp ./notifications/. web:/app/notifications
+            docker compose cp ./payments/.      web:/app/payments
+            docker compose cp ./search/.        web:/app/search
             echo
 
             echo "=== ensure ayla-ai-core in running container ==="
