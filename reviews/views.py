@@ -5,6 +5,7 @@ import logging
 
 from django.db import transaction
 from django.db.models import Avg, Count
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import permissions
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
@@ -68,7 +69,17 @@ class ReviewCreateView(APIView):
     - One review per appointment (OneToOne)
     """
     permission_classes = [permissions.IsAuthenticated, IsClient]
+    serializer_class = ReviewCreateSerializer
 
+    @extend_schema(
+        request=ReviewCreateSerializer,
+        responses={
+            201: ReviewDetailSerializer,
+            400: OpenApiResponse(description="Appointment not completed"),
+            404: OpenApiResponse(description="Appointment not found"),
+            409: OpenApiResponse(description="Review already exists for this appointment"),
+        },
+    )
     def post(self, request: Request) -> Response:
         serializer = ReviewCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -131,7 +142,14 @@ class SpecialistReviewsView(APIView):
     Supports ?sort=recent (default) or ?sort=rating
     """
     permission_classes = [permissions.AllowAny]
+    serializer_class = ReviewListSerializer
 
+    @extend_schema(
+        responses={
+            200: ReviewListSerializer(many=True),
+            404: OpenApiResponse(description="Specialist not found"),
+        },
+    )
     def get(self, request: Request, specialist_id) -> Response:
         from users.models import SpecialistProfile
 
@@ -174,7 +192,15 @@ class ReviewUpdateView(APIView):
     Client edits their own review (text only).
     """
     permission_classes = [permissions.IsAuthenticated, IsClient]
+    serializer_class = ReviewUpdateSerializer
 
+    @extend_schema(
+        request=ReviewUpdateSerializer,
+        responses={
+            200: ReviewDetailSerializer,
+            404: OpenApiResponse(description="Review not found"),
+        },
+    )
     def patch(self, request: Request, pk) -> Response:
         try:
             review = Review.objects.select_related('service').get(
@@ -199,7 +225,16 @@ class ReviewReplyView(APIView):
     Specialist replies to a review about them.
     """
     permission_classes = [permissions.IsAuthenticated, IsSpecialist]
+    serializer_class = ReviewReplySerializer
 
+    @extend_schema(
+        request=ReviewReplySerializer,
+        responses={
+            200: ReviewDetailSerializer,
+            403: OpenApiResponse(description="Access denied"),
+            404: OpenApiResponse(description="Review not found"),
+        },
+    )
     def post(self, request: Request, pk) -> Response:
         try:
             review = Review.objects.select_related(

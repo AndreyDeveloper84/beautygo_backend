@@ -18,7 +18,8 @@ from uuid import UUID
 
 from django.core.files.base import ContentFile
 from django.utils import timezone
-from rest_framework import permissions, status
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from rest_framework import permissions, serializers as drf_serializers, status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -32,9 +33,13 @@ from users.services import InvalidExternalUserIDError, resolve_external_user
 from nutrition.models import Beverage, FoodScan, WaterLog
 from nutrition.serializers import (
     BeverageCatalogItemSerializer,
+    CrossDomainConvertRequestSerializer,
+    CrossDomainDismissRequestSerializer,
+    CrossDomainHistoryResponseSerializer,
     FoodLogCreateSerializer,
     FoodLogEntrySerializer,
     FoodScanResponseSerializer,
+    NutritionProfileResponseSerializer,
     NutritionProfileUpsertSerializer,
     NutritionSummaryQuerySerializer,
     NutritionSummaryResponseSerializer,
@@ -92,7 +97,16 @@ class FoodScanView(APIView):
     parser_classes = [MultiPartParser, FormParser]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan"
+    serializer_class = ScanRequestSerializer
 
+    @extend_schema(
+        request=ScanRequestSerializer,
+        responses={
+            200: FoodScanResponseSerializer,
+            400: OpenApiResponse(description="Validation error or food not recognised"),
+            503: OpenApiResponse(description="All food-scan providers failed"),
+        },
+    )
     def post(self, request: Request) -> Response:
         serializer = ScanRequestSerializer(data=request.data)
         if not serializer.is_valid():
@@ -197,7 +211,17 @@ class InternalFoodScanView(APIView):
     parser_classes = [MultiPartParser, FormParser]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = ScanRequestSerializer
 
+    @extend_schema(
+        tags=["internal"],
+        request=ScanRequestSerializer,
+        responses={
+            200: FoodScanResponseSerializer,
+            400: OpenApiResponse(description="Validation error or food not recognised"),
+            503: OpenApiResponse(description="All food-scan providers failed"),
+        },
+    )
     def post(self, request: Request) -> Response:
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
@@ -334,7 +358,16 @@ class FoodLogCreateView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_log"
+    serializer_class = FoodLogCreateSerializer
 
+    @extend_schema(
+        request=FoodLogCreateSerializer,
+        responses={
+            201: FoodLogEntrySerializer,
+            400: OpenApiResponse(description="Validation or dish-not-recognised"),
+            404: OpenApiResponse(description="Scan not owned by caller"),
+        },
+    )
     def post(self, request: Request) -> Response:
         serializer = FoodLogCreateSerializer(data=request.data)
         if not serializer.is_valid():
@@ -357,7 +390,17 @@ class InternalFoodLogView(APIView):
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = FoodLogCreateSerializer
 
+    @extend_schema(
+        tags=["internal"],
+        request=FoodLogCreateSerializer,
+        responses={
+            201: FoodLogEntrySerializer,
+            400: OpenApiResponse(description="Validation or dish-not-recognised"),
+            404: OpenApiResponse(description="Scan not owned by caller"),
+        },
+    )
     def post(self, request: Request) -> Response:
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
@@ -392,7 +435,16 @@ class InternalSummaryView(APIView):
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = NutritionSummaryResponseSerializer
 
+    @extend_schema(
+        tags=["internal"],
+        parameters=[NutritionSummaryQuerySerializer],
+        responses={
+            200: NutritionSummaryResponseSerializer,
+            400: OpenApiResponse(description="Invalid date / period"),
+        },
+    )
     def get(self, request: Request) -> Response:
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
@@ -448,7 +500,15 @@ class NutritionSummaryView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "nutrition_summary"
+    serializer_class = NutritionSummaryResponseSerializer
 
+    @extend_schema(
+        parameters=[NutritionSummaryQuerySerializer],
+        responses={
+            200: NutritionSummaryResponseSerializer,
+            400: OpenApiResponse(description="Invalid date param"),
+        },
+    )
     def get(self, request: Request) -> Response:
         q = NutritionSummaryQuerySerializer(data=request.query_params)
         if not q.is_valid():
@@ -480,7 +540,15 @@ class WaterLogCreateView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "water"
+    serializer_class = WaterLogCreateSerializer
 
+    @extend_schema(
+        request=WaterLogCreateSerializer,
+        responses={
+            200: WaterLogResponseSerializer,
+            400: OpenApiResponse(description="Validation error"),
+        },
+    )
     def post(self, request: Request) -> Response:
         serializer = WaterLogCreateSerializer(data=request.data)
         if not serializer.is_valid():
@@ -517,7 +585,15 @@ class WaterLogDeleteView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "water"
+    serializer_class = WaterLogResponseSerializer
 
+    @extend_schema(
+        request=None,
+        responses={
+            200: WaterLogResponseSerializer,
+            404: OpenApiResponse(description="WaterLog not found for caller"),
+        },
+    )
     def delete(self, request: Request, pk: UUID) -> Response:
         try:
             log = WaterLog.objects.get(id=pk, user=request.user)
@@ -550,7 +626,9 @@ class WaterTodayView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "water"
+    serializer_class = WaterTodayResponseSerializer
 
+    @extend_schema(responses={200: WaterTodayResponseSerializer})
     def get(self, request: Request) -> Response:
         today = WaterService().today_logs(request.user.id)
         return success_response(
@@ -572,6 +650,24 @@ class InternalDeficitsView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
 
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: inline_serializer(
+                name="InternalDeficitsResponse",
+                fields={
+                    "days_observed": drf_serializers.IntegerField(),
+                    "protein_avg_pct_goal": drf_serializers.FloatField(allow_null=True),
+                    "protein_low_streak_days": drf_serializers.IntegerField(),
+                    "hint": drf_serializers.CharField(allow_null=True, allow_blank=True),
+                    "fired_keys": drf_serializers.ListField(
+                        child=drf_serializers.CharField(),
+                    ),
+                },
+            ),
+            400: OpenApiResponse(description="Invalid days param (1..14)"),
+        },
+    )
     def get(self, request: Request) -> Response:
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
@@ -629,7 +725,12 @@ class InternalReturningSuccessView(APIView):
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = ReturningSuccessResponseSerializer
 
+    @extend_schema(
+        tags=["internal"],
+        responses={200: ReturningSuccessResponseSerializer},
+    )
     def get(self, request: Request) -> Response:
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
@@ -661,7 +762,12 @@ class InternalPatternsView(APIView):
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = PatternDetectionResponseSerializer
 
+    @extend_schema(
+        tags=["internal"],
+        responses={200: PatternDetectionResponseSerializer},
+    )
     def get(self, request: Request) -> Response:
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
@@ -698,6 +804,7 @@ class InternalProfileView(APIView):
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = NutritionProfileResponseSerializer
 
     def _resolve(self, request):
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
@@ -710,6 +817,10 @@ class InternalProfileView(APIView):
             ), external_user_id
         return user, None, external_user_id
 
+    @extend_schema(
+        tags=["internal"],
+        responses={200: NutritionProfileResponseSerializer},
+    )
     def get(self, request: Request) -> Response:
         user, err, external_user_id = self._resolve(request)
         if err is not None:
@@ -719,6 +830,14 @@ class InternalProfileView(APIView):
             status_code=status.HTTP_200_OK,
         )
 
+    @extend_schema(
+        tags=["internal"],
+        request=NutritionProfileUpsertSerializer,
+        responses={
+            200: NutritionProfileResponseSerializer,
+            400: OpenApiResponse(description="Validation error"),
+        },
+    )
     def post(self, request: Request) -> Response:
         user, err, external_user_id = self._resolve(request)
         if err is not None:
@@ -757,7 +876,16 @@ class InternalWaterCreateView(APIView):
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = WaterEntryCreateSerializer
 
+    @extend_schema(
+        tags=["internal"],
+        request=WaterEntryCreateSerializer,
+        responses={
+            201: WaterEntryResponseSerializer,
+            400: OpenApiResponse(description="Validation / unknown beverage"),
+        },
+    )
     def post(self, request: Request) -> Response:
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
@@ -807,6 +935,22 @@ class InternalWaterDeleteView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
 
+    @extend_schema(
+        tags=["internal"],
+        request=None,
+        responses={
+            200: inline_serializer(
+                name="InternalWaterDeleteResponse",
+                fields={
+                    "entry_id": drf_serializers.UUIDField(),
+                    "deleted": drf_serializers.BooleanField(),
+                    "today_total_water_ml": drf_serializers.IntegerField(),
+                    "restore_window_expires_at": drf_serializers.DateTimeField(),
+                },
+            ),
+            404: OpenApiResponse(description="Entry not found"),
+        },
+    )
     def delete(self, request: Request, pk: UUID) -> Response:
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
@@ -850,6 +994,22 @@ class InternalWaterRestoreView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
 
+    @extend_schema(
+        tags=["internal"],
+        request=None,
+        responses={
+            200: inline_serializer(
+                name="InternalWaterRestoreResponse",
+                fields={
+                    "entry_id": drf_serializers.UUIDField(),
+                    "restored": drf_serializers.BooleanField(),
+                    "today_total_water_ml": drf_serializers.IntegerField(),
+                },
+            ),
+            404: OpenApiResponse(description="Entry not found"),
+            410: OpenApiResponse(description="Restore window expired"),
+        },
+    )
     def post(self, request: Request, pk: UUID) -> Response:
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
@@ -892,7 +1052,12 @@ class InternalWaterTodayView(APIView):
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = WaterTodayResponseSerializerV3
 
+    @extend_schema(
+        tags=["internal"],
+        responses={200: WaterTodayResponseSerializerV3},
+    )
     def get(self, request: Request) -> Response:
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
@@ -925,7 +1090,19 @@ class InternalBeveragesView(APIView):
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = BeverageCatalogItemSerializer
 
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: inline_serializer(
+                name="InternalBeveragesResponse",
+                fields={
+                    "beverages": BeverageCatalogItemSerializer(many=True),
+                },
+            ),
+        },
+    )
     def get(self, request: Request) -> Response:
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         try:
@@ -975,6 +1152,32 @@ class InternalCrossDomainView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
 
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: inline_serializer(
+                name="InternalCrossDomainResponse",
+                fields={
+                    "has_insight": drf_serializers.BooleanField(),
+                    "insight": inline_serializer(
+                        name="InternalCrossDomainInsight",
+                        fields={
+                            "shown_id": drf_serializers.CharField(),
+                            "rule_slug": drf_serializers.CharField(),
+                            "nutrition_trigger": drf_serializers.CharField(),
+                            "service_category_slug": drf_serializers.CharField(),
+                            "insight_text": drf_serializers.CharField(),
+                            "rationale_text": drf_serializers.CharField(),
+                            "disclaimer_text": drf_serializers.CharField(),
+                            "data_points": drf_serializers.IntegerField(),
+                            "severity": drf_serializers.CharField(),
+                        },
+                        required=False,
+                    ),
+                },
+            ),
+        },
+    )
     def get(self, request: Request) -> Response:
         try:
             user = _cd_resolve_user(request)
@@ -1021,6 +1224,20 @@ class InternalCrossDomainSeenView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
 
+    @extend_schema(
+        tags=["internal"],
+        request=None,
+        responses={
+            200: inline_serializer(
+                name="InternalCrossDomainSeenResponse",
+                fields={
+                    "shown_id": drf_serializers.CharField(),
+                    "seen_at": drf_serializers.DateTimeField(),
+                },
+            ),
+            404: OpenApiResponse(description="Cross-domain row not found"),
+        },
+    )
     def post(self, request: Request, shown_id) -> Response:
         try:
             user = _cd_resolve_user(request)
@@ -1060,7 +1277,23 @@ class InternalCrossDomainDismissView(APIView):
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = CrossDomainDismissRequestSerializer
 
+    @extend_schema(
+        tags=["internal"],
+        request=CrossDomainDismissRequestSerializer,
+        responses={
+            200: inline_serializer(
+                name="InternalCrossDomainDismissResponse",
+                fields={
+                    "shown_id": drf_serializers.CharField(),
+                    "user_action": drf_serializers.CharField(),
+                },
+            ),
+            400: OpenApiResponse(description="Invalid action"),
+            404: OpenApiResponse(description="Cross-domain row not found"),
+        },
+    )
     def post(self, request: Request, shown_id) -> Response:
         try:
             user = _cd_resolve_user(request)
@@ -1108,7 +1341,24 @@ class InternalCrossDomainConvertView(APIView):
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = CrossDomainConvertRequestSerializer
 
+    @extend_schema(
+        tags=["internal"],
+        request=CrossDomainConvertRequestSerializer,
+        responses={
+            200: inline_serializer(
+                name="InternalCrossDomainConvertResponse",
+                fields={
+                    "shown_id": drf_serializers.CharField(),
+                    "appointment_id": drf_serializers.CharField(),
+                    "user_action": drf_serializers.CharField(),
+                },
+            ),
+            400: OpenApiResponse(description="appointment_id required"),
+            404: OpenApiResponse(description="Cross-domain row or appointment not found"),
+        },
+    )
     def post(self, request: Request, shown_id) -> Response:
         try:
             user = _cd_resolve_user(request)
@@ -1171,7 +1421,12 @@ class InternalCrossDomainHistoryView(APIView):
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "food_scan_internal"
+    serializer_class = CrossDomainHistoryResponseSerializer
 
+    @extend_schema(
+        tags=["internal"],
+        responses={200: CrossDomainHistoryResponseSerializer},
+    )
     def get(self, request: Request) -> Response:
         try:
             user = _cd_resolve_user(request)
