@@ -13,7 +13,8 @@ from __future__ import annotations
 import logging
 
 from django.db.models import QuerySet
-from rest_framework import permissions, status
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import permissions, serializers as drf_serializers, status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -57,7 +58,19 @@ class NotificationListView(APIView):
     """
 
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
+    serializer_class = NotificationListItemSerializer
 
+    @extend_schema(
+        parameters=[NotificationListQuerySerializer],
+        responses={200: inline_serializer(
+            name="NotificationListResponse",
+            fields={
+                "results": NotificationListItemSerializer(many=True),
+                "count": drf_serializers.IntegerField(),
+                "unread_count": drf_serializers.IntegerField(),
+            },
+        )},
+    )
     def get(self, request: Request) -> Response:
         q = NotificationListQuerySerializer(data=request.query_params)
         if not q.is_valid():
@@ -101,7 +114,12 @@ class NotificationReadView(APIView):
     """
 
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
+    serializer_class = NotificationListItemSerializer
 
+    @extend_schema(
+        request=None,
+        responses={200: NotificationListItemSerializer, 404: None},
+    )
     def patch(self, request: Request, pk) -> Response:
         try:
             notification = _user_notifications(request.user).get(id=pk)
@@ -131,6 +149,13 @@ class NotificationReadAllView(APIView):
 
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
 
+    @extend_schema(
+        request=None,
+        responses={200: inline_serializer(
+            name="NotificationReadAllResponse",
+            fields={"marked_count": drf_serializers.IntegerField()},
+        )},
+    )
     def post(self, request: Request) -> Response:
         marked = (
             _user_notifications(request.user)

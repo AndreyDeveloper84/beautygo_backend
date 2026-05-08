@@ -61,7 +61,16 @@ class AppointmentViewSet(viewsets.GenericViewSet):
     cancel_booking_service_class = CancelBookingService
     reschedule_booking_service_class = RescheduleBookingService
 
+    queryset = Appointment.objects.none()
+
     def get_queryset(self) -> QuerySet:
+        # During drf-spectacular schema generation the viewset is invoked
+        # without a real user. Returning an empty queryset early skips
+        # the role-based filter (which would raise AttributeError on
+        # AnonymousUser.is_client) and lets spectacular derive the
+        # model type from the queryset attribute alone.
+        if getattr(self, 'swagger_fake_view', False):
+            return Appointment.objects.none()
         user = self.request.user
         qs = (
             Appointment.objects
@@ -74,9 +83,29 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             return qs.filter(specialist__user=user)
         return qs.none()
 
+    def get_serializer_class(self):
+        # Per-action serializer mapping. drf-spectacular uses this to
+        # derive request/response shapes; without it the viewset has
+        # no canonical ``serializer_class`` (because each action uses
+        # a different serializer) and schema generation falls back
+        # to error mode.
+        if self.action == 'list':
+            return AppointmentListSerializer
+        if self.action == 'create':
+            return AppointmentCreateSerializer
+        if self.action == 'cancel':
+            return AppointmentCancelSerializer
+        if self.action == 'reschedule':
+            return AppointmentRescheduleSerializer
+        # retrieve, complete, update_status — full detail body
+        return AppointmentDetailSerializer
+
     # -- List ----------------------------------------------------------------
 
-    @extend_schema(operation_id="appointments_list")
+    @extend_schema(
+        operation_id="appointments_list",
+        responses={200: AppointmentListSerializer(many=True)},
+    )
     def list(self, request: Request) -> Response:
         from core.pagination import paginated_success_response
 
@@ -90,6 +119,11 @@ class AppointmentViewSet(viewsets.GenericViewSet):
 
     # -- Create (via booking engine) ----------------------------------------
 
+    @extend_schema(
+        operation_id="appointments_create",
+        request=AppointmentCreateSerializer,
+        responses={201: AppointmentDetailSerializer},
+    )
     def create(self, request: Request) -> Response:
         if not request.user.is_client:
             return error_response(
@@ -129,7 +163,10 @@ class AppointmentViewSet(viewsets.GenericViewSet):
 
     # -- Retrieve ------------------------------------------------------------
 
-    @extend_schema(operation_id="appointments_retrieve")
+    @extend_schema(
+        operation_id="appointments_retrieve",
+        responses={200: AppointmentDetailSerializer, 404: None},
+    )
     def retrieve(self, request: Request, pk: Any = None) -> Response:
         try:
             appointment = self.get_queryset().get(pk=pk)
@@ -141,6 +178,10 @@ class AppointmentViewSet(viewsets.GenericViewSet):
 
     # -- Cancel (via booking engine) ----------------------------------------
 
+    @extend_schema(
+        request=AppointmentCancelSerializer,
+        responses={200: AppointmentDetailSerializer},
+    )
     @action(detail=True, methods=['post'])
     def cancel(self, request: Request, pk: Any = None) -> Response:
         try:
@@ -176,6 +217,10 @@ class AppointmentViewSet(viewsets.GenericViewSet):
 
     # -- Complete ------------------------------------------------------------
 
+    @extend_schema(
+        request=None,
+        responses={200: AppointmentDetailSerializer},
+    )
     @action(detail=True, methods=['post'])
     def complete(self, request: Request, pk: Any = None) -> Response:
         if not request.user.is_specialist:
@@ -200,6 +245,16 @@ class AppointmentViewSet(viewsets.GenericViewSet):
 
     # -- Status (spec-compliant: PATCH /appointments/{id}/status/) ----------
 
+    @extend_schema(
+        request={
+            "application/json": {
+                "type": "object",
+                "properties": {"status": {"type": "string", "enum": ["cancelled", "completed"]}},
+                "required": ["status"],
+            },
+        },
+        responses={200: AppointmentDetailSerializer},
+    )
     @action(detail=True, methods=['patch'], url_path='status')
     def update_status(self, request: Request, pk: Any = None) -> Response:
         """
@@ -225,6 +280,10 @@ class AppointmentViewSet(viewsets.GenericViewSet):
 
     # -- Reschedule (via booking engine) ------------------------------------
 
+    @extend_schema(
+        request=AppointmentRescheduleSerializer,
+        responses={200: AppointmentDetailSerializer},
+    )
     @action(detail=True, methods=['post'])
     def reschedule(self, request: Request, pk: Any = None) -> Response:
         try:

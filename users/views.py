@@ -5,7 +5,9 @@ import logging
 
 from django.conf import settings
 import rest_framework.parsers
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import generics, permissions
+from rest_framework import serializers as drf_serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -39,6 +41,47 @@ from .services import AuthService
 logger = logging.getLogger(__name__)
 
 
+# Reused inline schemas — auth flows return either a thin status payload
+# or the full JWT-token bundle. Both are documented once and referenced
+# from each view via @extend_schema below.
+_MessageResponse = inline_serializer(
+    name="MessageResponse",
+    fields={"message": drf_serializers.CharField()},
+)
+_OtpRequestedResponse = inline_serializer(
+    name="OtpRequestedResponse",
+    fields={
+        "expires_in": drf_serializers.IntegerField(),
+        "retry_after": drf_serializers.IntegerField(),
+        "is_new_user": drf_serializers.BooleanField(),
+    },
+)
+_TokensResponse = inline_serializer(
+    name="TokensResponse",
+    fields={
+        "access_token": drf_serializers.CharField(),
+        "refresh_token": drf_serializers.CharField(required=False),
+        "expires_in": drf_serializers.IntegerField(required=False),
+        "is_new_user": drf_serializers.BooleanField(required=False),
+        "onboarding_completed": drf_serializers.BooleanField(required=False),
+        "is_anonymous": drf_serializers.BooleanField(required=False),
+        "user": drf_serializers.DictField(required=False),
+    },
+)
+_UserShortResponse = inline_serializer(
+    name="UserShortResponse",
+    fields={
+        "id": drf_serializers.UUIDField(),
+        "phone": drf_serializers.CharField(allow_null=True),
+        "first_name": drf_serializers.CharField(required=False),
+        "last_name": drf_serializers.CharField(required=False),
+        "role": drf_serializers.CharField(),
+        "is_verified": drf_serializers.BooleanField(required=False),
+        "onboarding_completed": drf_serializers.BooleanField(required=False),
+    },
+)
+
+
 # --- Auth Views (phone-based OTP) ---
 
 class RegisterPhoneView(APIView):
@@ -52,7 +95,16 @@ class RegisterPhoneView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'
+    serializer_class = RegisterPhoneSerializer
 
+    @extend_schema(
+        request=RegisterPhoneSerializer,
+        responses={201: inline_serializer(
+            name="RegisterPhoneResponse",
+            fields={"phone": drf_serializers.CharField(), "message": drf_serializers.CharField()},
+        )},
+        deprecated=True,
+    )
     def post(self, request: Request) -> Response:
         """Register new user with phone number."""
         serializer = RegisterPhoneSerializer(data=request.data)
@@ -79,7 +131,13 @@ class LoginView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'
+    serializer_class = LoginSerializer
 
+    @extend_schema(
+        request=LoginSerializer,
+        responses={200: _MessageResponse},
+        deprecated=True,
+    )
     def post(self, request: Request) -> Response:
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -94,7 +152,12 @@ class SendOTPView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'
+    serializer_class = RegisterPhoneSerializer
 
+    @extend_schema(
+        request=RegisterPhoneSerializer,
+        responses={200: _OtpRequestedResponse},
+    )
     def post(self, request: Request) -> Response:
         serializer = RegisterPhoneSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -127,7 +190,12 @@ class VerifyOTPView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'
+    serializer_class = VerifyOTPSerializer
 
+    @extend_schema(
+        request=VerifyOTPSerializer,
+        responses={200: _TokensResponse},
+    )
     def post(self, request):
         serializer = VerifyOTPSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -198,7 +266,12 @@ class AnonymousAuthView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'
+    serializer_class = AnonymousAuthSerializer
 
+    @extend_schema(
+        request=AnonymousAuthSerializer,
+        responses={200: _TokensResponse, 201: _TokensResponse},
+    )
     def post(self, request: Request) -> Response:
         from datetime import timedelta
         from django.utils import timezone as tz
@@ -262,7 +335,12 @@ class OnboardingView(APIView):
     marks onboarding_completed = True on the user.
     """
     permission_classes = [permissions.IsAuthenticated]
+    serializer_class = OnboardingSerializer
 
+    @extend_schema(
+        request=OnboardingSerializer,
+        responses={200: _UserShortResponse},
+    )
     def post(self, request: Request) -> Response:
         serializer = OnboardingSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -305,7 +383,12 @@ class LogoutView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'
+    serializer_class = LogoutSerializer
 
+    @extend_schema(
+        request=LogoutSerializer,
+        responses={200: _MessageResponse, 400: OpenApiResponse(description="Invalid token")},
+    )
     def post(self, request):
         serializer = LogoutSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -328,7 +411,12 @@ class SendCodeView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'
+    serializer_class = SendCodeSerializer
 
+    @extend_schema(
+        request=SendCodeSerializer,
+        responses={200: _MessageResponse, 404: OpenApiResponse(description="User not found")},
+    )
     def post(self, request):
         serializer = SendCodeSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -352,6 +440,16 @@ class CompleteProfileView(APIView):
     """POST /api/v1/auth/complete-profile/ — Complete registration for new users."""
     permission_classes = [permissions.IsAuthenticated]
 
+    @extend_schema(
+        request=inline_serializer(
+            name="CompleteProfileRequest",
+            fields={
+                "first_name": drf_serializers.CharField(),
+                "last_name": drf_serializers.CharField(required=False, allow_blank=True),
+            },
+        ),
+        responses={200: _UserShortResponse},
+    )
     def post(self, request: Request) -> Response:
         first_name = (request.data.get('first_name') or '').strip()
         last_name = (request.data.get('last_name') or '').strip()
@@ -390,7 +488,9 @@ class MasterMeView(APIView):
         rest_framework.parsers.MultiPartParser,
         rest_framework.parsers.JSONParser,
     ]
+    serializer_class = SpecialistProfileDetailSerializer
 
+    @extend_schema(responses={200: SpecialistProfileDetailSerializer, 404: None})
     def get(self, request):
         try:
             profile = SpecialistProfile.objects.get(user=request.user)
@@ -403,6 +503,10 @@ class MasterMeView(APIView):
         serializer = SpecialistProfileDetailSerializer(profile)
         return success_response(serializer.data)
 
+    @extend_schema(
+        request=SpecialistProfileCreateSerializer,
+        responses={201: SpecialistProfileCreateSerializer},
+    )
     def post(self, request):
         """Step 1: create specialist profile."""
         if SpecialistProfile.objects.filter(user=request.user).exists():
@@ -416,6 +520,10 @@ class MasterMeView(APIView):
         serializer.save(user=request.user)
         return success_response(serializer.data, status_code=201)
 
+    @extend_schema(
+        request=SpecialistProfileUpdateSerializer,
+        responses={200: SpecialistProfileDetailSerializer, 404: None},
+    )
     def patch(self, request):
         """Step 2+: update specialist profile."""
         try:
@@ -504,6 +612,7 @@ class UserMeView(APIView):
     """
     permission_classes = [permissions.IsAuthenticated]
     throttle_scope = 'auth_sensitive'
+    serializer_class = DeleteAccountSerializer
 
     def get_throttles(self):
         # Apply the sensitive scope only on DELETE — GET /users/me/ is a
@@ -512,6 +621,7 @@ class UserMeView(APIView):
             return [ScopedRateThrottle()]
         return super().get_throttles()
 
+    @extend_schema(responses={200: _UserShortResponse})
     def get(self, request):
         """Return current user basic info."""
         user = request.user
@@ -522,6 +632,10 @@ class UserMeView(APIView):
             "is_verified": user.is_verified,
         })
 
+    @extend_schema(
+        request=DeleteAccountSerializer,
+        responses={200: _MessageResponse},
+    )
     def delete(self, request):
         serializer = DeleteAccountSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -549,7 +663,12 @@ class SocialAuthView(APIView):
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth'
+    serializer_class = SocialAuthSerializer
 
+    @extend_schema(
+        request=SocialAuthSerializer,
+        responses={200: _TokensResponse},
+    )
     def post(self, request, provider):
         serializer = SocialAuthSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -583,7 +702,12 @@ class BindPhoneView(APIView):
     permission_classes = [permissions.IsAuthenticated]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'auth_sensitive'
+    serializer_class = BindPhoneSerializer
 
+    @extend_schema(
+        request=BindPhoneSerializer,
+        responses={200: _MessageResponse},
+    )
     def post(self, request):
         serializer = BindPhoneSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
