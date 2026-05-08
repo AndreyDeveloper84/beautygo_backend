@@ -26,7 +26,8 @@ from __future__ import annotations
 import logging
 
 from django.db import IntegrityError, transaction
-from rest_framework import permissions, status
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from rest_framework import permissions, serializers as drf_serializers, status
 from rest_framework.generics import GenericAPIView
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -65,11 +66,27 @@ class FavoriteListView(GenericAPIView):
         return success_response(data, status_code=status.HTTP_200_OK)
 
 
+_FavoriteAddedResponse = inline_serializer(
+    name="FavoriteAddedResponse",
+    fields={"added": drf_serializers.BooleanField()},
+)
+
+
 class FavoriteAddRemoveView(GenericAPIView):
     """POST + DELETE /api/v1/favorites/specialists/{id}/."""
 
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
+    serializer_class = type(_FavoriteAddedResponse)
+    queryset = SpecialistProfile.objects.none()
 
+    @extend_schema(
+        request=None,
+        responses={
+            200: _FavoriteAddedResponse,
+            201: _FavoriteAddedResponse,
+            404: OpenApiResponse(description="Specialist not found"),
+        },
+    )
     def post(self, request: Request, pk) -> Response:
         # Existence check — POST against an unknown specialist still
         # surfaces 404 so the mobile UI can show "not found" instead of
@@ -101,6 +118,10 @@ class FavoriteAddRemoveView(GenericAPIView):
             ),
         )
 
+    @extend_schema(
+        request=None,
+        responses={204: None},
+    )
     def delete(self, request: Request, pk) -> Response:
         # Idempotent delete. We don't 404 on missing rows — POST/DELETE
         # symmetry: the post-condition is "not favourited", which is

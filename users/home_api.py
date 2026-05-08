@@ -37,7 +37,8 @@ from typing import Any
 from django.core.cache import cache as default_cache
 from django.db.models import Count, Q
 from django.utils import timezone
-from rest_framework import permissions
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import permissions, serializers as drf_serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -81,6 +82,19 @@ class HomeView(APIView):
 
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
 
+    @extend_schema(
+        responses={200: inline_serializer(
+            name="HomeResponse",
+            fields={
+                "upcoming_appointments": drf_serializers.ListField(child=drf_serializers.DictField()),
+                "favorite_specialists": drf_serializers.ListField(child=drf_serializers.DictField()),
+                "popular_categories": drf_serializers.ListField(child=drf_serializers.DictField()),
+                "nearby_specialists": drf_serializers.ListField(child=drf_serializers.DictField()),
+                "recent_activity": drf_serializers.ListField(child=drf_serializers.DictField()),
+            },
+        )},
+        description="Aggregated home-screen payload — 5 sections in one round-trip.",
+    )
     def get(self, request: Request) -> Response:
         user = request.user
         lat, lon = self._parse_geo(request)

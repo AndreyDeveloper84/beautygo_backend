@@ -27,7 +27,8 @@ from __future__ import annotations
 import logging
 
 from django.db import IntegrityError
-from rest_framework import permissions, status
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from rest_framework import permissions, serializers as drf_serializers, status
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -56,6 +57,26 @@ class AnalyticsEventView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "analytics_event"
 
+    @extend_schema(
+        request=EventCreateSerializer,
+        responses={
+            200: inline_serializer(
+                name="AnalyticsEventIdempotentResponse",
+                fields={
+                    "id": drf_serializers.UUIDField(),
+                    "created": drf_serializers.BooleanField(),
+                },
+            ),
+            201: inline_serializer(
+                name="AnalyticsEventCreatedResponse",
+                fields={
+                    "id": drf_serializers.UUIDField(),
+                    "created": drf_serializers.BooleanField(),
+                },
+            ),
+            400: OpenApiResponse(description="Validation error or unknown event_name"),
+        },
+    )
     def post(self, request: Request) -> Response:
         serializer = EventCreateSerializer(data=request.data)
         if not serializer.is_valid():

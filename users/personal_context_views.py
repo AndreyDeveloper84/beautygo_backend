@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
@@ -123,7 +123,9 @@ class UserPersonalContextView(APIView):
     """GET / PATCH / DELETE the whole context."""
 
     permission_classes = [IsAuthenticated]
+    serializer_class = UserPersonalContextSerializer
 
+    @extend_schema(responses={200: UserPersonalContextSerializer})
     def get(self, request: Request) -> Response:
         ctx = _get_or_create_context(request.user)
         return success_response(
@@ -131,6 +133,10 @@ class UserPersonalContextView(APIView):
             status_code=status.HTTP_200_OK,
         )
 
+    @extend_schema(
+        request=UserPersonalContextSerializer,
+        responses={200: UserPersonalContextSerializer},
+    )
     def patch(self, request: Request) -> Response:
         ctx = _get_or_create_context(request.user)
         serializer = UserPersonalContextSerializer(
@@ -168,7 +174,11 @@ class UserPersonalContextView(APIView):
             status_code=status.HTTP_200_OK,
         )
 
-    @extend_schema(operation_id="personal_context_wipe")
+    @extend_schema(
+        operation_id="personal_context_wipe",
+        request=None,
+        responses={204: None},
+    )
     def delete(self, request: Request) -> Response:
         # 152-ФЗ total wipe — delete the row entirely. Next GET will
         # lazy-create a fresh empty one.
@@ -190,6 +200,7 @@ class UserPersonalContextFieldDeleteView(APIView):
     """
 
     permission_classes = [IsAuthenticated]
+    serializer_class = UserPersonalContextSerializer
 
     _FIELD_DEFAULTS: dict[str, object] = {
         "preferred_districts": list,
@@ -206,7 +217,11 @@ class UserPersonalContextFieldDeleteView(APIView):
         "busy_days": list,
     }
 
-    @extend_schema(operation_id="personal_context_field_reset")
+    @extend_schema(
+        operation_id="personal_context_field_reset",
+        request=None,
+        responses={204: None, 404: None},
+    )
     def delete(self, request: Request, field: str) -> Response:
         if field not in self._FIELD_DEFAULTS:
             return error_response(
@@ -238,6 +253,21 @@ class UserPersonalContextSkipView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @extend_schema(
+        request=inline_serializer(
+            name="PersonalContextSkipRequest",
+            fields={"field": serializers.CharField()},
+        ),
+        responses={
+            200: inline_serializer(
+                name="PersonalContextSkipResponse",
+                fields={
+                    "field": serializers.CharField(),
+                    "count": serializers.IntegerField(),
+                },
+            ),
+        },
+    )
     def post(self, request: Request) -> Response:
         field = (request.data or {}).get("field")
         if not field or field not in UserPersonalContextFieldDeleteView._FIELD_DEFAULTS:
