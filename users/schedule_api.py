@@ -11,6 +11,7 @@ import logging
 from datetime import date, timedelta
 
 from django.conf import settings
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import permissions, serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -128,6 +129,31 @@ class TimeOffCreateSerializer(serializers.Serializer):
 
 
 # ---------------------------------------------------------------------------
+# Response serializer fields (for OpenAPI hints only; not used for parsing)
+# ---------------------------------------------------------------------------
+
+
+_WORKING_HOURS_RESPONSE_FIELDS = {
+    "day_of_week": serializers.IntegerField(),
+    "day_name": serializers.CharField(),
+    "is_working_day": serializers.BooleanField(),
+    "start_time": serializers.CharField(allow_null=True),
+    "end_time": serializers.CharField(allow_null=True),
+    "break_start": serializers.CharField(allow_null=True),
+    "break_end": serializers.CharField(allow_null=True),
+}
+
+
+_TIME_OFF_RESPONSE_FIELDS = {
+    "id": serializers.UUIDField(),
+    "start_at": serializers.DateTimeField(),
+    "end_at": serializers.DateTimeField(),
+    "reason": serializers.CharField(allow_blank=True),
+    "created_at": serializers.DateTimeField(),
+}
+
+
+# ---------------------------------------------------------------------------
 # Response formatters
 # ---------------------------------------------------------------------------
 
@@ -166,6 +192,7 @@ class ScheduleView(APIView):
     Pro app only. Requires role=specialist.
     """
     permission_classes = [permissions.IsAuthenticated, IsSpecialist]
+    serializer_class = SchedulePutSerializer
 
     def _get_specialist(self, request: Request):
         try:
@@ -173,6 +200,16 @@ class ScheduleView(APIView):
         except Exception:
             return None
 
+    @extend_schema(
+        responses={
+            200: inline_serializer(
+                name="ScheduleGetResponseItem",
+                fields=_WORKING_HOURS_RESPONSE_FIELDS,
+                many=True,
+            ),
+            404: OpenApiResponse(description="Specialist profile not found"),
+        },
+    )
     def get(self, request: Request) -> Response:
         specialist = self._get_specialist(request)
         if not specialist:
@@ -206,6 +243,17 @@ class ScheduleView(APIView):
 
         return success_response(result)
 
+    @extend_schema(
+        request=SchedulePutSerializer,
+        responses={
+            200: inline_serializer(
+                name="SchedulePutResponseItem",
+                fields=_WORKING_HOURS_RESPONSE_FIELDS,
+                many=True,
+            ),
+            404: OpenApiResponse(description="Specialist profile not found"),
+        },
+    )
     def put(self, request: Request) -> Response:
         specialist = self._get_specialist(request)
         if not specialist:
@@ -244,6 +292,17 @@ class ScheduleView(APIView):
         )
         return success_response([_wh_to_dict(wh) for wh in hours])
 
+    @extend_schema(
+        request=SchedulePatchSerializer,
+        responses={
+            200: inline_serializer(
+                name="SchedulePatchResponseItem",
+                fields=_WORKING_HOURS_RESPONSE_FIELDS,
+                many=True,
+            ),
+            404: OpenApiResponse(description="Specialist profile not found"),
+        },
+    )
     def patch(self, request: Request) -> Response:
         specialist = self._get_specialist(request)
         if not specialist:
@@ -295,6 +354,7 @@ class TimeOffListView(APIView):
     POST checks for active appointments before allowing the block.
     """
     permission_classes = [permissions.IsAuthenticated, IsSpecialist]
+    serializer_class = TimeOffCreateSerializer
 
     def _get_specialist(self, request: Request):
         try:
@@ -302,6 +362,16 @@ class TimeOffListView(APIView):
         except Exception:
             return None
 
+    @extend_schema(
+        responses={
+            200: inline_serializer(
+                name="TimeOffListResponseItem",
+                fields=_TIME_OFF_RESPONSE_FIELDS,
+                many=True,
+            ),
+            404: OpenApiResponse(description="Specialist profile not found"),
+        },
+    )
     def get(self, request: Request) -> Response:
         specialist = self._get_specialist(request)
         if not specialist:
@@ -320,6 +390,17 @@ class TimeOffListView(APIView):
 
         return success_response([_to_to_dict(to) for to in qs])
 
+    @extend_schema(
+        request=TimeOffCreateSerializer,
+        responses={
+            201: inline_serializer(
+                name="TimeOffCreateResponse",
+                fields=_TIME_OFF_RESPONSE_FIELDS,
+            ),
+            404: OpenApiResponse(description="Specialist profile not found"),
+            409: OpenApiResponse(description="Active appointments overlap this period"),
+        },
+    )
     def post(self, request: Request) -> Response:
         specialist = self._get_specialist(request)
         if not specialist:
@@ -366,6 +447,7 @@ class TimeOffDetailView(APIView):
     DELETE /api/v1/specialists/me/time-off/{id}/  — Remove time-off block
     """
     permission_classes = [permissions.IsAuthenticated, IsSpecialist]
+    serializer_class = TimeOffCreateSerializer
 
     def _get_specialist(self, request: Request):
         try:
@@ -373,6 +455,13 @@ class TimeOffDetailView(APIView):
         except Exception:
             return None
 
+    @extend_schema(
+        request=None,
+        responses={
+            204: None,
+            404: OpenApiResponse(description="Time-off or specialist profile not found"),
+        },
+    )
     def delete(self, request: Request, pk) -> Response:
         specialist = self._get_specialist(request)
         if not specialist:

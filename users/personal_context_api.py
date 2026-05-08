@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from drf_spectacular.utils import extend_schema
 from rest_framework import permissions, serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -121,11 +122,17 @@ class PersonalContextView(APIView):
     """
 
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
+    serializer_class = PersonalContextSerializer
 
+    @extend_schema(responses={200: PersonalContextSerializer})
     def get(self, request: Request) -> Response:
         ctx = self._get_or_default(request.user)
         return success_response(PersonalContextSerializer(ctx).data)
 
+    @extend_schema(
+        request=PersonalContextSerializer,
+        responses={200: PersonalContextSerializer},
+    )
     def patch(self, request: Request) -> Response:
         ctx, _ = UserPersonalContext.objects.get_or_create(user=request.user)
         serializer = PersonalContextSerializer(
