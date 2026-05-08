@@ -80,6 +80,16 @@ class AIChatView(APIView):
 
     chat_service_class = ChatService
 
+    @extend_schema(
+        operation_id="ai_chat_send",
+        request=ChatRequestSerializer,
+        responses={200: MessageSerializer},
+        description=(
+            "Send a message to the AI assistant. Returns the assistant's "
+            "reply and an optional `action` payload (e.g. specialist "
+            "carousel) for the mobile client to render."
+        ),
+    )
     def post(self, request: Request) -> Response:
         serializer = ChatRequestSerializer(data=request.data)
         if not serializer.is_valid():
@@ -154,6 +164,16 @@ class AIChatActionView(APIView):
 
     action_service_class = ActionService
 
+    @extend_schema(
+        operation_id="ai_chat_action_execute",
+        request=ActionRequestSerializer,
+        responses={200: MessageSerializer},
+        description=(
+            "Execute a confirmed UI action (book, reschedule, cancel) "
+            "inside an AI conversation. Returns the assistant's follow-up "
+            "message plus optional `appointment` / `next_action` payload."
+        ),
+    )
     def post(self, request: Request, conversation_id: UUID) -> Response:
         conversation = (
             Conversation.objects.filter(id=conversation_id, is_active=True).first()
@@ -232,7 +252,11 @@ class ConversationListView(APIView):
     permission_classes = [permissions.IsAuthenticated, IsClientApp]
     pagination_class = _ConversationsPagination
 
-    @extend_schema(operation_id="ai_conversations_list")
+    @extend_schema(
+        operation_id="ai_conversations_list",
+        responses={200: ConversationListItemSerializer(many=True)},
+        description="List the authenticated user's AI conversations, newest first.",
+    )
     def get(self, request: Request) -> Response:
         if getattr(request.user, "is_guest", False):
             return error_response(
@@ -276,7 +300,11 @@ class ConversationDetailView(APIView):
         ).first()
         return conv
 
-    @extend_schema(operation_id="ai_conversations_retrieve")
+    @extend_schema(
+        operation_id="ai_conversations_retrieve",
+        responses={200: ConversationDetailSerializer, 404: None},
+        description="Fetch a single AI conversation including its message history.",
+    )
     def get(self, request: Request, conversation_id: UUID) -> Response:
         conv = self._get_owned(request, conversation_id)
         if conv is None:
@@ -288,6 +316,11 @@ class ConversationDetailView(APIView):
         data = ConversationDetailSerializer(conv).data
         return success_response(data)
 
+    @extend_schema(
+        operation_id="ai_conversations_destroy",
+        responses={204: None, 404: None},
+        description="Soft-delete a conversation (sets is_active=False).",
+    )
     def delete(self, request: Request, conversation_id: UUID) -> Response:
         conv = self._get_owned(request, conversation_id)
         if conv is None:
