@@ -81,13 +81,24 @@ jobs:
             # Strip __pycache__/.pyc on host so we don't ship stale
             # bytecode into the container.
             find ./tenants ./users ./services ./reviews ./appointments \
-                 ./nutrition ./ai ./djangoProject \
+                 ./nutrition ./ai ./djangoProject ./analytics \
+                 ./notifications ./payments ./search \
               -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 
             echo "=== docker cp host → container (sync source) ==="
             # Trailing /. = "copy contents of src into dst" (overwrite),
             # not creating dst/<src-basename>/. Same gotcha as
             # smoke-on-dev.yml.
+            #
+            # Why all 12 app dirs even though backfill_tenants only
+            # imports models from tenants/users/ai/nutrition/appointments/
+            # services/reviews: Django's ``INSTALLED_APPS`` startup
+            # imports every app, including the four where the running
+            # image lags (analytics/notifications/payments/search).
+            # If a future signal handler in one of those apps reacts to
+            # a save we trigger from backfill, the stale container code
+            # would mis-handle it. Aligning to the canonical sync block
+            # (mirrors verify-schema-on-dev.yml) avoids that drift.
             docker compose cp ./tenants/.       web:/app/tenants
             docker compose cp ./users/.         web:/app/users
             docker compose cp ./services/.      web:/app/services
@@ -96,6 +107,13 @@ jobs:
             docker compose cp ./nutrition/.     web:/app/nutrition
             docker compose cp ./ai/.            web:/app/ai
             docker compose cp ./djangoProject/. web:/app/djangoProject
+            # Apps added 2026-05-08 (DRF-242.8 follow-up) — not in the
+            # running image, mkdir first so docker cp doesn't no-op.
+            docker compose exec -T web mkdir -p /app/analytics /app/notifications /app/payments /app/search
+            docker compose cp ./analytics/.     web:/app/analytics
+            docker compose cp ./notifications/. web:/app/notifications
+            docker compose cp ./payments/.      web:/app/payments
+            docker compose cp ./search/.        web:/app/search
             echo
 
             echo "=== ensure ayla-ai-core is installed in running container ==="
