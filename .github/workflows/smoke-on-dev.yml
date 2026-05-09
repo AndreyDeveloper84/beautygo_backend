@@ -87,21 +87,39 @@ jobs:
             #
             # Strip __pycache__/.pyc on the host side first so we don't
             # ship stale bytecode into the container.
-            find ./nutrition ./djangoProject ./ai ./tenants ./analytics \
+            find ./tenants ./users ./services ./reviews ./appointments \
+                 ./nutrition ./ai ./djangoProject ./analytics \
+                 ./notifications ./payments ./search \
               -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
             # Trailing /. means "copy contents of src into dst" (overwrite
             # dst's contents). Without it, when dst exists as a dir docker
             # cp creates dst/<src-basename>/ instead — last run silently
             # produced /app/nutrition/nutrition/tests/smoke/ rather than
             # overwriting /app/nutrition/.
-            docker compose cp ./nutrition/.     web:/app/nutrition
-            docker compose cp ./djangoProject/. web:/app/djangoProject
-            docker compose cp ./ai/.            web:/app/ai
+            #
+            # Why all 12 app dirs (canonical sync block, mirrors
+            # backfill-tenants-on-dev / verify-schema-on-dev): smoke
+            # tests focus on nutrition surface, but Django startup
+            # imports every app in INSTALLED_APPS. A stale notifications/
+            # payments/search/users/services/reviews/appointments
+            # in the lagging image can trip startup on cross-app signal
+            # handlers / model relations. Aligning the three workflows
+            # avoids drift.
             docker compose cp ./tenants/.       web:/app/tenants
-            # `analytics/` doesn't exist in the running image — create
-            # the dir before cp'ing into it (cp -L wouldn't help).
-            docker compose exec -T web mkdir -p /app/analytics
+            docker compose cp ./users/.         web:/app/users
+            docker compose cp ./services/.      web:/app/services
+            docker compose cp ./reviews/.       web:/app/reviews
+            docker compose cp ./appointments/.  web:/app/appointments
+            docker compose cp ./nutrition/.     web:/app/nutrition
+            docker compose cp ./ai/.            web:/app/ai
+            docker compose cp ./djangoProject/. web:/app/djangoProject
+            # Apps not present in the lagging image — mkdir first so
+            # docker cp doesn't no-op (cp -L wouldn't help).
+            docker compose exec -T web mkdir -p /app/analytics /app/notifications /app/payments /app/search
             docker compose cp ./analytics/.     web:/app/analytics
+            docker compose cp ./notifications/. web:/app/notifications
+            docker compose cp ./payments/.      web:/app/payments
+            docker compose cp ./search/.        web:/app/search
             echo
 
             echo "=== ensure ayla-ai-core is installed in running container ==="
