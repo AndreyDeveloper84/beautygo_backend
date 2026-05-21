@@ -213,6 +213,62 @@ class TestBookingConfirmedEmit:
         assert evt.data["booking_id"] == str(appt.id)
         assert evt.data["payment_id"] == str(payment.id)
 
+    def test_duplicate_webhook_does_not_double_emit(
+        self, client_user, specialist, service,
+    ):
+        """YooKassa may redeliver the same webhook event_id under
+        flaky network conditions. The pre-existing last_webhook_event_id
+        dedupe (payments/views.py:393) returns 200 'duplicate' WITHOUT
+        opening the outer transaction.atomic. So a duplicate must not
+        produce a second booking.confirmed row. Without this regression
+        pin, a future refactor that moves the dedupe check inside the
+        atomic block would silently double bot-platform memory updates.
+        """
+        appt, payment = _confirmed_appointment(client_user, specialist, service)
+        appt.status = Appointment.Status.AWAITING_PAYMENT
+        appt.save(update_fields=["status"])
+        payment.status = Payment.Status.PENDING
+        payment.provider_payment_id = "wh_dupe_509"
+        payment.save(update_fields=["status", "provider_payment_id"])
+
+        mock_info = {
+            "provider_payment_id": "wh_dupe_509",
+            "status": "waiting_for_capture",
+            "amount": str(payment.amount),
+        }
+        body = {
+            "event": "payment.waiting_for_capture",
+            "object": {"id": "wh_dupe_509"},
+        }
+        anon = APIClient()
+        with patch(
+            "payments.views._get_yookassa",
+            return_value=MagicMock(
+                get_payment_info=MagicMock(return_value=mock_info),
+            ),
+        ):
+            # First delivery — emits.
+            r1 = anon.post("/api/v1/payments/webhook/", body, format="json")
+            assert r1.status_code == 200
+
+            # Bump last_webhook_event_id to mimic the dedupe-key write
+            # the first call did. (Actual code path: write happens at
+            # payments/views.py around line 437.)
+            payment.refresh_from_db()
+            assert payment.last_webhook_event_id  # populated by first call
+
+            # Second delivery — same payload, dedupe trips.
+            r2 = anon.post("/api/v1/payments/webhook/", body, format="json")
+            assert r2.status_code == 200
+
+        events = OutboxEvent.objects.filter(
+            topic=OutboxEvent.Topic.BOOKING_CONFIRMED,
+        )
+        assert events.count() == 1, (
+            "Duplicate webhook produced a second booking.confirmed row — "
+            "dedupe path regressed."
+        )
+
 
 # --- Acceptance #3 — every booking-domain Topic has an emit path -----
 
