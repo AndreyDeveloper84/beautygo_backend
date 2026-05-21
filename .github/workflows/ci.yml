@@ -12,6 +12,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Guard against tracked db.sqlite3
+        # Per issue #420 / Phase 0 Bucket 3: db.sqlite3 is a dev artifact
+        # and must not be re-added to git. Fail the PR if any sqlite dev DB
+        # shows up in the tracked tree (covers -journal/-wal/-shm too).
+        run: |
+          matches=$(git ls-files | grep -E '(^|/)db\.sqlite3(-(journal|wal|shm))?$' || true)
+          if [ -n "$matches" ]; then
+            echo "::error::db.sqlite3 must not be tracked. See issue #420 and .gitignore."
+            echo "Offending paths:"
+            echo "$matches"
+            exit 1
+          fi
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
