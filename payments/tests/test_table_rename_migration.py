@@ -48,7 +48,11 @@ class TestPaymentTableRenameMigration:
         executor.migrate([(app, target)])
 
     def test_forward_renames_to_payments_payment(self):
-        # Start from the just-before-rename state.
+        # Rewind payments only — appointments stays at 0006 with Payment
+        # already removed from its state. Both apps "see" Payment over
+        # the appointments_payment table for the duration of the test,
+        # which is fine here because the assertions only inspect raw
+        # Postgres catalog (to_regclass), not Django ProjectState.
         self._migrate("payments", "0001_initial")
         assert _table_exists("appointments_payment")
         assert not _table_exists("payments_payment")
@@ -69,8 +73,9 @@ class TestPaymentTableRenameMigration:
         assert _table_exists("appointments_payment")
         assert not _table_exists("payments_payment")
 
-        # Re-apply so the next test in the class (and any teardown
-        # fixture that pokes the Payment table) sees the canonical
-        # post-PR-2 state. Without this, ordering between the two
-        # test methods becomes load-bearing.
+        # Belt + suspenders — pytest-django's transaction=True rollback
+        # would restore the canonical state anyway, but re-applying
+        # keeps the assertion line above (line 70) the last thing the
+        # reader's eye lands on instead of an unwind that could be
+        # mistaken for the test's main behaviour.
         self._migrate("payments", "0002_rename_table")
