@@ -126,38 +126,52 @@ logs-web:
 # lives in #421 — until that PR lands, these targets require the file to be
 # present locally. CI / VPS deploy never invokes these targets.
 
+# Preflight: bail out with a guiding message instead of docker's
+# generic "no such file or directory" when docker-compose.dev.yml is
+# missing (e.g. when this branch lands before PR #128/#421).
+.PHONY: _check-dev-compose
+_check-dev-compose:
+	@test -f docker-compose.dev.yml || { \
+	  echo "ERROR: docker-compose.dev.yml missing — needs PR #128 (#421) merged."; \
+	  exit 1; \
+	}
+
 .PHONY: up-dev
-up-dev:
+up-dev: _check-dev-compose
 	$(DC_DEV) up -d
 
 .PHONY: down-dev
-down-dev:
+down-dev: _check-dev-compose
 	$(DC_DEV) down
 
 # `make worker` brings up celery_worker (recreating it so a settings or
 # env change is picked up) and then tails its logs in the same shell. Ctrl-C
 # detaches from the log stream — the container keeps running until `down`.
+#
+# NOTE: --force-recreate stops the running container, so any in-flight
+# task without acks_late=True will be lost on SIGTERM. Acceptable for
+# local dev; never use this pattern in prod.
 .PHONY: worker
-worker:
+worker: _check-dev-compose
 	$(DC_DEV) up -d --force-recreate celery_worker
 	$(DC_DEV) logs -f celery_worker
 
 .PHONY: beat
-beat:
+beat: _check-dev-compose
 	$(DC_DEV) up -d --force-recreate celery_beat
 	$(DC_DEV) logs -f celery_beat
 
 .PHONY: logs-worker
-logs-worker:
+logs-worker: _check-dev-compose
 	$(DC_DEV) logs -f celery_worker
 
 .PHONY: logs-beat
-logs-beat:
+logs-beat: _check-dev-compose
 	$(DC_DEV) logs -f celery_beat
 
 # Sanity check the running worker actually answers Celery's inspect protocol.
-# Requires `make up-dev` (or at least `make worker`) running. Output should
-# list the worker's hostname under "OK".
+# Requires `make up-dev` (or at least `make worker`) running. --timeout 5
+# so it fails fast if Redis is down instead of hanging on broker discovery.
 .PHONY: celery-ping
-celery-ping:
-	$(DC_DEV) exec celery_worker celery -A djangoProject inspect ping
+celery-ping: _check-dev-compose
+	$(DC_DEV) exec celery_worker celery -A djangoProject inspect ping --timeout 5
