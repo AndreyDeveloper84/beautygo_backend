@@ -7,13 +7,18 @@ no worker. Real-Redis end-to-end coverage is opt-in via the
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
 
 from appointments.models import OutboxEvent
-from appointments.tasks import EVENT_HANDLERS, dispatch_outbox_events
+from appointments.tasks import (
+    EVENT_HANDLERS,
+    LAG_ALERT_THRESHOLD,
+    dispatch_outbox_events,
+)
 
 
 @pytest.mark.django_db
@@ -122,6 +127,63 @@ class TestDispatchOutboxEvents:
         assert first.processed_at is not None
         assert second.processed_at is not None
         assert first.processed_at <= second.processed_at
+
+
+@pytest.mark.django_db
+class TestLagAlert:
+    """The dispatcher logs ERROR when the oldest pending row is older than
+    LAG_ALERT_THRESHOLD. Sentry captures the ERROR and pages on-call.
+
+    Patching the module logger directly (instead of pytest's caplog) is
+    deliberate: settings/base.py LOGGING sets ``propagate=False`` on the
+    ``appointments`` logger so it can route to its own handler chain,
+    which means caplog's root-attached handler never receives records.
+    Spying on the logger object is the supported way to assert against
+    this code path.
+    """
+
+    def test_no_alert_when_queue_empty(self):
+        with patch("appointments.tasks.logger") as mock_logger:
+            dispatch_outbox_events()
+        # Empty queue → no lag-check log. (info / debug calls may fire
+        # in other branches; assert specifically no error.)
+        assert not mock_logger.error.called
+
+    def test_no_alert_when_pending_row_is_young(self):
+        OutboxEvent.objects.create(
+            topic="nonexistent.no_handler",  # stays pending — failed
+            payload={},
+        )
+        with patch("appointments.tasks.logger") as mock_logger:
+            dispatch_outbox_events()
+        # No 'outbox.lag_breach' error — the row is fresh.
+        lag_calls = [
+            c for c in mock_logger.error.call_args_list
+            if c.args and "outbox.lag_breach" in c.args[0]
+        ]
+        assert lag_calls == []
+
+    def test_alert_fires_for_old_pending_row(self):
+        # Create a row, then back-date created_at past the threshold.
+        # The lag SLO is about oldest unprocessed — pre-date the row to
+        # simulate a worker that hasn't drained the queue for >5 min.
+        event = OutboxEvent.objects.create(
+            topic="nonexistent.no_handler",
+            payload={},
+        )
+        OutboxEvent.objects.filter(pk=event.pk).update(
+            created_at=timezone.now() - LAG_ALERT_THRESHOLD - timedelta(seconds=30),
+        )
+        with patch("appointments.tasks.logger") as mock_logger:
+            dispatch_outbox_events()
+        lag_calls = [
+            c for c in mock_logger.error.call_args_list
+            if c.args and "outbox.lag_breach" in c.args[0]
+        ]
+        assert len(lag_calls) == 1, (
+            f"expected exactly one outbox.lag_breach ERROR, "
+            f"got error calls: {mock_logger.error.call_args_list}"
+        )
 
 
 @pytest.mark.django_db
