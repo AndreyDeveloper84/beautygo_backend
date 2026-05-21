@@ -403,6 +403,23 @@ class PaymentWebhookView(APIView):
                 payment.status = Payment.Status.AUTHORIZED
                 payment.appointment.status = Appointment.Status.CONFIRMED
                 payment.appointment.save(update_fields=['status'])
+                # booking.confirmed emit — payment hold is the only path
+                # in this codebase that moves an appointment to CONFIRMED.
+                # Without this emit, bot-platform memory drifts: AI keeps
+                # answering "your booking is awaiting payment" days after
+                # the hold landed. See ai-bot-platform#509.
+                from appointments.infrastructure.outbox import emit_outbox_event
+                emit_outbox_event(
+                    topic=OutboxEvent.Topic.BOOKING_CONFIRMED,
+                    data={
+                        'booking_id': str(payment.appointment_id),
+                        'client_id': str(payment.appointment.client_id),
+                        'specialist_id': str(payment.appointment.specialist_id),
+                        'payment_id': str(payment.id),
+                    },
+                    user_id=payment.appointment.client_id,
+                    actor="system",  # webhook-driven, no human in the loop
+                )
 
             elif event == 'payment.succeeded' and yookassa_status == 'succeeded':
                 payment.status = Payment.Status.PAID

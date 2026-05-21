@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from django.db.models import QuerySet
 from drf_spectacular.utils import extend_schema
 from rest_framework import permissions, viewsets
@@ -236,7 +237,25 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 "NOT_FOUND", "Appointment not found.", status_code=404,
             )
         try:
-            appointment.complete()
+            # Atomic: state flip + envelope emit must commit together so
+            # the dispatcher can't pick up a row that references state
+            # which never landed. Matches the pattern in
+            # CreateBookingService._execute_atomic.
+            with transaction.atomic():
+                appointment.complete()
+                from appointments.infrastructure.outbox import emit_outbox_event
+                emit_outbox_event(
+                    topic="booking.completed",
+                    data={
+                        "booking_id": str(appointment.id),
+                        "client_id": str(appointment.client_id),
+                        "specialist_id": str(appointment.specialist_id),
+                    },
+                    user_id=request.user.id,
+                    # Specialist-initiated; per ADR-0009 actor mapping
+                    # (specialist → 'admin', client → 'user').
+                    actor="admin",
+                )
         except DjangoValidationError as e:
             return error_response(
                 "INVALID_STATUS", str(e.message), status_code=422,
