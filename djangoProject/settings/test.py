@@ -9,6 +9,14 @@ that gives the same behaviour for unit-test purposes:
 - ``CELERY_TASK_ALWAYS_EAGER = True`` runs every @shared_task call
   synchronously in the caller's process — no broker, no worker.
 
+DATABASES is inherited from dev.py — Postgres since #422. Pytest-django
+creates ``test_<POSTGRES_DB>`` on first run from the same credentials.
+The CI workflow (.github/workflows/ci.yml) provisions a Postgres 16
+service container and passes the matching POSTGRES_* env vars. Locally,
+the developer must boot the compose `db` service first
+(`docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db`)
+or run a sibling Postgres on localhost:5432.
+
 Integration tests that need real Redis can override via env or use the
 ``@pytest.mark.integration`` marker (skipped by default).
 """
