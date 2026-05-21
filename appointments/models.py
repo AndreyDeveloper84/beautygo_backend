@@ -2,12 +2,10 @@
 from __future__ import annotations
 
 import uuid
-from decimal import Decimal
 from typing import Any
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.core.validators import MinValueValidator
 from django.db import models
 
 from .domain.value_objects import (
@@ -331,79 +329,9 @@ class SpecialistTimeOff(models.Model):
         return f"{self.specialist} — {self.start_at:%Y-%m-%d} - {self.end_at:%Y-%m-%d}"
 
 
-# ---------------------------------------------------------------------------
-# Payment — payment records linked to appointments
-# ---------------------------------------------------------------------------
-
-class Payment(models.Model):
-    """Payment record for an appointment."""
-
-    class Status(models.TextChoices):
-        PENDING = "pending", "Ожидает"
-        AUTHORIZED = "authorized", "Авторизован"
-        PAID = "paid", "Оплачен"
-        FAILED = "failed", "Ошибка"
-        REFUNDED = "refunded", "Возвращён"
-        PARTIALLY_REFUNDED = "partially_refunded", "Частичный возврат"
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    appointment = models.ForeignKey(
-        Appointment,
-        on_delete=models.PROTECT,
-        related_name='payments',
-    )
-
-    # Financial fields
-    amount = models.DecimalField(
-        max_digits=10, decimal_places=2,
-        validators=[MinValueValidator(Decimal("0.01"))],
-    )
-    status = models.CharField(
-        max_length=25,
-        choices=Status.choices,
-        default=Status.PENDING,
-    )
-    specialist_income = models.DecimalField(
-        max_digits=10, decimal_places=2, default=0,
-    )
-    platform_fee = models.DecimalField(
-        max_digits=10, decimal_places=2, default=0,
-    )
-    refunded_amount = models.DecimalField(
-        max_digits=10, decimal_places=2, default=0,
-    )
-
-    # Provider integration
-    provider = models.CharField(max_length=50, blank=True, default="")
-    provider_payment_id = models.CharField(
-        max_length=200, blank=True, default="", db_index=True,
-    )
-    provider_client_secret = models.CharField(
-        max_length=500, blank=True, default="",
-    )
-
-    # Webhook idempotency
-    last_webhook_event_id = models.CharField(
-        max_length=200, blank=True, default="",
-    )
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        verbose_name = 'Платёж'
-        verbose_name_plural = 'Платежи'
-        indexes = [
-            models.Index(fields=['appointment'], name='payment_appointment_idx'),
-        ]
-
-    @property
-    def net_amount(self):
-        """Amount after refunds."""
-        return self.amount - self.refunded_amount
-
-    def __str__(self) -> str:
-        return f"Payment {self.id} — {self.amount} ({self.status})"
+# Payment used to live here. Moved to `payments.models.Payment` in
+# issue #426 (Phase 0 Bucket 5). Import from `payments.models` directly;
+# don't re-export here to keep ownership unambiguous.
 
 
 # ---------------------------------------------------------------------------

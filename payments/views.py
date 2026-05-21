@@ -15,7 +15,8 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from appointments.models import Appointment, OutboxEvent, Payment
+from appointments.models import Appointment, OutboxEvent
+from payments.models import Payment
 from users.permissions import IsClient
 from users.response import error_response, success_response
 
