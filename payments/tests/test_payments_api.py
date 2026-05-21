@@ -400,8 +400,9 @@ class TestPaymentWebhook:
             topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
         )
         assert events.count() == 1
-        assert events.first().payload['payment_id'] == str(payment.id)
-        assert events.first().payload['appointment_id'] == str(payment.appointment_id)
+        # Post-#486 envelope wraps domain fields under .data.
+        assert events.first().data['payment_id'] == str(payment.id)
+        assert events.first().data['appointment_id'] == str(payment.appointment_id)
 
     def test_webhook_payment_canceled(self, anon_app, client_user, specialist_user, service):
         payment, appt = self._create_payment_with_appointment(client_user, specialist_user, service)
@@ -483,8 +484,9 @@ class TestPaymentWebhook:
         )
         assert events.count() == 1
         evt = events.first()
-        assert evt.payload['payment_id'] == str(payment.id)
-        assert evt.payload['is_partial'] is False
+        # Post-#486 envelope wraps domain fields under .data.
+        assert evt.data['payment_id'] == str(payment.id)
+        assert evt.data['is_partial'] is False
 
     def test_webhook_partial_refund_marks_outbox_partial(
         self, anon_app, client_user, specialist_user, service,
@@ -520,7 +522,7 @@ class TestPaymentWebhook:
         evt = OutboxEvent.objects.get(
             topic=OutboxEvent.Topic.PAYMENT_REFUNDED,
         )
-        assert evt.payload['is_partial'] is True
+        assert evt.data['is_partial'] is True
 
     def test_webhook_unknown_payment(self, anon_app):
         response = anon_app.post(WEBHOOK_URL, {

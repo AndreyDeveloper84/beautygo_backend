@@ -439,10 +439,15 @@ class PaymentWebhookView(APIView):
 
             # Outbox write inside the same transaction as the Payment
             # update — guarantees event-or-nothing semantics. The
-            # dispatcher beat task picks it up within ~10s.
+            # dispatcher beat task picks it up within ~10s. Envelope
+            # per ADR-0009 §Mandatory event contract — see emit_outbox_event.
             if outbox_topic is not None:
-                OutboxEvent.objects.create(
-                    topic=outbox_topic, payload=outbox_payload,
+                from appointments.infrastructure.outbox import emit_outbox_event
+                emit_outbox_event(
+                    topic=outbox_topic,
+                    data=outbox_payload,
+                    user_id=payment.appointment.client_id,
+                    actor="system",  # webhook-driven, no human in the loop
                 )
 
         logger.info('Webhook processed: event=%s payment=%s', event, payment.id)
@@ -539,14 +544,17 @@ class PaymentRefundView(APIView):
             # Refund initiated by the client (or admin) — fire the same
             # PAYMENT_REFUNDED topic as the webhook path so notification
             # handlers don't care about the trigger source.
-            OutboxEvent.objects.create(
+            from appointments.infrastructure.outbox import emit_outbox_event
+            emit_outbox_event(
                 topic=OutboxEvent.Topic.PAYMENT_REFUNDED,
-                payload={
+                data={
                     'payment_id': str(payment.id),
                     'appointment_id': str(payment.appointment_id),
                     'amount': str(refund_amount),
                     'is_partial': is_partial,
                 },
+                user_id=request.user.id,
+                actor="user",
             )
 
         logger.info(
