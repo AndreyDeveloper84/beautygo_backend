@@ -1,6 +1,8 @@
-# BeautyGO Backend
+# Ayla Backend
 
-REST API для платформы бронирования бьюти-услуг BeautyGO.
+REST API для платформы бронирования бьюти-услуг **Ayla** (booking + payments + catalog backend half of the Ayla product, per ADR-0009).
+
+> Repository name `beautygo_backend` and infrastructure hostnames (gobeauty.site, minio bucket `beautygo-media`, Postgres DB `beautygo`) **stay unchanged** for now — see the [domain decision deferred to Phase 1+](docs/architecture/ADR-0009-split-domain.md) and the per-Option-1 scope note in commit history (Bucket 2 / #418).
 
 ## Architecture
 
