@@ -413,40 +413,19 @@ class PaymentWebhookView(APIView):
             if payment.last_webhook_event_id == event_id:
                 return Response({'status': 'duplicate'}, status=200)
 
-            # Defer all emits to AFTER payment.save() so the
+            # Phase 1: state mutations per event branch. No emits here
+            # — defer all emits to AFTER payment.save() so the
             # OutboxEvent.created_at is causally after the row commit
-            # (adversarial review N5). Each entry: (topic, data_dict).
-            pending_emits: list[tuple[str, dict]] = []
+            # (adversarial review N5).
+            refunded_val = None  # carried across phases for refund branch.
 
             if event == 'payment.waiting_for_capture' and yookassa_status == 'waiting_for_capture':
                 payment.status = Payment.Status.AUTHORIZED
                 payment.appointment.status = Appointment.Status.CONFIRMED
                 payment.appointment.save(update_fields=['status'])
-                # booking.confirmed emit — payment hold is the only
-                # path in this codebase that moves an appointment to
-                # CONFIRMED. Without it, bot-platform memory drifts
-                # ("your booking is awaiting payment" days after the
-                # hold landed). See ai-bot-platform#509.
-                pending_emits.append((
-                    OutboxEvent.Topic.BOOKING_CONFIRMED,
-                    {
-                        'booking_id': str(payment.appointment_id),
-                        'client_id': str(payment.appointment.client_id),
-                        'specialist_id': str(payment.appointment.specialist_id),
-                        'payment_id': str(payment.id),
-                    },
-                ))
 
             elif event == 'payment.succeeded' and yookassa_status == 'succeeded':
                 payment.status = Payment.Status.PAID
-                pending_emits.append((
-                    OutboxEvent.Topic.PAYMENT_CONFIRMED,
-                    {
-                        'payment_id': str(payment.id),
-                        'appointment_id': str(payment.appointment_id),
-                        'amount': str(payment.amount),
-                    },
-                ))
 
             elif event == 'payment.canceled' and yookassa_status == 'canceled':
                 payment.status = Payment.Status.FAILED
@@ -461,33 +440,62 @@ class PaymentWebhookView(APIView):
                     payment.status = Payment.Status.REFUNDED
                 else:
                     payment.status = Payment.Status.PARTIALLY_REFUNDED
-                pending_emits.append((
-                    OutboxEvent.Topic.PAYMENT_REFUNDED,
-                    {
+
+            payment.last_webhook_event_id = event_id
+            payment.save()
+
+            # Phase 2: emits with explicit topic constants so the
+            # AST-walking coverage test in
+            # appointments/tests/test_state_emit_coverage_509.py can
+            # statically verify every topic has an emit site. Same
+            # `event` branching as Phase 1, deliberately verbose to
+            # keep the topic visible to AST.
+            tenant_id = safe_tenant_id(
+                payment.appointment, context="payments.webhook",
+            )
+            client_id = payment.appointment.client_id
+
+            if event == 'payment.waiting_for_capture' and yookassa_status == 'waiting_for_capture':
+                # booking.confirmed — payment hold is the only path in
+                # this codebase that moves an appointment to CONFIRMED.
+                # Without this emit, bot-platform memory drifts ("your
+                # booking is awaiting payment" days after hold landed).
+                emit_outbox_event(
+                    topic=OutboxEvent.Topic.BOOKING_CONFIRMED,
+                    data={
+                        'booking_id': str(payment.appointment_id),
+                        'client_id': str(client_id),
+                        'specialist_id': str(payment.appointment.specialist_id),
+                        'payment_id': str(payment.id),
+                    },
+                    user_id=client_id,
+                    tenant_id=tenant_id,
+                    actor="system",
+                )
+            elif event == 'payment.succeeded' and yookassa_status == 'succeeded':
+                emit_outbox_event(
+                    topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
+                    data={
+                        'payment_id': str(payment.id),
+                        'appointment_id': str(payment.appointment_id),
+                        'amount': str(payment.amount),
+                    },
+                    user_id=client_id,
+                    tenant_id=tenant_id,
+                    actor="system",
+                )
+            elif event == 'refund.succeeded':
+                emit_outbox_event(
+                    topic=OutboxEvent.Topic.PAYMENT_REFUNDED,
+                    data={
                         'payment_id': str(payment.id),
                         'appointment_id': str(payment.appointment_id),
                         'amount': str(refunded_val),
                         'is_partial': refunded_val < payment.amount,
                     },
-                ))
-
-            payment.last_webhook_event_id = event_id
-            payment.save()
-
-            # All emits go through emit_outbox_event AFTER payment.save()
-            # so consumers reconstruct the timeline correctly. ADR-0009
-            # envelope (event_id, event_version, tenant_id, …) is added
-            # by the helper.
-            tenant_id = safe_tenant_id(
-                payment.appointment, context="payments.webhook",
-            )
-            for topic, data in pending_emits:
-                emit_outbox_event(
-                    topic=topic,
-                    data=data,
-                    user_id=payment.appointment.client_id,
+                    user_id=client_id,
                     tenant_id=tenant_id,
-                    actor="system",  # webhook-driven, no human in the loop
+                    actor="system",
                 )
 
         logger.info('Webhook processed: event=%s payment=%s', event, payment.id)
