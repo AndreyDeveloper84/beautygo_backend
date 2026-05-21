@@ -6,6 +6,6 @@ emit sites were writing bare ``data`` dicts into ``OutboxEvent.payload``
 without the envelope (event_version, event_id, occurred_at, actor,
 correlation_id) required for cross-service consumption.
 """
-from .envelope import build_envelope, emit_outbox_event
+from .envelope import build_envelope, emit_outbox_event, safe_tenant_id
 
-__all__ = ["build_envelope", "emit_outbox_event"]
+__all__ = ["build_envelope", "emit_outbox_event", "safe_tenant_id"]
