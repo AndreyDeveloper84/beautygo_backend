@@ -161,6 +161,38 @@ class SpecialistProfile(models.Model):
     reviews_count = models.PositiveIntegerField(default=0)
     is_available = models.BooleanField(default=True)
 
+    # Booking-source dual mode (#439, ADR-0009 §Booking SoR rule).
+    # 'ayla_local'  — Ayla djangoproject is the system of record. The
+    #                 booking engine queries SpecialistWorkingHours /
+    #                 SpecialistTimeOff in this DB and writes Appointment
+    #                 rows here. No external API call.
+    # 'yclients'    — YClients is the system of record. Ayla fetches
+    #                 slots via the YClients API, creates the booking
+    #                 in YClients, and mirrors the result locally for
+    #                 the state machine. yclients_company_id is the
+    #                 provider's YClients account id.
+    # Default 'ayla_local' is current behaviour for every existing row
+    # (this repo has no YClients integration yet — see #439).
+    # TODO(phase-1.5): if multi-location providers appear, move this
+    # field to a ProviderLocation table per the #439 issue body. For
+    # MVP one source per specialist is enough.
+    class BookingSource(models.TextChoices):
+        AYLA_LOCAL = "ayla_local", "Ayla local DB SoR"
+        YCLIENTS = "yclients", "YClients SoR"
+
+    booking_source = models.CharField(
+        max_length=20,
+        choices=BookingSource.choices,
+        default=BookingSource.AYLA_LOCAL,
+    )
+    yclients_company_id = models.CharField(
+        max_length=64, blank=True, default="",
+        help_text=(
+            "YClients account/company id — required when "
+            "booking_source='yclients', empty otherwise."
+        ),
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
