@@ -1,9 +1,10 @@
 """Payment model — canonical home in the `payments` app.
 
 Moved from `appointments/models.py` per issue #426 (Bucket 5). The
-`db_table` is pinned to the legacy name `appointments_payment` for this
-PR so no data needs to move; a follow-up PR (#426 step 2) renames the
-table to the conventional `payments_payment` via `AlterModelTable`.
+underlying SQL table was renamed `appointments_payment → payments_payment`
+in #492 (`payments/migrations/0002_rename_table.py`). Django now uses
+its default `<app_label>_<modelname>` naming — no `db_table` override
+needed.
 
 ADR-0009 §Domain ownership matrix: payments are an Ayla-canonical domain
 (`payments/` app owns the YooKassa lifecycle). The split-from-appointments
@@ -83,10 +84,10 @@ class Payment(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        # db_table pinned to the legacy name so PR 1 is state-only (no
-        # data move). PR 2 of #426 will drop this and let Django default
-        # to `payments_payment` via `AlterModelTable`.
-        db_table = 'appointments_payment'
+        # Default db_table now resolves to 'payments_payment' via
+        # app_label='payments' + model name 'payment'. The actual SQL
+        # rename was applied in payments/migrations/0002_rename_table.py
+        # (#492).
         verbose_name = 'Платёж'
         verbose_name_plural = 'Платежи'
         indexes = [
