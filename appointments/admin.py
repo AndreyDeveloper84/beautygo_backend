@@ -4,10 +4,11 @@ from __future__ import annotations
 from django.contrib import admin
 from django.utils.html import format_html
 
+from payments.models import Payment
+
 from .models import (
     Appointment,
     OutboxEvent,
-    Payment,
     SpecialistTimeOff,
     SpecialistWorkingHours,
 )

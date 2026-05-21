@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from appointments.models import Payment
+from payments.models import Payment
 
 # Spec PaymentStatus: pending | succeeded | failed | refunded
 # Internal statuses that don't exist in spec are mapped to closest match.
