@@ -4,7 +4,8 @@ Moved from `appointments/models.py` per issue #426 (Bucket 5). The
 underlying SQL table was renamed `appointments_payment → payments_payment`
 in #492 (`payments/migrations/0002_rename_table.py`). Django now uses
 its default `<app_label>_<modelname>` naming — no `db_table` override
-needed.
+needed (and future maintainers shouldn't add one — Django's E028 catches
+duplicate db_table values across models).
 
 ADR-0009 §Domain ownership matrix: payments are an Ayla-canonical domain
 (`payments/` app owns the YooKassa lifecycle). The split-from-appointments
