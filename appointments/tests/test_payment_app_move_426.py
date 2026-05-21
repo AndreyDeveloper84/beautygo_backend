@@ -125,6 +125,9 @@ class TestPaymentCrudAcrossAppMove:
 
         appt = Appointment.objects.get()
         assert appt.payments.count() == 1
+        # Forward + reverse count parity — guards against signals
+        # double-creating rows via a misconfigured cross-app FK.
+        assert Payment.objects.count() == 1
         payment = appt.payments.first()
         # Forward FK works in both directions.
         assert payment.appointment_id == appt.id
