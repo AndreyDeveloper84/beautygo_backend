@@ -1,5 +1,11 @@
 """ADR-0009 §Mandatory event contract — envelope builder + outbox emit helper.
 
+ADR-0009 line 104 specifies `event_id` as a ULID. We use UUID4 instead
+so the value can double as `OutboxEvent.id` (a UUIDField PK) — gives us
+row-PK ↔ envelope-event-id agreement without an extra column. UUIDs and
+ULIDs are both opaque-for-dedupe to consumers; the deviation is documented
+in the PR body for #486 and intentional.
+
 The envelope shape (per ADR-0009):
 
     {
@@ -59,6 +65,9 @@ EVENT_VERSIONS: dict[str, int] = {
 }
 
 
+VALID_ACTORS = frozenset({"system", "user", "admin"})
+
+
 def _coerce_uuid(value: str | UUID | None) -> str | None:
     """Normalise UUID/str/None → str | None. Defensive against callers that
     pass already-stringified ids."""
@@ -100,6 +109,12 @@ def build_envelope(
 
     Returns a dict suitable to assign to ``OutboxEvent.payload`` verbatim.
     """
+    if actor not in VALID_ACTORS:
+        raise ValueError(
+            f"actor must be one of {sorted(VALID_ACTORS)}, got {actor!r}. "
+            "ADR-0009 §Mandatory event contract pins these three values; "
+            "extend VALID_ACTORS deliberately if a fourth ever lands."
+        )
     if event_version is None:
         try:
             event_version = EVENT_VERSIONS[event_name]
@@ -153,6 +168,19 @@ def emit_outbox_event(
     # imports this module's parent package (transitively via the
     # appointments app). Module-level import would deadlock app loading.
     from appointments.models import OutboxEvent
+
+    # Crisp failure at the emit site for a topic typo (e.g.
+    # 'bookings.created' s/'booking.created'). Without this guard, the
+    # ValueError would be raised inside build_envelope deeper in the
+    # call stack, after the @transaction.atomic block has already done
+    # work that's about to be rolled back.
+    valid_topics = {value for value, _label in OutboxEvent.Topic.choices}
+    if topic not in valid_topics:
+        raise ValueError(
+            f"Unknown OutboxEvent.Topic: {topic!r}. "
+            f"Add to OutboxEvent.Topic in appointments/models.py + "
+            f"EVENT_VERSIONS in this module."
+        )
 
     event_id = uuid.uuid4()
     envelope = build_envelope(

@@ -113,10 +113,18 @@ class CancelBookingService:
                 "reason": reason,
             },
             user_id=initiator_user_id,
-            # admin overrides land here too; the initiator_role inside
-            # `data` distinguishes the two so 'user' is the right default
-            # actor for the most common case (client cancel via mobile).
-            actor="admin" if initiator_role == "admin" else "user",
+            # initiator_role contract (see dto.py:36) is the closed set
+            # {client, specialist, system}. Map to ADR-0009 actor:
+            #   client    → 'user'   (client cancels via mobile)
+            #   specialist→ 'admin'  (provider-side action; closer to
+            #                         'admin' than 'user' per ADR-0009
+            #                         §Mandatory event contract)
+            #   system    → 'system' (rare — TTL sweep, batch job, etc.)
+            actor=(
+                "admin" if initiator_role == "specialist"
+                else "system" if initiator_role == "system"
+                else "user"
+            ),
         )
 
 
@@ -153,6 +161,7 @@ class RescheduleBookingService:
             booking_id=dto.booking_id,
             old_start_at=appointment.start_datetime,
             new_interval=new_interval,
+            initiator_role=dto.initiator_role,
         )
 
         logger.info(
@@ -166,6 +175,7 @@ class RescheduleBookingService:
         booking_id,
         old_start_at,
         new_interval: TimeInterval,
+        initiator_role: str = "client",
     ) -> None:
         from appointments.models import Appointment
 
@@ -207,5 +217,11 @@ class RescheduleBookingService:
                 "old_start_at": old_start_at.isoformat(),
             },
             user_id=appointment.client_id,
-            actor="user",
+            # Same actor mapping as the cancel emit above — see that
+            # comment for the rationale.
+            actor=(
+                "admin" if initiator_role == "specialist"
+                else "system" if initiator_role == "system"
+                else "user"
+            ),
         )
