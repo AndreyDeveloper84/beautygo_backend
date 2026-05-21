@@ -32,10 +32,10 @@ from appointments.domain.exceptions import (
 )
 from appointments.models import (
     Appointment,
-    Payment,
     OutboxEvent,
     SpecialistWorkingHours,
 )
+from payments.models import Payment
 from services.models import Service, ServiceCategory
 from users.models import SpecialistProfile, User
 

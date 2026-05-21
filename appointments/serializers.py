@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
-from .models import Appointment, Payment
+from .models import Appointment
+from payments.models import Payment
 
 
 # -- Read serializers ---------------------------------------------------------
