@@ -386,6 +386,10 @@ class OutboxEvent(models.Model):
         those the .get('data', self.payload) fallback returns the
         legacy shape unchanged, so the property is a no-op on history.
         """
-        return self.payload.get("data", self.payload) if isinstance(
-            self.payload, dict
-        ) else {}
+        # isinstance check guards a misshaped payload (e.g. someone
+        # writes None via a buggy migration). Treat both `payload['data']
+        # is None` and `payload` not a dict as legacy / no-envelope.
+        if not isinstance(self.payload, dict):
+            return {}
+        inner = self.payload.get("data")
+        return inner if isinstance(inner, dict) else self.payload

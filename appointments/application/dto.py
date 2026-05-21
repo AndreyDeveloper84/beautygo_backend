@@ -43,6 +43,11 @@ class RescheduleBookingDTO:
     booking_id: UUID
     initiator_user_id: UUID
     new_start_at: datetime      # Must be UTC timezone-aware
+    # initiator_role: "client" | "specialist" | "system" — matches the
+    # CancelBookingDTO contract so the outbox envelope can map to
+    # ADR-0009 actor consistently across both flows. Default "client"
+    # keeps pre-#486 test fixtures green.
+    initiator_role: str = "client"
 
 
 @dataclass(frozen=True)

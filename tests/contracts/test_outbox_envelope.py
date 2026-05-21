@@ -70,15 +70,40 @@ class TestBuildEnvelopeShape:
         assert env["event_name"] == "booking.cancelled"
 
     def test_event_version_pinned_from_registry(self):
-        # Bumping the version in EVENT_VERSIONS is a deliberate contract
-        # break; this assertion catches an accidental bump.
         env = build_envelope(event_name="booking.created", data={})
         assert env["event_version"] == EVENT_VERSIONS["booking.created"]
         assert isinstance(env["event_version"], int)
 
+    def test_all_mvp_versions_locked_at_v1(self):
+        """Bumping any of these is a deliberate contract break — it
+        forces every consumer to register a new (event_name, version)
+        handler per ADR-0009 §Versioning rule. Edit this test only as
+        part of an explicit ADR review."""
+        for event_name in (
+            "booking.created",
+            "booking.confirmed",
+            "booking.cancelled",
+            "booking.rescheduled",
+            "booking.completed",
+            "booking.no_show",
+            "payment.confirmed",
+            "payment.refunded",
+            "cache.invalidate_slots",
+        ):
+            assert EVENT_VERSIONS[event_name] == 1, (
+                f"{event_name} version bumped; if intentional, also "
+                "update consumers + this test."
+            )
+
     def test_unknown_event_name_raises(self):
         with pytest.raises(ValueError, match="Unregistered event_name"):
             build_envelope(event_name="bogus.thing", data={})
+
+    def test_invalid_actor_raises(self):
+        with pytest.raises(ValueError, match="actor must be one of"):
+            build_envelope(
+                event_name="booking.created", data={}, actor="bogus",
+            )
 
     def test_occurred_at_is_iso8601(self):
         env = build_envelope(event_name="booking.created", data={})
