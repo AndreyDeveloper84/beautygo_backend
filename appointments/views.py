@@ -32,7 +32,7 @@ from .domain.exceptions import (
     RescheduleNotAllowedError,
     SlotNotAvailableError,
 )
-from .models import Appointment
+from .models import Appointment, OutboxEvent
 from .serializers import (
     AppointmentCancelSerializer,
     AppointmentCreateSerializer,
@@ -245,13 +245,17 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 appointment.complete()
                 from appointments.infrastructure.outbox import emit_outbox_event
                 emit_outbox_event(
-                    topic="booking.completed",
+                    # Use the enum member rather than the string literal
+                    # so a rename catches via static analysis. Matches
+                    # the pattern in payments/views.py.
+                    topic=OutboxEvent.Topic.BOOKING_COMPLETED,
                     data={
                         "booking_id": str(appointment.id),
                         "client_id": str(appointment.client_id),
                         "specialist_id": str(appointment.specialist_id),
                     },
                     user_id=request.user.id,
+                    tenant_id=appointment.tenant_id,
                     # Specialist-initiated; per ADR-0009 actor mapping
                     # (specialist → 'admin', client → 'user').
                     actor="admin",

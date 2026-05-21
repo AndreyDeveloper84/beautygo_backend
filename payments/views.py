@@ -408,6 +408,12 @@ class PaymentWebhookView(APIView):
                 # Without this emit, bot-platform memory drifts: AI keeps
                 # answering "your booking is awaiting payment" days after
                 # the hold landed. See ai-bot-platform#509.
+                #
+                # Inline (not deferred via outbox_topic/_payload like the
+                # other branches) because this branch has its own
+                # single emit independent of the payment.* emit at line
+                # 462. Both commit together inside the outer
+                # transaction.atomic so ordering is irrelevant.
                 from appointments.infrastructure.outbox import emit_outbox_event
                 emit_outbox_event(
                     topic=OutboxEvent.Topic.BOOKING_CONFIRMED,
@@ -418,6 +424,7 @@ class PaymentWebhookView(APIView):
                         'payment_id': str(payment.id),
                     },
                     user_id=payment.appointment.client_id,
+                    tenant_id=payment.appointment.tenant_id,
                     actor="system",  # webhook-driven, no human in the loop
                 )
 
