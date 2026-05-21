@@ -53,6 +53,11 @@ A non-zero diff in the row-count table is **not** automatic failure
 — some divergence is expected for Django-managed bootstrap rows
 already present after `migrate`. Eyeball the table.
 
+> **Re-running the script**: `loaddata` is **upsert-by-PK**, not by
+> natural key. Re-running with the same SQLite source overwrites
+> matching rows in Postgres; rows added to Postgres after the first
+> run are preserved.
+
 ## Verify
 
 After the script finishes, run the test suite against Postgres:
@@ -66,6 +71,9 @@ A green suite confirms the schema accepts the loaded data. The 4
 `@pytest.mark.xfail` tests tracked in
 [`ai-bot-platform#477`](https://github.com/AndreyDeveloper84/ai-bot-platform/issues/477)
 will still report as expected-failures — that is fine.
+
+**This pytest run is the closure of issue #424 acceptance item 2**
+(`pytest passes against Postgres with migrated data`).
 
 For a faster smoke-only check:
 

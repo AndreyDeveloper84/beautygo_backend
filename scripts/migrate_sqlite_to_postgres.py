@@ -142,7 +142,15 @@ def _inject_sqlite_alias(sqlite_path: pathlib.Path) -> None:
         "OPTIONS": {},
         "TIME_ZONE": None,
         "CONN_HEALTH_CHECKS": False,
-        "TEST": {"NAME": None, "CHARSET": None, "COLLATION": None, "MIRROR": None},
+        # MIGRATE=True matches Django 5.2 default; pinned for forward
+        # compatibility with future Django minors that may require it.
+        "TEST": {
+            "NAME": None,
+            "CHARSET": None,
+            "COLLATION": None,
+            "MIRROR": None,
+            "MIGRATE": True,
+        },
         "USER": "",
         "PASSWORD": "",
         "HOST": "",
@@ -160,9 +168,12 @@ def _migrate_postgres() -> None:
 def _dump_sqlite_to_json() -> pathlib.Path:
     """``manage.py dumpdata --database=sqlite_legacy`` → temp JSON file.
 
-    Uses natural keys so the loaded data is FK-safe across PK
-    renumberings (Postgres assigns sequence-based PKs that won't match
-    SQLite's rowids for every row).
+    ``--natural-foreign`` is the load-bearing flag — it resolves FKs to
+    auth.Group / auth.Permission / contenttypes.ContentType by name
+    instead of PK, so the EXCLUDED_MODELS swap (re-created by Django's
+    migrate) doesn't break the loaded rows. ``--natural-primary`` is
+    largely a no-op for this codebase (domain models don't define
+    ``natural_key``), but staying defensive in case future models add it.
     """
     from django.core.management import call_command  # noqa: PLC0415
     tmp = pathlib.Path(tempfile.mkdtemp(prefix="sqlite_to_pg_")) / "dump.json"
@@ -232,8 +243,9 @@ def main() -> int:
     _verify_row_counts()
 
     print(
-        f"\nDone. JSON dump kept at {dump} — delete after you have "
-        "confirmed the data round-trip is correct."
+        f"\nDone. JSON dump kept at {dump} — delete the parent dir "
+        f"after confirming the data round-trip is correct:\n"
+        f"  rm -rf {dump.parent}"
     )
     return 0
 
