@@ -124,6 +124,7 @@ class TestBookingCompleteEmit:
         appt, _ = _confirmed_appointment(client_user, specialist, service)
 
         client = APIClient()
+        client.defaults["HTTP_X_APP_TYPE"] = "pro"
         client.force_authenticate(user=specialist_user)
         response = client.post(f"/api/v1/appointments/{appt.id}/complete/")
         assert response.status_code == 200, response.data
@@ -151,6 +152,7 @@ class TestBookingCompleteEmit:
         appt.save(update_fields=["status"])
 
         client = APIClient()
+        client.defaults["HTTP_X_APP_TYPE"] = "pro"
         client.force_authenticate(user=specialist_user)
         response = client.post(f"/api/v1/appointments/{appt.id}/complete/")
         assert response.status_code == 422
@@ -189,6 +191,7 @@ class TestBookingConfirmedEmit:
             ),
         ):
             anon = APIClient()
+            anon.defaults["HTTP_X_APP_TYPE"] = "client"
             response = anon.post(
                 "/api/v1/payments/webhook/",
                 {
@@ -241,6 +244,7 @@ class TestBookingConfirmedEmit:
             "object": {"id": "wh_dupe_509"},
         }
         anon = APIClient()
+        anon.defaults["HTTP_X_APP_TYPE"] = "client"
         with patch(
             "payments.views._get_yookassa",
             return_value=MagicMock(
