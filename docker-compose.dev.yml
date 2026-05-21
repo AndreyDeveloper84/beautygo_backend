@@ -1,0 +1,76 @@
+# Local-dev override for docker-compose.yml.
+#
+# NOT auto-merged — must be passed explicitly:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# The base docker-compose.yml is tuned for the dev VPS (settings.prod,
+# host bind mounts under /home/taximeter, a firebase-admin.json file the
+# CI deploy touches). This override strips the VPS-specific bits and
+# points web + celery at settings.dev so a fresh clone can `docker compose
+# -f ... up -d` without provisioning host paths.
+#
+# Postgres / Redis wiring of settings.dev itself lives in issue #422 —
+# this file only stages the env vars; the Django ORM still reads SQLite
+# until #422 lands. Bringing the stack up is still useful in the meantime
+# (postgres / redis / minio containers are exercised by the integration
+# test suite via @pytest.mark.integration and by the upcoming SQLite→PG
+# migration in #424).
+
+services:
+  web:
+    # Override the base service's DJANGO_SETTINGS_MODULE=...settings.prod
+    # plus pass Postgres / Redis / MinIO endpoints by their compose service
+    # names. .env on the host can override any of these — defaults match
+    # the base compose's POSTGRES_* defaults so a vanilla `.env.example`
+    # copy works.
+    environment:
+      DJANGO_SETTINGS_MODULE: djangoProject.settings.dev
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-beautygo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-beautygo}
+      POSTGRES_DB: ${POSTGRES_DB:-beautygo}
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: http://minio:9000
+    # !override replaces (not merges) the base volume list. Without it
+    # Compose v2 concatenates lists when overriding, so the base's
+    # /home/taximeter/... host bind mounts + firebase ro mount would
+    # survive. !override is the canonical multi-file-merge escape for
+    # "throw away whatever the base said and use exactly this list."
+    # See: docs.docker.com/compose/multiple-compose-files/merge/#override
+    volumes: !override
+      - dev_staticfiles:/app/staticfiles
+      - dev_media:/app/media
+
+  celery_worker:
+    environment:
+      DJANGO_SETTINGS_MODULE: djangoProject.settings.dev
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-beautygo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-beautygo}
+      POSTGRES_DB: ${POSTGRES_DB:-beautygo}
+      REDIS_URL: redis://redis:6379
+    # Drop firebase-admin.json bind mount — PushService falls into stub
+    # mode when FIREBASE_CREDENTIALS_PATH is empty (see PushService init).
+    # !reset clears the base file's volume list (Compose v2.24+ — required
+    # to drop the firebase-admin.json bind mount inherited from the base).
+    volumes: !reset null
+
+  celery_beat:
+    environment:
+      DJANGO_SETTINGS_MODULE: djangoProject.settings.dev
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-beautygo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-beautygo}
+      POSTGRES_DB: ${POSTGRES_DB:-beautygo}
+      REDIS_URL: redis://redis:6379
+    # !reset clears the base file's volume list (Compose v2.24+ — required
+    # to drop the firebase-admin.json bind mount inherited from the base).
+    volumes: !reset null
+
+volumes:
+  dev_staticfiles:
+  dev_media:
