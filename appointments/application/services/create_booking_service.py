@@ -118,7 +118,8 @@ class CreateBookingService:
 
     @transaction.atomic
     def _execute_atomic(self, dto, specialist, service, target_interval: TimeInterval):
-        from appointments.models import Appointment, Payment, OutboxEvent, SpecialistTimeOff
+        from appointments.models import Appointment, OutboxEvent, SpecialistTimeOff
+        from payments.models import Payment
 
         # Idempotency check
         existing = Appointment.objects.filter(

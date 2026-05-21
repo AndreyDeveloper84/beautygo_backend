@@ -316,7 +316,7 @@ def test_payment_handlers_registered():
 
 @pytest.fixture
 def payment(db, appointment):
-    from appointments.models import Payment
+    from payments.models import Payment
 
     return Payment.objects.create(
         appointment=appointment,

@@ -164,7 +164,7 @@ UNFOLD = {
                 "separator": True,
                 "items": [
                     {"title": "Записи", "icon": "calendar_month", "link": "/admin/appointments/appointment/"},
-                    {"title": "Платежи", "icon": "payments", "link": "/admin/appointments/payment/"},
+                    {"title": "Платежи", "icon": "payments", "link": "/admin/payments/payment/"},
                     {"title": "Расписание", "icon": "schedule", "link": "/admin/appointments/specialistworkinghours/"},
                     {"title": "Выходные", "icon": "event_busy", "link": "/admin/appointments/specialisttimeoff/"},
                 ],

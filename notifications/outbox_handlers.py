@@ -286,7 +286,7 @@ def _load_payment(event: OutboxEvent):
     Same defensive shape as ``_load_appointment``: returns None and logs
     on missing/malformed data so the dispatcher doesn't retry forever.
     """
-    from appointments.models import Payment  # lazy: avoid import at module load
+    from payments.models import Payment  # lazy: avoid import at module load
 
     payment_id = event.payload.get("payment_id")
     if not payment_id:
