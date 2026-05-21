@@ -118,7 +118,7 @@ class CreateBookingService:
 
     @transaction.atomic
     def _execute_atomic(self, dto, specialist, service, target_interval: TimeInterval):
-        from appointments.models import Appointment, OutboxEvent, SpecialistTimeOff
+        from appointments.models import Appointment, SpecialistTimeOff
         from payments.models import Payment
 
         # Idempotency check
@@ -207,10 +207,15 @@ class CreateBookingService:
             platform_fee=snapshot.platform_fee,
         )
 
-        # Write outbox event (same transaction)
-        OutboxEvent.objects.create(
+        # Write outbox event (same transaction). Envelope per ADR-0009
+        # §Mandatory event contract — emit_outbox_event wraps the
+        # domain data in the canonical envelope (event_id, event_version,
+        # actor, correlation_id, …) so cross-service consumers can
+        # dedupe + version-route handlers.
+        from appointments.infrastructure.outbox import emit_outbox_event
+        emit_outbox_event(
             topic="booking.created",
-            payload={
+            data={
                 "booking_id": str(appointment.id),
                 "client_id": str(dto.client_id),
                 "specialist_id": str(dto.specialist_id),
@@ -221,6 +226,8 @@ class CreateBookingService:
                 "amount": str(snapshot.price),
                 "specialist_timezone": snapshot.specialist_timezone,
             },
+            user_id=dto.client_id,
+            actor="user",  # booking created by the client via mobile app
         )
 
         return appointment, payment

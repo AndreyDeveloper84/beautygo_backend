@@ -85,7 +85,7 @@ class CancelBookingService:
         refund_percent: float,
         reason: str | None,
     ) -> None:
-        from appointments.models import Appointment, OutboxEvent
+        from appointments.models import Appointment
 
         appointment = Appointment.objects.select_for_update().get(id=booking_id)
 
@@ -101,9 +101,10 @@ class CancelBookingService:
             "status", "cancellation_reason", "cancelled_by_id", "updated_at",
         ])
 
-        OutboxEvent.objects.create(
+        from appointments.infrastructure.outbox import emit_outbox_event
+        emit_outbox_event(
             topic="booking.cancelled",
-            payload={
+            data={
                 "booking_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
                 "start_at": appointment.start_datetime.isoformat(),
@@ -111,6 +112,11 @@ class CancelBookingService:
                 "refund_percent": refund_percent,
                 "reason": reason,
             },
+            user_id=initiator_user_id,
+            # admin overrides land here too; the initiator_role inside
+            # `data` distinguishes the two so 'user' is the right default
+            # actor for the most common case (client cancel via mobile).
+            actor="admin" if initiator_role == "admin" else "user",
         )
 
 
@@ -161,7 +167,7 @@ class RescheduleBookingService:
         old_start_at,
         new_interval: TimeInterval,
     ) -> None:
-        from appointments.models import Appointment, OutboxEvent
+        from appointments.models import Appointment
 
         appointment = Appointment.objects.select_for_update().get(id=booking_id)
 
@@ -183,9 +189,10 @@ class RescheduleBookingService:
             "start_datetime", "end_datetime", "updated_at",
         ])
 
-        OutboxEvent.objects.create(
+        from appointments.infrastructure.outbox import emit_outbox_event
+        emit_outbox_event(
             topic="booking.rescheduled",
-            payload={
+            data={
                 "booking_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
                 "client_id": str(appointment.client_id),
@@ -199,4 +206,6 @@ class RescheduleBookingService:
                 "end_at": new_interval.end_at.isoformat(),
                 "old_start_at": old_start_at.isoformat(),
             },
+            user_id=appointment.client_id,
+            actor="user",
         )
