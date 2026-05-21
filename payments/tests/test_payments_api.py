@@ -10,7 +10,8 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from appointments.models import Appointment, Payment
+from appointments.models import Appointment
+from payments.models import Payment
 from services.models import Service, ServiceCategory
 from users.models import User
 
