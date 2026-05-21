@@ -85,7 +85,7 @@ class CancelBookingService:
         refund_percent: float,
         reason: str | None,
     ) -> None:
-        from appointments.models import Appointment, OutboxEvent
+        from appointments.models import Appointment
 
         appointment = Appointment.objects.select_for_update().get(id=booking_id)
 
@@ -101,9 +101,10 @@ class CancelBookingService:
             "status", "cancellation_reason", "cancelled_by_id", "updated_at",
         ])
 
-        OutboxEvent.objects.create(
+        from appointments.infrastructure.outbox import emit_outbox_event
+        emit_outbox_event(
             topic="booking.cancelled",
-            payload={
+            data={
                 "booking_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
                 "start_at": appointment.start_datetime.isoformat(),
@@ -111,6 +112,19 @@ class CancelBookingService:
                 "refund_percent": refund_percent,
                 "reason": reason,
             },
+            user_id=initiator_user_id,
+            # initiator_role contract (see dto.py:36) is the closed set
+            # {client, specialist, system}. Map to ADR-0009 actor:
+            #   client    → 'user'   (client cancels via mobile)
+            #   specialist→ 'admin'  (provider-side action; closer to
+            #                         'admin' than 'user' per ADR-0009
+            #                         §Mandatory event contract)
+            #   system    → 'system' (rare — TTL sweep, batch job, etc.)
+            actor=(
+                "admin" if initiator_role == "specialist"
+                else "system" if initiator_role == "system"
+                else "user"
+            ),
         )
 
 
@@ -147,6 +161,7 @@ class RescheduleBookingService:
             booking_id=dto.booking_id,
             old_start_at=appointment.start_datetime,
             new_interval=new_interval,
+            initiator_role=dto.initiator_role,
         )
 
         logger.info(
@@ -160,8 +175,9 @@ class RescheduleBookingService:
         booking_id,
         old_start_at,
         new_interval: TimeInterval,
+        initiator_role: str = "client",
     ) -> None:
-        from appointments.models import Appointment, OutboxEvent
+        from appointments.models import Appointment
 
         appointment = Appointment.objects.select_for_update().get(id=booking_id)
 
@@ -183,9 +199,10 @@ class RescheduleBookingService:
             "start_datetime", "end_datetime", "updated_at",
         ])
 
-        OutboxEvent.objects.create(
+        from appointments.infrastructure.outbox import emit_outbox_event
+        emit_outbox_event(
             topic="booking.rescheduled",
-            payload={
+            data={
                 "booking_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
                 "client_id": str(appointment.client_id),
@@ -199,4 +216,12 @@ class RescheduleBookingService:
                 "end_at": new_interval.end_at.isoformat(),
                 "old_start_at": old_start_at.isoformat(),
             },
+            user_id=appointment.client_id,
+            # Same actor mapping as the cancel emit above — see that
+            # comment for the rationale.
+            actor=(
+                "admin" if initiator_role == "specialist"
+                else "system" if initiator_role == "system"
+                else "user"
+            ),
         )

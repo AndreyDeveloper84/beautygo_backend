@@ -67,7 +67,7 @@ def _load_appointment(event: OutboxEvent) -> Appointment | None:
     succeed. Bad payloads aren't transient — letting them raise would
     pin the OutboxEvent at error_count++ until it dead-letters.
     """
-    booking_id = event.payload.get("booking_id")
+    booking_id = event.data.get("booking_id")
     if not booking_id:
         logger.warning(
             "outbox.handler.missing_booking_id topic=%s event_id=%s",
@@ -220,7 +220,7 @@ def handle_booking_rescheduled(event: OutboxEvent) -> None:
     # The reschedule payload carries the previous start so the push body
     # can read "перенесена с 14:00 → 16:00". Surface it in the context;
     # templates that don't reference it ignore the extra key.
-    old_start_at = event.payload.get("old_start_at")
+    old_start_at = event.data.get("old_start_at")
     if old_start_at:
         # Lazy import to avoid django.utils.dateparse cost at module load.
         from django.utils.dateparse import parse_datetime
@@ -288,7 +288,7 @@ def _load_payment(event: OutboxEvent):
     """
     from payments.models import Payment  # lazy: avoid import at module load
 
-    payment_id = event.payload.get("payment_id")
+    payment_id = event.data.get("payment_id")
     if not payment_id:
         logger.warning(
             "outbox.handler.missing_payment_id topic=%s event_id=%s",
@@ -322,7 +322,7 @@ def _payment_context(payment, event: OutboxEvent) -> dict:
     return {
         "payment_id": str(payment.id),
         "appointment_id": str(appointment.id),
-        "amount": str(event.payload.get("amount") or payment.amount),
+        "amount": str(event.data.get("amount") or payment.amount),
         "service_name": (
             appointment.service.name
             if appointment.service_id else ""
@@ -331,7 +331,7 @@ def _payment_context(payment, event: OutboxEvent) -> dict:
             appointment.specialist.display_name
             if appointment.specialist_id else ""
         ),
-        "is_partial": event.payload.get("is_partial", False),
+        "is_partial": event.data.get("is_partial", False),
     }
 
 

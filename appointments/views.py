@@ -300,6 +300,9 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             booking_id=appointment.id,
             initiator_user_id=request.user.id,
             new_start_at=serializer.validated_data['new_start_datetime'],
+            initiator_role=(
+                "specialist" if request.user.is_specialist else "client"
+            ),
         )
 
         try:

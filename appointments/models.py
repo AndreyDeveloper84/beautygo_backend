@@ -373,3 +373,23 @@ class OutboxEvent(models.Model):
     def __str__(self) -> str:
         status = "processed" if self.processed_at else "pending"
         return f"{self.topic} ({status}) — {self.created_at:%Y-%m-%d %H:%M}"
+
+    @property
+    def data(self) -> dict:
+        """Domain payload inside the ADR-0009 envelope.
+
+        Convenience accessor for handlers. After issue #486 every new
+        OutboxEvent.payload is the full envelope (event_id, event_name,
+        event_version, …, data: {...}). Handlers want the inner `data`
+        dict 99% of the time. Rows written before #486 stored the
+        domain payload directly under .payload with no wrapper — for
+        those the .get('data', self.payload) fallback returns the
+        legacy shape unchanged, so the property is a no-op on history.
+        """
+        # isinstance check guards a misshaped payload (e.g. someone
+        # writes None via a buggy migration). Treat both `payload['data']
+        # is None` and `payload` not a dict as legacy / no-envelope.
+        if not isinstance(self.payload, dict):
+            return {}
+        inner = self.payload.get("data")
+        return inner if isinstance(inner, dict) else self.payload
