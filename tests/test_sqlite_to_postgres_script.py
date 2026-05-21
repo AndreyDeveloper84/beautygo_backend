@@ -107,3 +107,25 @@ class TestInjectSqliteAlias:
         assert alias["NAME"] == str(path)
         # Default connection must be unchanged.
         assert settings.DATABASES["default"] == before_default
+
+    def test_alias_carries_django_required_keys(self, script_mod, settings, tmp_path):
+        """Catches the next Django minor adding a new defaulted key.
+
+        ``ConnectionHandler.configure_settings`` will quietly start
+        defaulting anything we miss — and a missing ``TEST.MIGRATE`` is
+        the kind of drift that surfaces as a confusing test-runner error
+        when someone uses this alias for the first time off CI.
+        """
+        path = tmp_path / "fake.sqlite3"
+        path.write_bytes(b"x")
+        script_mod._inject_sqlite_alias(path)
+        alias = settings.DATABASES["sqlite_legacy"]
+        assert alias["ATOMIC_REQUESTS"] is False
+        assert alias["AUTOCOMMIT"] is True
+        assert alias["CONN_MAX_AGE"] == 0
+        assert alias["CONN_HEALTH_CHECKS"] is False
+        assert alias["TIME_ZONE"] is None
+        # TEST sub-dict — every key Django 5.2 looks up.
+        assert alias["TEST"]["NAME"] is None
+        assert alias["TEST"]["MIRROR"] is None
+        assert alias["TEST"]["MIGRATE"] is True
