@@ -7,13 +7,18 @@ no worker. Real-Redis end-to-end coverage is opt-in via the
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
 
 from appointments.models import OutboxEvent
-from appointments.tasks import EVENT_HANDLERS, dispatch_outbox_events
+from appointments.tasks import (
+    EVENT_HANDLERS,
+    LAG_ALERT_THRESHOLD,
+    dispatch_outbox_events,
+)
 
 
 @pytest.mark.django_db
@@ -122,6 +127,41 @@ class TestDispatchOutboxEvents:
         assert first.processed_at is not None
         assert second.processed_at is not None
         assert first.processed_at <= second.processed_at
+
+
+@pytest.mark.django_db
+class TestLagAlert:
+    """The dispatcher logs ERROR when the oldest pending row is older than
+    LAG_ALERT_THRESHOLD. Sentry captures the ERROR and pages on-call."""
+
+    def test_no_alert_when_queue_empty(self, caplog):
+        with caplog.at_level("ERROR", logger="appointments.tasks"):
+            dispatch_outbox_events()
+        assert "outbox.lag_breach" not in caplog.text
+
+    def test_no_alert_when_pending_row_is_young(self, caplog):
+        OutboxEvent.objects.create(
+            topic="nonexistent.no_handler",  # stays pending — failed
+            payload={},
+        )
+        with caplog.at_level("ERROR", logger="appointments.tasks"):
+            dispatch_outbox_events()
+        assert "outbox.lag_breach" not in caplog.text
+
+    def test_alert_fires_for_old_pending_row(self, caplog):
+        # Create a row, then back-date created_at past the threshold.
+        # The lag SLO is about oldest unprocessed — pre-date the row to
+        # simulate a worker that hasn't drained the queue for >5 min.
+        event = OutboxEvent.objects.create(
+            topic="nonexistent.no_handler",
+            payload={},
+        )
+        OutboxEvent.objects.filter(pk=event.pk).update(
+            created_at=timezone.now() - LAG_ALERT_THRESHOLD - timedelta(seconds=30),
+        )
+        with caplog.at_level("ERROR", logger="appointments.tasks"):
+            dispatch_outbox_events()
+        assert "outbox.lag_breach" in caplog.text
 
 
 @pytest.mark.django_db

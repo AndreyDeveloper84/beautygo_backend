@@ -12,10 +12,12 @@ real handlers in ``EVENT_HANDLERS`` without touching this file.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Callable
 
 from celery import shared_task
 from django.db import transaction
+from django.db.models import Min
 from django.utils import timezone
 
 from .models import OutboxEvent
@@ -80,6 +82,12 @@ MAX_HANDLER_ATTEMPTS = 5
 # work on a tick. select_for_update with skip_locked ensures two workers
 # can't double-handle the same row.
 BATCH_SIZE = 100
+
+# Lag SLO — surface ERROR-level when the oldest unprocessed row is older
+# than this. Sentry / structured logs capture the ERROR and on-call gets
+# paged. 5 min matches ADR-0009 §Event contract guidance ("on-call alert
+# on >5 min lag"). Not a Celery retry trigger — purely observability.
+LAG_ALERT_THRESHOLD = timedelta(minutes=5)
 
 
 @shared_task(name="appointments.tasks.dispatch_outbox_events")
@@ -151,5 +159,21 @@ def dispatch_outbox_events() -> dict:
             "outbox.dispatch_summary processed=%d failed=%d skipped=%d",
             processed, failed, skipped,
         )
+
+    # Lag SLO check — runs every tick regardless of whether we processed
+    # anything. A backlog the dispatcher can't drain (handler stuck, broker
+    # off, dead-lettered batch) shows up as the oldest pending row aging
+    # past LAG_ALERT_THRESHOLD.
+    oldest_pending = OutboxEvent.objects.filter(
+        processed_at__isnull=True,
+    ).aggregate(oldest=Min("created_at"))["oldest"]
+    if oldest_pending is not None:
+        lag = timezone.now() - oldest_pending
+        if lag > LAG_ALERT_THRESHOLD:
+            logger.error(
+                "outbox.lag_breach lag_seconds=%d threshold_seconds=%d",
+                int(lag.total_seconds()),
+                int(LAG_ALERT_THRESHOLD.total_seconds()),
+            )
 
     return {"processed": processed, "failed": failed, "skipped": skipped}
