@@ -36,10 +36,25 @@ ALLOWED_HOSTS = ["*"]
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True  # если нужны куки
 
+# Postgres in dev — matches prod, lets `select_for_update()` actually lock
+# rows (SQLite is single-writer, so the booking-engine concurrency tests
+# behaved nothing like prod). The docker-compose stack defined in
+# docker-compose.yml + docker-compose.dev.yml exposes the `db` service
+# with these defaults; for host-process `manage.py runserver` the same
+# vars resolve to localhost once the compose `db` port is published.
+#
+# Issue #424 (SQLite -> Postgres data migration) ships the one-shot
+# dumpdata/loaddata script + verification. Until that lands a fresh
+# `manage.py migrate` builds an empty schema, which is the expected
+# state for new developers.
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('POSTGRES_DB', 'beautygo'),
+        'USER': os.environ.get('POSTGRES_USER', 'beautygo'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'beautygo'),
+        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
 

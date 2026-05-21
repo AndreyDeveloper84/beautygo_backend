@@ -40,9 +40,13 @@ jobs:
 
     services:
       postgres:
+        # POSTGRES_DB=beautygo matches settings.dev/test defaults so
+        # pytest-django creates test_beautygo via Django's default
+        # `test_<NAME>` convention. POSTGRES_USER=postgres is the
+        # superuser (has CREATEDB) so the per-test schema build works.
         image: postgres:16-alpine
         env:
-          POSTGRES_DB: test_db
+          POSTGRES_DB: beautygo
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
         ports:
@@ -100,6 +104,17 @@ jobs:
           # a service for the @pytest.mark.integration suite.
           DJANGO_SETTINGS_MODULE: djangoProject.settings.test
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
+          # Postgres connection — points at the `postgres` service
+          # container above. Settings.dev/.test honour these env vars
+          # (issue #422); without them DATABASES['default']['HOST']
+          # falls back to 'localhost' anyway, but we set them
+          # explicitly so a future settings refactor doesn't silently
+          # change the connection target.
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: '5432'
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: beautygo
           # Observability: keep SDKs explicitly inert in CI. Empty DSN
           # = sentry no-op; human log format keeps CI output readable.
           SENTRY_DSN: ''
@@ -116,6 +131,11 @@ jobs:
         env:
           DJANGO_SETTINGS_MODULE: djangoProject.settings.test
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: '5432'
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: beautygo
           SENTRY_DSN: ''
           REDIS_URL: redis://localhost:6379
         run: python manage.py check

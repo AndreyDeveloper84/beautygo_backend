@@ -122,6 +122,14 @@ class TestItemDescription:
         r = build_appointment_receipt(appointment, Decimal("100"))
         assert r["items"][0]["description"] == "Маникюр"
 
+    @pytest.mark.xfail(
+        reason=(
+            "Postgres-strict: Service.name is varchar(100); test sets 200 "
+            "chars which SQLite silently truncated and Postgres rejects. "
+            "Tracked in AndreyDeveloper84/ai-bot-platform#477."
+        ),
+        strict=False,
+    )
     def test_truncates_long_name_to_128_chars(
         self, appointment, service,
     ):
