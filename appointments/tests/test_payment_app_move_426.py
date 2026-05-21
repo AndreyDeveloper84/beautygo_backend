@@ -82,10 +82,11 @@ class TestPaymentAppMoveState:
     def test_payment_app_label_is_payments(self):
         assert Payment._meta.app_label == "payments"
 
-    def test_payment_table_still_named_appointments_payment(self):
-        # PR 2 will flip this to 'payments_payment' via AlterModelTable.
-        # Until then the physical table is unmoved.
-        assert Payment._meta.db_table == "appointments_payment"
+    def test_payment_table_renamed_to_payments_payment(self):
+        # PR 2 (#492) ran AlterModelTable; the physical table is now
+        # 'payments_payment', matching Django's default
+        # <app_label>_<modelname> naming.
+        assert Payment._meta.db_table == "payments_payment"
 
     def test_appointment_reverse_manager_resolves_payment(self):
         """`appointment.payments.all()` must still return Payment rows —
