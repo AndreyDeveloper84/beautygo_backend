@@ -2,6 +2,12 @@
 
 REST API для платформы бронирования бьюти-услуг BeautyGO.
 
+## Architecture
+
+This service is the **booking + payments + catalog backend** half of the Ayla split-domain architecture. See [`docs/architecture/ADR-0009-split-domain.md`](docs/architecture/ADR-0009-split-domain.md) for the architecture decision: which domain lives where, the cross-repo event contract, and the hard rules (e.g. no direct cross-repo DB access, every event has `event_version`).
+
+TL;DR: Ayla djangoproject owns canonical state for booking lifecycle, payments (YooKassa), catalog, user identity + PII; it publishes domain events to the ai-bot-platform AI backbone.
+
 ## Технологии
 
 - Python 3.12 + Django 5.2 + Django REST Framework 3.16
