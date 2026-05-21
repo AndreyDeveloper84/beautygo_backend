@@ -1,12 +1,12 @@
 openapi: 3.0.3
 info:
-  title: BeautyGO API
+  title: Ayla API
   description: |
-    REST API for BeautyGO beauty services booking platform.
+    REST API for Ayla beauty services booking platform.
 
     ## Two Applications
-    - **BeautyGO** (client) - for clients searching and booking beauty services
-    - **BeautyGO Pro** (pro) - for specialists managing their business
+    - **Ayla** (client) - for clients searching and booking beauty services
+    - **Ayla Pro** (pro) - for specialists managing their business
 
     ## Required Header
     All requests MUST include the `X-App-Type` header with value `client` or `pro`.
@@ -29,7 +29,7 @@ info:
     All dates and times are in ISO 8601 format.
   version: 1.0.0
   contact:
-    name: BeautyGO Team
+    name: Ayla Team
 servers:
   - url: https://api.beautygo.ru/api/v1
     description: Production
@@ -83,7 +83,7 @@ components:
       schema:
         type: string
         enum: [client, pro]
-      description: "Тип приложения (client = BeautyGO, pro = BeautyGO Pro)"
+      description: "Тип приложения (client = Ayla, pro = Ayla Pro)"
 
     PageParam:
       name: page
@@ -2647,7 +2647,7 @@ paths:
       tags: [appointments]
       summary: "🟣 Ручное добавление записи мастером"
       description: |
-        Только для BeautyGO Pro. Мастер создаёт запись вручную.
+        Только для Ayla Pro. Мастер создаёт запись вручную.
         Если клиента с таким телефоном нет в системе, запись создаётся
         с указанными client_name/client_phone без привязки к user.
       operationId: appointments_manual_create

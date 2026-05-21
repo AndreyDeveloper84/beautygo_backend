@@ -1,4 +1,4 @@
-# BeautyGO Backend — Implementation Plan
+# Ayla Backend — Implementation Plan
 
 ## Current State
 - Django project in `djangoProject/` (CLAUDE.md expects `config/`)

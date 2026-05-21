@@ -116,8 +116,8 @@ SIMPLE_JWT = {
 }
 
 UNFOLD = {
-    "SITE_TITLE": "BeautyGO Admin",
-    "SITE_HEADER": "BeautyGO",
+    "SITE_TITLE": "Ayla Admin",
+    "SITE_HEADER": "Ayla",
     "SITE_URL": "/",
     "SITE_SYMBOL": "spa",  # Material Symbol icon
     "SHOW_HISTORY": True,
@@ -188,8 +188,8 @@ UNFOLD = {
 }
 
 SPECTACULAR_SETTINGS = {
-    'TITLE': 'BeautyGO API',
-    'DESCRIPTION': 'REST API для платформы бронирования бьюти-услуг BeautyGO',
+    'TITLE': 'Ayla API',
+    'DESCRIPTION': 'REST API для платформы бронирования бьюти-услуг Ayla',
     'VERSION': '1.0.0',
     # DRF-242.8: document the X-Tenant header on every tenant-scoped op.
     # Hook lives in tenants/openapi.py — runs after view introspection

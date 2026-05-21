@@ -1345,6 +1345,8 @@ GET   /api/v1/specialists/{id}/reviews/ ⚪ Публичный список (All
 ## 🏷️ BRAND MIGRATION STATUS (BeautyGO → Ayla)
 
 > Ребрендинг утверждён 2026-03-30 (Notion: Brand Vision Document). Каноническое название продукта — **Ayla**, но миграция кода/инфры — поэтапная.
+>
+> **Update 2026-05-21 (Option 1 decision):** DNS rebrand is **deferred indefinitely**. Backend stays on `gobeauty.site` (current production hostname) until `ayla.app` is acquired or a better Ayla domain is chosen Phase 1+. The product-identity rebrand (user-facing strings, OpenAPI titles, admin UI labels) proceeds independently from the DNS rebrand. See ai-bot-platform issue #418 and the Phase 0 sprint plan's domain-decision note.
 
 ### ✅ Уже мигрировано (canonical в этом файле)
 - Название продукта в документации, PRD, App Store positioning;
