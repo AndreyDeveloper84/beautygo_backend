@@ -276,40 +276,105 @@ class TestBookingConfirmedEmit:
 
 # --- Acceptance #3 — every booking-domain Topic has an emit path -----
 
-class TestEveryBookingTopicHasEmitPath:
-    """Anti-regression: if a new BOOKING_* topic is added without a
-    matching emit-coverage entry below, this test fires. Forces a
-    contract registry update on every new topic."""
+def _emit_topics_in_source() -> set[str]:
+    """Walk every .py file in the repo (excluding tests + venv) and
+    return the set of topic values passed to ``emit_outbox_event(topic=...)``.
 
-    BOOKING_EMIT_PATHS = {
-        OutboxEvent.Topic.BOOKING_CREATED: (
-            "CreateBookingService._execute_atomic"
-        ),
-        OutboxEvent.Topic.BOOKING_CONFIRMED: (
-            "payments/views.py waiting_for_capture branch (#509)"
-        ),
-        OutboxEvent.Topic.BOOKING_CANCELLED: (
-            "CancelBookingService._execute_atomic"
-        ),
-        OutboxEvent.Topic.BOOKING_RESCHEDULED: (
-            "RescheduleBookingService._execute_atomic"
-        ),
-        OutboxEvent.Topic.BOOKING_COMPLETED: (
-            "AppointmentViewSet.complete (#509)"
-        ),
-        OutboxEvent.Topic.BOOKING_NO_SHOW: (
-            "— not yet implemented (tracked in #511)"
+    Catches BOTH forms:
+    - string literal: ``emit_outbox_event(topic="booking.created", ...)``
+    - enum attribute: ``emit_outbox_event(topic=OutboxEvent.Topic.BOOKING_CREATED, ...)``
+
+    Enum-form names are converted to their ``.value`` so the set is
+    comparable against ``OutboxEvent.Topic.choices``.
+    """
+    import ast
+    import pathlib
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent.parent
+    topics: set[str] = set()
+    # Reverse map for enum members: "BOOKING_CREATED" → "booking.created".
+    enum_name_to_value = {
+        member.name: member.value for member in OutboxEvent.Topic
+    }
+
+    for py_file in repo_root.rglob("*.py"):
+        path = str(py_file)
+        if (
+            ".venv" in path
+            or "__pycache__" in path
+            or path.endswith("test_state_emit_coverage_509.py")
+            or "/tests/" in path.replace("\\", "/")
+        ):
+            continue
+        try:
+            tree = ast.parse(py_file.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if not (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "emit_outbox_event"
+            ):
+                continue
+            for kw in node.keywords:
+                if kw.arg != "topic":
+                    continue
+                if isinstance(kw.value, ast.Constant) and isinstance(
+                    kw.value.value, str
+                ):
+                    topics.add(kw.value.value)
+                elif isinstance(kw.value, ast.Attribute):
+                    # OutboxEvent.Topic.BOOKING_CREATED → attr name.
+                    name = kw.value.attr
+                    if name in enum_name_to_value:
+                        topics.add(enum_name_to_value[name])
+                    else:
+                        topics.add(name)  # unrecognised — surface verbatim
+    return topics
+
+
+class TestEveryBookingTopicHasEmitPath:
+    """Anti-regression: every BOOKING_* topic in the OutboxEvent.Topic
+    enum must have at least one matching ``emit_outbox_event(topic=...)``
+    call somewhere in the source tree (NOT just a string mention in
+    docs / comments). Walks source via AST so we catch the real call,
+    not a manually-maintained registry that could drift.
+    """
+
+    # Topics that are intentionally not yet wired. Adding to this set
+    # is a deliberate act and forces a comment with the tracking issue.
+    KNOWN_PENDING = {
+        OutboxEvent.Topic.BOOKING_NO_SHOW.value: (
+            "tracked in ai-bot-platform#511 — no-show endpoint"
         ),
     }
 
-    def test_every_booking_topic_documented(self):
+    def test_every_booking_topic_has_emit_call_in_source(self):
         booking_topics = {
             value for value, _label in OutboxEvent.Topic.choices
             if value.startswith("booking.")
         }
-        documented = set(self.BOOKING_EMIT_PATHS.keys())
-        missing = booking_topics - documented
+        emitted = _emit_topics_in_source()
+        missing = booking_topics - emitted - set(self.KNOWN_PENDING.keys())
         assert not missing, (
-            f"Booking topics without an emit-path entry: {missing}. "
-            "Add them to BOOKING_EMIT_PATHS or file a follow-up issue."
+            f"Booking topics declared on OutboxEvent.Topic with no "
+            f"emit_outbox_event(topic=...) call in source: {sorted(missing)}. "
+            "Either add the emit site or add an entry to KNOWN_PENDING "
+            "with the tracking issue."
+        )
+
+    def test_no_emit_for_undeclared_topics(self):
+        """Reverse direction — if someone emits a topic that isn't in
+        the OutboxEvent.Topic enum, the dispatcher's unknown-topic
+        branch will fail every row at run-time. Catch in CI instead."""
+        all_topics = {
+            value for value, _label in OutboxEvent.Topic.choices
+        }
+        emitted = _emit_topics_in_source()
+        rogue = emitted - all_topics
+        assert not rogue, (
+            f"emit_outbox_event(topic=...) calls reference unknown "
+            f"topics not on OutboxEvent.Topic: {sorted(rogue)}. "
+            "Either add the topic to the enum or fix the typo."
         )

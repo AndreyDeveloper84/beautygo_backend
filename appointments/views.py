@@ -32,6 +32,7 @@ from .domain.exceptions import (
     RescheduleNotAllowedError,
     SlotNotAvailableError,
 )
+from .infrastructure.outbox import emit_outbox_event, safe_tenant_id
 from .models import Appointment, OutboxEvent
 from .serializers import (
     AppointmentCancelSerializer,
@@ -231,23 +232,47 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 status_code=403,
             )
         try:
-            appointment = self.get_queryset().get(pk=pk)
-        except Appointment.DoesNotExist:
-            return error_response(
-                "NOT_FOUND", "Appointment not found.", status_code=404,
-            )
-        try:
-            # Atomic: state flip + envelope emit must commit together so
-            # the dispatcher can't pick up a row that references state
-            # which never landed. Matches the pattern in
-            # CreateBookingService._execute_atomic.
             with transaction.atomic():
+                # Fetch inside the atomic block with select_for_update so
+                # two concurrent POSTs serialise here. Without the lock,
+                # both would pass can_complete() (status still CONFIRMED
+                # in both reads), both flip status, both emit with
+                # distinct event_ids — bot-platform processes both,
+                # double-completing the booking (adversarial review B3).
+                #
+                # We bypass get_queryset() (which filters by
+                # specialist__user) because select_for_update is on the
+                # raw Appointment manager. The explicit owner check on
+                # the next line restores the scope guard — belt-and-
+                # suspenders for B4.
+                try:
+                    appointment = (
+                        Appointment.objects
+                        .select_for_update()
+                        .select_related('specialist', 'client', 'service')
+                        .get(pk=pk)
+                    )
+                except Appointment.DoesNotExist:
+                    return error_response(
+                        "NOT_FOUND", "Appointment not found.", status_code=404,
+                    )
+                if appointment.specialist.user_id != request.user.id:
+                    # Defence-in-depth: a specialist cannot complete a
+                    # booking that isn't theirs even if get_queryset's
+                    # filter is later refactored. Distinct from the
+                    # is_specialist check above — that gates the role;
+                    # this gates the row.
+                    return error_response(
+                        "NOT_FOUND",  # don't leak existence to other specialists
+                        "Appointment not found.",
+                        status_code=404,
+                    )
+
+                # complete() raises ValidationError if status not
+                # CONFIRMED. Under the row lock that re-check sees the
+                # committed status of any racing transaction.
                 appointment.complete()
-                from appointments.infrastructure.outbox import emit_outbox_event
                 emit_outbox_event(
-                    # Use the enum member rather than the string literal
-                    # so a rename catches via static analysis. Matches
-                    # the pattern in payments/views.py.
                     topic=OutboxEvent.Topic.BOOKING_COMPLETED,
                     data={
                         "booking_id": str(appointment.id),
@@ -255,7 +280,9 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         "specialist_id": str(appointment.specialist_id),
                     },
                     user_id=request.user.id,
-                    tenant_id=appointment.tenant_id,
+                    tenant_id=safe_tenant_id(
+                        appointment, context="booking.completed",
+                    ),
                     # Specialist-initiated; per ADR-0009 actor mapping
                     # (specialist → 'admin', client → 'user').
                     actor="admin",

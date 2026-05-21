@@ -101,9 +101,12 @@ class CancelBookingService:
             "status", "cancellation_reason", "cancelled_by_id", "updated_at",
         ])
 
-        from appointments.infrastructure.outbox import emit_outbox_event
+        from appointments.infrastructure.outbox import (
+            emit_outbox_event, safe_tenant_id,
+        )
+        from appointments.models import OutboxEvent as _OutboxEvent
         emit_outbox_event(
-            topic="booking.cancelled",
+            topic=_OutboxEvent.Topic.BOOKING_CANCELLED,
             data={
                 "booking_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
@@ -113,6 +116,7 @@ class CancelBookingService:
                 "reason": reason,
             },
             user_id=initiator_user_id,
+            tenant_id=safe_tenant_id(appointment, context="booking.cancelled"),
             # initiator_role contract (see dto.py:36) is the closed set
             # {client, specialist, system}. Map to ADR-0009 actor:
             #   client    → 'user'   (client cancels via mobile)
@@ -199,9 +203,12 @@ class RescheduleBookingService:
             "start_datetime", "end_datetime", "updated_at",
         ])
 
-        from appointments.infrastructure.outbox import emit_outbox_event
+        from appointments.infrastructure.outbox import (
+            emit_outbox_event, safe_tenant_id,
+        )
+        from appointments.models import OutboxEvent as _OutboxEvent
         emit_outbox_event(
-            topic="booking.rescheduled",
+            topic=_OutboxEvent.Topic.BOOKING_RESCHEDULED,
             data={
                 "booking_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
@@ -217,6 +224,7 @@ class RescheduleBookingService:
                 "old_start_at": old_start_at.isoformat(),
             },
             user_id=appointment.client_id,
+            tenant_id=safe_tenant_id(appointment, context="booking.rescheduled"),
             # Same actor mapping as the cancel emit above — see that
             # comment for the rationale.
             actor=(

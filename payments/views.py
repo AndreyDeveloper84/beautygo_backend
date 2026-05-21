@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from appointments.infrastructure.outbox import emit_outbox_event, safe_tenant_id
 from appointments.models import Appointment, OutboxEvent
 from payments.models import Payment
 from users.permissions import IsClient
@@ -396,46 +397,56 @@ class PaymentWebhookView(APIView):
         yookassa_status = info['status']
 
         with transaction.atomic():
-            outbox_topic: str | None = None
-            outbox_payload: dict = {}
+            # Re-fetch under row lock so two concurrent webhooks for the
+            # same payment serialise here. Without this, both would pass
+            # the line 384 idempotency check, race through the branches,
+            # and emit twice with distinct event_ids → bot-platform sees
+            # two state transitions (adversarial review B3, ai-bot-platform#509).
+            payment = (
+                Payment.objects
+                .select_for_update()
+                .select_related('appointment')
+                .get(pk=payment.pk)
+            )
+            # Re-check idempotency inside the lock — same key under
+            # serial execution means the prior delivery already won.
+            if payment.last_webhook_event_id == event_id:
+                return Response({'status': 'duplicate'}, status=200)
+
+            # Defer all emits to AFTER payment.save() so the
+            # OutboxEvent.created_at is causally after the row commit
+            # (adversarial review N5). Each entry: (topic, data_dict).
+            pending_emits: list[tuple[str, dict]] = []
 
             if event == 'payment.waiting_for_capture' and yookassa_status == 'waiting_for_capture':
                 payment.status = Payment.Status.AUTHORIZED
                 payment.appointment.status = Appointment.Status.CONFIRMED
                 payment.appointment.save(update_fields=['status'])
-                # booking.confirmed emit — payment hold is the only path
-                # in this codebase that moves an appointment to CONFIRMED.
-                # Without this emit, bot-platform memory drifts: AI keeps
-                # answering "your booking is awaiting payment" days after
-                # the hold landed. See ai-bot-platform#509.
-                #
-                # Inline (not deferred via outbox_topic/_payload like the
-                # other branches) because this branch has its own
-                # single emit independent of the payment.* emit at line
-                # 462. Both commit together inside the outer
-                # transaction.atomic so ordering is irrelevant.
-                from appointments.infrastructure.outbox import emit_outbox_event
-                emit_outbox_event(
-                    topic=OutboxEvent.Topic.BOOKING_CONFIRMED,
-                    data={
+                # booking.confirmed emit — payment hold is the only
+                # path in this codebase that moves an appointment to
+                # CONFIRMED. Without it, bot-platform memory drifts
+                # ("your booking is awaiting payment" days after the
+                # hold landed). See ai-bot-platform#509.
+                pending_emits.append((
+                    OutboxEvent.Topic.BOOKING_CONFIRMED,
+                    {
                         'booking_id': str(payment.appointment_id),
                         'client_id': str(payment.appointment.client_id),
                         'specialist_id': str(payment.appointment.specialist_id),
                         'payment_id': str(payment.id),
                     },
-                    user_id=payment.appointment.client_id,
-                    tenant_id=payment.appointment.tenant_id,
-                    actor="system",  # webhook-driven, no human in the loop
-                )
+                ))
 
             elif event == 'payment.succeeded' and yookassa_status == 'succeeded':
                 payment.status = Payment.Status.PAID
-                outbox_topic = OutboxEvent.Topic.PAYMENT_CONFIRMED
-                outbox_payload = {
-                    'payment_id': str(payment.id),
-                    'appointment_id': str(payment.appointment_id),
-                    'amount': str(payment.amount),
-                }
+                pending_emits.append((
+                    OutboxEvent.Topic.PAYMENT_CONFIRMED,
+                    {
+                        'payment_id': str(payment.id),
+                        'appointment_id': str(payment.appointment_id),
+                        'amount': str(payment.amount),
+                    },
+                ))
 
             elif event == 'payment.canceled' and yookassa_status == 'canceled':
                 payment.status = Payment.Status.FAILED
@@ -450,27 +461,32 @@ class PaymentWebhookView(APIView):
                     payment.status = Payment.Status.REFUNDED
                 else:
                     payment.status = Payment.Status.PARTIALLY_REFUNDED
-                outbox_topic = OutboxEvent.Topic.PAYMENT_REFUNDED
-                outbox_payload = {
-                    'payment_id': str(payment.id),
-                    'appointment_id': str(payment.appointment_id),
-                    'amount': str(refunded_val),
-                    'is_partial': refunded_val < payment.amount,
-                }
+                pending_emits.append((
+                    OutboxEvent.Topic.PAYMENT_REFUNDED,
+                    {
+                        'payment_id': str(payment.id),
+                        'appointment_id': str(payment.appointment_id),
+                        'amount': str(refunded_val),
+                        'is_partial': refunded_val < payment.amount,
+                    },
+                ))
 
             payment.last_webhook_event_id = event_id
             payment.save()
 
-            # Outbox write inside the same transaction as the Payment
-            # update — guarantees event-or-nothing semantics. The
-            # dispatcher beat task picks it up within ~10s. Envelope
-            # per ADR-0009 §Mandatory event contract — see emit_outbox_event.
-            if outbox_topic is not None:
-                from appointments.infrastructure.outbox import emit_outbox_event
+            # All emits go through emit_outbox_event AFTER payment.save()
+            # so consumers reconstruct the timeline correctly. ADR-0009
+            # envelope (event_id, event_version, tenant_id, …) is added
+            # by the helper.
+            tenant_id = safe_tenant_id(
+                payment.appointment, context="payments.webhook",
+            )
+            for topic, data in pending_emits:
                 emit_outbox_event(
-                    topic=outbox_topic,
-                    data=outbox_payload,
+                    topic=topic,
+                    data=data,
                     user_id=payment.appointment.client_id,
+                    tenant_id=tenant_id,
                     actor="system",  # webhook-driven, no human in the loop
                 )
 
@@ -568,7 +584,6 @@ class PaymentRefundView(APIView):
             # Refund initiated by the client (or admin) — fire the same
             # PAYMENT_REFUNDED topic as the webhook path so notification
             # handlers don't care about the trigger source.
-            from appointments.infrastructure.outbox import emit_outbox_event
             emit_outbox_event(
                 topic=OutboxEvent.Topic.PAYMENT_REFUNDED,
                 data={
@@ -578,6 +593,9 @@ class PaymentRefundView(APIView):
                     'is_partial': is_partial,
                 },
                 user_id=request.user.id,
+                tenant_id=safe_tenant_id(
+                    payment.appointment, context="payments.refund.client",
+                ),
                 actor="user",
             )
 
