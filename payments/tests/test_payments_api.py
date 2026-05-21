@@ -400,8 +400,9 @@ class TestPaymentWebhook:
             topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
         )
         assert events.count() == 1
-        assert events.first().payload['payment_id'] == str(payment.id)
-        assert events.first().payload['appointment_id'] == str(payment.appointment_id)
+        # Post-#486 envelope wraps domain fields under .data.
+        assert events.first().data['payment_id'] == str(payment.id)
+        assert events.first().data['appointment_id'] == str(payment.appointment_id)
 
     def test_webhook_payment_canceled(self, anon_app, client_user, specialist_user, service):
         payment, appt = self._create_payment_with_appointment(client_user, specialist_user, service)

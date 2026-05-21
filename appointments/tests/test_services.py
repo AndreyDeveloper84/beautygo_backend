@@ -312,10 +312,13 @@ class TestRescheduleBookingService:
         RescheduleBookingService().execute(dto)
 
         event = OutboxEvent.objects.get(topic="booking.rescheduled")
-        assert "start_at" in event.payload, "missing start_at — cache won't invalidate"
-        assert "end_at" in event.payload
-        assert "old_start_at" in event.payload
-        assert event.payload["start_at"] == new_start.isoformat()
+        # Post-#486 the payload is an ADR-0009 envelope; domain fields
+        # live under .data (or via the OutboxEvent.data convenience
+        # property). Cache-invalidation handler reads via that path too.
+        assert "start_at" in event.data, "missing start_at — cache won't invalidate"
+        assert "end_at" in event.data
+        assert "old_start_at" in event.data
+        assert event.data["start_at"] == new_start.isoformat()
 
     def test_cannot_reschedule_pending(self, client_user, specialist, service):
         start = _future_utc(48)
