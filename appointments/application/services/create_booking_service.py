@@ -178,11 +178,20 @@ class CreateBookingService:
             buffer_after_minutes=getattr(service, "buffer_after_minutes", 0),
         )
 
-        # Create appointment
+        # Create appointment. tenant_id mirrors specialist.tenant_id —
+        # the canonical "owner tenant" of the row. Stamped here in #520
+        # so AppointmentViewSet.get_queryset can scope by tenant going
+        # forward; legacy rows (pre-#520) have tenant_id=NULL and are
+        # caught by the backward-compat ``Q(tenant__isnull=True)`` clause.
+        # When SpecialistProfile.tenant is still NULL (un-backfilled
+        # via DRF-242.4), the appointment also gets NULL — same legacy
+        # bucket. Data-migration backfill of historical rows is a
+        # separate ticket.
         appointment = Appointment.objects.create(
             client_id=dto.client_id,
             specialist_id=dto.specialist_id,
             service_id=dto.service_id,
+            tenant_id=specialist.tenant_id,
             start_datetime=target_interval.start_at,
             end_datetime=target_interval.end_at,
             status=BookingStatus.AWAITING_PAYMENT.value,
