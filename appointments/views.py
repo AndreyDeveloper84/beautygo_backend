@@ -96,8 +96,10 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         # Backward-compat: legacy rows have ``tenant_id=NULL`` because
         # CreateBookingService didn't stamp it before #520. Include them
         # via ``Q(tenant__isnull=True)`` so existing data stays
-        # accessible. Future data-migration will backfill from
-        # specialist.tenant; that ticket can drop the OR-clause.
+        # accessible.
+        # TODO(DRF-242.4): drop Q(tenant__isnull=True) once the
+        # data-migration backfills Appointment.tenant_id from
+        # specialist.tenant. The OR-clause is a rollout-only escape.
         from django.db.models import Q
         request_tenant = getattr(self.request, "tenant", None)
         if request_tenant is not None:
@@ -293,6 +295,22 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         "Appointment not found.",
                         status_code=404,
                     )
+                # Defence-in-depth #520: select_for_update bypasses
+                # get_queryset's tenant filter. Explicit row-level
+                # tenant assertion ensures a future refactor of
+                # ownership semantics (multi-specialist, assistants,
+                # salon-managed bookings) cannot silently re-open the
+                # §6 gap. Legacy NULL rows allowed via fallback.
+                request_tenant = getattr(request, "tenant", None)
+                if (
+                    request_tenant is not None
+                    and appointment.tenant_id not in (None, request_tenant.id)
+                ):
+                    return error_response(
+                        "NOT_FOUND",
+                        "Appointment not found.",
+                        status_code=404,
+                    )
 
                 # complete() raises ValidationError if status not
                 # CONFIRMED. Under the row lock that re-check sees the
@@ -357,6 +375,18 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 if appointment.specialist.user_id != request.user.id:
                     return error_response(
                         "NOT_FOUND",  # don't leak existence cross-specialist
+                        "Appointment not found.",
+                        status_code=404,
+                    )
+                # Same defence-in-depth tenant assertion as `complete`
+                # — select_for_update bypasses get_queryset's filter.
+                request_tenant = getattr(request, "tenant", None)
+                if (
+                    request_tenant is not None
+                    and appointment.tenant_id not in (None, request_tenant.id)
+                ):
+                    return error_response(
+                        "NOT_FOUND",
                         "Appointment not found.",
                         status_code=404,
                     )

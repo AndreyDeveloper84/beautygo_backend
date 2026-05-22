@@ -297,6 +297,24 @@ class TestTenantBoundaryAdr0009:
             f"Cross-tenant X-Tenant should 403; got {r.status_code}."
         )
 
+    def test_missing_xtenant_in_strict_mode_returns_400(
+        self, client_user, specialist, service, settings,
+    ):
+        """When MULTI_TENANT_STRICT=True (production), missing X-Tenant
+        on /api/v1/* paths 400s at the middleware layer BEFORE
+        IsTenantMember runs. Test-env default is permissive (False);
+        flip per-test to pin the strict path production will use."""
+        settings.MULTI_TENANT_STRICT = True
+        _create_appointment(client_user, specialist, service)
+        c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"
+        # No X-Tenant header.
+        c.force_authenticate(user=client_user)
+        r = c.get("/api/v1/appointments/")
+        assert r.status_code == 400, (
+            f"Strict mode + missing header should 400; got {r.status_code}."
+        )
+
     def test_user_with_revoked_tenant_relationship_denied(
         self, client_user, specialist, service, tenant_a,
     ):
