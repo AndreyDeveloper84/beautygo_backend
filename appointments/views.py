@@ -33,6 +33,11 @@ from .domain.exceptions import (
     RescheduleNotAllowedError,
     SlotNotAvailableError,
 )
+from .infrastructure.idempotency import (
+    IdempotencyConflict,
+    lookup_or_open_idempotency,
+    record_response,
+)
 from .infrastructure.outbox import emit_outbox_event, safe_tenant_id
 from .models import Appointment, OutboxEvent
 from .serializers import (
@@ -214,6 +219,24 @@ class AppointmentViewSet(viewsets.GenericViewSet):
     )
     @action(detail=True, methods=['post'])
     def cancel(self, request: Request, pk: Any = None) -> Response:
+        # X-Idempotency-Key replay protection (#512). Header-optional —
+        # clients without it pass through with no tracking. With it, a
+        # replay of the same key + body returns the cached response;
+        # same key + different body returns 422.
+        try:
+            cached, idem_record = lookup_or_open_idempotency(
+                request,
+                operation_name="booking.cancel",
+                target_type="Appointment",
+                target_id=str(pk),
+            )
+        except IdempotencyConflict as exc:
+            return error_response(
+                "IDEMPOTENCY_CONFLICT", str(exc), status_code=422,
+            )
+        if cached is not None:
+            return Response(cached["payload"], status=cached["status"])
+
         try:
             appointment = self.get_queryset().get(pk=pk)
         except Appointment.DoesNotExist:
@@ -243,7 +266,10 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             )
 
         appointment.refresh_from_db()
-        return success_response(AppointmentDetailSerializer(appointment).data)
+        response = success_response(AppointmentDetailSerializer(appointment).data)
+        if idem_record is not None:
+            record_response(idem_record, response.status_code, response.data)
+        return response
 
     # -- Complete ------------------------------------------------------------
 
@@ -453,6 +479,22 @@ class AppointmentViewSet(viewsets.GenericViewSet):
     )
     @action(detail=True, methods=['post'])
     def reschedule(self, request: Request, pk: Any = None) -> Response:
+        # X-Idempotency-Key replay protection (#512). Same shape as
+        # cancel — see that comment for contract details.
+        try:
+            cached, idem_record = lookup_or_open_idempotency(
+                request,
+                operation_name="booking.reschedule",
+                target_type="Appointment",
+                target_id=str(pk),
+            )
+        except IdempotencyConflict as exc:
+            return error_response(
+                "IDEMPOTENCY_CONFLICT", str(exc), status_code=422,
+            )
+        if cached is not None:
+            return Response(cached["payload"], status=cached["status"])
+
         try:
             appointment = self.get_queryset().get(pk=pk)
         except Appointment.DoesNotExist:
@@ -488,4 +530,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             )
 
         appointment.refresh_from_db()
-        return success_response(AppointmentDetailSerializer(appointment).data)
+        response = success_response(AppointmentDetailSerializer(appointment).data)
+        if idem_record is not None:
+            record_response(idem_record, response.status_code, response.data)
+        return response

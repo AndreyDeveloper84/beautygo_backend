@@ -177,3 +177,21 @@ def dispatch_outbox_events() -> dict:
             )
 
     return {"processed": processed, "failed": failed, "skipped": skipped}
+
+
+@shared_task(name="appointments.tasks.purge_expired_idempotency_keys")
+def purge_expired_idempotency_keys() -> dict:
+    """Delete IdempotencyKey rows past their expires_at (#512).
+
+    Run periodically (daily — see settings.base CELERY_BEAT_SCHEDULE).
+    The table grows monotonically without this; in pilot scale ~10k
+    rows/day on a busy salon is realistic, so a daily prune keeps the
+    table small and the index fast.
+    """
+    from .models import IdempotencyKey
+    deleted, _ = IdempotencyKey.objects.filter(
+        expires_at__lte=timezone.now(),
+    ).delete()
+    if deleted:
+        logger.info("idempotency.purged_expired count=%d", deleted)
+    return {"deleted": deleted}
