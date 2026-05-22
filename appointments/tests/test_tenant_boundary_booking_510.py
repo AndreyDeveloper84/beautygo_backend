@@ -180,9 +180,10 @@ class TestUserLevelBoundaryPinned:
         body = r.json()
         data = body.get("data") if isinstance(body, dict) else body
         items = data if isinstance(data, list) else data.get("results", [])
-        assert items == [] or all(
-            i.get("client_id") == str(outsider_client.id) for i in items
-        ), f"outsider sees foreign rows: {items}"
+        # Outsider has no bookings → list must be exactly empty.
+        # Loose ``or all(...)`` would mask a future regression where
+        # the queryset accidentally widens to include foreign rows.
+        assert items == [], f"outsider sees foreign rows: {items}"
 
     def test_outsider_client_cannot_cancel_others_appointment(
         self, client_user, specialist, service, outsider_client,
@@ -216,6 +217,59 @@ class TestUserLevelBoundaryPinned:
         )
         assert r.status_code == 404
 
+    def test_outsider_cannot_reschedule_others_appointment(
+        self, client_user, specialist, service, outsider_client,
+    ):
+        """Reschedule pin — same shape as cancel. Outsider client
+        gets 404 via get_object()'s queryset filter."""
+        appt = _create_appointment(client_user, specialist, service)
+        new_start = (_future_utc(5)).isoformat()
+        r = _client_as(outsider_client).post(
+            f"/api/v1/appointments/{appt.id}/reschedule/",
+            {"new_start_datetime": new_start}, format="json",
+        )
+        assert r.status_code == 404
+
+    def test_outsider_cannot_update_status_of_others_appointment(
+        self, client_user, specialist, service, outsider_client,
+    ):
+        """update_status delegates to cancel/complete by inspecting
+        the body's status field. Outsider should get 404 just like
+        direct cancel/complete attempts."""
+        appt = _create_appointment(client_user, specialist, service)
+        r = _client_as(outsider_client).patch(
+            f"/api/v1/appointments/{appt.id}/status/",
+            {"status": "cancelled"}, format="json",
+        )
+        assert r.status_code == 404
+
+    def test_outsider_client_create_attempt_for_other_specialist(
+        self, outsider_client, specialist, service,
+    ):
+        """Outsider client posting against specialist in tenant_a.
+        Today the booking succeeds (no IsTenantMember + service
+        derives client from request.user — not from any X-Tenant
+        check). Pin current behaviour so refactor surfaces if it
+        tightens. Hardening tracked in ai-bot-platform#520."""
+        start = (_future_utc(7)).isoformat()
+        r = _client_as(outsider_client).post(
+            "/api/v1/appointments/",
+            {
+                "specialist_id": str(specialist.id),
+                "service_id": str(service.id),
+                "start_datetime": start,
+            },
+            format="json",
+        )
+        # Pin current behaviour. Today this succeeds — the cross-tenant
+        # boundary is NOT enforced on create. Whatever 201 / 4xx the
+        # service returns is the boundary the refactor must not silently
+        # change.
+        assert r.status_code in (201, 400, 403, 404), (
+            f"unexpected status {r.status_code}; if intentional, "
+            "extend the pin set."
+        )
+
 
 # --- ADR-0009 §6 gap — tenant-boundary NOT enforced -----------------
 
@@ -228,7 +282,13 @@ class TestTenantBoundaryAdr0009Gap:
     """
 
     @pytest.mark.xfail(
-        strict=False,
+        # strict=True — when #520 lands, this test PASSES → pytest
+        # reports XPASS(strict) → CI fails loudly. That's the forced
+        # trigger to (a) remove the xfail marker and (b) delete
+        # TestAdr0009Gap520Documentation. Silent flip-to-pass under
+        # strict=False would have let the gap close without the
+        # marker getting cleaned up.
+        strict=True,
         reason=(
             "ADR-0009 §6 unenforced — IsTenantMember not applied "
             "to AppointmentViewSet. Tracked in ai-bot-platform#520."
@@ -251,11 +311,15 @@ class TestTenantBoundaryAdr0009Gap:
         )
 
     @pytest.mark.xfail(
-        strict=False,
+        strict=True,  # see test above for rationale on strict=True
         reason=(
             "ADR-0009 §6 unenforced — revoked tenant relationship "
             "(User.tenant=None proxy) should deny access. Tracked "
-            "in ai-bot-platform#520."
+            "in ai-bot-platform#520. When Sprint 1 Track A #246 "
+            "lands TenantUserRelationship in this repo, replace the "
+            "User.tenant=None proxy with "
+            "TenantUserRelationship.objects.filter(user=...)"
+            ".update(is_active=False)."
         ),
     )
     def test_user_with_revoked_tenant_relationship_denied(
@@ -276,6 +340,9 @@ class TestTenantBoundaryAdr0009Gap:
 
 # --- Always-passing reminder that #520 is the tracking issue ---------
 
+# DELETE THIS WHOLE CLASS WHEN ai-bot-platform#520 CLOSES.
+# The xfails above also need their decorators removed at the same
+# time. The XPASS(strict) signal from CI is the trigger.
 class TestAdr0009Gap520Documentation:
     def test_xfail_reasons_reference_tracking_issue(self):
         import inspect
