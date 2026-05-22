@@ -298,6 +298,32 @@ class TestCancelIdempotency:
         assert appt.status == Appointment.Status.CONFIRMED
 
 
+def _awaiting_payment(client_user, specialist, service):
+    """Same as _confirmed but leaves status=AWAITING_PAYMENT.
+
+    Reschedule policy permits AWAITING_PAYMENT but not CONFIRMED (per
+    ReschedulePolicy in appointments/domain/policies.py)."""
+    dto = CreateBookingDTO(
+        client_id=client_user.id,
+        specialist_id=specialist.id,
+        service_id=service.id,
+        start_at=_future_utc(3),
+        idempotency_key=str(uuid4()),
+    )
+    appt, _ = CreateBookingService()._execute_atomic(
+        dto, specialist, service,
+        target_interval=TimeInterval(
+            start_at=dto.start_at,
+            end_at=dto.start_at + timedelta(hours=1),
+        ),
+    )
+    # Leave at default AWAITING_PAYMENT — reschedule policy permits.
+    OutboxEvent.objects.filter(
+        topic=OutboxEvent.Topic.BOOKING_CREATED,
+    ).delete()
+    return appt
+
+
 @pytest.mark.django_db
 class TestRescheduleIdempotency:
     """Same shape but on the reschedule endpoint — confirms the helper
@@ -307,7 +333,7 @@ class TestRescheduleIdempotency:
     def test_replay_same_body_returns_cached_no_double_mutation(
         self, client_user, specialist, service,
     ):
-        appt = _confirmed(client_user, specialist, service)
+        appt = _awaiting_payment(client_user, specialist, service)
         key = "reschedule-replay-512"
         new_start = _future_utc(5).isoformat()
         body = {"new_start_datetime": new_start}
@@ -316,7 +342,7 @@ class TestRescheduleIdempotency:
             f"/api/v1/appointments/{appt.id}/reschedule/",
             body, format="json",
         )
-        assert first.status_code == 200
+        assert first.status_code == 200, first.data
         second = c.post(
             f"/api/v1/appointments/{appt.id}/reschedule/",
             body, format="json",
