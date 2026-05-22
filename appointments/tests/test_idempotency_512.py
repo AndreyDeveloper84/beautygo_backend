@@ -207,15 +207,15 @@ class TestCancelIdempotency:
             {"reason": "first"}, format="json",
         )
         assert first.status_code == 200
-        # Force-expire the record by back-dating expires_at.
+        # Force-expire by back-dating expires_at.
         IdempotencyKey.objects.filter(
             user=client_user, operation_name="booking.cancel", key=key,
         ).update(expires_at=dj_tz.now() - timedelta(seconds=1))
 
-        # Replay should now treat the key as cache miss and try to
-        # re-execute. The booking is already CANCELLED → service raises
-        # InvalidStateTransitionError → 422 (NOT cached 200). That
-        # proves the helper did NOT serve cached content.
+        # Replay should now treat the key as cache miss and re-execute.
+        # The booking is already CANCELLED → service raises
+        # InvalidStateTransitionError → 422 (NOT cached 200). Proves
+        # the helper did NOT serve cached content.
         second = c.post(
             f"/api/v1/appointments/{appt.id}/cancel/",
             {"reason": "first"}, format="json",
@@ -226,6 +226,76 @@ class TestCancelIdempotency:
             user=client_user, operation_name="booking.cancel", key=key,
             response_status=200,
         ).exists()
+
+    def test_first_call_errors_replay_returns_cached_error(
+        self, client_user, specialist, service,
+    ):
+        """Stripe-semantic: same key + same body that produced a 422
+        on the first call returns the SAME 422 on replay (not re-
+        executes). Caches errors too so replay-safety holds on the
+        sad path. Addresses Code Reviewer #143 blocker.
+        """
+        appt = _confirmed(client_user, specialist, service)
+        # Pre-flip to CANCELLED so the cancel service errors out.
+        appt.status = Appointment.Status.CANCELLED
+        appt.save(update_fields=["status"])
+
+        key = "error-replay-512"
+        c = _client_as(client_user, idem_key=key)
+        body = {"reason": "test error replay"}
+        first = c.post(
+            f"/api/v1/appointments/{appt.id}/cancel/",
+            body, format="json",
+        )
+        # First call errors with 422 (state machine rejects).
+        assert first.status_code == 422
+
+        # Replay returns the SAME cached 422 — no re-execute, no
+        # IdempotencyInFlight (placeholder was filled by record_response).
+        second = c.post(
+            f"/api/v1/appointments/{appt.id}/cancel/",
+            body, format="json",
+        )
+        assert second.status_code == 422
+        assert first.data == second.data
+        # Exactly one row, with the error status cached.
+        rec = IdempotencyKey.objects.get(
+            user=client_user, operation_name="booking.cancel", key=key,
+        )
+        assert rec.response_status == 422
+
+    def test_in_flight_placeholder_returns_409(
+        self, client_user, specialist, service,
+    ):
+        """Manually-injected placeholder (response_status=0) — simulates
+        a concurrent first-call still executing OR a crashed first
+        call. Replay returns 409 IDEMPOTENCY_IN_FLIGHT.
+        """
+        appt = _confirmed(client_user, specialist, service)
+        key = "in-flight-512"
+        body = {"reason": "in flight"}
+        # Compute the canonical body hash the way the helper does.
+        from appointments.infrastructure.idempotency import _hash_body
+        body_hash = _hash_body(body)
+        IdempotencyKey.objects.create(
+            user=client_user,
+            key=key,
+            operation_name="booking.cancel",
+            request_body_hash=body_hash,
+            response_status=0,           # placeholder
+            response_payload={},
+            expires_at=dj_tz.now() + timedelta(hours=12),
+        )
+        c = _client_as(client_user, idem_key=key)
+        r = c.post(
+            f"/api/v1/appointments/{appt.id}/cancel/",
+            body, format="json",
+        )
+        assert r.status_code == 409
+        assert r.data["error"]["code"] == "IDEMPOTENCY_IN_FLIGHT"
+        # Appointment state untouched — operation didn't run.
+        appt.refresh_from_db()
+        assert appt.status == Appointment.Status.CONFIRMED
 
 
 @pytest.mark.django_db
