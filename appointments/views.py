@@ -293,6 +293,67 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             )
         return success_response(AppointmentDetailSerializer(appointment).data)
 
+    # -- No-show ------------------------------------------------------------
+
+    @extend_schema(
+        request=None,
+        responses={200: AppointmentDetailSerializer},
+    )
+    @action(detail=True, methods=['post'], url_path='no-show')
+    def no_show(self, request: Request, pk: Any = None) -> Response:
+        """Specialist marks the client as no-show. Transition
+        confirmed → no_show. Distinct from cancel — preserves the
+        "specialist held the slot" signal for revenue loss tracking
+        + future reliability scoring (#511).
+        """
+        if not request.user.is_specialist:
+            return error_response(
+                "FORBIDDEN",
+                "Only specialists can mark appointments as no-show.",
+                status_code=403,
+            )
+        try:
+            with transaction.atomic():
+                # Same race-safe pattern as `complete`: select_for_update
+                # + explicit owner check after the lock, atomic over the
+                # state flip + envelope emit.
+                try:
+                    appointment = (
+                        Appointment.objects
+                        .select_for_update()
+                        .select_related('specialist', 'client', 'service')
+                        .get(pk=pk)
+                    )
+                except Appointment.DoesNotExist:
+                    return error_response(
+                        "NOT_FOUND", "Appointment not found.", status_code=404,
+                    )
+                if appointment.specialist.user_id != request.user.id:
+                    return error_response(
+                        "NOT_FOUND",  # don't leak existence cross-specialist
+                        "Appointment not found.",
+                        status_code=404,
+                    )
+                appointment.mark_no_show()
+                emit_outbox_event(
+                    topic=OutboxEvent.Topic.BOOKING_NO_SHOW,
+                    data={
+                        "booking_id": str(appointment.id),
+                        "client_id": str(appointment.client_id),
+                        "specialist_id": str(appointment.specialist_id),
+                    },
+                    user_id=request.user.id,
+                    tenant_id=safe_tenant_id(
+                        appointment, context="booking.no_show",
+                    ),
+                    actor="admin",  # specialist-initiated
+                )
+        except DjangoValidationError as e:
+            return error_response(
+                "INVALID_STATUS", str(e.message), status_code=422,
+            )
+        return success_response(AppointmentDetailSerializer(appointment).data)
+
     # -- Status (spec-compliant: PATCH /appointments/{id}/status/) ----------
 
     @extend_schema(
