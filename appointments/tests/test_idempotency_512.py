@@ -264,6 +264,84 @@ class TestCancelIdempotency:
         )
         assert rec.response_status == 422
 
+    def test_same_key_different_target_does_not_collide(
+        self, client_user, specialist, service,
+    ):
+        """🔴 Surface 1 (PR #143 adversarial): mobile commonly reuses
+        the same X-Idempotency-Key across distinct targets in the same
+        user intent. cancel(apt_X) followed by cancel(apt_Y) with the
+        same header MUST NOT return apt_X's cached response for apt_Y —
+        otherwise apt_Y is never cancelled and the customer is
+        double-booked. target_id in the lookup tuple closes the hole.
+        """
+        appt_x = _confirmed(client_user, specialist, service)
+        # Build a second confirmed booking. Use a non-overlapping slot
+        # via _future_utc with +24h so the slot-conflict check in
+        # CreateBookingService is happy.
+        from appointments.application.dto import CreateBookingDTO as _DTO
+
+        dto2 = _DTO(
+            client_id=client_user.id,
+            specialist_id=specialist.id,
+            service_id=service.id,
+            start_at=_future_utc(24),
+            idempotency_key=str(uuid4()),
+        )
+        appt_y, _ = CreateBookingService()._execute_atomic(
+            dto2, specialist, service,
+            target_interval=TimeInterval(
+                start_at=dto2.start_at,
+                end_at=dto2.start_at + timedelta(hours=1),
+            ),
+        )
+        appt_y.status = Appointment.Status.CONFIRMED
+        appt_y.save(update_fields=["status"])
+        OutboxEvent.objects.filter(
+            topic=OutboxEvent.Topic.BOOKING_CREATED,
+        ).delete()
+
+        # Same reuse-the-key pattern a mobile retry buffer produces.
+        key = "shared-key-X-and-Y"
+        body = {"reason": "shared"}
+        c = _client_as(client_user, idem_key=key)
+
+        # First call cancels apt_X. apt_X carries this in its target_id.
+        r1 = c.post(
+            f"/api/v1/appointments/{appt_x.id}/cancel/",
+            body, format="json",
+        )
+        assert r1.status_code == 200
+        appt_x.refresh_from_db()
+        assert appt_x.status == Appointment.Status.CANCELLED
+
+        # Second call: SAME key, SAME body, DIFFERENT target — must
+        # NOT return apt_X's cached 200. apt_Y must actually cancel.
+        r2 = c.post(
+            f"/api/v1/appointments/{appt_y.id}/cancel/",
+            body, format="json",
+        )
+        assert r2.status_code == 200
+        appt_y.refresh_from_db()
+        assert appt_y.status == Appointment.Status.CANCELLED, (
+            "Cross-target cache bleed: apt_Y was not actually cancelled. "
+            "target_id is missing from the IdempotencyKey lookup tuple."
+        )
+
+        # Two distinct outbox emits — one per target.
+        cancelled_events = OutboxEvent.objects.filter(
+            topic=OutboxEvent.Topic.BOOKING_CANCELLED,
+        )
+        assert cancelled_events.count() == 2
+
+        # Two distinct IdempotencyKey rows — one per (key, target_id).
+        rows = IdempotencyKey.objects.filter(
+            user=client_user, operation_name="booking.cancel", key=key,
+        )
+        assert rows.count() == 2
+        assert set(rows.values_list("target_id", flat=True)) == {
+            str(appt_x.id), str(appt_y.id),
+        }
+
     def test_in_flight_placeholder_returns_409(
         self, client_user, specialist, service,
     ):
@@ -281,6 +359,7 @@ class TestCancelIdempotency:
             user=client_user,
             key=key,
             operation_name="booking.cancel",
+            target_id=str(appt.id),  # in lookup tuple post Surface 1 fix
             request_body_hash=body_hash,
             response_status=0,           # placeholder
             response_payload={},

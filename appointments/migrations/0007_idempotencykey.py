@@ -44,14 +44,14 @@ class Migration(migrations.Migration):
         migrations.AddConstraint(
             model_name='idempotencykey',
             constraint=models.UniqueConstraint(
-                fields=('user', 'operation_name', 'key'),
-                name='idempotency_unique_user_op_key',
+                fields=('user', 'operation_name', 'key', 'target_id'),
+                name='idempotency_unique_user_op_key_target',
             ),
         ),
         migrations.AddIndex(
             model_name='idempotencykey',
             index=models.Index(
-                fields=['user', 'operation_name', 'key'],
+                fields=['user', 'operation_name', 'key', 'target_id'],
                 name='idempotency_lookup_idx',
             ),
         ),

@@ -487,14 +487,21 @@ class IdempotencyKey(models.Model):
         verbose_name = 'Idempotency Key'
         verbose_name_plural = 'Idempotency Keys'
         constraints = [
+            # target_id IS in the constraint to prevent cross-target
+            # cache bleed: cancel(apt_X) and cancel(apt_Y) with the same
+            # X-Idempotency-Key (a common mobile retry-buffer reuse
+            # pattern) must NOT return apt_X's cached response for
+            # apt_Y's request. Without target_id the helper would
+            # silently return cached 200 → apt_Y never cancelled →
+            # customer double-booked. See PR #143 adversarial review.
             models.UniqueConstraint(
-                fields=['user', 'operation_name', 'key'],
-                name='idempotency_unique_user_op_key',
+                fields=['user', 'operation_name', 'key', 'target_id'],
+                name='idempotency_unique_user_op_key_target',
             ),
         ]
         indexes = [
             models.Index(
-                fields=['user', 'operation_name', 'key'],
+                fields=['user', 'operation_name', 'key', 'target_id'],
                 name='idempotency_lookup_idx',
             ),
         ]
