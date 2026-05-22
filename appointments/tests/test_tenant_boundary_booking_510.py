@@ -5,18 +5,20 @@ booking endpoints (list / create / retrieve / cancel / reschedule /
 complete / update_status). A future refactor of `get_queryset` or the
 permission stack must not silently regress what's currently enforced.
 
-Gap acknowledged at PR time (filed as ai-bot-platform#520):
-- `AppointmentViewSet.permission_classes = [IsAuthenticated]` only —
-  `IsTenantMember` is NOT applied.
-- `get_queryset` filters by `client=user` or `specialist__user=user` —
-  USER-level boundary, not tenant-level.
-- ADR-0009 §Hard rule #6 mandates `TenantUserRelationship(user_id,
-  tenant_id)` verification. `TenantUserRelationship` model does NOT
-  yet exist in this repo (lands via Sprint 1 Track A #246). Closest
-  current proxy is `User.tenant` FK.
-- Tests that would assert the ADR-0009 invariant are marked
-  ``@pytest.mark.xfail(strict=False, reason="ai-bot-platform#520")``
-  — they flip to expected-pass once #520 closes.
+Status update 2026-05-22:
+- #520 closed — IsTenantMember now applied to AppointmentViewSet +
+  get_queryset filters by request.tenant + CreateBookingService
+  stamps Appointment.tenant_id. The two ADR-0009 §6 tests that were
+  xfail-ed now pass as expected-pass. TestAdr0009Gap520Documentation
+  guard class deleted.
+- Pre-DRF-242.4 backfill, some `Appointment.tenant_id` rows are still
+  NULL — get_queryset includes them via Q(tenant__isnull=True) so
+  legacy data stays accessible. Future hardening will drop the
+  OR-clause once a data-migration backfills.
+- `TenantUserRelationship` model still doesn't exist in this repo
+  (lands via Sprint 1 Track A #246). Strict relationship-revocation
+  modelling waits for that migration; today the test uses
+  `User.tenant=None` as the closest proxy.
 """
 from __future__ import annotations
 
@@ -271,84 +273,69 @@ class TestUserLevelBoundaryPinned:
         )
 
 
-# --- ADR-0009 §6 gap — tenant-boundary NOT enforced -----------------
+# --- ADR-0009 §6 invariant enforced post-#520 ----------------------
 
 @pytest.mark.django_db
-class TestTenantBoundaryAdr0009Gap:
-    """Tests that document the ADR-0009 §Hard rule #6 invariant gap.
-    Each xfail(strict=False) asserts what SHOULD happen post-hardening
-    (ai-bot-platform#520). When #520 lands, flip the xfail to
-    expected-pass.
-    """
+class TestTenantBoundaryAdr0009:
+    """ADR-0009 §Hard rule #6 — IsTenantMember + get_queryset tenant
+    filter (landed in #520). Cross-tenant X-Tenant and revoked
+    relationship both reject with 403."""
 
-    @pytest.mark.xfail(
-        # strict=True — when #520 lands, this test PASSES → pytest
-        # reports XPASS(strict) → CI fails loudly. That's the forced
-        # trigger to (a) remove the xfail marker and (b) delete
-        # TestAdr0009Gap520Documentation. Silent flip-to-pass under
-        # strict=False would have let the gap close without the
-        # marker getting cleaned up.
-        strict=True,
-        reason=(
-            "ADR-0009 §6 unenforced — IsTenantMember not applied "
-            "to AppointmentViewSet. Tracked in ai-bot-platform#520."
-        ),
-    )
-    def test_user_in_t1_with_xtenant_t2_header_should_be_rejected(
-        self, client_user, specialist, service, tenant_b,
+    def test_user_in_t1_with_xtenant_t2_header_is_rejected(
+        self, client_user, specialist, service, tenant_a, tenant_b,
     ):
-        """Client.tenant=T1, X-Tenant=T2 → should 403/400 per ADR §6.
-        Today the request succeeds — no permission check rejects
-        cross-tenant header use."""
+        """Client.tenant=T1, X-Tenant=T2 → 403 via IsTenantMember
+        (request.tenant_id != user.tenant_id). Post-#520 this is
+        the enforced ADR-0009 §6 invariant."""
         _create_appointment(client_user, specialist, service)
         c = APIClient()
         c.defaults["HTTP_X_APP_TYPE"] = "client"
         c.defaults["HTTP_X_TENANT"] = tenant_b.slug  # MISMATCHED
         c.force_authenticate(user=client_user)
         r = c.get("/api/v1/appointments/")
-        assert r.status_code in (400, 403), (
-            f"Cross-tenant X-Tenant accepted (status={r.status_code})."
+        assert r.status_code == 403, (
+            f"Cross-tenant X-Tenant should 403; got {r.status_code}."
         )
 
-    @pytest.mark.xfail(
-        strict=True,  # see test above for rationale on strict=True
-        reason=(
-            "ADR-0009 §6 unenforced — revoked tenant relationship "
-            "(User.tenant=None proxy) should deny access. Tracked "
-            "in ai-bot-platform#520. When Sprint 1 Track A #246 "
-            "lands TenantUserRelationship in this repo, replace the "
-            "User.tenant=None proxy with "
-            "TenantUserRelationship.objects.filter(user=...)"
-            ".update(is_active=False)."
-        ),
-    )
+    def test_missing_xtenant_in_strict_mode_returns_400(
+        self, client_user, specialist, service, settings,
+    ):
+        """When MULTI_TENANT_STRICT=True (production), missing X-Tenant
+        on /api/v1/* paths 400s at the middleware layer BEFORE
+        IsTenantMember runs. Test-env default is permissive (False);
+        flip per-test to pin the strict path production will use."""
+        settings.MULTI_TENANT_STRICT = True
+        _create_appointment(client_user, specialist, service)
+        c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"
+        # No X-Tenant header.
+        c.force_authenticate(user=client_user)
+        r = c.get("/api/v1/appointments/")
+        assert r.status_code == 400, (
+            f"Strict mode + missing header should 400; got {r.status_code}."
+        )
+
     def test_user_with_revoked_tenant_relationship_denied(
-        self, client_user, specialist, service,
+        self, client_user, specialist, service, tenant_a,
     ):
         """User.tenant=None (proxy for revoked TenantUserRelationship)
-        should not see their own historical T1 bookings per ADR-0009
-        §6 strict reading."""
+        sending X-Tenant=T1 → 403 via IsTenantMember (user.tenant_id
+        is None while request.tenant_id is set).
+
+        When Sprint 1 Track A #246 lands TenantUserRelationship in
+        this repo, replace the `User.tenant = None` proxy with
+        `TenantUserRelationship.objects.filter(user=...)
+        .update(is_active=False)`.
+        """
         appt = _create_appointment(client_user, specialist, service)
         client_user.tenant = None
         client_user.save(update_fields=["tenant"])
 
-        r = _client_as(client_user).get(f"/api/v1/appointments/{appt.id}/")
-        assert r.status_code in (403, 404), (
-            f"Revoked-tenant user still accessed (status={r.status_code})."
-        )
-
-
-# --- Always-passing reminder that #520 is the tracking issue ---------
-
-# DELETE THIS WHOLE CLASS WHEN ai-bot-platform#520 CLOSES.
-# The xfails above also need their decorators removed at the same
-# time. The XPASS(strict) signal from CI is the trigger.
-class TestAdr0009Gap520Documentation:
-    def test_xfail_reasons_reference_tracking_issue(self):
-        import inspect
-        source = inspect.getsource(TestTenantBoundaryAdr0009Gap)
-        assert "ai-bot-platform#520" in source, (
-            "Lost #520 reference. If #520 closed and the gap is "
-            "fixed, flip the xfails to expected-pass and delete "
-            "this guard."
+        c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"
+        c.defaults["HTTP_X_TENANT"] = tenant_a.slug  # was their tenant
+        c.force_authenticate(user=client_user)
+        r = c.get(f"/api/v1/appointments/{appt.id}/")
+        assert r.status_code == 403, (
+            f"Revoked-tenant user should 403; got {r.status_code}."
         )
