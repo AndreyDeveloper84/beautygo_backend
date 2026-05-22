@@ -33,11 +33,15 @@ the DB row and the payload agree without a second round-trip.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 from uuid import UUID
 
 from django.utils import timezone
+
+
+logger = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------------------
@@ -66,6 +70,34 @@ EVENT_VERSIONS: dict[str, int] = {
 
 
 VALID_ACTORS = frozenset({"system", "user", "admin"})
+
+
+def safe_tenant_id(obj, *, context: str) -> str | None:
+    """Extract tenant_id from an Appointment/Payment-shaped object, with
+    structured logging when it's NULL.
+
+    Pre-DRF-242.4 backfill, some Appointment / Payment rows still have
+    tenant=None (the FK is null=True until backfill completes). After
+    the STRICT_TENANT consumer-side flip on 2026-05-28, bot-platform
+    will reject envelopes with ``tenant_id: null``. Operations must
+    backfill before that date.
+
+    This helper surfaces the gap as a WARN log keyed on ``context``
+    (the emit-site name) so the operational alert tells whoever's
+    on-call exactly which call site is bleeding. Returns None instead
+    of raising — silent emit with a logged warning is preferable to
+    hard-failing the booking flow today; the alert tells ops to fix
+    the cause before the deadline.
+    """
+    tid = getattr(obj, "tenant_id", None)
+    if tid is None:
+        logger.warning(
+            "outbox.tenant_id_missing context=%s — backfill before "
+            "2026-05-28 STRICT_TENANT flip (consumer-side rejection)",
+            context,
+        )
+        return None
+    return str(tid)
 
 
 def _coerce_uuid(value: str | UUID | None) -> str | None:
@@ -164,9 +196,13 @@ def emit_outbox_event(
     ``.id`` if needed (e.g. for logging or for chaining a follow-up event
     via ``causation_id``).
     """
-    # Local import — OutboxEvent lives in appointments.models which
-    # imports this module's parent package (transitively via the
-    # appointments app). Module-level import would deadlock app loading.
+    # Local import — envelope.py is loaded as part of the appointments
+    # app bootstrap (via apps.py → infrastructure package walk). At
+    # bootstrap time appointments.models has not finished registering
+    # with django.apps, so a module-level import raises AppNotReady.
+    # Caller modules (views.py, services.py) are imported AFTER app
+    # registry is built and can hoist their own emit_outbox_event
+    # imports freely — only envelope.py itself needs the deferral.
     from appointments.models import OutboxEvent
 
     # Crisp failure at the emit site for a topic typo (e.g.

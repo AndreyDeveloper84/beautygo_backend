@@ -210,11 +210,14 @@ class CreateBookingService:
         # Write outbox event (same transaction). Envelope per ADR-0009
         # §Mandatory event contract — emit_outbox_event wraps the
         # domain data in the canonical envelope (event_id, event_version,
-        # actor, correlation_id, …) so cross-service consumers can
-        # dedupe + version-route handlers.
-        from appointments.infrastructure.outbox import emit_outbox_event
+        # actor, correlation_id, tenant_id, …) so cross-service consumers
+        # can dedupe + version-route handlers.
+        from appointments.infrastructure.outbox import (
+            emit_outbox_event, safe_tenant_id,
+        )
+        from appointments.models import OutboxEvent as _OutboxEvent
         emit_outbox_event(
-            topic="booking.created",
+            topic=_OutboxEvent.Topic.BOOKING_CREATED,
             data={
                 "booking_id": str(appointment.id),
                 "client_id": str(dto.client_id),
@@ -227,6 +230,7 @@ class CreateBookingService:
                 "specialist_timezone": snapshot.specialist_timezone,
             },
             user_id=dto.client_id,
+            tenant_id=safe_tenant_id(appointment, context="booking.created"),
             actor="user",  # booking created by the client via mobile app
         )
 
