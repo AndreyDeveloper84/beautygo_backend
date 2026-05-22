@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 from typing import Any
 
 from django.conf import settings
@@ -418,3 +419,92 @@ class OutboxEvent(models.Model):
             return {}
         inner = self.payload.get("data")
         return inner if isinstance(inner, dict) else self.payload
+
+
+# ---------------------------------------------------------------------------
+# IdempotencyKey — replay protection for mutating endpoints (#512)
+# ---------------------------------------------------------------------------
+
+class IdempotencyKey(models.Model):
+    """Replay protection for mutating booking endpoints.
+
+    POST /appointments/ already uses ``Appointment.idempotency_key`` for
+    create-time deduplication. ``cancel`` and ``reschedule`` (and any
+    future mutating endpoint) need their own keys — the same appointment
+    can be rescheduled twice, each call needs a distinct key.
+
+    Lookup key: ``(key, operation_name, user)``. Different users may
+    submit the same X-Idempotency-Key value; same user submitting the
+    same key for the same operation = replay.
+
+    Body-hash check: the request body is SHA256-hashed at first call;
+    a replay with a DIFFERENT body for the same key raises 422 conflict
+    (the client is misusing the key). Same hash → return cached response.
+
+    TTL: ``expires_at`` defaults to 24h after creation. The
+    ``appointments.purge_expired_idempotency_keys`` Celery beat task
+    (see settings.base CELERY_BEAT_SCHEDULE) drops expired rows.
+    """
+
+    DEFAULT_TTL = timedelta(hours=24)
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='idempotency_keys',
+    )
+    key = models.CharField(
+        max_length=128,
+        help_text="Client-provided X-Idempotency-Key header value.",
+    )
+    operation_name = models.CharField(
+        max_length=64,
+        help_text=(
+            "Operation identifier, e.g. 'booking.cancel'. Scoped so a "
+            "client can reuse the same key value across different "
+            "operations without collision."
+        ),
+    )
+    target_type = models.CharField(
+        max_length=64, blank=True, default="",
+        help_text="Optional model name of the target row (e.g. 'Appointment').",
+    )
+    target_id = models.CharField(
+        max_length=64, blank=True, default="",
+        help_text="Optional target row id (UUID stringified) for audit only.",
+    )
+    request_body_hash = models.CharField(
+        max_length=64,
+        help_text="SHA256 of the normalised request body. Mismatched on replay = 422.",
+    )
+    response_status = models.PositiveSmallIntegerField()
+    response_payload = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        verbose_name = 'Idempotency Key'
+        verbose_name_plural = 'Idempotency Keys'
+        constraints = [
+            # target_id IS in the constraint to prevent cross-target
+            # cache bleed: cancel(apt_X) and cancel(apt_Y) with the same
+            # X-Idempotency-Key (a common mobile retry-buffer reuse
+            # pattern) must NOT return apt_X's cached response for
+            # apt_Y's request. Without target_id the helper would
+            # silently return cached 200 → apt_Y never cancelled →
+            # customer double-booked. See PR #143 adversarial review.
+            models.UniqueConstraint(
+                fields=['user', 'operation_name', 'key', 'target_id'],
+                name='idempotency_unique_user_op_key_target',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=['user', 'operation_name', 'key', 'target_id'],
+                name='idempotency_lookup_idx',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.operation_name}:{self.key[:12]}… (user={self.user_id})"

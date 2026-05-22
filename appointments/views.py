@@ -33,6 +33,12 @@ from .domain.exceptions import (
     RescheduleNotAllowedError,
     SlotNotAvailableError,
 )
+from .infrastructure.idempotency import (
+    IdempotencyConflict,
+    IdempotencyInFlight,
+    lookup_or_open_idempotency,
+    record_response,
+)
 from .infrastructure.outbox import emit_outbox_event, safe_tenant_id
 from .models import Appointment, OutboxEvent
 from .serializers import (
@@ -214,6 +220,41 @@ class AppointmentViewSet(viewsets.GenericViewSet):
     )
     @action(detail=True, methods=['post'])
     def cancel(self, request: Request, pk: Any = None) -> Response:
+        # X-Idempotency-Key replay protection (#512). Header-optional —
+        # clients without it pass through with no tracking. With it,
+        # the helper raises IdempotencyConflict (different body) or
+        # IdempotencyInFlight (placeholder still pending). On hit
+        # we return cached; otherwise we open a placeholder record
+        # that MUST be filled in via record_response on EVERY return
+        # path (success AND error) — see Stripe-style semantics in
+        # infrastructure/idempotency.py.
+        try:
+            cached, idem_record = lookup_or_open_idempotency(
+                request,
+                operation_name="booking.cancel",
+                target_type="Appointment",
+                target_id=str(pk),
+            )
+        except IdempotencyConflict as exc:
+            return error_response(
+                "IDEMPOTENCY_CONFLICT", str(exc), status_code=422,
+            )
+        except IdempotencyInFlight as exc:
+            return error_response(
+                "IDEMPOTENCY_IN_FLIGHT", str(exc), status_code=409,
+            )
+        if cached is not None:
+            return Response(cached["payload"], status=cached["status"])
+
+        response = self._cancel_inner(request, pk)
+        if idem_record is not None:
+            record_response(idem_record, response.status_code, response.data)
+        return response
+
+    def _cancel_inner(self, request: Request, pk: Any) -> Response:
+        """Cancel implementation, isolated so the outer ``cancel`` can
+        record_response on EVERY return without scattering the call.
+        """
         try:
             appointment = self.get_queryset().get(pk=pk)
         except Appointment.DoesNotExist:
@@ -453,6 +494,34 @@ class AppointmentViewSet(viewsets.GenericViewSet):
     )
     @action(detail=True, methods=['post'])
     def reschedule(self, request: Request, pk: Any = None) -> Response:
+        # X-Idempotency-Key replay protection (#512). Same shape as
+        # cancel — see that comment for contract details.
+        try:
+            cached, idem_record = lookup_or_open_idempotency(
+                request,
+                operation_name="booking.reschedule",
+                target_type="Appointment",
+                target_id=str(pk),
+            )
+        except IdempotencyConflict as exc:
+            return error_response(
+                "IDEMPOTENCY_CONFLICT", str(exc), status_code=422,
+            )
+        except IdempotencyInFlight as exc:
+            return error_response(
+                "IDEMPOTENCY_IN_FLIGHT", str(exc), status_code=409,
+            )
+        if cached is not None:
+            return Response(cached["payload"], status=cached["status"])
+
+        response = self._reschedule_inner(request, pk)
+        if idem_record is not None:
+            record_response(idem_record, response.status_code, response.data)
+        return response
+
+    def _reschedule_inner(self, request: Request, pk: Any) -> Response:
+        """Reschedule implementation, isolated so the outer
+        ``reschedule`` can record_response on EVERY return path."""
         try:
             appointment = self.get_queryset().get(pk=pk)
         except Appointment.DoesNotExist:
