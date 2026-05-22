@@ -635,6 +635,15 @@ CELERY_BEAT_SCHEDULE = {
         "task": "users.infer_user_patterns",
         "schedule": crontab(hour=3, minute=0),
     },
+    # #512: daily prune of expired IdempotencyKey rows used by the
+    # booking cancel + reschedule endpoints. TTL is 24h; running once
+    # a day at 02:30 UTC keeps the table small without thrashing the
+    # busy window. Rare miss between expiry and prune is fine — the
+    # helper's TTL check treats stale rows as cache miss.
+    "purge-expired-idempotency-keys": {
+        "task": "appointments.tasks.purge_expired_idempotency_keys",
+        "schedule": crontab(hour=2, minute=30),
+    },
 }
 
 # Django default cache → Redis (db 1). SlotCacheService and any future
