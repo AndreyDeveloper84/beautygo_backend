@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from django.db.models import QuerySet
 from drf_spectacular.utils import extend_schema
 from rest_framework import permissions, viewsets
@@ -31,7 +32,8 @@ from .domain.exceptions import (
     RescheduleNotAllowedError,
     SlotNotAvailableError,
 )
-from .models import Appointment
+from .infrastructure.outbox import emit_outbox_event, safe_tenant_id
+from .models import Appointment, OutboxEvent
 from .serializers import (
     AppointmentCancelSerializer,
     AppointmentCreateSerializer,
@@ -230,13 +232,61 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 status_code=403,
             )
         try:
-            appointment = self.get_queryset().get(pk=pk)
-        except Appointment.DoesNotExist:
-            return error_response(
-                "NOT_FOUND", "Appointment not found.", status_code=404,
-            )
-        try:
-            appointment.complete()
+            with transaction.atomic():
+                # Fetch inside the atomic block with select_for_update so
+                # two concurrent POSTs serialise here. Without the lock,
+                # both would pass can_complete() (status still CONFIRMED
+                # in both reads), both flip status, both emit with
+                # distinct event_ids — bot-platform processes both,
+                # double-completing the booking (adversarial review B3).
+                #
+                # We bypass get_queryset() (which filters by
+                # specialist__user) because select_for_update is on the
+                # raw Appointment manager. The explicit owner check on
+                # the next line restores the scope guard — belt-and-
+                # suspenders for B4.
+                try:
+                    appointment = (
+                        Appointment.objects
+                        .select_for_update()
+                        .select_related('specialist', 'client', 'service')
+                        .get(pk=pk)
+                    )
+                except Appointment.DoesNotExist:
+                    return error_response(
+                        "NOT_FOUND", "Appointment not found.", status_code=404,
+                    )
+                if appointment.specialist.user_id != request.user.id:
+                    # Defence-in-depth: a specialist cannot complete a
+                    # booking that isn't theirs even if get_queryset's
+                    # filter is later refactored. Distinct from the
+                    # is_specialist check above — that gates the role;
+                    # this gates the row.
+                    return error_response(
+                        "NOT_FOUND",  # don't leak existence to other specialists
+                        "Appointment not found.",
+                        status_code=404,
+                    )
+
+                # complete() raises ValidationError if status not
+                # CONFIRMED. Under the row lock that re-check sees the
+                # committed status of any racing transaction.
+                appointment.complete()
+                emit_outbox_event(
+                    topic=OutboxEvent.Topic.BOOKING_COMPLETED,
+                    data={
+                        "booking_id": str(appointment.id),
+                        "client_id": str(appointment.client_id),
+                        "specialist_id": str(appointment.specialist_id),
+                    },
+                    user_id=request.user.id,
+                    tenant_id=safe_tenant_id(
+                        appointment, context="booking.completed",
+                    ),
+                    # Specialist-initiated; per ADR-0009 actor mapping
+                    # (specialist → 'admin', client → 'user').
+                    actor="admin",
+                )
         except DjangoValidationError as e:
             return error_response(
                 "INVALID_STATUS", str(e.message), status_code=422,
