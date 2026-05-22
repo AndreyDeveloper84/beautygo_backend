@@ -54,13 +54,16 @@ Body normalisation:
   then SHA256. Stable across whitespace, key order, JSON-compatible
   types. ``default=str`` handles UUID / datetime / Decimal in the body.
 
-target_id is audit-only:
-- Lookup tuple is ``(user, operation_name, key)``. target_type +
-  target_id are NOT in the unique constraint. A client that reuses
-  the same key value across different target rows for the same
-  operation receives a replay of the FIRST target's response —
-  intentional: the idempotency contract is "same key = same answer."
-  Clients must use distinct keys for distinct logical operations.
+target_id is part of the lookup tuple:
+- Lookup is ``(user, operation_name, key, target_id)``. Mobile clients
+  commonly reuse the same X-Idempotency-Key value across requests when
+  a single user-intent retries — including across DIFFERENT target
+  rows. Without target_id in the key, ``cancel(apt_X)`` followed by
+  ``cancel(apt_Y)`` with the same header would return apt_X's cached
+  200 for apt_Y → apt_Y never cancelled → customer double-booked.
+  target_id closes that hole. target_type is included on the model
+  for audit but not in the constraint — operation_name already
+  disambiguates the model.
 """
 from __future__ import annotations
 
@@ -143,11 +146,15 @@ def lookup_or_open_idempotency(
 
     body_hash = _hash_body(getattr(request, "data", {}) or {})
 
-    # Initial lookup — fast path for replays.
+    # Initial lookup — fast path for replays. target_id is part of
+    # the constraint to prevent cross-target cache bleed
+    # (cancel(apt_X) vs cancel(apt_Y) with the same key must NOT
+    # share a cached response).
     existing = IdempotencyKey.objects.filter(
         user=request.user,
         operation_name=operation_name,
         key=key,
+        target_id=target_id,
     ).first()
 
     if existing is not None:
@@ -178,6 +185,7 @@ def lookup_or_open_idempotency(
             user=request.user,
             operation_name=operation_name,
             key=key,
+            target_id=target_id,
         ).first()
         if existing is None:
             # Integrity error without a row visible — not the race;
