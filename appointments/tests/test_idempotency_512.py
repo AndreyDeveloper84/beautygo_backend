@@ -298,16 +298,16 @@ class TestCancelIdempotency:
         assert appt.status == Appointment.Status.CONFIRMED
 
 
-def _awaiting_payment(client_user, specialist, service):
-    """Same as _confirmed but leaves status=AWAITING_PAYMENT.
-
-    Reschedule policy permits AWAITING_PAYMENT but not CONFIRMED (per
-    ReschedulePolicy in appointments/domain/policies.py)."""
+def _confirmed_far_future(client_user, specialist, service):
+    """Reschedule needs status=CONFIRMED AND start_at > 4h from now
+    (StandardReschedulePolicy.MIN_HOURS_BEFORE_RESCHEDULE = 4). Use
+    6h ahead to leave headroom; force-flip status the same way
+    _confirmed does."""
     dto = CreateBookingDTO(
         client_id=client_user.id,
         specialist_id=specialist.id,
         service_id=service.id,
-        start_at=_future_utc(3),
+        start_at=_future_utc(6),  # > 4h margin
         idempotency_key=str(uuid4()),
     )
     appt, _ = CreateBookingService()._execute_atomic(
@@ -317,7 +317,8 @@ def _awaiting_payment(client_user, specialist, service):
             end_at=dto.start_at + timedelta(hours=1),
         ),
     )
-    # Leave at default AWAITING_PAYMENT — reschedule policy permits.
+    appt.status = Appointment.Status.CONFIRMED
+    appt.save(update_fields=["status"])
     OutboxEvent.objects.filter(
         topic=OutboxEvent.Topic.BOOKING_CREATED,
     ).delete()
@@ -333,9 +334,9 @@ class TestRescheduleIdempotency:
     def test_replay_same_body_returns_cached_no_double_mutation(
         self, client_user, specialist, service,
     ):
-        appt = _awaiting_payment(client_user, specialist, service)
+        appt = _confirmed_far_future(client_user, specialist, service)
         key = "reschedule-replay-512"
-        new_start = _future_utc(5).isoformat()
+        new_start = _future_utc(10).isoformat()  # well past min window
         body = {"new_start_datetime": new_start}
         c = _client_as(client_user, idem_key=key)
         first = c.post(
