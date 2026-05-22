@@ -201,6 +201,14 @@ class Appointment(models.Model):
         except ValueError:
             return False
 
+    def can_mark_no_show(self) -> bool:
+        try:
+            return BookingStateMachine.can_transition(
+                self.booking_status, BookingStatus.NO_SHOW,
+            )
+        except ValueError:
+            return False
+
     def cancel(self, cancelled_by, reason: str = "") -> None:
         """Cancel the appointment via state machine."""
         if not self.can_cancel():
@@ -221,6 +229,23 @@ class Appointment(models.Model):
                 f"Cannot complete appointment with status '{self.status}'."
             )
         self.status = self.Status.COMPLETED
+        self.save(update_fields=['status', 'updated_at'])
+
+    def mark_no_show(self) -> None:
+        """Mark client as no-show via state machine.
+
+        Triggered by the specialist after the booking time elapsed
+        without the client arriving. Unlike ``cancel``, this preserves
+        the "specialist took the slot" signal — important for revenue
+        loss tracking, customer reliability scoring, and any future
+        automated reschedule offer (#511).
+        """
+        if not self.can_mark_no_show():
+            raise ValidationError(
+                f"Cannot mark no-show on appointment with status "
+                f"'{self.status}'."
+            )
+        self.status = self.Status.NO_SHOW
         self.save(update_fields=['status', 'updated_at'])
 
     @property

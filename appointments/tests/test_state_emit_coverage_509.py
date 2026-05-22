@@ -344,11 +344,8 @@ class TestEveryBookingTopicHasEmitPath:
 
     # Topics that are intentionally not yet wired. Adding to this set
     # is a deliberate act and forces a comment with the tracking issue.
-    KNOWN_PENDING = {
-        OutboxEvent.Topic.BOOKING_NO_SHOW.value: (
-            "tracked in ai-bot-platform#511 — no-show endpoint"
-        ),
-    }
+    # Empty today: BOOKING_NO_SHOW landed via #511 (POST /no-show/).
+    KNOWN_PENDING: dict[str, str] = {}
 
     def test_every_booking_topic_has_emit_call_in_source(self):
         booking_topics = {
