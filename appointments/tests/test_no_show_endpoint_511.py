@@ -213,8 +213,10 @@ class TestNoShowStateMachine:
     def test_rejects_pending_booking(
         self, client_user, specialist_user, specialist, service,
     ):
-        """Only CONFIRMED → NO_SHOW is a valid transition. PENDING
-        and AWAITING_PAYMENT must reject."""
+        """PENDING must reject (only CONFIRMED → NO_SHOW is a valid
+        transition). AWAITING_PAYMENT / COMPLETED / NO_SHOW rejection
+        is covered exhaustively in
+        appointments/tests/test_domain.py::TestBookingStateMachine."""
         appt = _confirmed(client_user, specialist, service)
         appt.status = Appointment.Status.PENDING
         appt.save(update_fields=["status"])
