@@ -45,12 +45,15 @@ class Appointment(models.Model):
     )
     # tenant FK — DRF-242.3. Denormalized from specialist.tenant for query
     # performance: scoping middleware filters bookings by tenant before
-    # any join. null=True until 242.4 backfill.
+    # any join. null=False post-#590 — migration 0009 enforces this at
+    # the schema level via AlterField + CheckConstraint, closing the
+    # accidental-NULL window that backfill (#568) opened at the data
+    # layer. CreateBookingService stamps tenant_id=specialist.tenant_id
+    # at construction time (#520); admin/raw inserts now hit the
+    # constraint instead of silently landing in the gap.
     tenant = models.ForeignKey(
         'tenants.Tenant',
         on_delete=models.PROTECT,
-        null=True,
-        blank=True,
         related_name='appointments',
     )
     service = models.ForeignKey(
