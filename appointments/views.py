@@ -99,19 +99,14 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         # therefore complete/cancel/reschedule) appointments belonging
         # to a tenant the request is NOT scoped to.
         #
-        # Backward-compat: legacy rows have ``tenant_id=NULL`` because
-        # CreateBookingService didn't stamp it before #520. Include them
-        # via ``Q(tenant__isnull=True)`` so existing data stays
-        # accessible.
-        # TODO(DRF-242.4): drop Q(tenant__isnull=True) once the
-        # data-migration backfills Appointment.tenant_id from
-        # specialist.tenant. The OR-clause is a rollout-only escape.
-        from django.db.models import Q
+        # Strict equality post-#568: legacy tenant_id=NULL rows are
+        # backfilled by migration 0008_backfill_appointment_tenant. The
+        # rollout-window Q(tenant__isnull=True) OR-clause has been
+        # dropped — post-backfill any NULL is an integrity hole, not
+        # legacy state. Pre-STRICT-flip 2026-05-28 hardening.
         request_tenant = getattr(self.request, "tenant", None)
         if request_tenant is not None:
-            qs = qs.filter(
-                Q(tenant=request_tenant) | Q(tenant__isnull=True),
-            )
+            qs = qs.filter(tenant=request_tenant)
 
         if user.is_client:
             return qs.filter(client=user)
