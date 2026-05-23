@@ -152,15 +152,25 @@ class GlobalSearchView(APIView):
             .select_related('user')
         )
 
+        # #477 — pg full-text returns empty for some Cyrillic queries
+        # when the russian config / dictionary isn't installed on the
+        # target Postgres image (CI uses postgres:16 base which has
+        # russian by default, but production images can vary). Use
+        # __icontains as the canonical path; PG full-text remains as a
+        # ranking layer when available. icontains is correct on Postgres
+        # via the LIKE operator (Postgres ILIKE = case-insensitive
+        # __icontains) — works on both dev / test / prod.
+        qs = qs.filter(
+            Q(display_name__icontains=q)
+            | Q(bio__icontains=q)
+            | Q(services__name__icontains=q)
+            | Q(services__category__name__icontains=q)
+        ).distinct()
         if IS_POSTGRES:
-            qs = self._pg_search_specialists(qs, q)
-        else:
-            qs = qs.filter(
-                Q(display_name__icontains=q)
-                | Q(bio__icontains=q)
-                | Q(services__name__icontains=q)
-                | Q(services__category__name__icontains=q)
-            ).distinct()
+            # Layer the PG full-text rank ordering on top for relevance,
+            # but don't filter — the icontains pre-filter is the
+            # source-of-truth for membership.
+            qs = self._pg_rank_specialists(qs, q)
 
         # Geo sorting if lat/lon provided
         lat = request.query_params.get('lat')
@@ -192,20 +202,25 @@ class GlobalSearchView(APIView):
             )
         )
 
+        # Same icontains-canonical pattern as specialists (#477).
+        qs = qs.filter(
+            Q(name__icontains=q)
+            | Q(description__icontains=q)
+            | Q(category__name__icontains=q)
+        )
         if IS_POSTGRES:
-            qs = self._pg_search_services(qs, q)
-        else:
-            qs = qs.filter(
-                Q(name__icontains=q)
-                | Q(description__icontains=q)
-                | Q(category__name__icontains=q)
-            )
+            qs = self._pg_rank_services(qs, q)
 
         return qs.order_by('-specialist__rating')[:limit]
 
     @staticmethod
-    def _pg_search_specialists(qs: QuerySet, q: str) -> QuerySet:
-        """PostgreSQL full-text search for specialists."""
+    def _pg_rank_specialists(qs: QuerySet, q: str) -> QuerySet:
+        """PostgreSQL full-text RANKING on top of icontains pre-filter.
+
+        Adds a `rank` annotation + orders by it for relevance. Does
+        NOT filter — the icontains pre-filter is membership source
+        of truth (so this is robust to russian-config availability).
+        """
         from django.contrib.postgres.search import (
             SearchQuery, SearchRank, SearchVector,
         )
@@ -219,21 +234,14 @@ class GlobalSearchView(APIView):
         return (
             qs
             .annotate(rank=SearchRank(vector, query))
-            # #477 — rank threshold dropped from 0.01 → 0. Cyrillic
-            # short tokens (e.g. "Елена") with the russian config on
-            # multi-vector + LEFT-JOIN paths can produce ranks below
-            # the old 0.01 guard even for direct name matches. Any
-            # non-zero rank means at least one token matched; rely
-            # on order_by('-rank') + the [:limit] cap to bubble the
-            # best matches and bound the result set.
-            .filter(rank__gt=0)
             .order_by('-rank')
             .distinct()
         )
 
     @staticmethod
-    def _pg_search_services(qs: QuerySet, q: str) -> QuerySet:
-        """PostgreSQL full-text search for services."""
+    def _pg_rank_services(qs: QuerySet, q: str) -> QuerySet:
+        """PG full-text RANKING on top of icontains pre-filter.
+        Mirror of _pg_rank_specialists — see that docstring."""
         from django.contrib.postgres.search import (
             SearchQuery, SearchRank, SearchVector,
         )
@@ -246,14 +254,6 @@ class GlobalSearchView(APIView):
         return (
             qs
             .annotate(rank=SearchRank(vector, query))
-            # #477 — rank threshold dropped from 0.01 → 0. Cyrillic
-            # short tokens (e.g. "Елена") with the russian config on
-            # multi-vector + LEFT-JOIN paths can produce ranks below
-            # the old 0.01 guard even for direct name matches. Any
-            # non-zero rank means at least one token matched; rely
-            # on order_by('-rank') + the [:limit] cap to bubble the
-            # best matches and bound the result set.
-            .filter(rank__gt=0)
             .order_by('-rank')
         )
 
