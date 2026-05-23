@@ -201,7 +201,7 @@ class TestBackfillData:
         assert appt.tenant_id == other_tenant.id  # untouched
 
 
-@pytest.mark.django_db(transaction=True)
+@pytest.mark.django_db
 class TestMigrationApplied:
     """Full MigrationExecutor sanity — confirms 0008 is on the chain
     and runs without error against the test DB."""
