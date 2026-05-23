@@ -9,7 +9,12 @@ from django.core.management import call_command
 from tenants.models import Tenant
 
 
-pytestmark = pytest.mark.django_db
+# `no_auto_tenant` opts out of the root conftest autouse fixture that
+# stamps SpecialistProfile.tenant + Appointment.tenant from a default
+# test Tenant (post-#590). This test class explicitly asserts NULL
+# pre-conditions — it tests the backfill command, not the autouse
+# convenience.
+pytestmark = [pytest.mark.django_db, pytest.mark.no_auto_tenant]
 
 
 @pytest.fixture
