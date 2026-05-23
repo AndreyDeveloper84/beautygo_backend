@@ -101,15 +101,6 @@ def _client(user):
 class TestGlobalSearch:
     """GET /api/v1/search/"""
 
-    @pytest.mark.xfail(
-        reason=(
-            "Postgres-strict: Cyrillic __icontains lookup returns 0 results "
-            "on Postgres (works on SQLite via NOCASE). Likely needs ICU "
-            "collation or pg_trgm. Tracked in "
-            "AndreyDeveloper84/ai-bot-platform#477."
-        ),
-        strict=False,
-    )
     def test_search_specialist_by_name(self, client_user, specialist, service):
         response = _client(client_user).get('/api/v1/search/?q=Елена')
         assert response.status_code == status.HTTP_200_OK
@@ -124,13 +115,6 @@ class TestGlobalSearch:
         assert len(data['services']) >= 1
         assert any('маникюр' in s['name'].lower() for s in data['services'])
 
-    @pytest.mark.xfail(
-        reason=(
-            "Postgres-strict: Cyrillic category lookup returns 0 results. "
-            "See AndreyDeveloper84/ai-bot-platform#477."
-        ),
-        strict=False,
-    )
     def test_search_by_category(
         self, client_user, specialist, service, another_specialist, haircut_service,
     ):
@@ -185,14 +169,6 @@ class TestGlobalSearch:
         if 'services' in data:
             assert len(data['services']) <= 1
 
-    @pytest.mark.xfail(
-        reason=(
-            "Postgres-strict: same Cyrillic __icontains issue as "
-            "test_search_specialist_by_name. See "
-            "AndreyDeveloper84/ai-bot-platform#477."
-        ),
-        strict=False,
-    )
     def test_search_with_geo(self, client_user, specialist, service):
         response = _client(client_user).get(
             '/api/v1/search/?q=Елена&lat=55.75&lon=49.11'
