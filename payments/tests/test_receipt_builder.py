@@ -122,21 +122,28 @@ class TestItemDescription:
         r = build_appointment_receipt(appointment, Decimal("100"))
         assert r["items"][0]["description"] == "Маникюр"
 
-    @pytest.mark.xfail(
-        reason=(
-            "Postgres-strict: Service.name is varchar(100); test sets 200 "
-            "chars which SQLite silently truncated and Postgres rejects. "
-            "Tracked in AndreyDeveloper84/ai-bot-platform#477."
-        ),
-        strict=False,
-    )
-    def test_truncates_long_name_to_128_chars(
-        self, appointment, service,
-    ):
-        service.name = "A" * 200
-        service.save()
-        appointment.refresh_from_db()
-        r = build_appointment_receipt(appointment, Decimal("100"))
+    def test_truncates_long_name_to_128_chars(self, client_user):
+        """The receipt builder truncates the description to 128 chars
+        per YooKassa 54-FZ schema. Service.name is varchar(100) at the
+        DB layer — narrower than the builder's truncation point — so
+        exercising via a real ORM save can't even reach the 128-char
+        boundary. Use the SimpleNamespace mock pattern (same as
+        test_falls_back_to_snapshot_when_service_missing) to feed the
+        builder a 200-char name directly.
+
+        Fixes ai-bot-platform#477 — flipped from xfail(strict=False) to
+        expected-pass after switching to the mock-injection pattern.
+        """
+        from types import SimpleNamespace
+
+        fake_service = SimpleNamespace(name="A" * 200)
+        fake = SimpleNamespace(
+            client=client_user,
+            service_id=fake_service,  # truthy; builder checks .service
+            service=fake_service,
+            snapshot_service_name="",
+        )
+        r = build_appointment_receipt(fake, Decimal("100"))
         assert len(r["items"][0]["description"]) == 128
 
     def test_falls_back_to_snapshot_when_service_missing(self, client_user):
