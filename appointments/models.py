@@ -148,6 +148,19 @@ class Appointment(models.Model):
                 name='appt_tenant_starttime_idx',
             ),
         ]
+        constraints = [
+            # #590: belt-and-suspenders for null=False on `tenant`.
+            # MUST be declared here so Django's autodetector sees the
+            # constraint as part of the model state, not just a DB
+            # artifact. Without this declaration `makemigrations`
+            # would generate a phantom `RemoveConstraint` migration
+            # on every run — silently re-opening the gap the
+            # 0009 AddConstraint closed.
+            models.CheckConstraint(
+                check=models.Q(tenant__isnull=False),
+                name='appt_tenant_not_null',
+            ),
+        ]
 
     def clean(self) -> None:
         """Validate appointment constraints."""
