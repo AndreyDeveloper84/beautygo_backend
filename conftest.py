@@ -30,24 +30,23 @@ def log_test_lifecycle(request):
 
 
 @pytest.fixture(autouse=True)
-def _auto_default_tenant_for_specialist_profile(request):
-    """Post-#590: Appointment.tenant is null=False, stamped from
-    specialist.tenant_id. Existing test fixtures that build a
-    SpecialistProfile without explicitly setting tenant predate
-    this invariant — relying on the old null=True fallback. To
-    avoid touching every fixture in the repo, autouse a pre_save
-    signal handler that auto-attaches a default tenant when one
-    isn't set.
+def _auto_default_tenant(request):
+    """Post-#590: Appointment.tenant is null=False. Existing test
+    fixtures that build SpecialistProfile / Appointment without
+    setting tenant predate this invariant. To avoid touching every
+    fixture in the repo, autouse two pre_save signal handlers:
+
+    1. SpecialistProfile: when saved with tenant=None, attach a
+       shared 'test-default-tenant' Tenant.
+    2. Appointment: when saved with tenant=None, inherit from
+       specialist.tenant (which handler #1 ensures is non-NULL).
+
+    Tests that explicitly set tenant are unaffected — both handlers
+    short-circuit when tenant_id is already populated. Tests can
+    opt-out via the @pytest.mark.no_auto_tenant marker.
 
     Test-only behaviour. Production code paths MUST set tenant
-    explicitly via the registration / onboarding flow; the
-    model-level null=False catches them if they forget. The
-    signal short-circuits when tenant is already set, so tests
-    that explicitly assign tenant_a/tenant_b are unaffected.
-
-    Disabled for tests that opt-out via the
-    @pytest.mark.no_auto_tenant marker (e.g. tests that want to
-    pin the verify_no_null_tenant raise-path).
+    explicitly; model-level null=False enforces this.
     """
     if "no_auto_tenant" in request.keywords:
         yield
@@ -55,7 +54,7 @@ def _auto_default_tenant_for_specialist_profile(request):
 
     from django.db.models.signals import pre_save
 
-    def _set_default_tenant(sender, instance, **kwargs):
+    def _stamp_specialist_tenant(sender, instance, **kwargs):
         if instance.tenant_id is None:
             from tenants.models import Tenant
             default, _ = Tenant.objects.get_or_create(
@@ -64,20 +63,36 @@ def _auto_default_tenant_for_specialist_profile(request):
             )
             instance.tenant = default
 
-    # Lazy import so this conftest doesn't pull users.models at
-    # collection time (slows down --co).
+    def _stamp_appointment_tenant(sender, instance, **kwargs):
+        if instance.tenant_id is None and instance.specialist_id is not None:
+            # Inherit from specialist — the SpecialistProfile handler
+            # guarantees its tenant is non-NULL by the time we get here.
+            from users.models import SpecialistProfile
+            sp = SpecialistProfile.objects.filter(
+                pk=instance.specialist_id,
+            ).values_list("tenant_id", flat=True).first()
+            if sp is not None:
+                instance.tenant_id = sp
+
     try:
         from users.models import SpecialistProfile
+        from appointments.models import Appointment
     except Exception:
-        # App not loaded yet (e.g. test collection failure path).
+        # Apps not loaded yet — collection-time path.
         yield
         return
 
-    pre_save.connect(_set_default_tenant, sender=SpecialistProfile)
+    pre_save.connect(_stamp_specialist_tenant, sender=SpecialistProfile)
+    pre_save.connect(_stamp_appointment_tenant, sender=Appointment)
     try:
         yield
     finally:
-        pre_save.disconnect(_set_default_tenant, sender=SpecialistProfile)
+        pre_save.disconnect(
+            _stamp_specialist_tenant, sender=SpecialistProfile,
+        )
+        pre_save.disconnect(
+            _stamp_appointment_tenant, sender=Appointment,
+        )
 
 
 @pytest.hookimpl(tryfirst=True, hookwrapper=True)
