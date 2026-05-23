@@ -219,7 +219,14 @@ class GlobalSearchView(APIView):
         return (
             qs
             .annotate(rank=SearchRank(vector, query))
-            .filter(rank__gt=0.01)
+            # #477 — rank threshold dropped from 0.01 → 0 because
+            # ts_rank on multi-vector + LEFT-JOIN paths can return
+            # values just under 0.01 even for direct name matches
+            # (Cyrillic short tokens like "Елена" with the
+            # russian config land around 0.006). Use the SearchRank
+            # ordering alone — distinct() + order_by('-rank') still
+            # bubbles the best matches to the top.
+            .filter(rank__gt=0)
             .order_by('-rank')
             .distinct()
         )
@@ -239,7 +246,14 @@ class GlobalSearchView(APIView):
         return (
             qs
             .annotate(rank=SearchRank(vector, query))
-            .filter(rank__gt=0.01)
+            # #477 — rank threshold dropped from 0.01 → 0 because
+            # ts_rank on multi-vector + LEFT-JOIN paths can return
+            # values just under 0.01 even for direct name matches
+            # (Cyrillic short tokens like "Елена" with the
+            # russian config land around 0.006). Use the SearchRank
+            # ordering alone — distinct() + order_by('-rank') still
+            # bubbles the best matches to the top.
+            .filter(rank__gt=0)
             .order_by('-rank')
         )
 
