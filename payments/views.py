@@ -22,7 +22,12 @@ from users.permissions import IsClient
 from users.response import error_response, success_response
 
 from .exceptions import PaymentClientError, PaymentConfigError
-from .serializers import PaymentCreateSerializer, PaymentDetailSerializer, PaymentRefundSerializer
+from .serializers import (
+    PaymentCreateSerializer,
+    PaymentDetailSerializer,
+    PaymentRefundSerializer,
+    PaymentRetrySerializer,
+)
 from .services import YooKassaService, build_appointment_receipt
 
 logger = logging.getLogger(__name__)
@@ -500,6 +505,161 @@ class PaymentWebhookView(APIView):
 
         logger.info('Webhook processed: event=%s payment=%s', event, payment.id)
         return Response({'status': 'ok'}, status=200)
+
+
+class PaymentRetryView(APIView):
+    """
+    POST /api/v1/payments/{id}/retry/
+
+    Retry a failed payment by creating a new YooKassa session for the
+    same appointment + amount. Unblocks the W2 payment_failed skill —
+    when the original card declines, the client (or the bot on behalf
+    of the client) re-issues a fresh confirmation URL without forcing
+    a full re-create flow through the appointment endpoint.
+
+    Behaviour:
+    - Source payment MUST be in status='failed'. Other statuses 409.
+    - Underlying appointment must still be in PENDING or
+      AWAITING_PAYMENT (cancellation / completion blocks retry).
+    - The old failed Payment row stays as audit history; a NEW Payment
+      row is created with new YooKassa session.
+    - Same 8% commission + receipt builder as PaymentCreate (54-ФЗ).
+
+    Scoped on the same ``payment`` throttle bucket as PaymentCreate.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsClient]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'payment'
+    serializer_class = PaymentRetrySerializer
+
+    @extend_schema(
+        request=PaymentRetrySerializer,
+        responses={
+            201: inline_serializer(
+                name="PaymentRetryResponse",
+                fields={
+                    "payment_id": drf_serializers.UUIDField(),
+                    "confirmation_url": drf_serializers.URLField(),
+                    "amount": drf_serializers.FloatField(),
+                },
+            ),
+            404: OpenApiResponse(description="Payment not found"),
+            409: OpenApiResponse(
+                description="Source payment is not in retry-eligible state",
+            ),
+            502: OpenApiResponse(description="Payment provider error"),
+            503: OpenApiResponse(description="Payment provider not configured"),
+        },
+    )
+    def post(self, request: Request, pk) -> Response:
+        serializer = PaymentRetrySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        return_url = serializer.validated_data['return_url']
+
+        try:
+            old_payment = (
+                Payment.objects
+                .select_related(
+                    'appointment',
+                    'appointment__specialist',
+                    'appointment__service',
+                )
+                .get(pk=pk, appointment__client=request.user)
+            )
+        except Payment.DoesNotExist:
+            return error_response(
+                'NOT_FOUND', 'Payment not found.', status_code=404,
+            )
+
+        if old_payment.status != Payment.Status.FAILED:
+            return error_response(
+                'INVALID_STATUS',
+                f"Cannot retry payment in status '{old_payment.status}'. "
+                "Only failed payments may be retried.",
+                status_code=409,
+            )
+
+        appointment = old_payment.appointment
+        if appointment.status not in (
+            Appointment.Status.PENDING,
+            Appointment.Status.AWAITING_PAYMENT,
+        ):
+            return error_response(
+                'INVALID_STATUS',
+                f"Appointment in status '{appointment.status}' cannot "
+                "accept a new payment.",
+                status_code=409,
+            )
+
+        idempotency_key = request.META.get(
+            'HTTP_X_IDEMPOTENCY_KEY', str(uuid4()),
+        )
+        description = (
+            f"Ayla: {appointment.service.name} у "
+            f"{appointment.specialist.display_name}"
+        )
+        # 54-ФЗ receipt — mandatory for every YooKassa payment session,
+        # not just first-attempt.
+        receipt = build_appointment_receipt(appointment, appointment.price)
+
+        try:
+            svc = _get_yookassa()
+            result = svc.create_payment(
+                amount=appointment.price,
+                appointment_id=appointment.id,
+                description=description,
+                return_url=return_url,
+                idempotency_key=idempotency_key,
+                capture=False,
+                receipt=receipt,
+            )
+        except PaymentConfigError as exc:
+            logger.error('YooKassa not configured on retry: %s', exc)
+            return error_response(
+                'SERVICE_UNAVAILABLE',
+                'Payment provider not configured.',
+                status_code=503,
+            )
+        except PaymentClientError as exc:
+            logger.error('YooKassa create_payment failed on retry: %s', exc)
+            return error_response(
+                'PAYMENT_PROVIDER_ERROR',
+                'Payment provider error. Please try again.',
+                status_code=502,
+            )
+
+        with transaction.atomic():
+            new_payment = Payment.objects.create(
+                appointment=appointment,
+                amount=appointment.price,
+                status=Payment.Status.PENDING,
+                specialist_income=result['specialist_income'],
+                platform_fee=result['platform_fee'],
+                provider='yookassa',
+                provider_payment_id=result['provider_payment_id'],
+                provider_client_secret=result['confirmation_url'],
+            )
+            # Re-enter awaiting_payment if appointment fell back to
+            # pending after the original failure (defensive — usually
+            # already awaiting_payment).
+            if appointment.status == Appointment.Status.PENDING:
+                appointment.status = Appointment.Status.AWAITING_PAYMENT
+                appointment.save(update_fields=['status'])
+
+        logger.info(
+            'Payment retry: old_payment_id=%s new_payment_id=%s '
+            'appointment_id=%s amount=%s',
+            old_payment.id, new_payment.id, appointment.id, new_payment.amount,
+        )
+
+        return success_response(
+            {
+                'payment_id': str(new_payment.id),
+                'confirmation_url': result['confirmation_url'],
+                'amount': float(new_payment.amount),
+            },
+            status_code=201,
+        )
 
 
 class PaymentRefundView(APIView):
