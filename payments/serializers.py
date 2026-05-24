@@ -26,6 +26,18 @@ class PaymentCreateSerializer(serializers.Serializer):
     )
 
 
+class PaymentRetrySerializer(serializers.Serializer):
+    """POST /api/v1/payments/{id}/retry — input.
+
+    The same return_url contract as the create endpoint; the failed
+    payment's appointment is reused, so no appointment_id field.
+    """
+    return_url = serializers.URLField(
+        required=False,
+        default='https://beautygo.ru/payment/success',
+    )
+
+
 class PaymentDetailSerializer(serializers.ModelSerializer):
     """
     GET /api/v1/payments/{id} — matches Notion spec Payment model.
