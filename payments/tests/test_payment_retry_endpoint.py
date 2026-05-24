@@ -142,12 +142,14 @@ class TestPaymentRetryHappyPath:
         failed_payment.refresh_from_db()
         assert failed_payment.status == Payment.Status.FAILED
 
-        # New payment row created in PENDING.
-        new_payment = Payment.objects.exclude(pk=failed_payment.pk).get(
-            appointment=appointment,
+        # New payment row created in PENDING. The appointment fixture
+        # auto-creates one Payment via CreateBookingService, the
+        # failed_payment fixture adds another, and retry adds a third.
+        # Match by the mock's provider_payment_id to find the new one.
+        new_payment = Payment.objects.get(
+            appointment=appointment, provider_payment_id="yk-retry-001",
         )
         assert new_payment.status == Payment.Status.PENDING
-        assert new_payment.provider_payment_id == "yk-retry-001"
 
 
 @pytest.mark.django_db
