@@ -162,7 +162,12 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 status_code=403,
             )
 
-        serializer = AppointmentCreateSerializer(data=request.data)
+        # context={"request"} required so the validator can read
+        # request.tenant for the Phase 0 cross-tenant 404 guard.
+        serializer = AppointmentCreateSerializer(
+            data=request.data,
+            context={"request": request},
+        )
         serializer.is_valid(raise_exception=True)
 
         idempotency_key = request.META.get(
