@@ -63,11 +63,16 @@ class AppointmentViewSet(viewsets.GenericViewSet):
     - POST   /api/v1/appointments/{id}/complete/ Complete (specialist only)
     - POST   /api/v1/appointments/{id}/reschedule/ Reschedule
     """
-    # IsTenantMember (#520) closes the ADR-0009 §Hard rule #6 gap:
-    # cross-tenant X-Tenant headers now 403 instead of silently passing.
-    # The middleware's MULTI_TENANT_STRICT toggle controls whether a
-    # missing header rejects (strict) or accepts (rollout) — IsTenantMember
-    # only fires when request.tenant is resolved.
+    # IsTenantMember closes the ADR-0009 §Hard rule #6 gap (#520) +
+    # post-#246 sub-phase 1.B reads membership from TenantUserRelationship
+    # instead of User.tenant FK. Post-1.C: permission stays here in
+    # PERMISSIVE mode (returns True when request.tenant=None) so the
+    # global multi-provider customer endpoints work — Anna can call
+    # GET /api/v1/appointments/ without X-Tenant header and see her
+    # bookings across all her active TUR tenants. When X-Tenant IS
+    # set, IsTenantMember rejects callers without an active TUR for
+    # that tenant. Sub-phase 1.D adds Variant E (invisible TUR grant)
+    # in the AppointmentCreateSerializer.validate.
     permission_classes = [permissions.IsAuthenticated, IsTenantMember]
 
     # Service classes — override in tests for mocking
