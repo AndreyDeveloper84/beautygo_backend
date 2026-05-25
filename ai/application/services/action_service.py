@@ -141,12 +141,19 @@ class ActionService:
         idempotency_key = self._idempotency_key(conversation.id, slot_dt)
         self._record_user_message(conversation, "Подтверждаю запись")
 
+        # #246 sub-phase 1.D: thread tenant context so the service can
+        # invisibly grant TUR(actor, specialist.tenant) for cross-tenant
+        # AI bookings (Variant E). actor.tenant_id is the legacy primary
+        # FK — adequate proxy until JWT carries it explicitly (1.E).
+        # For multi-tenant customers with no primary tenant FK, this is
+        # None → no Variant E grant fires.
         dto = CreateBookingDTO(
             client_id=actor.id,
             specialist_id=specialist_id,
             service_id=service_id,
             start_at=slot_dt,
             idempotency_key=idempotency_key,
+            request_tenant_id=getattr(actor, "tenant_id", None),
         )
 
         try:

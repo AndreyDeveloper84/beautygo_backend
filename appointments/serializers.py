@@ -94,84 +94,15 @@ class AppointmentCreateSerializer(serializers.Serializer):
     start_datetime = serializers.DateTimeField()
     notes = serializers.CharField(required=False, allow_blank=True, default='')
 
-    def validate(self, attrs):
-        """Variant E — invisible TenantUserRelationship grant (#246 1.D).
-
-        Replaces the Phase 0 cross-tenant 404 guard. When the customer
-        books a specialist whose tenant they're not yet a member of,
-        we invisibly create the relationship inside the booking
-        transaction. The act of booking IS the consent gesture per
-        `ayla-first-strategic-pivot` ("AI belongs to the user, salon
-        is a provider"). No 404, no consent dialog.
-
-        Defense from PR #152 F2: if a REVOKED TUR exists for the
-        (user, specialist.tenant) pair, refuse silently with 404 —
-        re-grant requires explicit admin action, not a side effect of
-        the booking flow. Same posture as the User.post_save bridge.
-
-        Permissive branches:
-        - No request context / no `request.tenant`: caller didn't
-          enter provider scope. CreateBookingService will stamp
-          `appointment.tenant_id = specialist.tenant_id`; queryset
-          scoping handles the rest. No TUR check.
-        - Specialist not found: let downstream raise the proper error.
-        - Specialist has no tenant (legacy NULL — pre-#590 row):
-          legacy state, not a Variant E concern; let through.
-        """
-        request = self.context.get("request")
-        if request is None:
-            return attrs
-        request_tenant = getattr(request, "tenant", None)
-        if request_tenant is None:
-            # Caller in global / customer-wide context (#246 design).
-            # No tenant scope to bridge.
-            return attrs
-
-        from users.models import SpecialistProfile, TenantUserRelationship
-        try:
-            specialist = SpecialistProfile.objects.only(
-                "tenant_id",
-            ).get(pk=attrs["specialist_id"])
-        except SpecialistProfile.DoesNotExist:
-            return attrs
-
-        if not specialist.tenant_id:
-            # Legacy specialist with no tenant — Variant E only fires
-            # for tenant-stamped specialists. Let downstream proceed.
-            return attrs
-
-        if specialist.tenant_id == request_tenant.id:
-            # Same-tenant booking — no grant needed.
-            return attrs
-
-        # Cross-tenant: customer is in X-Tenant context for tenant A,
-        # booking a specialist in tenant B. Need TUR(user, B).
-        has_revoked = TenantUserRelationship.objects.filter(
-            user=request.user,
-            tenant_id=specialist.tenant_id,
-            is_active=False,
-        ).exists()
-        if has_revoked:
-            # F2 defense: refuse silently rather than silently re-grant.
-            # Mirrors the User.post_save bridge revoke-defense logic.
-            from rest_framework.exceptions import NotFound
-            raise NotFound("Specialist not found.")
-
-        # Invisible grant — get_or_create handles idempotency under
-        # concurrent booking attempts. partial unique constraint on
-        # (user, tenant) WHERE is_active=True catches dups via
-        # IntegrityError if two concurrent grants race; get_or_create
-        # surfaces that as "got" not "created."
-        TenantUserRelationship.objects.get_or_create(
-            user=request.user,
-            tenant_id=specialist.tenant_id,
-            is_active=True,
-            defaults={
-                "role": TenantUserRelationship.Role.CUSTOMER,
-                "granted_by": TenantUserRelationship.GrantedBy.SELF,
-            },
-        )
-        return attrs
+    # Pure validator post-1.D. Variant E invisible-grant + F2 revoke
+    # defense live in CreateBookingService._execute_atomic — folded
+    # into the booking transaction so:
+    # 1. The AI booking path (which bypasses this serializer) shares
+    #    the same contract.
+    # 2. If the booking rolls back later, the TUR write rolls back
+    #    too — no orphan grants in the audit log.
+    # 3. select_for_update on existing TUR rows defeats the admin-
+    #    revoke TOCTOU race.
 
 
 class AppointmentRescheduleSerializer(serializers.Serializer):
