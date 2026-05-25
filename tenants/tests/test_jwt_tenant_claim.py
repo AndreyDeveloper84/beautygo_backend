@@ -198,11 +198,20 @@ class TestMiddlewareJwtFallback:
     middleware chain."""
 
     def test_jwt_claim_resolves_tenant_when_header_missing(self, tenant, rf):
+        """Post-1.E: customer JWT carries no tenant claim, so middleware
+        fallback only applies to staff users. Use a specialist with an
+        explicit staff TUR — that's the population this fallback was
+        designed to serve."""
         from users.middleware import TenantContextMiddleware
+        from users.models import TenantUserRelationship
 
         user = User.objects.create_user(
-            username="mw_jwt", phone="+79991115011", role="client",
-            tenant=tenant,
+            username="mw_jwt", phone="+79991115011", role="specialist",
+        )
+        TenantUserRelationship.objects.filter(user=user).delete()
+        TenantUserRelationship.objects.create(
+            user=user, tenant=tenant,
+            role=TenantUserRelationship.Role.STAFF,
         )
         tokens = AuthService.issue_tokens(user)
 
@@ -222,12 +231,18 @@ class TestMiddlewareJwtFallback:
         assert captured["tenant"] == tenant
 
     def test_explicit_header_wins_over_jwt(self, tenant, other_tenant, rf):
-        """Header is the caller's explicit intent; JWT is the fallback."""
+        """Header is the caller's explicit intent; JWT is the fallback.
+        Uses staff user post-1.E (customers no longer have JWT primary)."""
         from users.middleware import TenantContextMiddleware
+        from users.models import TenantUserRelationship
 
         user = User.objects.create_user(
-            username="mw_both", phone="+79991115012", role="client",
-            tenant=tenant,
+            username="mw_both", phone="+79991115012", role="specialist",
+        )
+        TenantUserRelationship.objects.filter(user=user).delete()
+        TenantUserRelationship.objects.create(
+            user=user, tenant=tenant,
+            role=TenantUserRelationship.Role.STAFF,
         )
         tokens = AuthService.issue_tokens(user)
 
