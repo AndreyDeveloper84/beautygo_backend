@@ -152,6 +152,8 @@ class TestBackfillFromUserTenant:
         self, alice, specialist_user, tenant_a,
     ):
         """User.tenant=A → exactly one active TUR(user, A)."""
+        from django.apps import apps as real_apps
+
         alice.tenant = tenant_a
         alice.save()
         specialist_user.tenant = tenant_a
@@ -160,13 +162,8 @@ class TestBackfillFromUserTenant:
         # Wipe any TURs that signals or fixtures created.
         TenantUserRelationship.objects.all().delete()
 
-        backfill_tur_from_user_tenant(
-            apps=connection.schema_editor().connection,
-            schema_editor=connection.schema_editor(),
-        )
-        # `apps` parameter is used only for `get_model`; pass the
-        # real Django apps registry for correctness.
-        from django.apps import apps as real_apps
+        # `apps` parameter is the live Django apps registry — same
+        # shape the migration framework uses when invoking RunPython.
         backfill_tur_from_user_tenant(real_apps, connection.schema_editor())
 
         active = TenantUserRelationship.objects.filter(is_active=True)
