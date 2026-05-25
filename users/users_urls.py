@@ -7,6 +7,7 @@ for backwards compatibility.
 from django.urls import path
 
 from .personal_context_api import PersonalContextView
+from .tenant_relationships_api import MyTenantRelationshipsView
 from .views import ClientProfileView, UserMeView
 
 urlpatterns = [
@@ -19,5 +20,12 @@ urlpatterns = [
         'me/personal-context/',
         PersonalContextView.as_view(),
         name='users-personal-context',
+    ),
+    # GET /api/v1/users/me/tenant-relationships/ — #246 sub-phase 1.F.
+    # Canonical multi-provider list (Q4 closure 2026-05-25).
+    path(
+        'me/tenant-relationships/',
+        MyTenantRelationshipsView.as_view(),
+        name='users-tenant-relationships',
     ),
 ]
