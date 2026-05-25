@@ -87,20 +87,22 @@ class IsTenantMember(permissions.BasePermission):
         if not user or not getattr(user, "is_authenticated", False):
             return False
         request_tenant = getattr(request, "tenant", None)
-        user_tenant_id = getattr(user, "tenant_id", None)
-        # No header → caller didn't ask for tenant scope.
-        # - Permissive (rollout): allow through, view-side scoping will
-        #   limit data to the user's tenant via queryset filters.
-        # - Strict (DRF-242.5): the middleware already 400'd before we
-        #   got here on tenant-required paths, so a None at this point
-        #   means we're on an opt-out path — still permissive.
+        # No header → caller didn't ask for tenant scope. Permissive
+        # by design (#246: customer is multi-provider; global endpoints
+        # work without tenant context). The middleware's
+        # MULTI_TENANT_STRICT gate handles header-required paths.
         if request_tenant is None:
             return True
-        # Header set, but user has no tenant assigned — fail (prevents
-        # un-backfilled users from accessing tenant-scoped data).
-        if user_tenant_id is None:
-            return False
-        return request_tenant.id == user_tenant_id
+        # #246 sub-phase 1.B: membership read from TenantUserRelationship.
+        # User.tenant FK is now a denormalized pointer; the source of
+        # truth is the TUR table. `User.post_save` bridges legacy
+        # `user.tenant=X` callsites by auto-granting TUR.
+        from users.models import TenantUserRelationship
+        return TenantUserRelationship.objects.filter(
+            user=user,
+            tenant=request_tenant,
+            is_active=True,
+        ).exists()
 
 
 class IsServiceAccount(permissions.BasePermission):
