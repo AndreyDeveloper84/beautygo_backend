@@ -42,23 +42,59 @@ def other_tenant():
 
 
 class TestIssueTokensStampsTenantClaim:
-    def test_user_with_tenant(self, tenant):
+    """#246 sub-phase 1.E — role-aware JWT tenant claim:
+    customer always gets None (multi-provider model); staff gets
+    primary active staff/admin TUR."""
+
+    def test_customer_role_claim_is_none(self, tenant):
+        """Per founder ack 2026-05-25: customer is multi-provider by
+        default — JWT carries no primary tenant. Tenant context
+        comes from X-Tenant header per-request."""
         user = User.objects.create_user(
             username="claim1", phone="+79991115001", role="client",
-            tenant=tenant,
+            tenant=tenant,  # Legacy FK — irrelevant to claim post-1.E.
         )
         result = AuthService.issue_tokens(user)
         access = AccessToken(result["access_token"])
-        assert access["tenant_id"] == str(tenant.id)
+        assert access["tenant_id"] is None
 
-    def test_user_without_tenant(self):
+    def test_customer_without_tenant_fk_claim_is_none(self):
         user = User.objects.create_user(
             username="claim2", phone="+79991115002", role="client",
         )
         result = AuthService.issue_tokens(user)
         access = AccessToken(result["access_token"])
-        # null is the documented contract — middleware reads it as "no
-        # JWT-side hint, fall through to permissive mode".
+        assert access["tenant_id"] is None
+
+    def test_specialist_with_staff_tur_gets_that_tenant(self, tenant):
+        """Staff (specialist/admin) get their primary active staff/admin
+        TUR's tenant as the JWT primary."""
+        from users.models import TenantUserRelationship
+        user = User.objects.create_user(
+            username="claim_spec", phone="+79991115006", role="specialist",
+        )
+        # User.post_save bridge creates TUR with role='staff' when
+        # user.tenant is set. Use direct create to pin the role.
+        TenantUserRelationship.objects.filter(user=user).delete()
+        TenantUserRelationship.objects.create(
+            user=user, tenant=tenant,
+            role=TenantUserRelationship.Role.STAFF,
+        )
+        result = AuthService.issue_tokens(user)
+        access = AccessToken(result["access_token"])
+        assert access["tenant_id"] == str(tenant.id)
+
+    def test_specialist_with_no_staff_tur_claim_is_none(self):
+        """Brand-new specialist with no TUR yet → no JWT primary.
+        TenantContextMiddleware falls back to X-Tenant header."""
+        from users.models import TenantUserRelationship
+        user = User.objects.create_user(
+            username="claim_spec_empty", phone="+79991115007",
+            role="specialist",
+        )
+        TenantUserRelationship.objects.filter(user=user).delete()
+        result = AuthService.issue_tokens(user)
+        access = AccessToken(result["access_token"])
         assert access["tenant_id"] is None
 
 
@@ -68,41 +104,20 @@ class TestIssueTokensStampsTenantClaim:
 
 
 class TestRefreshResolvesLiveTenant:
-    def test_refresh_picks_up_admin_reassignment(self, tenant, other_tenant):
-        """User starts on tenant A, admin moves them to tenant B, the
-        next refresh stamps B into the new access token. Without this
-        the user keeps a stale tenant_id for up to ACCESS_TOKEN_LIFETIME."""
+    """Post-1.E: customer refresh always re-stamps None. Staff refresh
+    picks up the current primary staff TUR (admin-reassignment flow)."""
+
+    def test_customer_refresh_stays_none(self, tenant):
+        """Customer JWT is invariant on tenant claim — refresh never
+        picks up any tenant. Multi-provider customers manage context
+        via X-Tenant header, not JWT."""
         user = User.objects.create_user(
             username="claim_move", phone="+79991115003", role="client",
             tenant=tenant,
         )
-        # Initial issue — tenant_id == tenant.id
         first = AuthService.issue_tokens(user)
         first_access = AccessToken(first["access_token"])
-        assert first_access["tenant_id"] == str(tenant.id)
-
-        # Admin reassigns
-        user.tenant = other_tenant
-        user.save(update_fields=["tenant"])
-
-        # Refresh — must pick up the new tenant
-        ser = TenantAwareTokenRefreshSerializer(
-            data={"refresh": first["refresh_token"]},
-        )
-        ser.is_valid(raise_exception=True)
-        new_access = AccessToken(ser.validated_data["access"])
-        assert new_access["tenant_id"] == str(other_tenant.id)
-
-    def test_refresh_picks_up_tenant_removal(self, tenant):
-        """Admin can also drop a tenant assignment — claim turns null."""
-        user = User.objects.create_user(
-            username="claim_drop", phone="+79991115004", role="client",
-            tenant=tenant,
-        )
-        first = AuthService.issue_tokens(user)
-
-        user.tenant = None
-        user.save(update_fields=["tenant"])
+        assert first_access["tenant_id"] is None
 
         ser = TenantAwareTokenRefreshSerializer(
             data={"refresh": first["refresh_token"]},
@@ -110,6 +125,42 @@ class TestRefreshResolvesLiveTenant:
         ser.is_valid(raise_exception=True)
         new_access = AccessToken(ser.validated_data["access"])
         assert new_access["tenant_id"] is None
+
+    def test_staff_refresh_picks_up_new_primary_tur(
+        self, tenant, other_tenant,
+    ):
+        """Staff with TUR(tenant) gets JWT.tenant=tenant. Adding
+        TUR(other_tenant) more recently makes other_tenant the new
+        primary (granted_at DESC tiebreak). Refresh stamps the new
+        primary into the access token."""
+        from users.models import TenantUserRelationship
+        user = User.objects.create_user(
+            username="claim_staff_move", phone="+79991115008",
+            role="specialist",
+        )
+        TenantUserRelationship.objects.filter(user=user).delete()
+        TenantUserRelationship.objects.create(
+            user=user, tenant=tenant,
+            role=TenantUserRelationship.Role.STAFF,
+        )
+
+        first = AuthService.issue_tokens(user)
+        first_access = AccessToken(first["access_token"])
+        assert first_access["tenant_id"] == str(tenant.id)
+
+        # Specialist mobility — new staff TUR added later (granted_at
+        # higher → becomes primary).
+        TenantUserRelationship.objects.create(
+            user=user, tenant=other_tenant,
+            role=TenantUserRelationship.Role.STAFF,
+        )
+
+        ser = TenantAwareTokenRefreshSerializer(
+            data={"refresh": first["refresh_token"]},
+        )
+        ser.is_valid(raise_exception=True)
+        new_access = AccessToken(ser.validated_data["access"])
+        assert new_access["tenant_id"] == str(other_tenant.id)
 
     def test_refresh_propagates_missing_user_error(self, tenant):
         """User deleted between issue and refresh — simplejwt's base
