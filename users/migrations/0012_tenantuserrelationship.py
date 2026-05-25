@@ -62,7 +62,15 @@ def backfill_tur_from_user_tenant(apps, schema_editor):
         ))
 
     if to_create:
-        TUR.objects.bulk_create(to_create, batch_size=500)
+        # ignore_conflicts=True defends against the (unlikely) race
+        # where a parallel writer inserts a TUR row mid-migration —
+        # the partial unique constraint would otherwise abort the
+        # whole RunPython. Pilot scale + single-process migrations
+        # make this practically theoretical, but defensive.
+        # Per-adversarial review PR #151.
+        TUR.objects.bulk_create(
+            to_create, batch_size=500, ignore_conflicts=True,
+        )
 
 
 def reverse_noop(apps, schema_editor):
