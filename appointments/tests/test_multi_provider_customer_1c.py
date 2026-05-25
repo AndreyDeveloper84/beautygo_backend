@@ -57,9 +57,11 @@ def anna(db, tenant_a, tenant_b):
         username="mp_anna", password="x", role="client",
         phone="+79991C00000",
     )
-    # Use bridge — setting user.tenant=A then user.tenant=B grants
-    # both TURs (bridge defends against re-grant of revoked but
-    # allows new grants on different tenants).
+    # Direct TUR creation — the User.post_save bridge only handles
+    # ONE tenant per save() (the current user.tenant_id). A
+    # multi-provider customer needs N TURs created explicitly. In the
+    # real flow Variant E (sub-phase 1.D) creates each TUR inside the
+    # booking transaction.
     TenantUserRelationship.objects.create(user=u, tenant=tenant_a)
     TenantUserRelationship.objects.create(user=u, tenant=tenant_b)
     return u
