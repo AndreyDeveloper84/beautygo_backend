@@ -1,18 +1,21 @@
-"""Phase 0 (Variant B) — cross-tenant POST /appointments/ returns 404.
+"""Cross-tenant POST /appointments/ — Variant E invisible TUR grant (#246 1.D).
 
-Pins the interim integrity fix:
-- Anna (user.tenant=A, X-Tenant: A) tries to create a booking with
-  Olga (specialist.tenant=B). Post-#142 IsTenantMember accepted
-  because the header matched the user; CreateBookingService stamped
-  tenant_id=B on the row; the strict queryset filter made the row
-  unreachable. Net: silent integrity bug, booking stranded.
-- Phase 0 fix in AppointmentCreateSerializer.validate raises 404
-  "Specialist not found." before the service runs. No row created.
+Historical context:
+- Phase 0 (PR #148) raised 404 on cross-tenant create as an interim
+  integrity guard. The file name still references "404" for that era.
+- Sub-phase 1.D (this version) replaces the 404 with Variant E:
+  the booking succeeds AND silently grants a `TenantUserRelationship`
+  for the specialist's tenant. "Booking IS the consent gesture" per
+  the `ayla-first-strategic-pivot` framing.
 
-Phase 1 will replace this with Variant E (invisible TUR grant via
-#246). When Phase 1 lands, this test changes shape — the create
-should succeed silently and the response should include a normal
-appointment payload.
+Pins (post-1.D):
+- Anna in tenant A books Olga in tenant B → 201, new TUR(Anna, B) row.
+- Same-tenant create unaffected (no TUR grant needed; serializer no-op).
+- No X-Tenant header → serializer no-op (permissive customer-wide context).
+- Missing specialist → serializer no-op, downstream raises proper error.
+- Revoked TUR for the target tenant → 404 (F2 defense from PR #152).
+- Idempotent: repeat cross-tenant create on same specialist's tenant
+  doesn't create a second TUR row.
 """
 from __future__ import annotations
 
@@ -26,7 +29,7 @@ from rest_framework.test import APIClient
 from appointments.models import Appointment
 from services.models import Service, ServiceCategory
 from tenants.models import Tenant
-from users.models import SpecialistProfile, User
+from users.models import SpecialistProfile, TenantUserRelationship, User
 
 
 @pytest.fixture
@@ -41,6 +44,7 @@ def tenant_b(db):
 
 @pytest.fixture
 def anna_in_a(db, tenant_a):
+    """Customer in tenant A. User.post_save bridge auto-creates TUR(anna, A)."""
     u = User.objects.create_user(
         username="ct404_anna", password="x", role="client",
         phone="+79991404000",
@@ -61,7 +65,7 @@ def olga_in_b(db, tenant_b):
     u.save(update_fields=["tenant"])
     p = SpecialistProfile.objects.get(user=u)
     p.tenant = tenant_b
-    p.display_name = "Ольга"
+    p.display_name = "Olga"
     p.status = SpecialistProfile.ProfileStatus.ACTIVE
     p.is_available = True
     p.is_booking_enabled = True
@@ -80,7 +84,7 @@ def service_in_b(olga_in_b, category):
     return Service.objects.create(
         specialist=olga_in_b,
         category=category,
-        name="Маникюр у Ольги",
+        name="Manicure",
         price=Decimal("1500.00"),
         duration_minutes=60,
         is_active=True,
@@ -95,13 +99,88 @@ def _future_iso(hours: int = 3) -> str:
 
 
 @pytest.mark.django_db
-class TestCrossTenantCreate404:
-    def test_anna_a_books_olga_b_returns_404(
-        self, anna_in_a, olga_in_b, service_in_b, tenant_a,
+class TestCrossTenantCreateVariantE:
+    """Variant E: cross-tenant booking succeeds + invisibly grants TUR."""
+
+    def test_anna_a_books_olga_b_succeeds_and_grants_tur(
+        self, anna_in_a, olga_in_b, service_in_b, tenant_a, tenant_b,
     ):
-        """The headline case: client in tenant A books specialist in
-        tenant B with X-Tenant=A. Serializer raises 404 before the
-        booking service runs."""
+        """Headline Variant E case: client in tenant A books
+        specialist in tenant B with X-Tenant=A. Booking succeeds;
+        TUR(Anna, tenant_b) is invisibly created."""
+        assert not TenantUserRelationship.objects.filter(
+            user=anna_in_a, tenant=tenant_b, is_active=True,
+        ).exists()
+
+        c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"
+        c.defaults["HTTP_X_TENANT"] = tenant_a.slug
+        c.force_authenticate(user=anna_in_a)
+        r = c.post(
+            "/api/v1/appointments/",
+            {
+                "specialist_id": str(olga_in_b.id),
+                "service_id": str(service_in_b.id),
+                "start_datetime": _future_iso(3),
+            },
+            format="json",
+        )
+        assert r.status_code == 201, r.data
+        appt = Appointment.objects.get()
+        assert appt.tenant_id == tenant_b.id
+        assert TenantUserRelationship.objects.filter(
+            user=anna_in_a, tenant=tenant_b, is_active=True,
+        ).count() == 1
+
+    def test_repeat_cross_tenant_create_does_not_duplicate_tur(
+        self, anna_in_a, olga_in_b, service_in_b, tenant_a, tenant_b,
+    ):
+        """Second cross-tenant booking for same tenant_b doesn't
+        create a second TUR row — get_or_create + partial unique."""
+        c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"
+        c.defaults["HTTP_X_TENANT"] = tenant_a.slug
+        c.force_authenticate(user=anna_in_a)
+
+        r1 = c.post(
+            "/api/v1/appointments/",
+            {
+                "specialist_id": str(olga_in_b.id),
+                "service_id": str(service_in_b.id),
+                "start_datetime": _future_iso(3),
+            },
+            format="json",
+        )
+        assert r1.status_code == 201
+        r2 = c.post(
+            "/api/v1/appointments/",
+            {
+                "specialist_id": str(olga_in_b.id),
+                "service_id": str(service_in_b.id),
+                "start_datetime": _future_iso(7),
+            },
+            format="json",
+        )
+        assert r2.status_code == 201
+        assert TenantUserRelationship.objects.filter(
+            user=anna_in_a, tenant=tenant_b, is_active=True,
+        ).count() == 1
+
+    def test_revoked_tur_blocks_cross_tenant_create(
+        self, anna_in_a, olga_in_b, service_in_b, tenant_a, tenant_b,
+    ):
+        """F2 defense (PR #152 adversarial): if Anna's TUR for tenant_b
+        was previously revoked by admin, Variant E MUST NOT silently
+        re-grant. Returns 404 same as missing-specialist (info hiding).
+        """
+        from django.utils import timezone as dj_tz
+        TenantUserRelationship.objects.create(
+            user=anna_in_a, tenant=tenant_b,
+            is_active=False,
+            revoked_at=dj_tz.now(),
+            revoke_reason="admin_pre_test_revoke",
+        )
+
         c = APIClient()
         c.defaults["HTTP_X_APP_TYPE"] = "client"
         c.defaults["HTTP_X_TENANT"] = tenant_a.slug
@@ -116,68 +195,93 @@ class TestCrossTenantCreate404:
             format="json",
         )
         assert r.status_code == 404
-        # No row should have been created.
         assert Appointment.objects.count() == 0
+        assert not TenantUserRelationship.objects.filter(
+            user=anna_in_a, tenant=tenant_b, is_active=True,
+        ).exists()
 
-    def test_same_tenant_create_still_works(
-        self, anna_in_a, olga_in_b, service_in_b, tenant_b,
-    ):
-        """Sanity: same-tenant booking succeeds. Anna sends
-        X-Tenant=B to confirm the 404 path is cross-tenant-specific,
-        not "any tenant header at all blocks." (She wouldn't normally
-        do this, but the serializer behaviour should match the
-        request_tenant input.)"""
-        # Anna goes into tenant B context for the request.
-        # Pre-#246 this wouldn't pass IsTenantMember; we test the
-        # serializer alone via DRF's APIRequestFactory.
-        from rest_framework.test import APIRequestFactory
-        from appointments.serializers import AppointmentCreateSerializer
 
-        factory = APIRequestFactory()
-        request = factory.post("/api/v1/appointments/")
-        request.user = anna_in_a
-        request.tenant = tenant_b  # mimic middleware setting
+@pytest.mark.django_db
+class TestNonCrossTenantPaths:
+    """Permissive branches: same-tenant, no-header, missing-FK."""
 
-        ser = AppointmentCreateSerializer(
-            data={
-                "specialist_id": str(olga_in_b.id),
-                "service_id": str(service_in_b.id),
-                "start_datetime": _future_iso(3),
-            },
-            context={"request": request},
-        )
-        assert ser.is_valid(), ser.errors  # validator passes
-
-    def test_no_tenant_header_skips_check(
-        self, anna_in_a, olga_in_b, service_in_b,
-    ):
-        """Permissive Phase 0 rollout: when X-Tenant is absent,
-        request.tenant is None and the cross-tenant validator is a
-        no-op. Other layers (IsTenantMember + queryset) still apply."""
-        from rest_framework.test import APIRequestFactory
-        from appointments.serializers import AppointmentCreateSerializer
-
-        factory = APIRequestFactory()
-        request = factory.post("/api/v1/appointments/")
-        request.user = anna_in_a
-        request.tenant = None
-
-        ser = AppointmentCreateSerializer(
-            data={
-                "specialist_id": str(olga_in_b.id),
-                "service_id": str(service_in_b.id),
-                "start_datetime": _future_iso(3),
-            },
-            context={"request": request},
-        )
-        assert ser.is_valid(), ser.errors
-
-    def test_missing_specialist_falls_through(
+    def test_same_tenant_create_no_tur_change(
         self, anna_in_a, tenant_a,
     ):
-        """If specialist_id points to nothing, the cross-tenant guard
-        is silent and downstream validation handles the missing-FK
-        case."""
+        """Same-tenant booking: validator no-op, no new TUR row."""
+        spec_user = User.objects.create_user(
+            username="ct404_spec_a", password="x", role="specialist",
+            phone="+79991404099",
+        )
+        spec_user.tenant = tenant_a
+        spec_user.save(update_fields=["tenant"])
+        p = SpecialistProfile.objects.get(user=spec_user)
+        p.tenant = tenant_a
+        p.display_name = "Spec A"
+        p.status = SpecialistProfile.ProfileStatus.ACTIVE
+        p.is_available = True
+        p.is_booking_enabled = True
+        p.timezone = "Europe/Moscow"
+        p.save()
+        category = ServiceCategory.objects.create(
+            name="Same", slug="ct404-same",
+        )
+        service = Service.objects.create(
+            specialist=p, category=category, name="Same Service",
+            price=Decimal("1500"), duration_minutes=60, is_active=True,
+        )
+
+        tur_count_before = TenantUserRelationship.objects.filter(
+            user=anna_in_a,
+        ).count()
+
+        c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"
+        c.defaults["HTTP_X_TENANT"] = tenant_a.slug
+        c.force_authenticate(user=anna_in_a)
+        r = c.post(
+            "/api/v1/appointments/",
+            {
+                "specialist_id": str(p.id),
+                "service_id": str(service.id),
+                "start_datetime": _future_iso(3),
+            },
+            format="json",
+        )
+        assert r.status_code == 201
+        assert TenantUserRelationship.objects.filter(
+            user=anna_in_a,
+        ).count() == tur_count_before
+
+    def test_no_tenant_header_skips_variant_e(
+        self, anna_in_a, olga_in_b, service_in_b, tenant_b,
+    ):
+        """No X-Tenant header → permissive customer-wide context.
+        Variant E doesn't fire. Booking proceeds; no TUR auto-grant."""
+        c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"
+        c.force_authenticate(user=anna_in_a)
+        r = c.post(
+            "/api/v1/appointments/",
+            {
+                "specialist_id": str(olga_in_b.id),
+                "service_id": str(service_in_b.id),
+                "start_datetime": _future_iso(3),
+            },
+            format="json",
+        )
+        assert r.status_code == 201
+        appt = Appointment.objects.get()
+        assert appt.tenant_id == tenant_b.id
+        assert not TenantUserRelationship.objects.filter(
+            user=anna_in_a, tenant=tenant_b,
+        ).exists()
+
+    def test_missing_specialist_validator_silent(
+        self, anna_in_a, tenant_a,
+    ):
+        """Missing specialist_id → validator skips silently; downstream
+        raises proper error."""
         from rest_framework.test import APIRequestFactory
         from appointments.serializers import AppointmentCreateSerializer
 
@@ -188,12 +292,10 @@ class TestCrossTenantCreate404:
 
         ser = AppointmentCreateSerializer(
             data={
-                "specialist_id": str(uuid4()),  # nonexistent
+                "specialist_id": str(uuid4()),
                 "service_id": str(uuid4()),
                 "start_datetime": _future_iso(3),
             },
             context={"request": request},
         )
-        # Validator returns silently — downstream (service) raises
-        # the proper not-found / not-available error.
         assert ser.is_valid(), ser.errors

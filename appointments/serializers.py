@@ -94,49 +94,15 @@ class AppointmentCreateSerializer(serializers.Serializer):
     start_datetime = serializers.DateTimeField()
     notes = serializers.CharField(required=False, allow_blank=True, default='')
 
-    def validate(self, attrs):
-        """Phase 0 (Variant B) interim cross-tenant guard.
-
-        When the request carries a tenant context (X-Tenant header
-        resolved by TenantContextMiddleware) and the requested
-        specialist belongs to a DIFFERENT tenant, surface a 404
-        "Specialist not found" instead of letting the booking land
-        in the wrong tenant (post-#142 `IsTenantMember` accepts
-        because the header matches the user; `CreateBookingService`
-        then stamps `tenant_id = specialist.tenant_id`, and the
-        strict queryset filter makes the row unreachable to the
-        actor — confusing UX + mismatched billing tenant).
-
-        Phase 1 will replace this with Variant E: invisibly create
-        a TenantUserRelationship via Sprint 1 Track A #246 and let
-        the booking proceed. See
-        docs/design/cross-tenant-create-reject.md.
-        """
-        request = self.context.get("request")
-        if request is None:
-            return attrs
-        request_tenant = getattr(request, "tenant", None)
-        if request_tenant is None:
-            # Permissive mode (no header) — Phase 0 freeze rollout.
-            return attrs
-
-        from users.models import SpecialistProfile
-        try:
-            specialist = SpecialistProfile.objects.only(
-                "tenant_id",
-            ).get(pk=attrs["specialist_id"])
-        except SpecialistProfile.DoesNotExist:
-            # Not the cross-tenant case — let downstream handle.
-            return attrs
-
-        if (
-            specialist.tenant_id is not None
-            and specialist.tenant_id != request_tenant.id
-        ):
-            from rest_framework.exceptions import NotFound
-            raise NotFound("Specialist not found.")
-
-        return attrs
+    # Pure validator post-1.D. Variant E invisible-grant + F2 revoke
+    # defense live in CreateBookingService._execute_atomic — folded
+    # into the booking transaction so:
+    # 1. The AI booking path (which bypasses this serializer) shares
+    #    the same contract.
+    # 2. If the booking rolls back later, the TUR write rolls back
+    #    too — no orphan grants in the audit log.
+    # 3. select_for_update on existing TUR rows defeats the admin-
+    #    revoke TOCTOU race.
 
 
 class AppointmentRescheduleSerializer(serializers.Serializer):
