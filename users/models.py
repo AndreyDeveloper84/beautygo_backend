@@ -575,3 +575,108 @@ class AnonymousSession(models.Model):
 
     def __str__(self):
         return f"AnonSession device={self.device_id} platform={self.platform}"
+
+
+# ---------------------------------------------------------------------------
+# TenantUserRelationship — multi-provider customer model (#246)
+# ---------------------------------------------------------------------------
+
+class TenantUserRelationship(models.Model):
+    """A user's relationship with a tenant.
+
+    Replaces the single ``User.tenant`` FK semantics for customers — a
+    customer is multi-provider by default (massage at salon A + nails
+    at salon B + freelance lash master + etc). Each link is permanent
+    and equal-weight. There is no "primary tenant" for customers.
+
+    Schema = variant β (partial unique + history) per founder ack 2026-05-24:
+    each ``(user, tenant)`` pair can have AT MOST ONE row with
+    ``is_active=True`` via a partial unique constraint. Inactive rows
+    accumulate as history — every grant + revoke is a separate row.
+    152-ФЗ audit requires "when did Tenant X have access to user Y" as
+    a queryable fact (list of granted_at / revoked_at pairs), not a
+    last-write-wins boolean.
+
+    Role split (Q5 recommendation, founder ack pending):
+    - ``customer`` — grants on first booking via Variant E. Default-
+      deny + green-zone privacy across tenants.
+    - ``staff`` — specialist working in a salon. Full employer data
+      access. Multi-tenant for mobility (Q2: master moves salon).
+    - ``admin`` — tenant owner / manager. Same as staff + admin perms.
+
+    Staff-specific side-fields (hire_date, commission_rate, etc.)
+    live on a separate ``StaffEmployment`` model when needed — keeps
+    the customer-side TUR rows lean.
+    """
+
+    class Role(models.TextChoices):
+        CUSTOMER = "customer", "Customer"
+        STAFF = "staff", "Staff"
+        ADMIN = "admin", "Admin"
+
+    class GrantedBy(models.TextChoices):
+        SELF = "self", "Self (user-initiated)"
+        ADMIN = "admin", "Admin (tenant-initiated)"
+        SYSTEM = "system", "System (backfill / cascade)"
+
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False,
+    )
+    user = models.ForeignKey(
+        "users.User",
+        on_delete=models.CASCADE,
+        related_name="tenant_relationships",
+    )
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        related_name="user_relationships",
+    )
+    role = models.CharField(
+        max_length=16, choices=Role.choices, default=Role.CUSTOMER,
+        help_text=(
+            "customer: granted on booking via Variant E. "
+            "staff: specialist working in the salon. "
+            "admin: tenant owner / manager."
+        ),
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+    granted_at = models.DateTimeField(auto_now_add=True)
+    granted_by = models.CharField(
+        max_length=16,
+        choices=GrantedBy.choices,
+        default=GrantedBy.SELF,
+    )
+    revoked_at = models.DateTimeField(
+        null=True, blank=True, db_index=True,
+    )
+    revoke_reason = models.CharField(
+        max_length=128, blank=True, default="",
+    )
+
+    class Meta:
+        verbose_name = "Tenant ↔ User relationship"
+        verbose_name_plural = "Tenant ↔ User relationships"
+        constraints = [
+            # Partial unique: at most ONE active row per (user, tenant).
+            # Inactive rows pile up as history. 152-ФЗ access-log support.
+            models.UniqueConstraint(
+                fields=["user", "tenant"],
+                condition=models.Q(is_active=True),
+                name="tur_unique_active",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["user", "tenant"],
+                name="tur_lookup_idx",
+            ),
+            models.Index(
+                fields=["user", "is_active"],
+                name="tur_user_active_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        flag = "active" if self.is_active else "revoked"
+        return f"TUR({self.user_id}, {self.tenant_id}, {self.role}, {flag})"
