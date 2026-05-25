@@ -178,15 +178,47 @@ class CreateBookingService:
             buffer_after_minutes=getattr(service, "buffer_after_minutes", 0),
         )
 
+        # #246 sub-phase 1.D Variant E — invisible TenantUserRelationship
+        # grant. Folded into the booking transaction (not the serializer)
+        # so that:
+        #   1. AI booking path gets it too (it bypasses serializer).
+        #   2. If the booking rolls back later (slot conflict, etc),
+        #      the TUR write rolls back with it — no orphan grants.
+        #   3. ``select_for_update`` on existing TUR rows defeats the
+        #      admin-revoke TOCTOU race (PR #154 adversarial F-3).
+        if (
+            dto.request_tenant_id is not None
+            and specialist.tenant_id is not None
+            and specialist.tenant_id != dto.request_tenant_id
+        ):
+            # Lock existing TUR rows for this (user, tenant) pair so
+            # an admin revoke that lands between our read and write
+            # serialises behind our row lock.
+            from users.models import TenantUserRelationship
+            existing = list(
+                TenantUserRelationship.objects.select_for_update().filter(
+                    user_id=dto.client_id,
+                    tenant_id=specialist.tenant_id,
+                )
+            )
+            has_revoked = any(not row.is_active for row in existing)
+            if has_revoked:
+                # F2 defense (PR #152): refuse silently. Re-grant
+                # requires explicit admin action.
+                from rest_framework.exceptions import NotFound
+                raise NotFound("Specialist not found.")
+            has_active = any(row.is_active for row in existing)
+            if not has_active:
+                TenantUserRelationship.objects.create(
+                    user_id=dto.client_id,
+                    tenant_id=specialist.tenant_id,
+                    is_active=True,
+                    role=TenantUserRelationship.Role.CUSTOMER,
+                    granted_by=TenantUserRelationship.GrantedBy.SELF,
+                )
+
         # Create appointment. tenant_id mirrors specialist.tenant_id —
-        # the canonical "owner tenant" of the row. Stamped here in #520
-        # so AppointmentViewSet.get_queryset can scope by tenant going
-        # forward; legacy rows (pre-#520) have tenant_id=NULL and are
-        # caught by the backward-compat ``Q(tenant__isnull=True)`` clause.
-        # When SpecialistProfile.tenant is still NULL (un-backfilled
-        # via DRF-242.4), the appointment also gets NULL — same legacy
-        # bucket. Data-migration backfill of historical rows is a
-        # separate ticket.
+        # the canonical "owner tenant" of the row.
         appointment = Appointment.objects.create(
             client_id=dto.client_id,
             specialist_id=dto.specialist_id,

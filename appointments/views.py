@@ -167,17 +167,17 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 status_code=403,
             )
 
-        # context={"request"} required so the validator can read
-        # request.tenant for the Phase 0 cross-tenant 404 guard.
-        serializer = AppointmentCreateSerializer(
-            data=request.data,
-            context={"request": request},
-        )
+        # Serializer is now a pure validator post-1.D (no DB side
+        # effects). Variant E invisible-grant moved into
+        # CreateBookingService._execute_atomic so it shares the booking
+        # transaction (rollback-safe + AI-path-compatible).
+        serializer = AppointmentCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
         idempotency_key = request.META.get(
             'HTTP_X_IDEMPOTENCY_KEY', str(uuid4()),
         )
+        request_tenant = getattr(request, "tenant", None)
 
         dto = CreateBookingDTO(
             client_id=request.user.id,
@@ -185,6 +185,9 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             service_id=serializer.validated_data['service_id'],
             start_at=serializer.validated_data['start_datetime'],
             idempotency_key=idempotency_key,
+            request_tenant_id=(
+                request_tenant.id if request_tenant else None
+            ),
         )
 
         service = self.create_booking_service_class()
