@@ -14,6 +14,48 @@ from .models import OTPCode, User
 logger = logging.getLogger(__name__)
 
 
+def get_jwt_tenant_claim(user) -> str | None:
+    """Determine the ``tenant_id`` JWT claim per #246 sub-phase 1.E.
+
+    Customer (role=client) → ``None``. Per founder ack 2026-05-25 the
+    customer is multi-provider by default — tenant context is action-
+    scope (X-Tenant header), not a default user property. JWT carries
+    no primary.
+
+    Staff (role=specialist/admin) → primary active staff/admin TUR's
+    tenant. Picked by ``-granted_at`` (most-recently-active default
+    per Q3 closed). Multi-tenant staff support (specialist mobility
+    Q2) gets a UI tenant switcher later; for now the most-recently
+    granted staff tenant wins.
+
+    Returns ``None`` when the user has no active staff/admin TUR —
+    e.g. a brand-new specialist who hasn't been linked to a salon
+    yet. ``TenantContextMiddleware`` then falls back to the X-Tenant
+    header.
+
+    String-stringified UUID to keep the JWT payload JSON-portable.
+    """
+    # User.role is a plain CharField with choices ('client',
+    # 'specialist', 'admin') — see users/models.py:11.
+    if user.role == 'client':
+        return None
+    from .models import TenantUserRelationship
+    primary = (
+        TenantUserRelationship.objects
+        .filter(
+            user=user,
+            is_active=True,
+            role__in=[
+                TenantUserRelationship.Role.STAFF,
+                TenantUserRelationship.Role.ADMIN,
+            ],
+        )
+        .order_by('-granted_at')
+        .first()
+    )
+    return str(primary.tenant_id) if primary else None
+
+
 # --- Proxy user resolution (DRF-246) ---
 
 _EXTERNAL_USER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*:[A-Za-z0-9_-]{1,64}$")
@@ -261,13 +303,13 @@ class AuthService:
         refresh = RefreshToken.for_user(user)
         if device_id:
             refresh['device_id'] = device_id
-        # DRF-242.8: embed user's tenant in the access token so
-        # TenantContextMiddleware can fall back to it when the mobile
-        # client forgets the X-Tenant header. Stored as string so the
-        # JWT JSON payload stays portable; null when user has no tenant.
-        refresh['tenant_id'] = (
-            str(user.tenant_id) if user.tenant_id else None
-        )
+        # #246 sub-phase 1.E — role-aware JWT tenant claim:
+        # - Customer (role=client): None. Multi-provider by default
+        #   per founder ack 2026-05-25 — tenant context comes from
+        #   the X-Tenant header per-request, not a default JWT claim.
+        # - Staff (role=specialist/admin): primary active staff TUR.
+        # See `get_jwt_tenant_claim`.
+        refresh['tenant_id'] = get_jwt_tenant_claim(user)
 
         return {
             "access_token": str(refresh.access_token),

@@ -66,13 +66,15 @@ class TenantAwareTokenRefreshSerializer(TokenRefreshSerializer):
             return data
 
         try:
-            user = User.objects.only("id", "tenant_id").get(pk=user_id)
+            # role + id needed for role-aware claim (#246 1.E).
+            user = User.objects.only("id", "role", "tenant_id").get(pk=user_id)
         except User.DoesNotExist:
             logger.info("token.refresh.user_missing user_id=%s", user_id)
             return data
 
-        new_access["tenant_id"] = (
-            str(user.tenant_id) if user.tenant_id else None
-        )
+        # Re-resolve tenant claim via the role-aware helper. Customer
+        # always gets None; staff gets their primary active staff TUR.
+        from users.services import get_jwt_tenant_claim
+        new_access["tenant_id"] = get_jwt_tenant_claim(user)
         data["access"] = str(new_access)
         return data
