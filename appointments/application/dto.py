@@ -26,6 +26,14 @@ class CreateBookingDTO:
     service_id: UUID
     start_at: datetime          # Must be UTC timezone-aware
     idempotency_key: str        # Client-provided UUID to prevent duplicates
+    # #246 sub-phase 1.D Variant E: when the caller is in a specific
+    # tenant context (X-Tenant header at the REST layer; mobile UI
+    # tenant switcher), pass it through so the service can invisibly
+    # grant TUR(client, specialist.tenant) inside the booking
+    # transaction. None = caller is in customer-wide context — no
+    # grant needed (appointment.tenant_id stamped from specialist
+    # per legacy behavior).
+    request_tenant_id: Optional[UUID] = None
 
 
 @dataclass(frozen=True)
