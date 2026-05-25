@@ -119,6 +119,63 @@ class TestConfirmBooking:
         assert result.success is False
         assert result.error_code == "SLOT_NOT_AVAILABLE"
 
+    def test_request_tenant_id_forwarded_to_dto(self, client_user):
+        """#716: request_tenant_id from the HTTP layer must land in the
+        DTO so Variant E grants TUR against the tenant the user is
+        actually acting in, not actor's legacy primary FK."""
+        import uuid as _uuid
+        booking_svc = MagicMock()
+        slot_dt = datetime(2026, 6, 1, 14, 0, tzinfo=dt_timezone.utc)
+        booking_id = _uuid.uuid4()
+        booking_svc.execute.return_value = _booking_result(booking_id, slot_dt)
+        request_tenant_id = _uuid.uuid4()
+
+        conv = make_conversation(user=client_user)
+        ActionService(booking_service=booking_svc).execute(
+            actor=client_user,
+            conversation=conv,
+            action_type=ActionType.CONFIRM_BOOKING,
+            confirmed=True,
+            data={
+                "specialist_id": str(_uuid.uuid4()),
+                "service_id": str(_uuid.uuid4()),
+                "datetime": slot_dt.isoformat(),
+            },
+            request_tenant_id=request_tenant_id,
+        )
+        dto = booking_svc.execute.call_args.args[0]
+        assert dto.request_tenant_id == request_tenant_id
+
+    def test_actor_tenant_id_not_used_as_fallback(self, client_user):
+        """#716 regression pin: even when actor has a legacy primary
+        tenant_id, the DTO must carry None when the request didn't pass
+        one. The action service no longer reads actor.tenant_id — the
+        only source of truth is the request tenant context."""
+        import uuid as _uuid
+        booking_svc = MagicMock()
+        slot_dt = datetime(2026, 6, 1, 14, 0, tzinfo=dt_timezone.utc)
+        booking_id = _uuid.uuid4()
+        booking_svc.execute.return_value = _booking_result(booking_id, slot_dt)
+        # Simulate a customer who still has a legacy User.tenant FK.
+        # Variant E semantics post-1.E say this should be ignored.
+        client_user.tenant_id = _uuid.uuid4()
+
+        conv = make_conversation(user=client_user)
+        ActionService(booking_service=booking_svc).execute(
+            actor=client_user,
+            conversation=conv,
+            action_type=ActionType.CONFIRM_BOOKING,
+            confirmed=True,
+            data={
+                "specialist_id": str(_uuid.uuid4()),
+                "service_id": str(_uuid.uuid4()),
+                "datetime": slot_dt.isoformat(),
+            },
+            # request_tenant_id intentionally omitted.
+        )
+        dto = booking_svc.execute.call_args.args[0]
+        assert dto.request_tenant_id is None
+
     def test_missing_datetime_raises_invalid_action(self, client_user):
         booking_svc = MagicMock()
         conv = make_conversation(user=client_user)
