@@ -318,22 +318,32 @@ class TestTenantBoundaryAdr0009:
     def test_user_with_revoked_tenant_relationship_denied(
         self, client_user, specialist, service, tenant_a,
     ):
-        """User.tenant=None (proxy for revoked TenantUserRelationship)
-        sending X-Tenant=T1 → 403 via IsTenantMember (user.tenant_id
-        is None while request.tenant_id is set).
+        """Revoked TUR(user, tenant_a) → 403 on tenant-scoped action.
 
-        When Sprint 1 Track A #246 lands TenantUserRelationship in
-        this repo, replace the `User.tenant = None` proxy with
-        `TenantUserRelationship.objects.filter(user=...)
-        .update(is_active=False)`.
+        Post-#246 sub-phase 1.B: revoke is an explicit action on the
+        TUR row (``is_active=False`` + ``revoked_at``). Clearing
+        ``user.tenant`` is NOT a revoke per design (1.B bridge
+        intentionally skips when tenant_id is None). To pin the
+        "revoked relationship → 403" invariant we now flip the TUR
+        row directly.
         """
+        from django.utils import timezone
+        from users.models import TenantUserRelationship
+
         appt = _create_appointment(client_user, specialist, service)
-        client_user.tenant = None
-        client_user.save(update_fields=["tenant"])
+        # client_user.tenant=tenant_a set by fixture → bridge created
+        # TUR(client_user, tenant_a, is_active=True). Flip it now.
+        TenantUserRelationship.objects.filter(
+            user=client_user, tenant=tenant_a, is_active=True,
+        ).update(
+            is_active=False,
+            revoked_at=timezone.now(),
+            revoke_reason="test_revoke",
+        )
 
         c = APIClient()
         c.defaults["HTTP_X_APP_TYPE"] = "client"
-        c.defaults["HTTP_X_TENANT"] = tenant_a.slug  # was their tenant
+        c.defaults["HTTP_X_TENANT"] = tenant_a.slug
         c.force_authenticate(user=client_user)
         r = c.get(f"/api/v1/appointments/{appt.id}/")
         assert r.status_code == 403, (
