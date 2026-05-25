@@ -95,47 +95,82 @@ class AppointmentCreateSerializer(serializers.Serializer):
     notes = serializers.CharField(required=False, allow_blank=True, default='')
 
     def validate(self, attrs):
-        """Phase 0 (Variant B) interim cross-tenant guard.
+        """Variant E — invisible TenantUserRelationship grant (#246 1.D).
 
-        When the request carries a tenant context (X-Tenant header
-        resolved by TenantContextMiddleware) and the requested
-        specialist belongs to a DIFFERENT tenant, surface a 404
-        "Specialist not found" instead of letting the booking land
-        in the wrong tenant (post-#142 `IsTenantMember` accepts
-        because the header matches the user; `CreateBookingService`
-        then stamps `tenant_id = specialist.tenant_id`, and the
-        strict queryset filter makes the row unreachable to the
-        actor — confusing UX + mismatched billing tenant).
+        Replaces the Phase 0 cross-tenant 404 guard. When the customer
+        books a specialist whose tenant they're not yet a member of,
+        we invisibly create the relationship inside the booking
+        transaction. The act of booking IS the consent gesture per
+        `ayla-first-strategic-pivot` ("AI belongs to the user, salon
+        is a provider"). No 404, no consent dialog.
 
-        Phase 1 will replace this with Variant E: invisibly create
-        a TenantUserRelationship via Sprint 1 Track A #246 and let
-        the booking proceed. See
-        docs/design/cross-tenant-create-reject.md.
+        Defense from PR #152 F2: if a REVOKED TUR exists for the
+        (user, specialist.tenant) pair, refuse silently with 404 —
+        re-grant requires explicit admin action, not a side effect of
+        the booking flow. Same posture as the User.post_save bridge.
+
+        Permissive branches:
+        - No request context / no `request.tenant`: caller didn't
+          enter provider scope. CreateBookingService will stamp
+          `appointment.tenant_id = specialist.tenant_id`; queryset
+          scoping handles the rest. No TUR check.
+        - Specialist not found: let downstream raise the proper error.
+        - Specialist has no tenant (legacy NULL — pre-#590 row):
+          legacy state, not a Variant E concern; let through.
         """
         request = self.context.get("request")
         if request is None:
             return attrs
         request_tenant = getattr(request, "tenant", None)
         if request_tenant is None:
-            # Permissive mode (no header) — Phase 0 freeze rollout.
+            # Caller in global / customer-wide context (#246 design).
+            # No tenant scope to bridge.
             return attrs
 
-        from users.models import SpecialistProfile
+        from users.models import SpecialistProfile, TenantUserRelationship
         try:
             specialist = SpecialistProfile.objects.only(
                 "tenant_id",
             ).get(pk=attrs["specialist_id"])
         except SpecialistProfile.DoesNotExist:
-            # Not the cross-tenant case — let downstream handle.
             return attrs
 
-        if (
-            specialist.tenant_id is not None
-            and specialist.tenant_id != request_tenant.id
-        ):
+        if not specialist.tenant_id:
+            # Legacy specialist with no tenant — Variant E only fires
+            # for tenant-stamped specialists. Let downstream proceed.
+            return attrs
+
+        if specialist.tenant_id == request_tenant.id:
+            # Same-tenant booking — no grant needed.
+            return attrs
+
+        # Cross-tenant: customer is in X-Tenant context for tenant A,
+        # booking a specialist in tenant B. Need TUR(user, B).
+        has_revoked = TenantUserRelationship.objects.filter(
+            user=request.user,
+            tenant_id=specialist.tenant_id,
+            is_active=False,
+        ).exists()
+        if has_revoked:
+            # F2 defense: refuse silently rather than silently re-grant.
+            # Mirrors the User.post_save bridge revoke-defense logic.
             from rest_framework.exceptions import NotFound
             raise NotFound("Specialist not found.")
 
+        # Invisible grant — get_or_create handles idempotency under
+        # concurrent booking attempts. partial unique constraint on
+        # (user, tenant) WHERE is_active=True catches dups via
+        # IntegrityError if two concurrent grants race; get_or_create
+        # surfaces that as "got" not "created."
+        TenantUserRelationship.objects.get_or_create(
+            user=request.user,
+            tenant_id=specialist.tenant_id,
+            is_active=True,
+            defaults={
+                "role": TenantUserRelationship.Role.CUSTOMER,
+                "granted_by": TenantUserRelationship.GrantedBy.SELF,
+            },
+        )
         return attrs
 
 
