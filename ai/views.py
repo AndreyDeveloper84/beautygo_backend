@@ -194,6 +194,11 @@ class AIChatActionView(APIView):
             )
         validated = serializer.validated_data
 
+        # #716: pass the current request tenant (set by
+        # TenantContextMiddleware from the X-Tenant header / JWT claim)
+        # so cross-tenant AI bookings grant TUR against the tenant the
+        # user is acting in, not actor's legacy primary FK.
+        request_tenant = getattr(request, "tenant", None)
         try:
             result = self.action_service_class().execute(
                 actor=request.user,
@@ -201,6 +206,9 @@ class AIChatActionView(APIView):
                 action_type=validated["action_type"],
                 confirmed=validated["confirmed"],
                 data=validated.get("data") or {},
+                request_tenant_id=(
+                    request_tenant.id if request_tenant else None
+                ),
             )
         except AINotOwner:
             return error_response(
