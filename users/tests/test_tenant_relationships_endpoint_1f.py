@@ -38,7 +38,11 @@ class TestMyTenantRelationshipsEndpoint:
     """Pin the canonical multi-provider list endpoint."""
 
     def test_unauthenticated_returns_401(self):
+        """AppTypeMiddleware runs before auth — must send X-App-Type to
+        reach the IsAuthenticated check (otherwise 403 from middleware,
+        not the 401 we want to pin)."""
         c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"
         r = c.get("/api/v1/users/me/tenant-relationships/")
         assert r.status_code == 401
 
