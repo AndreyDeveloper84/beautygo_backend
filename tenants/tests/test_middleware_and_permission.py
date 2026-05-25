@@ -338,3 +338,41 @@ class TestUserPostSaveBridge:
         assert TenantUserRelationship.objects.filter(
             user=user, tenant=t,
         ).count() == 1
+
+    def test_revoked_tur_blocks_silent_regrant(self):
+        """F2 defense (adversarial review PR #152): bridge MUST NOT
+        silently re-grant a revoked relationship. Revoke is admin-
+        gated; bypassing via `user.save()` would be a security hole.
+        """
+        from django.utils import timezone
+        from users.models import TenantUserRelationship, User
+        t = Tenant.objects.create(slug="bridge-revoke", name="Revoke")
+        user = User.objects.create_user(
+            username="bridge_revoke_user", password="x", role="client",
+            phone="+79991122004",
+        )
+        # Grant via bridge.
+        user.tenant = t
+        user.save()
+        # Admin revokes.
+        TenantUserRelationship.objects.filter(
+            user=user, tenant=t, is_active=True,
+        ).update(
+            is_active=False, revoked_at=timezone.now(),
+            revoke_reason="admin_revoke",
+        )
+        # Now legacy code re-saves the user for unrelated reasons
+        # (phone update, etc) — bridge MUST NOT re-create active TUR.
+        user.first_name = "Updated"
+        user.save()
+
+        active = TenantUserRelationship.objects.filter(
+            user=user, tenant=t, is_active=True,
+        )
+        assert active.count() == 0, (
+            "Bridge silently re-granted a revoked TUR — security hole."
+        )
+        revoked = TenantUserRelationship.objects.filter(
+            user=user, tenant=t, is_active=False,
+        )
+        assert revoked.count() == 1
