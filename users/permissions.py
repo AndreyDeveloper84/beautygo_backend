@@ -129,3 +129,79 @@ class IsServiceAccount(permissions.BasePermission):
         if not provided:
             return False
         return compare_digest(provided, expected)
+
+
+class IsBotServiceWithVerifiedClient(permissions.BasePermission):
+    """Bearer-authenticated service-to-service calls with a resolved actor.
+
+    Used by `/api/v1/payments/internal/*` (task #85) and other endpoints
+    where the bot acts on behalf of a specific Ayla User and the view
+    still needs ``request.user`` to be that User (so existing filters
+    like ``appointment__client=request.user`` keep working unchanged).
+
+    Auth contract:
+
+    1. ``Authorization: Bearer <token>`` matches
+       ``settings.AYLA_INTERNAL_API_TOKEN`` (constant-time). Empty
+       setting fails closed — never accept any token on a misconfigured
+       deployment.
+    2. ``X-External-User-ID`` (e.g. ``bot:12345``) resolves via
+       ``resolve_external_user`` to an Ayla ``User`` (lazily created
+       as a proxy on first call — same semantics as nutrition/internal).
+    3. ``request.user`` is replaced by the resolved User so views can
+       use the same per-user queryset filters as the mobile path.
+
+    Defense-in-depth (lives in the **view**, not here): the view MUST
+    cross-check the request body's ``client_id`` field against
+    ``request.user.id``. The bearer token alone is a single secret;
+    if it leaks, an attacker holding it could impersonate any user by
+    forging only the header. Forcing the body to independently name
+    the same user means a leaked token still requires the attacker to
+    also know the victim's specific Ayla user-id — a second factor
+    that limits blast radius.
+
+    Why this is not just ``IsServiceAccount`` with extra steps: that
+    class deliberately leaves user resolution to the view (nutrition
+    internal endpoints accept multiple shapes); this one promises that
+    a passing permission guarantees ``request.user`` is a concrete,
+    resolved Ayla user. Views written against this class can rely on
+    ``request.user`` being non-anonymous without re-checking.
+    """
+
+    message = "Bot service auth required"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        # Lazy import — users.services imports models, breaking the
+        # users.permissions → users.services circular if hoisted.
+        from users.services import (
+            InvalidExternalUserIDError,
+            resolve_external_user,
+        )
+
+        expected = getattr(settings, "AYLA_INTERNAL_API_TOKEN", "") or ""
+        if not expected:
+            # Misconfigured deployment — never honour any bearer.
+            return False
+
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        prefix = "Bearer "
+        if not auth_header.startswith(prefix):
+            return False
+        provided = auth_header[len(prefix):].strip()
+        if not provided or not compare_digest(provided, expected):
+            return False
+
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        if not external_user_id:
+            return False
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError:
+            return False
+
+        # Replace AnonymousUser (the request authenticator never ran
+        # for this permission-only auth path) with the resolved Ayla
+        # User. Downstream code — including the view's defense-in-depth
+        # cross-check — reads request.user.
+        request.user = user
+        return True
