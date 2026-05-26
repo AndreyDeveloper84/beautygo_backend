@@ -205,3 +205,47 @@ class IsBotServiceWithVerifiedClient(permissions.BasePermission):
         # cross-check — reads request.user.
         request.user = user
         return True
+
+
+class IsInternalBearer(permissions.BasePermission):
+    """Bearer-authenticated service-to-service calls without user resolution.
+
+    Used by admin-level batch endpoints (task #92 `POST
+    /api/v1/masters/internal/by-yclients-staff-ids/`) where the bot
+    acts on behalf of an *admin operator*, not a specific Ayla User.
+    No ``X-External-User-ID`` is required; ``request.user`` stays
+    Anonymous.
+
+    Auth contract:
+
+    1. ``Authorization: Bearer <token>`` matches
+       ``settings.AYLA_INTERNAL_API_TOKEN`` (constant-time). Empty
+       setting fails closed.
+
+    When the endpoint is per-tenant, the **view** still enforces the
+    tenant boundary by requiring an explicit ``tenant_id`` field in
+    the request body — same defense-in-depth idea as ``client_id`` in
+    ``IsBotServiceWithVerifiedClient``: a leaked bearer can't be used
+    to enumerate across tenants without naming each one explicitly.
+
+    Pick this over ``IsBotServiceWithVerifiedClient`` when the endpoint
+    is *catalog-shaped* (read/lookup across many records) rather than
+    *on-behalf-of-user-shaped* (write tied to one User's data). The
+    distinction matters because user-shaped endpoints have a natural
+    second factor (the user-id); catalog endpoints don't.
+    """
+
+    message = "Internal service auth required"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        expected = getattr(settings, "AYLA_INTERNAL_API_TOKEN", "") or ""
+        if not expected:
+            return False
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        prefix = "Bearer "
+        if not auth_header.startswith(prefix):
+            return False
+        provided = auth_header[len(prefix):].strip()
+        if not provided or not compare_digest(provided, expected):
+            return False
+        return True
