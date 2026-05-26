@@ -82,6 +82,11 @@ class MastersByYclientsStaffIdsView(APIView):
     ``not_found_staff_ids`` preserves the request order minus any that
     matched — useful for the admin UI to highlight gaps.
     """
+    # Disable DRF's default JWTAuthentication: the bot ships an
+    # Authorization: Bearer <AYLA_INTERNAL_API_TOKEN>, which is NOT a
+    # JWT — leaving JWTAuthentication in place would 401-reject the
+    # request before IsInternalBearer ever runs. See PR #158 fix.
+    authentication_classes: list = []
     permission_classes = [IsInternalBearer]
     serializer_class = MastersByYclientsStaffIdsRequestSerializer
 
