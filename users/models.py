@@ -192,6 +192,15 @@ class SpecialistProfile(models.Model):
             "booking_source='yclients', empty otherwise."
         ),
     )
+    yclients_staff_id = models.CharField(
+        max_length=64, blank=True, default="", db_index=True,
+        help_text=(
+            "YClients per-master staff id — required when "
+            "booking_source='yclients' and the admin mini-app needs "
+            "to resolve YClients staff ids → SpecialistProfile rows. "
+            "Empty otherwise."
+        ),
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
