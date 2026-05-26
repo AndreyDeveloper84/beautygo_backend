@@ -1,0 +1,456 @@
+"""POST /api/v1/internal/me/catalog/recommendations/ — task #99.
+
+W1 booking flow Phase B unblock. Three-layer catalog recommendations
+per Tau's §10.1 (project_ayla_ranking_philosophy):
+
+  layer_1_your_places  — specialists in tenants the customer already
+                         has an active CUSTOMER-role TUR with (the
+                         "salons you know" rail in the Mini App).
+  layer_2_ayla_picks   — top-3 specialists NOT in customer's history,
+                         ranked by simple composite score with a
+                         template reasoning_text per item.
+  layer_3_explore      — category-aggregate counts across the
+                         eligible pool ("there are 12 manicure
+                         specialists, 8 massage" — feeds the
+                         "browse by category" UI).
+
+Identity bridging: ``IsBotServiceWithVerifiedClient`` (Bearer +
+X-External-User-ID) per memory ``project_identity_bridging_pattern``.
+Mini App calls bot-platform proxy → bot-platform calls this endpoint
+with the resolved bot_user identity; Ayla resolves to a canonical
+``User`` and reads their TUR history backend-side.
+
+Pilot scope discipline:
+- NO LLM-generated reasoning text. Template strings only (founder
+  pilot_scope_discipline).
+- NO availability/slot computation in reasoning (would multiply DB
+  load by the size of the candidate pool). The "available" claim is
+  reduced to the ``is_available + is_booking_enabled`` boolean pair.
+- Minimum eligibility filter only (active specialist + active tenant)
+  — no rating/reviews thresholds in MVP per founder cut "simple
+  eligibility".
+- Goal matching is ILIKE on ``service.name`` OR
+  ``category.slug``; semantic match is post-pilot.
+"""
+from __future__ import annotations
+
+import logging
+import math
+from decimal import Decimal
+from typing import Any
+
+from django.db.models import Count, Q, QuerySet
+from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+from rest_framework import serializers
+from rest_framework.request import Request
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from services.models import ServiceCategory
+from users.models import SpecialistProfile, TenantUserRelationship
+from users.permissions import IsBotServiceWithVerifiedClient
+from users.response import success_response
+
+
+logger = logging.getLogger(__name__)
+
+
+# Pool caps per layer. Tuned conservatively — Mini App card list
+# performance budget is ~10 items per rail before scroll feels slow.
+LAYER_1_LIMIT = 5
+LAYER_2_LIMIT = 3
+LAYER_3_CATEGORY_LIMIT = 10
+
+# Rating threshold for the "Рейтинг X.Y" reasoning fact. Below this we
+# omit it to avoid surfacing weak signals as endorsements.
+RATING_REASONING_FLOOR = Decimal("4.5")
+
+
+# ---------------------------------------------------------------------------
+# Request / response serializers
+# ---------------------------------------------------------------------------
+
+
+class RecommendationsRequestSerializer(serializers.Serializer):
+    lat = serializers.FloatField(
+        required=False,
+        help_text="Customer's latitude. When provided alongside lon, "
+                  "distance feeds the layer_2 ranking and reasoning_text.",
+    )
+    lon = serializers.FloatField(required=False)
+    goal = serializers.CharField(
+        required=False, max_length=64, allow_blank=True,
+        help_text="Free-text goal like 'маникюр' or 'massage'. "
+                  "ILIKE-matched against service.name and "
+                  "category.slug. Optional.",
+    )
+
+
+class _SpecialistCardSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    display_name = serializers.CharField()
+    avatar_url = serializers.CharField(allow_null=True)
+    rating = serializers.DecimalField(
+        max_digits=2, decimal_places=1, allow_null=True,
+    )
+    reviews_count = serializers.IntegerField()
+    distance_km = serializers.FloatField(allow_null=True)
+    tenant_id = serializers.UUIDField()
+    tenant_slug = serializers.CharField()
+    tenant_name = serializers.CharField()
+
+
+class _Layer2ItemSerializer(_SpecialistCardSerializer):
+    reasoning_text = serializers.CharField()
+
+
+class _Layer3CategorySerializer(serializers.Serializer):
+    slug = serializers.CharField()
+    name = serializers.CharField()
+    count = serializers.IntegerField()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance between two lat/lon points in km."""
+    earth_km = 6371.0088
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2
+    )
+    return 2 * earth_km * math.asin(math.sqrt(a))
+
+
+def _specialist_distance_km(
+    specialist: SpecialistProfile,
+    *, lat: float | None, lon: float | None,
+) -> float | None:
+    if (
+        lat is None or lon is None
+        or specialist.location_lat is None
+        or specialist.location_lng is None
+    ):
+        return None
+    return _haversine(
+        float(lat), float(lon),
+        float(specialist.location_lat), float(specialist.location_lng),
+    )
+
+
+def _build_card(
+    specialist: SpecialistProfile,
+    *, lat: float | None, lon: float | None,
+) -> dict[str, Any]:
+    """Common card payload — keeps Layer 1 / 2 / Layer 1-without-reasoning
+    rails consistent."""
+    return {
+        "id": str(specialist.id),
+        "display_name": specialist.display_name,
+        "avatar_url": specialist.avatar.url if specialist.avatar else None,
+        "rating": specialist.rating,
+        "reviews_count": specialist.reviews_count,
+        "distance_km": _specialist_distance_km(
+            specialist, lat=lat, lon=lon,
+        ),
+        "tenant_id": str(specialist.tenant_id),
+        "tenant_slug": specialist.tenant.slug,
+        "tenant_name": specialist.tenant.name,
+    }
+
+
+def _compute_layer_2_score(
+    specialist: SpecialistProfile,
+    *, lat: float | None, lon: float | None,
+) -> float:
+    """Composite score for Layer 2 ranking. Higher = better.
+
+    Three additive components:
+    - Rating: 0..50 (raw rating 0-5 multiplied by 10)
+    - Proximity: 100 / (km + 1); when no lat/lon, 0
+    - Availability boost: +5 when is_available
+
+    Deliberately simple. Tau §10.3 says priority order is goal >
+    distance > availability > rating; we tilt the *score* toward
+    distance + rating because goal match is a boolean filter applied
+    upstream (in goal-mode the pool is already goal-matching), not a
+    score signal here.
+    """
+    score = 0.0
+    if specialist.rating is not None:
+        score += float(specialist.rating) * 10.0
+    distance = _specialist_distance_km(specialist, lat=lat, lon=lon)
+    if distance is not None:
+        score += 100.0 / (distance + 1.0)
+    if specialist.is_available:
+        score += 5.0
+    return score
+
+
+def _goal_matches(specialist: SpecialistProfile, goal: str) -> bool:
+    """Cheap goal-match check used by reasoning_text generation.
+
+    The candidate pool is already filtered by goal upstream when
+    goal is non-empty; this helper exists so the reasoning_text
+    builder can call it without re-filtering, and to handle the
+    case where the upstream filter is OR-shape (service name OR
+    category slug) — we still want to know if the match was on the
+    name (more meaningful) vs slug (more abstract).
+    """
+    if not goal:
+        return False
+    needle = goal.lower()
+    for service in specialist.services.all():
+        if needle in service.name.lower():
+            return True
+        category = getattr(service, "category", None)
+        if category is not None:
+            if needle in (category.slug or "").lower():
+                return True
+            if needle in (category.name or "").lower():
+                return True
+    return False
+
+
+def _build_reasoning_text(
+    specialist: SpecialistProfile,
+    *, lat: float | None, lon: float | None, goal: str,
+) -> str:
+    """Template-driven reasoning string for Layer 2 items.
+
+    Priority order per Tau §10.3 — emit at most ONE fact for each
+    tier in this order, joined by ", ". A combined output reads like:
+    "Совпадает с твоей целью, 1.2 км от вас, рейтинг 4.9".
+
+    The empty-fallback case ('Принимает записи') is the truthful
+    minimum claim — we never invent availability nor distance when
+    the inputs aren't there.
+    """
+    parts: list[str] = []
+    if goal and _goal_matches(specialist, goal):
+        parts.append("Совпадает с твоей целью")
+    distance = _specialist_distance_km(specialist, lat=lat, lon=lon)
+    if distance is not None:
+        parts.append(f"{distance:.1f} км от вас")
+    if (
+        specialist.rating is not None
+        and specialist.rating >= RATING_REASONING_FLOOR
+    ):
+        # Strip trailing zeros so a 4.5 doesn't render as "4.50" —
+        # DecimalField(max_digits=2, decimal_places=1) keeps one
+        # decimal place internally; normalize() trims the float-style
+        # zero for display.
+        rating_str = format(specialist.rating, "g")
+        parts.append(f"Рейтинг {rating_str}")
+    if not parts:
+        # Fallback when none of the higher-tier facts apply.
+        # is_available is already a pool prerequisite — the claim
+        # is truthful: this specialist is open for bookings.
+        return "Принимает записи"
+    return ", ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Layer builders
+# ---------------------------------------------------------------------------
+
+
+def _base_pool() -> QuerySet:
+    """Goal-independent eligibility pool — Tau §10.2 'simple eligibility'.
+
+    Just "active specialist in an active tenant taking bookings".
+    No quality scoring, no geographic radius, no rating threshold.
+
+    Layer 1 ('your salons') uses THIS pool so that typing a goal
+    doesn't hide a customer's known salon when that salon doesn't
+    happen to offer the goal — identity/relationship anchors layer 1,
+    not goal. Layers 2 + 3 apply the goal filter via
+    ``_apply_goal_filter``.
+    """
+    return (
+        SpecialistProfile.objects
+        .filter(
+            is_available=True,
+            is_booking_enabled=True,
+            status=SpecialistProfile.ProfileStatus.ACTIVE,
+        )
+        .select_related("tenant")
+        .prefetch_related("services", "services__category")
+    )
+
+
+def _apply_goal_filter(qs: QuerySet, goal: str) -> QuerySet:
+    """Apply the goal ILIKE filter to a base pool. No-op when goal=''.
+
+    ILIKE on service name OR category slug/name. Post-pilot:
+    tag-based or semantic match.
+    """
+    if not goal:
+        return qs
+    return qs.filter(
+        Q(services__name__icontains=goal)
+        | Q(services__category__slug__icontains=goal)
+        | Q(services__category__name__icontains=goal)
+    ).distinct()
+
+
+def _build_layer_1(
+    base_pool: QuerySet, *, history_tenant_ids: list,
+    lat: float | None, lon: float | None,
+) -> list[dict]:
+    """Layer 1 — customer's known salons, ordered by rating desc.
+
+    Takes the GOAL-INDEPENDENT base pool (see _base_pool docstring).
+    Order: rating desc, then id (stable across replicas — Postgres
+    otherwise returns LIMIT 5 in arbitrary insertion order).
+    """
+    if not history_tenant_ids:
+        return []
+    rows = list(
+        base_pool
+        .filter(tenant_id__in=history_tenant_ids)
+        .order_by("-rating", "id")[:LAYER_1_LIMIT]
+    )
+    return [_build_card(r, lat=lat, lon=lon) for r in rows]
+
+
+def _build_layer_2(
+    pool: QuerySet, *, history_tenant_ids: list,
+    lat: float | None, lon: float | None, goal: str,
+) -> list[dict]:
+    rows = list(pool.exclude(tenant_id__in=history_tenant_ids))
+    # Score + rank. Python-side because the score formula isn't a
+    # cheap SQL expression (1 / (distance + 1) for variable distance).
+    scored = [
+        (r, _compute_layer_2_score(r, lat=lat, lon=lon)) for r in rows
+    ]
+    # Sort by descending score; ties broken by specialist id for
+    # deterministic responses across replicas.
+    scored.sort(key=lambda pair: (-pair[1], str(pair[0].id)))
+    top_n = scored[:LAYER_2_LIMIT]
+    out = []
+    for specialist, _score in top_n:
+        item = _build_card(specialist, lat=lat, lon=lon)
+        item["reasoning_text"] = _build_reasoning_text(
+            specialist, lat=lat, lon=lon, goal=goal,
+        )
+        out.append(item)
+    return out
+
+
+def _build_layer_3(pool: QuerySet) -> dict[str, Any]:
+    """Category counts across the eligible pool — feeds the Mini App's
+    "browse by category" rail.
+
+    Simple GROUP BY: counts distinct services within the pool's
+    eligible specialists. Sorted by count descending, top-N.
+    """
+    eligible_ids = pool.values_list("id", flat=True)
+    cat_rows = (
+        ServiceCategory.objects
+        .filter(
+            services__is_active=True,
+            services__specialist__in=eligible_ids,
+        )
+        .annotate(count=Count("services", distinct=True))
+        .values("slug", "name", "count")
+        .order_by("-count", "slug")[:LAYER_3_CATEGORY_LIMIT]
+    )
+    return {"categories": list(cat_rows)}
+
+
+# ---------------------------------------------------------------------------
+# View
+# ---------------------------------------------------------------------------
+
+
+class CatalogRecommendationsView(APIView):
+    """POST /api/v1/internal/me/catalog/recommendations/"""
+    # Bot service auth — same pattern as #97 Records endpoints.
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+    serializer_class = RecommendationsRequestSerializer
+
+    @extend_schema(
+        tags=["internal"],
+        request=RecommendationsRequestSerializer,
+        responses={
+            200: inline_serializer(
+                name="CatalogRecommendationsResponse",
+                fields={
+                    "data": inline_serializer(
+                        name="CatalogRecommendationsData",
+                        fields={
+                            "layer_1_your_places": _SpecialistCardSerializer(many=True),
+                            "layer_2_ayla_picks": _Layer2ItemSerializer(many=True),
+                            "layer_3_explore": inline_serializer(
+                                name="Layer3Explore",
+                                fields={
+                                    "categories": _Layer3CategorySerializer(many=True),
+                                },
+                            ),
+                        },
+                    ),
+                },
+            ),
+            400: OpenApiResponse(description="Validation error"),
+            403: OpenApiResponse(description="Bearer / external id invalid"),
+        },
+    )
+    def post(self, request: Request) -> Response:
+        serializer = RecommendationsRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        lat = serializer.validated_data.get("lat")
+        lon = serializer.validated_data.get("lon")
+        goal = (serializer.validated_data.get("goal") or "").strip()
+
+        # Customer's history tenants: TUR rows where the resolved User
+        # has an active CUSTOMER role. ADMIN/STAFF rows are
+        # operational, not "places you've been booked at".
+        history_tenant_ids = list(
+            TenantUserRelationship.objects
+            .filter(
+                user=request.user,
+                is_active=True,
+                role=TenantUserRelationship.Role.CUSTOMER,
+            )
+            .values_list("tenant_id", flat=True)
+        )
+
+        # One base pool query, two derived views:
+        # - layer 1 uses the GOAL-INDEPENDENT base (your salons stay
+        #   visible regardless of what the customer is searching for);
+        # - layers 2 + 3 apply the goal filter (the picks + category
+        #   counts should react to the search).
+        base_pool = _base_pool()
+        scoped_pool = _apply_goal_filter(base_pool, goal)
+
+        layer_1 = _build_layer_1(
+            base_pool, history_tenant_ids=history_tenant_ids,
+            lat=lat, lon=lon,
+        )
+        layer_2 = _build_layer_2(
+            scoped_pool, history_tenant_ids=history_tenant_ids,
+            lat=lat, lon=lon, goal=goal,
+        )
+        layer_3 = _build_layer_3(scoped_pool)
+
+        logger.info(
+            "catalog.recommendations user_id=%s goal=%r lat=%s lon=%s "
+            "l1=%d l2=%d l3_cats=%d",
+            request.user.id, goal, lat, lon,
+            len(layer_1), len(layer_2),
+            len(layer_3.get("categories", [])),
+        )
+
+        return success_response({
+            "layer_1_your_places": layer_1,
+            "layer_2_ayla_picks": layer_2,
+            "layer_3_explore": layer_3,
+        })

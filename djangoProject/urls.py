@@ -27,6 +27,10 @@ urlpatterns = [
         'api/v1/internal/me/bookings/',
         include('appointments.records_urls'),
     ),
+    path(
+        'api/v1/internal/me/catalog/recommendations/',
+        include('users.catalog_recommendations_urls'),
+    ),
     path('api/v1/appointments/', include('appointments.urls')),
     path('api/v1/reviews/', include('reviews.urls')),
     path('api/v1/payments/', include('payments.urls')),
