@@ -51,6 +51,12 @@ EVENT_HANDLERS: dict[str, EventHandler] = {
     OutboxEvent.Topic.PAYMENT_CONFIRMED: _log_handler("payment.confirmed"),
     OutboxEvent.Topic.PAYMENT_REFUNDED: _log_handler("payment.refunded"),
     OutboxEvent.Topic.CACHE_INVALIDATE_SLOTS: _log_handler("cache.invalidate_slots"),
+    # #246 Q1 — log-only stub. Real cross-service consumer is bot-
+    # platform (per ADR-0009 §Domain ownership matrix). The Ayla side
+    # only persists + logs; consumers dedupe by event_id on their end.
+    OutboxEvent.Topic.TENANT_RELATIONSHIP_REVOKED: _log_handler(
+        "tenant.relationship.revoked",
+    ),
 }
 
 

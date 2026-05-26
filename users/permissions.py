@@ -249,3 +249,43 @@ class IsInternalBearer(permissions.BasePermission):
         if not provided or not compare_digest(provided, expected):
             return False
         return True
+
+
+class IsTenantAdmin(permissions.BasePermission):
+    """Caller must hold an active ``admin``-role TUR in ``request.tenant``.
+
+    Used by admin-only endpoints in the salon-management surface
+    (#246 Q1 revoke endpoint, future master-departure flow). The
+    permission requires BOTH:
+
+    1. ``request.user`` is authenticated.
+    2. ``request.tenant`` is non-None (X-Tenant header must be set;
+       ``TenantContextMiddleware`` resolved it).
+    3. A ``TenantUserRelationship`` row exists with
+       ``user=request.user``, ``tenant=request.tenant``,
+       ``role=admin``, ``is_active=True``.
+
+    A salon admin can act ONLY inside the tenant they administer. The
+    middleware's ``request.tenant`` is the *active* tenant (from the
+    header / JWT claim); the TUR check confirms the user is registered
+    as admin THERE — not just somewhere else in the system. This is
+    the second factor that defeats the "admin-of-A acts on tenant-B"
+    impersonation attempt.
+    """
+
+    message = "Доступ только для администратора салона"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        user = request.user
+        if not user or not getattr(user, "is_authenticated", False):
+            return False
+        request_tenant = getattr(request, "tenant", None)
+        if request_tenant is None:
+            return False
+        from users.models import TenantUserRelationship
+        return TenantUserRelationship.objects.filter(
+            user=user,
+            tenant=request_tenant,
+            role=TenantUserRelationship.Role.ADMIN,
+            is_active=True,
+        ).exists()
