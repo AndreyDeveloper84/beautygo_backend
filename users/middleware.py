@@ -71,9 +71,11 @@ EXCLUDED_PATH_PREFIXES = (
     "/api/v1/health/",
     "/static/",
     "/media/",
-    # Service-to-service endpoints (DRF-246/247) — auth via X-Service-Token,
-    # not X-App-Type. The MAX bot is neither client nor pro.
+    # Service-to-service endpoints (DRF-246/247, task #85) — auth via
+    # X-Service-Token or Authorization: Bearer + X-External-User-ID, not
+    # X-App-Type. The MAX bot is neither client nor pro.
     "/api/v1/nutrition/internal/",
+    "/api/v1/payments/internal/",
 )
 
 
@@ -201,6 +203,7 @@ class TenantContextMiddleware:
         "/api/redoc/",
         "/api/v1/health/",
         "/api/v1/nutrition/internal/",
+        "/api/v1/payments/internal/",
         "/static/",
         "/media/",
     )
