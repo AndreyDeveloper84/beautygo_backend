@@ -133,7 +133,7 @@ class _RepeatIntentResponseSerializer(serializers.Serializer):
     # MVP: empty list. Slot suggestions deferred — bot opens catalog
     # with master filter as fallback per Tau's customer-records-flow.md
     # §R6 fallback path.
-    suggested_slots: serializers.ListField = serializers.ListField(
+    suggested_slots = serializers.ListField(
         child=serializers.DateTimeField(),
         allow_empty=True,
     )

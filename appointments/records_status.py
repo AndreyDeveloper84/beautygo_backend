@@ -2,7 +2,7 @@
 
 Per Tau's customer-records-flow.md §R4 + memory ref
 ``project_records_voice_principles``. The Records UI badges expect a
-single ``derived_status`` string drawn from the 14-value canonical
+single ``derived_status`` string drawn from the 17-value canonical
 taxonomy below — combining ``Appointment.status``, payment lifecycle,
 and cancellation attribution.
 
@@ -163,6 +163,16 @@ def derive_status(appointment, payments: Iterable | None = None) -> str:
             return "customer_cancelled_with_refund"
         return "cancelled"
 
-    # Unknown / future operational status — return as-is. UI falls
-    # back to the raw string.
-    return status
+    # Unknown / future operational status — fall back to the raw
+    # ``Appointment.status`` if it happens to align with the taxonomy,
+    # otherwise log a structured warning and surface 'cancelled' as
+    # the safest UI fallback (badge renders as terminal, no claim
+    # about refund or attribution).
+    if status in DERIVED_STATUSES:
+        return status
+    import logging
+    logging.getLogger(__name__).warning(
+        "records_status.unknown_status appointment_id=%s status=%r",
+        appointment.id, status,
+    )
+    return "cancelled"

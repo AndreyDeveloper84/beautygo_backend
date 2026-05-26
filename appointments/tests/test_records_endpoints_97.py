@@ -410,7 +410,9 @@ class TestDerivedStatusTaxonomy:
             provider_payment_id="yk-cust-refund",
         )
         r = _api().get(_detail_url(appt.id))
-        assert r.json()["data"]["derived_status"] == "customer_cancelled_with_refund"
+        body = r.json()["data"]
+        assert body["derived_status"] == "customer_cancelled_with_refund"
+        assert body["cancelled_by_client"] is True
 
     def test_partial_refund(self, customer, tenant_a, category):
         spec = _make_specialist(tenant_a, suffix="00033", name="DS4")
