@@ -775,6 +775,43 @@ class CrossDomainRule(models.Model):
     def __str__(self) -> str:
         return f"{self.rule_id} ({self.nutrition_trigger}→{self.service_category_slug})"
 
+    def clean(self) -> None:
+        """Enforce the cross-domain safety contract on every save.
+
+        Tau handoff 2026-05-25 (task #91): admin / fixture / migration
+        must NOT be able to land a rule with medical-diagnosis terms,
+        shame-adjacent comparatives, causation claims, missing
+        disclaimer markers, or missing mandatory health-flag
+        exclusions. The English-language docstring in the seed file
+        was insufficient — legal counsel is non-technical and drift
+        is inevitable without a programmatic gate.
+
+        Raises ``django.core.exceptions.ValidationError`` (caught and
+        surfaced inline by the admin form) when any ERROR-severity
+        violation is found. WARNING violations are silently allowed —
+        future tightening will be on a per-code basis after we have
+        real curator feedback.
+        """
+        from django.core.exceptions import ValidationError
+        from nutrition.services.cross_domain_safety import (
+            has_errors,
+            validate_safety_contract,
+        )
+
+        super().clean()
+        violations = validate_safety_contract(self)
+        if not has_errors(violations):
+            return
+
+        # Group by field so the admin renders one bullet per field.
+        field_errors: dict[str, list[str]] = {}
+        for v in violations:
+            if v.severity != "error":
+                continue
+            field_errors.setdefault(v.field, []).append(v.message)
+        if field_errors:
+            raise ValidationError(field_errors)
+
 
 class CrossDomainShownRule(models.Model):
     """History of cross-domain recommendations served to a user (DRF-263).
