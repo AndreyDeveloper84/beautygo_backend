@@ -183,8 +183,12 @@ class TestInternalPaymentRetryHappyPath:
             'provider_payment_id': "yk-internal-retry-001",
             'confirmation_url': "https://yookassa/new/internal-retry",
         }
-        with patch("payments.views._get_yookassa") as mock_get_yk:
-            mock_get_yk.return_value.create_payment.return_value = mock_result
+        # PaymentRetryService lazy-constructs YooKassaService inside
+        # execute() — patch the class, not the view's old indirection.
+        with patch(
+            "payments.services.YooKassaService",
+        ) as mock_yk_cls:
+            mock_yk_cls.return_value.create_payment.return_value = mock_result
             r = _api().post(
                 _url(failed_payment.id),
                 {
