@@ -286,6 +286,12 @@ class TestSeedRulesAuditSnapshot:
         )
         violations = validate_safety_contract(rule)
         passed = not has_errors(violations)
+        assert seed["rule_id"] in self.EXPECTED, (
+            f"New seed rule '{seed['rule_id']}' added without an "
+            f"expected verdict — add it to "
+            "TestSeedRulesAuditSnapshot.EXPECTED and update §7 of "
+            "docs/safety/cross_domain_safety_contract.md."
+        )
         expected = self.EXPECTED[seed["rule_id"]]
 
         if expected:
