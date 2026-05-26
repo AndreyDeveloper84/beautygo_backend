@@ -105,6 +105,18 @@ TEMPLATES: dict[str, NotificationTemplate] = {
         push_body="Оплата {amount} ₽ за {service_name} прошла успешно",
         deep_link="appointment/{appointment_id}",
     ),
+    # #246 Q1 — Generic salon-side revoke. Push only (no email in MVP).
+    # Reason is deliberately NOT exposed; customer can ask details via
+    # Ayla follow-up. The audit OutboxEvent always carries the internal
+    # reason for ops/compliance.
+    "tenant_relationship_revoked": NotificationTemplate(
+        id="tenant_relationship_revoked",
+        app_type="client",
+        channel=Notification.Channel.PUSH,
+        push_title="Связь с салоном прекращена",
+        push_body="Связь с салоном {tenant_name} прекращена.",
+        deep_link="",
+    ),
     # --- Slice N4 additions -----------------------------------------------
     # New strings use the Ayla brand (per CLAUDE.md Brand Migration Status).
     # The five templates above predate the rebrand and are migrated as a

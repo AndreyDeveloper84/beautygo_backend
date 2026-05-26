@@ -89,6 +89,127 @@ def resolve_external_user(external_user_id: str) -> User:
     return user
 
 
+# --- Tenant-relationship revoke (#246 Q1) ---
+
+
+class TURNotFoundError(LookupError):
+    """No active TUR for (user, tenant) pair — admin's revoke request
+    targets a relationship that doesn't exist or is already revoked.
+
+    Treated as a 404 by the view: we don't disclose which of the two
+    (no such user / not in this tenant / already revoked) matched."""
+
+
+def revoke_tenant_user_relationship(
+    *,
+    target_user,
+    tenant,
+    actor,
+    reason: str,
+    notify_customer: bool = False,
+):
+    """Revoke an active ``TenantUserRelationship`` row.
+
+    Side effects (all inside one ``transaction.atomic`` block):
+
+    1. The active TUR row flips ``is_active=False`` with
+       ``revoked_at=now`` and ``revoke_reason=reason``.
+    2. An OutboxEvent ``tenant.relationship.revoked`` is ALWAYS emitted
+       — audit trail per founder Q1 ack 2026-05-26 ("internal audit
+       event + internal event ALWAYS emitted regardless of
+       notification setting").
+    3. When ``notify_customer`` is True AND the revoked role is
+       ``customer``, a push notification "Связь с салоном X
+       прекращена" is queued. Generic message — no internal reason
+       exposed; customer can ask details via Ayla follow-up.
+
+    Raises:
+        TURNotFoundError — no active TUR exists for (target_user, tenant).
+
+    Why this lives in users.services, not the view: the cascade (Q2
+    specialist mobility) will call this same primitive from inside a
+    larger SpecialistDepartureService, so it must be reusable. Also:
+    the admin endpoint must not be the only entry point — Django admin
+    save and management commands need the same audit guarantee.
+    """
+    from django.db import transaction
+    from django.utils import timezone
+
+    from appointments.infrastructure.outbox import emit_outbox_event
+    from notifications.services.dispatcher import NotificationService
+
+    from .models import TenantUserRelationship
+
+    with transaction.atomic():
+        # Lock the candidate row so a parallel revoke doesn't double-
+        # emit. select_for_update is a no-op on SQLite (dev/test) but
+        # serialises concurrent admin actions on prod Postgres.
+        try:
+            tur = (
+                TenantUserRelationship.objects
+                .select_for_update()
+                .get(
+                    user=target_user,
+                    tenant=tenant,
+                    is_active=True,
+                )
+            )
+        except TenantUserRelationship.DoesNotExist as exc:
+            raise TURNotFoundError(
+                f"No active TUR for user={target_user.pk} tenant={tenant.pk}"
+            ) from exc
+
+        tur.is_active = False
+        tur.revoked_at = timezone.now()
+        tur.revoke_reason = reason
+        tur.save(update_fields=[
+            "is_active", "revoked_at", "revoke_reason",
+        ])
+
+        # ALWAYS emit audit event — Q1 founder ack: "internal audit
+        # event + internal event ALWAYS emitted regardless of
+        # notification setting". Consumers dedupe by event_id.
+        emit_outbox_event(
+            topic="tenant.relationship.revoked",
+            data={
+                "user_id": str(target_user.pk),
+                "tenant_id": str(tenant.pk),
+                "role": tur.role,
+                "revoke_reason": reason,
+                "notify_customer": bool(notify_customer),
+                # Actor's id is in user_id field of the envelope; this
+                # nested field tells consumers who initiated. user_id
+                # in the envelope refers to the TARGET (subject of the
+                # event) — actor is a separate datum.
+                "revoked_by_user_id": str(actor.pk) if actor else None,
+            },
+            actor="admin",
+            user_id=target_user.pk,
+            tenant_id=tenant.pk,
+        )
+
+    # Notification fires OUTSIDE the transaction so a failure in the
+    # FCM queue doesn't roll back the revoke. The DB write is
+    # the authoritative record; push is best-effort.
+    if (
+        notify_customer
+        and tur.role == TenantUserRelationship.Role.CUSTOMER
+    ):
+        NotificationService().send(
+            user=target_user,
+            template_id="tenant_relationship_revoked",
+            context={"tenant_name": tenant.name},
+        )
+
+    logger.info(
+        "tur.revoked user_id=%s tenant_id=%s role=%s "
+        "actor_id=%s notify_customer=%s",
+        target_user.pk, tenant.pk, tur.role,
+        getattr(actor, "pk", None), bool(notify_customer),
+    )
+    return tur
+
+
 # --- Custom Exceptions ---
 
 class AuthError(Exception):
