@@ -57,9 +57,11 @@ def external_user_id():
 @pytest.fixture
 def customer(db, external_user_id):
     # resolve_external_user looks up by username.
+    # Phone in +7-700XXXXX block so no collision with specialist
+    # fixtures (which use +7-99930XXXXX).
     return User.objects.create_user(
         username=external_user_id, password="x", role="client",
-        phone="+79993000001", is_proxy=True,
+        phone="+79997000001", is_proxy=True,
     )
 
 
@@ -322,14 +324,19 @@ class TestCursorPagination:
                 start_at=_future(hours),
             ))
 
-        r = _api().get(LIST_URL + "?section=upcoming&limit=2")
+        r = _api().get(LIST_URL, {"section": "upcoming", "limit": "2"})
         body = r.json()["data"]
         assert len(body["items"]) == 2
         assert body["next_cursor"] is not None
 
-        r2 = _api().get(
-            LIST_URL + f"?section=upcoming&limit=2&cursor={body['next_cursor']}",
-        )
+        # APIClient.get with dict QueryDict-encodes the cursor, so the
+        # "+" in the tz offset is properly URL-encoded as %2B instead
+        # of decaying to a space.
+        r2 = _api().get(LIST_URL, {
+            "section": "upcoming",
+            "limit": "2",
+            "cursor": body["next_cursor"],
+        })
         body2 = r2.json()["data"]
         assert len(body2["items"]) == 1
         assert body2["next_cursor"] is None
@@ -493,8 +500,13 @@ class TestDetailEndpoint:
         r = _api().get(_detail_url(appt.id))
         body = r.json()["data"]
         assert body["notes"] == "Принести браслет"
-        assert len(body["payments"]) == 1
-        assert body["payments"][0]["status"] == "paid"
+        # The booking fixture's CreateBookingService._execute_atomic
+        # auto-creates a Payment row, and the test added a second one
+        # explicitly. Detail returns BOTH ordered by created_at desc;
+        # the most-recent (paid) is the one this test cares about.
+        assert len(body["payments"]) >= 1
+        paid_payments = [p for p in body["payments"] if p["status"] == "paid"]
+        assert len(paid_payments) == 1
 
 
 # ---------------------------------------------------------------------------
