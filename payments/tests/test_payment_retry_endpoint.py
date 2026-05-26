@@ -124,10 +124,14 @@ class TestPaymentRetryHappyPath:
             'provider_payment_id': "yk-retry-001",
             'confirmation_url': "https://yookassa/new/retry",
         }
+        # PaymentRetryService now constructs YooKassaService lazily
+        # inside execute() AFTER validation, so we patch the class
+        # itself rather than the (now unused) ``payments.views``
+        # ``_get_yookassa`` indirection.
         with patch(
-            "payments.views._get_yookassa",
-        ) as mock_get_yk:
-            mock_get_yk.return_value.create_payment.return_value = mock_result
+            "payments.services.YooKassaService",
+        ) as mock_yk_cls:
+            mock_yk_cls.return_value.create_payment.return_value = mock_result
             r = _client_as(client_user).post(
                 f"/api/v1/payments/{failed_payment.id}/retry/",
                 {"return_url": "https://ayla.app/success"},

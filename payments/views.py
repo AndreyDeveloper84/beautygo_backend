@@ -569,12 +569,11 @@ class PaymentRetryView(APIView):
             payment_id=pk,
             return_url=return_url,
             idempotency_key=idempotency_key,
-            yookassa=_get_yookassa(),
         )
 
 
 def _execute_payment_retry(
-    *, user, payment_id, return_url, idempotency_key, yookassa,
+    *, user, payment_id, return_url, idempotency_key,
 ) -> Response:
     """Shared response wrapper around :class:`PaymentRetryService`.
 
@@ -586,12 +585,14 @@ def _execute_payment_retry(
     contract from the original mobile path byte-for-byte (404 / 409
     / 502 / 503 codes and messages).
 
-    ``yookassa`` is injected by the caller so existing tests that
-    patch ``_get_yookassa`` at the view boundary keep working without
-    re-mocking the underlying SDK.
+    The service lazily instantiates :class:`YooKassaService` inside
+    ``execute`` *after* the visibility/state checks — that way a
+    deployment with unconfigured provider credentials still returns
+    the correct 404/409 for the not-found/bad-state branches instead
+    of masking everything as 503.
     """
     try:
-        result = PaymentRetryService(yookassa=yookassa).execute(
+        result = PaymentRetryService().execute(
             user=user,
             payment_id=payment_id,
             return_url=return_url,
@@ -719,7 +720,6 @@ class InternalPaymentRetryView(APIView):
             payment_id=pk,
             return_url=return_url,
             idempotency_key=idempotency_key,
-            yookassa=_get_yookassa(),
         )
 
 

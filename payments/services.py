@@ -312,7 +312,15 @@ class PaymentRetryService:
     """
 
     def __init__(self, yookassa: YooKassaService | None = None) -> None:
-        self._yookassa = yookassa or YooKassaService()
+        # Stash the (optionally injected) instance; do NOT construct a
+        # default ``YooKassaService()`` here. The constructor raises
+        # ``PaymentConfigError`` when YOOKASSA_SHOP_ID / SECRET_KEY are
+        # empty, and constructing eagerly here would prevent the
+        # validation steps in ``execute`` (404 / 409 paths) from running
+        # in deployments where the provider isn't configured — the
+        # error path correct for visibility/state guards must not be
+        # gated on provider config.
+        self._yookassa = yookassa
 
     def execute(
         self,
@@ -362,7 +370,13 @@ class PaymentRetryService:
         # not just first-attempt.
         receipt = build_appointment_receipt(appointment, appointment.price)
 
-        result = self._yookassa.create_payment(
+        # Lazy provider instantiation: only after the validation steps
+        # above have passed. ``PaymentConfigError`` (missing credentials)
+        # surfaces as 503 to the caller; getting here means the request
+        # is well-formed AND the resource is reachable, so a 503 is the
+        # accurate signal.
+        yookassa = self._yookassa or YooKassaService()
+        result = yookassa.create_payment(
             amount=appointment.price,
             appointment_id=appointment.id,
             description=description,
