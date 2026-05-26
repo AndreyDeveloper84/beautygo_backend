@@ -18,17 +18,23 @@ from rest_framework.views import APIView
 from appointments.infrastructure.outbox import emit_outbox_event, safe_tenant_id
 from appointments.models import Appointment, OutboxEvent
 from payments.models import Payment
-from users.permissions import IsClient
+from users.permissions import IsBotServiceWithVerifiedClient, IsClient
 from users.response import error_response, success_response
 
 from .exceptions import PaymentClientError, PaymentConfigError
 from .serializers import (
+    InternalPaymentRetrySerializer,
     PaymentCreateSerializer,
     PaymentDetailSerializer,
     PaymentRefundSerializer,
     PaymentRetrySerializer,
 )
-from .services import YooKassaService, build_appointment_receipt
+from .services import (
+    PaymentRetryService,
+    PaymentRetryStatusError,
+    YooKassaService,
+    build_appointment_receipt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -555,110 +561,157 @@ class PaymentRetryView(APIView):
         serializer = PaymentRetrySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         return_url = serializer.validated_data['return_url']
-
-        try:
-            old_payment = (
-                Payment.objects
-                .select_related(
-                    'appointment',
-                    'appointment__specialist',
-                    'appointment__service',
-                )
-                .get(pk=pk, appointment__client=request.user)
-            )
-        except Payment.DoesNotExist:
-            return error_response(
-                'NOT_FOUND', 'Payment not found.', status_code=404,
-            )
-
-        if old_payment.status != Payment.Status.FAILED:
-            return error_response(
-                'INVALID_STATUS',
-                f"Cannot retry payment in status '{old_payment.status}'. "
-                "Only failed payments may be retried.",
-                status_code=409,
-            )
-
-        appointment = old_payment.appointment
-        if appointment.status not in (
-            Appointment.Status.PENDING,
-            Appointment.Status.AWAITING_PAYMENT,
-        ):
-            return error_response(
-                'INVALID_STATUS',
-                f"Appointment in status '{appointment.status}' cannot "
-                "accept a new payment.",
-                status_code=409,
-            )
-
         idempotency_key = request.META.get(
             'HTTP_X_IDEMPOTENCY_KEY', str(uuid4()),
         )
-        description = (
-            f"Ayla: {appointment.service.name} у "
-            f"{appointment.specialist.display_name}"
-        )
-        # 54-ФЗ receipt — mandatory for every YooKassa payment session,
-        # not just first-attempt.
-        receipt = build_appointment_receipt(appointment, appointment.price)
-
-        try:
-            svc = _get_yookassa()
-            result = svc.create_payment(
-                amount=appointment.price,
-                appointment_id=appointment.id,
-                description=description,
-                return_url=return_url,
-                idempotency_key=idempotency_key,
-                capture=False,
-                receipt=receipt,
-            )
-        except PaymentConfigError as exc:
-            logger.error('YooKassa not configured on retry: %s', exc)
-            return error_response(
-                'SERVICE_UNAVAILABLE',
-                'Payment provider not configured.',
-                status_code=503,
-            )
-        except PaymentClientError as exc:
-            logger.error('YooKassa create_payment failed on retry: %s', exc)
-            return error_response(
-                'PAYMENT_PROVIDER_ERROR',
-                'Payment provider error. Please try again.',
-                status_code=502,
-            )
-
-        with transaction.atomic():
-            new_payment = Payment.objects.create(
-                appointment=appointment,
-                amount=appointment.price,
-                status=Payment.Status.PENDING,
-                specialist_income=result['specialist_income'],
-                platform_fee=result['platform_fee'],
-                provider='yookassa',
-                provider_payment_id=result['provider_payment_id'],
-                provider_client_secret=result['confirmation_url'],
-            )
-            # Re-enter awaiting_payment if appointment fell back to
-            # pending after the original failure (defensive — usually
-            # already awaiting_payment).
-            if appointment.status == Appointment.Status.PENDING:
-                appointment.status = Appointment.Status.AWAITING_PAYMENT
-                appointment.save(update_fields=['status'])
-
-        logger.info(
-            'Payment retry: old_payment_id=%s new_payment_id=%s '
-            'appointment_id=%s amount=%s',
-            old_payment.id, new_payment.id, appointment.id, new_payment.amount,
+        return _execute_payment_retry(
+            user=request.user,
+            payment_id=pk,
+            return_url=return_url,
+            idempotency_key=idempotency_key,
+            yookassa=_get_yookassa(),
         )
 
-        return success_response(
-            {
-                'payment_id': str(new_payment.id),
-                'confirmation_url': result['confirmation_url'],
-                'amount': float(new_payment.amount),
-            },
-            status_code=201,
+
+def _execute_payment_retry(
+    *, user, payment_id, return_url, idempotency_key, yookassa,
+) -> Response:
+    """Shared response wrapper around :class:`PaymentRetryService`.
+
+    Both ``PaymentRetryView`` (mobile, JWT auth) and
+    ``InternalPaymentRetryView`` (bot, bearer + X-External-User-ID)
+    funnel here. The service raises; this helper translates each
+    exception type to the matching ``error_response``. Keeping the
+    translation here — not in the service — preserves the mapping
+    contract from the original mobile path byte-for-byte (404 / 409
+    / 502 / 503 codes and messages).
+
+    ``yookassa`` is injected by the caller so existing tests that
+    patch ``_get_yookassa`` at the view boundary keep working without
+    re-mocking the underlying SDK.
+    """
+    try:
+        result = PaymentRetryService(yookassa=yookassa).execute(
+            user=user,
+            payment_id=payment_id,
+            return_url=return_url,
+            idempotency_key=idempotency_key,
+        )
+    except Payment.DoesNotExist:
+        return error_response(
+            'NOT_FOUND', 'Payment not found.', status_code=404,
+        )
+    except PaymentRetryStatusError as exc:
+        return error_response(
+            'INVALID_STATUS', exc.message, status_code=exc.http_status,
+        )
+    except PaymentConfigError as exc:
+        logger.error('YooKassa not configured on retry: %s', exc)
+        return error_response(
+            'SERVICE_UNAVAILABLE',
+            'Payment provider not configured.',
+            status_code=503,
+        )
+    except PaymentClientError as exc:
+        logger.error('YooKassa create_payment failed on retry: %s', exc)
+        return error_response(
+            'PAYMENT_PROVIDER_ERROR',
+            'Payment provider error. Please try again.',
+            status_code=502,
+        )
+
+    return success_response(
+        {
+            'payment_id': str(result.payment_id),
+            'confirmation_url': result.confirmation_url,
+            'amount': result.amount,
+        },
+        status_code=201,
+    )
+
+
+class InternalPaymentRetryView(APIView):
+    """
+    POST /api/v1/payments/internal/{id}/retry/
+
+    Service-to-service equivalent of :class:`PaymentRetryView`. Used by
+    the bot's W2 payment-failed skill to issue a fresh confirmation
+    URL on behalf of a verified end-user without forcing the user back
+    into the mobile app.
+
+    Auth: ``IsBotServiceWithVerifiedClient`` — ``Authorization: Bearer
+    <AYLA_INTERNAL_API_TOKEN>`` + ``X-External-User-ID: <source>:<id>``.
+    The permission class resolves the external id to an Ayla User and
+    overwrites ``request.user`` with it.
+
+    Defense-in-depth: the request body MUST carry ``client_id`` matching
+    ``request.user.id``. A leaked bearer token alone cannot impersonate
+    an arbitrary user — the attacker also needs to know the specific
+    Ayla user-id, narrowing the blast radius. Mismatch → 403.
+
+    Throttle: separate ``payment_internal`` scope from the mobile retry
+    bucket so bot retries do not consume the mobile user's 5/min quota.
+    """
+    permission_classes = [IsBotServiceWithVerifiedClient]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'payment_internal'
+    serializer_class = InternalPaymentRetrySerializer
+
+    @extend_schema(
+        tags=["internal"],
+        request=InternalPaymentRetrySerializer,
+        responses={
+            201: inline_serializer(
+                name="InternalPaymentRetryResponse",
+                fields={
+                    "payment_id": drf_serializers.UUIDField(),
+                    "confirmation_url": drf_serializers.URLField(),
+                    "amount": drf_serializers.FloatField(),
+                },
+            ),
+            401: OpenApiResponse(description="Bearer / X-External-User-ID invalid"),
+            403: OpenApiResponse(
+                description="body.client_id does not match resolved actor",
+            ),
+            404: OpenApiResponse(description="Payment not found for this user"),
+            409: OpenApiResponse(
+                description="Source payment is not in retry-eligible state",
+            ),
+            502: OpenApiResponse(description="Payment provider error"),
+            503: OpenApiResponse(description="Payment provider not configured"),
+        },
+    )
+    def post(self, request: Request, pk) -> Response:
+        serializer = InternalPaymentRetrySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        # Defense-in-depth. The bearer + X-External-User-ID combination
+        # has already authenticated and resolved request.user. The body
+        # cross-check ensures a token holder cannot impersonate an
+        # arbitrary user by forging only the header — the body has to
+        # independently name the same Ayla user-id.
+        claimed_client_id = serializer.validated_data['client_id']
+        if str(claimed_client_id) != str(request.user.id):
+            logger.warning(
+                'payment.internal.retry client_mismatch resolved=%s body=%s',
+                request.user.id, claimed_client_id,
+            )
+            return error_response(
+                'CLIENT_MISMATCH',
+                'body.client_id does not match resolved actor.',
+                status_code=403,
+            )
+
+        return_url = serializer.validated_data['return_url']
+        idempotency_key = request.META.get(
+            'HTTP_X_IDEMPOTENCY_KEY', str(uuid4()),
+        )
+        return _execute_payment_retry(
+            user=request.user,
+            payment_id=pk,
+            return_url=return_url,
+            idempotency_key=idempotency_key,
+            yookassa=_get_yookassa(),
         )
 
 

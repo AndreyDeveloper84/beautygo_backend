@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
+from uuid import UUID
 
 from django.conf import settings
+from django.db import transaction
 
 from .exceptions import PaymentClientError, PaymentConfigError
 
@@ -264,3 +267,138 @@ def build_appointment_receipt(appointment, amount: Decimal) -> dict[str, Any]:
             "payment_subject": "service",
         }],
     }
+
+
+# ---------------------------------------------------------------------------
+# Payment retry — shared between client-mobile and internal/bot views
+# ---------------------------------------------------------------------------
+
+
+class PaymentRetryStatusError(Exception):
+    """Retry refused because the source payment or its appointment is
+    not in a retry-eligible state.
+
+    Carries ``http_status`` so the calling view can translate to the
+    correct REST status code without re-discriminating the cause.
+    """
+
+    def __init__(self, message: str, *, http_status: int = 409) -> None:
+        super().__init__(message)
+        self.message = message
+        self.http_status = http_status
+
+
+@dataclass(frozen=True)
+class PaymentRetryResult:
+    payment_id: UUID
+    confirmation_url: str
+    amount: float
+
+
+class PaymentRetryService:
+    """Issue a fresh YooKassa session for a previously-failed Payment.
+
+    Extracted from ``PaymentRetryView.post`` so the mobile path and the
+    internal bot path (``InternalPaymentRetryView``) share one
+    transactional + validation contract. The view is now thin: parse →
+    auth → ``service.execute(...)`` → translate exception or return
+    ``PaymentRetryResult`` to the response envelope.
+
+    The service does NOT swallow exceptions — callers translate
+    ``Payment.DoesNotExist`` to 404, ``PaymentRetryStatusError`` to its
+    carried ``http_status`` (409), ``PaymentConfigError`` to 503, and
+    ``PaymentClientError`` to 502. This mirrors the original
+    behaviour byte-for-byte.
+    """
+
+    def __init__(self, yookassa: YooKassaService | None = None) -> None:
+        self._yookassa = yookassa or YooKassaService()
+
+    def execute(
+        self,
+        *,
+        user,
+        payment_id: UUID,
+        return_url: str,
+        idempotency_key: str,
+    ) -> PaymentRetryResult:
+        # Lazy import — payments.services is imported by views/tests; we
+        # don't want to introduce a hard-edge dep on appointments here
+        # at module load (and ``Payment`` already lives in this app).
+        from appointments.models import Appointment
+        from payments.models import Payment
+
+        old_payment = (
+            Payment.objects
+            .select_related(
+                'appointment',
+                'appointment__specialist',
+                'appointment__service',
+            )
+            .get(pk=payment_id, appointment__client=user)
+        )
+
+        if old_payment.status != Payment.Status.FAILED:
+            raise PaymentRetryStatusError(
+                f"Cannot retry payment in status '{old_payment.status}'. "
+                "Only failed payments may be retried.",
+            )
+
+        appointment = old_payment.appointment
+        if appointment.status not in (
+            Appointment.Status.PENDING,
+            Appointment.Status.AWAITING_PAYMENT,
+        ):
+            raise PaymentRetryStatusError(
+                f"Appointment in status '{appointment.status}' cannot "
+                "accept a new payment.",
+            )
+
+        description = (
+            f"Ayla: {appointment.service.name} у "
+            f"{appointment.specialist.display_name}"
+        )
+        # 54-ФЗ receipt — mandatory for every YooKassa payment session,
+        # not just first-attempt.
+        receipt = build_appointment_receipt(appointment, appointment.price)
+
+        result = self._yookassa.create_payment(
+            amount=appointment.price,
+            appointment_id=appointment.id,
+            description=description,
+            return_url=return_url,
+            idempotency_key=idempotency_key,
+            capture=False,
+            receipt=receipt,
+        )
+
+        with transaction.atomic():
+            new_payment = Payment.objects.create(
+                appointment=appointment,
+                amount=appointment.price,
+                status=Payment.Status.PENDING,
+                specialist_income=result['specialist_income'],
+                platform_fee=result['platform_fee'],
+                provider='yookassa',
+                provider_payment_id=result['provider_payment_id'],
+                provider_client_secret=result['confirmation_url'],
+            )
+            # Re-enter awaiting_payment if appointment fell back to
+            # pending after the original failure (defensive — usually
+            # already awaiting_payment).
+            if appointment.status == Appointment.Status.PENDING:
+                appointment.status = Appointment.Status.AWAITING_PAYMENT
+                appointment.save(update_fields=['status'])
+
+        logger.info(
+            'Payment retry: old_payment_id=%s new_payment_id=%s '
+            'appointment_id=%s amount=%s',
+            old_payment.id, new_payment.id, appointment.id,
+            new_payment.amount,
+        )
+
+        return PaymentRetryResult(
+            payment_id=new_payment.id,
+            confirmation_url=result['confirmation_url'],
+            amount=float(new_payment.amount),
+        )

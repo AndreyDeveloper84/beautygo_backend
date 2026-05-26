@@ -38,6 +38,27 @@ class PaymentRetrySerializer(serializers.Serializer):
     )
 
 
+class InternalPaymentRetrySerializer(serializers.Serializer):
+    """POST /api/v1/payments/internal/{id}/retry — input (task #85).
+
+    Same shape as :class:`PaymentRetrySerializer` plus a *required*
+    ``client_id`` field. The view cross-checks it against the user
+    resolved from ``X-External-User-ID`` as defense-in-depth — a leaked
+    bearer token still requires the attacker to name the specific
+    victim's Ayla user-id explicitly in the body.
+    """
+    client_id = serializers.UUIDField(
+        help_text=(
+            "Ayla User id the bot is acting on behalf of. MUST match the "
+            "user resolved from X-External-User-ID."
+        ),
+    )
+    return_url = serializers.URLField(
+        required=False,
+        default='https://beautygo.ru/payment/success',
+    )
+
+
 class PaymentDetailSerializer(serializers.ModelSerializer):
     """
     GET /api/v1/payments/{id} — matches Notion spec Payment model.

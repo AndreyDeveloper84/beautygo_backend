@@ -201,6 +201,7 @@ class TenantContextMiddleware:
         "/api/redoc/",
         "/api/v1/health/",
         "/api/v1/nutrition/internal/",
+        "/api/v1/payments/internal/",
         "/static/",
         "/media/",
     )

@@ -91,6 +91,9 @@ REST_FRAMEWORK = {
         'auth': '10/min',            # Scoped: login, verify-otp, social, anonymous, refresh
         'auth_sensitive': '5/min',   # Scoped: bind-phone, account-delete-with-otp
         'payment': '5/min',          # Scoped: POST /payments/create, refund
+        # Scoped: POST /payments/internal/{id}/retry/ — bot fans out
+        # across many BotUsers, looser than client-app `payment` bucket.
+        'payment_internal': '60/min',
         'webhook_payment': '100/min',  # Scoped: YooKassa /payments/webhook (amplification cap)
         'ai_chat': '30/min',         # Scoped: AI chat send/action endpoints
         'food_scan': '10/min',       # Scoped: POST /nutrition/scan (vision API cost cap)
@@ -480,6 +483,14 @@ FOOD_SCANNER_FALLBACK = os.environ.get("FOOD_SCANNER_FALLBACK", "yandex")
 # value disables internal endpoints (IsServiceAccount fails closed) — set
 # in dev/staging/prod env, rotate quarterly.
 NUTRITION_SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN", "")
+
+# Service-to-service Bearer token for /api/v1/payments/internal/* and other
+# unified internal endpoints (task #85, W1 task #92). Bot/skills call Ayla
+# on behalf of a verified end-user; X-External-User-ID identifies the actor,
+# this token authenticates the calling service. Empty value disables
+# internal endpoints (IsBotServiceWithVerifiedClient fails closed). Rotate
+# quarterly; treat as production secret.
+AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
 # DRF-288 — Cross-domain (Track E) production rollout gate.
 # Default closed: when CROSS_DOMAIN_ENABLED is False, the engine only
