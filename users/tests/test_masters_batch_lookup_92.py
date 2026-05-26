@@ -120,7 +120,7 @@ class TestMastersBatchLookupResolution:
             format="json",
         )
         assert r.status_code == 200
-        body = r.json()["data"]["data"]
+        body = r.json()["data"]
         assert len(body["masters"]) == 1
         assert body["masters"][0]["id"] == str(anna.id)
         assert body["masters"][0]["yclients_staff_id"] == "10001"
@@ -140,7 +140,7 @@ class TestMastersBatchLookupResolution:
             format="json",
         )
         assert r.status_code == 200
-        body = r.json()["data"]["data"]
+        body = r.json()["data"]
         assert len(body["masters"]) == 10
         assert body["not_found_staff_ids"] == []
 
@@ -154,7 +154,7 @@ class TestMastersBatchLookupResolution:
             format="json",
         )
         assert r.status_code == 200
-        body = r.json()["data"]["data"]
+        body = r.json()["data"]
         assert body["masters"] == []
         assert body["not_found_staff_ids"] == ["ghost-1", "ghost-2", "ghost-3"]
 
@@ -170,7 +170,7 @@ class TestMastersBatchLookupResolution:
             format="json",
         )
         assert r.status_code == 200
-        body = r.json()["data"]["data"]
+        body = r.json()["data"]
         found = {m["yclients_staff_id"] for m in body["masters"]}
         assert found == {"3001", "3002"}
         # not_found preserves request order minus matched.
@@ -196,7 +196,7 @@ class TestMastersBatchLookupTenantBoundary:
             format="json",
         )
         assert r.status_code == 200
-        body = r.json()["data"]["data"]
+        body = r.json()["data"]
         assert len(body["masters"]) == 1
         assert body["masters"][0]["id"] == str(in_a.id)
         assert body["masters"][0]["tenant_id"] == str(tenant_a.id)
@@ -211,6 +211,20 @@ class TestMastersBatchLookupValidation:
     def test_missing_tenant_id_400(self, tenant_a):
         r = _api().post(
             URL, {"yclients_staff_ids": ["1"]}, format="json",
+        )
+        assert r.status_code == 400
+
+    def test_empty_string_id_in_list_400(self, tenant_a):
+        """Defense-in-depth pin (Code Reviewer FOLLOW_UP a4a0aed0):
+        a future refactor that flips ``allow_blank=True`` on the
+        CharField MUST NOT silently let `[""]` enumerate every
+        legacy SpecialistProfile row where ``yclients_staff_id``
+        defaults to "". 400 at serializer layer is the first line
+        of defense; the in-view empty-string filter is the second."""
+        r = _api().post(
+            URL,
+            {"tenant_id": str(tenant_a.id), "yclients_staff_ids": [""]},
+            format="json",
         )
         assert r.status_code == 400
 
@@ -230,7 +244,10 @@ class TestMastersBatchLookupValidation:
         assert r.status_code == 400
 
     def test_batch_size_cap(self, tenant_a):
-        # 201 ids exceeds MAX_BATCH_SIZE=200 → 400.
+        # 201 ids exceeds MAX_BATCH_SIZE=200 → 400. (Edge case: exactly
+        # 200 is allowed; the ListField uses max_length, which is
+        # inclusive on the upper bound — pinned implicitly by the
+        # batch_of_50 perf test passing.)
         ids = [str(i) for i in range(201)]
         r = _api().post(
             URL,
@@ -250,7 +267,7 @@ class TestMastersBatchLookupValidation:
             format="json",
         )
         assert r.status_code == 200
-        body = r.json()["data"]["data"]
+        body = r.json()["data"]
         assert len(body["masters"]) == 1
         assert body["not_found_staff_ids"] == ["ghost"]
 
@@ -280,7 +297,7 @@ class TestMastersBatchLookupPerformance:
         )
         elapsed_ms = (time.monotonic() - start) * 1000
         assert r.status_code == 200
-        body = r.json()["data"]["data"]
+        body = r.json()["data"]
         assert len(body["masters"]) == 50
         # Local fast-DB budget: 200ms is generous, comfortable headroom
         # over the actual query cost which sits well under 50ms with
