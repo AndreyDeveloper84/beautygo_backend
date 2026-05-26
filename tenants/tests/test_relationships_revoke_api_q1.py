@@ -214,6 +214,53 @@ class TestRevokeHappyPath:
         # internal reason.
         assert call_kwargs["context"] == {"tenant_name": tenant_a.name}
 
+    def test_notify_customer_true_on_staff_does_not_push(
+        self, admin_a, tenant_a,
+    ):
+        """notify_customer is a CUSTOMER-only flag — revoking a staff
+        TUR never queues the 'связь с салоном прекращена' push, even
+        if the admin set notify=true (would be wrong template for the
+        audience). Audit still fires; only the push is suppressed."""
+        staff_user = _make_user(
+            username="q1_staff_in_a", role="specialist",
+            phone="+79991900030",
+        )
+        TenantUserRelationship.objects.create(
+            user=staff_user, tenant=tenant_a,
+            role=TenantUserRelationship.Role.STAFF,
+        )
+        with patch(
+            "notifications.services.dispatcher.NotificationService.send",
+        ) as mock_send:
+            r = _client_as(admin_a, tenant_a).post(
+                _url(staff_user.pk),
+                {"reason": "left", "notify_customer": True},
+                format="json",
+            )
+        assert r.status_code == 204
+        assert mock_send.call_count == 0
+        # Audit STILL fires for staff revoke.
+        assert OutboxEvent.objects.filter(
+            topic="tenant.relationship.revoked",
+        ).count() == 1
+
+    def test_client_app_type_denied(
+        self, admin_a, customer_in_a, tenant_a,
+    ):
+        """IsProApp belt-and-suspenders: even an admin-role TUR holder
+        on X-App-Type=client cannot reach this surface. Defeats
+        'stolen admin JWT replayed from a malicious mobile-client app'."""
+        c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"  # NOT pro
+        c.defaults["HTTP_X_TENANT"] = tenant_a.slug
+        c.force_authenticate(user=admin_a)
+        r = c.post(
+            _url(customer_in_a.pk),
+            {"reason": "test"},
+            format="json",
+        )
+        assert r.status_code == 403
+
     def test_notify_customer_true_does_not_expose_internal_reason(
         self, admin_a, customer_in_a, tenant_a,
     ):

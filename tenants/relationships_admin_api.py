@@ -35,7 +35,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from users.permissions import IsTenantAdmin
+from users.permissions import IsProApp, IsTenantAdmin
 from users.response import error_response, success_response
 from users.services import (
     TURNotFoundError,
@@ -71,7 +71,15 @@ class TenantRelationshipRevokeView(APIView):
 
     Salon admin revokes a TenantUserRelationship in their own tenant.
     """
-    permission_classes = [permissions.IsAuthenticated, IsTenantAdmin]
+    # Belt-and-suspenders: IsProApp gates the surface to X-App-Type=pro
+    # callers, defeating the "stolen admin JWT replayed from a malicious
+    # mobile-client build" path even if the JWT itself is otherwise
+    # valid. IsTenantAdmin then enforces the (admin, tenant) tuple.
+    permission_classes = [
+        permissions.IsAuthenticated,
+        IsProApp,
+        IsTenantAdmin,
+    ]
     serializer_class = TenantRelationshipRevokeRequestSerializer
 
     @extend_schema(
