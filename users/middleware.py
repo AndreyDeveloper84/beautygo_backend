@@ -77,6 +77,7 @@ EXCLUDED_PATH_PREFIXES = (
     "/api/v1/nutrition/internal/",
     "/api/v1/payments/internal/",
     "/api/v1/masters/internal/",
+    "/api/v1/internal/me/",
 )
 
 
@@ -206,6 +207,7 @@ class TenantContextMiddleware:
         "/api/v1/nutrition/internal/",
         "/api/v1/payments/internal/",
         "/api/v1/masters/internal/",
+        "/api/v1/internal/me/",
         "/static/",
         "/media/",
     )
