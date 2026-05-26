@@ -398,6 +398,10 @@ class OutboxEvent(models.Model):
         PAYMENT_CONFIRMED = "payment.confirmed", "Оплата подтверждена"
         PAYMENT_REFUNDED = "payment.refunded", "Возврат оплаты"
         CACHE_INVALIDATE_SLOTS = "cache.invalidate_slots", "Инвалидация кеша слотов"
+        TENANT_RELATIONSHIP_REVOKED = (
+            "tenant.relationship.revoked",
+            "TenantUserRelationship отозван (#246 Q1)",
+        )
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     topic = models.CharField(max_length=50, choices=Topic.choices)

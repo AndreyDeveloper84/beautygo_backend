@@ -66,6 +66,9 @@ EVENT_VERSIONS: dict[str, int] = {
     "payment.confirmed": 1,
     "payment.refunded": 1,
     "cache.invalidate_slots": 1,
+    # #246 Q1 — TUR revoke. Audit ALWAYS emitted (regardless of
+    # notify_customer setting); consumers dedupe on event_id.
+    "tenant.relationship.revoked": 1,
 }
 
 
