@@ -210,7 +210,7 @@ def handle_booking_cancelled(event: OutboxEvent) -> None:
         return
     ctx = _appointment_context(appointment)
 
-    reason = event.data.get("reason") if event.data else None
+    reason = event.data.get("reason")
     if reason == "specialist_departure":
         _send_if_template_exists(
             user=appointment.client,

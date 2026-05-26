@@ -444,6 +444,55 @@ class TestRefundBestEffort:
         assert summary["refunded_count"] == 1
         assert summary["refund_failures"] == []
 
+    def test_partially_refunded_payment_gets_remainder_refunded(
+        self, customer, specialist_a, tenant_a,
+    ):
+        """Adversarial F1: a Payment that was partially refunded
+        earlier (e.g. via manual /payments/{id}/refund/) must NOT
+        fall through the cascade. Founder Q2: 'full refund, no
+        penalty'. Customer ends up whole regardless of prior refund
+        history."""
+        spec_user, spec_profile = specialist_a
+        cat = _make_category(spec_user.__class__.objects.db)
+        svc = _make_service(spec_profile, cat)
+        appt = _make_booking(
+            client_user=customer, specialist_profile=spec_profile,
+            service=svc, start_at=_future(3),
+        )
+        payment = Payment.objects.create(
+            appointment=appt,
+            amount=Decimal("1500.00"),
+            refunded_amount=Decimal("500.00"),  # prior partial refund
+            status=Payment.Status.PARTIALLY_REFUNDED,
+            specialist_income=Decimal("1380.00"),
+            platform_fee=Decimal("120.00"),
+            provider="yookassa",
+            provider_payment_id="yk-partial-q2-001",
+            provider_client_secret="https://yookassa/old",
+        )
+
+        with patch(
+            "payments.services.YooKassaService",
+        ) as mock_yk_cls:
+            mock_refund = MagicMock(
+                return_value={"refund_id": "rf-r", "status": "succeeded"},
+            )
+            mock_yk_cls.return_value.refund_payment = mock_refund
+            cascade_specialist_departure(
+                specialist_user=spec_user,
+                tenant=tenant_a,
+                actor=None,
+            )
+
+        payment.refresh_from_db()
+        assert payment.status == Payment.Status.REFUNDED
+        assert payment.refunded_amount == Decimal("1500.00")
+        # YooKassa.refund_payment called for the REMAINDER (1000), not
+        # full amount (1500) — avoids double-charging the partial.
+        mock_refund.assert_called_once()
+        call_kwargs = mock_refund.call_args.kwargs
+        assert call_kwargs["amount"] == Decimal("1000.00")
+
     def test_yookassa_failure_does_not_rollback_cancel(
         self, customer, specialist_a, tenant_a,
     ):

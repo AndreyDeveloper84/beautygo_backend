@@ -352,7 +352,15 @@ def cascade_specialist_departure(
 
 
 def _refund_paid_payments_for(appointment, *, summary: dict) -> None:
-    """Refund any PAID Payment rows for this appointment via YooKassa.
+    """Refund any PAID or PARTIALLY_REFUNDED Payment rows for this
+    appointment via YooKassa.
+
+    PARTIALLY_REFUNDED is included so a prior manual partial refund
+    (e.g. customer used /payments/{id}/refund/ to claw back a portion
+    earlier) does not leave the cascade under-refunding the remainder.
+    We refund ``payment.amount - payment.refunded_amount`` and flip
+    the row to REFUNDED. Founder Q2: "full refund, no penalty" — that
+    means the customer ends up whole regardless of refund history.
 
     Split out from the cascade loop for readability and so a future
     Celery-task refund worker can plug in without touching the cancel
@@ -360,17 +368,29 @@ def _refund_paid_payments_for(appointment, *, summary: dict) -> None:
     so ops can do a one-shot manual refund; the booking stays
     cancelled regardless.
     """
+    from decimal import Decimal
+
     from payments.exceptions import PaymentClientError, PaymentConfigError
     from payments.models import Payment
     from payments.services import YooKassaService
 
-    paid_payments = list(
+    refundable_statuses = [
+        Payment.Status.PAID,
+        Payment.Status.PARTIALLY_REFUNDED,
+    ]
+    candidates = list(
         Payment.objects.filter(
             appointment=appointment,
-            status=Payment.Status.PAID,
+            status__in=refundable_statuses,
         )
     )
-    if not paid_payments:
+    # Skip rows with nothing left to refund (defensive — would be a
+    # data-state anomaly otherwise).
+    candidates = [
+        p for p in candidates
+        if (p.amount - (p.refunded_amount or Decimal("0"))) > 0
+    ]
+    if not candidates:
         return
 
     try:
@@ -384,11 +404,14 @@ def _refund_paid_payments_for(appointment, *, summary: dict) -> None:
         summary["refund_failures"].append(str(appointment.id))
         return
 
-    for payment in paid_payments:
+    for payment in candidates:
+        remaining = (
+            payment.amount - (payment.refunded_amount or Decimal("0"))
+        )
         try:
             yk.refund_payment(
                 provider_payment_id=payment.provider_payment_id,
-                amount=payment.amount,
+                amount=remaining,
                 idempotency_key=(
                     f"departure-refund-{payment.id}"
                 ),
@@ -401,8 +424,9 @@ def _refund_paid_payments_for(appointment, *, summary: dict) -> None:
             )
             summary["refund_failures"].append(str(appointment.id))
             continue
+        payment.refunded_amount = payment.amount
         payment.status = Payment.Status.REFUNDED
-        payment.save(update_fields=["status"])
+        payment.save(update_fields=["refunded_amount", "status"])
         summary["refunded_count"] += 1
 
 
