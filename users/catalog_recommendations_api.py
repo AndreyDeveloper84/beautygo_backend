@@ -242,7 +242,12 @@ def _build_reasoning_text(
         specialist.rating is not None
         and specialist.rating >= RATING_REASONING_FLOOR
     ):
-        parts.append(f"Рейтинг {specialist.rating}")
+        # Strip trailing zeros so a 4.5 doesn't render as "4.50" —
+        # DecimalField(max_digits=2, decimal_places=1) keeps one
+        # decimal place internally; normalize() trims the float-style
+        # zero for display.
+        rating_str = format(specialist.rating, "g")
+        parts.append(f"Рейтинг {rating_str}")
     if not parts:
         # Fallback when none of the higher-tier facts apply.
         # is_available is already a pool prerequisite — the claim
@@ -256,13 +261,19 @@ def _build_reasoning_text(
 # ---------------------------------------------------------------------------
 
 
-def _eligible_pool(goal: str) -> QuerySet:
-    """Lean-filter candidate pool — Tau §10.2 'simple eligibility'.
+def _base_pool() -> QuerySet:
+    """Goal-independent eligibility pool — Tau §10.2 'simple eligibility'.
 
     Just "active specialist in an active tenant taking bookings".
     No quality scoring, no geographic radius, no rating threshold.
+
+    Layer 1 ('your salons') uses THIS pool so that typing a goal
+    doesn't hide a customer's known salon when that salon doesn't
+    happen to offer the goal — identity/relationship anchors layer 1,
+    not goal. Layers 2 + 3 apply the goal filter via
+    ``_apply_goal_filter``.
     """
-    qs = (
+    return (
         SpecialistProfile.objects
         .filter(
             is_available=True,
@@ -272,25 +283,40 @@ def _eligible_pool(goal: str) -> QuerySet:
         .select_related("tenant")
         .prefetch_related("services", "services__category")
     )
-    if goal:
-        # ILIKE on service name OR category slug/name. Post-pilot:
-        # tag-based or semantic match.
-        needle = goal
-        qs = qs.filter(
-            Q(services__name__icontains=needle)
-            | Q(services__category__slug__icontains=needle)
-            | Q(services__category__name__icontains=needle)
-        ).distinct()
-    return qs
+
+
+def _apply_goal_filter(qs: QuerySet, goal: str) -> QuerySet:
+    """Apply the goal ILIKE filter to a base pool. No-op when goal=''.
+
+    ILIKE on service name OR category slug/name. Post-pilot:
+    tag-based or semantic match.
+    """
+    if not goal:
+        return qs
+    return qs.filter(
+        Q(services__name__icontains=goal)
+        | Q(services__category__slug__icontains=goal)
+        | Q(services__category__name__icontains=goal)
+    ).distinct()
 
 
 def _build_layer_1(
-    pool: QuerySet, *, history_tenant_ids: list,
+    base_pool: QuerySet, *, history_tenant_ids: list,
     lat: float | None, lon: float | None,
 ) -> list[dict]:
+    """Layer 1 — customer's known salons, ordered by rating desc.
+
+    Takes the GOAL-INDEPENDENT base pool (see _base_pool docstring).
+    Order: rating desc, then id (stable across replicas — Postgres
+    otherwise returns LIMIT 5 in arbitrary insertion order).
+    """
     if not history_tenant_ids:
         return []
-    rows = list(pool.filter(tenant_id__in=history_tenant_ids)[:LAYER_1_LIMIT])
+    rows = list(
+        base_pool
+        .filter(tenant_id__in=history_tenant_ids)
+        .order_by("-rating", "id")[:LAYER_1_LIMIT]
+    )
     return [_build_card(r, lat=lat, lon=lon) for r in rows]
 
 
@@ -397,16 +423,23 @@ class CatalogRecommendationsView(APIView):
             .values_list("tenant_id", flat=True)
         )
 
-        pool = _eligible_pool(goal)
+        # One base pool query, two derived views:
+        # - layer 1 uses the GOAL-INDEPENDENT base (your salons stay
+        #   visible regardless of what the customer is searching for);
+        # - layers 2 + 3 apply the goal filter (the picks + category
+        #   counts should react to the search).
+        base_pool = _base_pool()
+        scoped_pool = _apply_goal_filter(base_pool, goal)
+
         layer_1 = _build_layer_1(
-            pool, history_tenant_ids=history_tenant_ids,
+            base_pool, history_tenant_ids=history_tenant_ids,
             lat=lat, lon=lon,
         )
         layer_2 = _build_layer_2(
-            pool, history_tenant_ids=history_tenant_ids,
+            scoped_pool, history_tenant_ids=history_tenant_ids,
             lat=lat, lon=lon, goal=goal,
         )
-        layer_3 = _build_layer_3(pool)
+        layer_3 = _build_layer_3(scoped_pool)
 
         logger.info(
             "catalog.recommendations user_id=%s goal=%r lat=%s lon=%s "

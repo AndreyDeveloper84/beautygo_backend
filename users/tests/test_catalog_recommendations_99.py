@@ -208,6 +208,50 @@ class TestLayer1YourPlaces:
         body = r.json()["data"]
         assert body["layer_1_your_places"] == []
 
+    def test_layer_1_not_filtered_by_goal(
+        self, customer, customer_known_tur, tenant_known,
+        manicure_category, massage_category,
+    ):
+        """Code Reviewer MUST_FIX (ae4a9f66195355a6c): typing a goal
+        must NOT hide the customer's known salon when that salon
+        doesn't happen to offer the goal. Layer 1 is identity/
+        relationship-anchored, not goal-scoped."""
+        masseur = _make_specialist(
+            tenant_known, suffix="0004", name="OnlyMassage",
+        )
+        _make_service(masseur, massage_category, name="Массаж")
+
+        r = _api().post(URL, {"goal": "маникюр"}, format="json")
+        body = r.json()["data"]
+        l1_ids = {item["id"] for item in body["layer_1_your_places"]}
+        # Salon offers no manicure, but it's still in 'your places'.
+        assert str(masseur.id) in l1_ids
+        # Layer 2 should NOT surface this masseur — they don't match
+        # the goal and aren't in history.
+        l2_ids = {item["id"] for item in body["layer_2_ayla_picks"]}
+        assert str(masseur.id) not in l2_ids
+
+    def test_layer_1_ordered_by_rating_desc(
+        self, customer, customer_known_tur, tenant_known,
+        manicure_category,
+    ):
+        low = _make_specialist(
+            tenant_known, suffix="0005", name="Low",
+            rating=Decimal("3.5"),
+        )
+        high = _make_specialist(
+            tenant_known, suffix="0006", name="High",
+            rating=Decimal("4.9"),
+        )
+        _make_service(low, manicure_category, name="Маникюр")
+        _make_service(high, manicure_category, name="Маникюр")
+
+        r = _api().post(URL, {}, format="json")
+        items = r.json()["data"]["layer_1_your_places"]
+        # Higher-rated specialist first — stable ordering.
+        assert items[0]["id"] == str(high.id)
+        assert items[1]["id"] == str(low.id)
+
 
 # ---------------------------------------------------------------------------
 # Layer 2 — top-3 ayla picks (excluding history)
