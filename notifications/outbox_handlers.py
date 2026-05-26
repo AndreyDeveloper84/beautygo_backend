@@ -191,11 +191,35 @@ def handle_booking_confirmed(event: OutboxEvent) -> None:
 
 
 def handle_booking_cancelled(event: OutboxEvent) -> None:
-    """Notify both sides when a booking is cancelled."""
+    """Notify both sides when a booking is cancelled.
+
+    Customer-side template branches on ``reason``:
+
+    - ``specialist_departure`` (#246 Q2 cascade): use the dedicated
+      ``appointment_cancelled_specialist_departure`` template — the
+      copy carries the salon's commitment to reach back out
+      ('обещает связаться'), distinct from generic cancellation.
+    - everything else: standard ``appointment_cancelled`` template.
+
+    Specialist-side push is suppressed for ``specialist_departure``
+    — the specialist already knows (they were just revoked) and a
+    push would be confusing noise.
+    """
     appointment = _load_appointment(event)
     if appointment is None:
         return
     ctx = _appointment_context(appointment)
+
+    reason = event.data.get("reason")
+    if reason == "specialist_departure":
+        _send_if_template_exists(
+            user=appointment.client,
+            template_id="appointment_cancelled_specialist_departure",
+            context=ctx,
+            event_id=event.id,
+        )
+        # No specialist-side push — they were just revoked.
+        return
 
     _send_if_template_exists(
         user=appointment.client,
