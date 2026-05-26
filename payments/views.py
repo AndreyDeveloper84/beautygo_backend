@@ -652,6 +652,14 @@ class InternalPaymentRetryView(APIView):
     Throttle: separate ``payment_internal`` scope from the mobile retry
     bucket so bot retries do not consume the mobile user's 5/min quota.
     """
+    # Disable DRF's default JWTAuthentication: the bot ships an
+    # Authorization: Bearer <AYLA_INTERNAL_API_TOKEN>, which is NOT a
+    # JWT — leaving JWTAuthentication in place would 401-reject the
+    # request before IsBotServiceWithVerifiedClient ever runs. Empty
+    # authentication_classes makes the permission class the sole
+    # boundary, matching nutrition/internal pattern (which sidesteps
+    # this only because it uses a non-Authorization header).
+    authentication_classes: list = []
     permission_classes = [IsBotServiceWithVerifiedClient]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'payment_internal'
