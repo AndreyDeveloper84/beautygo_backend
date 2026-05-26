@@ -117,6 +117,21 @@ TEMPLATES: dict[str, NotificationTemplate] = {
         push_body="Связь с салоном {tenant_name} прекращена.",
         deep_link="",
     ),
+    # #246 Q2 — Specialist-departure cascade notification. Distinct
+    # from the generic 'appointment_cancelled' template because the
+    # phrasing carries the salon's commitment to reach back out
+    # ('обещает связаться') — that line is the founder's chosen
+    # framing for the no-fault refund flow.
+    "appointment_cancelled_specialist_departure": NotificationTemplate(
+        id="appointment_cancelled_specialist_departure",
+        app_type="client",
+        channel=Notification.Channel.PUSH,
+        push_title="Запись отменена",
+        push_body=(
+            "Запись на {date_time} отменена. Салон обещает связаться."
+        ),
+        deep_link="appointment/{appointment_id}",
+    ),
     # --- Slice N4 additions -----------------------------------------------
     # New strings use the Ayla brand (per CLAUDE.md Brand Migration Status).
     # The five templates above predate the rebrand and are migrated as a

@@ -207,7 +207,203 @@ def revoke_tenant_user_relationship(
         target_user.pk, tenant.pk, tur.role,
         getattr(actor, "pk", None), bool(notify_customer),
     )
+
+    # Q2 specialist mobility cascade — fires only for STAFF revokes.
+    # Customer-revoke doesn't touch bookings; admin-revoke is rare
+    # and the policy on tenant ownership is open (FOLLOW_UP #801).
+    if tur.role == TenantUserRelationship.Role.STAFF:
+        cascade_specialist_departure(
+            specialist_user=target_user,
+            tenant=tenant,
+            actor=actor,
+        )
     return tur
+
+
+def cascade_specialist_departure(
+    *, specialist_user, tenant, actor,
+) -> dict:
+    """Q2 cascade: when a specialist's TUR is revoked, cancel all of
+    their active future bookings in the affected tenant with a
+    no-fault full refund and notify the customers.
+
+    Founder Q2 ack 2026-05-26:
+        EXISTING bookings: stay in original tenant. NOT automatically
+        transferred.
+        NEW behavior when master leaves tenant:
+          1. Tenant admin must assign replacement OR cancel
+          2. Cancellation = no-fault refund к customer (full refund,
+             no penalty)
+          3. Customer gets push «Запись cancelled, salon обещает
+             связаться»
+
+    Scope of this implementation:
+
+    - Selects bookings where ``appointment.specialist.user ==
+      specialist_user`` AND ``appointment.tenant == tenant`` AND
+      status in (PENDING, AWAITING_PAYMENT, CONFIRMED) AND
+      ``start_datetime > now`` (past-start bookings stay as-is — the
+      master either already started or no-show'd; not our state to
+      change).
+    - For each: calls ``CancelBookingService`` with a
+      ``ForceFullRefundCancellationPolicy`` (always 100%, no time-
+      window check). The standard ``booking.cancelled`` OutboxEvent
+      fires with ``reason='specialist_departure'`` and
+      ``refund_percent=100``.
+    - For each booking with a PAID Payment: issues a YooKassa refund
+      and marks the Payment status REFUNDED. Best-effort — failure
+      logs an error and tags the row for manual ops follow-up; we do
+      not roll back the cancellation if the refund fails (booking
+      stays cancelled, refund happens manually).
+    - Customer notification is routed through the standard
+      ``handle_booking_cancelled`` outbox handler — that handler
+      branches on ``reason='specialist_departure'`` to use the
+      ``appointment_cancelled_specialist_departure`` template ('салон
+      обещает связаться') instead of the generic 'appointment_cancelled'.
+
+    Returns a summary dict for the caller's audit log:
+        {
+          "cancelled_count": int,
+          "refunded_count": int,
+          "refund_failures": [str, ...],  # booking_id strings
+        }
+
+    NOT in scope:
+    - Follow-specialist transfer (Olya leaves Casa Bella → joins
+      Studio Aura, customer wants to follow). Founder ack: POST-MVP.
+    - Replacement-master assignment flow. Founder ack: separate
+      admin action; this cascade runs only when admin chose 'cancel'
+      path.
+    """
+    from appointments.application.dto import CancelBookingDTO
+    from appointments.application.services.cancel_reschedule_service import (
+        CancelBookingService,
+    )
+    from appointments.domain.policies import (
+        ForceFullRefundCancellationPolicy,
+    )
+    from appointments.domain.value_objects import ACTIVE_BOOKING_STATUSES
+    from appointments.models import Appointment
+    from django.utils import timezone
+
+    summary = {
+        "cancelled_count": 0,
+        "refunded_count": 0,
+        "refund_failures": [],
+    }
+
+    if not hasattr(specialist_user, "specialist_profile"):
+        # Target user wasn't a specialist at all (data drift or
+        # mis-typed TUR). Nothing to cascade.
+        logger.warning(
+            "cascade_specialist_departure.no_profile user_id=%s",
+            specialist_user.pk,
+        )
+        return summary
+
+    now = timezone.now()
+    active_statuses = [s.value for s in ACTIVE_BOOKING_STATUSES]
+
+    candidates = list(
+        Appointment.objects
+        .filter(
+            specialist__user=specialist_user,
+            tenant=tenant,
+            status__in=active_statuses,
+            start_datetime__gt=now,
+        )
+        .order_by("start_datetime")
+    )
+
+    cancel_service = CancelBookingService(
+        cancellation_policy=ForceFullRefundCancellationPolicy(),
+    )
+
+    for appointment in candidates:
+        try:
+            cancel_service.execute(CancelBookingDTO(
+                booking_id=appointment.id,
+                initiator_user_id=(
+                    actor.pk if actor is not None else specialist_user.pk
+                ),
+                initiator_role="system",
+                reason="specialist_departure",
+            ))
+            summary["cancelled_count"] += 1
+        except Exception as exc:  # noqa: BLE001 — best-effort cascade
+            logger.exception(
+                "cascade_specialist_departure.cancel_failed "
+                "booking_id=%s err=%s",
+                appointment.id, exc,
+            )
+            continue
+
+        # Issue refunds for any PAID payments on this booking.
+        _refund_paid_payments_for(appointment, summary=summary)
+
+    logger.info(
+        "cascade_specialist_departure done user_id=%s tenant_id=%s "
+        "cancelled=%d refunded=%d failed=%d",
+        specialist_user.pk, tenant.pk,
+        summary["cancelled_count"], summary["refunded_count"],
+        len(summary["refund_failures"]),
+    )
+    return summary
+
+
+def _refund_paid_payments_for(appointment, *, summary: dict) -> None:
+    """Refund any PAID Payment rows for this appointment via YooKassa.
+
+    Split out from the cascade loop for readability and so a future
+    Celery-task refund worker can plug in without touching the cancel
+    loop. Failures are logged + tagged in ``summary['refund_failures']``
+    so ops can do a one-shot manual refund; the booking stays
+    cancelled regardless.
+    """
+    from payments.exceptions import PaymentClientError, PaymentConfigError
+    from payments.models import Payment
+    from payments.services import YooKassaService
+
+    paid_payments = list(
+        Payment.objects.filter(
+            appointment=appointment,
+            status=Payment.Status.PAID,
+        )
+    )
+    if not paid_payments:
+        return
+
+    try:
+        yk = YooKassaService()
+    except PaymentConfigError as exc:
+        logger.error(
+            "cascade_specialist_departure.refund_skipped_no_provider "
+            "booking_id=%s err=%s",
+            appointment.id, exc,
+        )
+        summary["refund_failures"].append(str(appointment.id))
+        return
+
+    for payment in paid_payments:
+        try:
+            yk.refund_payment(
+                provider_payment_id=payment.provider_payment_id,
+                amount=payment.amount,
+                idempotency_key=(
+                    f"departure-refund-{payment.id}"
+                ),
+            )
+        except PaymentClientError as exc:
+            logger.exception(
+                "cascade_specialist_departure.refund_failed "
+                "booking_id=%s payment_id=%s err=%s",
+                appointment.id, payment.id, exc,
+            )
+            summary["refund_failures"].append(str(appointment.id))
+            continue
+        payment.status = Payment.Status.REFUNDED
+        payment.save(update_fields=["status"])
+        summary["refunded_count"] += 1
 
 
 # --- Custom Exceptions ---

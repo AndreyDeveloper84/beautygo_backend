@@ -158,6 +158,55 @@ class StandardCancellationPolicy:
             return 0.0
 
 
+class ForceFullRefundCancellationPolicy:
+    """No-fault cancellation policy used by cascade flows.
+
+    #246 Q2 (founder ack 2026-05-26): when a specialist leaves a
+    tenant, all of their active bookings must be cancelled with a full
+    refund and no penalty — regardless of how close to start_at the
+    booking is. The standard policy's time-based fee schedule does not
+    apply: the customer did nothing wrong.
+
+    Differs from ``StandardCancellationPolicy`` in two ways:
+
+    1. CANCELLABLE_STATUSES extends to PENDING (specialist hasn't yet
+       confirmed; cascade kills it regardless).
+    2. ``get_refund_percent`` is ALWAYS 100.0.
+    3. ``can_cancel`` skips the "already-started" guard — the cascade
+       layer is responsible for filtering past-start bookings out of
+       the input set (those should be marked completed/no_show via
+       different flows, not retroactively cancelled).
+
+    Use ONLY from system-initiated cascade contexts; never expose to
+    end users (would defeat the whole point of the standard fee
+    schedule).
+    """
+    CANCELLABLE_STATUSES = frozenset({
+        BookingStatus.PENDING,
+        BookingStatus.AWAITING_PAYMENT,
+        BookingStatus.CONFIRMED,
+    })
+
+    def can_cancel(
+        self,
+        booking_status: BookingStatus,
+        booking_start_at: datetime,
+        initiator: str,
+    ) -> None:
+        if booking_status not in self.CANCELLABLE_STATUSES:
+            raise CancellationNotAllowedError(
+                f"Cannot cancel booking with status '{booking_status.value}'"
+            )
+        # Intentionally no time-window check — see class docstring.
+
+    def get_refund_percent(
+        self,
+        booking_start_at: datetime,
+        initiator: str,
+    ) -> float:
+        return 100.0
+
+
 class StandardReschedulePolicy:
     """
     Reschedule is allowed if:
