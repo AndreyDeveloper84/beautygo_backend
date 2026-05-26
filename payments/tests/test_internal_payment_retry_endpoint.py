@@ -25,7 +25,6 @@ from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
-from django.test import override_settings
 from rest_framework.test import APIClient
 
 from appointments.application.dto import CreateBookingDTO
@@ -169,9 +168,12 @@ def _url(payment_id) -> str:
 # ---------------------------------------------------------------------------
 
 
-@override_settings(AYLA_INTERNAL_API_TOKEN=VALID_TOKEN)
 @pytest.mark.django_db
 class TestInternalPaymentRetryHappyPath:
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
     def test_bot_can_retry_failed_payment(
         self, client_user, failed_payment, appointment,
     ):
@@ -208,9 +210,12 @@ class TestInternalPaymentRetryHappyPath:
 # ---------------------------------------------------------------------------
 
 
-@override_settings(AYLA_INTERNAL_API_TOKEN=VALID_TOKEN)
 @pytest.mark.django_db
 class TestInternalPaymentRetryBearerAuth:
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
     def test_missing_authorization_header_denies(
         self, client_user, failed_payment,
     ):
@@ -259,7 +264,10 @@ class TestInternalPaymentRetryFailClosed:
     deployment that hasn't been provisioned with the secret.
     """
 
-    @override_settings(AYLA_INTERNAL_API_TOKEN="")
+    @pytest.fixture(autouse=True)
+    def _empty_token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = ""
+
     def test_empty_token_denies_even_with_empty_bearer(
         self, client_user, failed_payment,
     ):
@@ -274,7 +282,6 @@ class TestInternalPaymentRetryFailClosed:
         )
         assert r.status_code == 403
 
-    @override_settings(AYLA_INTERNAL_API_TOKEN="")
     def test_empty_token_denies_with_any_bearer(
         self, client_user, failed_payment,
     ):
@@ -292,9 +299,12 @@ class TestInternalPaymentRetryFailClosed:
 # ---------------------------------------------------------------------------
 
 
-@override_settings(AYLA_INTERNAL_API_TOKEN=VALID_TOKEN)
 @pytest.mark.django_db
 class TestInternalPaymentRetryExternalUserHeader:
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
     def test_missing_external_user_id_denies(
         self, client_user, failed_payment,
     ):
@@ -325,9 +335,12 @@ class TestInternalPaymentRetryExternalUserHeader:
 # ---------------------------------------------------------------------------
 
 
-@override_settings(AYLA_INTERNAL_API_TOKEN=VALID_TOKEN)
 @pytest.mark.django_db
 class TestInternalPaymentRetryClientIdDefense:
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
     def test_body_client_id_mismatch_returns_403(
         self, client_user, failed_payment,
     ):
@@ -367,9 +380,12 @@ class TestInternalPaymentRetryClientIdDefense:
 # ---------------------------------------------------------------------------
 
 
-@override_settings(AYLA_INTERNAL_API_TOKEN=VALID_TOKEN)
 @pytest.mark.django_db
 class TestInternalPaymentRetryVisibility:
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
     def test_other_users_payment_returns_404(
         self, client_user, failed_payment,
     ):
