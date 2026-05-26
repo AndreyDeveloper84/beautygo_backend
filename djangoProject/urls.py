@@ -23,6 +23,10 @@ urlpatterns = [
     path('api/v1/specialists/', include('users.specialists_urls')),
     path('api/v1/masters/', include('users.masters_urls')),
     path('api/v1/tenants/', include('tenants.urls')),
+    path(
+        'api/v1/internal/me/bookings/',
+        include('appointments.records_urls'),
+    ),
     path('api/v1/appointments/', include('appointments.urls')),
     path('api/v1/reviews/', include('reviews.urls')),
     path('api/v1/payments/', include('payments.urls')),
