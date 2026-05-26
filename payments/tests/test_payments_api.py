@@ -428,6 +428,62 @@ class TestPaymentWebhook:
         appt.refresh_from_db()
         assert appt.status == Appointment.Status.CANCELLED
 
+    def test_webhook_event_vs_api_status_mismatch_is_noop(
+        self, anon_app, client_user, specialist_user, service,
+    ):
+        """Task #101 webhook audit (PR #166): the view branches on
+        ``event == X and yookassa_status == X``. If YooKassa retries a
+        webhook for a payment whose API state has since drifted (e.g.
+        the event says payment.succeeded but get_payment_info now
+        returns 'pending' — manual ops cancel mid-flight), the handler
+        must no-op: HTTP 200, no state change, no outbox emit.
+
+        Without this contract, a stale webhook delivery could flip a
+        cancelled-then-uncancelled payment back to PAID and dispatch
+        the refund event a second time.
+        """
+        from appointments.models import OutboxEvent
+
+        payment, appt = self._create_payment_with_appointment(
+            client_user, specialist_user, service,
+        )
+        # Snapshot pre-call state.
+        original_status = payment.status
+        original_appt_status = appt.status
+        OutboxEvent.objects.all().delete()
+
+        mock_info = {
+            "provider_payment_id": "wh_pay_001",
+            "status": "pending",           # API drift — not 'succeeded'
+            "refunded_amount": Decimal("0"),
+        }
+        with patch(
+            "payments.views._get_yookassa",
+            return_value=MagicMock(
+                get_payment_info=MagicMock(return_value=mock_info),
+            ),
+        ):
+            response = anon_app.post(
+                WEBHOOK_URL,
+                {
+                    "event": "payment.succeeded",   # event says succeeded
+                    "object": {"id": "wh_pay_001"},
+                },
+                format="json",
+            )
+
+        # 200 ack — we don't want YooKassa to retry forever.
+        assert response.status_code == 200
+        # State unchanged.
+        payment.refresh_from_db()
+        appt.refresh_from_db()
+        assert payment.status == original_status
+        assert appt.status == original_appt_status
+        # No outbox emit on the mismatch branch.
+        assert OutboxEvent.objects.filter(
+            topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
+        ).count() == 0
+
     def test_webhook_idempotent(self, anon_app, client_user, specialist_user, service):
         """Same event ID processed only once."""
         payment, _ = self._create_payment_with_appointment(client_user, specialist_user, service)
