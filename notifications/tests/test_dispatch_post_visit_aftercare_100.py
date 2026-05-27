@@ -171,9 +171,10 @@ class TestAftercareHappyPath:
             user=customer, template_id=AFTERCARE_TEMPLATE_ID,
         )
         assert notif.data["appointment_id"] == str(appt.id)
-        # Body carries the SERVICE's approved text verbatim — no
-        # template-side modification.
-        assert APPROVED_TEXT in notif.body
+        # Body carries the SERVICE's approved text VERBATIM — no
+        # template-side embellishment. Locks the contract; if a
+        # future template change adds a static prefix this fails.
+        assert notif.body == APPROVED_TEXT
 
     def test_idempotent_across_beat_runs(
         self, customer, specialist_profile, service_with_aftercare,
@@ -217,6 +218,98 @@ class TestAftercareSafetyFilter:
         assert Notification.objects.filter(
             user=customer, template_id=AFTERCARE_TEMPLATE_ID,
         ).count() == 0
+
+    def test_whitespace_only_aftercare_text_silently_skipped(
+        self, customer, specialist_profile, category,
+    ):
+        """Reviewer MUST_FIX (a65c36ddf6347a2cc): curator accidentally
+        saving '   ' or '\\n' must not produce a blank push body. The
+        beat's regex-based filter rejects anything that strips to
+        empty."""
+        svc = Service.objects.create(
+            specialist=specialist_profile,
+            category=category,
+            name="Whitespace Aftercare",
+            price=Decimal("1500.00"),
+            duration_minutes=60,
+            is_active=True,
+            buffer_after_minutes=0,
+            aftercare_text="   \n  \t  ",
+        )
+        _make_completed_booking(
+            customer, specialist_profile, svc,
+            end_at=_in_window_end_datetime(),
+        )
+
+        result = dispatch_post_visit_aftercare()
+
+        assert result["queued"] == 0
+        assert Notification.objects.filter(
+            user=customer, template_id=AFTERCARE_TEMPLATE_ID,
+        ).count() == 0
+
+    def test_curly_brace_in_aftercare_text_does_not_poison_batch(
+        self, customer, specialist_profile, category,
+    ):
+        """Reviewer MUST_FIX (a65c36ddf6347a2cc): if a curator types
+        literal `{` in approved Russian text (e.g. 'Через {2} часа'),
+        ``str.format`` raises mid-render. The beat must catch + log +
+        skip — not abort the whole batch. A good row in the SAME tick
+        must still receive its push."""
+        # Bad row — curator typed unescaped curly braces.
+        bad_svc = Service.objects.create(
+            specialist=specialist_profile,
+            category=category,
+            name="Bad Curly",
+            price=Decimal("1500.00"),
+            duration_minutes=60,
+            is_active=True,
+            buffer_after_minutes=0,
+            aftercare_text="Через {2} часа смазать",
+        )
+        bad_appt = _make_completed_booking(
+            customer, specialist_profile, bad_svc,
+            end_at=_in_window_end_datetime(),
+        )
+
+        # Good row in the SAME beat window.
+        good_svc = Service.objects.create(
+            specialist=specialist_profile,
+            category=category,
+            name="Good Plain",
+            price=Decimal("1500.00"),
+            duration_minutes=60,
+            is_active=True,
+            buffer_after_minutes=0,
+            aftercare_text=APPROVED_TEXT,
+        )
+        good_customer = User.objects.create_user(
+            username="b9_good_customer", password="x", role="client",
+            phone="+79995000111",
+        )
+        good_appt = _make_completed_booking(
+            good_customer, specialist_profile, good_svc,
+            end_at=_in_window_end_datetime() - timedelta(minutes=2),
+        )
+
+        # Beat runs, hits bad row first OR second — order doesn't
+        # matter for the contract.
+        result = dispatch_post_visit_aftercare()
+
+        # Good row got its push despite the bad row in the same tick.
+        good_notif = Notification.objects.filter(
+            user=good_customer, template_id=AFTERCARE_TEMPLATE_ID,
+            data__appointment_id=str(good_appt.id),
+        )
+        assert good_notif.count() == 1
+        # Bad row produced no push.
+        bad_notif = Notification.objects.filter(
+            template_id=AFTERCARE_TEMPLATE_ID,
+            data__appointment_id=str(bad_appt.id),
+        )
+        assert bad_notif.count() == 0
+        # Counter reflects: 1 queued (good), 0 explicit-skip.
+        assert result["queued"] == 1
 
 
 # ---------------------------------------------------------------------------

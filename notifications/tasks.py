@@ -170,7 +170,11 @@ def dispatch_post_visit_aftercare() -> dict:
             end_datetime__gte=window_start,
             end_datetime__lte=window_end,
         )
-        .exclude(service__aftercare_text="")
+        # Reviewer F1 (a65c36ddf6347a2cc): plain `.exclude(="")`
+        # passes through whitespace-only text — curator pasting a
+        # trailing newline (or `'   '`) would otherwise produce a
+        # blank push body. Reject anything that strips to empty.
+        .exclude(service__aftercare_text__regex=r"^\s*$")
         .select_related("client", "specialist", "service")
     )
 
@@ -202,14 +206,28 @@ def dispatch_post_visit_aftercare() -> dict:
             suppressed_refund += 1
             continue
 
-        service.send(
-            user=appointment.client,
-            template_id=AFTERCARE_TEMPLATE_ID,
-            context={
-                "aftercare_text": appointment.service.aftercare_text,
-                "appointment_id": str(appointment.id),
-            },
-        )
+        # Per-row try/except (reviewer MUST_FIX, a65c36ddf6347a2cc):
+        # a curator typing literal `{` / `}` in approved Russian
+        # (e.g. "Через {2} часа смазать") raises KeyError inside
+        # ``str.format`` deep in the dispatcher. Without isolation
+        # one bad row would abort the beat loop and silently drop
+        # every later candidate in the same tick. Per-row catch
+        # logs and skips — the beat keeps going.
+        try:
+            service.send(
+                user=appointment.client,
+                template_id=AFTERCARE_TEMPLATE_ID,
+                context={
+                    "aftercare_text": appointment.service.aftercare_text,
+                    "appointment_id": str(appointment.id),
+                },
+            )
+        except Exception:
+            logger.exception(
+                "aftercare.dispatch_error appointment_id=%s",
+                appointment.id,
+            )
+            continue
         queued += 1
 
     if queued or skipped or suppressed_refund:
