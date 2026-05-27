@@ -117,6 +117,19 @@ TEMPLATES: dict[str, NotificationTemplate] = {
         push_body="Связь с салоном {tenant_name} прекращена.",
         deep_link="",
     ),
+    # B9 (task #100) — post-visit aftercare push, T+2h after the
+    # appointment finished. Title is static; body is the SERVICE'S
+    # APPROVED aftercare_text rendered verbatim. Founder safety rule:
+    # NO LLM-generated care advice — the template surface intentionally
+    # offers no embellishment hook beyond the curator-approved string.
+    "post_visit_aftercare": NotificationTemplate(
+        id="post_visit_aftercare",
+        app_type="client",
+        channel=Notification.Channel.PUSH,
+        push_title="Совет от мастера",
+        push_body="{aftercare_text}",
+        deep_link="appointment/{appointment_id}",
+    ),
     # #246 Q2 — Specialist-departure cascade notification. Distinct
     # from the generic 'appointment_cancelled' template because the
     # phrasing carries the salon's commitment to reach back out

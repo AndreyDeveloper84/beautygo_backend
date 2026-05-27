@@ -33,6 +33,18 @@ REMINDER_LEAD_MINUTES = 60
 REMINDER_TEMPLATE_ID = "appointment_reminder_1h"
 
 
+# B9 (task #100) — post-visit aftercare. Send T+2h after end_datetime.
+# Window: [end_datetime + 2h - 30min, end_datetime + 2h] — wider than
+# the reminder window because the value of "did you remember the
+# aftercare" decays slowly, so beat jitter or transient downtime
+# doesn't matter as long as we eventually deliver within the same day.
+# Refusing to send after the window prevents night-time pushes on
+# bookings completed in the morning.
+AFTERCARE_LAG_HOURS = 2
+AFTERCARE_WINDOW_MINUTES = 30
+AFTERCARE_TEMPLATE_ID = "post_visit_aftercare"
+
+
 @shared_task(name="notifications.deliver_notification", bind=True, max_retries=3)
 def deliver_notification(self, notification_id: str) -> None:
     """Send an individual notification. Retries on transient errors with
@@ -111,6 +123,124 @@ def dispatch_appointment_reminders() -> dict:
             "reminders.dispatched queued=%d skipped=%d", queued, skipped,
         )
     return {"queued": queued, "skipped": skipped}
+
+
+@shared_task(name="notifications.dispatch_post_visit_aftercare")
+def dispatch_post_visit_aftercare() -> dict:
+    """B9 beat — T+2h post-visit aftercare push.
+
+    Founder pilot safety rule (memory project_pilot_scope_discipline):
+        NO LLM-generated care advice pilot. ONLY approved canonical
+        text per service.
+
+    The rule is enforced at the DATA layer (filter requires
+    ``service.aftercare_text`` non-empty — empty is the default for
+    every Service row until ops curator fills it via Django admin)
+    and at the TEMPLATE layer (push_body is literally
+    ``{aftercare_text}`` — no embellishment hook).
+
+    Selection criteria:
+
+    - Status COMPLETED (the only non-terminal-but-doable status with
+      successful service delivery; CANCELLED / NO_SHOW are explicitly
+      excluded — that customer didn't get the service).
+    - ``end_datetime`` inside the window
+      [now - 2h30m, now - 2h] — beat fires every 5 min so the 30-min
+      window easily absorbs jitter.
+    - ``service.aftercare_text`` is non-empty (the safety gate).
+    - No prior post_visit_aftercare Notification for this appointment
+      (idempotency — beat overlap or replay safe).
+    - No completed-then-refunded payment (a refunded visit suggests
+      something went wrong; suppressing the aftercare push avoids
+      the bad UX of "thanks for your business" after a complaint).
+
+    Returns small status dict for monitoring.
+    """
+    from appointments.models import Appointment
+    from payments.models import Payment
+    from .services.dispatcher import NotificationService
+
+    now = timezone.now()
+    window_end = now - timedelta(hours=AFTERCARE_LAG_HOURS)
+    window_start = window_end - timedelta(minutes=AFTERCARE_WINDOW_MINUTES)
+
+    candidates = (
+        Appointment.objects.filter(
+            status=Appointment.Status.COMPLETED,
+            end_datetime__gte=window_start,
+            end_datetime__lte=window_end,
+        )
+        # Reviewer F1 (a65c36ddf6347a2cc): plain `.exclude(="")`
+        # passes through whitespace-only text — curator pasting a
+        # trailing newline (or `'   '`) would otherwise produce a
+        # blank push body. Reject anything that strips to empty.
+        .exclude(service__aftercare_text__regex=r"^\s*$")
+        .select_related("client", "specialist", "service")
+    )
+
+    queued = 0
+    skipped = 0
+    suppressed_refund = 0
+    service = NotificationService()
+    for appointment in candidates:
+        # Already-sent guard. Beat-overlap or worker replay is the
+        # common case here — we shouldn't double-push.
+        if Notification.objects.filter(
+            user_id=appointment.client_id,
+            template_id=AFTERCARE_TEMPLATE_ID,
+            data__appointment_id=str(appointment.id),
+        ).exists():
+            skipped += 1
+            continue
+
+        # Refund suppression. A booking that completed AND has a
+        # refund (full or partial) is a "thanks for your business +
+        # we owed you money" UX trap.
+        if Payment.objects.filter(
+            appointment=appointment,
+            status__in=(
+                Payment.Status.REFUNDED,
+                Payment.Status.PARTIALLY_REFUNDED,
+            ),
+        ).exists():
+            suppressed_refund += 1
+            continue
+
+        # Per-row try/except (reviewer MUST_FIX, a65c36ddf6347a2cc):
+        # a curator typing literal `{` / `}` in approved Russian
+        # (e.g. "Через {2} часа смазать") raises KeyError inside
+        # ``str.format`` deep in the dispatcher. Without isolation
+        # one bad row would abort the beat loop and silently drop
+        # every later candidate in the same tick. Per-row catch
+        # logs and skips — the beat keeps going.
+        try:
+            service.send(
+                user=appointment.client,
+                template_id=AFTERCARE_TEMPLATE_ID,
+                context={
+                    "aftercare_text": appointment.service.aftercare_text,
+                    "appointment_id": str(appointment.id),
+                },
+            )
+        except Exception:
+            logger.exception(
+                "aftercare.dispatch_error appointment_id=%s",
+                appointment.id,
+            )
+            continue
+        queued += 1
+
+    if queued or skipped or suppressed_refund:
+        logger.info(
+            "aftercare.dispatched queued=%d skipped=%d "
+            "suppressed_refund=%d",
+            queued, skipped, suppressed_refund,
+        )
+    return {
+        "queued": queued,
+        "skipped": skipped,
+        "suppressed_refund": suppressed_refund,
+    }
 
 
 # ---------------------------------------------------------------------------
