@@ -248,67 +248,72 @@ class TestAftercareSafetyFilter:
             user=customer, template_id=AFTERCARE_TEMPLATE_ID,
         ).count() == 0
 
-    def test_curly_brace_in_aftercare_text_does_not_poison_batch(
-        self, customer, specialist_profile, category,
+    def test_per_row_dispatch_exception_does_not_poison_batch(
+        self, customer, specialist_profile, service_with_aftercare,
     ):
-        """Reviewer MUST_FIX (a65c36ddf6347a2cc): if a curator types
-        literal `{` in approved Russian text (e.g. 'Через {2} часа'),
-        ``str.format`` raises mid-render. The beat must catch + log +
-        skip — not abort the whole batch. A good row in the SAME tick
-        must still receive its push."""
-        # Bad row — curator typed unescaped curly braces.
-        bad_svc = Service.objects.create(
-            specialist=specialist_profile,
-            category=category,
-            name="Bad Curly",
-            price=Decimal("1500.00"),
-            duration_minutes=60,
-            is_active=True,
-            buffer_after_minutes=0,
-            aftercare_text="Через {2} часа смазать",
-        )
+        """Reviewer MUST_FIX (a65c36ddf6347a2cc): a transient failure
+        inside ``NotificationService.send`` for one row must NOT
+        abort the whole beat tick — every other candidate in the
+        window must still get its push. We simulate the failure via
+        a side_effect on send().
+
+        Note: the original reviewer hypothesis was that curator-typed
+        ``{`` would crash ``str.format``. In practice ``format`` does
+        NOT recursively interpolate the value, so a literal ``{2}`` in
+        the approved text just renders as-is — no crash. The
+        defensive try/except still matters for OTHER possible
+        failures (FCM 5xx in a sync stub, DB hiccup mid-batch, etc.)
+        which this test pins."""
+        from unittest.mock import patch
+
         bad_appt = _make_completed_booking(
-            customer, specialist_profile, bad_svc,
+            customer, specialist_profile, service_with_aftercare,
             end_at=_in_window_end_datetime(),
         )
 
-        # Good row in the SAME beat window.
-        good_svc = Service.objects.create(
-            specialist=specialist_profile,
-            category=category,
-            name="Good Plain",
-            price=Decimal("1500.00"),
-            duration_minutes=60,
-            is_active=True,
-            buffer_after_minutes=0,
-            aftercare_text=APPROVED_TEXT,
-        )
         good_customer = User.objects.create_user(
             username="b9_good_customer", password="x", role="client",
             phone="+79995000111",
         )
         good_appt = _make_completed_booking(
-            good_customer, specialist_profile, good_svc,
+            good_customer, specialist_profile, service_with_aftercare,
             end_at=_in_window_end_datetime() - timedelta(minutes=2),
         )
 
-        # Beat runs, hits bad row first OR second — order doesn't
-        # matter for the contract.
-        result = dispatch_post_visit_aftercare()
+        # Send raises for the bad row's customer, succeeds for the
+        # good row's. The beat must catch + skip + continue.
+        original_send = (
+            __import__(
+                "notifications.services.dispatcher",
+                fromlist=["NotificationService"],
+            ).NotificationService.send
+        )
 
-        # Good row got its push despite the bad row in the same tick.
-        good_notif = Notification.objects.filter(
+        def flaky_send(self, *, user, template_id, context):
+            if user.id == customer.id:
+                raise RuntimeError("simulated FCM hiccup")
+            return original_send(
+                self, user=user, template_id=template_id, context=context,
+            )
+
+        with patch(
+            "notifications.services.dispatcher.NotificationService.send",
+            new=flaky_send,
+        ):
+            result = dispatch_post_visit_aftercare()
+
+        # Good row got its push despite the bad row blowing up.
+        assert Notification.objects.filter(
             user=good_customer, template_id=AFTERCARE_TEMPLATE_ID,
             data__appointment_id=str(good_appt.id),
-        )
-        assert good_notif.count() == 1
-        # Bad row produced no push.
-        bad_notif = Notification.objects.filter(
+        ).count() == 1
+        # Bad row left no Notification row (send raised before
+        # NotificationService.send could persist).
+        assert Notification.objects.filter(
             template_id=AFTERCARE_TEMPLATE_ID,
             data__appointment_id=str(bad_appt.id),
-        )
-        assert bad_notif.count() == 0
-        # Counter reflects: 1 queued (good), 0 explicit-skip.
+        ).count() == 0
+        # Counter reflects: 1 queued, the bad one fell out silently.
         assert result["queued"] == 1
 
 
