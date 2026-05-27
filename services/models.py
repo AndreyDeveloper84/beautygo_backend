@@ -228,6 +228,21 @@ class Service(models.Model):
         help_text="Required gap (minutes) after this service before next booking",
     )
 
+    # B9 T+2h aftercare push body. Founder pilot safety rule
+    # (project_pilot_scope_discipline): NO LLM-generated care advice
+    # pilot — only approved canonical text per service. Empty value
+    # is the default and suppresses the push entirely (explicit opt-in
+    # per service when ops curator fills approved content via admin).
+    # Sent VERBATIM by notifications.dispatch_post_visit_aftercare;
+    # no template-side embellishment beyond a static title prefix.
+    aftercare_text = models.TextField(
+        blank=True, default='',
+        help_text=(
+            "Approved post-visit aftercare advice. Sent verbatim via "
+            "B9 T+2h push. Empty (default) suppresses the push."
+        ),
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -605,6 +605,16 @@ CELERY_BEAT_SCHEDULE = {
         "task": "notifications.dispatch_appointment_reminders",
         "schedule": 300.0,                      # every 5 minutes
     },
+    # B9 task #100 — post-visit aftercare push, T+2h after the
+    # appointment finished. 30-min window absorbs beat jitter; the
+    # task's selection filter requires `service.aftercare_text`
+    # non-empty (founder safety rule — NO LLM-generated care advice)
+    # so the dispatch is silent for services without approved
+    # canonical content.
+    "dispatch-post-visit-aftercare": {
+        "task": "notifications.dispatch_post_visit_aftercare",
+        "schedule": 300.0,                      # every 5 minutes
+    },
     # Water reminders fire twice daily at 14:00 and 18:00 UTC. Pilot is
     # single-tz Penza (MSK = UTC+3), so 17:00 / 21:00 local — afternoon
     # slump and evening cool-down windows where users typically fall
