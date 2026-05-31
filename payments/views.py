@@ -43,6 +43,29 @@ def _get_yookassa() -> YooKassaService:
     return YooKassaService()
 
 
+def _idempotency_key_from(request: Request) -> str:
+    """Read the idempotency header with a tolerant fallback chain.
+
+    Canonical name is ``X-Idempotency-Key`` (CLAUDE.md booking-engine
+    section). bot-platform's ``AylaPaymentsClient`` and the YooKassa
+    SDK both ship ``Idempotence-Key`` historically (codex P0-3). A
+    duplicate-payment retry that lands here without a recognised
+    header would otherwise generate a fresh ``str(uuid4())`` per
+    attempt — YooKassa creates one payment per call and the customer
+    sees N pending charges.
+
+    Order matters: the canonical name wins so a client that
+    transitions but still emits both during the rollout converges
+    on the right value.
+    """
+    return (
+        request.META.get('HTTP_X_IDEMPOTENCY_KEY')
+        or request.META.get('HTTP_IDEMPOTENCE_KEY')
+        or request.META.get('HTTP_IDEMPOTENCY_KEY')
+        or str(uuid4())
+    )
+
+
 def _verify_basic_auth(request: Request) -> bool:
     """Verify the Authorization: Basic header against the configured creds.
 
@@ -208,7 +231,7 @@ class PaymentCreateView(APIView):
                 status_code=200,
             )
 
-        idempotency_key = request.META.get('HTTP_X_IDEMPOTENCY_KEY', str(uuid4()))
+        idempotency_key = _idempotency_key_from(request)
         description = (
             f'BeautyGO: {appointment.service.name} у {appointment.specialist.display_name}'
         )
@@ -561,9 +584,7 @@ class PaymentRetryView(APIView):
         serializer = PaymentRetrySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         return_url = serializer.validated_data['return_url']
-        idempotency_key = request.META.get(
-            'HTTP_X_IDEMPOTENCY_KEY', str(uuid4()),
-        )
+        idempotency_key = _idempotency_key_from(request)
         return _execute_payment_retry(
             user=request.user,
             payment_id=pk,
@@ -712,9 +733,7 @@ class InternalPaymentRetryView(APIView):
             )
 
         return_url = serializer.validated_data['return_url']
-        idempotency_key = request.META.get(
-            'HTTP_X_IDEMPOTENCY_KEY', str(uuid4()),
-        )
+        idempotency_key = _idempotency_key_from(request)
         return _execute_payment_retry(
             user=request.user,
             payment_id=pk,
@@ -777,7 +796,7 @@ class PaymentRefundView(APIView):
                 status_code=422,
             )
 
-        idempotency_key = request.META.get('HTTP_X_IDEMPOTENCY_KEY', str(uuid4()))
+        idempotency_key = _idempotency_key_from(request)
 
         try:
             svc = _get_yookassa()
