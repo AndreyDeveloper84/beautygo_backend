@@ -70,14 +70,23 @@ yookassa==3.10.0
 # AI orchestration shared package (DRF-236..239 + DRF-241 — tool_dispatcher hook).
 # Repo: https://github.com/AndreyDeveloper84/ayla-ai-core (private)
 #
-# v0.6.0 unlocks Slice B: chat_service drives ayla-ai-core's AIConcierge while
-# keeping Ayla's own wire-format (show_specialists, specialist_id) via the new
-# `tool_dispatcher` DI parameter. Bot stays on its local copies (Phase 2.4 work
-# adds `recommend_services` not in shared) — convergence is decoupled.
+# Pinned SHA aligned with bot-platform's pyproject.toml entry (handoff
+# Block A → A9, codex P0-5). Both services MUST stay on the same SHA;
+# divergence shifts prompt rendering, tool dispatch, history truncation,
+# and safety behaviour per channel. The startup probe in core/ai_core.py
+# logs the resolved version at boot, and the smoke test in
+# core/tests/test_ai_core_version_pin.py pins the SHA here so a future
+# requirements edit that strays from bot-platform is caught in CI.
+#
+# Bump procedure (mirror of bot-platform pyproject.toml):
+#   1. Land the change in ayla-ai-core, tag vX.Y.Z.
+#   2. Capture target SHA: `cd ~/PycharmProjects/ayla-ai-core && git rev-parse vX.Y.Z`.
+#   3. Update BOTH this line AND bot-platform pyproject.toml in coordinated PRs.
+#   4. PR title: `chore(deps): bump ayla-ai-core <prev> → vX.Y.Z (SHA <short>)`.
 #
 # CI auth: this is a private repo. The runner needs read access via either
 #   (a) deploy key on the repo + GIT_SSH_COMMAND with the key, or
 #   (b) a personal access token: https://${GH_TOKEN}@github.com/...
 # Local dev: `pip install -e ../../ayla-ai-core` keeps a faster iteration loop;
 # the editable install satisfies the same requirement.
-ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0
+ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@e73a1b4784c150493c300b316d7a62cd423c8377
