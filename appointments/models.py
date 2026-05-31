@@ -384,8 +384,21 @@ class OutboxEvent(models.Model):
     """
     Transactional outbox: events written atomically with domain changes.
 
-    Workers pick up unprocessed events (processed_at IS NULL) and handle them.
-    This guarantees no events are lost even if the app crashes after DB commit.
+    Two-track semantics (Block C HTTP publisher, founder verdict 2026-05-30,
+    memory ``project_outbox_dual_delivery_fields``):
+
+    * ``local_processed_at`` — local Ayla handlers (notifications, cache
+      invalidation, log stubs) ran successfully. ``processed_at`` is the
+      legacy alias kept in lock-step during the transition window.
+    * ``bot_delivery_status`` (+ companion fields) — cross-service
+      delivery to ``external_target`` (default ``bot-platform``). HTTP
+      publisher (Block C) sets these.
+
+    Codex P0-4 root cause: today's dispatcher conflates "local notification
+    succeeded" with "external consumer received the event". Splitting the
+    state markers removes that ambiguity. Until Block C publisher lands
+    ``external_delivery_enabled`` stays ``False`` so existing rows are
+    untouched and the dispatcher behaves identically.
     """
 
     class Topic(models.TextChoices):
@@ -403,18 +416,102 @@ class OutboxEvent(models.Model):
             "TenantUserRelationship отозван (#246 Q1)",
         )
 
+    class BotDeliveryStatus(models.TextChoices):
+        # Default — publisher has not attempted delivery yet.
+        PENDING = "pending", "Ожидает доставки"
+        # HTTP request fired and bot-platform returned 2xx (synchronous
+        # ack). Some endpoints will return 202 + async ack later → state
+        # advances to ACKNOWLEDGED when the matching ingest receipt is
+        # observed.
+        SENT = "sent", "Отправлено"
+        ACKNOWLEDGED = "acknowledged", "Подтверждено получателем"
+        # Transient failure (network / 5xx / timeout / 429). Publisher
+        # bumps ``bot_attempt_count`` and sets ``bot_next_retry_at``.
+        FAILED = "failed", "Ошибка доставки (ретрай возможен)"
+        # Terminal state — exceeded retry budget or permanent 4xx.
+        # Ops needs to inspect and replay via the future replay command.
+        DEAD = "dead", "Письмо мертво (DLQ)"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     topic = models.CharField(max_length=50, choices=Topic.choices)
     payload = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    # Legacy "row has been touched by any processor" marker. Kept
+    # functional during transition: existing dispatcher continues to
+    # set this so old SQL filters (``WHERE processed_at IS NULL``) still
+    # work. New publisher writes to ``local_processed_at`` AND
+    # ``processed_at`` together until the next migration removes this.
     processed_at = models.DateTimeField(null=True, blank=True, db_index=True)
     error_count = models.PositiveSmallIntegerField(default=0)
     last_error = models.TextField(blank=True, default="")
+
+    # --- Block C dual-delivery extension (founder 2026-05-30) -----------
+    # Local handler completion timestamp. Distinct from cross-service
+    # delivery: rows can be ``local_processed_at IS NOT NULL`` while
+    # ``bot_delivery_status = pending`` (the bot publisher just has not
+    # picked them up yet).
+    local_processed_at = models.DateTimeField(
+        null=True, blank=True, db_index=True,
+        help_text=(
+            "When local Ayla handlers finished. Cross-service delivery "
+            "tracked separately via bot_delivery_status."
+        ),
+    )
+    # Per-row opt-in switch. The publisher only ships rows where this
+    # is True. Defaulting to False keeps the migration backward compat
+    # — historical rows and topics not yet promoted to cross-service
+    # ignore the new fields entirely.
+    external_delivery_enabled = models.BooleanField(
+        default=False,
+        help_text=(
+            "If False, publisher skips this row. Toggled True per topic "
+            "as Block C wires each cross-service event into the contract."
+        ),
+    )
+    external_target = models.CharField(
+        max_length=64,
+        default="bot-platform",
+        help_text=(
+            "Logical destination identifier. ``bot-platform`` for the "
+            "ADR-0009 cross-service ingest; future targets may be added."
+        ),
+    )
+    bot_delivery_status = models.CharField(
+        max_length=20,
+        choices=BotDeliveryStatus.choices,
+        default=BotDeliveryStatus.PENDING,
+        db_index=True,
+    )
+    bot_delivered_at = models.DateTimeField(null=True, blank=True)
+    bot_attempt_count = models.PositiveSmallIntegerField(default=0)
+    bot_next_retry_at = models.DateTimeField(
+        null=True, blank=True, db_index=True,
+        help_text="Earliest time the publisher may retry this row.",
+    )
+    bot_last_error = models.TextField(blank=True, default="")
+    bot_response_status = models.PositiveSmallIntegerField(
+        null=True, blank=True,
+        help_text="HTTP status of the most recent bot-platform response.",
+    )
+    bot_dead_lettered_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['created_at']
         verbose_name = 'Outbox Event'
         verbose_name_plural = 'Outbox Events'
+        indexes = [
+            # Publisher scan: pull rows that need cross-service delivery
+            # and are eligible right now (not blocked by retry backoff).
+            # Composite covers the WHERE chain
+            #   external_delivery_enabled = True
+            #   AND bot_delivery_status IN ('pending', 'failed')
+            #   AND (bot_next_retry_at IS NULL OR bot_next_retry_at <= now)
+            # without scanning rows that opt out of external delivery.
+            models.Index(
+                fields=['external_delivery_enabled', 'bot_delivery_status', 'bot_next_retry_at'],
+                name='outbox_publisher_scan_idx',
+            ),
+        ]
 
     def __str__(self) -> str:
         status = "processed" if self.processed_at else "pending"
