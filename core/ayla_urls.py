@@ -79,10 +79,23 @@ class AylaUrlBuilder:
     surface — everything else derives from them. Frozen dataclass
     so a mistake like ``builder.internal_base = "…"`` raises instead
     of silently mutating a singleton.
+
+    Bases are normalised at construct-time (strip trailing ``/``) so
+    direct construction and ``from_settings()`` produce the same
+    shape — otherwise a caller that builds the dataclass directly
+    would carry a trailing slash that breaks urljoin's path-boundary.
     """
 
     internal_base: str
     public_base: str
+
+    def __post_init__(self) -> None:
+        # Frozen dataclass — direct attribute assignment raises
+        # FrozenInstanceError. ``object.__setattr__`` bypasses the
+        # lock for this one-shot init step (stdlib-recommended
+        # pattern for frozen-dataclass post-init normalisation).
+        object.__setattr__(self, "internal_base", _normalise_base(self.internal_base))
+        object.__setattr__(self, "public_base", _normalise_base(self.public_base))
 
     @classmethod
     def from_settings(cls) -> "AylaUrlBuilder":
@@ -91,12 +104,8 @@ class AylaUrlBuilder:
         the builder methods raise when a caller actually tries to
         build a URL with an unconfigured base."""
         return cls(
-            internal_base=_normalise_base(
-                getattr(settings, "AYLA_INTERNAL_BASE_URL", "") or ""
-            ),
-            public_base=_normalise_base(
-                getattr(settings, "AYLA_PUBLIC_BASE_URL", "") or ""
-            ),
+            internal_base=getattr(settings, "AYLA_INTERNAL_BASE_URL", "") or "",
+            public_base=getattr(settings, "AYLA_PUBLIC_BASE_URL", "") or "",
         )
 
     # --- builder methods -----------------------------------------------
