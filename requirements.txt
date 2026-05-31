@@ -70,10 +70,24 @@ yookassa==3.10.0
 # AI orchestration shared package (DRF-236..239 + DRF-241 — tool_dispatcher hook).
 # Repo: https://github.com/AndreyDeveloper84/ayla-ai-core (private)
 #
-# v0.6.0 unlocks Slice B: chat_service drives ayla-ai-core's AIConcierge while
-# keeping Ayla's own wire-format (show_specialists, specialist_id) via the new
-# `tool_dispatcher` DI parameter. Bot stays on its local copies (Phase 2.4 work
-# adds `recommend_services` not in shared) — convergence is decoupled.
+# v0.6.0 — current Ayla pin. bot-platform tracks a later SHA aligned
+# with v0.8.1 work (pyproject.toml e73a1b47…). The version drift is
+# codex P0-5: prompt rendering, tool dispatch, history truncation,
+# and safety behaviour shift per channel.
+#
+# Joint with W2: closing the gap is a coordinated change because the
+# v0.7.0 release made tenant_id a REQUIRED keyword arg on
+# build_specialist_context_from_candidates — ai/concierge_factory.py
+# and 20+ ai/tests/ call sites break on the bump. This PR (A9) only
+# adds the boot probe + version log so ops can observe the drift; the
+# SHA alignment lands in a follow-up PR that also rewires call sites
+# to thread tenant_id through.
+#
+# Bump procedure (when the follow-up lands):
+#   1. Land the change in ayla-ai-core, tag vX.Y.Z.
+#   2. Capture target SHA: `cd ~/PycharmProjects/ayla-ai-core && git rev-parse vX.Y.Z`.
+#   3. Update BOTH this line AND bot-platform pyproject.toml in coordinated PRs.
+#   4. PR title: `chore(deps): bump ayla-ai-core <prev> → vX.Y.Z (SHA <short>)`.
 #
 # CI auth: this is a private repo. The runner needs read access via either
 #   (a) deploy key on the repo + GIT_SSH_COMMAND with the key, or
