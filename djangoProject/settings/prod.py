@@ -22,6 +22,14 @@ ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',')
 #   logs a warning but accepts every source. An attacker who can guess a
 #   provider_payment_id can replay events; the re-fetch + idempotency
 #   layers narrow blast radius but don't close it.
+# - AYLA_INTERNAL_API_TOKEN: handoff Block A → A5. Cross-service Bearer
+#   token used by bot-platform AylaPaymentsClient / AylaBookingClient
+#   (codex P0-3) and IsBotServiceWithVerifiedClient permission. Empty
+#   value silently rejects every internal request as 401 — bot-side
+#   live-mode payment/booking calls degrade to opaque "service down"
+#   errors with no obvious root cause from logs. Pinning it here gives
+#   the operator a single error message at boot instead of paged-at-
+#   midnight payment failures.
 #
 # Strictness gated by DJANGO_ENV: real production raises on missing
 # values, staging / dev VPS environments downgrade to warnings so the
@@ -31,6 +39,7 @@ _REQUIRED_PROD_ENV = (
     "GOOGLE_CLIENT_ID",
     "APPLE_CLIENT_ID",
     "YOOKASSA_WEBHOOK_ALLOWED_IPS",
+    "AYLA_INTERNAL_API_TOKEN",
 )
 _missing_prod = [name for name in _REQUIRED_PROD_ENV if not os.environ.get(name)]
 enforce_required_env(
