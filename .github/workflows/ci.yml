@@ -172,7 +172,16 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
           timeout: 300s
-          command_timeout: 5m
+          # Docker build on the dev VPS regularly exceeds 5m: ayla-ai-core
+          # is a private git+https package (no wheel cache), so a layer
+          # invalidation triggers a fresh clone + install every time. The
+          # 5m cap raced the docker compose build step and timed out
+          # before the deploy could ack — see the 5x failures on the
+          # Block A merges (runs 26719649094-26719655346, all hit
+          # "Run Command Timeout" at ~5min). 15m gives docker enough
+          # headroom without letting a genuinely stuck deploy hang
+          # forever.
+          command_timeout: 15m
           envs: SENTRY_DSN,SENTRY_ENVIRONMENT,SENTRY_RELEASE,DJANGO_ENV,FIREBASE_CREDENTIALS_JSON
           script: |
             cd /home/taximeter/beautygo/dev
