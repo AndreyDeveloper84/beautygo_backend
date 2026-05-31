@@ -492,6 +492,18 @@ NUTRITION_SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN", "")
 # quarterly; treat as production secret.
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
+# Block A → A4 — Single source for Ayla service URLs.
+# AYLA_INTERNAL_BASE_URL: cluster-internal scheme+host (no public TLS),
+#   used by AylaUrlBuilder.internal() for service-to-service calls.
+# AYLA_PUBLIC_BASE_URL: public scheme+host (matches DJANGO_ALLOWED_HOSTS),
+#   used by AylaUrlBuilder.public() for mobile-facing URLs and YooKassa
+#   return_url. Conflating the two has already caused a YooKassa webhook
+#   to be issued for an internal-only host that YooKassa cannot reach.
+# Empty defaults: dev / unit tests can boot without these; callers that
+# need a URL raise at the point of use with a named env var.
+AYLA_INTERNAL_BASE_URL = os.environ.get("AYLA_INTERNAL_BASE_URL", "")
+AYLA_PUBLIC_BASE_URL = os.environ.get("AYLA_PUBLIC_BASE_URL", "")
+
 # DRF-288 — Cross-domain (Track E) production rollout gate.
 # Default closed: when CROSS_DOMAIN_ENABLED is False, the engine only
 # evaluates for accounts listed in CROSS_DOMAIN_INTERNAL_ACCOUNTS (5
