@@ -382,6 +382,7 @@ class TestProdOAuthFailFast:
                 GOOGLE_CLIENT_ID=None,
                 APPLE_CLIENT_ID="apple-id",
                 YOOKASSA_WEBHOOK_ALLOWED_IPS="185.71.76.0/27",
+                AYLA_INTERNAL_API_TOKEN="bearer-token",
             )
 
     def test_raises_when_apple_client_id_missing(self, monkeypatch):
@@ -394,6 +395,7 @@ class TestProdOAuthFailFast:
                 GOOGLE_CLIENT_ID="google-id",
                 APPLE_CLIENT_ID=None,
                 YOOKASSA_WEBHOOK_ALLOWED_IPS="185.71.76.0/27",
+                AYLA_INTERNAL_API_TOKEN="bearer-token",
             )
 
     def test_raises_when_yookassa_webhook_ips_missing(self, monkeypatch):
@@ -408,15 +410,21 @@ class TestProdOAuthFailFast:
                 GOOGLE_CLIENT_ID="google-id",
                 APPLE_CLIENT_ID="apple-id",
                 YOOKASSA_WEBHOOK_ALLOWED_IPS=None,
+                AYLA_INTERNAL_API_TOKEN="bearer-token",
             )
 
     def test_imports_when_all_required_set(self, monkeypatch):
+        # A5 added AYLA_INTERNAL_API_TOKEN to the required tuple — pass
+        # it here so this golden-path test does not become a false
+        # positive for the new gate. Dedicated coverage for the token
+        # itself lives in djangoProject/tests/test_prod_required_env.py.
         module = self._reload_prod(
             monkeypatch,
             DJANGO_SECRET_KEY="test-secret",
             GOOGLE_CLIENT_ID="google-id",
             APPLE_CLIENT_ID="apple-id",
             YOOKASSA_WEBHOOK_ALLOWED_IPS="185.71.76.0/27",
+            AYLA_INTERNAL_API_TOKEN="bearer-token",
         )
         assert module.GOOGLE_CLIENT_ID == "google-id"
         assert module.APPLE_CLIENT_ID == "apple-id"
