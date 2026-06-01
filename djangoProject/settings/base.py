@@ -504,6 +504,18 @@ AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 AYLA_INTERNAL_BASE_URL = os.environ.get("AYLA_INTERNAL_BASE_URL", "")
 AYLA_PUBLIC_BASE_URL = os.environ.get("AYLA_PUBLIC_BASE_URL", "")
 
+# Block C → C2 — bot-platform ingest endpoint for cross-service events.
+# Empty default means the publisher will no-op (raises RuntimeError on
+# the first delivery attempt, but the beat task swallows the message
+# at log-level). Prod / staging deploys set this in env so the
+# publisher actually ships. Local dev leaves it empty so unit tests
+# that exercise the publisher can monkeypatch the env without
+# requiring a live bot ingest.
+BOT_PLATFORM_BASE_URL = os.environ.get("BOT_PLATFORM_BASE_URL", "")
+BOT_PLATFORM_INGEST_PATH = os.environ.get(
+    "BOT_PLATFORM_INGEST_PATH", "/api/v1/internal/events/ingest",
+)
+
 # DRF-288 — Cross-domain (Track E) production rollout gate.
 # Default closed: when CROSS_DOMAIN_ENABLED is False, the engine only
 # evaluates for accounts listed in CROSS_DOMAIN_INTERNAL_ACCOUNTS (5
@@ -610,6 +622,16 @@ CELERY_BEAT_SCHEDULE = {
     "dispatch-outbox-events": {
         "task": "appointments.tasks.dispatch_outbox_events",
         "schedule": 10.0,                       # every 10 seconds
+    },
+    # Block C → C2 — Cross-service HTTP publisher. Picks rows where
+    # external_delivery_enabled=True and POSTs them to bot-platform
+    # /api/v1/internal/events/ingest. Separate from the local-only
+    # dispatcher above so a misbehaving consumer can't stall the
+    # notification pipeline (and vice versa). 30s cadence is twice the
+    # bot ingest expected latency target (~15s end-to-end SLO).
+    "publish-outbox-events-to-bot": {
+        "task": "appointments.tasks.publish_outbox_events_to_bot",
+        "schedule": 30.0,
     },
     # 1h reminder beat. Window logic in the task itself absorbs the
     # 5-min jitter so we don't spam-send if a tick arrives early/late.

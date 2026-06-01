@@ -20,6 +20,9 @@ from django.db import transaction
 from django.db.models import Min
 from django.utils import timezone
 
+from .infrastructure.outbox.publisher import (
+    publish_outbox_events_to_bot as _publish_to_bot,
+)
 from .models import OutboxEvent
 
 logger = logging.getLogger(__name__)
@@ -183,6 +186,31 @@ def dispatch_outbox_events() -> dict:
             )
 
     return {"processed": processed, "failed": failed, "skipped": skipped}
+
+
+@shared_task(name="appointments.tasks.publish_outbox_events_to_bot")
+def publish_outbox_events_to_bot() -> dict:
+    """Block C → C2 — cross-service HTTP publisher beat task.
+
+    Thin Celery wrapper around
+    :func:`appointments.infrastructure.outbox.publisher.publish_outbox_events_to_bot`.
+    The implementation lives in the infrastructure module so it can be
+    invoked directly from tests without the Celery harness. This task
+    just translates the dataclass summary into the dict shape Celery's
+    result backend prefers.
+
+    Scheduled every 30 seconds (see ``CELERY_BEAT_SCHEDULE``). Outcome
+    counts land in the result backend for monitoring; the publisher
+    also logs warnings on dead-lettered rows so on-call can act on
+    them via the C5 replay management command.
+    """
+    summary = _publish_to_bot()
+    return {
+        "sent": summary.sent,
+        "failed": summary.failed,
+        "dead": summary.dead,
+        "scanned": summary.scanned,
+    }
 
 
 @shared_task(name="appointments.tasks.purge_expired_idempotency_keys")
