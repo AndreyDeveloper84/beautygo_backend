@@ -259,7 +259,7 @@ class TestHeaders:
         ev = _make_event()
         captured = {}
 
-        def fake_post(url, json, headers, timeout):  # noqa: A002 — match requests sig
+        def fake_post(url, data=None, headers=None, timeout=None, **_kw):
             captured["headers"] = headers
             captured["url"] = url
 
