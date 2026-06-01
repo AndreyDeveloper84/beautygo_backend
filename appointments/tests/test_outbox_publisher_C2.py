@@ -32,7 +32,6 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
-from django.test import override_settings
 from django.utils import timezone
 
 from appointments.infrastructure.outbox import publisher
@@ -44,11 +43,18 @@ from appointments.infrastructure.outbox.publisher import (
 from appointments.models import OutboxEvent
 
 
-_BASE_SETTINGS = override_settings(
-    BOT_PLATFORM_BASE_URL="https://bot.test.local",
-    BOT_PLATFORM_INGEST_PATH="/api/v1/internal/events/ingest",
-    AYLA_INTERNAL_API_TOKEN="test-bearer",
-)
+@pytest.fixture(autouse=True)
+def _publisher_settings(settings):
+    """Configure the publisher's runtime settings for every test.
+
+    ``override_settings`` as a class decorator only works on
+    ``SimpleTestCase`` subclasses; the pytest-django ``settings``
+    fixture is the equivalent for plain pytest classes. Autouse so
+    we don't have to repeat the parameter in every test signature.
+    """
+    settings.BOT_PLATFORM_BASE_URL = "https://bot.test.local"
+    settings.BOT_PLATFORM_INGEST_PATH = "/api/v1/internal/events/ingest"
+    settings.AYLA_INTERNAL_API_TOKEN = "test-bearer"
 
 
 def _make_event(**kwargs) -> OutboxEvent:
@@ -62,7 +68,6 @@ def _make_event(**kwargs) -> OutboxEvent:
 
 
 @pytest.mark.django_db
-@_BASE_SETTINGS
 class TestHappyPath:
     """2xx response → row marked sent with delivered_at populated."""
 
@@ -94,7 +99,6 @@ class TestHappyPath:
 
 
 @pytest.mark.django_db
-@_BASE_SETTINGS
 class TestTransientFailure:
     """5xx / network / 429 → ``failed`` + backoff schedule."""
 
@@ -141,7 +145,6 @@ class TestTransientFailure:
 
 
 @pytest.mark.django_db
-@_BASE_SETTINGS
 class TestPermanentFailure:
     """4xx (except 429) → immediate dead-letter."""
 
@@ -162,7 +165,6 @@ class TestPermanentFailure:
 
 
 @pytest.mark.django_db
-@_BASE_SETTINGS
 class TestRetryBudget:
     """Exhausting :data:`MAX_DELIVERY_ATTEMPTS` transitions to dead."""
 
@@ -204,7 +206,6 @@ class TestBackoffCurve:
 
 
 @pytest.mark.django_db
-@_BASE_SETTINGS
 class TestEligibility:
     """Only rows with the right gate combination are picked up."""
 
@@ -251,7 +252,6 @@ class TestEligibility:
 
 
 @pytest.mark.django_db
-@_BASE_SETTINGS
 class TestHeaders:
     """Idempotency contract — event_id reused on retries."""
 
