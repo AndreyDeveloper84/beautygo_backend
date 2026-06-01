@@ -114,10 +114,11 @@ class TestTransientFailure:
         assert ev.bot_response_status == 500
         assert "boom" in ev.bot_last_error
         assert ev.bot_next_retry_at is not None
-        # 30s base, attempt 1 → +60s. Allow ±5s for timezone.now() drift
-        # between publisher and assertion.
+        # Backoff curve _backoff_seconds(attempt) = 30 * 2**(attempt-1)
+        # capped at 1h. First retry (post-increment attempt=1) → 30s.
+        # Allow ±5s for the now() drift between publisher and assertion.
         delta = (ev.bot_next_retry_at - timezone.now()).total_seconds()
-        assert 55 <= delta <= 65, f"expected ~60s, got {delta}s"
+        assert 25 <= delta <= 35, f"expected ~30s, got {delta}s"
 
     def test_429_is_treated_as_transient(self):
         # Per the C2 spec, 429 (rate-limited) follows the retry path
