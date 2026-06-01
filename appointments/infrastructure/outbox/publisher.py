@@ -67,7 +67,11 @@ prefers it.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -171,6 +175,44 @@ def _bearer_token() -> str:
     return token
 
 
+def _hmac_secret() -> str:
+    """Resolve the shared HMAC secret for the X-Ayla-Event-Signature header.
+
+    The secret is shared with bot-platform — bot-side env var name is
+    ``EVENT_INGEST_HMAC_SECRET`` (per ai-bot-platform-codex
+    ``apps/eventbus/ingest_security.py``). Ayla side uses
+    ``AYLA_OUTBOUND_HMAC_SECRET`` per the founder handoff so each side
+    can rotate the variable name independently; the VALUE must match.
+
+    Empty value disables signing (the publisher will not add the
+    ``X-Ayla-Event-Signature`` / ``X-Ayla-Event-Timestamp`` headers
+    and the bot-side verifier will reject with
+    ``REASON_MISSING_SIGNATURE``). That fail-closed behaviour is the
+    point — a forgotten secret in prod must not silently bypass HMAC.
+    """
+    return getattr(settings, "AYLA_OUTBOUND_HMAC_SECRET", "") or ""
+
+
+def _sign_body(body_bytes: bytes, ts_ms: int, secret: str) -> str:
+    """Compute the ``sha256=<hex>`` value for X-Ayla-Event-Signature.
+
+    Per ai-bot-platform-codex ``apps/eventbus/ingest_security.py`` the
+    HMAC input is the RAW request body bytes (no normalisation). We
+    pre-serialise the envelope to bytes once and use the same bytes
+    both for signing and for the HTTP request body so the two cannot
+    drift via JSON encoding differences.
+
+    ``ts_ms`` is included in the contract via the separate
+    ``X-Ayla-Event-Timestamp`` header (not in the HMAC input itself)
+    — bot rejects the request on stale timestamp BEFORE HMAC compare,
+    so an attacker who replays an old captured body cannot use a
+    fresh timestamp to slip past the window.
+    """
+    return "sha256=" + hmac.new(
+        secret.encode("utf-8"), body_bytes, hashlib.sha256,
+    ).hexdigest()
+
+
 def _backoff_seconds(attempt: int) -> int:
     """C4 backoff curve.
 
@@ -190,6 +232,14 @@ def _attempt_post(envelope: dict, event_id) -> tuple[int | None, str]:
     populated for any failure path so the caller can record it.
     """
     url = _ingest_url()
+    # Pre-serialise the envelope to bytes ONCE and reuse for both the
+    # HMAC input and the HTTP body. Letting requests' json= argument
+    # serialise separately would allow whitespace / key-order drift
+    # between the signed bytes and the wire bytes → spurious
+    # REASON_HMAC_MISMATCH on the bot-side verifier.
+    body_bytes = json.dumps(
+        envelope, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8")
     headers = {
         "Authorization": f"Bearer {_bearer_token()}",
         "Content-Type": "application/json",
@@ -200,9 +250,26 @@ def _attempt_post(envelope: dict, event_id) -> tuple[int | None, str]:
         # internal cross-service traffic in bot-platform access logs.
         "User-Agent": "ayla-outbox-publisher/1",
     }
+
+    # C3 — HMAC + timestamp anti-replay. Only attach headers when the
+    # secret is configured; missing secret in dev/tests means the
+    # publisher hits the bot without signing → bot rejects with
+    # REASON_MISSING_SIGNATURE (fail-closed). Same secret value as
+    # bot's EVENT_INGEST_HMAC_SECRET — see _hmac_secret() docstring.
+    secret = _hmac_secret()
+    if secret:
+        # Unix milliseconds per the contract in
+        # ai-bot-platform-codex apps/eventbus/ingest_security.py
+        # (±300s window). The bot rejects on stale timestamp BEFORE
+        # HMAC compare so a fresh timestamp + replayed body cannot
+        # slip through.
+        ts_ms = int(time.time() * 1000)
+        headers["X-Ayla-Event-Timestamp"] = str(ts_ms)
+        headers["X-Ayla-Event-Signature"] = _sign_body(body_bytes, ts_ms, secret)
+
     try:
         response = requests.post(
-            url, json=envelope, headers=headers, timeout=HTTP_TIMEOUT_SECONDS,
+            url, data=body_bytes, headers=headers, timeout=HTTP_TIMEOUT_SECONDS,
         )
     except requests.Timeout as exc:
         return None, f"Timeout: {exc}"
