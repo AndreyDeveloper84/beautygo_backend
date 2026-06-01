@@ -70,20 +70,16 @@ yookassa==3.10.0
 # AI orchestration shared package (DRF-236..239 + DRF-241 — tool_dispatcher hook).
 # Repo: https://github.com/AndreyDeveloper84/ayla-ai-core (private)
 #
-# v0.6.0 — current Ayla pin. bot-platform tracks a later SHA aligned
-# with v0.8.1 work (pyproject.toml e73a1b47…). The version drift is
-# codex P0-5: prompt rendering, tool dispatch, history truncation,
-# and safety behaviour shift per channel.
+# Pinned SHA aligned with bot-platform pyproject.toml. Both services
+# share the same SHA so prompt rendering, tool dispatch, history
+# truncation, and safety behaviour stay identical across channels
+# (codex P0-5). The A9 follow-up that landed this SHA also rewired
+# ai/concierge_factory.to_core_specialist_context() to thread the
+# new required tenant_id kwarg through; AIChatView resolves the id
+# from request.tenant (TenantContextMiddleware) and falls back to
+# the GLOBAL_TENANT_SENTINEL when no tenant context is set.
 #
-# Joint with W2: closing the gap is a coordinated change because the
-# v0.7.0 release made tenant_id a REQUIRED keyword arg on
-# build_specialist_context_from_candidates — ai/concierge_factory.py
-# and 20+ ai/tests/ call sites break on the bump. This PR (A9) only
-# adds the boot probe + version log so ops can observe the drift; the
-# SHA alignment lands in a follow-up PR that also rewires call sites
-# to thread tenant_id through.
-#
-# Bump procedure (when the follow-up lands):
+# Bump procedure:
 #   1. Land the change in ayla-ai-core, tag vX.Y.Z.
 #   2. Capture target SHA: `cd ~/PycharmProjects/ayla-ai-core && git rev-parse vX.Y.Z`.
 #   3. Update BOTH this line AND bot-platform pyproject.toml in coordinated PRs.
@@ -94,4 +90,4 @@ yookassa==3.10.0
 #   (b) a personal access token: https://${GH_TOKEN}@github.com/...
 # Local dev: `pip install -e ../../ayla-ai-core` keeps a faster iteration loop;
 # the editable install satisfies the same requirement.
-ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0
+ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@e73a1b4784c150493c300b316d7a62cd423c8377
