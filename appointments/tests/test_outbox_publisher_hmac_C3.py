@@ -26,7 +26,6 @@ import json
 from unittest.mock import patch
 
 import pytest
-from django.test import override_settings
 
 from appointments.infrastructure.outbox import publisher
 from appointments.infrastructure.outbox.publisher import (
@@ -36,12 +35,19 @@ from appointments.infrastructure.outbox.publisher import (
 from appointments.models import OutboxEvent
 
 
-_BASE_SETTINGS = override_settings(
-    BOT_PLATFORM_BASE_URL="https://bot.test.local",
-    BOT_PLATFORM_INGEST_PATH="/api/v1/internal/events/ingest",
-    AYLA_INTERNAL_API_TOKEN="test-bearer",
-    AYLA_OUTBOUND_HMAC_SECRET="shared-secret-32-bytes-min-long-enough",
-)
+@pytest.fixture
+def hmac_settings(settings):
+    """Apply the publisher's HMAC-enabled settings for a single test.
+
+    Used by the per-test fixture below. Pulled out so the "no secret"
+    test can override the secret to '' without dragging in the
+    autouse contract.
+    """
+    settings.BOT_PLATFORM_BASE_URL = "https://bot.test.local"
+    settings.BOT_PLATFORM_INGEST_PATH = "/api/v1/internal/events/ingest"
+    settings.AYLA_INTERNAL_API_TOKEN = "test-bearer"
+    settings.AYLA_OUTBOUND_HMAC_SECRET = "shared-secret-32-bytes-min-long-enough"
+    return settings
 
 
 def _make_event(**kwargs) -> OutboxEvent:
@@ -98,9 +104,14 @@ class TestSignBodyHelper:
 
 
 @pytest.mark.django_db
-@_BASE_SETTINGS
 class TestPublisherAddsHmacHeaders:
     """End-to-end: publisher attaches signature + timestamp on every POST."""
+
+    @pytest.fixture(autouse=True)
+    def _apply_hmac_settings(self, hmac_settings):
+        # Reuse the module-level fixture so the same secret value lives
+        # in one place and the per-class scope picks it up.
+        return hmac_settings
 
     def _capture_post(self):
         """Return (capture_dict, side_effect) for patching requests.post."""
@@ -183,12 +194,14 @@ class TestNoSecretFailsClosed:
     confirm no header is attached so the bot's "missing" path triggers.
     """
 
-    @override_settings(
-        BOT_PLATFORM_BASE_URL="https://bot.test.local",
-        AYLA_INTERNAL_API_TOKEN="test-bearer",
-        AYLA_OUTBOUND_HMAC_SECRET="",
-    )
-    def test_empty_secret_skips_signature_headers(self):
+    def test_empty_secret_skips_signature_headers(self, settings):
+        # Same as the no-secret path on prod: bot rejects with
+        # REASON_MISSING_SIGNATURE. Use the per-test settings fixture
+        # (not the autouse hmac one) so we can flip the secret off
+        # without dragging in the default.
+        settings.BOT_PLATFORM_BASE_URL = "https://bot.test.local"
+        settings.AYLA_INTERNAL_API_TOKEN = "test-bearer"
+        settings.AYLA_OUTBOUND_HMAC_SECRET = ""
         _make_event()
         captured = {}
 
