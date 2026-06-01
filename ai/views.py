@@ -109,12 +109,20 @@ class AIChatView(APIView):
             voice_mode=bool(validated.get("voice_mode")),
         )
 
+        # A9 follow-up — ayla-ai-core v0.7.0+ partitions the candidate
+        # context by tenant_id. Pull from request.tenant (set by
+        # TenantContextMiddleware via X-Tenant header / JWT claim); the
+        # service falls back to GLOBAL_TENANT_SENTINEL when None.
+        request_tenant = getattr(request, "tenant", None)
         try:
             result = self.chat_service_class().send_message(
                 actor=request.user,
                 conversation_id=validated.get("conversation_id"),
                 message_text=validated["message"],
                 request_context=ctx_with_voice,
+                request_tenant_id=(
+                    request_tenant.id if request_tenant else None
+                ),
             )
         except AIUnavailable as exc:
             logger.warning("ai.chat.unavailable: %s", exc)
