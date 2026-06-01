@@ -516,6 +516,16 @@ BOT_PLATFORM_INGEST_PATH = os.environ.get(
     "BOT_PLATFORM_INGEST_PATH", "/api/v1/internal/events/ingest",
 )
 
+# Block C → C3 — HMAC-SHA256 signing secret for cross-service event
+# delivery. Shared with bot-platform; bot-side env var is
+# EVENT_INGEST_HMAC_SECRET (apps/eventbus/ingest_security.py). The
+# VALUE must match on both sides — ops sets both env vars to the
+# same secret and rotates them together. Empty value disables
+# signing entirely; bot then rejects every request with
+# REASON_MISSING_SIGNATURE (fail-closed by design). Rotate
+# quarterly per event-contract §6.2 cadence.
+AYLA_OUTBOUND_HMAC_SECRET = os.environ.get("AYLA_OUTBOUND_HMAC_SECRET", "")
+
 # DRF-288 — Cross-domain (Track E) production rollout gate.
 # Default closed: when CROSS_DOMAIN_ENABLED is False, the engine only
 # evaluates for accounts listed in CROSS_DOMAIN_INTERNAL_ACCOUNTS (5
