@@ -51,6 +51,7 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 __all__ = [
+    "GLOBAL_TENANT_SENTINEL",
     "build_specialist_context_for_actor",
     "get_concierge_for",
     "render_ayla_system_prompt",
@@ -58,11 +59,21 @@ __all__ = [
 ]
 
 
+# Stable fallback when the request has no tenant context (anonymous
+# chat without X-Tenant header). ayla-ai-core v0.7.0+ rejects empty
+# string — this sentinel keeps anti-hallucination frozenset semantics
+# intact while making the no-tenant case greppable. Same semantic
+# value across both repos so cross-service traces are comparable.
+GLOBAL_TENANT_SENTINEL = "global"
+
+
 logger = logging.getLogger(__name__)
 
 
 def to_core_specialist_context(
     local: LocalSpecialistContext,
+    *,
+    tenant_id: str,
 ) -> SpecialistContext[UUID]:
     """Convert local recommendation-engine output → ayla-ai-core context.
 
@@ -75,6 +86,11 @@ def to_core_specialist_context(
     service-level anti-hallucination on `confirm_booking` is no-op for
     Ayla today. A later slice will surface real service IDs through the
     recommendation engine so layer-2 validation kicks in.
+
+    ``tenant_id`` — required since ayla-ai-core v0.7.0 (security
+    boundary, multi-tenant scoping). Caller passes a stable non-empty
+    string identifying the request scope. See ``GLOBAL_TENANT_SENTINEL``
+    for the no-tenant fallback used in anonymous chat.
     """
     candidates = [
         SpecialistCandidate(
@@ -85,7 +101,9 @@ def to_core_specialist_context(
         )
         for c in local.candidates
     ]
-    return build_specialist_context_from_candidates(candidates)
+    return build_specialist_context_from_candidates(
+        candidates, tenant_id=tenant_id,
+    )
 
 
 def build_specialist_context_for_actor(actor: "User") -> LocalSpecialistContext:
@@ -143,7 +161,11 @@ def render_ayla_system_prompt(
     )
 
 
-def get_concierge_for(actor: "User") -> AIConcierge:
+def get_concierge_for(
+    actor: "User",
+    *,
+    tenant_id: str = GLOBAL_TENANT_SENTINEL,
+) -> AIConcierge:
     """Build a per-request AIConcierge instance bound to this actor.
 
     The local `SpecialistContext` (with reasons / score / distance) is
@@ -152,7 +174,20 @@ def get_concierge_for(actor: "User") -> AIConcierge:
     `actor` to thread `client_id` into Ayla's local handlers — anonymous
     users get a clarification fallback for `show_appointments`, same
     semantics as before AIConcierge wiring.
+
+    ``tenant_id`` — caller resolves from ``request.tenant.id`` (set by
+    TenantContextMiddleware) and falls back to ``GLOBAL_TENANT_SENTINEL``
+    when no tenant context is available. Required by ayla-ai-core
+    v0.7.0+ to partition the candidate frozensets per tenant scope.
     """
+    if not tenant_id:
+        # Belt-and-suspenders. ayla-ai-core would raise ValueError on
+        # an empty string further down, but failing here gives a more
+        # localised stack trace.
+        raise ValueError(
+            "tenant_id must be a non-empty stable identifier; pass "
+            "GLOBAL_TENANT_SENTINEL for the no-tenant fallback."
+        )
     # Shared per-request slot — context_builder writes the local context,
     # tool_dispatcher reads it. AIConcierge calls context_builder before
     # dispatcher within send_message(), so the read is always populated.
@@ -161,7 +196,7 @@ def get_concierge_for(actor: "User") -> AIConcierge:
     def context_builder() -> SpecialistContext[UUID]:
         local = build_specialist_context_for_actor(actor)
         state["local_context"] = local
-        return to_core_specialist_context(local)
+        return to_core_specialist_context(local, tenant_id=tenant_id)
 
     def tool_dispatcher(tool_call, _core_context):
         local_context = state["local_context"]
