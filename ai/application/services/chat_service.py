@@ -80,6 +80,7 @@ class ChatService:
         conversation_id: UUID | None,
         message_text: str,
         request_context: ChatRequestContext | None = None,
+        request_tenant_id: UUID | None = None,
     ) -> ChatResponseDTO:
         if not settings.OPENAI_API_KEY:
             raise AIUnavailable("OPENAI_API_KEY is not configured")
@@ -99,7 +100,13 @@ class ChatService:
         redacted_text = redact_pii(message_text)
 
         prompt_renderer = self._make_prompt_renderer(actor)
-        concierge = get_concierge_for(actor)
+        # ayla-ai-core v0.7.0+ requires tenant_id on the SpecialistContext
+        # (anti-hallucination partitioning, security boundary). Caller
+        # resolves it from request.tenant; falls back to the global
+        # sentinel when no tenant context exists (anonymous chat).
+        from ai.concierge_factory import GLOBAL_TENANT_SENTINEL
+        tenant_key = str(request_tenant_id) if request_tenant_id else GLOBAL_TENANT_SENTINEL
+        concierge = get_concierge_for(actor, tenant_id=tenant_key)
 
         try:
             core_result = async_to_sync(concierge.send_message)(

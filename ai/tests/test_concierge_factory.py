@@ -48,7 +48,7 @@ class TestToCoreContext:
             )
             for n, i in enumerate(ids)
         ])
-        core = to_core_specialist_context(local)
+        core = to_core_specialist_context(local, tenant_id="test-tenant")
         assert isinstance(core, SpecialistContext)
         assert core.candidate_ids == frozenset(ids)
         # Anti-hallucination layer 2 (services) is no-op until Slice B
@@ -56,7 +56,7 @@ class TestToCoreContext:
         assert core.candidate_service_ids == frozenset()
 
     def test_empty_local_context_yields_empty_core_context(self):
-        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]))
+        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]), tenant_id="test-tenant")
         assert core.candidates == []
         assert core.candidate_ids == frozenset()
 
@@ -87,7 +87,7 @@ class TestBuildContextForActor:
 
 class TestRenderPrompt:
     def test_uses_ayla_marketplace_voice(self):
-        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]))
+        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]), tenant_id="test-tenant")
         prompt = render_ayla_system_prompt(
             core, today=date(2026, 5, 3), client_name="Анна", bookings_count=2,
         )
@@ -97,7 +97,7 @@ class TestRenderPrompt:
         assert "2026-05-03" in prompt
 
     def test_extra_hint_renders_advisory_block(self):
-        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]))
+        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]), tenant_id="test-tenant")
         prompt = render_ayla_system_prompt(
             core, today=date(2026, 5, 3), extra_hint="Дефицит белка 4 дня подряд",
         )
@@ -105,7 +105,7 @@ class TestRenderPrompt:
         assert "ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ" in prompt
 
     def test_empty_extra_hint_skips_block(self):
-        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]))
+        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]), tenant_id="test-tenant")
         prompt = render_ayla_system_prompt(core, today=date(2026, 5, 3))
         assert "ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ" not in prompt
 
