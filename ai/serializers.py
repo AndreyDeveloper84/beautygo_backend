@@ -6,6 +6,7 @@ format is ``{"data": {...}}``; serializers here produce the inner dict.
 """
 from __future__ import annotations
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from ai.models import Conversation, Message
@@ -133,6 +134,7 @@ class ConversationDetailSerializer(serializers.ModelSerializer):
         model = Conversation
         fields = ("id", "messages", "truncated", "created_at")
 
+    @extend_schema_field(serializers.ListSerializer(child=serializers.DictField()))
     def get_messages(self, obj: Conversation):
         qs = obj.messages.order_by("created_at")
         # Trim to last HISTORY_HARD_TRIM if exceeded.

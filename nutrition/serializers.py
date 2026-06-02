@@ -5,6 +5,7 @@ the image; the response shape mirrors the spec's ``FoodScanResponse``.
 """
 from __future__ import annotations
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from nutrition.models import Beverage, FoodLog, FoodScan, NutritionProfile, WaterLog
@@ -170,6 +171,7 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
 
+    @extend_schema_field(serializers.DictField(allow_null=True))
     def get_nutrition(self, obj: FoodScan):
         """Transform rich internal JSON → spec FoodScanResponse.nutrition shape.
 
@@ -203,6 +205,7 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
             "vitamins": vitamins,
         }
 
+    @extend_schema_field(serializers.DictField(allow_null=True))
     def get_beauty_insights(self, obj: FoodScan):
         """DRF-264: spec v2.0 §FoodScanResponse.beauty_insights.
 
