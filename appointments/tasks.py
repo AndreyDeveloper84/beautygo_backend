@@ -51,7 +51,10 @@ EVENT_HANDLERS: dict[str, EventHandler] = {
     OutboxEvent.Topic.BOOKING_RESCHEDULED: _log_handler("booking.rescheduled"),
     OutboxEvent.Topic.BOOKING_COMPLETED: _log_handler("booking.completed"),
     OutboxEvent.Topic.BOOKING_NO_SHOW: _log_handler("booking.no_show"),
-    OutboxEvent.Topic.PAYMENT_CONFIRMED: _log_handler("payment.confirmed"),
+    # B-1a — renamed payment.confirmed → payment.captured (Variant C).
+    OutboxEvent.Topic.PAYMENT_CAPTURED: _log_handler("payment.captured"),
+    # B-1b — new payment.failed topic emitted on YooKassa fail/canceled.
+    OutboxEvent.Topic.PAYMENT_FAILED: _log_handler("payment.failed"),
     OutboxEvent.Topic.PAYMENT_REFUNDED: _log_handler("payment.refunded"),
     OutboxEvent.Topic.CACHE_INVALIDATE_SLOTS: _log_handler("cache.invalidate_slots"),
     # #246 Q1 — log-only stub. Real cross-service consumer is bot-

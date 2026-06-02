@@ -10,7 +10,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from appointments.models import Appointment
+from appointments.models import Appointment, OutboxEvent
 from payments.models import Payment
 from services.models import Service, ServiceCategory
 from users.models import User
@@ -393,16 +393,30 @@ class TestPaymentWebhook:
         payment.refresh_from_db()
         assert payment.status == Payment.Status.PAID
 
-        # N2: webhook writes a PAYMENT_CONFIRMED OutboxEvent in the same
+        # N2: webhook writes a PAYMENT_CAPTURED OutboxEvent in the same
         # transaction so the notifications dispatcher fires the
         # `payment_paid` push within one beat (~10s).
         events = OutboxEvent.objects.filter(
-            topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
+            topic=OutboxEvent.Topic.PAYMENT_CAPTURED,
         )
         assert events.count() == 1
         # Post-#486 envelope wraps domain fields under .data.
         assert events.first().data['payment_id'] == str(payment.id)
         assert events.first().data['appointment_id'] == str(payment.appointment_id)
+        # B-1a — vocabulary contract: cross-service topic uses
+        # 'payment.captured' (not legacy 'payment.confirmed'). Bot's
+        # eventbus consumer registers the new name; emitting the old
+        # one landed in the ingest DLQ.
+        assert events.first().payload['event_name'] == 'payment.captured'
+        # PII guard mirror of payment.failed — pin the captured data
+        # shape so a future PR that accidentally adds e.g.
+        # customer_email / card_last4 / full_name fails this test.
+        # Closed allowlist; any addition has to land here explicitly.
+        captured_allowed = {'payment_id', 'appointment_id', 'amount'}
+        assert set(events.first().data.keys()) == captured_allowed, (
+            f"payment.captured data must NOT include PII; saw extras: "
+            f"{set(events.first().data.keys()) - captured_allowed}"
+        )
 
     def test_webhook_payment_canceled(self, anon_app, client_user, specialist_user, service):
         payment, appt = self._create_payment_with_appointment(client_user, specialist_user, service)
@@ -412,6 +426,12 @@ class TestPaymentWebhook:
             'status': 'canceled',
             'paid': False,
             'refunded_amount': Decimal('0'),
+            # B-1b — coarse closed-enum reason fields per YooKassa
+            # cancellation_details. No PII (per event-contract §7).
+            'cancellation_details': {
+                'party': 'payment_network',
+                'reason': 'insufficient_funds',
+            },
         }
         with patch(
             'payments.views._get_yookassa',
@@ -427,6 +447,99 @@ class TestPaymentWebhook:
         assert payment.status == Payment.Status.FAILED
         appt.refresh_from_db()
         assert appt.status == Appointment.Status.CANCELLED
+
+        # B-1b — payment.failed emit, no PII, coarse reason enums.
+        events = OutboxEvent.objects.filter(
+            topic=OutboxEvent.Topic.PAYMENT_FAILED,
+        )
+        assert events.count() == 1
+        ev = events.first()
+        assert ev.payload['event_name'] == 'payment.failed'
+        assert ev.data['payment_id'] == str(payment.id)
+        assert ev.data['appointment_id'] == str(payment.appointment_id)
+        assert ev.data['amount'] == str(payment.amount)
+        assert ev.data['cancellation_party'] == 'payment_network'
+        assert ev.data['reason_code'] == 'insufficient_funds'
+        # PII guard per event-contract §7 — no names / emails / cards /
+        # free-text reasons. Closed allowlist of data keys means any
+        # accidental addition of a PII-shaped key fails this assertion.
+        allowed_keys = {
+            'payment_id', 'appointment_id', 'amount',
+            'cancellation_party', 'reason_code',
+        }
+        assert set(ev.data.keys()) == allowed_keys, (
+            f"payment.failed data must NOT include PII; saw extras: "
+            f"{set(ev.data.keys()) - allowed_keys}"
+        )
+
+    def test_webhook_payment_canceled_normalises_unknown_enum_values(
+        self, anon_app, client_user, specialist_user, service,
+    ):
+        # B-1b PII floor — if YooKassa (or a buggy SDK) ever puts a
+        # value outside the documented closed enum into party / reason,
+        # the publisher must NOT pass it through to bot-platform.
+        # _safe_cancellation_party / _safe_cancellation_reason coerce
+        # everything outside the allowlist to ''.
+        payment, _ = self._create_payment_with_appointment(
+            client_user, specialist_user, service,
+        )
+        mock_info = {
+            'provider_payment_id': 'wh_pay_001',
+            'status': 'canceled',
+            'refunded_amount': Decimal('0'),
+            'cancellation_details': {
+                # Exotic / attacker-supplied values — must normalise to ''.
+                'party': '<script>alert(1)</script>',
+                'reason': 'free-text leak attempt: customer Anna ****1234',
+            },
+        }
+        with patch(
+            'payments.views._get_yookassa',
+            return_value=MagicMock(
+                get_payment_info=MagicMock(return_value=mock_info),
+            ),
+        ):
+            response = anon_app.post(
+                WEBHOOK_URL,
+                {'event': 'payment.canceled', 'object': {'id': 'wh_pay_001'}},
+                format='json',
+            )
+        assert response.status_code == 200
+        ev = OutboxEvent.objects.get(topic=OutboxEvent.Topic.PAYMENT_FAILED)
+        assert ev.data['cancellation_party'] == ''
+        assert ev.data['reason_code'] == ''
+
+    def test_webhook_payment_canceled_handles_missing_cancellation_details(
+        self, anon_app, client_user, specialist_user, service,
+    ):
+        # YooKassa MAY omit cancellation_details when the provider does
+        # not surface a reason. The emit must still fire with empty
+        # enum slots — bot-side handler can branch on '' vs known
+        # values rather than crashing on a missing key.
+        payment, _ = self._create_payment_with_appointment(
+            client_user, specialist_user, service,
+        )
+        mock_info = {
+            'provider_payment_id': 'wh_pay_001',
+            'status': 'canceled',
+            'refunded_amount': Decimal('0'),
+            # cancellation_details intentionally absent
+        }
+        with patch(
+            'payments.views._get_yookassa',
+            return_value=MagicMock(
+                get_payment_info=MagicMock(return_value=mock_info),
+            ),
+        ):
+            response = anon_app.post(
+                WEBHOOK_URL,
+                {'event': 'payment.canceled', 'object': {'id': 'wh_pay_001'}},
+                format='json',
+            )
+        assert response.status_code == 200
+        ev = OutboxEvent.objects.get(topic=OutboxEvent.Topic.PAYMENT_FAILED)
+        assert ev.data['cancellation_party'] == ''
+        assert ev.data['reason_code'] == ''
 
     def test_webhook_event_vs_api_status_mismatch_is_noop(
         self, anon_app, client_user, specialist_user, service,
@@ -481,7 +594,7 @@ class TestPaymentWebhook:
         assert appt.status == original_appt_status
         # No outbox emit on the mismatch branch.
         assert OutboxEvent.objects.filter(
-            topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
+            topic=OutboxEvent.Topic.PAYMENT_CAPTURED,
         ).count() == 0
 
     def test_webhook_idempotent(self, anon_app, client_user, specialist_user, service):

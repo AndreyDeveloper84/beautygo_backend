@@ -99,9 +99,22 @@ def handle_booking_confirmed(payload: dict) -> None:
     logger.info("outbox.handle booking.confirmed booking_id=%s", payload.get("booking_id"))
 
 
-def handle_payment_confirmed(payload: dict) -> None:
-    """Stub: would transition booking to CONFIRMED."""
-    logger.info("outbox.handle payment.confirmed payment_id=%s", payload.get("payment_id"))
+def handle_payment_captured(payload: dict) -> None:
+    """Stub: would transition booking to COMPLETED-billing.
+
+    Renamed from handle_payment_confirmed in B-1a (Variant C).
+    """
+    logger.info("outbox.handle payment.captured payment_id=%s", payload.get("payment_id"))
+
+
+def handle_payment_failed(payload: dict) -> None:
+    """Stub: B-1b — payment failure. The retry threshold + customer DM
+    live on the bot side (W2); Ayla side is log-only."""
+    logger.info(
+        "outbox.handle payment.failed payment_id=%s reason=%s",
+        payload.get("payment_id"),
+        payload.get("reason_code") or "",
+    )
 
 
 def handle_cache_invalidate_slots(payload: dict) -> None:
@@ -127,6 +140,7 @@ HANDLERS = {
     "booking.cancelled": handle_booking_cancelled,
     "booking.rescheduled": handle_booking_rescheduled,
     "booking.confirmed": handle_booking_confirmed,
-    "payment.confirmed": handle_payment_confirmed,
+    "payment.captured": handle_payment_captured,
+    "payment.failed": handle_payment_failed,
     "cache.invalidate_slots": handle_cache_invalidate_slots,
 }
