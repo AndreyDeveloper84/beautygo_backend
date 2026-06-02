@@ -1,5 +1,6 @@
 import re
 
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from .models import Profile, SpecialistProfile, User
@@ -206,6 +207,7 @@ class SpecialistProfileDetailSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at',
         ]
 
+    @extend_schema_field(serializers.IntegerField())
     def get_services_count(self, obj):
         return obj.services.count()
 

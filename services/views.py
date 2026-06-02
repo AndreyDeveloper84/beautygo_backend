@@ -60,11 +60,24 @@ class ServiceCategoryViewSet(viewsets.ReadOnlyModelViewSet):
 
 class ServiceViewSet(viewsets.ModelViewSet):
     """Pro only — CRUD услуг мастера."""
+    # Phase 5 — drf-spectacular schema generation hits ``get_queryset``
+    # with an AnonymousUser (no ``specialist_profile``). Without an
+    # explicit fallback queryset the call raised AttributeError and the
+    # generator could not derive the path-param type. The base queryset
+    # attribute keeps schema generation happy; ``get_queryset`` still
+    # owns the runtime auth scoping below.
+    queryset = Service.objects.none()
     serializer_class = ServiceSerializer
     permission_classes = [permissions.IsAuthenticated, IsProApp, IsSpecialist]
 
     def get_queryset(self) -> QuerySet[Service]:
         """Return services belonging to the authenticated specialist."""
+        # drf-spectacular sets ``swagger_fake_view`` on the viewset
+        # instance when introspecting routes — short-circuit so we
+        # don't reach into request.user.specialist_profile during
+        # schema generation.
+        if getattr(self, "swagger_fake_view", False):
+            return Service.objects.none()
         return Service.objects.filter(
             specialist=self.request.user.specialist_profile,
         ).select_related('category')
