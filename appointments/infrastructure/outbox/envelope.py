@@ -63,7 +63,13 @@ EVENT_VERSIONS: dict[str, int] = {
     "booking.rescheduled": 1,
     "booking.completed": 1,
     "booking.no_show": 1,
-    "payment.confirmed": 1,
+    # B-1a (Block B, Variant C): renamed payment.confirmed →
+    # payment.captured to match the ADR cross-service vocabulary
+    # bot-platform consumes.
+    "payment.captured": 1,
+    # B-1b — payment.failed v1, emitted on YooKassa fail/canceled.
+    # No PII in data per event-contract §7.
+    "payment.failed": 1,
     "payment.refunded": 1,
     "cache.invalidate_slots": 1,
     # #246 Q1 — TUR revoke. Audit ALWAYS emitted (regardless of

@@ -86,7 +86,8 @@ class TestBuildEnvelopeShape:
             "booking.rescheduled",
             "booking.completed",
             "booking.no_show",
-            "payment.confirmed",
+            "payment.captured",
+            "payment.failed",
             "payment.refunded",
             "cache.invalidate_slots",
         ):
