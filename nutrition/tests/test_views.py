@@ -363,3 +363,50 @@ class TestResponseShape:
         body = resp.json()["data"]
         assert "beauty_insights" in body
         assert body["beauty_insights"] is None
+
+
+class TestLocalizeFirst152FZ:
+    """152-ФЗ ст. 18 п. 5 — localize-first invariant.
+
+    The FoodScan row tying ``user`` to the uploaded image MUST be
+    committed to the RF DB BEFORE the photo bytes leave the country
+    via OpenAI/Yandex Vision. Pre-pilot legal gate for #947.
+    """
+
+    def test_scan_row_exists_in_db_before_vendor_call(
+        self, auth_client, client_user,
+    ):
+        observed_rows_at_router_call: list[int] = []
+
+        def _record_row_count(*args, **kwargs):
+            # Snapshot from inside the mocked router — counts FoodScan
+            # rows for this user at the exact moment the OpenAI call
+            # would normally fire. localize-first → exactly 1 row.
+            observed_rows_at_router_call.append(
+                FoodScan.objects.filter(user=client_user).count()
+            )
+            return RouterResult(
+                result=_scan_result(), primary_provider_name="openai",
+            )
+
+        router_mock = MagicMock()
+        router_mock.scan.side_effect = _record_row_count
+
+        with patch(
+            "nutrition.views.FoodScannerRouter",
+            return_value=router_mock,
+        ), patch(
+            "nutrition.views.NutritionLookup",
+            return_value=MagicMock(lookup=lambda *a, **kw: None),
+        ):
+            resp = auth_client.post(
+                SCAN_URL, {"image": _upload()}, format="multipart",
+            )
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert observed_rows_at_router_call == [1], (
+            "152-ФЗ localize-first invariant broken: FoodScan row "
+            "did not exist in RF DB before the OpenAI Vision call. "
+            "Move scan.save() BEFORE router.scan() in "
+            "nutrition/views.py::FoodScanView.post."
+        )
