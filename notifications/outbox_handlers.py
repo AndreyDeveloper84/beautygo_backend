@@ -341,7 +341,7 @@ def _payment_context(payment, event: OutboxEvent) -> dict:
     """Template context for payment notifications. The amount in the
     payload may be the full payment or a partial refund — the
     PAYMENT_REFUNDED writer puts the refunded amount there, the
-    PAYMENT_CONFIRMED writer puts the captured amount."""
+    PAYMENT_CAPTURED writer puts the captured amount."""
     appointment = payment.appointment
     return {
         "payment_id": str(payment.id),
@@ -359,8 +359,13 @@ def _payment_context(payment, event: OutboxEvent) -> dict:
     }
 
 
-def handle_payment_confirmed(event: OutboxEvent) -> None:
-    """Push the 'оплата прошла' notification to the client."""
+def handle_payment_captured(event: OutboxEvent) -> None:
+    """Push the 'оплата прошла' notification to the client.
+
+    Renamed from handle_payment_confirmed in B-1a (Variant C) — the
+    cross-service topic is now payment.captured per the ADR. Local
+    notification behaviour unchanged; template stays payment_paid.
+    """
     payment = _load_payment(event)
     if payment is None:
         return
@@ -369,6 +374,22 @@ def handle_payment_confirmed(event: OutboxEvent) -> None:
         template_id="payment_paid",
         context=_payment_context(payment, event),
         event_id=event.id,
+    )
+
+
+def handle_payment_failed(event: OutboxEvent) -> None:
+    """B-1b — local-side handler for payment.failed.
+
+    Bot-platform owns the retry threshold + customer DM (W2). On the
+    Ayla side the failure is mostly observed via the appointment's
+    own status transition; we keep a log-only handler so the topic is
+    not flagged as 'unknown_topic' by the dispatcher. A future slice
+    may surface a client-facing 'payment_failed' template here.
+    """
+    logger.info(
+        "outbox.handle payment.failed payment_id=%s reason=%s",
+        event.data.get("payment_id"),
+        event.data.get("reason_code") or "",
     )
 
 
@@ -401,7 +422,8 @@ BOOKING_HANDLERS: dict[str, EventHandler] = {
     OutboxEvent.Topic.BOOKING_RESCHEDULED: handle_booking_rescheduled,
     OutboxEvent.Topic.BOOKING_COMPLETED: handle_booking_completed,
     OutboxEvent.Topic.BOOKING_NO_SHOW: handle_booking_no_show,
-    OutboxEvent.Topic.PAYMENT_CONFIRMED: handle_payment_confirmed,
+    OutboxEvent.Topic.PAYMENT_CAPTURED: handle_payment_captured,
+    OutboxEvent.Topic.PAYMENT_FAILED: handle_payment_failed,
     OutboxEvent.Topic.PAYMENT_REFUNDED: handle_payment_refunded,
 }
 
@@ -415,7 +437,8 @@ __all__ = [
     "handle_booking_rescheduled",
     "handle_booking_completed",
     "handle_booking_no_show",
-    "handle_payment_confirmed",
+    "handle_payment_captured",
+    "handle_payment_failed",
     "handle_payment_refunded",
     "Notification",  # convenience for test imports
 ]

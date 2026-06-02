@@ -408,7 +408,22 @@ class OutboxEvent(models.Model):
         BOOKING_RESCHEDULED = "booking.rescheduled", "Запись перенесена"
         BOOKING_COMPLETED = "booking.completed", "Запись завершена"
         BOOKING_NO_SHOW = "booking.no_show", "Клиент не пришёл"
-        PAYMENT_CONFIRMED = "payment.confirmed", "Оплата подтверждена"
+        # B-1a (Block B, Variant C): renamed payment.confirmed →
+        # payment.captured to align with the ADR cross-service vocabulary
+        # bot-platform already consumes (apps/eventbus/consumers/payment.py
+        # registers payment.authorized / payment.captured / payment.failed
+        # / payment.refunded). Ayla's old payment.confirmed name was
+        # rejected by bot's ingest as unknown → codex P0-1.
+        # payment.authorized intentionally NOT emitted here — the hold
+        # lifecycle stays on booking.confirmed during pilot (Variant C
+        # decision, event-contract pilot vocabulary addendum 2026-06-01).
+        PAYMENT_CAPTURED = "payment.captured", "Оплата захвачена"
+        # B-1b — payment.failed (v1) emitted when YooKassa cancels or
+        # fails a payment. Data carries id / enum / numbers only, no
+        # PII per event-contract §7 (no names / emails / card numbers /
+        # free-text reasons). Bot-side handler (W2 territory) owns the
+        # retry threshold + customer DM.
+        PAYMENT_FAILED = "payment.failed", "Оплата не прошла"
         PAYMENT_REFUNDED = "payment.refunded", "Возврат оплаты"
         CACHE_INVALIDATE_SLOTS = "cache.invalidate_slots", "Инвалидация кеша слотов"
         TENANT_RELATIONSHIP_REVOKED = (
