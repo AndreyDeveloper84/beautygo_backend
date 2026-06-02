@@ -260,6 +260,12 @@ class MeBookingsListView(_CursorPageMixin, APIView):
     serializer_class = BookingListItemSerializer
 
     @extend_schema(
+        # Phase 5 — explicit operation_id resolves the drf-spectacular
+        # collision with MeBookingDetailView (both GET under the same
+        # /api/v1/internal/me/bookings/ prefix). Stable name pinned
+        # here so mobile / bot codegen does not re-bind to numeral
+        # suffixes when the route order shifts.
+        operation_id="internal_me_bookings_list",
         tags=["internal"],
         parameters=[],
         responses={
@@ -346,6 +352,9 @@ class MeBookingDetailView(APIView):
     serializer_class = BookingDetailSerializer
 
     @extend_schema(
+        # Phase 5 — explicit operation_id to differentiate from
+        # MeBookingsListView's GET on the same URL prefix.
+        operation_id="internal_me_bookings_retrieve",
         tags=["internal"],
         responses={
             200: BookingDetailSerializer,

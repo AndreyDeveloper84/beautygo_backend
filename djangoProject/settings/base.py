@@ -218,6 +218,26 @@ SPECTACULAR_SETTINGS = {
         {'name': 'notifications', 'description': '⚪ Уведомления (shared)'},
         {'name': 'ai', 'description': '🟢 AI-ассистент (client)'},
     ],
+    # Phase 5 — drf-spectacular collision warnings. Multiple ``status``
+    # fields across different choice sets produced auto-named
+    # ``Status00fEnum`` / ``Status56bEnum`` components. Pin readable
+    # names per field-owning model. The values themselves are stable
+    # contract — pinning the schema NAMES keeps OpenAPI consumers
+    # (mobile codegen, drf-spectacular Sidecar UI) from re-binding to
+    # a different identifier every time the hash bucket reshuffles.
+    # Values reference the Choices class via dotted path; the dotted
+    # path lookup is drf-spectacular's preferred form.
+    'ENUM_NAME_OVERRIDES': {
+        # drf-spectacular calls .choices on a Choices subclass when the
+        # value resolves to one; pass the class itself, not .choices.
+        'AppointmentStatusEnum': 'appointments.models.Appointment.Status',
+        'PaymentStatusEnum': 'payments.models.Payment.Status',
+        # SpecialistProfile.ProfileStatus (draft/pending/active) —
+        # third "status" field across the schema; without the override
+        # drf-spectacular falls back to ``Status56bEnum``.
+        'SpecialistProfileStatusEnum':
+            'users.models.SpecialistProfile.ProfileStatus',
+    },
 }
 
 MIDDLEWARE = [
