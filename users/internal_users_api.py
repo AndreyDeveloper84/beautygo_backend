@@ -152,9 +152,14 @@ class InternalUserProfileView(APIView):
             # 404 is intentional — bot's profile_client treats this as
             # non-retryable: the user is gone, retrying won't bring
             # them back. Ops can investigate from the event_id.
+            # Include request_id for cross-service log correlation —
+            # bot-side dead-letter logs already carry their event_id;
+            # request_id stamped by users/middleware.py:RequestIDMiddleware
+            # closes the loop when ops triages a not-found across both
+            # sides.
             logger.info(
-                "internal.users.profile_not_found user_id=%s",
-                user_id,
+                "internal.users.profile_not_found user_id=%s request_id=%s",
+                user_id, getattr(request, "request_id", "-"),
             )
             return error_response(
                 "NOT_FOUND",

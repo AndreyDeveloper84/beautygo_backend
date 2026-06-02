@@ -174,6 +174,27 @@ class TestProfileResolution:
         response = api.get(url)
         assert response.status_code == 404
 
+    def test_avatar_url_is_resolved_when_image_present(self, api, specialist_user):
+        # CR FOLLOW_UP gap — happy-path tests above had avatar=None,
+        # so the ``specialist.avatar.url`` branch was untested. Attach
+        # a minimal in-memory file to exercise the .url accessor end-
+        # to-end. Don't assert the exact URL (depends on storage
+        # backend / MEDIA_URL config) — only that it's a non-empty
+        # string starting with '/' (relative URL from FileSystemStorage).
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        sp = specialist_user.specialist_profile
+        sp.avatar = SimpleUploadedFile(
+            "test.jpg", b"\xff\xd8\xff\xe0fake", content_type="image/jpeg",
+        )
+        sp.save()
+
+        url = URL_TMPL.format(user_id=specialist_user.id)
+        response = api.get(url)
+        assert response.status_code == 200
+        avatar_url = response.data["avatar_url"]
+        assert avatar_url, "avatar_url must be non-empty when avatar file is set"
+        assert isinstance(avatar_url, str)
+
 
 @pytest.mark.django_db
 class TestPIIGuard:
