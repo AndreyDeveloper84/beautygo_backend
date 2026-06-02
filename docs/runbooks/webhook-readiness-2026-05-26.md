@@ -34,11 +34,13 @@ Throttle: `webhook_payment` at 100/min (amplification cap).
 | YooKassa event | Required API status | Internal state change | Outbox topic |
 |---|---|---|---|
 | `payment.waiting_for_capture` | `waiting_for_capture` | `Payment→AUTHORIZED`, `Appointment→CONFIRMED` | `booking.confirmed` |
-| `payment.succeeded` | `succeeded` | `Payment→PAID` | `payment.confirmed` |
-| `payment.canceled` | `canceled` | `Payment→FAILED`, `Appointment→CANCELLED` (if non-terminal) | (no emit) |
+| `payment.succeeded` | `succeeded` | `Payment→PAID` | `payment.captured` |
+| `payment.canceled` | `canceled` | `Payment→FAILED`, `Appointment→CANCELLED` (if non-terminal) | `payment.failed` |
 | `refund.succeeded` | n/a | `Payment→REFUNDED` or `PARTIALLY_REFUNDED` (depending on `refunded_amount`) | `payment.refunded` |
 
-Reference: `payments/views.py:432-510`.
+> **Vocabulary alignment (Variant C, B-1, 2026-06-02):** `payment.succeeded` now emits `payment.captured` (was `payment.confirmed`). `payment.canceled` now emits `payment.failed` (previously no emit — bot's `payment_failed` skill had no trigger, codex P0-3). `payment.authorized` intentionally NOT emitted on hold — the hold lifecycle stays on `booking.confirmed` for pilot.
+
+Reference: `payments/views.py:456-589`.
 
 ### 3. Production environment gating
 
