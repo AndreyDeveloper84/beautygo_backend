@@ -131,6 +131,16 @@ class FoodScanView(APIView):
             ContentFile(image_bytes),
             save=False,
         )
+        # 152-ФЗ ст. 18 п. 5 — localize-first. The DB row tying user
+        # to image MUST exist in an RF-located DB BEFORE the photo
+        # bytes leave Russia (OpenAI Vision call below). The file
+        # itself is already in MinIO at this point via image.save(
+        # save=False) — the missing piece was the structured record.
+        # Without this commit, a crash during the router.scan() call
+        # below would leave an orphan file with no DB linkage, AND a
+        # strict reading of ст. 18 п. 5 would flag the cross-border
+        # transfer as occurring before the RF-side record exists.
+        scan.save()
 
         router = FoodScannerRouter()
         try:
@@ -252,6 +262,13 @@ class InternalFoodScanView(APIView):
             ContentFile(image_bytes),
             save=False,
         )
+        # 152-ФЗ ст. 18 п. 5 — see FoodScanView above. Same rationale
+        # for the internal (bot-driven) path: the structured FoodScan
+        # row MUST be committed to the RF DB before the photo leaves
+        # the country via OpenAI Vision. resolve_external_user above
+        # has already either fetched or created the proxy User in the
+        # RF DB; this completes the localize-first record.
+        scan.save()
 
         router = FoodScannerRouter()
         try:

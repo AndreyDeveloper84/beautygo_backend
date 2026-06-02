@@ -221,3 +221,49 @@ class TestScanFlow:
         scan = FoodScan.objects.get()
         proxy = User.objects.get(username="bot:42")
         assert scan.user_id == proxy.id
+
+    def test_localize_first_scan_row_exists_before_vendor_call(self):
+        """152-ФЗ ст. 18 п. 5 — pre-pilot legal gate.
+
+        The FoodScan row tying ``user`` to the uploaded image MUST be
+        committed to the RF DB BEFORE the photo bytes are sent across
+        the border via OpenAI/Yandex Vision. This test pins the order
+        by inspecting the DB row count from inside the router mock —
+        when router.scan is called, exactly one FoodScan row must
+        already exist for the actor (created by the localize-first
+        save call).
+        """
+        c = APIClient()
+        observed_rows_at_router_call: list[int] = []
+
+        def _record_row_count(*args, **kwargs):
+            # Snapshot of FoodScan rows for this proxy at the moment
+            # OpenAI is being called. If localize-first is removed,
+            # this list stays at 0 and the assertion below fails.
+            user = User.objects.get(username="bot:loc")
+            observed_rows_at_router_call.append(
+                FoodScan.objects.filter(user=user).count()
+            )
+            return RouterResult(
+                result=_scan_result(), primary_provider_name="openai",
+            )
+
+        router_mock = MagicMock()
+        router_mock.scan.side_effect = _record_row_count
+
+        with patch(
+            "nutrition.views.FoodScannerRouter",
+            return_value=router_mock,
+        ), patch(
+            "nutrition.views.NutritionLookup",
+            return_value=MagicMock(lookup=lambda *a, **kw: None),
+        ):
+            resp = _post(c, token=SERVICE_TOKEN, external_id="bot:loc")
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert observed_rows_at_router_call == [1], (
+            "152-ФЗ localize-first invariant broken: FoodScan row "
+            "did not exist in RF DB before the OpenAI Vision call. "
+            "Move scan.save() BEFORE router.scan() in "
+            "nutrition/views.py::InternalFoodScanView.post."
+        )
