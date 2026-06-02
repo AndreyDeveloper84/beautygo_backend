@@ -39,6 +39,65 @@ from .services import (
 logger = logging.getLogger(__name__)
 
 
+# B-1b — Closed allowlists for payment.failed data fields. YooKassa's
+# documented cancellation_details vocabulary, pinned at the emit site
+# so a future upstream addition (or a buggy SDK that injects free-text)
+# cannot leak into the event payload. Anything outside the allowlist
+# normalises to '' — bot-side handler branches on '' vs known values
+# the same way it does for actual missing details.
+# Source: https://yookassa.ru/developers/payment-acceptance/
+#         after-the-payment/declined-payments
+_CANCELLATION_PARTIES = frozenset({
+    "merchant",
+    "yandex_checkout",
+    "payment_network",
+})
+# Closed enum of reason slugs YooKassa publishes today. Kept as an
+# explicit allowlist so we don't pass through free-text reason strings
+# even if the upstream schema relaxes. New values land here only via
+# an explicit code change.
+_CANCELLATION_REASONS = frozenset({
+    "3d_secure_failed",
+    "call_issuer",
+    "canceled_by_merchant",
+    "card_expired",
+    "country_forbidden",
+    "deal_expired",
+    "expired_on_capture",
+    "expired_on_confirmation",
+    "fraud_suspected",
+    "general_decline",
+    "identification_required",
+    "insufficient_funds",
+    "internal_timeout",
+    "invalid_card_number",
+    "invalid_csc",
+    "issuer_unavailable",
+    "payment_method_limit_exceeded",
+    "payment_method_restricted",
+    "permission_revoked",
+    "unsupported_mobile_operator",
+})
+
+
+def _safe_cancellation_party(value: object) -> str:
+    """Coerce a YooKassa ``cancellation_details.party`` value to the
+    closed allowlist. Anything else → empty string."""
+    if isinstance(value, str) and value in _CANCELLATION_PARTIES:
+        return value
+    return ""
+
+
+def _safe_cancellation_reason(value: object) -> str:
+    """Coerce a YooKassa ``cancellation_details.reason`` slug to the
+    closed allowlist. Anything else → empty string. This is the PII
+    floor for payment.failed: even if the provider one day starts
+    putting free text here, it never reaches the wire."""
+    if isinstance(value, str) and value in _CANCELLATION_REASONS:
+        return value
+    return ""
+
+
 def _get_yookassa() -> YooKassaService:
     return YooKassaService()
 
@@ -507,12 +566,58 @@ class PaymentWebhookView(APIView):
                     actor="system",
                 )
             elif event == 'payment.succeeded' and yookassa_status == 'succeeded':
+                # B-1a (Block B) — emit payment.captured (was
+                # payment.confirmed). Bot-platform's eventbus consumer
+                # registers payment.captured per the ADR vocabulary;
+                # the old name landed in the DLQ on every successful
+                # capture (codex P0-1). Data shape unchanged.
                 emit_outbox_event(
-                    topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
+                    topic=OutboxEvent.Topic.PAYMENT_CAPTURED,
                     data={
                         'payment_id': str(payment.id),
                         'appointment_id': str(payment.appointment_id),
                         'amount': str(payment.amount),
+                    },
+                    user_id=client_id,
+                    tenant_id=tenant_id,
+                    actor="system",
+                )
+            elif event == 'payment.canceled' and yookassa_status == 'canceled':
+                # B-1b (Block B) — emit payment.failed when YooKassa
+                # cancels or fails a payment. Previously no event was
+                # emitted on this branch (codex P0-3 finding); bot-
+                # platform's payment_failed skill could not run because
+                # the trigger never arrived.
+                #
+                # Data per event-contract §7: id / enum / numbers only,
+                # NO PII. We expose the YooKassa cancellation_party
+                # (merchant / yandex_checkout / payment_network) and
+                # the coarse reason slug — both are closed enums with
+                # zero free text. Card numbers, names, emails,
+                # provider-side free-text reasons are NEVER included.
+                #
+                # The bot-side retry threshold + customer DM are W2's
+                # responsibility; this emit only reports the fail
+                # event.
+                cancellation = info.get('cancellation_details') or {}
+                emit_outbox_event(
+                    topic=OutboxEvent.Topic.PAYMENT_FAILED,
+                    data={
+                        'payment_id': str(payment.id),
+                        'appointment_id': str(payment.appointment_id),
+                        'amount': str(payment.amount),
+                        # Closed-allowlist coercion — see
+                        # _safe_cancellation_party / _safe_cancellation_reason
+                        # at the top of this module. Any value outside
+                        # the YooKassa-documented enum normalises to ''
+                        # so a relaxed upstream schema cannot leak free
+                        # text into the event payload.
+                        'cancellation_party': _safe_cancellation_party(
+                            cancellation.get('party'),
+                        ),
+                        'reason_code': _safe_cancellation_reason(
+                            cancellation.get('reason'),
+                        ),
                     },
                     user_id=client_id,
                     tenant_id=tenant_id,

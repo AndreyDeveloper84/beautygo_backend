@@ -300,8 +300,8 @@ def test_payment_handlers_registered():
     from appointments import tasks as apt_tasks
 
     assert (
-        apt_tasks.EVENT_HANDLERS[OutboxEvent.Topic.PAYMENT_CONFIRMED]
-        is outbox_handlers.handle_payment_confirmed
+        apt_tasks.EVENT_HANDLERS[OutboxEvent.Topic.PAYMENT_CAPTURED]
+        is outbox_handlers.handle_payment_captured
     )
     assert (
         apt_tasks.EVENT_HANDLERS[OutboxEvent.Topic.PAYMENT_REFUNDED]
@@ -310,7 +310,7 @@ def test_payment_handlers_registered():
 
 
 # ---------------------------------------------------------------------------
-# payment.confirmed / payment.refunded
+# payment.captured / payment.refunded
 # ---------------------------------------------------------------------------
 
 
@@ -332,14 +332,14 @@ def payment(db, appointment):
 class TestPaymentConfirmed:
     def test_sends_payment_paid_to_client(self, payment, client_user):
         event = OutboxEvent.objects.create(
-            topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
+            topic=OutboxEvent.Topic.PAYMENT_CAPTURED,
             payload={
                 "payment_id": str(payment.id),
                 "appointment_id": str(payment.appointment_id),
                 "amount": str(payment.amount),
             },
         )
-        outbox_handlers.handle_payment_confirmed(event)
+        outbox_handlers.handle_payment_captured(event)
         rows = Notification.objects.filter(
             user=client_user, template_id="payment_paid",
         )
@@ -350,19 +350,19 @@ class TestPaymentConfirmed:
 
     def test_missing_payment_logs_and_skips(self, db):
         event = OutboxEvent.objects.create(
-            topic=OutboxEvent.Topic.PAYMENT_CONFIRMED,
+            topic=OutboxEvent.Topic.PAYMENT_CAPTURED,
             payload={
                 "payment_id": "00000000-0000-0000-0000-000000000000",
             },
         )
-        outbox_handlers.handle_payment_confirmed(event)
+        outbox_handlers.handle_payment_captured(event)
         assert Notification.objects.count() == 0
 
     def test_missing_payment_id_logs_and_skips(self, db):
         event = OutboxEvent.objects.create(
-            topic=OutboxEvent.Topic.PAYMENT_CONFIRMED, payload={},
+            topic=OutboxEvent.Topic.PAYMENT_CAPTURED, payload={},
         )
-        outbox_handlers.handle_payment_confirmed(event)
+        outbox_handlers.handle_payment_captured(event)
         assert Notification.objects.count() == 0
 
 
