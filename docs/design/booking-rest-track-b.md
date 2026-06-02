@@ -53,7 +53,9 @@ Transitions enforced by `BookingStateMachine.transition()`. `ACTIVE_BOOKING_STAT
 All 5 booking/payment emit sites go through `appointments.infrastructure.outbox.emit_outbox_event(...)`, which wraps domain data in the ADR-0009 envelope (`event_id == OutboxEvent.id`, `event_version` from registry, `actor` validated against `{system, user, admin}`).
 
 Live topics in `OutboxEvent.Topic`:
-`booking.created`, `booking.confirmed`, `booking.cancelled`, `booking.rescheduled`, `booking.completed`, `booking.no_show`, `payment.confirmed`, `payment.refunded`, `cache.invalidate_slots`.
+`booking.created`, `booking.confirmed`, `booking.cancelled`, `booking.rescheduled`, `booking.completed`, `booking.no_show`, `payment.captured`, `payment.failed`, `payment.refunded`, `cache.invalidate_slots`, `tenant.relationship.revoked`.
+
+> **Vocabulary alignment (Variant C, B-1, 2026-06-02):** `payment.confirmed` renamed to `payment.captured`; new `payment.failed` added. `payment.authorized` deferred — the hold lifecycle stays on `booking.confirmed` for pilot. See migration `0011_b1_payment_vocab` for the in-flight row rewrite.
 
 ### Tests
 
