@@ -78,6 +78,9 @@ EXCLUDED_PATH_PREFIXES = (
     "/api/v1/payments/internal/",
     "/api/v1/masters/internal/",
     "/api/v1/internal/me/",
+    # P1-3 codex audit — internal user-profile fetch for the bot's
+    # user.profile.updated consumer. Bearer auth, no X-App-Type.
+    "/api/v1/internal/users/",
 )
 
 
@@ -208,6 +211,7 @@ class TenantContextMiddleware:
         "/api/v1/payments/internal/",
         "/api/v1/masters/internal/",
         "/api/v1/internal/me/",
+        "/api/v1/internal/users/",
         "/static/",
         "/media/",
     )

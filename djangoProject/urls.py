@@ -27,6 +27,13 @@ urlpatterns = [
         'api/v1/internal/me/bookings/',
         include('appointments.records_urls'),
     ),
+    # P1-3 codex audit — internal user-profile fetch for the bot's
+    # user.profile.updated consumer (#446). PII §7 closed subset
+    # (display_name + avatar_url only); Bearer-auth only.
+    path(
+        'api/v1/internal/users/',
+        include('users.internal_users_urls'),
+    ),
     path(
         'api/v1/internal/me/catalog/recommendations/',
         include('users.catalog_recommendations_urls'),
