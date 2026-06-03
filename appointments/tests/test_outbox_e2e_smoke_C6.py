@@ -92,7 +92,7 @@ class TestOutboxToBotChain:
         event = emit_outbox_event(
             topic=OutboxEvent.Topic.BOOKING_CREATED,
             data={
-                "booking_id": "11111111-1111-1111-1111-111111111111",
+                "appointment_id": "11111111-1111-1111-1111-111111111111",
                 "specialist_id": "22222222-2222-2222-2222-222222222222",
                 "service_id": "33333333-3333-3333-3333-333333333333",
                 "start_at": "2026-06-15T10:00:00+03:00",
@@ -135,7 +135,7 @@ class TestOutboxToBotChain:
         assert body["actor"] == "user"
         assert body["tenant_id"] == "55555555-5555-5555-5555-555555555555"
         assert body["user_id"] == "44444444-4444-4444-4444-444444444444"
-        assert body["data"]["booking_id"] == "11111111-1111-1111-1111-111111111111"
+        assert body["data"]["appointment_id"] == "11111111-1111-1111-1111-111111111111"
         # event_id present, ULID/UUID shape (>= 22 chars after stripping
         # hyphens). Don't over-pin the exact format — only that it's
         # populated.
@@ -171,7 +171,7 @@ class TestOutboxToBotChain:
         # land in 'sent' with attempt_count=2 — not stuck in 'failed'.
         event = emit_outbox_event(
             topic=OutboxEvent.Topic.BOOKING_CONFIRMED,
-            data={"booking_id": "11111111-1111-1111-1111-111111111111"},
+            data={"appointment_id": "11111111-1111-1111-1111-111111111111"},
             actor="system",
             tenant_id="55555555-5555-5555-5555-555555555555",
         )

@@ -137,7 +137,7 @@ class TestBookingCompleteEmit:
         assert evt.payload["event_name"] == "booking.completed"
         assert evt.payload["event_version"] == 1
         assert evt.payload["actor"] == "admin"  # specialist → admin
-        assert evt.data["booking_id"] == str(appt.id)
+        assert evt.data["appointment_id"] == str(appt.id)
         assert evt.data["client_id"] == str(client_user.id)
         assert evt.data["specialist_id"] == str(specialist.id)
 
@@ -213,7 +213,7 @@ class TestBookingConfirmedEmit:
         assert evt.payload["event_name"] == "booking.confirmed"
         assert evt.payload["event_version"] == 1
         assert evt.payload["actor"] == "system"
-        assert evt.data["booking_id"] == str(appt.id)
+        assert evt.data["appointment_id"] == str(appt.id)
         assert evt.data["payment_id"] == str(payment.id)
 
     def test_duplicate_webhook_does_not_double_emit(

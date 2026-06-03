@@ -260,7 +260,7 @@ class CreateBookingService:
         emit_outbox_event(
             topic=_OutboxEvent.Topic.BOOKING_CREATED,
             data={
-                "booking_id": str(appointment.id),
+                "appointment_id": str(appointment.id),
                 "client_id": str(dto.client_id),
                 "specialist_id": str(dto.specialist_id),
                 "service_id": str(dto.service_id),

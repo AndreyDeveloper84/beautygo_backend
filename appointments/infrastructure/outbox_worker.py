@@ -74,19 +74,19 @@ def process_outbox_events() -> dict:
 
 def handle_booking_created(payload: dict) -> None:
     """Stub: would create payment intent + send push to specialist."""
-    logger.info("outbox.handle booking.created booking_id=%s", payload.get("booking_id"))
+    logger.info("outbox.handle booking.created appointment_id=%s", payload.get("appointment_id"))
     _invalidate_slots_from_payload(payload)
 
 
 def handle_booking_cancelled(payload: dict) -> None:
     """Stub: would process refund + send notifications."""
-    logger.info("outbox.handle booking.cancelled booking_id=%s", payload.get("booking_id"))
+    logger.info("outbox.handle booking.cancelled appointment_id=%s", payload.get("appointment_id"))
     _invalidate_slots_from_payload(payload)
 
 
 def handle_booking_rescheduled(payload: dict) -> None:
     """Invalidate cache for BOTH old and new dates."""
-    logger.info("outbox.handle booking.rescheduled booking_id=%s", payload.get("booking_id"))
+    logger.info("outbox.handle booking.rescheduled appointment_id=%s", payload.get("appointment_id"))
     _invalidate_slots_from_payload(payload)
     if "old_start_at" in payload:
         old_date = date.fromisoformat(payload["old_start_at"][:10])
@@ -96,7 +96,7 @@ def handle_booking_rescheduled(payload: dict) -> None:
 
 def handle_booking_confirmed(payload: dict) -> None:
     """Stub: would send confirmation notifications."""
-    logger.info("outbox.handle booking.confirmed booking_id=%s", payload.get("booking_id"))
+    logger.info("outbox.handle booking.confirmed appointment_id=%s", payload.get("appointment_id"))
 
 
 def handle_payment_captured(payload: dict) -> None:

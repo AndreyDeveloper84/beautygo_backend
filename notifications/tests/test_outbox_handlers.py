@@ -88,7 +88,7 @@ def appointment(db, client_user, specialist, service):
 def _make_event(topic: str, appointment, **extra) -> OutboxEvent:
     return OutboxEvent.objects.create(
         topic=topic,
-        payload={"booking_id": str(appointment.id), **extra},
+        payload={"appointment_id": str(appointment.id), **extra},
     )
 
 
@@ -148,13 +148,13 @@ class TestBookingCreated:
     def test_missing_appointment_logs_and_skips(self, db):
         event = OutboxEvent.objects.create(
             topic=OutboxEvent.Topic.BOOKING_CREATED,
-            payload={"booking_id": "00000000-0000-0000-0000-000000000000"},
+            payload={"appointment_id": "00000000-0000-0000-0000-000000000000"},
         )
         # Doesn't raise — just logs and skips.
         outbox_handlers.handle_booking_created(event)
         assert Notification.objects.count() == 0
 
-    def test_missing_booking_id_logs_and_skips(self, db):
+    def test_missing_appointment_id_logs_and_skips(self, db):
         event = OutboxEvent.objects.create(
             topic=OutboxEvent.Topic.BOOKING_CREATED, payload={},
         )

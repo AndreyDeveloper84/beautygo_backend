@@ -556,7 +556,7 @@ class PaymentWebhookView(APIView):
                 emit_outbox_event(
                     topic=OutboxEvent.Topic.BOOKING_CONFIRMED,
                     data={
-                        'booking_id': str(payment.appointment_id),
+                        'appointment_id': str(payment.appointment_id),
                         'client_id': str(client_id),
                         'specialist_id': str(payment.appointment.specialist_id),
                         'payment_id': str(payment.id),
