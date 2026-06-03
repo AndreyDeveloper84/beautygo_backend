@@ -20,7 +20,7 @@ Design notes:
   fills the gaps.
 - **Loading the appointment.** The cancellation event payload omits
   ``client_id`` (see ``cancel_reschedule_service.py:104``), so handlers
-  reload the Appointment by ``booking_id`` rather than trusting the
+  reload the Appointment by ``appointment_id`` rather than trusting the
   payload to be complete.
 - **Soft-delete on missing FK.** If the appointment was hard-deleted
   between event write and dispatch (rare), we log and skip rather than
@@ -58,19 +58,19 @@ def _load_appointment(event: OutboxEvent) -> Appointment | None:
 
     Returns None and logs (rather than raising) for any of these
     non-transient data issues:
-    - ``booking_id`` missing from payload (writer bug)
+    - ``appointment_id`` missing from payload (writer bug)
     - row deleted between event write and dispatch (admin cleanup)
-    - ``booking_id`` not a valid UUID (data drift / legacy event)
+    - ``appointment_id`` not a valid UUID (data drift / legacy event)
 
     The dispatcher's exception path is reserved for transient failures
     (DB blip, downstream service down) where a retry has a chance to
     succeed. Bad payloads aren't transient — letting them raise would
     pin the OutboxEvent at error_count++ until it dead-letters.
     """
-    booking_id = event.data.get("booking_id")
-    if not booking_id:
+    appointment_id = event.data.get("appointment_id")
+    if not appointment_id:
         logger.warning(
-            "outbox.handler.missing_booking_id topic=%s event_id=%s",
+            "outbox.handler.missing_appointment_id topic=%s event_id=%s",
             event.topic, event.id,
         )
         return None
@@ -78,14 +78,14 @@ def _load_appointment(event: OutboxEvent) -> Appointment | None:
         return (
             Appointment.objects
             .select_related("client", "specialist", "service")
-            .get(id=booking_id)
+            .get(id=appointment_id)
         )
     except (
         Appointment.DoesNotExist, ValueError, TypeError, ValidationError,
     ) as exc:
         logger.warning(
-            "outbox.handler.appointment_missing topic=%s booking_id=%s err=%s",
-            event.topic, booking_id, exc,
+            "outbox.handler.appointment_missing topic=%s appointment_id=%s err=%s",
+            event.topic, appointment_id, exc,
         )
         return None
 
