@@ -28,7 +28,7 @@ class TestDispatchOutboxEvents:
         """Pending events get a processed_at stamp and the handler runs."""
         event = OutboxEvent.objects.create(
             topic=OutboxEvent.Topic.BOOKING_CREATED,
-            payload={"booking_id": "abc-123"},
+            payload={"appointment_id": "abc-123"},
         )
         result = dispatch_outbox_events()
 
@@ -41,7 +41,7 @@ class TestDispatchOutboxEvents:
         """Events with processed_at set must not be touched on a subsequent tick."""
         event = OutboxEvent.objects.create(
             topic=OutboxEvent.Topic.BOOKING_CREATED,
-            payload={"booking_id": "abc-456"},
+            payload={"appointment_id": "abc-456"},
             processed_at=timezone.now(),
         )
         original = event.processed_at
