@@ -368,7 +368,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 emit_outbox_event(
                     topic=OutboxEvent.Topic.BOOKING_COMPLETED,
                     data={
-                        "booking_id": str(appointment.id),
+                        "appointment_id": str(appointment.id),
                         "client_id": str(appointment.client_id),
                         "specialist_id": str(appointment.specialist_id),
                     },
@@ -443,7 +443,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 emit_outbox_event(
                     topic=OutboxEvent.Topic.BOOKING_NO_SHOW,
                     data={
-                        "booking_id": str(appointment.id),
+                        "appointment_id": str(appointment.id),
                         "client_id": str(appointment.client_id),
                         "specialist_id": str(appointment.specialist_id),
                     },

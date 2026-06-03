@@ -144,7 +144,7 @@ class TestNoShowHappyPath:
         assert evt.payload["event_version"] == 1
         # Specialist-initiated → admin per ADR-0009 actor mapping.
         assert evt.payload["actor"] == "admin"
-        assert evt.data["booking_id"] == str(appt.id)
+        assert evt.data["appointment_id"] == str(appt.id)
         assert evt.data["client_id"] == str(client_user.id)
         assert evt.data["specialist_id"] == str(specialist.id)
 

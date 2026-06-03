@@ -108,7 +108,7 @@ class CancelBookingService:
         emit_outbox_event(
             topic=_OutboxEvent.Topic.BOOKING_CANCELLED,
             data={
-                "booking_id": str(booking_id),
+                "appointment_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
                 "start_at": appointment.start_datetime.isoformat(),
                 "initiator_role": initiator_role,
@@ -210,7 +210,7 @@ class RescheduleBookingService:
         emit_outbox_event(
             topic=_OutboxEvent.Topic.BOOKING_RESCHEDULED,
             data={
-                "booking_id": str(booking_id),
+                "appointment_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
                 "client_id": str(appointment.client_id),
                 # Use the same start_at/end_at field names as booking.created
