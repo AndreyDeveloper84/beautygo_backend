@@ -190,11 +190,16 @@ class TestWalkInClientResolution:
         c2 = Appointment.objects.get(id=r2.data["data"]["id"]).client_id
         assert c1 != c2  # no phone → distinct stubs
 
-    def test_existing_registered_phone_is_linked(
+    def test_existing_registered_phone_is_NOT_linked(
         self, specialist_user, specialist, service, client_user,
     ):
-        """A walk-in whose phone matches a real registered customer
-        attaches to that account (keeps one identity + history)."""
+        """A walk-in whose phone matches a REAL registered customer must
+        NOT attach to that account — a master cannot silently land a
+        CONFIRMED booking on someone's real profile without consent
+        (152-ФЗ). A fresh proxy stub is created instead; the real
+        account is untouched.
+        """
+        assert client_user.is_proxy is False  # guard: real account
         r = _pro(specialist_user).post(
             WALK_IN_URL,
             _body(service, name="Reg", phone=client_user.phone, hours=5),
@@ -202,4 +207,38 @@ class TestWalkInClientResolution:
         )
         assert r.status_code == 201
         appt = Appointment.objects.get(id=r.data["data"]["id"])
-        assert appt.client_id == client_user.id
+        # The booking landed on a separate proxy stub, NOT the real user.
+        assert appt.client_id != client_user.id
+        assert appt.client.is_proxy is True
+        # The real account picked up no booking at all.
+        assert not Appointment.objects.filter(client=client_user).exists()
+
+    def test_walkin_on_real_account_phone_creates_distinct_stubs(
+        self, specialist_user, specialist, service, client_user,
+    ):
+        """Regression (#194 gate): ``User.phone`` is unique, so a walk-in
+        whose number already belongs to a REAL account cannot carry that
+        number on its proxy stub (no collision, no co-opting). Repeated
+        walk-ins on such a number therefore land DISTINCT NULL-phone stubs
+        — and the real account is never touched.
+        """
+        phone = client_user.phone
+        r1 = _pro(specialist_user).post(
+            WALK_IN_URL, _body(service, name="WI", phone=phone, hours=3),
+            format="json",
+        )
+        r2 = _pro(specialist_user).post(
+            WALK_IN_URL, _body(service, name="WI", phone=phone, hours=6),
+            format="json",
+        )
+        assert r1.status_code == 201 and r2.status_code == 201
+        c1 = Appointment.objects.get(id=r1.data["data"]["id"]).client
+        c2 = Appointment.objects.get(id=r2.data["data"]["id"]).client
+        assert c1.is_proxy is True and c2.is_proxy is True
+        assert c1.id != c2.id                 # can't dedup on a real number
+        assert client_user.id not in {c1.id, c2.id}   # never the real account
+        assert c1.phone is None and c2.phone is None   # stub carries no phone
+        # The master's contact record lives in the booking notes instead.
+        appt1 = Appointment.objects.get(id=r1.data["data"]["id"])
+        assert phone in (appt1.notes or "")
+        assert not Appointment.objects.filter(client=client_user).exists()

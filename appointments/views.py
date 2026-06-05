@@ -267,10 +267,17 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             .prefetch_related('payments')
             .get(id=result.booking_id)
         )
-        # Mirror the walk-in customer's name onto the booking for the
-        # provider's reference (the proxy User also carries it).
+        # Mirror the walk-in customer's name + phone onto the booking for
+        # the provider's reference. The phone is kept here unconditionally
+        # because the proxy User may NOT carry it (when the number already
+        # belongs to a real account, get_or_create_walkin_client leaves the
+        # stub's phone NULL to avoid co-opting that account) — notes is then
+        # the master's only record of how to reach the walk-in.
         if not appointment.notes:
-            appointment.notes = f"Walk-in: {client_name}"
+            note = f"Walk-in: {client_name}"
+            if client_phone:
+                note += f" ({client_phone})"
+            appointment.notes = note
             appointment.save(update_fields=['notes'])
         return success_response(
             AppointmentDetailSerializer(appointment).data,
