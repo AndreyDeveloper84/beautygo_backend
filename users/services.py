@@ -58,29 +58,40 @@ def get_jwt_tenant_claim(user) -> str | None:
 
 # --- Proxy user resolution (DRF-246) ---
 
-_EXTERNAL_USER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*:[A-Za-z0-9_-]{1,64}$")
+# Accepts a `<source>:<segment>[:<segment>...]` external id: a lowercase
+# source followed by one OR MORE colon-separated segments. The single-
+# segment form `bot:12345` (nutrition/payments s2s) stays valid; the
+# multi-segment form `bot:{channel}:{id}` (booking s2s per #1016 — the
+# bot's `external_user_id_for` emits `bot:telegram:12345`) now resolves
+# too instead of 403-ing every booking write.
+_EXTERNAL_USER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*(?::[A-Za-z0-9_-]{1,64})+$")
 
 
 class InvalidExternalUserIDError(ValueError):
-    """Raised when X-External-User-ID does not match `<source>:<id>` shape."""
+    """Raised when X-External-User-ID does not match the
+    `<source>:<id>[:<id>...]` shape."""
 
 
 def resolve_external_user(external_user_id: str) -> User:
-    """Resolve `<source>:<id>` (e.g. `bot:12345`) to a User, lazily creating.
+    """Resolve `<source>:<id>[:<id>...]` to a User, lazily creating.
 
-    Used by service-to-service endpoints (e.g. nutrition/internal/scan/) when
-    the caller acts on behalf of an external identity that does not yet have
-    an Ayla account. The created User has `is_proxy=True`, `role='client'`,
-    `is_guest=False`. Phase C migration links proxy → real account by setting
-    `User.linked_proxy_id` and migrating data.
+    Used by service-to-service endpoints (e.g. nutrition/internal/scan/,
+    the #1016 booking surface) when the caller acts on behalf of an
+    external identity that does not yet have an Ayla account. The created
+    User has `is_proxy=True`, `role='client'`, `is_guest=False`. Phase C
+    migration links proxy → real account by setting `User.linked_proxy_id`
+    and migrating data.
 
-    Format: `<source>:<id>` where source is lowercase alphanumeric (e.g. `bot`,
-    `formula`), id is up to 64 chars of alphanumeric/underscore/hyphen.
-    Stored as `username` directly (already unique on AbstractUser).
+    Format: a lowercase-alphanumeric source (e.g. `bot`, `formula`)
+    followed by one or more colon-separated segments, each up to 64 chars
+    of alphanumeric/underscore/hyphen. Both `bot:12345` (single segment)
+    and `bot:telegram:12345` (channel-scoped, #1016) are valid. The whole
+    string is stored as `username` directly (already unique on AbstractUser).
     """
     if not external_user_id or not _EXTERNAL_USER_ID_RE.match(external_user_id):
         raise InvalidExternalUserIDError(
-            f"external_user_id must match '<source>:<id>', got {external_user_id!r}"
+            "external_user_id must match '<source>:<id>[:<id>...]', "
+            f"got {external_user_id!r}"
         )
     user, _ = User.objects.get_or_create(
         username=external_user_id,

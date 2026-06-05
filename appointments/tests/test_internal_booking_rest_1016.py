@@ -183,6 +183,25 @@ class TestInternalCreate:
             user=customer, tenant=tenant, is_active=True,
         ).count() == 1
 
+    def test_multi_segment_external_user_id_resolves(
+        self, specialist, service,
+    ):
+        """Channel-scoped X-External-User-ID (bot:{channel}:{id}, #1016 §2)
+        resolves to a proxy actor and the booking write succeeds."""
+        from users.services import resolve_external_user
+        actor = resolve_external_user("bot:telegram:90001")
+        body = {
+            "client_id": str(actor.id),
+            "specialist_id": str(specialist.id),
+            "service_id": str(service.id),
+            "start_datetime": _future_iso(3),
+        }
+        r = _api(external_user_id="bot:telegram:90001").post(
+            CREATE_URL, body, format="json",
+        )
+        assert r.status_code == 201, r.data
+        assert Appointment.objects.get().client_id == actor.id
+
     def test_client_id_mismatch_forbidden(
         self, customer, specialist, service,
     ):
