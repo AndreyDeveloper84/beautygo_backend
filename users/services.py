@@ -6,6 +6,7 @@ import re
 from datetime import timedelta
 
 from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -138,15 +139,36 @@ def get_or_create_walkin_client(name: str, phone: str | None = None) -> User:
         if User.objects.filter(phone=phone).exists():
             stub_phone = None
 
-    return User.objects.create_user(
-        username=f"walkin:{uuid4().hex}",
-        password=None,
-        first_name=(name or "Гость")[:150],
-        phone=stub_phone,
-        role="client",
-        is_proxy=True,
-        is_guest=True,
-    )
+    def _create_stub(stub_phone_value):
+        return User.objects.create_user(
+            username=f"walkin:{uuid4().hex}",
+            password=None,
+            first_name=(name or "Гость")[:150],
+            phone=stub_phone_value,
+            role="client",
+            is_proxy=True,
+            is_guest=True,
+        )
+
+    if stub_phone is None:
+        # No phone to collide on — a fresh NULL-phone stub always succeeds
+        # (NULLs are exempt from the unique constraint).
+        return _create_stub(None)
+
+    # Guard the unique-``phone`` create against a TOCTOU race: between the
+    # checks above and the INSERT, a concurrent walk-in on the same number
+    # may have created the holder. Retry once on collision — if it was a
+    # parallel proxy stub we now reuse it; otherwise the number is taken by
+    # a real account, so we fall back to a NULL-phone stub (never the real
+    # account). Single try/except, no spin.
+    try:
+        with transaction.atomic():
+            return _create_stub(stub_phone)
+    except IntegrityError:
+        existing = User.objects.filter(phone=phone, is_proxy=True).first()
+        if existing is not None:
+            return existing
+        return _create_stub(None)
 
 
 # --- Tenant-relationship revoke (#246 Q1) ---
