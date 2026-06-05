@@ -105,6 +105,22 @@ class AppointmentCreateSerializer(serializers.Serializer):
     #    revoke TOCTOU race.
 
 
+class WalkInCreateSerializer(serializers.Serializer):
+    """Validates a provider walk-in booking (#1017).
+
+    The specialist is taken from the authenticated user (a master books
+    into their OWN diary), so only the service, slot, and the walk-in
+    customer's name/phone are supplied. Validation only — the booking
+    logic stays in CreateBookingService.
+    """
+    service_id = serializers.UUIDField()
+    start_datetime = serializers.DateTimeField()
+    client_name = serializers.CharField(max_length=150)
+    client_phone = serializers.CharField(
+        required=False, allow_blank=True, default='', max_length=20,
+    )
+
+
 class AppointmentRescheduleSerializer(serializers.Serializer):
     """Validates input for rescheduling."""
     new_start_datetime = serializers.DateTimeField()

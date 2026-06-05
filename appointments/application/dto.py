@@ -34,6 +34,16 @@ class CreateBookingDTO:
     # grant needed (appointment.tenant_id stamped from specialist
     # per legacy behavior).
     request_tenant_id: Optional[UUID] = None
+    # Provider walk-in create path (#1017). Defaults preserve the
+    # customer online-payment contract (a Payment row is created and the
+    # booking lands in AWAITING_PAYMENT). A provider recording a walk-in
+    # passes ``payment_required=False`` + ``confirm_immediately=True`` so
+    # the booking skips Payment and lands directly in CONFIRMED (the
+    # cash/in-person transaction happens off-platform). ``actor_role``
+    # maps to the ADR-0009 envelope actor ("specialist" → "admin").
+    payment_required: bool = True
+    confirm_immediately: bool = False
+    actor_role: str = "user"
 
 
 @dataclass(frozen=True)
