@@ -190,6 +190,82 @@ def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return round(R * c, 1)
 
 
+def compute_specialist_day_slots(
+    specialist: SpecialistProfile,
+    *,
+    service_id: str | None,
+    date_param: str | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Compute available booking slots for one specialist/service/day.
+
+    Shared by the public mobile endpoint (``GET /specialists/{id}/slots/``)
+    and the internal Bearer endpoint (``GET /api/v1/internal/specialists/
+    {id}/slots/``, #1016) so both honour the same
+    SpecialistWorkingHours + SpecialistTimeOff + active-booking logic
+    via ``AvailabilityQueryService``.
+
+    Returns ``(payload, None)`` on success or ``(None, error)`` on
+    failure, where ``error`` carries an ``_status`` key the caller pops
+    to set the HTTP status. ``payload`` matches the established mobile
+    contract: ``{"date": "YYYY-MM-DD", "slots": [<ISO-8601 local>, ...]}``.
+    """
+    from zoneinfo import ZoneInfo
+
+    from appointments.application.dto import GetAvailabilityDTO
+    from appointments.application.services.availability_query_service import (
+        AvailabilityQueryService,
+    )
+
+    if not service_id:
+        return None, {
+            '_status': 400, 'code': 'MISSING_PARAM',
+            'message': 'service_id is required',
+        }
+
+    try:
+        service = Service.objects.get(
+            id=service_id, specialist=specialist, is_active=True,
+        )
+    except (Service.DoesNotExist, ValueError, django_exceptions.ValidationError):
+        return None, {
+            '_status': 404, 'code': 'NOT_FOUND',
+            'message': 'Service not found',
+        }
+
+    specialist_tz = ZoneInfo(specialist.timezone)
+    try:
+        slot_date: date = (
+            datetime.strptime(date_param, '%Y-%m-%d').date()
+            if date_param
+            else datetime.now(tz=specialist_tz).date()
+        )
+    except ValueError:
+        return None, {
+            '_status': 400, 'code': 'INVALID_PARAM',
+            'message': 'date must be YYYY-MM-DD',
+        }
+
+    result = AvailabilityQueryService().get_day_availability(
+        GetAvailabilityDTO(
+            specialist_id=specialist.pk,
+            target_date=slot_date,
+            service_id=service.pk,
+        )
+    )
+
+    # Mobile contract: slots as ISO-8601 strings in the specialist's
+    # local timezone (mobile parses them as Date objects).
+    if not result.is_working_day:
+        available: list[str] = []
+    else:
+        available = [
+            slot.start_at.astimezone(specialist_tz).isoformat()
+            for slot in result.slots
+        ]
+
+    return {'date': slot_date.isoformat(), 'slots': available}, None
+
+
 # --- Filters ---
 
 class SpecialistFilter(FilterSet):
@@ -283,69 +359,20 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
         and date. Defaults to today (in specialist's timezone) if date not
         supplied.
 
-        Delegates to AvailabilityQueryService so that the specialist's real
+        Delegates to ``compute_specialist_day_slots`` (shared with the
+        internal Bearer surface, #1016) so the specialist's real
         SpecialistWorkingHours + SpecialistTimeOff + active bookings are
         respected (fixes ln-624 #1).
         """
-        from zoneinfo import ZoneInfo
-
-        from appointments.application.dto import GetAvailabilityDTO
-        from appointments.application.services.availability_query_service import (
-            AvailabilityQueryService,
-        )
-
         specialist = self.get_object()
-
-        service_id = request.query_params.get('service_id')
-        if not service_id:
-            return Response(
-                {'error': {'code': 'MISSING_PARAM', 'message': 'service_id is required'}},
-                status=400,
-            )
-
-        try:
-            service = Service.objects.get(
-                id=service_id, specialist=specialist, is_active=True,
-            )
-        except (Service.DoesNotExist, ValueError, django_exceptions.ValidationError):
-            return Response(
-                {'error': {'code': 'NOT_FOUND', 'message': 'Service not found'}},
-                status=404,
-            )
-
-        specialist_tz = ZoneInfo(specialist.timezone)
-        date_param = request.query_params.get('date')
-        try:
-            slot_date: date = (
-                datetime.strptime(date_param, '%Y-%m-%d').date()
-                if date_param
-                else datetime.now(tz=specialist_tz).date()
-            )
-        except ValueError:
-            return Response(
-                {'error': {'code': 'INVALID_PARAM', 'message': 'date must be YYYY-MM-DD'}},
-                status=400,
-            )
-
-        result = AvailabilityQueryService().get_day_availability(
-            GetAvailabilityDTO(
-                specialist_id=specialist.pk,
-                target_date=slot_date,
-                service_id=service.pk,
-            )
+        payload, error = compute_specialist_day_slots(
+            specialist,
+            service_id=request.query_params.get('service_id'),
+            date_param=request.query_params.get('date'),
         )
-
-        # Preserve existing mobile contract: slots as ISO-8601 strings in
-        # specialist's local timezone (mobile parses them as Date objects).
-        if not result.is_working_day:
-            available: list[str] = []
-        else:
-            available = [
-                slot.start_at.astimezone(specialist_tz).isoformat()
-                for slot in result.slots
-            ]
-
-        return Response({'date': slot_date.isoformat(), 'slots': available})
+        if error is not None:
+            return Response({'error': error}, status=error.pop('_status'))
+        return Response(payload)
 
     # GET /specialists/{id}/reviews/ — wired directly in users/specialists_urls.py
     # to SpecialistReviewsView (reviews app), avoiding the cross-app late import

@@ -38,6 +38,21 @@ urlpatterns = [
         'api/v1/internal/me/catalog/recommendations/',
         include('users.catalog_recommendations_urls'),
     ),
+    # #1016 S2 — internal Bearer REST surface the Ayla bot reads/writes
+    # (slots + catalog mirror + booking create/cancel/reschedule).
+    # Contract co-owned with S1: ai-bot-platform/docs/architecture/.
+    path(
+        'api/v1/internal/specialists/',
+        include('users.internal_catalog_urls'),
+    ),
+    path(
+        'api/v1/internal/services/',
+        include('services.internal_urls'),
+    ),
+    path(
+        'api/v1/internal/appointments/',
+        include('appointments.internal_urls'),
+    ),
     path('api/v1/appointments/', include('appointments.urls')),
     path('api/v1/reviews/', include('reviews.urls')),
     path('api/v1/payments/', include('payments.urls')),

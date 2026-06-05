@@ -253,11 +253,23 @@ class TestNonCrossTenantPaths:
             user=anna_in_a,
         ).count() == tur_count_before
 
-    def test_no_tenant_header_skips_variant_e(
+    def test_no_tenant_header_still_grants_tur(
         self, anna_in_a, olga_in_b, service_in_b, tenant_b,
     ):
-        """No X-Tenant header → permissive customer-wide context.
-        Variant E doesn't fire. Booking proceeds; no TUR auto-grant."""
+        """No X-Tenant header → grant-on-first-booking STILL fires.
+
+        Post-#1014 the grant is a single platform-wide rule keyed off
+        the specialist's tenant, not request_tenant_id. The nationwide
+        bot (and a mobile customer without X-Tenant) carry no client
+        tenant scope, yet booking IS the consent gesture — so the
+        booking proceeds AND TUR(Anna, tenant_b) is granted. This
+        replaces the pre-#1014 behaviour where a header-less booking
+        skipped the grant.
+        """
+        assert not TenantUserRelationship.objects.filter(
+            user=anna_in_a, tenant=tenant_b, is_active=True,
+        ).exists()
+
         c = APIClient()
         c.defaults["HTTP_X_APP_TYPE"] = "client"
         c.force_authenticate(user=anna_in_a)
@@ -273,9 +285,9 @@ class TestNonCrossTenantPaths:
         assert r.status_code == 201
         appt = Appointment.objects.get()
         assert appt.tenant_id == tenant_b.id
-        assert not TenantUserRelationship.objects.filter(
-            user=anna_in_a, tenant=tenant_b,
-        ).exists()
+        assert TenantUserRelationship.objects.filter(
+            user=anna_in_a, tenant=tenant_b, is_active=True,
+        ).count() == 1
 
     def test_missing_specialist_validator_silent(
         self, anna_in_a, tenant_a,
