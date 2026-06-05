@@ -242,3 +242,27 @@ class TestWalkInClientResolution:
         appt1 = Appointment.objects.get(id=r1.data["data"]["id"])
         assert phone in (appt1.notes or "")
         assert not Appointment.objects.filter(client=client_user).exists()
+
+    def test_local_format_phone_normalized_to_match_real_account(
+        self, specialist_user, specialist, service, client_user,
+    ):
+        """A walk-in number entered in local format (``8…``) must be
+        canonicalised to ``+7…`` so it still recognises the real account
+        that stored the same number canonically — otherwise the exact-string
+        exclusion would miss and the stub would carry a duplicate of the
+        real customer's number. The real account stays untouched; the stub
+        carries no phone; the canonical number is in the notes.
+        """
+        assert client_user.phone == "+79991017050"
+        local = "89991017050"  # same human, local format
+        r = _pro(specialist_user).post(
+            WALK_IN_URL, _body(service, name="Local", phone=local, hours=4),
+            format="json",
+        )
+        assert r.status_code == 201
+        appt = Appointment.objects.get(id=r.data["data"]["id"])
+        assert appt.client_id != client_user.id
+        assert appt.client.is_proxy is True
+        assert appt.client.phone is None           # recognised → not copied
+        assert "+79991017050" in (appt.notes or "")  # canonical form stored
+        assert not Appointment.objects.filter(client=client_user).exists()

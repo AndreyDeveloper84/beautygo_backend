@@ -1,6 +1,8 @@
 """Appointment serializers — upgraded with booking engine fields."""
 from __future__ import annotations
 
+import re
+
 from rest_framework import serializers
 
 from .models import Appointment
@@ -119,6 +121,30 @@ class WalkInCreateSerializer(serializers.Serializer):
     client_phone = serializers.CharField(
         required=False, allow_blank=True, default='', max_length=20,
     )
+
+    def validate_client_phone(self, value):
+        """Normalise the walk-in phone to the SAME canonical form a
+        registered account stores (``+7XXXXXXXXXX``).
+
+        Registration runs every phone through ``PhoneSerializer`` →
+        canonical ``+7…``. ``get_or_create_walkin_client`` excludes a
+        real account by exact-string phone match, so if the walk-in
+        number arrived in a different shape (``8…``, spaces, dashes) the
+        exclusion would silently miss the real account and the stub would
+        store a non-canonical duplicate of the same human's number. We
+        canonicalise here so both sides compare in one form.
+
+        Lenient on purpose: a walk-in is provider-entered free text, so a
+        value that does NOT look like a RU mobile is cleaned of separators
+        but accepted as-is rather than rejected — the master must still be
+        able to record whatever contact they have. Empty stays empty.
+        """
+        if not value:
+            return value
+        cleaned = re.sub(r'[\s\-()]', '', value)
+        if re.match(r'^(\+7|8)\d{10}$', cleaned):
+            return '+7' + cleaned[1:] if cleaned.startswith('8') else cleaned
+        return cleaned
 
 
 class AppointmentRescheduleSerializer(serializers.Serializer):
