@@ -7,12 +7,14 @@ from django.utils import timezone
 from users.models import OTPCode, User
 from users.services import (
     AuthService,
+    InvalidExternalUserIDError,
     InvalidOTPError,
     MaxAttemptsError,
     OTPService,
     PhoneAlreadyRegisteredError,
     RateLimitError,
     UserNotFoundError,
+    resolve_external_user,
 )
 
 logger = logging.getLogger(__name__)
@@ -162,3 +164,40 @@ class TestAuthService:
         user = User.objects.get(phone='+79007000005')
         logger.info("User in DB: is_verified=%s", user.is_verified)
         assert user.is_verified
+
+
+@pytest.mark.django_db
+class TestResolveExternalUser:
+    """X-External-User-ID resolution (#1016 sign-off): the booking s2s
+    surface sends a channel-scoped `bot:{channel}:{id}`, so the resolver
+    must accept multi-segment ids while keeping the legacy single-segment
+    `bot:{id}` (nutrition/payments) valid."""
+
+    def test_single_segment_legacy_form(self):
+        user = resolve_external_user("bot:12345")
+        assert user.username == "bot:12345"
+        assert user.is_proxy is True
+        assert user.role == "client"
+
+    def test_multi_segment_channel_scoped_form(self):
+        """`bot:telegram:12345` (#1016 §2) resolves instead of 403-ing."""
+        user = resolve_external_user("bot:telegram:12345")
+        assert user.username == "bot:telegram:12345"
+        assert user.is_proxy is True
+
+    def test_idempotent_same_id_returns_same_user(self):
+        a = resolve_external_user("bot:telegram:777")
+        b = resolve_external_user("bot:telegram:777")
+        assert a.pk == b.pk
+
+    @pytest.mark.parametrize("bad", [
+        "",            # empty
+        "bot",         # no segment
+        "bot:",        # trailing colon, empty segment
+        "Bot:12345",   # uppercase source
+        ":12345",      # missing source
+        "bot::12345",  # empty middle segment
+    ])
+    def test_invalid_forms_rejected(self, bad):
+        with pytest.raises(InvalidExternalUserIDError):
+            resolve_external_user(bad)
