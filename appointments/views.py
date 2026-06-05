@@ -14,7 +14,7 @@ from rest_framework.decorators import action
 from rest_framework.request import Request
 from rest_framework.response import Response
 
-from users.permissions import IsTenantMember
+from users.permissions import IsProApp, IsSpecialist, IsTenantMember
 from users.response import error_response, success_response
 
 from .application.dto import (
@@ -47,6 +47,7 @@ from .serializers import (
     AppointmentDetailSerializer,
     AppointmentListSerializer,
     AppointmentRescheduleSerializer,
+    WalkInCreateSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,77 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             .prefetch_related('payments')
             .get(id=result.booking_id)
         )
+        return success_response(
+            AppointmentDetailSerializer(appointment).data,
+            status_code=201,
+        )
+
+    # -- Walk-in (provider records an off-platform booking) ------------------
+
+    @extend_schema(
+        operation_id="appointments_walk_in",
+        request=WalkInCreateSerializer,
+        responses={201: AppointmentDetailSerializer},
+    )
+    @action(
+        detail=False, methods=['post'], url_path='walk-in',
+        permission_classes=[permissions.IsAuthenticated, IsProApp, IsSpecialist],
+    )
+    def walk_in(self, request: Request) -> Response:
+        """POST /api/v1/appointments/walk-in/ — a master records a
+        walk-in (no app, no online payment) into their OWN diary.
+
+        Without this the slot a walk-in occupies stays "free" in the
+        bot's mirror and gets double-booked (#1017). The booking reuses
+        the engine (conflict re-check, snapshot, grant, outbox) but skips
+        Payment and lands directly in CONFIRMED, emitting booking.created
+        + booking.confirmed so the mirror + reminders stay correct.
+        """
+        from users.services import get_or_create_walkin_client
+
+        specialist = getattr(request.user, 'specialist_profile', None)
+        if specialist is None:
+            return error_response(
+                "FORBIDDEN", "Specialist profile required.", status_code=403,
+            )
+
+        serializer = WalkInCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        client_name = serializer.validated_data['client_name']
+        client_phone = serializer.validated_data.get('client_phone') or None
+        walk_in_client = get_or_create_walkin_client(client_name, client_phone)
+
+        idempotency_key = request.META.get(
+            'HTTP_X_IDEMPOTENCY_KEY', str(uuid4()),
+        )
+        dto = CreateBookingDTO(
+            client_id=walk_in_client.id,
+            specialist_id=specialist.id,
+            service_id=serializer.validated_data['service_id'],
+            start_at=serializer.validated_data['start_datetime'],
+            idempotency_key=idempotency_key,
+            request_tenant_id=None,
+            payment_required=False,
+            confirm_immediately=True,
+            actor_role="specialist",
+        )
+
+        # Booking domain errors (slot taken, inactive service) propagate
+        # to api_exception_handler.
+        result = self.create_booking_service_class().execute(dto)
+
+        appointment = (
+            Appointment.objects
+            .select_related('client', 'specialist', 'service')
+            .prefetch_related('payments')
+            .get(id=result.booking_id)
+        )
+        # Mirror the walk-in customer's name onto the booking for the
+        # provider's reference (the proxy User also carries it).
+        if not appointment.notes:
+            appointment.notes = f"Walk-in: {client_name}"
+            appointment.save(update_fields=['notes'])
         return success_response(
             AppointmentDetailSerializer(appointment).data,
             status_code=201,

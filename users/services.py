@@ -89,6 +89,44 @@ def resolve_external_user(external_user_id: str) -> User:
     return user
 
 
+def get_or_create_walkin_client(name: str, phone: str | None = None) -> User:
+    """Resolve (or stub-create) the client for a provider walk-in (#1017).
+
+    A walk-in customer has no Ayla app account — the salon records them
+    into its own diary so the bot's slot mirror stays accurate (a slot a
+    walk-in occupies must show as busy or the bot double-books it).
+
+    Behaviour:
+    - If ``phone`` is given and an existing ``User`` already has it,
+      reuse that account — a returning walk-in / a customer who later
+      registered keeps one identity (and their booking history).
+    - Otherwise create a proxy stub: ``is_proxy=True`` (Phase-C
+      proxy→real linking applies the same as ``resolve_external_user``),
+      ``is_guest=True`` (no credentials, cannot log in), ``role=client``.
+      ``username`` is a unique ``walkin:<uuid>`` token (the source:id
+      shape ``resolve_external_user`` uses), unusable password.
+
+    The display name is stored on ``first_name`` for the provider's
+    reference; the caller may also mirror it into ``Appointment.notes``.
+    """
+    from uuid import uuid4
+
+    if phone:
+        existing = User.objects.filter(phone=phone).first()
+        if existing is not None:
+            return existing
+
+    return User.objects.create_user(
+        username=f"walkin:{uuid4().hex}",
+        password=None,
+        first_name=(name or "Гость")[:150],
+        phone=phone or None,
+        role="client",
+        is_proxy=True,
+        is_guest=True,
+    )
+
+
 # --- Tenant-relationship revoke (#246 Q1) ---
 
 
