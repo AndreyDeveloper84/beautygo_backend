@@ -26,13 +26,13 @@ class CreateBookingDTO:
     service_id: UUID
     start_at: datetime          # Must be UTC timezone-aware
     idempotency_key: str        # Client-provided UUID to prevent duplicates
-    # #246 sub-phase 1.D Variant E: when the caller is in a specific
-    # tenant context (X-Tenant header at the REST layer; mobile UI
-    # tenant switcher), pass it through so the service can invisibly
-    # grant TUR(client, specialist.tenant) inside the booking
-    # transaction. None = caller is in customer-wide context — no
-    # grant needed (appointment.tenant_id stamped from specialist
-    # per legacy behavior).
+    # Tenant context the caller is acting in (X-Tenant header at the
+    # REST layer; mobile UI tenant switcher). Retained for auditing /
+    # future scoping. As of #1014 it no longer gates the grant-on-
+    # first-booking rule — that grant keys purely off the specialist's
+    # tenant inside the booking transaction (see
+    # CreateBookingService._execute_atomic). appointment.tenant_id is
+    # always stamped from the specialist's tenant regardless.
     request_tenant_id: Optional[UUID] = None
     # Provider walk-in create path (#1017). Defaults preserve the
     # customer online-payment contract (a Payment row is created and the

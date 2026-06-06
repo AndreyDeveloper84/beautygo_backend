@@ -178,21 +178,30 @@ class CreateBookingService:
             buffer_after_minutes=getattr(service, "buffer_after_minutes", 0),
         )
 
-        # #246 sub-phase 1.D Variant E — invisible TenantUserRelationship
-        # grant. Folded into the booking transaction (not the serializer)
-        # so that:
-        #   1. AI booking path gets it too (it bypasses serializer).
-        #   2. If the booking rolls back later (slot conflict, etc),
-        #      the TUR write rolls back with it — no orphan grants.
+        # Grant-on-first-booking — single platform-wide rule (#1014).
+        # "Booking IS the consent gesture": any successful booking
+        # through any channel (mobile, internal/bot REST, provider
+        # walk-in) locks the customer to the specialist's tenant the
+        # first time they book there. This generalises the original
+        # #246 Variant E grant, which only fired in the cross-tenant
+        # case (request_tenant_id set AND ≠ specialist tenant). The
+        # nationwide bot books with no client tenant context
+        # (tenant_id claim is None for customers per get_jwt_tenant_claim),
+        # so a request_tenant_id-gated grant never fired for it — the
+        # gate is removed and the grant now keys purely off the
+        # specialist's tenant.
+        #
+        # Folded into the booking transaction (not the serializer) so:
+        #   1. Every create path gets it (bot/AI/walk-in bypass the
+        #      serializer).
+        #   2. If the booking rolls back later (slot conflict, etc.) the
+        #      TUR write rolls back with it — no orphan grants.
         #   3. ``select_for_update`` on existing TUR rows defeats the
         #      admin-revoke TOCTOU race (PR #154 adversarial F-3).
-        if (
-            dto.request_tenant_id is not None
-            and specialist.tenant_id is not None
-            and specialist.tenant_id != dto.request_tenant_id
-        ):
-            # Lock existing TUR rows for this (user, tenant) pair so
-            # an admin revoke that lands between our read and write
+        # Create-path only — never granted on a read/availability path.
+        if specialist.tenant_id is not None:
+            # Lock existing TUR rows for this (user, tenant) pair so an
+            # admin revoke that lands between our read and write
             # serialises behind our row lock.
             from users.models import TenantUserRelationship
             existing = list(
@@ -203,19 +212,44 @@ class CreateBookingService:
             )
             has_revoked = any(not row.is_active for row in existing)
             if has_revoked:
-                # F2 defense (PR #152): refuse silently. Re-grant
-                # requires explicit admin action.
+                # F2 defense (PR #152): a revoked relationship refuses
+                # silently — re-grant requires explicit admin action.
+                # Preserved verbatim under the generalised rule, so a
+                # banned customer cannot silently re-book via ANY
+                # channel, same-tenant or cross-tenant.
                 from rest_framework.exceptions import NotFound
                 raise NotFound("Specialist not found.")
             has_active = any(row.is_active for row in existing)
             if not has_active:
-                TenantUserRelationship.objects.create(
-                    user_id=dto.client_id,
-                    tenant_id=specialist.tenant_id,
-                    is_active=True,
-                    role=TenantUserRelationship.Role.CUSTOMER,
-                    granted_by=TenantUserRelationship.GrantedBy.SELF,
-                )
+                # TOCTOU note: the select_for_update above locks only
+                # rows that ALREADY exist. On a true first booking there
+                # are none, so two concurrent first-bookings for the same
+                # (client, tenant) both read empty, both reach this insert.
+                # The partial-unique constraint ``tur_unique_active``
+                # rejects the loser with IntegrityError. Wrap the insert
+                # in a savepoint so that rejection doesn't poison the
+                # outer booking transaction: on conflict a concurrent
+                # booking has already granted the (active) TUR, so the
+                # grant intent is satisfied — the booking proceeds.
+                from django.db import IntegrityError
+                try:
+                    with transaction.atomic():
+                        TenantUserRelationship.objects.create(
+                            user_id=dto.client_id,
+                            tenant_id=specialist.tenant_id,
+                            is_active=True,
+                            role=TenantUserRelationship.Role.CUSTOMER,
+                            granted_by=TenantUserRelationship.GrantedBy.SELF,
+                        )
+                except IntegrityError:
+                    # Loser of the first-booking race. The winner's active
+                    # TUR now exists (the partial-unique fires only on
+                    # active rows), so the grant is effectively done.
+                    logger.info(
+                        "booking.tur_grant_race client=%s tenant=%s "
+                        "— concurrent grant won, proceeding",
+                        dto.client_id, specialist.tenant_id,
+                    )
 
         # Provider walk-in (#1017): the cash/in-person transaction
         # happens off-platform, so the booking skips the online Payment
