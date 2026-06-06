@@ -6,6 +6,7 @@ import re
 from datetime import timedelta
 
 from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
 
@@ -98,6 +99,87 @@ def resolve_external_user(external_user_id: str) -> User:
         defaults={"role": "client", "is_proxy": True, "is_guest": False},
     )
     return user
+
+
+def get_or_create_walkin_client(name: str, phone: str | None = None) -> User:
+    """Resolve (or stub-create) the client for a provider walk-in (#1017).
+
+    A walk-in customer has no Ayla app account — the salon records them
+    into its own diary so the bot's slot mirror stays accurate (a slot a
+    walk-in occupies must show as busy or the bot double-books it).
+
+    Behaviour:
+    - If ``phone`` is given and an existing **proxy** ``User`` already
+      has it, reuse that stub — a returning walk-in keeps one identity
+      (and its booking history). The lookup is scoped to proxy accounts
+      (``is_proxy=True``) on purpose: a phone that belongs to a real,
+      registered (``is_proxy=False``) customer is **never** matched, so
+      a master cannot silently attach a CONFIRMED walk-in to someone's
+      real account without their consent (152-ФЗ). A real customer who
+      walks in is recorded as a fresh proxy stub; they reconcile their
+      walk-in history when they later claim the number via OTP (a
+      separate Phase-C ``linked_proxy_id`` follow-up, out of scope here).
+    - Otherwise create a proxy stub: ``is_proxy=True`` (Phase-C
+      proxy→real linking applies the same as ``resolve_external_user``),
+      ``is_guest=True`` (no credentials, cannot log in), ``role=client``.
+      ``username`` is a unique ``walkin:<uuid>`` token (the source:id
+      shape ``resolve_external_user`` uses), unusable password.
+
+    The display name is stored on ``first_name`` for the provider's
+    reference; the caller may also mirror it into ``Appointment.notes``.
+    """
+    from uuid import uuid4
+
+    stub_phone = phone or None
+    if phone:
+        # Scoped to proxy stubs — a real (is_proxy=False) account that
+        # happens to share the phone must NOT be reused (consent / 152-ФЗ).
+        existing = User.objects.filter(phone=phone, is_proxy=True).first()
+        if existing is not None:
+            return existing
+        # ``User.phone`` is unique. If the number is already held by some
+        # account — necessarily a REAL one, since any proxy holding it was
+        # reused above — we can neither copy it onto a new stub (it would
+        # collide) nor co-opt the real account's number. Leave the stub's
+        # phone NULL; the walk-in endpoint preserves the entered number in
+        # ``Appointment.notes`` for the master, and Phase-C reconciles the
+        # walk-in history if the customer later claims the number via OTP.
+        # Trade-off: repeated walk-ins on a real-account number can't be
+        # deduped (each lands a fresh NULL-phone stub) — acceptable for the
+        # edge case; never touching the real account is the priority.
+        if User.objects.filter(phone=phone).exists():
+            stub_phone = None
+
+    def _create_stub(stub_phone_value):
+        return User.objects.create_user(
+            username=f"walkin:{uuid4().hex}",
+            password=None,
+            first_name=(name or "Гость")[:150],
+            phone=stub_phone_value,
+            role="client",
+            is_proxy=True,
+            is_guest=True,
+        )
+
+    if stub_phone is None:
+        # No phone to collide on — a fresh NULL-phone stub always succeeds
+        # (NULLs are exempt from the unique constraint).
+        return _create_stub(None)
+
+    # Guard the unique-``phone`` create against a TOCTOU race: between the
+    # checks above and the INSERT, a concurrent walk-in on the same number
+    # may have created the holder. Retry once on collision — if it was a
+    # parallel proxy stub we now reuse it; otherwise the number is taken by
+    # a real account, so we fall back to a NULL-phone stub (never the real
+    # account). Single try/except, no spin.
+    try:
+        with transaction.atomic():
+            return _create_stub(stub_phone)
+    except IntegrityError:
+        existing = User.objects.filter(phone=phone, is_proxy=True).first()
+        if existing is not None:
+            return existing
+        return _create_stub(None)
 
 
 # --- Tenant-relationship revoke (#246 Q1) ---
