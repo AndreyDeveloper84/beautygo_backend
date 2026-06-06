@@ -308,10 +308,21 @@ def _add_progressive_method():
         for w in range(weeks):
             week_end = today - timedelta(days=w * 7)
             week_start = week_end - timedelta(days=6)
+            # Bound the bucket with explicit UTC datetimes rather than
+            # ``logged_at__date`` lookups. ``__date`` truncates in the
+            # connection timezone (settings.TIME_ZONE = Europe/Moscow),
+            # while ``today`` above is a UTC date — so when CI/prod runs
+            # past 21:00 UTC (00:00+ MSK) every log's date shifted +1,
+            # pushing the newest day out of the window and leaving the
+            # oldest 7-day bucket with only 6 days → 6000/7 = 857.1.
+            # Pinning to UTC matches summary()/weekly_deficits() and the
+            # UTC ``today`` anchor, making buckets timezone-stable.
+            start_dt = datetime.combine(week_start, time.min, tzinfo=timezone.utc)
+            end_dt = datetime.combine(week_end, time.max, tzinfo=timezone.utc)
             qs = FoodLog.objects.filter(
                 user=user,
-                logged_at__date__gte=week_start,
-                logged_at__date__lte=week_end,
+                logged_at__gte=start_dt,
+                logged_at__lte=end_dt,
             )
             agg = qs.aggregate(
                 kcal=Sum("calories"),
