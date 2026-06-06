@@ -251,6 +251,17 @@ class CreateBookingService:
                         dto.client_id, specialist.tenant_id,
                     )
 
+        # Provider walk-in (#1017): the cash/in-person transaction
+        # happens off-platform, so the booking skips the online Payment
+        # and lands directly in CONFIRMED. The default customer path
+        # keeps the online-payment contract (AWAITING_PAYMENT + a pending
+        # Payment row the YooKassa hold later confirms).
+        initial_status = (
+            BookingStatus.CONFIRMED.value
+            if dto.confirm_immediately
+            else BookingStatus.AWAITING_PAYMENT.value
+        )
+
         # Create appointment. tenant_id mirrors specialist.tenant_id —
         # the canonical "owner tenant" of the row.
         appointment = Appointment.objects.create(
@@ -260,7 +271,7 @@ class CreateBookingService:
             tenant_id=specialist.tenant_id,
             start_datetime=target_interval.start_at,
             end_datetime=target_interval.end_at,
-            status=BookingStatus.AWAITING_PAYMENT.value,
+            status=initial_status,
             idempotency_key=dto.idempotency_key,
             is_first_visit=is_first_visit,
             price=snapshot.price,
@@ -273,16 +284,19 @@ class CreateBookingService:
             snapshot_timezone=snapshot.specialist_timezone,
         )
 
-        # Create payment record
-        payment = Payment.objects.create(
-            appointment=appointment,
-            amount=snapshot.price,
-            status="pending",
-            specialist_income=snapshot.specialist_income,
-            platform_fee=snapshot.platform_fee,
-        )
+        # Create payment record (online-payment path only). Walk-ins are
+        # settled off-platform — no Payment row.
+        payment = None
+        if dto.payment_required:
+            payment = Payment.objects.create(
+                appointment=appointment,
+                amount=snapshot.price,
+                status="pending",
+                specialist_income=snapshot.specialist_income,
+                platform_fee=snapshot.platform_fee,
+            )
 
-        # Write outbox event (same transaction). Envelope per ADR-0009
+        # Write outbox event(s) (same transaction). Envelope per ADR-0009
         # §Mandatory event contract — emit_outbox_event wraps the
         # domain data in the canonical envelope (event_id, event_version,
         # actor, correlation_id, tenant_id, …) so cross-service consumers
@@ -291,6 +305,14 @@ class CreateBookingService:
             emit_outbox_event, safe_tenant_id,
         )
         from appointments.models import OutboxEvent as _OutboxEvent
+        # actor_role contract {user, specialist, system} → ADR-0009 actor.
+        # A provider-initiated walk-in maps "specialist" → "admin".
+        actor = (
+            "admin" if dto.actor_role == "specialist"
+            else "system" if dto.actor_role == "system"
+            else "user"
+        )
+        tenant_id = safe_tenant_id(appointment, context="booking.created")
         emit_outbox_event(
             topic=_OutboxEvent.Topic.BOOKING_CREATED,
             data={
@@ -300,13 +322,31 @@ class CreateBookingService:
                 "service_id": str(dto.service_id),
                 "start_at": target_interval.start_at.isoformat(),
                 "end_at": target_interval.end_at.isoformat(),
-                "payment_id": str(payment.id),
+                "payment_id": str(payment.id) if payment else None,
                 "amount": str(snapshot.price),
                 "specialist_timezone": snapshot.specialist_timezone,
             },
             user_id=dto.client_id,
-            tenant_id=safe_tenant_id(appointment, context="booking.created"),
-            actor="user",  # booking created by the client via mobile app
+            tenant_id=tenant_id,
+            actor=actor,
         )
+        # For a walk-in the booking is already CONFIRMED, so also emit
+        # booking.confirmed — mirrors the lifecycle the YooKassa hold
+        # produces for online bookings, keeping the bot's mirror +
+        # reminder scheduling correct (a walk-in is now a second path,
+        # besides payment hold, that reaches CONFIRMED).
+        if initial_status == BookingStatus.CONFIRMED.value:
+            emit_outbox_event(
+                topic=_OutboxEvent.Topic.BOOKING_CONFIRMED,
+                data={
+                    "appointment_id": str(appointment.id),
+                    "client_id": str(dto.client_id),
+                    "specialist_id": str(dto.specialist_id),
+                    "payment_id": str(payment.id) if payment else None,
+                },
+                user_id=dto.client_id,
+                tenant_id=tenant_id,
+                actor=actor,
+            )
 
         return appointment, payment
