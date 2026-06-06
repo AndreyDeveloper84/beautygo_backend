@@ -77,10 +77,12 @@ EXCLUDED_PATH_PREFIXES = (
     "/api/v1/nutrition/internal/",
     "/api/v1/payments/internal/",
     "/api/v1/masters/internal/",
-    "/api/v1/internal/me/",
-    # P1-3 codex audit — internal user-profile fetch for the bot's
-    # user.profile.updated consumer. Bearer auth, no X-App-Type.
-    "/api/v1/internal/users/",
+    # All `/api/v1/internal/*` endpoints are Bearer service-to-service
+    # (bot ↔ Ayla REST per #1016): internal booking read/write, slots,
+    # catalog mirror, user-profile fetch. None are client/pro apps, so
+    # X-App-Type does not apply. Single broad prefix covers me/, users/,
+    # specialists/, services/, appointments/ under the internal tree.
+    "/api/v1/internal/",
 )
 
 
@@ -210,8 +212,11 @@ class TenantContextMiddleware:
         "/api/v1/nutrition/internal/",
         "/api/v1/payments/internal/",
         "/api/v1/masters/internal/",
-        "/api/v1/internal/me/",
-        "/api/v1/internal/users/",
+        # Bearer service-to-service tree (#1016). The bot does not carry
+        # an X-Tenant header for every call, and the booking grant keys
+        # off the specialist's tenant — not request.tenant — so these
+        # paths must NOT 400 with TENANT_REQUIRED in strict mode.
+        "/api/v1/internal/",
         "/static/",
         "/media/",
     )
