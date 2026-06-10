@@ -242,6 +242,57 @@ class TestBookingCancelledPayload:
         assert evt.data["reason_code"] == "user_changed_plans"
         assert "cancelled_at" in evt.data
 
+    def test_specialist_cancel_maps_to_master_unavailable(
+        self, client_user, specialist, service,
+    ):
+        """A provider-initiated cancel → cancelled_by=master, and any
+        free-text reason still resolves to the master_unavailable code."""
+        appt = _confirmed(client_user, specialist, service)
+        OutboxEvent.objects.all().delete()
+        CancelBookingService().execute(CancelBookingDTO(
+            booking_id=appt.id,
+            initiator_user_id=client_user.id,
+            initiator_role="specialist",
+            reason="Заболел",
+        ))
+        evt = OutboxEvent.objects.get(topic=OutboxEvent.Topic.BOOKING_CANCELLED)
+        assert evt.data["cancelled_by"] == "master"
+        assert evt.data["reason_code"] == "master_unavailable"
+
+    def test_system_specialist_departure_maps_to_master_unavailable(
+        self, client_user, specialist, service,
+    ):
+        """The only system-initiated cancel in the repo (specialist
+        departure cascade, users/services.py) ships a non-null §3.2 code."""
+        appt = _confirmed(client_user, specialist, service)
+        OutboxEvent.objects.all().delete()
+        CancelBookingService().execute(CancelBookingDTO(
+            booking_id=appt.id,
+            initiator_user_id=client_user.id,
+            initiator_role="system",
+            reason="specialist_departure",
+        ))
+        evt = OutboxEvent.objects.get(topic=OutboxEvent.Topic.BOOKING_CANCELLED)
+        assert evt.data["cancelled_by"] == "system"
+        assert evt.data["reason_code"] == "master_unavailable"
+        assert evt.data["reason_code"] is not None
+
+    def test_system_unknown_reason_falls_back_to_other(
+        self, client_user, specialist, service,
+    ):
+        """A system cancel with no recognised reason never emits a null
+        reason_code — it falls back to the §3.2 'other' bucket."""
+        appt = _confirmed(client_user, specialist, service)
+        OutboxEvent.objects.all().delete()
+        CancelBookingService().execute(CancelBookingDTO(
+            booking_id=appt.id,
+            initiator_user_id=client_user.id,
+            initiator_role="system",
+        ))
+        evt = OutboxEvent.objects.get(topic=OutboxEvent.Topic.BOOKING_CANCELLED)
+        assert evt.data["cancelled_by"] == "system"
+        assert evt.data["reason_code"] == "other"
+
 
 # --- the modeling decision: no-show ships as booking.cancelled -------------
 

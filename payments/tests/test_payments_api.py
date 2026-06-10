@@ -460,12 +460,16 @@ class TestPaymentWebhook:
         assert ev.data['amount'] == str(payment.amount)
         assert ev.data['cancellation_party'] == 'payment_network'
         assert ev.data['reason_code'] == 'insufficient_funds'
+        # The bot's handle_payment_failed reads data["reason"] + data["failed_at"];
+        # reason carries the same closed-allowlist slug as reason_code.
+        assert ev.data['reason'] == 'insufficient_funds'
+        assert ev.data['failed_at']  # ISO timestamp, present
         # PII guard per event-contract §7 — no names / emails / cards /
         # free-text reasons. Closed allowlist of data keys means any
         # accidental addition of a PII-shaped key fails this assertion.
         allowed_keys = {
             'payment_id', 'appointment_id', 'amount',
-            'cancellation_party', 'reason_code',
+            'cancellation_party', 'reason_code', 'reason', 'failed_at',
         }
         assert set(ev.data.keys()) == allowed_keys, (
             f"payment.failed data must NOT include PII; saw extras: "
@@ -508,6 +512,9 @@ class TestPaymentWebhook:
         ev = OutboxEvent.objects.get(topic=OutboxEvent.Topic.PAYMENT_FAILED)
         assert ev.data['cancellation_party'] == ''
         assert ev.data['reason_code'] == ''
+        # reason mirrors reason_code's coercion (no free-text leak).
+        assert ev.data['reason'] == ''
+        assert ev.data['failed_at']
 
     def test_webhook_payment_canceled_handles_missing_cancellation_details(
         self, anon_app, client_user, specialist_user, service,
@@ -540,6 +547,8 @@ class TestPaymentWebhook:
         ev = OutboxEvent.objects.get(topic=OutboxEvent.Topic.PAYMENT_FAILED)
         assert ev.data['cancellation_party'] == ''
         assert ev.data['reason_code'] == ''
+        assert ev.data['reason'] == ''
+        assert ev.data['failed_at']
 
     def test_webhook_event_vs_api_status_mismatch_is_noop(
         self, anon_app, client_user, specialist_user, service,

@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import permissions, serializers as drf_serializers
 from rest_framework.exceptions import PermissionDenied
@@ -618,6 +619,15 @@ class PaymentWebhookView(APIView):
                         'reason_code': _safe_cancellation_reason(
                             cancellation.get('reason'),
                         ),
+                        # The bot's handle_payment_failed reads
+                        # data["reason"] (mapped via _map_yookassa_failure_code,
+                        # fail-closed → "other") and data["failed_at"].
+                        # ``reason`` carries the same closed-allowlist slug
+                        # as reason_code (no PII); failed_at is the emit time.
+                        'reason': _safe_cancellation_reason(
+                            cancellation.get('reason'),
+                        ),
+                        'failed_at': timezone.now().isoformat(),
                     },
                     user_id=client_id,
                     tenant_id=tenant_id,
