@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 
 from django.db import transaction
+from django.utils import timezone
 
 from appointments.application.dto import CancelBookingDTO, RescheduleBookingDTO
 from appointments.domain.exceptions import SlotNotAvailableError
@@ -105,12 +106,27 @@ class CancelBookingService:
             emit_outbox_event, safe_tenant_id,
         )
         from appointments.models import OutboxEvent as _OutboxEvent
+        # Contract §3.2 vocabulary (consumers/booking.py reads
+        # data["cancelled_by"] + data["reason_code"]). Map the internal
+        # initiator_role {client, specialist, system} → the closed
+        # cancelled_by enum {user, master, system}, and pick a coarse
+        # reason_code (the §3.2 enum blesses coarse categoricals).
+        # ``reason_code`` is null only for a system-driven cancel, where
+        # the code is auto-derived elsewhere per the contract. The
+        # free-text ``reason`` stays for human/audit context.
+        cancelled_by, reason_code = {
+            "specialist": ("master", "master_unavailable"),
+            "system": ("system", None),
+        }.get(initiator_role, ("user", "user_changed_plans"))
         emit_outbox_event(
             topic=_OutboxEvent.Topic.BOOKING_CANCELLED,
             data={
                 "appointment_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
                 "start_at": appointment.start_datetime.isoformat(),
+                "cancelled_by": cancelled_by,
+                "reason_code": reason_code,
+                "cancelled_at": timezone.now().isoformat(),
                 "initiator_role": initiator_role,
                 "refund_percent": refund_percent,
                 "reason": reason,
@@ -221,7 +237,18 @@ class RescheduleBookingService:
                 # stale after a reschedule (#12 in REFACTOR_PRIORITIZATION).
                 "start_at": new_interval.start_at.isoformat(),
                 "end_at": new_interval.end_at.isoformat(),
+                # Contract §3.3 field the bot consumer hard-reads
+                # (consumers/booking.py: data["new_start_at"]). Same
+                # value as start_at above; both kept so the in-process
+                # cache handler (reads start_at) and the cross-service
+                # consumer (reads new_start_at) each find their key.
+                "new_start_at": new_interval.start_at.isoformat(),
                 "old_start_at": old_start_at.isoformat(),
+                "rescheduled_by": (
+                    "master" if initiator_role == "specialist"
+                    else "system" if initiator_role == "system"
+                    else "user"
+                ),
             },
             user_id=appointment.client_id,
             tenant_id=safe_tenant_id(appointment, context="booking.rescheduled"),
