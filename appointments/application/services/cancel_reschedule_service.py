@@ -31,6 +31,41 @@ from appointments.domain.value_objects import (
 
 logger = logging.getLogger(__name__)
 
+# event-contract.md §3.2 closed reason_code vocabulary.
+_REASON_CODE_VOCAB = frozenset({
+    "user_changed_plans", "user_no_show", "master_unavailable",
+    "tenant_closed_slot", "payment_hold_expired", "policy_violation", "other",
+})
+# Structured internal reason tokens → §3.2 code. ``reason`` is matched
+# against this first; unrecognised free-text falls back to the role default.
+_REASON_TOKEN_TO_CODE = {
+    "specialist_departure": "master_unavailable",
+}
+# initiator_role → (cancelled_by enum, fallback reason_code). System falls
+# back to "other" (never None); §3.2 has no generic system-auto code.
+_ROLE_TO_CANCELLED_BY = {
+    "specialist": ("master", "master_unavailable"),
+    "system": ("system", "other"),
+}  # default → ("user", "user_changed_plans")
+
+
+def _resolve_cancellation_vocab(initiator_role: str, reason: str | None):
+    """Map (initiator_role, free-text reason) → (cancelled_by, reason_code).
+
+    ``reason`` is authoritative when recognised — either a known internal
+    token (e.g. ``specialist_departure``) or a literal §3.2 code passed
+    through; otherwise the initiator-role default applies. The result is
+    always a non-null §3.2 ``reason_code``.
+    """
+    cancelled_by, fallback = _ROLE_TO_CANCELLED_BY.get(
+        initiator_role, ("user", "user_changed_plans"))
+    code = None
+    if reason:
+        token = reason.strip().lower()
+        code = _REASON_TOKEN_TO_CODE.get(token) or (
+            token if token in _REASON_CODE_VOCAB else None)
+    return cancelled_by, (code or fallback)
+
 
 class CancelBookingService:
     """Cancels a booking according to cancellation policy."""
@@ -109,15 +144,13 @@ class CancelBookingService:
         # Contract §3.2 vocabulary (consumers/booking.py reads
         # data["cancelled_by"] + data["reason_code"]). Map the internal
         # initiator_role {client, specialist, system} → the closed
-        # cancelled_by enum {user, master, system}, and pick a coarse
-        # reason_code (the §3.2 enum blesses coarse categoricals).
-        # ``reason_code`` is null only for a system-driven cancel, where
-        # the code is auto-derived elsewhere per the contract. The
-        # free-text ``reason`` stays for human/audit context.
-        cancelled_by, reason_code = {
-            "specialist": ("master", "master_unavailable"),
-            "system": ("system", None),
-        }.get(initiator_role, ("user", "user_changed_plans"))
+        # cancelled_by enum {user, master, system} and resolve a non-null
+        # §3.2 reason_code, letting a recognised ``reason`` (internal token
+        # or literal §3.2 code) win over the role default. The free-text
+        # ``reason`` stays in the payload for human/audit context.
+        cancelled_by, reason_code = _resolve_cancellation_vocab(
+            initiator_role, reason,
+        )
         emit_outbox_event(
             topic=_OutboxEvent.Topic.BOOKING_CANCELLED,
             data={
