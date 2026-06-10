@@ -19,6 +19,44 @@ CREATE_URL = '/api/v1/payments/create/'
 WEBHOOK_URL = '/api/v1/payments/webhook/'
 
 
+class TestContractFailureReasonMapper:
+    """_contract_failure_reason: YooKassa slug → §3.7 reason enum.
+
+    The §3.7 reason value-space is closed
+    {card_declined, insufficient_funds, hold_expired, provider_error,
+    cancelled_by_user}; the bot consumer fail-closes anything else to
+    OTHER, so the emitter must always produce a real member."""
+
+    @pytest.mark.parametrize('slug, expected', [
+        ('insufficient_funds', 'insufficient_funds'),
+        ('expired_on_capture', 'hold_expired'),
+        ('expired_on_confirmation', 'hold_expired'),
+        ('canceled_by_merchant', 'cancelled_by_user'),
+        # Granular YooKassa declines fold into provider_error per the
+        # agreed mapping (not guessed into card_declined).
+        ('general_decline', 'provider_error'),
+        ('card_expired', 'provider_error'),
+        ('fraud_suspected', 'provider_error'),
+        # Unknown / free-text / None never leak and never become '' —
+        # they resolve to a valid §3.7 member.
+        ('totally unknown free text', 'provider_error'),
+        ('', 'provider_error'),
+        (None, 'provider_error'),
+    ])
+    def test_maps_to_contract_enum(self, slug, expected):
+        from payments.views import _contract_failure_reason
+        assert _contract_failure_reason(slug) == expected
+
+    def test_output_is_always_a_contract_member(self):
+        from payments.views import (
+            _CANCELLATION_REASONS,
+            _CONTRACT_FAILURE_REASONS,
+            _contract_failure_reason,
+        )
+        for slug in _CANCELLATION_REASONS | {None, '', 'garbage'}:
+            assert _contract_failure_reason(slug) in _CONTRACT_FAILURE_REASONS
+
+
 # ---------------------------------------------------------------------------
 # Helpers / Fixtures
 # ---------------------------------------------------------------------------
@@ -460,12 +498,16 @@ class TestPaymentWebhook:
         assert ev.data['amount'] == str(payment.amount)
         assert ev.data['cancellation_party'] == 'payment_network'
         assert ev.data['reason_code'] == 'insufficient_funds'
+        # The bot's handle_payment_failed reads data["reason"] + data["failed_at"];
+        # reason carries the same closed-allowlist slug as reason_code.
+        assert ev.data['reason'] == 'insufficient_funds'
+        assert ev.data['failed_at']  # ISO timestamp, present
         # PII guard per event-contract §7 — no names / emails / cards /
         # free-text reasons. Closed allowlist of data keys means any
         # accidental addition of a PII-shaped key fails this assertion.
         allowed_keys = {
             'payment_id', 'appointment_id', 'amount',
-            'cancellation_party', 'reason_code',
+            'cancellation_party', 'reason_code', 'reason', 'failed_at',
         }
         assert set(ev.data.keys()) == allowed_keys, (
             f"payment.failed data must NOT include PII; saw extras: "
@@ -508,6 +550,11 @@ class TestPaymentWebhook:
         ev = OutboxEvent.objects.get(topic=OutboxEvent.Topic.PAYMENT_FAILED)
         assert ev.data['cancellation_party'] == ''
         assert ev.data['reason_code'] == ''
+        # reason_code (raw YooKassa slug) coerces to '', but reason is the
+        # §3.7 enum — an unrecognised/free-text slug maps to provider_error
+        # (a valid member), never '' which the consumer would drop to OTHER.
+        assert ev.data['reason'] == 'provider_error'
+        assert ev.data['failed_at']
 
     def test_webhook_payment_canceled_handles_missing_cancellation_details(
         self, anon_app, client_user, specialist_user, service,
@@ -540,6 +587,10 @@ class TestPaymentWebhook:
         ev = OutboxEvent.objects.get(topic=OutboxEvent.Topic.PAYMENT_FAILED)
         assert ev.data['cancellation_party'] == ''
         assert ev.data['reason_code'] == ''
+        # Missing details → reason_code '' (raw slot empty) but reason still
+        # a valid §3.7 member so the consumer records provider_error.
+        assert ev.data['reason'] == 'provider_error'
+        assert ev.data['failed_at']
 
     def test_webhook_event_vs_api_status_mismatch_is_noop(
         self, anon_app, client_user, specialist_user, service,
