@@ -99,6 +99,39 @@ def _safe_cancellation_reason(value: object) -> str:
     return ""
 
 
+# event-contract.md §3.7 — payment.failed.reason is a CLOSED enum:
+# {card_declined, insufficient_funds, hold_expired, provider_error,
+# cancelled_by_user}. This is a DIFFERENT value-space from the YooKassa
+# cancellation slug we keep in reason_code (B-1b). The bot consumer
+# (apps/eventbus/consumers/payment._map_yookassa_failure_code — a
+# BOT-side function we do NOT call) maps these names 1:1 and fail-closes
+# anything else to OTHER, so the emitter MUST translate the YooKassa slug
+# into a §3.7 member here. Anything unrecognised — incl. None — maps to
+# ``provider_error`` (a valid member), never '' and never OTHER, so the
+# cause is preserved rather than lost.
+_CONTRACT_FAILURE_REASONS = frozenset({
+    "card_declined", "insufficient_funds", "hold_expired",
+    "provider_error", "cancelled_by_user",
+})
+
+
+def _contract_failure_reason(value: object) -> str:
+    """Map a YooKassa cancellation slug → the §3.7 reason enum.
+
+    ``card_declined`` is a valid §3.7 member but is intentionally not
+    produced here: per the agreed mapping, granular card-decline slugs
+    fold into ``provider_error`` rather than guessing a finer category.
+    """
+    slug = value.strip().lower() if isinstance(value, str) else ""
+    if slug in _CONTRACT_FAILURE_REASONS:
+        return slug
+    if slug.startswith("expired_on"):
+        return "hold_expired"
+    if slug.startswith(("canceled_by", "cancelled_by")):
+        return "cancelled_by_user"
+    return "provider_error"
+
+
 def _get_yookassa() -> YooKassaService:
     return YooKassaService()
 
@@ -619,12 +652,14 @@ class PaymentWebhookView(APIView):
                         'reason_code': _safe_cancellation_reason(
                             cancellation.get('reason'),
                         ),
-                        # The bot's handle_payment_failed reads
-                        # data["reason"] (mapped via _map_yookassa_failure_code,
-                        # fail-closed → "other") and data["failed_at"].
-                        # ``reason`` carries the same closed-allowlist slug
-                        # as reason_code (no PII); failed_at is the emit time.
-                        'reason': _safe_cancellation_reason(
+                        # The bot's handle_payment_failed reads data["reason"]
+                        # (a §3.7 enum member) and data["failed_at"]. reason
+                        # is translated from the YooKassa slug into the §3.7
+                        # value-space — distinct from reason_code's raw slug —
+                        # so the consumer keeps the cause instead of folding
+                        # everything to OTHER. No PII either way; failed_at is
+                        # the emit time.
+                        'reason': _contract_failure_reason(
                             cancellation.get('reason'),
                         ),
                         'failed_at': timezone.now().isoformat(),
