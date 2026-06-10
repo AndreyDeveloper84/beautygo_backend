@@ -31,13 +31,15 @@ from appointments.domain.value_objects import (
 
 logger = logging.getLogger(__name__)
 
-# event-contract.md §3.2 closed reason_code vocabulary.
-_REASON_CODE_VOCAB = frozenset({
-    "user_changed_plans", "user_no_show", "master_unavailable",
-    "tenant_closed_slot", "payment_hold_expired", "policy_violation", "other",
-})
-# Structured internal reason tokens → §3.2 code. ``reason`` is matched
-# against this first; unrecognised free-text falls back to the role default.
+# Trusted internal reason tokens → §3.2 reason_code. ONLY server-side
+# callers populate ``reason`` with these tokens (e.g. the specialist-
+# departure cascade in users/services.py). API free-text reason (an
+# unvalidated CharField, AppointmentCancelSerializer.reason) MUST NOT be
+# able to drive the attribution enum — a client cancelling their own
+# booking could otherwise send reason="user_no_show"/"master_unavailable"
+# and forge a reason_code that contradicts cancelled_by. So there is no
+# literal §3.2 passthrough: an unrecognised reason falls back to the
+# initiator-role default below.
 _REASON_TOKEN_TO_CODE = {
     "specialist_departure": "master_unavailable",
 }
@@ -50,20 +52,20 @@ _ROLE_TO_CANCELLED_BY = {
 
 
 def _resolve_cancellation_vocab(initiator_role: str, reason: str | None):
-    """Map (initiator_role, free-text reason) → (cancelled_by, reason_code).
+    """Map (initiator_role, reason) → (cancelled_by, reason_code).
 
-    ``reason`` is authoritative when recognised — either a known internal
-    token (e.g. ``specialist_departure``) or a literal §3.2 code passed
-    through; otherwise the initiator-role default applies. The result is
-    always a non-null §3.2 ``reason_code``.
+    ``reason_code`` is derived ONLY from a trusted internal reason token
+    (``_REASON_TOKEN_TO_CODE``, populated by server-side callers) or the
+    initiator-role default — never from raw API free-text, which would
+    let a client forge the attribution enum. The free-text ``reason``
+    itself travels separately in the human-readable payload field. The
+    result is always a non-null §3.2 ``reason_code``.
     """
     cancelled_by, fallback = _ROLE_TO_CANCELLED_BY.get(
         initiator_role, ("user", "user_changed_plans"))
     code = None
     if reason:
-        token = reason.strip().lower()
-        code = _REASON_TOKEN_TO_CODE.get(token) or (
-            token if token in _REASON_CODE_VOCAB else None)
+        code = _REASON_TOKEN_TO_CODE.get(reason.strip().lower())
     return cancelled_by, (code or fallback)
 
 
@@ -145,9 +147,9 @@ class CancelBookingService:
         # data["cancelled_by"] + data["reason_code"]). Map the internal
         # initiator_role {client, specialist, system} → the closed
         # cancelled_by enum {user, master, system} and resolve a non-null
-        # §3.2 reason_code, letting a recognised ``reason`` (internal token
-        # or literal §3.2 code) win over the role default. The free-text
-        # ``reason`` stays in the payload for human/audit context.
+        # §3.2 reason_code from a trusted internal token or the role
+        # default (NOT from API free-text). The free-text ``reason`` stays
+        # in the payload for human/audit context only.
         cancelled_by, reason_code = _resolve_cancellation_vocab(
             initiator_role, reason,
         )

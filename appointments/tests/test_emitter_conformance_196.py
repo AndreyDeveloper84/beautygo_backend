@@ -242,6 +242,34 @@ class TestBookingCancelledPayload:
         assert evt.data["reason_code"] == "user_changed_plans"
         assert "cancelled_at" in evt.data
 
+    def test_client_free_text_reason_cannot_forge_reason_code(
+        self, client_user, specialist, service,
+    ):
+        """Security: ``reason`` is unvalidated API free-text. A client
+        cancelling their own booking must NOT be able to inject a §3.2
+        code (e.g. "user_no_show" / "master_unavailable") into the
+        attribution enum — that would forge a cancelled_by/reason_code
+        contradiction. The reason_code stays the client role default; the
+        free-text rides only in the human-readable ``reason`` field."""
+        for forged in ("user_no_show", "master_unavailable", "other"):
+            appt = _confirmed(client_user, specialist, service)
+            OutboxEvent.objects.all().delete()
+            CancelBookingService().execute(CancelBookingDTO(
+                booking_id=appt.id,
+                initiator_user_id=client_user.id,
+                initiator_role="client",
+                reason=forged,
+            ))
+            evt = OutboxEvent.objects.get(
+                topic=OutboxEvent.Topic.BOOKING_CANCELLED,
+            )
+            assert evt.data["cancelled_by"] == "user"
+            assert evt.data["reason_code"] == "user_changed_plans", (
+                f"client free-text reason={forged!r} forged reason_code"
+            )
+            # The raw free-text still travels in the audit field.
+            assert evt.data["reason"] == forged
+
     def test_specialist_cancel_maps_to_master_unavailable(
         self, client_user, specialist, service,
     ):
