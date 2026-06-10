@@ -322,6 +322,24 @@ class CreateBookingService:
                 "service_id": str(dto.service_id),
                 "start_at": target_interval.start_at.isoformat(),
                 "end_at": target_interval.end_at.isoformat(),
+                # Lifecycle status the consumer mirrors onto
+                # RemoteBookingProxy.status (event-contract.md §3.1; the
+                # bot's consumers/booking.py hard-reads data["status"]).
+                # Omitting it crashed the booking.created handler with
+                # KeyError before delivery could ever succeed.
+                "status": str(appointment.status),
+                # Coarse origin channel — "walk_in" for a provider-
+                # initiated booking (actor_role 'specialist'), else the
+                # mobile client. Consumer stores it on the proxy; §3.1
+                # `source` accepts any string.
+                "source": (
+                    "walk_in" if dto.actor_role == "specialist"
+                    else "mobile_app"
+                ),
+                # Contract field name for the booked total (§3.1
+                # `price_total`). ``amount`` is kept below for the
+                # in-process handlers that already read it.
+                "price_total": str(snapshot.price),
                 "payment_id": str(payment.id) if payment else None,
                 "amount": str(snapshot.price),
                 "specialist_timezone": snapshot.specialist_timezone,
