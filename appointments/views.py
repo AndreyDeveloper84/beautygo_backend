@@ -8,6 +8,7 @@ from uuid import uuid4
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import QuerySet
+from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
@@ -450,6 +451,10 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         "appointment_id": str(appointment.id),
                         "client_id": str(appointment.client_id),
                         "specialist_id": str(appointment.specialist_id),
+                        # Contract §3.4 field the consumer reads for the
+                        # completion timestamp (consumers/booking.py:
+                        # data.get("completed_at")).
+                        "completed_at": timezone.now().isoformat(),
                     },
                     user_id=request.user.id,
                     tenant_id=safe_tenant_id(
@@ -519,6 +524,11 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         status_code=404,
                     )
                 appointment.mark_no_show()
+                # Internal no-show signal — kept for in-process handlers
+                # (#511 reliability scoring, revenue-loss tracking). This
+                # topic is NOT in the cross-service taxonomy, so it stays
+                # internal-delivery only; the bot mirror is fed by the
+                # booking.cancelled emit below.
                 emit_outbox_event(
                     topic=OutboxEvent.Topic.BOOKING_NO_SHOW,
                     data={
@@ -530,6 +540,31 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                     tenant_id=safe_tenant_id(
                         appointment, context="booking.no_show",
                     ),
+                    actor="admin",  # specialist-initiated
+                )
+                # Cross-service representation of a no-show. The bot's
+                # ingest taxonomy has no "booking.no_show" name (it would
+                # dead-letter); event-contract.md §3.2 models a no-show
+                # as booking.cancelled + reason_code="user_no_show". The
+                # consumer flips its RemoteBookingProxy to cancelled and
+                # cancels pending reminders — the correct mirror state for
+                # a client who didn't show. user_id is the customer (whose
+                # booking this is), not the specialist who marked it.
+                tenant_id = safe_tenant_id(
+                    appointment, context="booking.cancelled",
+                )
+                emit_outbox_event(
+                    topic=OutboxEvent.Topic.BOOKING_CANCELLED,
+                    data={
+                        "appointment_id": str(appointment.id),
+                        "specialist_id": str(appointment.specialist_id),
+                        "start_at": appointment.start_datetime.isoformat(),
+                        "cancelled_by": "master",
+                        "reason_code": "user_no_show",
+                        "cancelled_at": timezone.now().isoformat(),
+                    },
+                    user_id=appointment.client_id,
+                    tenant_id=tenant_id,
                     actor="admin",  # specialist-initiated
                 )
         except DjangoValidationError as e:
