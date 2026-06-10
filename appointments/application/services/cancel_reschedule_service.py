@@ -31,6 +31,43 @@ from appointments.domain.value_objects import (
 
 logger = logging.getLogger(__name__)
 
+# Trusted internal reason tokens → §3.2 reason_code. ONLY server-side
+# callers populate ``reason`` with these tokens (e.g. the specialist-
+# departure cascade in users/services.py). API free-text reason (an
+# unvalidated CharField, AppointmentCancelSerializer.reason) MUST NOT be
+# able to drive the attribution enum — a client cancelling their own
+# booking could otherwise send reason="user_no_show"/"master_unavailable"
+# and forge a reason_code that contradicts cancelled_by. So there is no
+# literal §3.2 passthrough: an unrecognised reason falls back to the
+# initiator-role default below.
+_REASON_TOKEN_TO_CODE = {
+    "specialist_departure": "master_unavailable",
+}
+# initiator_role → (cancelled_by enum, fallback reason_code). System falls
+# back to "other" (never None); §3.2 has no generic system-auto code.
+_ROLE_TO_CANCELLED_BY = {
+    "specialist": ("master", "master_unavailable"),
+    "system": ("system", "other"),
+}  # default → ("user", "user_changed_plans")
+
+
+def _resolve_cancellation_vocab(initiator_role: str, reason: str | None):
+    """Map (initiator_role, reason) → (cancelled_by, reason_code).
+
+    ``reason_code`` is derived ONLY from a trusted internal reason token
+    (``_REASON_TOKEN_TO_CODE``, populated by server-side callers) or the
+    initiator-role default — never from raw API free-text, which would
+    let a client forge the attribution enum. The free-text ``reason``
+    itself travels separately in the human-readable payload field. The
+    result is always a non-null §3.2 ``reason_code``.
+    """
+    cancelled_by, fallback = _ROLE_TO_CANCELLED_BY.get(
+        initiator_role, ("user", "user_changed_plans"))
+    code = None
+    if reason:
+        code = _REASON_TOKEN_TO_CODE.get(reason.strip().lower())
+    return cancelled_by, (code or fallback)
+
 
 class CancelBookingService:
     """Cancels a booking according to cancellation policy."""
@@ -109,15 +146,13 @@ class CancelBookingService:
         # Contract §3.2 vocabulary (consumers/booking.py reads
         # data["cancelled_by"] + data["reason_code"]). Map the internal
         # initiator_role {client, specialist, system} → the closed
-        # cancelled_by enum {user, master, system}, and pick a coarse
-        # reason_code (the §3.2 enum blesses coarse categoricals).
-        # ``reason_code`` is null only for a system-driven cancel, where
-        # the code is auto-derived elsewhere per the contract. The
-        # free-text ``reason`` stays for human/audit context.
-        cancelled_by, reason_code = {
-            "specialist": ("master", "master_unavailable"),
-            "system": ("system", None),
-        }.get(initiator_role, ("user", "user_changed_plans"))
+        # cancelled_by enum {user, master, system} and resolve a non-null
+        # §3.2 reason_code from a trusted internal token or the role
+        # default (NOT from API free-text). The free-text ``reason`` stays
+        # in the payload for human/audit context only.
+        cancelled_by, reason_code = _resolve_cancellation_vocab(
+            initiator_role, reason,
+        )
         emit_outbox_event(
             topic=_OutboxEvent.Topic.BOOKING_CANCELLED,
             data={
