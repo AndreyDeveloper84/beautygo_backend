@@ -546,6 +546,32 @@ BOT_PLATFORM_INGEST_PATH = os.environ.get(
 # quarterly per event-contract §6.2 cadence.
 AYLA_OUTBOUND_HMAC_SECRET = os.environ.get("AYLA_OUTBOUND_HMAC_SECRET", "")
 
+# Block B → Track 5 — per-topic cross-service delivery allowlist.
+#
+# OUTBOX_EXTERNAL_DELIVERY_TOPICS gates which OutboxEvent topics get
+# ``external_delivery_enabled=True`` at emit time → which the Block C
+# HTTP publisher actually ships to bot-platform's ingest. Defaults to
+# the empty tuple — every row stays local-only, identical to pre-B-1
+# behaviour. Founder holds the flip per-topic; the corresponding
+# bot-platform consumer must be round-trip green before a topic
+# moves onto this list (codex P0-1 + P0-3 read-side close).
+#
+# Env format: comma-separated topic slugs.
+# Example flip (single line in deploy env, no code change required):
+#     OUTBOX_EXTERNAL_DELIVERY_TOPICS=payment.captured,payment.failed
+#
+# The publisher already gates on the model field
+# (external_delivery_enabled=True), so leaving this empty AND the
+# model default at False means cross-service traffic is gated by two
+# independent layers. Once a topic is added here, every NEW row gets
+# the flag set; existing rows can be flipped via a one-off SQL UPDATE
+# (operator runbook, separate dispatch).
+OUTBOX_EXTERNAL_DELIVERY_TOPICS: tuple[str, ...] = tuple(
+    slug.strip()
+    for slug in os.environ.get("OUTBOX_EXTERNAL_DELIVERY_TOPICS", "").split(",")
+    if slug.strip()
+)
+
 # DRF-288 — Cross-domain (Track E) production rollout gate.
 # Default closed: when CROSS_DOMAIN_ENABLED is False, the engine only
 # evaluates for accounts listed in CROSS_DOMAIN_INTERNAL_ACCOUNTS (5
