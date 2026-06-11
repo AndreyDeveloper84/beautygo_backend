@@ -238,8 +238,21 @@ def emit_outbox_event(
         causation_id=causation_id,
         event_id=event_id,
     )
+    # Per-topic cross-service delivery gate. The publisher (C2) only
+    # ships rows where ``external_delivery_enabled=True``; the value
+    # here is derived from the per-topic allowlist in
+    # ``OUTBOX_EXTERNAL_DELIVERY_TOPICS`` (settings.base). Empty
+    # allowlist → every row stays local-only, identical to pre-B-1
+    # behaviour. Founder holds the flip-gate per-topic until the
+    # matching bot consumer is round-trip green.
+    from django.conf import settings as _settings
+    enabled_topics = set(
+        getattr(_settings, "OUTBOX_EXTERNAL_DELIVERY_TOPICS", ()) or ()
+    )
+    external_delivery_enabled = topic in enabled_topics
     return OutboxEvent.objects.create(
         id=event_id,
         topic=topic,
         payload=envelope,
+        external_delivery_enabled=external_delivery_enabled,
     )
