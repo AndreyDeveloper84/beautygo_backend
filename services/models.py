@@ -92,14 +92,31 @@ class ServiceTemplate(models.Model):
         max_length=40,
         help_text="Короткое имя для чипов/списков",
     )
+    # Durations are nullable so the canonical catalog can be seeded from the
+    # reference list before per-service timings are curated (see
+    # seed_canonical_catalog + docs/CANONICAL_CATALOG_SEED_PLAN_2026-07.md).
     duration_default = models.PositiveIntegerField(
+        null=True, blank=True,
         validators=[MinValueValidator(5), MaxValueValidator(480)],
     )
     duration_min = models.PositiveIntegerField(
+        null=True, blank=True,
         validators=[MinValueValidator(5), MaxValueValidator(480)],
     )
     duration_max = models.PositiveIntegerField(
+        null=True, blank=True,
         validators=[MinValueValidator(5), MaxValueValidator(480)],
+    )
+    # Canonical health-screening attributes (subset of #200 task 1). A gated
+    # service must be screened for contraindications before booking; the bot
+    # grounds its health-check on these via ayla_service_id.
+    requires_health_check = models.BooleanField(
+        default=False,
+        help_text="Услуга требует проверки противопоказаний перед записью",
+    )
+    contraindications = models.TextField(
+        blank=True, default="",
+        help_text="Противопоказания / оговорки (мед. профиль, разрешение врача и т.п.)",
     )
     is_popular = models.BooleanField(
         default=False,
@@ -117,11 +134,21 @@ class ServiceTemplate(models.Model):
         ]
 
     def clean(self) -> None:
-        if self.duration_min > self.duration_default:
+        # Durations may be null on canonical rows that are not yet timed;
+        # only cross-validate when the pair is present.
+        if (
+            self.duration_min is not None
+            and self.duration_default is not None
+            and self.duration_min > self.duration_default
+        ):
             raise ValidationError(
                 {'duration_min': 'duration_min must be <= duration_default.'}
             )
-        if self.duration_max < self.duration_default:
+        if (
+            self.duration_max is not None
+            and self.duration_default is not None
+            and self.duration_max < self.duration_default
+        ):
             raise ValidationError(
                 {'duration_max': 'duration_max must be >= duration_default.'}
             )
