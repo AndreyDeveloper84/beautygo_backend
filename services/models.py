@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
@@ -301,3 +302,359 @@ class Service(models.Model):
 
     def __str__(self):
         return f"{self.name} — {self.specialist.display_name}"
+
+
+# --------------------------------------------------------------------------- #
+# S3A canonical catalog rebuild (#1044 / #200) — additive new layer.
+# ServiceTemplate (taxonomy) -> SalonService -> SpecialistService (bookable).
+# Service / Appointment are intentionally NOT touched here (strangler-fig;
+# cutover is the separate founder-authorized S3-CUT chunk). See
+# docs/CATALOG_DOMAIN_REBUILD_S3_DESIGN_2026-07.md.
+# --------------------------------------------------------------------------- #
+class SalonService(models.Model):
+    """A service a salon (Tenant) offers — mid layer of the catalog chain.
+
+    Derived from a ``ServiceTemplate`` (taxonomy) or, for off-taxonomy
+    custom offerings, standalone with an explicit category (D2). Not
+    bookable on its own — a ``SpecialistService`` makes it bookable.
+    """
+
+    class Source(models.TextChoices):
+        MANUAL = "manual", "Manual"
+        YCLIENTS = "yclients", "YClients"
+        SEED = "seed", "Seed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        related_name="salon_services",
+    )
+    # Nullable so off-taxonomy custom services are allowed (D2); when null,
+    # ``category`` is required (enforced in clean()).
+    template = models.ForeignKey(
+        "ServiceTemplate",
+        on_delete=models.PROTECT,
+        null=True, blank=True,
+        related_name="salon_services",
+    )
+    category = models.ForeignKey(
+        ServiceCategory,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="salon_services",
+    )
+    name = models.CharField(max_length=200)
+    # Salon-level default; null resolves from template (see
+    # SpecialistService.resolved_duration).
+    duration_minutes = models.PositiveIntegerField(
+        null=True, blank=True,
+        validators=[MinValueValidator(5), MaxValueValidator(480)],
+    )
+    base_price = models.DecimalField(
+        max_digits=10, decimal_places=2,
+        null=True, blank=True,
+        validators=[MinValueValidator(1)],
+    )
+    # Escalate-only floor vs template (D1): admin may set True on a salon
+    # even when the template does not require it; cannot relax a gated
+    # template downstream (SpecialistService.resolved_requires_health_check).
+    requires_health_check = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    source = models.CharField(
+        max_length=10, choices=Source.choices, default=Source.MANUAL,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "template", "name"],
+                name="salonservice_tenant_template_name_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["tenant", "is_active"],
+                name="salonsvc_tenant_active_idx",
+            ),
+            models.Index(
+                fields=["tenant", "category", "is_active"],
+                name="salonsvc_tenant_cat_active_idx",
+            ),
+        ]
+
+    def clean(self) -> None:
+        if self.template_id is None and self.category_id is None:
+            raise ValidationError(
+                {"category": "category is required for off-taxonomy custom services."}
+            )
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.name} @ {self.tenant.slug}"
+
+
+class SpecialistService(models.Model):
+    """A specialist performs a SalonService — the BOOKABLE catalog unit.
+
+    ``id`` is the stable booking key the bot resolves (see the stable-id
+    contract in the design doc). ``duration_minutes`` / ``requires_health_check``
+    resolve down the chain (specialist -> salon -> template).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    salon_service = models.ForeignKey(
+        "SalonService",
+        on_delete=models.PROTECT,
+        related_name="specialist_services",
+    )
+    specialist = models.ForeignKey(
+        "users.SpecialistProfile",
+        on_delete=models.CASCADE,
+        related_name="specialist_services",
+    )
+    # Denormalized from salon_service for tenant-scoped queries; populated in
+    # save() when unset. Nullable for parity with other denormalized tenant FKs.
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        null=True, blank=True,
+        related_name="specialist_services",
+    )
+    # Nullable in DB; must be resolvable when is_active (enforced in clean()).
+    duration_minutes = models.PositiveIntegerField(
+        null=True, blank=True,
+        validators=[MinValueValidator(5), MaxValueValidator(480)],
+    )
+    price = models.DecimalField(
+        max_digits=10, decimal_places=2,
+        validators=[MinValueValidator(1)],
+    )
+    requires_health_check = models.BooleanField(default=False)
+    buffer_after_minutes = models.PositiveSmallIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["specialist", "salon_service"],
+                name="specialistservice_specialist_salon_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["tenant", "is_active"],
+                name="specsvc_tenant_active_idx",
+            ),
+            models.Index(
+                fields=["specialist", "is_active"],
+                name="specsvc_spec_active_idx",
+            ),
+            models.Index(
+                fields=["salon_service", "is_active"],
+                name="specsvc_salon_active_idx",
+            ),
+        ]
+
+    def resolved_duration(self) -> int | None:
+        """First non-null of specialist -> salon -> template duration."""
+        if self.duration_minutes is not None:
+            return self.duration_minutes
+        salon = self.salon_service
+        if salon.duration_minutes is not None:
+            return salon.duration_minutes
+        template = salon.template
+        if template is not None:
+            return template.duration_default
+        return None
+
+    def resolved_requires_health_check(self) -> bool:
+        """Escalate-only OR across template floor, salon, specialist (D1)."""
+        salon = self.salon_service
+        template = salon.template
+        template_floor = (
+            template.requires_health_check if template is not None else False
+        )
+        return bool(
+            template_floor or salon.requires_health_check or self.requires_health_check
+        )
+
+    def clean(self) -> None:
+        if self.is_active and self.resolved_duration() is None:
+            raise ValidationError(
+                {"duration_minutes": "An active bookable service needs a resolvable duration."}
+            )
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        if self.tenant_id is None and self.salon_service_id is not None:
+            self.tenant_id = self.salon_service.tenant_id
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.salon_service.name} — {self.specialist.display_name}"
+
+
+class DraftSalonService(models.Model):
+    """External-prefill staging row for onboarding "Confirm, don't create".
+
+    An intake (YClients API-pull or CSV-bootstrap) writes a draft; a human
+    confirms it -> materializes a SalonService (+ ExternalSourceMapping).
+    The confirm/reject WRITE flow lands in S3C — S3A ships the model only.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        CONFIRMED = "confirmed", "Confirmed"
+        REJECTED = "rejected", "Rejected"
+        SUPERSEDED = "superseded", "Superseded"
+
+    class ExternalSource(models.TextChoices):
+        YCLIENTS = "yclients", "YClients"
+        CSV = "csv", "CSV bootstrap"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        related_name="draft_salon_services",
+    )
+    status = models.CharField(
+        max_length=12, choices=Status.choices, default=Status.PENDING,
+    )
+    external_source = models.CharField(
+        max_length=10, choices=ExternalSource.choices,
+        default=ExternalSource.YCLIENTS,
+    )
+    external_service_id = models.CharField(max_length=64, blank=True, default="")
+    suggested_template = models.ForeignKey(
+        "ServiceTemplate",
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    external_name = models.CharField(max_length=200)
+    suggested_duration = models.PositiveIntegerField(null=True, blank=True)
+    suggested_price = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+    )
+    raw_payload = models.JSONField(default=dict, blank=True)
+    confirmed_salon_service = models.ForeignKey(
+        "SalonService",
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            # Idempotent intake key — only when an external id is present, so
+            # multiple manual/blank drafts coexist.
+            models.UniqueConstraint(
+                fields=["tenant", "external_source", "external_service_id"],
+                condition=~models.Q(external_service_id=""),
+                name="draftsalonservice_external_id_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["tenant", "status"],
+                name="draftsvc_tenant_status_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"Draft<{self.status}> {self.external_name} @ {self.tenant.slug}"
+
+
+class ExternalSourceMapping(models.Model):
+    """Idempotent key between an external system id and an Ayla entity.
+
+    Keyed by YClients ``service_id`` / ``staff_id`` (per tenant, since
+    YClients ids are per-company). Two explicit nullable FKs rather than a
+    GenericForeignKey (D6): ``external_type`` discriminates which is set.
+    Guarantees a re-import re-uses the same Ayla id.
+    """
+
+    class Source(models.TextChoices):
+        YCLIENTS = "yclients", "YClients"
+
+    class ExternalType(models.TextChoices):
+        SERVICE = "service", "Service"
+        STAFF = "staff", "Staff"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source = models.CharField(
+        max_length=16, choices=Source.choices, default=Source.YCLIENTS,
+    )
+    external_type = models.CharField(max_length=8, choices=ExternalType.choices)
+    external_id = models.CharField(max_length=64)
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        related_name="external_source_mappings",
+    )
+    salon_service = models.ForeignKey(
+        "SalonService",
+        on_delete=models.CASCADE,
+        null=True, blank=True,
+        related_name="external_source_mappings",
+    )
+    specialist = models.ForeignKey(
+        "users.SpecialistProfile",
+        on_delete=models.CASCADE,
+        null=True, blank=True,
+        related_name="external_source_mappings",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "external_type", "external_id", "tenant"],
+                name="externalsourcemapping_key_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["tenant", "source", "external_type"],
+                name="extmap_tenant_src_type_idx",
+            ),
+        ]
+
+    def clean(self) -> None:
+        """Exactly one target FK, matching external_type."""
+        if self.external_type == self.ExternalType.SERVICE:
+            if self.salon_service_id is None or self.specialist_id is not None:
+                raise ValidationError(
+                    "external_type 'service' requires salon_service and no specialist."
+                )
+        elif self.external_type == self.ExternalType.STAFF:
+            if self.specialist_id is None or self.salon_service_id is not None:
+                raise ValidationError(
+                    "external_type 'staff' requires specialist and no salon_service."
+                )
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.source}:{self.external_type}:{self.external_id} @ {self.tenant.slug}"
