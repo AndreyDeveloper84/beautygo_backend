@@ -49,6 +49,12 @@ urlpatterns = [
         'api/v1/internal/services/',
         include('services.internal_urls'),
     ),
+    # S3A canonical catalog mirror (#1044 / #200) — new SalonService /
+    # SpecialistService layer the bot (S3B) reads.
+    path(
+        'api/v1/internal/catalog/',
+        include('services.internal_catalog_urls'),
+    ),
     path(
         'api/v1/internal/appointments/',
         include('appointments.internal_urls'),

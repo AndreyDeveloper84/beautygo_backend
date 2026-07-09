@@ -4,7 +4,12 @@ from typing import Any
 
 from rest_framework import serializers
 
-from .models import Service, ServiceCategory
+from .models import (
+    SalonService,
+    Service,
+    ServiceCategory,
+    SpecialistService,
+)
 
 # --- Public serializers (Client App) ---
 
@@ -153,3 +158,54 @@ class ServiceSerializer(serializers.ModelSerializer):
                 "Размер файла не должен превышать 5 МБ"
             )
         return value
+
+
+# --- S3A internal catalog serializers (Bearer mirror, #1044 / #200) ---
+
+
+class SalonServiceInternalSerializer(serializers.ModelSerializer):
+    """Read mirror of the salon-offer layer for the bot (S3B)."""
+
+    class Meta:
+        model = SalonService
+        fields = [
+            'id', 'tenant', 'template', 'category', 'name',
+            'duration_minutes', 'base_price', 'requires_health_check',
+            'is_active', 'source', 'created_at', 'updated_at',
+        ]
+
+
+class SpecialistServiceInternalSerializer(serializers.ModelSerializer):
+    """Read mirror of the BOOKABLE layer — the bot's stable booking key.
+
+    Exposes the resolved duration / health-check (cascade specialist ->
+    salon -> template, D1 escalate-only) so the bot never re-derives them,
+    plus the YClients staff id for cross-source reconciliation.
+    """
+
+    resolved_duration = serializers.SerializerMethodField()
+    resolved_requires_health_check = serializers.SerializerMethodField()
+    template = serializers.SerializerMethodField()
+    yclients_staff_id = serializers.CharField(
+        source='specialist.yclients_staff_id', default='', read_only=True,
+    )
+
+    class Meta:
+        model = SpecialistService
+        fields = [
+            'id', 'salon_service', 'specialist', 'tenant', 'template',
+            'duration_minutes', 'resolved_duration',
+            'requires_health_check', 'resolved_requires_health_check',
+            'price', 'buffer_after_minutes', 'is_active',
+            'yclients_staff_id', 'created_at', 'updated_at',
+        ]
+
+    def get_resolved_duration(self, obj: SpecialistService) -> int | None:
+        return obj.resolved_duration()
+
+    def get_resolved_requires_health_check(self, obj: SpecialistService) -> bool:
+        return obj.resolved_requires_health_check()
+
+    def get_template(self, obj: SpecialistService) -> str | None:
+        template_id = obj.salon_service.template_id
+        return str(template_id) if template_id is not None else None
