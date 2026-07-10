@@ -67,6 +67,8 @@ def specialist(db, tenant):
     p.tenant = tenant
     p.display_name = "S3A Spec"
     p.yclients_staff_id = "9001"
+    p.reviews_count = 17
+    p.rating = Decimal("4.7")
     p.save()
     return p
 
@@ -139,6 +141,17 @@ class TestSpecialistServiceRead:
         assert data["resolved_requires_health_check"] is True
         assert str(data["specialist"]) == str(specialist.id)
         assert data["yclients_staff_id"] == "9001"
+
+    def test_detail_exposes_user_id_reviews_and_rating(self, specialist_service, specialist):
+        # #1052/#1060: bot populates CatalogMaster.ayla_user_id (= User.id,
+        # NOT SpecialistProfile.id) + review_count/rating single-call.
+        r = _api().get(f"{SPEC_URL}{specialist_service.id}/")
+        assert r.status_code == 200, r.data
+        data = r.json().get("data", r.json())
+        assert str(data["user_id"]) == str(specialist.user_id)
+        assert str(data["user_id"]) != str(specialist.id)  # canonical User.id
+        assert data["reviews_count"] == 17
+        assert str(data["rating"]) == "4.7"
 
     def test_filter_by_specialist(self, specialist_service, specialist):
         r = _api().get(f"{SPEC_URL}?specialist={specialist.id}")
