@@ -189,15 +189,28 @@ class SpecialistServiceInternalSerializer(serializers.ModelSerializer):
     yclients_staff_id = serializers.CharField(
         source='specialist.yclients_staff_id', default='', read_only=True,
     )
+    # Canonical Ayla User.id (NOT SpecialistProfile.id) — the bot maps this to
+    # CatalogMaster.ayla_user_id. reviews_count/rating let the bot populate
+    # CatalogMaster.review_count/rating in the same catalog sync (#1052/#1060),
+    # no second call to /internal/specialists/.
+    user_id = serializers.UUIDField(source='specialist.user_id', read_only=True)
+    reviews_count = serializers.IntegerField(
+        source='specialist.reviews_count', read_only=True,
+    )
+    rating = serializers.DecimalField(
+        source='specialist.rating', max_digits=2, decimal_places=1,
+        read_only=True,
+    )
 
     class Meta:
         model = SpecialistService
         fields = [
-            'id', 'salon_service', 'specialist', 'tenant', 'template',
-            'duration_minutes', 'resolved_duration',
+            'id', 'salon_service', 'specialist', 'user_id', 'tenant',
+            'template', 'duration_minutes', 'resolved_duration',
             'requires_health_check', 'resolved_requires_health_check',
             'price', 'buffer_after_minutes', 'is_active',
-            'yclients_staff_id', 'created_at', 'updated_at',
+            'yclients_staff_id', 'reviews_count', 'rating',
+            'created_at', 'updated_at',
         ]
 
     def get_resolved_duration(self, obj: SpecialistService) -> int | None:
