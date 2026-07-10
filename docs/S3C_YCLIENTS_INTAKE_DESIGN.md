@@ -163,3 +163,69 @@ S3A-моделей в `dev` нет. Чтобы не блокироваться:
 - [ ] intake draft → confirm поток.
 - [ ] `ExternalSourceMapping` идемпотентность (повторный import без дублей).
 - [ ] §H.3 double-pass; PR → dev; Refs #1044.
+
+## 10. Проверенный контракт YClients (live 2026-07-10, company 884045)
+
+Read-only probe, креды из env (разовая верификация; прод-адаптер читает **свои**
+`YCLIENTS_*` env). Значения токенов/данные салона не сохранялись.
+
+**Base:** `https://api.yclients.com/api/v1`
+**Auth:** `Authorization: Bearer <partner>, User <user>` + `Accept: application/vnd.yclients.v2+json`.
+Формат заголовка **подтверждён** (management-вызов дошёл до бизнес-слоя, не 401).
+**Envelope:** `{ "success": bool, "data": <list|dict>, "meta": <obj|[]> }`.
+Ошибка → `success:false` + `meta.message` (RU-текст). ✅ live.
+**Rate-limit (✅ live, заголовки ответа):** `X-RateLimit-Limit: 200`,
+`X-RateLimit-Remaining`, `X-RateLimit-Reset: <сек до сброса окна>`. Адаптер:
+следить за `Remaining`, backoff на `429`.
+
+### Эндпоинты (проверено live)
+
+| Endpoint | Токен | `data` | Статус probe |
+|---|---|---|---|
+| `GET /company/{id}/services[?staff_id=]` | partner+**user** + **активная лицензия** | **плоский список** service-объектов | ⛔ `403` — лицензия истекла (см. блокер) |
+| `GET /book_services/{id}` | partner | **dict** `{services[], category[], category_groups[], events[]}` | ✅ `200` (но `services`=пусто из-за лицензии) |
+| `GET /book_staff/{id}[?service_ids[]=X]` | partner | **список** staff-объектов | ✅ `200`, 6 мастеров |
+
+`book_services.data` — **сгруппированный dict**, НЕ плоский список (в отличие от
+management `/services`). Услуги в `data.services`, категории в `data.category`.
+
+### Формы объектов
+
+**Staff (✅ live):** `id`(int), `name`, `specialization`, `avatar`, `avatar_big`,
+`bookable`(bool), `weight`(int), `rating`, `prepaid`(str, напр. `forbidden`),
+`position_id`, `schedule_till`(`YYYY-MM-DD`), `fired`, `hidden`, `status`,
+`information`, `image_group`(dict), `votes_count`, `comments_count`, `api_id`, `user_id`.
+→ для intake нужны: `id`(staff_id), `name`, `specialization`, `bookable`, `weight`.
+
+**Category (✅ live, `book_services.data.category`):** `id`(int), `parent_id`(int),
+`title`, `sex`(int), `weight`(int), `api_id`. Иерархия через `parent_id`.
+
+**Service (из прод-кода mysite; live не переподтверждён — лицензия):** `id`(int,
+service_id), `title`, `price_min`(number), `price_max`(number), `price_from`,
+`seance_length`(int, **СЕКУНДЫ**), `category_id`, `is_folder`(bool), `active`,
+`comment`, `weight`, `prepaid`, `image_group`. Прод-sync `mysite` парсит именно
+эти поля → контракт высокой точности.
+
+### Конверсии/правила адаптера (подтверждены)
+- `seance_length` секунды → **минуты** (`round(sec/60)`) для `duration_min`.
+- `is_folder == true` → **папка-группировка, НЕ bookable-услуга → фильтровать**.
+- `service_ids[]` — **bracket-notation** (без скобок → 404).
+- Даты — `YYYY-MM-DD`.
+- `429` → exponential backoff (лимит 200/окно).
+
+### Пагинация
+Management `/services` — не проверено live (лицензия). `book_services` отдаёт
+всё в одном `data` без страничных полей. **[уточнить на активной лицензии]** —
+адаптер закладывает возможную пагинацию через `meta`/`count`, но по умолчанию
+читает весь `data`.
+
+### 🚨 БЛОКЕР ПИЛОТА: лицензия YClients истекла (884045)
+Management `/company/{id}/services` → `403` + `meta.message`
+«Необходимо продлить лицензию в филиале с id: 884045». `book_services.data.services`
+= пусто. **Каталог услуг с ценами/длительностями сейчас из YClients НЕ вытянуть**
+(ни management, ни booking). Следствия:
+1. **API-pull даёт пустой каталог пилота, пока лицензия не продлена.**
+2. Критпуть пилота → **CSV-fallback**, либо продлить лицензию (тогда API-pull primary).
+3. **PR1 (адаптер+pipeline+DTO+замоканные тесты) НЕ заблокирован** — строится
+   против этого проверенного контракта; live-данные для unit-тестов не нужны
+   (санитизированные/синтетические фикстуры).
