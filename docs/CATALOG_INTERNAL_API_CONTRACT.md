@@ -93,7 +93,8 @@ Example detail:
 |---|---|---|
 | `id` | uuid str | **🔑 stable booking key** — the id the bot books against |
 | `salon_service` | uuid str | parent SalonService |
-| `specialist` | uuid str | SpecialistProfile |
+| `specialist` | uuid str | **SpecialistProfile.id** (profile pk — not the User id) |
+| `user_id` | uuid str | **canonical Ayla `User.id`** — map to `CatalogMaster.ayla_user_id`. NOT the same as `specialist`. |
 | `tenant` | uuid str \| null | denormalized salon |
 | `template` | uuid str \| null | taxonomy id (via salon_service.template) — discovery key |
 | `duration_minutes` | int \| null | raw specialist override (may be null) |
@@ -104,6 +105,8 @@ Example detail:
 | `buffer_after_minutes` | int | required gap after the service |
 | `is_active` | bool | bookability |
 | `yclients_staff_id` | str | YClients staff id from SpecialistProfile (`""` if none) — cross-source reconciliation |
+| `reviews_count` | int | from SpecialistProfile → `CatalogMaster.review_count` (single-call populate, #1060) |
+| `rating` | str | from SpecialistProfile → `CatalogMaster.rating` |
 | `created_at` / `updated_at` | iso datetime | |
 
 Example detail:
@@ -113,6 +116,7 @@ Example detail:
   "id": "a4e0....",
   "salon_service": "6f1c....",
   "specialist": "77aa....",
+  "user_id": "33cc....",
   "tenant": "b0a1....",
   "template": "9d3f....",
   "duration_minutes": 45,
@@ -123,6 +127,8 @@ Example detail:
   "buffer_after_minutes": 0,
   "is_active": true,
   "yclients_staff_id": "9001",
+  "reviews_count": 17,
+  "rating": "4.7",
   "created_at": "2026-07-09T18:31:00Z",
   "updated_at": "2026-07-09T18:31:00Z"
 }
@@ -138,6 +144,8 @@ Example detail:
 
 - All ids are immutable `UUIDv4`, stable across catalog syncs.
 - **Book against `specialist_service.id`.** It is the canonical bookable unit.
+- **`CatalogMaster.ayla_user_id` = `user_id`** (canonical Ayla `User.id`), **not**
+  `specialist` (SpecialistProfile.id). The two differ — do not conflate them.
 - **Discovery / taxonomy** keys off `template` (ServiceTemplate id).
 - Idempotency across YClients re-exports is guaranteed Ayla-side by
   `ExternalSourceMapping (source, external_type, external_id, tenant) → Ayla id`
@@ -155,3 +163,9 @@ Example detail:
 
 Additive-only within S3A. New fields may be appended; existing field names /
 types will not change without bumping this contract and notifying S3B.
+
+**Changelog**
+- 2026-07-10 — added `user_id`, `reviews_count`, `rating` to specialist-services
+  payload (additive) so the bot populates `CatalogMaster.ayla_user_id` /
+  `review_count` / `rating` single-call, without a join to `/internal/specialists/`
+  (#1052 / #1060).
