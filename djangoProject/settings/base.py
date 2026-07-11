@@ -586,6 +586,13 @@ OUTBOX_EXTERNAL_DELIVERY_TOPICS: tuple[str, ...] = tuple(
 # Drift between the two = feature off for misconfigured users (bot GET
 # returns has_insight:false). No data corruption — fail-closed by design.
 CROSS_DOMAIN_ENABLED = os.environ.get("CROSS_DOMAIN_ENABLED", "0") in {"1", "true", "True"}
+
+# S3-CAL external busy / calendar sync (#1044 / EPIC #317). Default OFF: when
+# False, the ExternalBusyIntervalProvider is not composed into the slot read
+# path and the recheck-at-confirm guard is inert — booking behaviour is
+# unchanged. Flip to True once the pilot's external-busy source (YClients
+# webhook) is live. A Variant-A (Ayla-primary) pivot leaves this False.
+EXTERNAL_BUSY_ENABLED = os.environ.get("EXTERNAL_BUSY_ENABLED", "false").lower() == "true"
 CROSS_DOMAIN_INTERNAL_ACCOUNTS = [
     name.strip()
     for name in os.environ.get("CROSS_DOMAIN_INTERNAL_ACCOUNTS", "").split(",")
