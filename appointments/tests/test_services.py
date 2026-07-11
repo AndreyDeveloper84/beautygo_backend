@@ -450,3 +450,50 @@ class TestAvailabilityQueryService:
 
         after = AvailabilityQueryService().get_day_availability(dto)
         assert len(after.slots) < len(before.slots)
+
+
+# ---------------------------------------------------------------------------
+# S3-CAL recheck-at-confirm (external busy) — Level-1, behind EXTERNAL_BUSY_ENABLED
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+class TestExternalBusyRecheckAtConfirm:
+    def test_flag_on_external_busy_blocks_booking(
+        self, settings, client_user, specialist, service,
+    ):
+        settings.EXTERNAL_BUSY_ENABLED = True
+        from appointments.domain.exceptions import ExternalSlotTakenError
+        from services.models import ExternalBusyInterval
+
+        start = _future_utc(4)
+        ExternalBusyInterval.objects.create(
+            tenant=specialist.tenant, specialist=specialist,
+            start_at=start, end_at=start + timedelta(minutes=60),
+            external_id="ext-busy-block",
+        )
+        dto = CreateBookingDTO(
+            client_id=client_user.id, specialist_id=specialist.id,
+            service_id=service.id, start_at=start, idempotency_key=str(uuid4()),
+        )
+        with pytest.raises(ExternalSlotTakenError):
+            CreateBookingService().execute(dto)
+        assert Appointment.objects.count() == 0
+
+    def test_flag_off_external_busy_ignored(
+        self, settings, client_user, specialist, service,
+    ):
+        settings.EXTERNAL_BUSY_ENABLED = False
+        from services.models import ExternalBusyInterval
+
+        start = _future_utc(5)
+        ExternalBusyInterval.objects.create(
+            tenant=specialist.tenant, specialist=specialist,
+            start_at=start, end_at=start + timedelta(minutes=60),
+            external_id="ext-busy-ignored",
+        )
+        dto = CreateBookingDTO(
+            client_id=client_user.id, specialist_id=specialist.id,
+            service_id=service.id, start_at=start, idempotency_key=str(uuid4()),
+        )
+        result = CreateBookingService().execute(dto)
+        assert result.booking_id is not None

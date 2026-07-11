@@ -658,3 +658,71 @@ class ExternalSourceMapping(models.Model):
 
     def __str__(self) -> str:
         return f"{self.source}:{self.external_type}:{self.external_id} @ {self.tenant.slug}"
+
+
+class ExternalBusyInterval(models.Model):
+    """An external (e.g. YClients) busy interval the slot busy-guard subtracts.
+
+    Source-abstracted (S3-CAL): YClients is coupled only in the webhook ingress.
+    A Variant-A (Ayla-primary) pivot leaves this table unfed by YClients — the
+    slot engine and recheck-at-confirm read it identically regardless of source.
+    See docs/CATALOG_EXTERNAL_BUSY_S3CAL_DESIGN_2026-07.md.
+    """
+
+    class Source(models.TextChoices):
+        YCLIENTS = "yclients", "YClients"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.PROTECT,
+        related_name="external_busy_intervals",
+    )
+    specialist = models.ForeignKey(
+        "users.SpecialistProfile",
+        on_delete=models.CASCADE,
+        related_name="external_busy_intervals",
+    )
+    start_at = models.DateTimeField()
+    end_at = models.DateTimeField()
+    source = models.CharField(
+        max_length=16, choices=Source.choices, default=Source.YCLIENTS,
+    )
+    external_id = models.CharField(max_length=64, blank=True, default="")
+    raw_payload = models.JSONField(default=dict, blank=True)
+    # Set by the webhook ingress to the ingestion time (staleness signal for
+    # recheck); null until an ingress writes it.
+    received_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "external_id", "tenant"],
+                condition=~models.Q(external_id=""),
+                name="externalbusyinterval_ext_id_uniq",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["specialist", "start_at", "end_at"],
+                name="extbusy_spec_window_idx",
+            ),
+        ]
+
+    def clean(self) -> None:
+        if self.end_at is not None and self.start_at is not None and self.end_at <= self.start_at:
+            raise ValidationError(
+                {"end_at": "end_at must be after start_at."}
+            )
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return (
+            f"busy[{self.source}] {self.specialist_id} "
+            f"{self.start_at:%Y-%m-%d %H:%M}–{self.end_at:%H:%M}"
+        )

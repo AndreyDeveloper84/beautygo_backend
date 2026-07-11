@@ -156,11 +156,22 @@ to the booking REST error contract.
 - Live end-to-end webhook test waits on pilot creds / license resolution
   (orchestrator-coordinated); does not block S3-CAL.1/.2 build.
 
-## 9. Open decisions for sign-off
-1. **Fork 2a placement** — provider class in `services/`, factory edit in
-   `appointments/` (proposed) — OK?
-2. **Fork 3 authorization** — is the Level-1 `_execute_atomic` touch authorized
-   now, or must recheck-at-confirm avoid appointments-write entirely (needs an
-   alternative design)?
-3. **Fork 3 scope** — Level 1 now, Level 2 (live pull) deferred — agree?
-4. **Webhook auth** — reuse which existing secret/HMAC pattern?
+## 9. Sign-off decisions (RESOLVED 2026-07-10)
+1. **D1 — Fork 2a placement — APPROVED.** Provider class in `services/`,
+   one-line registration in the `appointments` factory (under the read
+   carve-out), behind `EXTERNAL_BUSY_ENABLED`.
+2. **D2 — Fork 3 Level-1 — AUTHORIZED (strict).** `recheck-at-confirm` MUST be
+   atomic with the booking transaction (an external interval appearing between a
+   separate guard call and commit is a TOCTOU hole — a gap in the double-book
+   defense itself), so a separate atomic-guard endpoint is rejected. Authorized:
+   **~5 lines inside the existing `_execute_atomic` block** (ExternalBusyInterval
+   overlap check + `raise EXTERNAL_SLOT_TAKEN`); **no refactor** of booking logic;
+   behind `EXTERNAL_BUSY_ENABLED` (inert when off). 🔴 Founder-flag: this touches
+   the booking-atomic path — offer the booking-transaction diff for review before
+   merge (S3-CUT-style); veto reserved.
+3. **D3 — Level 1 now, Level 2 (live pull) follow-up — AGREED.** Level 2 is
+   double-deferred (depends on live YClients / license).
+4. **D4 — Webhook auth — scout during ingress design (S3-CAL.3), not blocking .1.**
+   Check the YClients outbound-webhook signature spec; reuse an existing Ayla
+   inbound-webhook auth util if canonical, else implement to the YClients spec;
+   secret in env, never in code.
