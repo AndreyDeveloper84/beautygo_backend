@@ -5,6 +5,7 @@ from django.contrib import admin
 
 from .models import (
     DraftSalonService,
+    ExternalBusyInterval,
     ExternalSourceMapping,
     RegionalPricing,
     SalonService,
@@ -145,6 +146,19 @@ class DraftSalonServiceAdmin(admin.ModelAdmin):
     raw_id_fields = ('suggested_template', 'confirmed_salon_service', 'confirmed_by')
     readonly_fields = ('created_at', 'updated_at')
     ordering = ('tenant', 'status', 'external_name')
+
+
+@admin.register(ExternalBusyInterval)
+class ExternalBusyIntervalAdmin(admin.ModelAdmin):
+    list_display = (
+        'specialist', 'tenant', 'start_at', 'end_at',
+        'source', 'external_id', 'received_at',
+    )
+    list_filter = ('source', 'tenant')
+    search_fields = ('external_id', 'specialist__display_name', 'tenant__slug')
+    raw_id_fields = ('tenant', 'specialist')
+    readonly_fields = ('created_at', 'updated_at')
+    ordering = ('-start_at',)
 
 
 @admin.register(ExternalSourceMapping)

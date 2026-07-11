@@ -14,6 +14,15 @@ class SlotNotAvailableError(BookingDomainError):
     pass
 
 
+class ExternalSlotTakenError(SlotNotAvailableError):
+    """Slot taken by an external calendar (S3-CAL recheck-at-confirm).
+
+    Subclasses SlotNotAvailableError so existing 409 handlers keep working;
+    a distinct type lets callers surface EXTERNAL_SLOT_TAKEN if they want to.
+    """
+    pass
+
+
 class InvalidStateTransitionError(BookingDomainError):
     """Raised when a booking state transition is not allowed."""
 
