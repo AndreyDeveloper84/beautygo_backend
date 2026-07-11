@@ -110,11 +110,27 @@ class CompositeAvailabilityProvider:
         return all_intervals
 
 
+def _external_busy_providers() -> list[BusyIntervalProvider]:
+    """S3-CAL: external busy source, composed only when the flag is on.
+
+    Off (default) → inert, booking behaviour unchanged. Import is lazy to
+    avoid an app-load import cycle (services imports appointments value
+    objects).
+    """
+    from django.conf import settings
+
+    if not getattr(settings, "EXTERNAL_BUSY_ENABLED", False):
+        return []
+    from services.availability import ExternalBusyIntervalProvider
+    return [ExternalBusyIntervalProvider()]
+
+
 def make_read_provider() -> CompositeAvailabilityProvider:
     """Factory for read-path availability (no locking)."""
     return CompositeAvailabilityProvider([
         BookingBusyIntervalProvider(for_update=False),
         TimeOffBusyIntervalProvider(),
+        *_external_busy_providers(),
     ])
 
 
@@ -123,4 +139,5 @@ def make_write_provider() -> CompositeAvailabilityProvider:
     return CompositeAvailabilityProvider([
         BookingBusyIntervalProvider(for_update=True),
         TimeOffBusyIntervalProvider(),
+        *_external_busy_providers(),
     ])

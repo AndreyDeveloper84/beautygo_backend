@@ -13,10 +13,12 @@ import logging
 from datetime import timedelta
 from decimal import Decimal
 
+from django.conf import settings
 from django.db import transaction
 
 from appointments.application.dto import CreateBookingDTO, BookingResultDTO
 from appointments.domain.exceptions import (
+    ExternalSlotTakenError,
     SlotNotAvailableError,
     SpecialistNotActiveError,
     ServiceNotActiveError,
@@ -157,6 +159,22 @@ class CreateBookingService:
             raise SlotNotAvailableError(
                 f"Slot {target_interval} is blocked by specialist"
             )
+
+        # S3-CAL recheck-at-confirm (Level-1): external busy must be
+        # re-validated inside this atomic block so an interval that arrived
+        # after the read-path slot check still blocks the booking (TOCTOU-safe).
+        # Inert when EXTERNAL_BUSY_ENABLED is off — booking behaviour unchanged.
+        if getattr(settings, "EXTERNAL_BUSY_ENABLED", False):
+            from services.models import ExternalBusyInterval
+            external_busy = ExternalBusyInterval.objects.filter(
+                specialist_id=dto.specialist_id,
+                start_at__lt=target_interval.end_at,
+                end_at__gt=target_interval.start_at,
+            ).exists()
+            if external_busy:
+                raise ExternalSlotTakenError(
+                    f"Slot {target_interval} is taken by an external calendar"
+                )
 
         # First vs repeat visit
         is_first_visit = not Appointment.objects.filter(
