@@ -97,6 +97,12 @@ class Command(BaseCommand):
                     f"{result.specialist_services_skipped_no_price} specialist(s) "
                     "skipped (draft has no price)"
                 )
+            if result.specialist_services_skipped_invalid:
+                self.stderr.write(
+                    f"  {draft.external_service_id}: "
+                    f"{result.specialist_services_skipped_invalid} specialist(s) "
+                    "skipped (no resolvable duration)"
+                )
 
         self.stdout.write(self.style.SUCCESS(
             f"Confirmed {confirmed} draft(s), {bookable} bookable specialist-service(s), "
