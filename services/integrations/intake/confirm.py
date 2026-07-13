@@ -23,7 +23,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
-from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from services.models import (
@@ -46,6 +47,7 @@ class ConfirmResult:
     created_salon_service: bool
     specialist_services_created: int = 0
     specialist_services_skipped_no_price: int = 0
+    specialist_services_skipped_invalid: int = 0
     unmatched_staff: list[str] = field(default_factory=list)
 
 
@@ -87,15 +89,25 @@ def _get_or_create_salon_service(draft, fallback_category):
         salon.save()
         return salon, False
 
-    salon = SalonService.objects.create(
-        tenant=draft.tenant,
-        template=template,
-        category=category,
-        name=draft.external_name,
-        duration_minutes=draft.suggested_duration,
-        base_price=draft.suggested_price,
-        source=SalonService.Source.YCLIENTS,
-    )
+    try:
+        salon = SalonService.objects.create(
+            tenant=draft.tenant,
+            template=template,
+            category=category,
+            name=draft.external_name,
+            duration_minutes=draft.suggested_duration,
+            base_price=draft.suggested_price,
+            source=SalonService.Source.YCLIENTS,
+        )
+    except IntegrityError as exc:
+        # SalonService unique (tenant, template, name): another service (a
+        # different YClients id) already owns this template+name. Seed-safe:
+        # surface as DraftNotConfirmable so the caller skips this draft rather
+        # than crashing the whole intake run.
+        raise DraftNotConfirmable(
+            f"Draft {draft.pk} collides with an existing SalonService "
+            f"(tenant, template, name={draft.external_name!r}): {exc}"
+        ) from exc
     ExternalSourceMapping.objects.create(
         source=ExternalSourceMapping.Source.YCLIENTS,
         external_type=ExternalSourceMapping.ExternalType.SERVICE,
@@ -134,16 +146,24 @@ def confirm_draft(draft, *, staff_ids=None, fallback_category=None, actor=None) 
             # bookable without a price. Report, don't guess a value.
             result.specialist_services_skipped_no_price += 1
             continue
-        _, ss_created = SpecialistService.objects.update_or_create(
-            specialist=specialist,
-            salon_service=salon,
-            defaults={
-                "tenant": draft.tenant,
-                "price": draft.suggested_price,
-                "duration_minutes": draft.suggested_duration,
-                "is_active": True,
-            },
-        )
+        try:
+            _, ss_created = SpecialistService.objects.update_or_create(
+                specialist=specialist,
+                salon_service=salon,
+                defaults={
+                    "tenant": draft.tenant,
+                    "price": draft.suggested_price,
+                    "duration_minutes": draft.suggested_duration,
+                    "is_active": True,
+                },
+            )
+        except ValidationError:
+            # No resolvable duration (off-taxonomy draft, no duration, no
+            # template default) → an active bookable row is invalid. clean()
+            # rejects it before any DB write, so the transaction stays intact:
+            # report and keep confirming the rest rather than crashing the seed.
+            result.specialist_services_skipped_invalid += 1
+            continue
         if ss_created:
             result.specialist_services_created += 1
 

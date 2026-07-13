@@ -155,8 +155,13 @@ S3A-моделей в `dev` нет. Чтобы не блокироваться:
    уверенности; что делать с no-match (draft без шаблона, admin вручную)?
 5. **Форма `ExternalSourceMapping`/`DraftSalonService` от S3A** — свериться с
    agent-1, чтобы PR2 писал в реальную схему.
-6. **CSV-контракт** (колонки) — если fallback нужен, зафиксировать формат
-   (предложу в PR4: `external_service_id,title,duration_min,price,category,staff_ids`).
+6. **CSV-контракт** — **РЕШЕНО (PR4):** колонки
+   `external_service_id,title,duration_min,price_min,price_max,category,staff_ids`;
+   `duration_min` уже в минутах; `staff_ids` — `;`-разделённые YClients staff-id
+   (попадают в `raw_payload['staff_ids']` → `intake_confirm` делает bookable).
+   `external_source='csv'` на драфте (транспорт); `ExternalSourceMapping` остаётся
+   `source='yclients'` (CSV = экспорт YClients-данных). Загрузка:
+   `manage.py intake_csv --tenant <slug> --file <path>`. Пилот-путь без лицензии 884045.
 
 ## 9. DoD (из #1109)
 - [ ] YClients API-client (pull services/staff), fail-closed на кредах.

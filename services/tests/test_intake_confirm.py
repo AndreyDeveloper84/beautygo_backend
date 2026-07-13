@@ -121,6 +121,27 @@ class TestSalonServiceMaterialization:
         with pytest.raises(DraftNotConfirmable):
             confirm_draft(draft, staff_ids=[])
 
+    def test_salon_name_collision_is_graceful(self, tenant, template):
+        # Two distinct YClients services sharing template+name collide on the
+        # SalonService unique (tenant, template, name). Must surface as a
+        # DraftNotConfirmable (seed-safe), never a raw IntegrityError crash.
+        confirm_draft(_draft(tenant, template, eid="101", name="Массаж"), staff_ids=[])
+        with pytest.raises(DraftNotConfirmable):
+            confirm_draft(_draft(tenant, template, eid="102", name="Массаж"), staff_ids=[])
+
+
+class TestGracefulDegradation:
+    def test_offtaxonomy_without_duration_skips_specialist_not_crash(self, tenant, category):
+        _staff(tenant, "10")
+        # No template + no duration → SpecialistService has no resolvable
+        # duration; must skip the bookable row (reported) and still confirm.
+        draft = _draft(tenant, template=None, duration=None, price="1500")
+        result = confirm_draft(draft, staff_ids=["10"], fallback_category=category)
+        assert result.specialist_services_skipped_invalid == 1
+        assert SpecialistService.objects.count() == 0
+        draft.refresh_from_db()
+        assert draft.status == DraftSalonService.Status.CONFIRMED
+
 
 class TestSpecialistServiceBookability:
     def test_specialist_service_created_for_matched_staff(self, tenant, template):
