@@ -44,8 +44,13 @@ class IntakeSummary:
     staff_unmatched: int = 0
 
 
-def upsert_service_draft(tenant, rec: RawServiceRecord) -> str:
+def upsert_service_draft(tenant, rec: RawServiceRecord, external_source: str) -> str:
     """Idempotent upsert of one service draft. Returns the outcome.
+
+    ``external_source`` records the transport (YClients API vs CSV bootstrap)
+    on the draft; it is part of the idempotency key. A CSV export still carries
+    YClients ids, so the downstream ``ExternalSourceMapping`` stays
+    source='yclients' — only the draft distinguishes how it arrived.
 
     Outcome ∈ {"created", "updated", "skipped"}. A record without an
     external id can't be keyed idempotently → skipped (the caller logs it).
@@ -60,7 +65,7 @@ def upsert_service_draft(tenant, rec: RawServiceRecord) -> str:
 
     existing = DraftSalonService.objects.filter(
         tenant=tenant,
-        external_source=DraftSalonService.ExternalSource.YCLIENTS,
+        external_source=external_source,
         external_service_id=eid,
     ).first()
 
@@ -78,7 +83,7 @@ def upsert_service_draft(tenant, rec: RawServiceRecord) -> str:
 
     DraftSalonService.objects.create(
         tenant=tenant,
-        external_source=DraftSalonService.ExternalSource.YCLIENTS,
+        external_source=external_source,
         external_service_id=eid,
         external_name=rec.name[:_NAME_MAX],
         suggested_duration=rec.duration_min,
@@ -120,8 +125,14 @@ def map_staff(tenant, st: RawStaffRecord) -> bool:
     return True
 
 
-def import_catalog(source, tenant) -> IntakeSummary:
+def import_catalog(
+    source, tenant,
+    external_source: str = DraftSalonService.ExternalSource.YCLIENTS,
+) -> IntakeSummary:
     """Pull from ``source`` and upsert drafts + staff mappings for ``tenant``.
+
+    ``external_source`` tags the drafts with their transport (default
+    YClients API; the CSV loader passes ``ExternalSource.CSV``).
 
     Idempotent: safe to run repeatedly (nightly / manual). Returns an
     :class:`IntakeSummary` of what changed.
@@ -129,7 +140,7 @@ def import_catalog(source, tenant) -> IntakeSummary:
     summary = IntakeSummary()
 
     for rec in source.fetch_services():
-        outcome = upsert_service_draft(tenant, rec)
+        outcome = upsert_service_draft(tenant, rec, external_source)
         if outcome == "created":
             summary.services_created += 1
         elif outcome == "updated":
