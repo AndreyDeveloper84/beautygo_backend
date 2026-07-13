@@ -512,6 +512,21 @@ NUTRITION_SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN", "")
 # quarterly; treat as production secret.
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
+# S3C — YClients catalog intake (read-only pull of the pilot salon's
+# services + staff). Dual-token auth: partner (application) token +
+# optional user token, both in one Authorization header. Empty partner
+# token / company id fail closed — YClientsClient raises YClientsConfigError
+# rather than hitting an unauthenticated endpoint. Rotate as salon creds
+# rotate; treat as production secrets. Verified contract:
+# docs/S3C_YCLIENTS_INTAKE_DESIGN.md §10.
+YCLIENTS_PARTNER_TOKEN = os.environ.get("YCLIENTS_PARTNER_TOKEN", "")
+YCLIENTS_USER_TOKEN = os.environ.get("YCLIENTS_USER_TOKEN", "")
+YCLIENTS_COMPANY_ID = os.environ.get("YCLIENTS_COMPANY_ID", "")
+YCLIENTS_API_BASE_URL = os.environ.get(
+    "YCLIENTS_API_BASE_URL", "https://api.yclients.com/api/v1",
+)
+YCLIENTS_HTTP_TIMEOUT = float(os.environ.get("YCLIENTS_HTTP_TIMEOUT", "10"))
+
 # Block A → A4 — Single source for Ayla service URLs.
 # AYLA_INTERNAL_BASE_URL: cluster-internal scheme+host (no public TLS),
 #   used by AylaUrlBuilder.internal() for service-to-service calls.
