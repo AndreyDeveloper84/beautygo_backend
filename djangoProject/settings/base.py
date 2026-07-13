@@ -608,6 +608,10 @@ CROSS_DOMAIN_ENABLED = os.environ.get("CROSS_DOMAIN_ENABLED", "0") in {"1", "tru
 # unchanged. Flip to True once the pilot's external-busy source (YClients
 # webhook) is live. A Variant-A (Ayla-primary) pivot leaves this False.
 EXTERNAL_BUSY_ENABLED = os.environ.get("EXTERNAL_BUSY_ENABLED", "false").lower() == "true"
+# Shared secret for verifying inbound YClients busy webhooks (HMAC-SHA256 over
+# the raw body). Empty (default) fails signature verification closed. Set in env
+# only — never commit the secret.
+YCLIENTS_WEBHOOK_SECRET = os.environ.get("YCLIENTS_WEBHOOK_SECRET", "")
 CROSS_DOMAIN_INTERNAL_ACCOUNTS = [
     name.strip()
     for name in os.environ.get("CROSS_DOMAIN_INTERNAL_ACCOUNTS", "").split(",")
