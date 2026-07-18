@@ -1,0 +1,147 @@
+manifest_version: "1.1"
+mode: staging
+target_repository: ayla-knowledge
+generated_branch: generated/mirrors
+conflict_policy: fail-fast
+write_policy: pull-request-only
+enabled_default: false
+
+sync_resolution:
+  branch_resolves_to: git-commit-sha
+  mirror_ref_field: source_ref
+  require_immutable_ref: true
+
+source_content_hash:
+  algorithm: sha256
+  input: canonical-content-before-mirror-metadata
+  encoding: utf-8
+  line_endings: lf
+  bom: excluded
+  trailing_whitespace: preserved
+
+collision_policy:
+  action: fail-fast
+  conflicts:
+    - duplicate-target-path
+    - duplicate-node-id
+    - canonical-mirror-node-id-collision
+    - canonical-mirror-title-collision
+    - locally-modified-mirror
+    - overlapping-include-match
+  source_deleted: create-deprecation-pr
+  source_renamed: create-rename-pr-preserve-node-id
+
+# This manifest is normative but not yet connected to CI. Activation requires
+# creating the separate ayla-knowledge repository and its credentials.
+sources:
+  - id: beautygo-backend-product
+    enabled: true
+    repository: https://github.com/AndreyDeveloper84/beautygo_backend
+    branch: main
+    include:
+      - docs/product/**/*.md
+    exclude:
+      - docs/**/archive/**
+      - docs/**/*.ini
+    target: docs/01 Product/Mirrors/beautygo-backend
+    mode: mirror
+    owner: Backend Architecture
+    review_policy: source-owner-or-kb-maintainer
+
+  - id: beautygo-backend-architecture
+    enabled: true
+    repository: https://github.com/AndreyDeveloper84/beautygo_backend
+    branch: main
+    include:
+      - docs/architecture/**/*.md
+    exclude:
+      - docs/**/archive/**
+    target: docs/05 Architecture/Mirrors/beautygo-backend
+    mode: mirror
+    owner: Backend Architecture
+    review_policy: source-owner-or-kb-maintainer
+
+  - id: beautygo-backend-safety
+    enabled: true
+    repository: https://github.com/AndreyDeveloper84/beautygo_backend
+    branch: main
+    include:
+      - docs/safety/**/*.md
+    exclude:
+      - docs/**/archive/**
+    target: docs/06 Safety and Governance/Mirrors/beautygo-backend
+    mode: mirror
+    owner: Safety Governance
+    review_policy: source-owner-or-kb-maintainer
+
+  - id: ai-bot-platform-adr
+    enabled: true
+    repository: https://github.com/AndreyDeveloper84/ai-bot-platform
+    branch: main
+    include:
+      - docs/adr/**/*.md
+    exclude:
+      - docs/**/archive/**
+    target: docs/05 Architecture/ADR
+    mode: mirror
+    owner: AI Platform Architecture
+    review_policy: source-owner-or-kb-maintainer
+
+  - id: ai-bot-platform-specifications
+    enabled: true
+    repository: https://github.com/AndreyDeveloper84/ai-bot-platform
+    branch: main
+    include:
+      - docs/specs/**/*.md
+    exclude:
+      - docs/**/archive/**
+    target: docs/03 AI System/Specifications
+    mode: mirror
+    owner: AI Platform Architecture
+    review_policy: source-owner-or-kb-maintainer
+
+  - id: ai-bot-platform-design-policies
+    enabled: true
+    repository: https://github.com/AndreyDeveloper84/ai-bot-platform
+    branch: main
+    include:
+      - docs/design/policies/**/*.md
+    exclude:
+      - docs/**/archive/**
+    target: docs/90 Sources/Mirrors/ai-bot-platform/design-policies
+    mode: mirror
+    owner: AI Platform Architecture
+    review_policy: source-owner-or-kb-maintainer
+
+  - id: ayla-ai-core-docs
+    enabled: false
+    repository: https://github.com/AndreyDeveloper84/ayla-ai-core
+    branch: main
+    include:
+      - docs/**/*.md
+    exclude:
+      - docs/**/archive/**
+    target: docs/03 AI System/Mirrors/ayla-ai-core
+    mode: mirror
+    owner: AI Core Architecture
+    review_policy: source-owner-or-kb-maintainer
+
+validation:
+  schema: schema.yaml
+  required_checks:
+    - frontmatter
+    - duplicate-yaml-keys
+    - enum-values
+    - links
+    - relationship-cycles
+    - lifecycle-transitions
+    - conditional-rules
+    - duplicate-canon
+    - node-id-uniqueness
+    - adr-consistency
+    - source-path-allowlist
+    - target-collisions
+    - mirror-integrity
+    - secrets
+    - pii
+    - ai-export-policy
