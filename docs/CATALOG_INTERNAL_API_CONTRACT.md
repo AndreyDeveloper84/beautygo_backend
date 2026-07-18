@@ -97,6 +97,8 @@ Example detail:
 | `user_id` | uuid str | **canonical Ayla `User.id`** — map to `CatalogMaster.ayla_user_id`. NOT the same as `specialist`. |
 | `tenant` | uuid str \| null | denormalized salon |
 | `template` | uuid str \| null | taxonomy id (via salon_service.template) — discovery key |
+| `name` | str | service name (from salon_service) — **C6 link key**, raw (bot normalizes) |
+| `category_slug` | str | category slug (via salon_service.category) — **C6 link key** |
 | `duration_minutes` | int \| null | raw specialist override (may be null) |
 | `resolved_duration` | int \| null | **effective** duration: specialist → salon → template. Non-null on an active bookable. **Use this.** |
 | `requires_health_check` | bool | raw specialist flag |
@@ -119,6 +121,8 @@ Example detail:
   "user_id": "33cc....",
   "tenant": "b0a1....",
   "template": "9d3f....",
+  "name": "Маникюр классический",
+  "category_slug": "manicure",
   "duration_minutes": 45,
   "resolved_duration": 45,
   "requires_health_check": false,
@@ -147,6 +151,13 @@ Example detail:
 - **`CatalogMaster.ayla_user_id` = `user_id`** (canonical Ayla `User.id`), **not**
   `specialist` (SpecialistProfile.id). The two differ — do not conflate them.
 - **Discovery / taxonomy** keys off `template` (ServiceTemplate id).
+- **Catalog link (C6, orchestrator decision 2026-07-19):** the bot links its
+  catalog rows to Ayla services by `(category_slug, normalized name)` with
+  `resolved_duration` as tiebreaker. `ServiceTemplate` intentionally has **no
+  `slug`** field (no matching-only migration in the pilot). Normalization
+  rules, fixed for both sides: `lower`, `trim`, `ё→е`, collapse whitespace,
+  strip `«»` quotes. Ayla exposes raw `name` + `category_slug`; normalization
+  and the exception mapping file live bot-side (W3).
 - Idempotency across YClients re-exports is guaranteed Ayla-side by
   `ExternalSourceMapping (source, external_type, external_id, tenant) → Ayla id`
   (keyed by YClients `service_id` / `staff_id`). A re-import re-uses the same
@@ -165,6 +176,10 @@ Additive-only within S3A. New fields may be appended; existing field names /
 types will not change without bumping this contract and notifying S3B.
 
 **Changelog**
+- 2026-07-19 — added `name`, `category_slug` to specialist-services payload
+  (additive) — C6 catalog-link keys: the bot matches
+  `(category_slug, normalized name)` + duration tiebreaker; no
+  `ServiceTemplate.slug` per orchestrator decision.
 - 2026-07-10 — added `user_id`, `reviews_count`, `rating` to specialist-services
   payload (additive) so the bot populates `CatalogMaster.ayla_user_id` /
   `review_count` / `rating` single-call, without a join to `/internal/specialists/`

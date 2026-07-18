@@ -181,11 +181,26 @@ class SpecialistServiceInternalSerializer(serializers.ModelSerializer):
     Exposes the resolved duration / health-check (cascade specialist ->
     salon -> template, D1 escalate-only) so the bot never re-derives them,
     plus the YClients staff id for cross-source reconciliation.
+
+    Catalog-link contract (C6, orchestrator decision 2026-07-19): the bot
+    links its catalog rows to Ayla by ``(category_slug, normalized name)``
+    with duration as tiebreaker — ServiceTemplate intentionally has NO
+    slug field (no migration for matching's sake in the pilot).
+    Normalization rules (fixed for both sides): lower, trim, ё→е,
+    collapse whitespace, strip «» quotes. This serializer therefore
+    exposes raw ``name`` + ``category_slug`` alongside ``template``;
+    normalization itself happens on the bot side (W3).
     """
 
     resolved_duration = serializers.SerializerMethodField()
     resolved_requires_health_check = serializers.SerializerMethodField()
     template = serializers.SerializerMethodField()
+    # C6 link keys (additive): raw values the bot normalizes per the
+    # contract above.
+    name = serializers.CharField(source='salon_service.name', read_only=True)
+    category_slug = serializers.CharField(
+        source='salon_service.category.slug', read_only=True,
+    )
     yclients_staff_id = serializers.CharField(
         source='specialist.yclients_staff_id', default='', read_only=True,
     )
@@ -206,7 +221,8 @@ class SpecialistServiceInternalSerializer(serializers.ModelSerializer):
         model = SpecialistService
         fields = [
             'id', 'salon_service', 'specialist', 'user_id', 'tenant',
-            'template', 'duration_minutes', 'resolved_duration',
+            'template', 'name', 'category_slug',
+            'duration_minutes', 'resolved_duration',
             'requires_health_check', 'resolved_requires_health_check',
             'price', 'buffer_after_minutes', 'is_active',
             'yclients_staff_id', 'reviews_count', 'rating',
