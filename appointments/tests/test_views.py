@@ -4,7 +4,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from appointments.models import Appointment
+from appointments.models import Appointment, OutboxEvent
 
 
 @pytest.mark.django_db
@@ -37,6 +37,55 @@ class TestAppointmentCreate:
         assert appt.client == client_user
         assert appt.snapshot_service_name == service.name
         assert float(appt.snapshot_price) == float(service.price)
+
+    def test_create_without_prepayment_confirms(
+        self, client_user, specialist, service,
+    ):
+        """D6 — online payment is optional: payment_required=False lands
+        the booking directly in CONFIRMED with no Payment row and emits
+        booking.confirmed (R1 — reminder source for W3)."""
+        start = (timezone.now() + timezone.timedelta(hours=3)).replace(
+            second=0, microsecond=0,
+        )
+        response = self._client(client_user).post(
+            '/api/v1/appointments/',
+            data={
+                'specialist_id': str(specialist.id),
+                'service_id': str(service.id),
+                'start_datetime': start.isoformat(),
+                'payment_required': False,
+            },
+            format='json',
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+        appt = Appointment.objects.get()
+        assert appt.status == Appointment.Status.CONFIRMED
+        assert appt.payments.count() == 0
+        topics = set(OutboxEvent.objects.values_list('topic', flat=True))
+        assert OutboxEvent.Topic.BOOKING_CREATED in topics
+        assert OutboxEvent.Topic.BOOKING_CONFIRMED in topics
+
+    def test_create_default_keeps_online_payment_path(
+        self, client_user, specialist, service,
+    ):
+        """Backward compatible: omitting payment_required keeps the
+        online-payment contract (AWAITING_PAYMENT + pending Payment)."""
+        start = (timezone.now() + timezone.timedelta(hours=3)).replace(
+            second=0, microsecond=0,
+        )
+        response = self._client(client_user).post(
+            '/api/v1/appointments/',
+            data={
+                'specialist_id': str(specialist.id),
+                'service_id': str(service.id),
+                'start_datetime': start.isoformat(),
+            },
+            format='json',
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+        appt = Appointment.objects.get()
+        assert appt.status == Appointment.Status.AWAITING_PAYMENT
+        assert appt.payments.filter(status='pending').count() == 1
 
     def test_create_unauthenticated(self, specialist, service):
         c = APIClient()
