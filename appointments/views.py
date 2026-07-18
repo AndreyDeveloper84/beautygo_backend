@@ -190,6 +190,12 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             request_tenant_id=(
                 request_tenant.id if request_tenant else None
             ),
+            # D6: payment_required=False → confirm immediately without a
+            # Payment row (no-prepayment pilot baseline).
+            payment_required=serializer.validated_data['payment_required'],
+            confirm_immediately=(
+                not serializer.validated_data['payment_required']
+            ),
         )
 
         service = self.create_booking_service_class()
