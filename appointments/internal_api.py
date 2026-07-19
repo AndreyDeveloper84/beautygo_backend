@@ -139,7 +139,19 @@ class InternalBookingCreateView(_InternalAuthMixin, APIView):
 
         # Booking domain errors (slot taken, inactive specialist/service)
         # and the grant F2 NotFound propagate to api_exception_handler.
-        result = CreateBookingService().execute(dto)
+        from appointments.domain.exceptions import BillingEligibilityError
+        try:
+            result = CreateBookingService().execute(dto)
+        except BillingEligibilityError as exc:
+            # C1: the INTERNAL/backend surface gets the real reason code
+            # (the bot routes the master to the debt screen; the customer
+            # gets a neutral message bot-side).
+            return error_response(
+                exc.reason,
+                'Subscription payment is past due — new bookings are '
+                'blocked for this specialist.',
+                status_code=409,
+            )
 
         appointment = (
             Appointment.objects

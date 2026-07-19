@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+from decimal import Decimal
 from uuid import uuid4
 
 from django.conf import settings
@@ -19,7 +20,11 @@ from rest_framework.views import APIView
 from appointments.infrastructure.outbox import emit_outbox_event, safe_tenant_id
 from appointments.models import Appointment, OutboxEvent
 from payments.models import Payment
-from users.permissions import IsBotServiceWithVerifiedClient, IsClient
+from users.permissions import (
+    IsBotServiceWithVerifiedClient,
+    IsClient,
+    IsInternalBearer,
+)
 from users.response import error_response, success_response
 
 from .exceptions import (
@@ -1043,3 +1048,96 @@ class PaymentRefundView(APIView):
         )
 
         return success_response(PaymentDetailSerializer(payment).data)
+
+
+# ---------------------------------------------------------------------------
+# C3 — Payout preview (internal, bot → master dashboard «К выплате»)
+# ---------------------------------------------------------------------------
+
+# Contract-frozen hint text (PILOT_CONTRACTS C3 example): «ожидается»,
+# never «гарантированно».
+_PAYOUT_SETTLEMENT_HINT = "~следующий рабочий день по расписанию ЮKassa"
+
+# States counted into pending_amount (C3 state table): the money is
+# either held with capture planned, or captured and awaiting the
+# YooKassa payout. settled / capture_failed / canceled / refunded are
+# excluded by definition.
+_PAYOUT_PENDING_STATES = (
+    Payment.CaptureState.SCHEDULED,
+    Payment.CaptureState.CAPTURED_PENDING_SETTLEMENT,
+)
+
+
+def _money(value) -> str:
+    """Data contract §1: amounts are Decimal strings, exactly 2dp."""
+    from decimal import Decimal, ROUND_HALF_UP
+    return str(Decimal(value).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+
+
+class InternalPayoutPreviewView(APIView):
+    """GET /api/v1/internal/specialists/{specialist_id}/payout-preview/
+
+    Read-only payout vitrine for the bot (W3 → W4 master dashboard).
+    Empty selection is a 200 with "0.00" (C3), 404 only when the
+    specialist does not exist.
+    """
+
+    # Bot bearer is not a JWT — same pattern as the other internal views.
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearer]
+
+    @extend_schema(
+        operation_id="internal_specialists_payout_preview",
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(description="Payout preview (may be empty)"),
+            404: OpenApiResponse(description="SPECIALIST_NOT_FOUND"),
+        },
+    )
+    def get(self, request: Request, specialist_id) -> Response:
+        from users.models import SpecialistProfile
+
+        if not SpecialistProfile.objects.filter(id=specialist_id).exists():
+            return error_response(
+                'SPECIALIST_NOT_FOUND',
+                'Specialist not found.',
+                status_code=404,
+            )
+
+        payments = (
+            Payment.objects
+            .select_related('appointment')
+            .filter(
+                appointment__specialist_id=specialist_id,
+                capture_state__in=_PAYOUT_PENDING_STATES,
+            )
+            .order_by('appointment__completed_at', 'created_at')
+        )
+
+        items = []
+        pending_total = Decimal('0.00')
+        for payment in payments:
+            appointment = payment.appointment
+            items.append({
+                'appointment_id': str(payment.appointment_id),
+                # Null while the visit is still ahead (capture_state
+                # scheduled) — W4 renders the two states explicitly.
+                'completed_at': (
+                    appointment.completed_at.isoformat()
+                    if appointment.completed_at else None
+                ),
+                'amount': _money(payment.amount),
+                'platform_fee': _money(payment.platform_fee),
+                'specialist_income': _money(payment.specialist_income),
+                'capture_state': payment.capture_state,
+            })
+            pending_total += payment.specialist_income
+
+        return success_response({
+            'pending_amount': _money(pending_total),
+            'currency': 'RUB',
+            'expected_settlement_hint': (
+                _PAYOUT_SETTLEMENT_HINT if items else None
+            ),
+            'items': items,
+        })

@@ -750,6 +750,14 @@ CELERY_BEAT_SCHEDULE = {
         "task": "notifications.dispatch_post_visit_aftercare",
         "schedule": 300.0,                      # every 5 minutes
     },
+    # D9 capture safety net (docs/architecture/payments-capture-strategy.md
+    # §2): re-enqueues captures stuck in waiting_for_capture and alerts
+    # on holds nearing expires_at / exhausted retries. 5-min cadence —
+    # well inside the shortest YooKassa hold (2h) with the 60m buffer.
+    "reconcile-captures": {
+        "task": "payments.tasks.reconcile_captures",
+        "schedule": 300.0,
+    },
     # Water reminders fire twice daily at 14:00 and 18:00 UTC. Pilot is
     # single-tz Penza (MSK = UTC+3), so 17:00 / 21:00 local — afternoon
     # slump and evening cool-down windows where users typically fall

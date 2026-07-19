@@ -134,6 +134,19 @@ class CreateBookingService:
             )
             return existing, existing.payments.filter(status="pending").first()
 
+        # C1 — billing eligibility (W2): a past_due subscription blocks
+        # only NEW bookings. Placed AFTER the idempotency early-return
+        # so a retried create of an existing booking is never refused
+        # (C1: only creation is gated); cancel/reschedule/complete never
+        # consult this. Fail-open per C1 when billing is unavailable.
+        from appointments.application.services.billing_eligibility import (
+            check_billing_eligibility,
+        )
+        check_billing_eligibility(
+            specialist_id=dto.specialist_id,
+            tenant_id=specialist.tenant_id,
+        )
+
         # Conflict check with row-level lock
         conflicting_count = Appointment.objects.filter(
             specialist_id=dto.specialist_id,
