@@ -68,6 +68,11 @@ urlpatterns = [
         'api/v1/internal/appointments/',
         include('appointments.internal_urls'),
     ),
+    # W2 billing (P3): C2 status + card-setup for the bot (Bearer), and
+    # the YooKassa webhook (IP allowlist + Basic — AMD-014: lives under
+    # the internal/ prefix, which is exempt from X-App-Type).
+    path("api/v1/internal/billing/", include("billing.internal_urls")),
+    path("api/v1/internal/billing/", include("billing.urls")),
     path('api/v1/appointments/', include('appointments.urls')),
     path('api/v1/reviews/', include('reviews.urls')),
     path('api/v1/payments/', include('payments.urls')),
