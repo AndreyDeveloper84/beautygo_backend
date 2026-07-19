@@ -90,4 +90,4 @@ yookassa==3.10.0
 #   (b) a personal access token: https://${GH_TOKEN}@github.com/...
 # Local dev: `pip install -e ../../ayla-ai-core` keeps a faster iteration loop;
 # the editable install satisfies the same requirement.
-ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@e73a1b4784c150493c300b316d7a62cd423c8377
+ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@f773e7dcbd27f03befd11dd3aee6fb6f9327d535
