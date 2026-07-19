@@ -1,8 +1,8 @@
 # Волна 0 — Frozen Contracts пилота (2026-08-15)
 
-**Contract version:** 1.5.0
+**Contract version:** 1.6.0
 **Frozen at:** 2026-07-18 (после пакета amendments READY-WITH-AMENDMENTS)
-**Last amendment:** AMD-014 (2026-07-19, см. §14)
+**Last amendment:** C7 (2026-07-19, решение владельца — штатный контур оплаты клиента)
 **Effective for pilot:** 2026-08-15
 **Владелец:** оркестратор (Chief Product Architect); изменения — только amendment'ом (§13).
 
@@ -471,3 +471,54 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
 - **Потоки:** W2 (уже реализовано), W6 (чеклист staging), W1 (см. P8 — та же
   проверка для payments webhook).
 - **Решение:** оркестратор (по запросу W2).
+
+
+## 7.5 C7. Client Payments — штатный контур оплаты клиента
+
+> Решение владельца 2026-07-19: полноценный контур оплаты в miniapp — привязка
+> карты и нормальный процесс оплаты, без DM-only хаков. Версия контрактов 1.6.0.
+
+### C7.1 Payment create (bot → Ayla)
+
+- `POST /api/v1/internal/appointments/{appointment_id}/payment/` — Bearer `AYLA_INTERNAL_API_TOKEN`.
+- Создаёт двухстадийный платёж (`capture=false`, D9) по записи с `payment_required=true`.
+- **200:** `{ "data": { "payment_id": "<uuid>", "confirmation_url": "<url>", "amount": "2000.00", "currency": "RUB", "capture_state": "authorized" } }`
+- **Идемпотентность:** не более одного активного платежа на запись; повтор → тот же платёж.
+- Если у клиента привязанная карта и передан `use_saved_method: true` → списание без `confirmation_url` (рекуррент, по аналогии с D7).
+
+### C7.2 Card binding (клиент)
+
+- `POST /api/v1/internal/users/{ayla_user_id}/cards/setup/` (Bearer) → `{ "data": { "confirmation_url": "<url>" } }` — `save_payment_method: true`.
+- Webhook `payment.succeeded` → сохранить метод: `UserPaymentMethod` (user FK, `payment_method_id`, last4, brand).
+- `GET /api/v1/internal/users/{ayla_user_id}/cards/` → список (last4, brand).
+- `DELETE /api/v1/internal/users/{ayla_user_id}/cards/{id}/` — отзыв метода (152-ФЗ-смежное право пользователя).
+
+### C7.3 Payment status read model
+
+- Бот зеркалит статус через события `payment.*` (authorized → booking.confirmed, captured, failed, refunded) + on-demand `GET /api/v1/internal/payments/{payment_id}/` (Bearer).
+- **Маппинг статусов на UX (по ADR capture-стратегии):**
+  | Внутренний | Клиент видит |
+  |---|---|
+  | `authorized` | «Зарезервировано» |
+  | `capture_scheduled` | «Оплата будет подтверждена после визита» |
+  | `captured` | «Оплата завершена» |
+  | `released/canceled` | «Резерв отменён, деньги разблокированы» |
+  | `failed` | «Оплата не прошла» |
+  | `refunded` | «Оплата возвращена» |
+- `waiting_for_capture` клиенту не показывать (ADR).
+
+### C7.4 Booking create с оплатой
+
+- По AMD-002: `payment_required` передаётся из miniapp (выбор пользователя) через бота в Ayla REST. **Зависимость: флип `BOOKING_VIA_AYLA_REST` (#1041)** ← отчёт покрытия каталога на staging.
+- `payment_required=true` + выбор «оплатить сейчас» → после create немедленно C7.1, открыть `confirmation_url` в webview.
+
+### C7.5 Отмена и возврат
+
+- Отмена записи → авто-отмена холда (W1, готово) → статус «разблокировано».
+- Расширенный refund-UX (частичные возвраты, политики) — post-pilot; в пилоте refund операционно через backend.
+
+### Роли
+
+- **W1:** C7.1 (internal payment create), C7.2 (card setup/list/delete), проверка события `payment.authorized` (эмитить, если нет).
+- **W3:** passthrough в miniapp_api (payment create, cards setup/list/delete, платёжные поля в BookingItem), маппинг отказа C1 на клиентский slug `UNAVAILABLE` (без раскрытия долга).
+- **W4:** экраны — выбор оплаты на summary, webview confirmation_url + возврат, статусы в records/detail, экран карт в профиле, C1 нейтральное сообщение + альтернативы.
