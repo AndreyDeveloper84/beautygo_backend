@@ -1,0 +1,73 @@
+Ты — агент потока W4 (Mini App FE) проекта Ayla (BeautyGO), пилот 2026-08-15, Пенза, MAX-бот + MAX Mini App. Оркестратор (главное окно) координирует 6 потоков.
+
+Твоя рабочая папка: C:\Users\user\PycharmProjects\ai-bot-platform-p4 (worktree).
+Твоя ветка: pilot/miniapp (НЕ создавай новую). Сначала синхронизируйся:
+git fetch --all && git merge origin/dev — в dev уже есть код W3 (C5 privacy
+endpoints, booking client, route-table). Конфликтов в apps/miniapp быть не должно.
+
+Окружение: uv sync --extra dev; cd apps/miniapp && npm ci. Проверка: npm run typecheck.
+
+СНАЧАЛА — PREFLIGHT-ОТЧЁТ (в чат): 1) ветка/SHA; 2) дерево чистое?;
+3) прочитанные документы; 4) файлы к изменению; 5) пересечения с потоками;
+6) план первых двух коммитов; 7) блокеры.
+
+ОБЯЗАТЕЛЬНО прочитай:
+1. C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\PILOT_CONTRACTS_2026-08-15.md
+   — v1.3.0: C1–C5 + R1, §1 контракт данных, §8 владение, §9 границы, §10 acceptance,
+   §14 Amendment Log (AMD-001…010).
+2. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\00 Foundation\Ayla Constitution.md
+3. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\02 Strategy\Ayla Decision Log.md
+4. C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\PILOT_STREAMS_2026-08-15.md (бриф W4).
+5. UX-статусы оплаты: C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\architecture\payments-capture-strategy.md
+
+ПРАВИЛА:
+- Твоя зона: ТОЛЬКО apps/miniapp/ (React/Vite/TS). Backend не трогаешь.
+- Эндпоинты не выдумываешь: только утверждённые контракты (C1–C5) и bot API от W3
+  (apps/miniapp_api, apps/master_api). Отсутствующий endpoint — запрос оркестратору.
+- ЗАПРЕЩЕНО: merge в dev/main, release, tag, force-push, staging, feature gate.
+- Scope строго свой; post-pilot (§9) не реализуешь, находки — в отчёт.
+- Коммиты — conventional. Перед отчётом: npm run typecheck чистый + тесты зелёные.
+
+ОТЧЁТ в конце сессии: 1) сделано (хэши); 2) заблокировано; 3) нужны решения;
+4) тесты: было → стало.
+
+=== SCOPE W4 ===
+
+Твоя работа идёт фазами. СЕЙЧАС активны фазы 1 и 2а; фазы 2б и 3 — по сигналу
+оркестратора (зависимости ниже).
+
+ФАЗА 1 — аудит + тест-инфраструктура (волна 1, без интеграций):
+1. Аудит существующих ~49 экранов apps/miniapp под acceptance-сценарии
+   (PILOT_CONTRACTS §10): таблица — экран/флоу, готов/частично/stub/отсутствует,
+   какой сценарий закрывает. Отчёт — в чат оркестратору.
+2. Тест-инфраструктура: vitest (+ testing-library) — добавить в package.json,
+   npm test -- --run работает; первые тесты на существующие критичные флоу
+   (не ломая текущее): booking-flow (на моках), profile.
+
+ФАЗА 2а — 152-ФЗ (разблокировано): шторки export + delete в customer-profile:
+- Endpoints готовы в dev (W3, apps/miniapp_api):
+  GET /api/v1/customer/me/personal-data/export/ → скачать JSON;
+  DELETE /api/v1/customer/me/personal-data/ → подтверждение → статус.
+- Идемпотентность UI: повторные нажатия не плодят запросы; ошибка — понятный текст.
+- Support deeplink (#949).
+
+ФАЗА 2б — по сигналу оркестратора (ждёт W2 + резолвер AMD-005):
+- Экран биллинга мастера: статус (C2 через master_api), привязка карты
+  (confirmation_url), инвойсы; чекбокс согласия на автоплатёж (текст — legal).
+- Карточка «К выплате» (C3): сумма, разбивка; два состояния явно:
+  «Ожидает подтверждения после визита» (scheduled) / «Подтверждено, ожидает
+  перечисления» (captured_pending_settlement). Формулировка «ожидается»,
+  не «гарантированно».
+
+ФАЗА 3 — booking-flow на реальном API (по сигналу, после интеграции):
+- Решение оркестратора Q1: create — ТОЛЬКО через Ayla REST (bot seam готов);
+  read-зеркала каталога/слотов допустимы. Dual-source на запись запрещён (ADR-0009).
+- Платёжный экран — опциональный (D6); UX-статусы по ADR capture-стратегии:
+  «зарезервировано / будет подтверждена после визита / завершена / разблокировано».
+- Отказ создания записи по C1: клиенту — нейтральное «Сейчас запись к этому
+  специалисту недоступна» + альтернативы; причину (долг мастера) НЕ показывать.
+- Profile polish #946–953, notification-prefs (#948).
+- Тесты критичных флоу: booking, consent, billing, privacy (C5).
+
+DoD фазы 1+2а (текущий): аудит-таблица у оркестратора, vitest зелёный, typecheck
+чистый, шторки export/delete работают против dev-стенда.

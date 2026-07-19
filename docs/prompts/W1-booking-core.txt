@@ -1,0 +1,99 @@
+Ты — агент потока W1 (Ayla Booking Core) проекта Ayla (BeautyGO), пилот 2026-08-15, Пенза, MAX-бот + MAX Mini App. Оркестратор (главное окно) координирует 6 потоков.
+
+Твоя рабочая папка: C:\Users\user\PycharmProjects\Ayla\djangoproject-w1 (worktree).
+Твоя ветка: pilot/booking-core (уже создана от origin/dev — НЕ создавай новую, работай в ней).
+Нормативные документы читаешь из основной папки C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\ (в твоём worktree их нет — они untracked, читай по абсолютным путям ниже).
+
+ПОДГОТОВКА ОКРУЖЕНИЯ (первый запуск):
+- Python: используй venv основной папки — C:\Users\user\PycharmProjects\Ayla\djangoproject\.venv\Scripts\python.exe (запускай из корня своего worktree: <путь-к-venv>\python.exe -m pytest --ds=djangoProject.settings.test).
+- Свежая SQLite: <venv>\python.exe manage.py migrate.
+- .env НЕ читай. Если для локального запуска нужен — скопируй командой cp из основной папки, не открывая.
+- Сервер (runserver) не поднимай без необходимости; если нужен — с отличным от 8000 портом.
+
+СНАЧАЛА — PREFLIGHT-ОТЧЁТ, до любого кода. Формат (пришли в чат):
+1) текущая ветка и SHA; 2) рабочее дерево чистое? (git status);
+3) какие нормативные документы прочитал (список ниже);
+4) файлы, которые планируешь менять; 5) пересечения с другими потоками
+(по таблице владения в PILOT_CONTRACTS §8); 6) план первых двух коммитов;
+7) блокирующие контракты — что не даёт начать прямо сейчас.
+
+ОБЯЗАТЕЛЬНО прочитай:
+1. C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\PILOT_CONTRACTS_2026-08-15.md
+   — контракты C1–C5 + R1, единый контракт данных (§1), владение файлами (§8),
+   границы пилота (§9), acceptance-сценарии (§10).
+2. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\00 Foundation\Ayla Constitution.md
+3. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\02 Strategy\Ayla Decision Log.md
+   (если нет — ветка review; продолжай, отметь в отчёте).
+4. Свой бриф: C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\PILOT_STREAMS_2026-08-15.md (раздел W1).
+5. ADR: C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\architecture\payments-capture-strategy.md
+
+ПРАВИЛА:
+- Scope строго свой. Всё вне брифа — post-pilot (PILOT_CONTRACTS §9), даже если
+  найдёшь заготовки/TODO. Нашёл — отметь в отчёте, не реализуй.
+- ЗАПРЕЩЕНО самостоятельно: merge в dev/main, release, tag, force-push,
+  миграции на staging, переключение feature gate. Ты готовишь изменения и
+  передаёшь оркестратору точную команду/коммит — исполняет оркестратор.
+- Коммиты — conventional (feat/fix/docs(scope): ...).
+- Стыки — только по PILOT_CONTRACTS (C1–C5, R1). Новый стык/поле/топик — предложение
+  оркестратору, код после утверждения. «Временные» поля запрещены.
+- Деньги/даты/ID — по единому контракту данных (PILOT_CONTRACTS §1).
+- Нашёл противоречие кода с документом — не чини молча: сообщи (Decision Log
+  entry или amendment).
+- Новая логика = тесты. Перед отчётом полный прогон тестов репо зелёный
+  (команды — PILOT_CONTRACTS §12).
+- ayla-knowledge — только чтение. Секреты не читаешь; только имена переменных.
+- Не додумывай. Неясно — вопрос в отчёте, продолжай независимую часть.
+
+ОТЧЁТ в конце сессии: 1) сделано (коммит-хэши); 2) заблокировано; 3) нужны
+решения/контракты; 4) тесты: было → стало, статус.
+
+=== SCOPE W1: Ayla Booking Core ===
+
+Твоя зона: appointments/, services/, payments/, users/ (только internal API и
+SpecialistProfile-поля по контракту), djangoProject/settings|urls (ты — владелец,
+PILOT_CONTRACTS §8). НЕ трогаешь: billing/ (W2), ai/, nutrition/, personal_context.
+
+Работа идёт ТРЕМЯ ФАЗАМИ, не вперемешку:
+
+ФАЗА A — sync + booking baseline (волна 1):
+1. Твоя ветка создана от origin/dev (свежая). Проверь pytest зелёный на старте —
+   это baseline. Затем сделай в СВОЕЙ ветке merge feature-ветки
+   feat/memory-foundation-internal-api (internal personal-context API,
+   коммиты 63af097e + f6e9572e); конфликты с YClients intake (#205–#215) реши
+   аккуратно (чужой мердж, не ломать). Готовую ветку и команду merge в dev —
+   оркестратору (сам не мерджишь).
+2. Запись без предоплаты: create → CONFIRMED без платежа. Путь с оплатой сохраняется
+   (онлайн-оплата опциональна, D6). Оба пути CONFIRMED должны работать.
+   Ты — producer booking state/events (outbox: booking.confirmed и т.п.) — источник
+   для напоминаний W3 (контракт R1).
+3. Каталог: #201 (canonical seed) в dev; наполнить пилотные услуги; internal API
+   отдаёт template_id/slug боту (#200 t5). Контракт слотов/брони (#1016) сверить с
+   tests/contracts/ — расхождения в отчёт.
+
+ФАЗА B — payments vertical slice (волна 2), по ADR capture-стратегии:
+1. Capture: capture_payment сейчас не вызывается нигде — холды сгорают.
+   Параметризуемая отложенная задача: CAPTURE_DELAY_HOURS=0 default;
+   capture_at = min(completed_at + delay, expires_at − 60m); expires_at из ЮKassa.
+   Идемпотентный ключ, retry с backoff, ручная management-команда повтора.
+2. Отмена записи → автоматическая отмена холда (YooKassa cancel — добавить метод).
+3. Комиссия flat 90₽ вместо 8% (payments/services.py:81-85 + appointments/domain/policies.py:96).
+   Обновить тесты и receipt-builder.
+4. Split per-master: transfers на суб-счёт мастера (services.py:109-115 сейчас общий).
+   Поле yookassa sub-account в SpecialistProfile (миграция). Нет sub-account →
+   онлайн-оплата недоступна, запись без предоплаты работает.
+5. Инвариант AYLA-DEC-0010: онлайн-оплаченная запись НЕ создаёт BookingFee
+   (BookingFee — сторона W2; стык через C1/отчёт, не кодом в billing/).
+
+ФАЗА C — после зелёного booking e2e (волна 3):
+1. Reconciliation job + алерты: платёж → expires_at; completed застрял в
+   waiting_for_capture.
+2. Payout preview endpoint — строго по C3: capture_state-фильтрация
+   (scheduled + captured_pending_settlement), пустая выборка → 200 с "0.00".
+3. Billing eligibility: вызов can_accept_booking (C1, сигнатура с tenant_id) в
+   CreateBookingService; 409 SUBSCRIPTION_PAST_DUE; клиентскому API — generic
+   UNAVAILABLE (долг не раскрываем, C1 §2); совместный инвариант-тест с W2.
+
+DoD: по фазам. A: baseline зелёный, merge memory-ветки передан оркестратору,
+два пути записи, каталог. B: capture/cancel/fee/split + тесты (mock ЮKassa).
+C: reconciliation, payout по C3, eligibility по C1 с совместным тестом.
+Полный pytest зелёный на каждой фазе.

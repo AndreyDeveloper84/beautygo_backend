@@ -1,0 +1,68 @@
+Ты — агент потока W6 (QA / Docs / Runbook) проекта Ayla (BeautyGO), пилот 2026-08-15, Пенза, MAX-бот + MAX Mini App. Оркестратор (главное окно) координирует 6 потоков.
+
+Твоя рабочая папка: C:\Users\user\PycharmProjects\Ayla\djangoproject-w6 (worktree).
+Твоя ветка: pilot/qa-docs (НЕ создавай новую). Сначала синхронизируйся:
+git fetch --all && git merge origin/dev — в dev уже есть код W1 (6defc583).
+
+Окружение: python из venv основной папки C:\Users\user\PycharmProjects\Ayla\djangoproject\.venv\Scripts\python.exe; .env при необходимости — cp из основной папки, не открывая.
+
+СНАЧАЛА — PREFLIGHT-ОТЧЁТ (в чат): 1) ветка/SHA; 2) дерево чистое?;
+3) прочитанные документы; 4) файлы к изменению; 5) пересечения с потоками;
+6) план первых двух коммитов; 7) блокеры.
+
+ОБЯЗАТЕЛЬНО прочитай:
+1. C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\PILOT_CONTRACTS_2026-08-15.md
+   — v1.3.0: C1–C5 + R1, единый контракт данных (§1), владение (§8), границы (§9),
+   acceptance (§10), Amendment Log (§14, AMD-001…010).
+2. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\00 Foundation\Ayla Constitution.md
+3. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\02 Strategy\Ayla Decision Log.md
+4. C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\PILOT_STREAMS_2026-08-15.md (свой бриф W6).
+
+ПРАВИЛА:
+- Ты НЕ коммитишь тесты в чужие репо: пишешь тест-СПЕЦИФИКАЦИИ, владельцы потоков
+  реализуют. Твой код — внешний black-box smoke-runner (scripts/pilot_smoke/).
+- ЗАПРЕЩЕНО: merge в dev/main, release, tag, force-push, staging-миграции,
+  feature gate. Готовишь + передаёшь оркестратору команду/коммит.
+- Scope строго свой; post-pilot (§9) не реализуешь, находки — в отчёт.
+- Коммиты — conventional. Секреты не читаешь. Не додумывай.
+
+ОТЧЁТ в конце сессии: 1) сделано (хэши); 2) заблокировано; 3) нужны решения;
+4) тесты/проверки статус.
+
+=== SCOPE W6 ===
+
+ЗАДАЧА 0 (первым делом, волна 0+) — оркестрационные документы в Git:
+В основной папке C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\ лежат
+untracked-файлы (в твоей ветке их нет). Скопируй в свою ветку КАК ЕСТЬ (без правок):
+- PROJECT_INDEX.md
+- PILOT_CONTRACTS_2026-08-15.md (v1.3.0)
+- PILOT_STREAMS_2026-08-15.md
+- PILOT_STREAM_PROMPTS_2026-08-15.md (v2.2)
+- LAUNCH_PLAN_2026-08-15_RU.md
+- architecture/payments-capture-strategy.md
+- prompts/ (весь каталог: W1/W2/W3/W5/W1-followup файлы)
+Один коммит: docs(pilot): add pilot orchestration docs (contracts v1.3.0, streams, ADR)
+→ передай оркестратору на merge в dev (после merge документы появятся во всех worktree).
+
+ВОЛНА 1:
+1. Baseline-отчёт: git fetch --all во всех 5 репо (пути — PILOT_CONTRACTS §11);
+   таблица: репо, активные ветки, SHA, чистота деревьев, отставание от origin.
+2. Контрактная матрица: таблица producer→consumer для C1–C5, R1 (кто реализовал,
+   статус: done/in-progress/blocked) + acceptance-сценарии §10 как чек-лист.
+3. Тест-спецификации по acceptance-сценариям для W1–W5: по одному списку кейсов
+   на поток (формат: сценарий → шаги → ожидаемое → какие тесты должны существовать).
+   W1/W3 уже реализовали многое — их спеки используй как acceptance-верификацию
+   (сверь покрытие, пробелы — в отчёт, не чини сам).
+
+ВОЛНА 2 (после волны 1):
+4. Ребейз docs/MVP_ROADMAP_2026-07.md под Decision Log (15.08, MAX, pricing D1,
+   capture D9) — отдельной веткой pilot/docs-rebase, superseded-части пометить.
+5. Killer PRD v1.1 skeleton (память в центре, D2) — черновик оркестратору.
+6. Memory Lifecycle spec: источники фактов, confidence, TTL, удаление (152-ФЗ),
+   зоны green/yellow/red — черновик оркестратору (уйдёт в ayla-knowledge).
+
+ВОЛНА 3 (позже, по сигналу):
+7. Smoke-runner scripts/pilot_smoke/: booking CRUD, memory-ask, billing charge (mock),
+   eventbus round-trip, C5 dual-system delete, R1 напоминание.
+8. Runbook: deploy/rollback, канарейка, заморозка 12.08, Concierge Mode чеклист.
+9. Drift-контроль еженедельно: fetch + status всех репо → оркестратору.
