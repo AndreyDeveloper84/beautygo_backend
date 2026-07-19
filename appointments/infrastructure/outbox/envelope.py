@@ -75,6 +75,11 @@ EVENT_VERSIONS: dict[str, int] = {
     # #246 Q1 — TUR revoke. Audit ALWAYS emitted (regardless of
     # notify_customer setting); consumers dedupe on event_id.
     "tenant.relationship.revoked": 1,
+    # W2 billing producer topics (C4, P4/W2 R-2) — emitted from
+    # billing/events.py; consumers W3 (master notifications) + analytics.
+    "subscription.activated": 1,
+    "subscription.past_due": 1,
+    "billing.fee_charged": 1,
 }
 
 

@@ -114,6 +114,33 @@ class TestInternalCatalogRead:
         assert r.status_code == 200, r.data
         assert "slots" in r.json()
 
+    def test_slots_carry_timezone_offset(self, specialist, service):
+        """P7 (W3 question O1): every slot datetime on the internal API
+        must be ISO 8601 WITH a timezone offset (data contract §1) —
+        never naive. Builds a real working day so the list is non-empty.
+        """
+        from appointments.models import SpecialistWorkingHours
+
+        target = (datetime.now(tz=timezone.utc) + timedelta(days=7)).date()
+        SpecialistWorkingHours.objects.create(
+            specialist=specialist,
+            day_of_week=target.weekday(),
+            is_working_day=True,
+            start_time="09:00",
+            end_time="18:00",
+        )
+        r = _api().get(
+            f"{SPECIALISTS_URL}{specialist.id}/slots/"
+            f"?service_id={service.id}&date={target.isoformat()}",
+        )
+        assert r.status_code == 200, r.data
+        slots = r.json()["slots"]
+        assert slots, "expected a non-empty slot list for a working day"
+        for raw in slots:
+            parsed = datetime.fromisoformat(raw)
+            assert parsed.tzinfo is not None, f"naive slot datetime: {raw}"
+            assert parsed.utcoffset() is not None
+
     def test_slots_missing_service_id_400(self, specialist, service):
         r = _api().get(f"{SPECIALISTS_URL}{specialist.id}/slots/")
         assert r.status_code == 400
