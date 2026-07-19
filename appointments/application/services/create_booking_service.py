@@ -139,11 +139,13 @@ class CreateBookingService:
         # so a retried create of an existing booking is never refused
         # (C1: only creation is gated); cancel/reschedule/complete never
         # consult this. Fail-open per C1 when billing is unavailable.
+        # AMD-005: the billing account key is the Ayla User UUID
+        # (specialist.user_id), NOT SpecialistProfile.id.
         from appointments.application.services.billing_eligibility import (
             check_billing_eligibility,
         )
         check_billing_eligibility(
-            specialist_id=dto.specialist_id,
+            specialist_id=specialist.user_id,
             tenant_id=specialist.tenant_id,
         )
 

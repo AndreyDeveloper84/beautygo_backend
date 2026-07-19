@@ -1097,7 +1097,16 @@ class InternalPayoutPreviewView(APIView):
     def get(self, request: Request, specialist_id) -> Response:
         from users.models import SpecialistProfile
 
-        if not SpecialistProfile.objects.filter(id=specialist_id).exists():
+        # AMD-005: the path key is the Ayla User UUID (the bot mirrors
+        # masters by User.id), NOT SpecialistProfile.id — the user →
+        # profile resolution is W1's job. 404 covers both a missing
+        # user and a user without a specialist profile.
+        profile = (
+            SpecialistProfile.objects
+            .filter(user_id=specialist_id)
+            .first()
+        )
+        if profile is None:
             return error_response(
                 'SPECIALIST_NOT_FOUND',
                 'Specialist not found.',
@@ -1108,7 +1117,7 @@ class InternalPayoutPreviewView(APIView):
             Payment.objects
             .select_related('appointment')
             .filter(
-                appointment__specialist_id=specialist_id,
+                appointment__specialist_id=profile.id,
                 capture_state__in=_PAYOUT_PENDING_STATES,
             )
             .order_by('appointment__completed_at', 'created_at')

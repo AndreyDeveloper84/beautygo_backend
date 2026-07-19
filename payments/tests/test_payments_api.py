@@ -789,6 +789,20 @@ class TestPaymentWebhookSecurity:
         )
         assert response.status_code == status.HTTP_200_OK
 
+    def test_no_x_app_type_header_reaches_view(self, settings):
+        """P8 regression: real YooKassa sends NO X-App-Type header — the
+        AppTypeMiddleware must exempt the webhook path (parity with the
+        billing webhook under /api/v1/internal/, AMD-014). Previously
+        the middleware 403'd before the view ever ran."""
+        api = APIClient()  # deliberately NO X-App-Type default
+        response = api.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()['status'] == 'ok'
+
     def test_respects_x_forwarded_for_when_behind_proxy(
         self, anon_app, settings,
     ):

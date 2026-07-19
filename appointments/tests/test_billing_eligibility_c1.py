@@ -90,9 +90,14 @@ def _future_iso(hours: int = 3) -> str:
 
 def _fake_billing(monkeypatch, fn):
     """Install a fake billing.services module exposing fn as
-    can_accept_booking."""
+    can_accept_booking. A PEP-562 __getattr__ returns a dummy for any
+    OTHER name — billing/internal_api.py (P3 urls) does its own
+    ``from billing.services import build_billing_status`` when the
+    URLconf loads, and without a fallback the fake breaks unrelated
+    imports depending on test order."""
     fake = types.ModuleType("billing.services")
     fake.can_accept_booking = fn
+    fake.__getattr__ = lambda name: (lambda *a, **k: None)
     monkeypatch.setitem(sys.modules, "billing.services", fake)
     return fake
 
@@ -186,10 +191,16 @@ class TestEligibilityAllows:
         assert r.status_code == 201, r.data
 
     def test_missing_billing_module_fails_open(
-        self, customer, specialist, service,
+        self, monkeypatch, customer, specialist, service,
     ):
-        """billing/ not in repo yet (W2 pending) → booking proceeds."""
-        assert "billing.services" not in sys.modules
+        """billing.services unavailable (import error) → booking
+        proceeds (C1 fail-open). Simulated by pointing the adapter at a
+        nonexistent module — billing/ itself now lives in the repo."""
+        monkeypatch.setattr(
+            "appointments.application.services.billing_eligibility"
+            "._BILLING_MODULE",
+            "billing.nonexistent_module",
+        )
         r = _internal_api().post(
             INTERNAL_CREATE_URL, _body(customer, specialist, service),
             format="json",

@@ -436,6 +436,11 @@ class OutboxEvent(models.Model):
             "tenant.relationship.revoked",
             "TenantUserRelationship отозван (#246 Q1)",
         )
+        # W2 billing producer topics (C4, P4/W2 R-2). W2's billing/events.py
+        # is the only emit site; W3 registers them in ALLOWED_EVENT_NAMES.
+        SUBSCRIPTION_ACTIVATED = "subscription.activated", "Подписка активирована"
+        SUBSCRIPTION_PAST_DUE = "subscription.past_due", "Подписка просрочена"
+        BILLING_FEE_CHARGED = "billing.fee_charged", "Комиссия за запись начислена"
 
     class BotDeliveryStatus(models.TextChoices):
         # Default — publisher has not attempted delivery yet.

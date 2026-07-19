@@ -82,8 +82,9 @@ def _api(bearer=VALID_TOKEN):
     return c
 
 
-def _url(specialist_id) -> str:
-    return f"/api/v1/internal/specialists/{specialist_id}/payout-preview/"
+def _url(user_id) -> str:
+    # AMD-005: the path key is the Ayla User UUID, not SpecialistProfile.id
+    return f"/api/v1/internal/specialists/{user_id}/payout-preview/"
 
 
 def _payment(client_user, specialist, service, *, amount, income, state,
@@ -111,10 +112,10 @@ def _payment(client_user, specialist, service, *, amount, income, state,
 @pytest.mark.django_db
 class TestPayoutPreviewAuth:
     def test_missing_bearer_denied(self, specialist):
-        assert _api(bearer=None).get(_url(specialist.id)).status_code == 403
+        assert _api(bearer=None).get(_url(specialist.user_id)).status_code == 403
 
     def test_wrong_bearer_denied(self, specialist):
-        assert _api(bearer="nope").get(_url(specialist.id)).status_code == 403
+        assert _api(bearer="nope").get(_url(specialist.user_id)).status_code == 403
 
 
 @pytest.mark.django_db
@@ -127,7 +128,7 @@ class TestPayoutPreview:
 
     def test_empty_selection_200_zero(self, specialist):
         """C3: empty is NOT an error — 200 with "0.00" and null hint."""
-        r = _api().get(_url(specialist.id))
+        r = _api().get(_url(specialist.user_id))
         assert r.status_code == 200, r.data
         data = r.data["data"]
         assert data["pending_amount"] == "0.00"
@@ -154,7 +155,7 @@ class TestPayoutPreview:
         _payment(client_user, other_specialist, service, amount="9000.00",
                  income="8910.00", state="scheduled")
 
-        r = _api().get(_url(specialist.id))
+        r = _api().get(_url(specialist.user_id))
         assert r.status_code == 200, r.data
         data = r.data["data"]
         assert data["pending_amount"] == "4820.00"  # 1910 + 2910
