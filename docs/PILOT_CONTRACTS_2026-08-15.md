@@ -1,8 +1,8 @@
 # Волна 0 — Frozen Contracts пилота (2026-08-15)
 
-**Contract version:** 1.7.0
+**Contract version:** 1.8.0
 **Frozen at:** 2026-07-18 (после пакета amendments READY-WITH-AMENDMENTS)
-**Last amendment:** C7-review (2026-07-19, consent/authorization границы — по review)
+**Last amendment:** AMD-015 (2026-07-19, tenant_id nullable для billing-событий)
 **Effective for pilot:** 2026-08-15
 **Владелец:** оркестратор (Chief Product Architect); изменения — только amendment'ом (§13).
 
@@ -539,3 +539,18 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
 - **W1:** C7.1 (internal payment create, сумма из snapshot), C7.2 (cards setup/list/delete, поля consent, проверка `payment_method.saved`), ownership checks (C7.6). Событие `payment.authorized` НЕ требуется — сигнал холда = `booking.confirmed`.
 - **W3:** verified customer binding (C7.6), passthrough в miniapp_api (payment create, cards setup/list/delete, платёжные поля в BookingItem), маппинг отказа C1 на клиентский slug `UNAVAILABLE` (без раскрытия долга).
 - **W4:** экраны — выбор оплаты на summary (опционально, без навязывания), webview confirmation_url + возврат, статусы в records/detail по C7.3, экран карт (opt-in привязка + отзыв), C1 нейтральное сообщение + альтернативы.
+
+
+### AMD-015 — C4: `tenant_id` nullable для billing/subscription событий (2026-07-19, MINOR)
+
+- **Причина (W3 D-1):** `SpecialistSubscription.tenant` для соло-мастера NULL —
+  billing-события соло шли бы в 422/DLQ у consumer'а.
+- **Контракт (уточнение C4):** для топиков `subscription.activated`,
+  `subscription.past_due`, `billing.fee_charged` поле `tenant_id` **может быть
+  NULL** (соло-мастер). Верификация тогда по user-scope (ключ мастера = Ayla
+  User UUID, AMD-005). Для salon-подписок `tenant_id` обязателен и
+  верифицируется по tenant. Добавить эти топики в `TENANT_NULLABLE_EVENT_NAMES`
+  на стороне бота.
+- **Потоки:** W2 (эмитит как есть — NULL для соло), W3 (ingest: nullable для
+  этих топиков).
+- **Решение:** оркестратор (по эскалации W3 D-1).

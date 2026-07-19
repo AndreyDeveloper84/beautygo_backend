@@ -11,12 +11,12 @@
 ## Общий прогресс
 
 ```
-Код:     ████████████░░░░░░░░░░░░░░  63% done (130/207 SP)
+Код:     ████████████░░░░░░░░░░░░░░  64% done (133/207 SP)
          ░░░░████░░░░░░░░░░░░░░░░░░  16% in-progress (29 SP)
          ░░░░░░░░░░████████████░░░░  40% pending (73 SP)
 ```
 
-- **Done:** 130 SP · **In-progress:** 29 SP · **Pending (код):** 57 SP · **Pending (внешнее):** 16 SP
+- **Done:** 133 SP · **In-progress:** 29 SP · **Pending (код):** 57 SP · **Pending (внешнее):** 16 SP
 - Осталось дней: **26** (пилот 15.08). Сделано за дни 1–2: 78 SP.
 - Требуемый темп: ~4 SP/день суммарно по окнам — достижимо при текущей скорости.
 
@@ -26,11 +26,11 @@
 |---|---|---|---|---|---|
 | W1 Booking Core | **84%** | 27/32 | — | 5 SP (follow-up патчи — ждут W2) | ✅ в dev; очередь P1–P7 готова |
 | W2 Billing | **93%** | 28/30 | — | 2 SP (совместный тест — W1) | ✅ в dev (41a5133c); очередь W1 разблокирована |
-| W3 Bot Backend | **88%** | 29/33 | — | 4 SP (follow-up) | ✅ в dev + #1045 |
+| W3 Bot Backend | **97%** | 32/33 | — | 1 SP (прогон staging) | ✅ follow-up в dev (8817190) |
 | W4 Mini App | **45%** | 15/33 | 5 SP | 13 SP | ✅ каталог+записи real в dev; booking create — в разведке |
 | W5 Concierge | **100%** | 20/20 | — | 0 | ✅ фазы 1+2 в dev (a5e215d): память в диалоге |
 | W6 QA/Docs | **55%** | 11/20 | 1 SP | 8 SP (волна 3) | ✅ документы в Git |
-| **ИТОГО код** | **63%** | **130/207** | 1 SP | 61 SP | |
+| **ИТОГО код** | **64%** | **133/207** | 1 SP | 58 SP | |
 | Внешнее | **0%** | 0/16 | — | 16 SP | юрист/KYC/мастера |
 
 ## W1 — Ayla Booking Core (84%)
@@ -65,7 +65,7 @@
 | C4 события | 2 |✅ |
 | Совместный инвариант-тест W1×W2 | 2 | ⏳ |
 
-## W3 — Bot Backend (88%)
+## W3 — Bot Backend (97%)
 
 | Задача | SP | Статус |
 |---|---|---|
@@ -83,8 +83,8 @@
 | Baseline-rot fixes | 2 | ✅ |
 | #1045 разрешение конфликта | 2 | ✅ |
 | Бамп ai-core v0.9.0 | 1 | ✅ |
-| payment_required на create (G-1) | 1 | ⏳ |
-| link до AMD-001 (tiebreaker, stripping, mapping file) | 2 | ⏳ |
+| payment_required на create (G-1) | 1 | ✅ |
+| link до AMD-001 (tiebreaker, stripping, mapping file) | 2 | ✅ |
 | Прогон покрытия на staging | 1 | ⏳ staging |
 
 ## W4 — Mini App (26%)
@@ -157,6 +157,8 @@
 | Staging: прогон link + флип гейта | 3 | оркестратор | нед. 3 |
 
 ## Журнал обновлений
+
+- **2026-07-19 (день 2, вечер):** +3 SP — W3 follow-up в dev `8817190` (payment_required AMD-002, link до AMD-001 с mapping-file, AMD-005 specialist_id_for_master). W3 → 97%. Решение D-1 → AMD-015 (tenant NULL для billing-событий соло). D-2 (топики не зарегистрированы) — это W1 P4, напоминание. Done: 133/207 (64%).
 
 - **2026-07-19 (день 2, вечер):** +17 SP — W5 фаза 2 полностью в dev `a5e215d`: concierge wiring (DRF-241), memory block с consent-гейтом, memory-ask (S3.5), голос/границы, orchestrator-пакет зелёный. W5 → 100%. Тесты бота: 20 failed → 5 failed (все вне его зон, root cause передан W3). Done: 130/207 (63%).
 
