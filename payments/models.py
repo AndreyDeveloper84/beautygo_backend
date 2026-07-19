@@ -134,3 +134,60 @@ class Payment(models.Model):
 
     def __str__(self) -> str:
         return f"Payment {self.id} — {self.amount} ({self.status})"
+
+
+class UserPaymentMethod(models.Model):
+    """Saved client card (C7.2) — opt-in binding, never a payment side
+    effect.
+
+    Consent boundary (PILOT_CONTRACTS §7.5, AYLA-DEC-0011): a row is
+    created ONLY when the provider confirms ``payment_method.saved ==
+    true`` after a user-initiated binding flow with explicit consent
+    (``consent_version`` + ``consented_at``). A saved method may be used
+    solely for user-initiated charges — no client auto-charges in the
+    pilot (AYLA-DEC-0001). ``revoked_at`` set = the method is dead:
+    ``chargeable()`` returns False and any charge path must refuse it
+    (delete → charge forbidden).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        'users.User',
+        on_delete=models.CASCADE,
+        related_name='payment_methods',
+    )
+    # Provider-side token of the saved method (YooKassa payment_method.id).
+    payment_method_id = models.CharField(max_length=200, unique=True)
+    last4 = models.CharField(max_length=4)
+    brand = models.CharField(max_length=32)
+    # Explicit consent proof: which text version the user accepted and
+    # when. Set at binding time from the setup call's metadata.
+    consent_version = models.CharField(max_length=64)
+    consented_at = models.DateTimeField()
+    # NULL = active. Set on user revoke (C7.2 delete) — 152-ФЗ-adjacent
+    # right; never hard-delete the row (audit trail of the consent).
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Способ оплаты пользователя'
+        verbose_name_plural = 'Способы оплаты пользователей'
+        indexes = [
+            models.Index(fields=['user'], name='upm_user_idx'),
+        ]
+
+    def chargeable(self) -> bool:
+        """A revoked method must never be charged (C7.2 boundary)."""
+        return self.revoked_at is None
+
+    def revoke(self) -> None:
+        """User-initiated revoke — after this, charges are forbidden."""
+        from django.utils import timezone
+        if self.revoked_at is None:
+            self.revoked_at = timezone.now()
+            self.save(update_fields=['revoked_at', 'updated_at'])
+
+    def __str__(self) -> str:
+        return f"{self.brand} ···· {self.last4} (user {self.user_id})"

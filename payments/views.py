@@ -528,7 +528,19 @@ class PaymentWebhookView(APIView):
                 'appointment',
             ).get(provider_payment_id=provider_payment_id)
         except Payment.DoesNotExist:
-            # Unknown payment — could be a test notification; acknowledge silently
+            # Unknown payment — either a test notification, or a
+            # card-binding confirmation (C7.2): binding payments have no
+            # booking Payment row by design. Verify against the provider
+            # (never trust the payload alone) and persist the saved
+            # method only when payment_method.saved == true.
+            try:
+                svc = _get_yookassa()
+                binding_info = svc.get_payment_info(provider_payment_id)
+            except (PaymentClientError, PaymentConfigError) as exc:
+                logger.error('YooKassa get_payment_info failed: %s', exc)
+                # Return 200 to stop YooKassa retries; we'll reconcile later
+                return Response({'status': 'ok'}, status=200)
+            _handle_card_binding_webhook(event, binding_info)
             return Response({'status': 'ok'}, status=200)
 
         # Idempotency: skip if we already processed this event
@@ -1150,3 +1162,403 @@ class InternalPayoutPreviewView(APIView):
             ),
             'items': items,
         })
+
+
+# ---------------------------------------------------------------------------
+# C7 — Client payments (internal, bot-driven): payment create + card binding
+# ---------------------------------------------------------------------------
+
+class _InternalPaymentCreateSerializer(drf_serializers.Serializer):
+    """C7.1 body. NOTE: there is deliberately NO amount field — the
+    charge amount comes ONLY from the authoritative Booking snapshot
+    (C7.1/C7.6); anything a client sends is ignored by design."""
+    client_id = drf_serializers.UUIDField()
+    return_url = drf_serializers.URLField()
+
+
+class InternalPaymentCreateView(APIView):
+    """POST /api/v1/internal/appointments/{appointment_id}/payment/ (C7.1).
+
+    Creates the two-stage YooKassa hold (capture=false, D9) for a
+    booking of the verified customer. Idempotent: at most one ACTIVE
+    payment per booking — a repeat returns the same payment.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    # Booking statuses that may start a payment. Cancelled / completed /
+    # no_show are excluded by construction (409 per contract).
+    PAYABLE_STATUSES = (
+        Appointment.Status.PENDING,
+        Appointment.Status.AWAITING_PAYMENT,
+        Appointment.Status.CONFIRMED,
+    )
+
+    @extend_schema(
+        operation_id="internal_appointments_payment_create",
+        tags=["internal"],
+        request=_InternalPaymentCreateSerializer,
+        responses={
+            200: OpenApiResponse(description="Payment (possibly existing)"),
+            403: OpenApiResponse(description="CLIENT_MISMATCH"),
+            404: OpenApiResponse(description="APPOINTMENT_NOT_FOUND"),
+            409: OpenApiResponse(description="Booking not payable / already paid"),
+            422: OpenApiResponse(description="ONLINE_PAYMENT_UNAVAILABLE"),
+        },
+    )
+    def post(self, request: Request, appointment_id) -> Response:
+        serializer = _InternalPaymentCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        # C7.6 — cross-check: the body must independently name the same
+        # user the bearer + X-External-User-ID resolved to (precedent:
+        # internal booking create / payment retry).
+        if str(serializer.validated_data['client_id']) != str(request.user.id):
+            return error_response(
+                'CLIENT_MISMATCH',
+                'body.client_id does not match resolved actor.',
+                status_code=403,
+            )
+
+        try:
+            appointment = (
+                Appointment.objects
+                .select_related('specialist', 'service')
+                .prefetch_related('payments')
+                .get(id=appointment_id, client=request.user)
+            )
+        except Appointment.DoesNotExist:
+            # Info-hidden 404 — ownership is not distinguishable from
+            # non-existence (same contract as internal booking cancel).
+            return error_response(
+                'APPOINTMENT_NOT_FOUND', 'Appointment not found.',
+                status_code=404,
+            )
+
+        if appointment.status not in self.PAYABLE_STATUSES:
+            return error_response(
+                'INVALID_STATUS',
+                f'Cannot pay for appointment in status "{appointment.status}".',
+                status_code=409,
+            )
+
+        # Already paid → 409 (the money moved; no second hold).
+        if appointment.payments.filter(status=Payment.Status.PAID).exists():
+            return error_response(
+                'INVALID_STATUS',
+                'Appointment is already paid.',
+                status_code=409,
+            )
+
+        # Idempotency (C7.1): an ACTIVE payment — pending provider
+        # session or an authorized hold — is returned as-is; a repeat
+        # call never spawns a second provider payment.
+        active = appointment.payments.filter(
+            status__in=(Payment.Status.PENDING, Payment.Status.AUTHORIZED),
+            provider_payment_id__gt='',
+        ).order_by('-created_at').first()
+        if active is not None:
+            return self._respond(active)
+
+        # The booking engine may have pre-created a pending row WITHOUT
+        # a provider session (payment_required=true path) — reuse that
+        # row instead of adding a second one.
+        payment = appointment.payments.filter(
+            status=Payment.Status.PENDING,
+        ).order_by('-created_at').first()
+
+        # Amount: ONLY the authoritative snapshot price stamped at
+        # booking time (C7.1/C7.6) — never anything from the request.
+        amount = appointment.price
+        receipt = build_appointment_receipt(appointment, amount)
+
+        try:
+            svc = _get_yookassa()
+            result = svc.create_payment(
+                amount=amount,
+                appointment_id=appointment.id,
+                description=(
+                    f'Ayla: {appointment.service.name} у '
+                    f'{appointment.specialist.display_name}'
+                ),
+                return_url=serializer.validated_data['return_url'],
+                idempotency_key=_idempotency_key_from(request),
+                capture=False,  # two-stage hold (D9)
+                receipt=receipt,
+                specialist_account_id=getattr(
+                    appointment.specialist, 'yookassa_account_id', '',
+                ),
+            )
+        except SpecialistPayoutNotConfiguredError as exc:
+            # D8 — split per-master; online payment unavailable, the
+            # no-prepayment path still works.
+            logger.info('Online payment unavailable: %s', exc)
+            return error_response(
+                'ONLINE_PAYMENT_UNAVAILABLE',
+                'Online payment is not available for this specialist.',
+                status_code=422,
+            )
+        except PaymentConfigError as exc:
+            logger.error('YooKassa not configured: %s', exc)
+            return error_response(
+                'SERVICE_UNAVAILABLE',
+                'Payment provider not configured.',
+                status_code=503,
+            )
+        except PaymentClientError as exc:
+            logger.error('YooKassa create_payment failed: %s', exc)
+            return error_response(
+                'PAYMENT_PROVIDER_ERROR',
+                'Payment provider error. Please try again.',
+                status_code=502,
+            )
+
+        with transaction.atomic():
+            if payment is None:
+                payment = Payment(
+                    appointment=appointment,
+                    amount=amount,
+                    status=Payment.Status.PENDING,
+                )
+            payment.specialist_income = result['specialist_income']
+            payment.platform_fee = result['platform_fee']
+            payment.provider = 'yookassa'
+            payment.provider_payment_id = result['provider_payment_id']
+            payment.provider_client_secret = result['confirmation_url']
+            payment.save()
+            if appointment.status == Appointment.Status.PENDING:
+                appointment.status = Appointment.Status.AWAITING_PAYMENT
+                appointment.save(update_fields=['status'])
+
+        logger.info(
+            'Internal payment created: payment_id=%s appointment_id=%s amount=%s',
+            payment.id, appointment.id, payment.amount,
+        )
+        return self._respond(payment)
+
+    @staticmethod
+    def _respond(payment: Payment) -> Response:
+        return success_response({
+            'payment_id': str(payment.id),
+            'confirmation_url': payment.provider_client_secret,
+            'amount': _money(payment.amount),
+            'currency': 'RUB',
+            # C7.1 frozen response shape: the payment is an authorization
+            # (two-stage hold), not an instant charge — reported in the
+            # hold vocabulary regardless of the current lifecycle step.
+            'capture_state': 'authorized',
+        })
+
+
+class _InternalCardSetupSerializer(drf_serializers.Serializer):
+    """C7.2 card-binding body. ``consent_version`` is REQUIRED — the
+    consent boundary: binding is a separate voluntary action with an
+    explicit, versioned consent text."""
+    consent_version = drf_serializers.CharField(max_length=64, allow_blank=False)
+    return_url = drf_serializers.URLField()
+
+
+def _check_user_scope(request: Request, ayla_user_id) -> Response | None:
+    """C7.6 ownership boundary: the path's ayla_user_id must be the same
+    user the bearer + X-External-User-ID resolved to. An arbitrary
+    ayla_user_id without that linkage → 403."""
+    if str(ayla_user_id) != str(request.user.id):
+        return error_response(
+            'CLIENT_MISMATCH',
+            'path user id does not match resolved actor.',
+            status_code=403,
+        )
+    return None
+
+
+class InternalCardSetupView(APIView):
+    """POST /api/v1/internal/users/{ayla_user_id}/cards/setup/ (C7.2).
+
+    Starts the zero-amount binding flow (save_payment_method: true) —
+    a SEPARATE voluntary action, never a payment side effect. The method
+    is persisted only when the webhook confirms payment_method.saved.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(
+        operation_id="internal_users_cards_setup",
+        tags=["internal"],
+        request=_InternalCardSetupSerializer,
+        responses={
+            200: OpenApiResponse(description="confirmation_url for the binding flow"),
+            403: OpenApiResponse(description="CLIENT_MISMATCH"),
+        },
+    )
+    def post(self, request: Request, ayla_user_id) -> Response:
+        denied = _check_user_scope(request, ayla_user_id)
+        if denied is not None:
+            return denied
+
+        serializer = _InternalCardSetupSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        try:
+            svc = _get_yookassa()
+            result = svc.create_card_binding(
+                user_id=request.user.id,
+                consent_version=serializer.validated_data['consent_version'],
+                return_url=serializer.validated_data['return_url'],
+                idempotency_key=_idempotency_key_from(request),
+            )
+        except PaymentConfigError as exc:
+            logger.error('YooKassa not configured: %s', exc)
+            return error_response(
+                'SERVICE_UNAVAILABLE',
+                'Payment provider not configured.',
+                status_code=503,
+            )
+        except PaymentClientError as exc:
+            logger.error('YooKassa create_card_binding failed: %s', exc)
+            return error_response(
+                'PAYMENT_PROVIDER_ERROR',
+                'Payment provider error. Please try again.',
+                status_code=502,
+            )
+
+        return success_response({
+            'confirmation_url': result['confirmation_url'],
+        })
+
+
+class InternalCardListView(APIView):
+    """GET /api/v1/internal/users/{ayla_user_id}/cards/ (C7.2) — active
+    (non-revoked) saved methods of the verified customer."""
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(
+        operation_id="internal_users_cards_list",
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(description="List of saved cards"),
+            403: OpenApiResponse(description="CLIENT_MISMATCH"),
+        },
+    )
+    def get(self, request: Request, ayla_user_id) -> Response:
+        denied = _check_user_scope(request, ayla_user_id)
+        if denied is not None:
+            return denied
+
+        from payments.models import UserPaymentMethod
+        cards = (
+            UserPaymentMethod.objects
+            .filter(user=request.user, revoked_at__isnull=True)
+            .order_by('-created_at')
+        )
+        return success_response([
+            {'id': str(card.id), 'last4': card.last4, 'brand': card.brand}
+            for card in cards
+        ])
+
+
+class InternalCardDeleteView(APIView):
+    """DELETE /api/v1/internal/users/{ayla_user_id}/cards/{card_id}/ (C7.2).
+
+    Revoke: sets revoked_at — charges with the method are forbidden
+    from that moment (enforced by UserPaymentMethod.chargeable()).
+    Idempotent: revoking an already-revoked card returns 200.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(
+        operation_id="internal_users_cards_delete",
+        tags=["internal"],
+        request=None,
+        responses={
+            200: OpenApiResponse(description="Card revoked"),
+            403: OpenApiResponse(description="CLIENT_MISMATCH"),
+            404: OpenApiResponse(description="CARD_NOT_FOUND"),
+        },
+    )
+    def delete(self, request: Request, ayla_user_id, card_id) -> Response:
+        denied = _check_user_scope(request, ayla_user_id)
+        if denied is not None:
+            return denied
+
+        from payments.models import UserPaymentMethod
+        card = (
+            UserPaymentMethod.objects
+            .filter(id=card_id, user=request.user)
+            .first()
+        )
+        if card is None:
+            # Info-hidden 404 — another user's card is indistinguishable
+            # from a nonexistent one.
+            return error_response(
+                'CARD_NOT_FOUND', 'Card not found.', status_code=404,
+            )
+        card.revoke()
+        return success_response({
+            'id': str(card.id),
+            'revoked': True,
+        })
+
+
+def _handle_card_binding_webhook(event: str, info: dict) -> bool:
+    """C7.2 — persist a saved card from a binding-flow webhook.
+
+    Returns True when the payload belongs to the card-binding flow
+    (handled, possibly as a no-op) so the caller stops further
+    processing. Consent boundary: the method is stored ONLY when the
+    provider's own data carries ``payment_method.saved == true`` —
+    never on the mere fact of ``payment.succeeded``.
+    """
+    from payments.models import UserPaymentMethod
+
+    metadata = info.get('metadata') or {}
+    if metadata.get('purpose') != 'card_binding':
+        return False
+    if event != 'payment.succeeded' or info.get('status') != 'succeeded':
+        return True  # binding flow, but nothing to persist yet
+
+    method = info.get('payment_method') or {}
+    if not method.get('saved'):
+        logger.warning(
+            'card_binding.succeeded_without_saved provider_id=%s',
+            info.get('provider_payment_id'),
+        )
+        return True
+
+    user_id = metadata.get('ayla_user_id')
+    if not user_id or not method.get('id'):
+        logger.error(
+            'card_binding.missing_fields provider_id=%s',
+            info.get('provider_payment_id'),
+        )
+        return True
+
+    consented_at = None
+    raw_consent = metadata.get('consented_at')
+    if raw_consent:
+        try:
+            from datetime import datetime as _dt
+            consented_at = _dt.fromisoformat(raw_consent)
+        except (TypeError, ValueError):
+            consented_at = None
+
+    UserPaymentMethod.objects.get_or_create(
+        payment_method_id=method['id'],
+        defaults={
+            'user_id': user_id,
+            'last4': (method.get('last4') or '')[:4],
+            'brand': method.get('brand') or '',
+            'consent_version': metadata.get('consent_version', ''),
+            'consented_at': consented_at or timezone.now(),
+        },
+    )
+    logger.info(
+        'card_binding.saved user_id=%s method_id=%s',
+        user_id, method['id'],
+    )
+    return True
