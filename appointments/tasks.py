@@ -63,6 +63,18 @@ EVENT_HANDLERS: dict[str, EventHandler] = {
     OutboxEvent.Topic.TENANT_RELATIONSHIP_REVOKED: _log_handler(
         "tenant.relationship.revoked",
     ),
+    # W2 billing producer topics (C4, P4) — cross-service consumers only
+    # (W3 bot notifications + analytics); the Ayla side persists + logs,
+    # same rationale as the TUR stub above.
+    OutboxEvent.Topic.SUBSCRIPTION_ACTIVATED: _log_handler(
+        "subscription.activated",
+    ),
+    OutboxEvent.Topic.SUBSCRIPTION_PAST_DUE: _log_handler(
+        "subscription.past_due",
+    ),
+    OutboxEvent.Topic.BILLING_FEE_CHARGED: _log_handler(
+        "billing.fee_charged",
+    ),
 }
 
 
@@ -81,6 +93,39 @@ def _register_notification_handlers() -> None:
 
 
 _register_notification_handlers()
+
+
+def _chain_handlers(first: EventHandler, second: EventHandler) -> EventHandler:
+    """Compose two handlers into one — order matters."""
+    def chained(event: OutboxEvent) -> None:
+        first(event)
+        second(event)
+    return chained
+
+
+def _register_billing_handlers() -> None:
+    """W2 R-5 / P5: booking.completed fee accrual CHAINED with the
+    notifications handler — NEVER a replacement (a plain
+    ``EVENT_HANDLERS.update`` from billing would silently drop the
+    notification leg). Billing runs FIRST: money before pushes.
+    billing.handlers.on_booking_completed swallows its own exceptions,
+    so the notification leg always runs; if that leg fails, the
+    dispatcher retries the whole chain and BookingFee's
+    UNIQUE(appointment_id) keeps the billing re-run idempotent
+    (AYLA-DEC-0010 / C4).
+    """
+    try:
+        from billing.handlers import on_booking_completed
+    except ImportError:  # pragma: no cover — billing app missing
+        logger.exception("outbox.billing_handlers_import_failed")
+        return
+    topic = OutboxEvent.Topic.BOOKING_COMPLETED
+    EVENT_HANDLERS[topic] = _chain_handlers(
+        on_booking_completed, EVENT_HANDLERS[topic],
+    )
+
+
+_register_billing_handlers()
 
 
 # Max times a single event will go through the dispatcher before we stop

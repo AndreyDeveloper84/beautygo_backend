@@ -288,11 +288,24 @@ def test_booking_handlers_registry_covers_all_booking_topics():
 
 def test_booking_handlers_registered_in_event_handlers():
     """appointments.tasks.EVENT_HANDLERS must have the booking handlers
-    bound (no longer the _log_handler stubs)."""
+    bound (no longer the _log_handler stubs).
+
+    P5 (W2 R-5) exception: BOOKING_COMPLETED is a CHAIN — billing's fee
+    accrual first, this app´s handler second (money before pushes). The
+    notifications leg must still be present as the chain's second leg.
+    """
     from appointments import tasks as apt_tasks
 
     for topic, handler in outbox_handlers.BOOKING_HANDLERS.items():
-        assert apt_tasks.EVENT_HANDLERS[topic] is handler
+        if topic == OutboxEvent.Topic.BOOKING_COMPLETED:
+            chained = apt_tasks.EVENT_HANDLERS[topic]
+            legs = [c.cell_contents for c in (chained.__closure__ or ())]
+            assert legs[-1] is handler, (
+                "notifications handler must remain the LAST leg of the "
+                "booking.completed chain (billing runs first, P5)"
+            )
+        else:
+            assert apt_tasks.EVENT_HANDLERS[topic] is handler
 
 
 def test_payment_handlers_registered():

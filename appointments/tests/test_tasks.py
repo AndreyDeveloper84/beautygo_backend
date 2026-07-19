@@ -199,3 +199,27 @@ class TestHandlerRegistry:
                 f"entry in EVENT_HANDLERS. Add a handler in "
                 f"appointments/tasks.py."
             )
+
+    def test_booking_completed_chains_billing_before_notifications(self):
+        """P5 (W2 R-5): booking.completed must run billing's fee accrual
+        FIRST and the notifications handler SECOND — a plain
+        EVENT_HANDLERS.update from billing would silently drop the
+        notification leg. Closure inspection: the chain is built once
+        at import time."""
+        from billing.handlers import on_booking_completed
+        from notifications.outbox_handlers import handle_booking_completed
+
+        handler = EVENT_HANDLERS[OutboxEvent.Topic.BOOKING_COMPLETED]
+        legs = [c.cell_contents for c in (handler.__closure__ or ())]
+        assert legs[0] is on_booking_completed
+        assert legs[1] is handle_booking_completed
+
+    def test_chain_handlers_runs_legs_in_order(self):
+        """The composer itself: first leg runs before the second."""
+        from appointments.tasks import _chain_handlers
+        calls = []
+        _chain_handlers(
+            lambda e: calls.append("billing"),
+            lambda e: calls.append("notifications"),
+        )(object())
+        assert calls == ["billing", "notifications"]
