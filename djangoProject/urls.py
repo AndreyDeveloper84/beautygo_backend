@@ -9,6 +9,7 @@ from drf_spectacular.views import (
 )
 
 from .health import liveness, readiness
+from payments.views import InternalPayoutPreviewView
 
 
 urlpatterns = [
@@ -41,6 +42,14 @@ urlpatterns = [
     # #1016 S2 — internal Bearer REST surface the Ayla bot reads/writes
     # (slots + catalog mirror + booking create/cancel/reschedule).
     # Contract co-owned with S1: ai-bot-platform/docs/architecture/.
+    # C3 payout preview — explicit route BEFORE the specialists include
+    # so the resolver doesn't feed "payout-preview" into the include's
+    # patterns (owner: payments/, PILOT_CONTRACTS §4).
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/payout-preview/',
+        InternalPayoutPreviewView.as_view(),
+        name='internal-payout-preview',
+    ),
     path(
         'api/v1/internal/specialists/',
         include('users.internal_catalog_urls'),

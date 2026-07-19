@@ -201,6 +201,19 @@ class SpecialistProfile(models.Model):
             "Empty otherwise."
         ),
     )
+    # Split per-master (AYLA-DEC-0008/D8): the specialist's own YooKassa
+    # sub-account. Online payment transfers specialist_income here at
+    # capture; the platform keeps the flat 90₽ fee. EMPTY → online
+    # payment unavailable for this specialist (422
+    # ONLINE_PAYMENT_UNAVAILABLE); booking without prepayment (D6)
+    # keeps working. Populated by the KYC onboarding ops process.
+    yookassa_account_id = models.CharField(
+        max_length=64, blank=True, default="",
+        help_text=(
+            "YooKassa sub-account id for split-per-master payouts. "
+            "Empty = online payment unavailable for this specialist."
+        ),
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

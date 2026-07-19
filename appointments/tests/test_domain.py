@@ -169,32 +169,37 @@ class TestBookingSnapshot:
             service_name="Маникюр",
             duration_minutes=60,
             price=Decimal("2000.00"),
-            commission_percent=Decimal("8.0"),
+            platform_fee=Decimal("90.00"),
             specialist_timezone="Europe/Moscow",
             buffer_after_minutes=10,
         )
-        assert snap.platform_fee == Decimal("160.00")
-        assert snap.specialist_income == Decimal("1840.00")
+        # Flat 90₽ fee (AYLA-DEC-0001), income is the remainder.
+        assert snap.platform_fee == Decimal("90.00")
+        assert snap.specialist_income == Decimal("1910.00")
+        # commission_percent is the derived EFFECTIVE rate (analytics only)
+        assert snap.commission_percent == Decimal("4.50")
         assert snap.service_name == "Маникюр"
         assert snap.buffer_after_minutes == 10
 
-    def test_zero_commission(self):
+    def test_fee_capped_at_price(self):
+        """Degenerate sub-90₽ service: fee is capped so income never
+        goes negative (data contract §1)."""
         snap = BookingSnapshot.create(
             service_name="Test",
             duration_minutes=30,
-            price=Decimal("1000.00"),
-            commission_percent=Decimal("0"),
+            price=Decimal("50.00"),
+            platform_fee=Decimal("90.00"),
             specialist_timezone="UTC",
         )
-        assert snap.platform_fee == Decimal("0.00")
-        assert snap.specialist_income == Decimal("1000.00")
+        assert snap.platform_fee == Decimal("50.00")
+        assert snap.specialist_income == Decimal("0.00")
 
     def test_snapshot_is_immutable(self):
         snap = BookingSnapshot.create(
             service_name="Test",
             duration_minutes=30,
             price=Decimal("500.00"),
-            commission_percent=Decimal("10"),
+            platform_fee=Decimal("90.00"),
             specialist_timezone="UTC",
         )
         with pytest.raises(AttributeError):
@@ -206,20 +211,25 @@ class TestBookingSnapshot:
 # ---------------------------------------------------------------------------
 
 class TestDefaultCommissionPolicy:
-    def test_returns_configured_percent(self, settings):
-        settings.BOOKING_COMMISSION_PERCENT = 8.0
+    def test_returns_configured_flat_fee(self, settings):
+        settings.BOOKING_PLATFORM_FEE_RUB = "90.00"
         policy = DefaultCommissionPolicy()
-        import uuid
-        result = policy.get_percent(uuid.uuid4(), uuid.uuid4())
-        assert result == 8.0
+        result = policy.get_platform_fee(Decimal("2000.00"))
+        assert result == Decimal("90.00")
+
+    def test_fee_independent_of_price(self, settings):
+        """Flat fee (D1): same 90₽ for a 500₽ and a 5000₽ service."""
+        settings.BOOKING_PLATFORM_FEE_RUB = "90.00"
+        policy = DefaultCommissionPolicy()
+        assert policy.get_platform_fee(Decimal("500.00")) == Decimal("90.00")
+        assert policy.get_platform_fee(Decimal("5000.00")) == Decimal("90.00")
 
     def test_fallback_to_default(self, settings):
-        if hasattr(settings, 'BOOKING_COMMISSION_PERCENT'):
-            delattr(settings, 'BOOKING_COMMISSION_PERCENT')
+        if hasattr(settings, 'BOOKING_PLATFORM_FEE_RUB'):
+            delattr(settings, 'BOOKING_PLATFORM_FEE_RUB')
         policy = DefaultCommissionPolicy()
-        import uuid
-        result = policy.get_percent(uuid.uuid4(), uuid.uuid4())
-        assert result == 8.0  # fallback
+        result = policy.get_platform_fee(Decimal("2000.00"))
+        assert result == Decimal("90.00")  # fallback
 
 
 # ---------------------------------------------------------------------------

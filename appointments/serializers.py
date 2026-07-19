@@ -95,6 +95,13 @@ class AppointmentCreateSerializer(serializers.Serializer):
     service_id = serializers.UUIDField()
     start_datetime = serializers.DateTimeField()
     notes = serializers.CharField(required=False, allow_blank=True, default='')
+    # D6 — online payment is OPTIONAL. Default True preserves the
+    # pre-pilot contract (AWAITING_PAYMENT + pending Payment). Passing
+    # False books without prepayment: no Payment row, the booking lands
+    # directly in CONFIRMED and booking.confirmed is emitted (R1).
+    # The API layer derives confirm_immediately from this flag — the two
+    # never diverge on public paths.
+    payment_required = serializers.BooleanField(required=False, default=True)
 
     # Pure validator post-1.D. Variant E invisible-grant + F2 revoke
     # defense live in CreateBookingService._execute_atomic — folded

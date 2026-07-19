@@ -168,12 +168,23 @@ class BookingSnapshot:
         service_name: str,
         duration_minutes: int,
         price: Decimal,
-        commission_percent: Decimal,
+        platform_fee: Decimal,
         specialist_timezone: str,
         buffer_after_minutes: int = 0,
     ) -> BookingSnapshot:
-        platform_fee = (price * commission_percent / 100).quantize(Decimal("0.01"))
+        # Flat platform fee (AYLA-DEC-0001/D1: 90₽ per successful booking).
+        # Capped at the price so specialist_income stays non-negative
+        # (data contract §1: negative amounts are forbidden) — degenerate
+        # sub-90₽ services yield zero income rather than a negative one.
+        platform_fee = min(platform_fee, price).quantize(Decimal("0.01"))
         specialist_income = price - platform_fee
+        # Legacy analytics column: the EFFECTIVE rate derived from the
+        # flat fee (90₽ of 2000₽ → 4.50). Informational only — it no
+        # longer drives the fee math.
+        commission_percent = (
+            (platform_fee / price * 100).quantize(Decimal("0.01"))
+            if price else Decimal("0.00")
+        )
         return cls(
             service_name=service_name,
             service_duration_minutes=duration_minutes,

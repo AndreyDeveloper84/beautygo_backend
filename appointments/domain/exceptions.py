@@ -57,3 +57,18 @@ class RescheduleNotAllowedError(BookingDomainError):
 class CancellationNotAllowedError(BookingDomainError):
     """Raised when cancellation policy does not allow the operation."""
     pass
+
+
+class BillingEligibilityError(BookingDomainError):
+    """C1 — billing refused a NEW booking (subscription past due).
+
+    Carries the machine ``reason`` from the C1 EligibilityResult
+    (today only "SUBSCRIPTION_PAST_DUE"). Mapping per C1 privacy rule:
+    the internal/backend surface gets 409 SUBSCRIPTION_PAST_DUE, the
+    client-facing API gets a generic UNAVAILABLE — the debt reason is
+    never disclosed to customers.
+    """
+
+    def __init__(self, reason: str = "SUBSCRIPTION_PAST_DUE"):
+        self.reason = reason
+        super().__init__(reason)

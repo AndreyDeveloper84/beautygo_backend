@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -121,7 +122,10 @@ class TestCreateBookingService:
 
         appt = Appointment.objects.first()
         assert appt.snapshot_service_name == "Test Haircut"
-        assert float(appt.snapshot_commission_percent) == 8.0
+        # Flat 90₽ fee (D1) on a 2000₽ service → effective rate 4.50.
+        assert appt.snapshot_platform_fee == Decimal("90.00")
+        assert appt.snapshot_specialist_income == Decimal("1910.00")
+        assert appt.snapshot_commission_percent == Decimal("4.50")
 
     def test_idempotency_same_key_returns_same_booking(
         self, client_user, specialist, service,

@@ -66,6 +66,13 @@ class InternalBookingCreateSerializer(serializers.Serializer):
     specialist_id = serializers.UUIDField()
     service_id = serializers.UUIDField()
     start_datetime = serializers.DateTimeField()
+    # D6 — online payment is OPTIONAL. Default True preserves the
+    # pre-pilot contract (AWAITING_PAYMENT + pending Payment). The bot
+    # passes False for the pilot baseline "запись без предоплаты":
+    # no Payment row, booking lands directly in CONFIRMED and
+    # booking.confirmed is emitted (R1). Additive contract change
+    # (#1016, MINOR) — omitted field behaves exactly as before.
+    payment_required = serializers.BooleanField(required=False, default=True)
 
 
 class _InternalAuthMixin:
@@ -122,11 +129,29 @@ class InternalBookingCreateView(_InternalAuthMixin, APIView):
             # Bot context has no client tenant scope; the grant keys off
             # the specialist's tenant regardless (#1014).
             request_tenant_id=None,
+            # D6: payment_required=False → confirm immediately without a
+            # Payment row (no-prepayment pilot baseline).
+            payment_required=serializer.validated_data['payment_required'],
+            confirm_immediately=(
+                not serializer.validated_data['payment_required']
+            ),
         )
 
         # Booking domain errors (slot taken, inactive specialist/service)
         # and the grant F2 NotFound propagate to api_exception_handler.
-        result = CreateBookingService().execute(dto)
+        from appointments.domain.exceptions import BillingEligibilityError
+        try:
+            result = CreateBookingService().execute(dto)
+        except BillingEligibilityError as exc:
+            # C1: the INTERNAL/backend surface gets the real reason code
+            # (the bot routes the master to the debt screen; the customer
+            # gets a neutral message bot-side).
+            return error_response(
+                exc.reason,
+                'Subscription payment is past due — new bookings are '
+                'blocked for this specialist.',
+                status_code=409,
+            )
 
         appointment = (
             Appointment.objects

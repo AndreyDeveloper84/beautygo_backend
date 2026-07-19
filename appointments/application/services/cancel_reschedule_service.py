@@ -108,6 +108,19 @@ class CancelBookingService:
             reason=dto.reason,
         )
 
+        # Acceptance #5: booking cancelled ⇒ the hold is released
+        # automatically (D6/D8). Runs AFTER the commit — a provider
+        # outage never blocks the cancellation itself; failures are
+        # logged and left for the reconciliation job. No-op when the
+        # booking has no authorized hold (no-prepayment path).
+        from payments.services import cancel_authorized_hold_for_appointment
+        try:
+            cancel_authorized_hold_for_appointment(appointment)
+        except Exception:  # noqa: BLE001 — same post-commit rationale
+            logger.exception(
+                'hold.cancel_hook_failed booking_id=%s', dto.booking_id,
+            )
+
         logger.info(
             "booking.cancelled booking_id=%s initiator=%s refund_percent=%s",
             dto.booking_id, dto.initiator_role, refund_percent,

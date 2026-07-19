@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction
@@ -135,6 +134,19 @@ class CreateBookingService:
             )
             return existing, existing.payments.filter(status="pending").first()
 
+        # C1 — billing eligibility (W2): a past_due subscription blocks
+        # only NEW bookings. Placed AFTER the idempotency early-return
+        # so a retried create of an existing booking is never refused
+        # (C1: only creation is gated); cancel/reschedule/complete never
+        # consult this. Fail-open per C1 when billing is unavailable.
+        from appointments.application.services.billing_eligibility import (
+            check_billing_eligibility,
+        )
+        check_billing_eligibility(
+            specialist_id=dto.specialist_id,
+            tenant_id=specialist.tenant_id,
+        )
+
         # Conflict check with row-level lock
         conflicting_count = Appointment.objects.filter(
             specialist_id=dto.specialist_id,
@@ -183,15 +195,13 @@ class CreateBookingService:
             status=BookingStatus.COMPLETED.value,
         ).exists()
 
-        # Commission snapshot
-        commission_percent = Decimal(str(
-            self._commission_policy.get_percent(dto.client_id, dto.specialist_id)
-        ))
+        # Platform fee snapshot (flat 90₽, AYLA-DEC-0001)
+        platform_fee = self._commission_policy.get_platform_fee(service.price)
         snapshot = BookingSnapshot.create(
             service_name=service.name,
             duration_minutes=service.duration_minutes,
             price=service.price,
-            commission_percent=commission_percent,
+            platform_fee=platform_fee,
             specialist_timezone=specialist.timezone,
             buffer_after_minutes=getattr(service, "buffer_after_minutes", 0),
         )
