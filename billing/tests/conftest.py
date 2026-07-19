@@ -1,24 +1,17 @@
 """Fixtures for billing tests — mirrors appointments/tests/conftest.py style.
 
-B-1 handoff: until W1 registers `billing` in INSTALLED_APPS these tests
-run only under the W2 shim (--ds=billing.tests.settings_w2). Under the
-canonical settings the whole directory is skipped at collection — the
-canonical suite must stay green for the other streams TODAY, and
-importing billing.models without the app installed raises RuntimeError.
+Runs under the canonical settings: billing is in INSTALLED_APPS (W1's
+P1 patch) and the temporary W2 ds-shim is removed.
 """
 from datetime import date
 
 import pytest
-from django.conf import settings
 from django.utils import timezone
 
 from appointments.models import Appointment
 from services.models import Service, ServiceCategory
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
-
-if "billing" not in settings.INSTALLED_APPS:
-    collect_ignore_glob = ["test_*.py"]
 
 
 @pytest.fixture
