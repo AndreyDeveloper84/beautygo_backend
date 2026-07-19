@@ -11,3 +11,6 @@ registers 'billing' and the canonical `pytest` command covers the app.
 from djangoProject.settings.test import *  # noqa: F401,F403
 
 INSTALLED_APPS += ["billing"]  # noqa: F405
+
+# B-5 handoff: billing urls are not in djangoProject/urls.py yet.
+ROOT_URLCONF = "billing.tests.urls_w2"

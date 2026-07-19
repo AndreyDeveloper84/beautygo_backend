@@ -60,24 +60,30 @@ class TestComputeBookingFee:
 
 
 class TestSubscriptionOwnership:
-    def test_exactly_one_owner_required(self, db, specialist_user, tenant, tariff_solo):
-        with pytest.raises(IntegrityError), transaction.atomic():
-            SpecialistSubscription.objects.create(tariff=tariff_solo)
-        with pytest.raises(IntegrityError), transaction.atomic():
-            SpecialistSubscription.objects.create(
-                user=specialist_user, tenant=tenant, tariff=tariff_solo,
-            )
-
-    def test_one_subscription_per_user(self, db, subscription, tariff_solo):
+    def test_one_personal_subscription_per_user(self, db, subscription, tariff_solo):
         with pytest.raises(IntegrityError), transaction.atomic():
             SpecialistSubscription.objects.create(
                 user=subscription.user, tariff=tariff_solo,
             )
 
-    def test_one_subscription_per_tenant(self, db, tenant, tariff_salon):
-        SpecialistSubscription.objects.create(tenant=tenant, tariff=tariff_salon)
+    def test_one_subscription_per_tenant(self, db, specialist_user, tenant, tariff_salon):
+        SpecialistSubscription.objects.create(
+            user=specialist_user, tenant=tenant, tariff=tariff_salon,
+        )
         with pytest.raises(IntegrityError), transaction.atomic():
-            SpecialistSubscription.objects.create(tenant=tenant, tariff=tariff_salon)
+            SpecialistSubscription.objects.create(
+                user=specialist_user, tenant=tenant, tariff=tariff_salon,
+            )
+
+    def test_personal_plus_salon_allowed(self, db, subscription, tenant, tariff_salon):
+        # Salon owner may also hold a personal subscription.
+        salon = SpecialistSubscription.objects.create(
+            user=subscription.user, tenant=tenant, tariff=tariff_salon,
+        )
+        assert salon.tenant_id == tenant.id
+        assert SpecialistSubscription.objects.filter(
+            user=subscription.user,
+        ).count() == 2
 
     def test_default_status_is_trial(self, db, specialist_user, tariff_solo):
         sub = SpecialistSubscription.objects.create(
