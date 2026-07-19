@@ -111,3 +111,21 @@ def salon_subscription(db, specialist_user, tenant, tariff_salon):
         current_period_start=date(2026, 7, 1),
         current_period_end=date(2026, 7, 31),
     )
+
+
+@pytest.fixture
+def subscription_with_card(db, subscription):
+    subscription.payment_method_id = "pm_test_123"
+    subscription.save(update_fields=["payment_method_id"])
+    return subscription
+
+
+@pytest.fixture
+def due_subscription(db, subscription_with_card):
+    """Active subscription whose paid period has ended (charge is due)."""
+    subscription_with_card.current_period_start = date(2026, 6, 11)
+    subscription_with_card.current_period_end = date(2026, 7, 10)
+    subscription_with_card.save(
+        update_fields=["current_period_start", "current_period_end"],
+    )
+    return subscription_with_card
