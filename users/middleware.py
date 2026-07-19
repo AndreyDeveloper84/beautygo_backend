@@ -77,6 +77,12 @@ EXCLUDED_PATH_PREFIXES = (
     "/api/v1/nutrition/internal/",
     "/api/v1/payments/internal/",
     "/api/v1/masters/internal/",
+    # YooKassa webhook (client payments) — the provider sends neither
+    # X-App-Type nor a Bearer; auth is the IP allowlist + optional Basic
+    # inside the view itself. Without this exemption AppTypeMiddleware
+    # 403'd every real webhook (P8, parity with the billing webhook
+    # living under /api/v1/internal/ per AMD-014).
+    "/api/v1/payments/webhook/",
     # All `/api/v1/internal/*` endpoints are Bearer service-to-service
     # (bot ↔ Ayla REST per #1016): internal booking read/write, slots,
     # catalog mirror, user-profile fetch. None are client/pro apps, so
