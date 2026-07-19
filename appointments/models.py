@@ -8,6 +8,7 @@ from typing import Any
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils import timezone
 
 from .domain.value_objects import (
     ACTIVE_BOOKING_STATUSES,
@@ -115,6 +116,10 @@ class Appointment(models.Model):
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    # Set by complete() — the visit-completion timestamp. Drives the
+    # payout preview (C3 items[].completed_at) and reconciliation of
+    # stuck captures (D9). Null until completed.
+    completed_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ['-start_datetime']
@@ -246,7 +251,8 @@ class Appointment(models.Model):
                 f"Cannot complete appointment with status '{self.status}'."
             )
         self.status = self.Status.COMPLETED
-        self.save(update_fields=['status', 'updated_at'])
+        self.completed_at = timezone.now()
+        self.save(update_fields=['status', 'completed_at', 'updated_at'])
 
     def mark_no_show(self) -> None:
         """Mark client as no-show via state machine.

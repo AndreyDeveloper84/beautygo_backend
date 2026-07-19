@@ -199,7 +199,19 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         )
 
         service = self.create_booking_service_class()
-        result = service.execute(dto)
+        from appointments.domain.exceptions import BillingEligibilityError
+        try:
+            result = service.execute(dto)
+        except BillingEligibilityError:
+            # C1 privacy rule: the CLIENT-facing API never discloses the
+            # debt reason — generic UNAVAILABLE with a neutral message;
+            # the master sees the debt screen in their own cabinet.
+            return error_response(
+                "UNAVAILABLE",
+                "Сейчас запись к этому специалисту недоступна. "
+                "Попробуйте выбрать другого мастера или другое время.",
+                status_code=409,
+            )
 
         # Reload for full serialization
         appointment = (
