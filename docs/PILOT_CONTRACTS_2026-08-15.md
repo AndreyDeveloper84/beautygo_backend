@@ -1,8 +1,8 @@
 # Волна 0 — Frozen Contracts пилота (2026-08-15)
 
-**Contract version:** 1.5.0
+**Contract version:** 1.8.0
 **Frozen at:** 2026-07-18 (после пакета amendments READY-WITH-AMENDMENTS)
-**Last amendment:** AMD-014 (2026-07-19, см. §14)
+**Last amendment:** AMD-015 (2026-07-19, tenant_id nullable для billing-событий)
 **Effective for pilot:** 2026-08-15
 **Владелец:** оркестратор (Chief Product Architect); изменения — только amendment'ом (§13).
 
@@ -471,3 +471,86 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
 - **Потоки:** W2 (уже реализовано), W6 (чеклист staging), W1 (см. P8 — та же
   проверка для payments webhook).
 - **Решение:** оркестратор (по запросу W2).
+
+
+## 7.5 C7. Client Payments — штатный контур оплаты клиента
+
+> Решение владельца 2026-07-19 (AYLA-DEC-0011): Mini App предоставляет штатный,
+> но **опциональный** сценарий онлайн-оплаты **услуги Provider** (не доступа к
+> Ayla — AYLA-DEC-0001, Конституция Ст. IV).
+> **Статус: REVIEW** — принимается после закрытия consent-границы (C7.2) и
+> authorization boundary (C7.6). Версия контрактов 1.7.0.
+
+### C7.1 Payment create (bot → Ayla)
+
+- `POST /api/v1/internal/appointments/{appointment_id}/payment/` — Bearer `AYLA_INTERNAL_API_TOKEN`.
+- Создаёт двухстадийный платёж (`capture=false`, D9) по записи с `payment_required=true`.
+- **Сумма — только из authoritative Booking snapshot на стороне Ayla** (цена записи из БД). Сумма от клиента/miniapp НЕ принимается и игнорируется.
+- **200:** `{ "data": { "payment_id": "<uuid>", "confirmation_url": "<url>", "amount": "2000.00", "currency": "RUB", "capture_state": "authorized" } }`
+- **Идемпотентность:** не более одного активного платежа на запись; повтор → тот же платёж.
+- Одноразовая оплата — без сохранения карты (default). Списание сохранённым методом — только при явном consent (C7.2) и `use_saved_method: true`.
+
+### C7.2 Card binding (клиент) и consent-граница
+
+- **Одноразовая оплата по умолчанию — без сохранения способа оплаты** (`save_payment_method: false` — дефолт).
+- Сохранение карты — **отдельное добровольное действие**, не побочный эффект оплаты:
+  - явное согласие: версия текста согласия + timestamp (поля `consent_version`, `consented_at`);
+  - граница user-initiated оплаты и безакцептного автоплатежа: сохранённый метод используется только при инициированном пользователем платеже (автосписаний с клиента в пилоте нет — AYLA-DEC-0001);
+  - после отзыва метод не используется (delete → charge запрещён).
+- `POST /api/v1/internal/users/{ayla_user_id}/cards/setup/` (Bearer) → `{ "data": { "confirmation_url": "<url>" } }` — привязка как отдельное действие (zero-amount binding) ИЛИ opt-in сохранение во время платежа. Сохранять метод **только при фактическом `payment_method.saved == true`** в данных webhook — не по одному факту `payment.succeeded` двухстадийного платежа.
+- `GET /api/v1/internal/users/{ayla_user_id}/cards/` → список (last4, brand).
+- `DELETE /api/v1/internal/users/{ayla_user_id}/cards/{id}/` — отзыв метода (152-ФЗ-смежное право пользователя).
+
+### C7.3 Payment status read model
+
+- Сигнал холда — **`booking.confirmed`** (pilot vocabulary; отдельное событие `payment.authorized` в пилоте **не вводится**).
+- Бот зеркалит статус через события `payment.*` (captured, failed, refunded) + on-demand `GET /api/v1/internal/payments/{payment_id}/` (Bearer).
+- **Маппинг статусов на UX (по ADR capture-стратегии):**
+  | Внутренний | Клиент видит |
+  |---|---|
+  | холд (`booking.confirmed`) | «Зарезервировано» |
+  | `capture_scheduled` | «Оплата будет подтверждена после визита» |
+  | `captured` | «Оплата завершена» |
+  | `released/canceled` | «Резерв отменён, деньги разблокированы» |
+  | `failed` | «Оплата не прошла» |
+  | `refunded` | «Оплата возвращена» |
+- `waiting_for_capture` клиенту не показывать (ADR).
+
+### C7.4 Booking create с оплатой
+
+- Поле `payment_required` (AMD-002) означает: **инициировать холд сразу после записи** — выбор пользователя «оплатить сейчас». Это НЕ «оплата обязательна»: опциональность предоплаты по AYLA-DEC-0006 сохраняется (`payment_required=false` → запись без предоплаты, оплата на месте).
+- **Зависимость: флип `BOOKING_VIA_AYLA_REST` (#1041)** ← отчёт покрытия каталога на staging.
+- `payment_required=true` → после create немедленно C7.1, открыть `confirmation_url` в webview.
+
+### C7.5 Отмена и возврат
+
+- Отмена записи → авто-отмена холда (W1, готово) → статус «разблокировано».
+- Расширенный refund-UX (частичные возвраты, политики) — post-pilot; в пилоте refund операционно через backend.
+
+### C7.6 Authorization boundary (обязательна)
+
+- **Verified customer binding:** W3 обязан доказать связь текущего BotUser с указанным Ayla User (identity linkage в bot) до проксирования любых payment/cards вызовов. Произвольному `ayla_user_id` из клиента НЕ доверять.
+- **Ownership checks в Ayla:** cards list/delete и payment create исполняются только для владельца ресурса (скоп `X-External-User-ID` + cross-check `client_id` — прецедент: internal payment retry).
+- Сумма платежа — только из Booking snapshot (C7.1), никогда из запроса клиента.
+- Internal Bearer — строго service-to-service; клиентских JWT на этих путях нет.
+
+### Роли
+
+- **W1:** C7.1 (internal payment create, сумма из snapshot), C7.2 (cards setup/list/delete, поля consent, проверка `payment_method.saved`), ownership checks (C7.6). Событие `payment.authorized` НЕ требуется — сигнал холда = `booking.confirmed`.
+- **W3:** verified customer binding (C7.6), passthrough в miniapp_api (payment create, cards setup/list/delete, платёжные поля в BookingItem), маппинг отказа C1 на клиентский slug `UNAVAILABLE` (без раскрытия долга).
+- **W4:** экраны — выбор оплаты на summary (опционально, без навязывания), webview confirmation_url + возврат, статусы в records/detail по C7.3, экран карт (opt-in привязка + отзыв), C1 нейтральное сообщение + альтернативы.
+
+
+### AMD-015 — C4: `tenant_id` nullable для billing/subscription событий (2026-07-19, MINOR)
+
+- **Причина (W3 D-1):** `SpecialistSubscription.tenant` для соло-мастера NULL —
+  billing-события соло шли бы в 422/DLQ у consumer'а.
+- **Контракт (уточнение C4):** для топиков `subscription.activated`,
+  `subscription.past_due`, `billing.fee_charged` поле `tenant_id` **может быть
+  NULL** (соло-мастер). Верификация тогда по user-scope (ключ мастера = Ayla
+  User UUID, AMD-005). Для salon-подписок `tenant_id` обязателен и
+  верифицируется по tenant. Добавить эти топики в `TENANT_NULLABLE_EVENT_NAMES`
+  на стороне бота.
+- **Потоки:** W2 (эмитит как есть — NULL для соло), W3 (ingest: nullable для
+  этих топиков).
+- **Решение:** оркестратор (по эскалации W3 D-1).
