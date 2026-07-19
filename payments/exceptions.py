@@ -38,3 +38,13 @@ class PaymentClientError(PaymentError):
     underlying ``yookassa.ApiError`` is chained via ``raise ... from``
     so Sentry shows both layers.
     """
+
+
+class SpecialistPayoutNotConfiguredError(PaymentError):
+    """The specialist has no YooKassa sub-account (split per-master, D8).
+
+    Online payment for their bookings is UNAVAILABLE — the booking
+    itself still works without prepayment (D6). Views map this to
+    422 ONLINE_PAYMENT_UNAVAILABLE so the bot/client can fall back to
+    the no-prepayment path instead of a generic provider error.
+    """

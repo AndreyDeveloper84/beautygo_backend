@@ -371,7 +371,8 @@ OTP_MAX_ATTEMPTS = 3
 OTP_DEBUG_CODE = "0000"
 
 # Booking Engine Configuration
-BOOKING_COMMISSION_PERCENT = 8.0        # Platform commission (%)
+# (commission: see BOOKING_PLATFORM_FEE_RUB in the YooKassa section —
+# flat 90₽ per AYLA-DEC-0001, the 8% percent is gone)
 BOOKING_MIN_AHEAD_MINUTES = 60          # Min booking lead time
 BOOKING_MAX_AHEAD_DAYS = 60             # Max days in advance
 BOOKING_SLOT_GRID_MINUTES = 30          # Slot interval grid
@@ -431,7 +432,25 @@ FIREBASE_CREDENTIALS_PATH = os.environ.get("FIREBASE_CREDENTIALS_PATH", "")
 # YooKassa Payment Settings
 YOOKASSA_SHOP_ID = os.environ.get("YOOKASSA_SHOP_ID", "")
 YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
-YOOKASSA_AGENT_ID = os.environ.get("YOOKASSA_AGENT_ID", "")  # Sub-account for split payments
+# DEPRECATED (pilot, AYLA-DEC-0008): single shared sub-account for split
+# payments. Split is now PER-MASTER — transfers target
+# SpecialistProfile.yookassa_account_id. Kept readable so existing envs
+# don't crash, but payments/services.py no longer consults it.
+YOOKASSA_AGENT_ID = os.environ.get("YOOKASSA_AGENT_ID", "")
+
+# Pilot monetization (AYLA-DEC-0001/D1): flat platform fee per successful
+# booking — replaces the pre-pilot 8% commission. String on purpose:
+# callers Decimal() it (money is never float, data contract §1).
+BOOKING_PLATFORM_FEE_RUB = os.environ.get("BOOKING_PLATFORM_FEE_RUB", "90.00")
+
+# Capture strategy (AYLA-DEC-0009/D9, docs/architecture/payments-capture-strategy.md):
+# immediate capture after service completion in the pilot (delay 0); the
+# mechanism is a parametrized delayed task ready for 24h. capture_at =
+# min(completed_at + CAPTURE_DELAY_HOURS, yookassa expires_at − buffer).
+CAPTURE_DELAY_HOURS = float(os.environ.get("CAPTURE_DELAY_HOURS", "0"))
+CAPTURE_SAFETY_BUFFER_MINUTES = int(
+    os.environ.get("CAPTURE_SAFETY_BUFFER_MINUTES", "60"),
+)
 
 # 54-ФЗ fiscal receipt — VAT code per OFD reference table.
 #   1 — без НДС (default for самозанятые / УСН — pilot starts here)

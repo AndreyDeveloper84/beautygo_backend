@@ -22,7 +22,11 @@ from payments.models import Payment
 from users.permissions import IsBotServiceWithVerifiedClient, IsClient
 from users.response import error_response, success_response
 
-from .exceptions import PaymentClientError, PaymentConfigError
+from .exceptions import (
+    PaymentClientError,
+    PaymentConfigError,
+    SpecialistPayoutNotConfiguredError,
+)
 from .serializers import (
     InternalPaymentRetrySerializer,
     PaymentCreateSerializer,
@@ -344,6 +348,20 @@ class PaymentCreateView(APIView):
                 idempotency_key=idempotency_key,
                 capture=False,  # two-stage: hold first
                 receipt=receipt,
+                specialist_account_id=getattr(
+                    appointment.specialist, 'yookassa_account_id', '',
+                ),
+            )
+        except SpecialistPayoutNotConfiguredError as exc:
+            # D8 — split per-master: no sub-account ⇒ online payment is
+            # unavailable for this specialist; the no-prepayment booking
+            # path (D6) still works. Distinct code so the bot/client can
+            # fall back deliberately instead of retrying.
+            logger.info('Online payment unavailable: %s', exc)
+            return error_response(
+                'ONLINE_PAYMENT_UNAVAILABLE',
+                'Online payment is not available for this specialist.',
+                status_code=422,
             )
         except PaymentConfigError as exc:
             logger.error('YooKassa not configured: %s', exc)
@@ -548,14 +566,27 @@ class PaymentWebhookView(APIView):
 
             if event == 'payment.waiting_for_capture' and yookassa_status == 'waiting_for_capture':
                 payment.status = Payment.Status.AUTHORIZED
+                # D9 — the hold is on: capture becomes schedulable.
+                # Remember the provider's deadline so capture planning
+                # clamps to expires_at − safety buffer (never a
+                # hardcoded "7 days").
+                payment.capture_state = Payment.CaptureState.SCHEDULED
+                payment.yookassa_expires_at = info.get('expires_at') or None
                 payment.appointment.status = Appointment.Status.CONFIRMED
                 payment.appointment.save(update_fields=['status'])
 
             elif event == 'payment.succeeded' and yookassa_status == 'succeeded':
                 payment.status = Payment.Status.PAID
+                # D9 — capture confirmed provider-side (idempotent with
+                # the capture task's own state advance).
+                payment.capture_state = (
+                    Payment.CaptureState.CAPTURED_PENDING_SETTLEMENT
+                )
+                payment.captured_at = payment.captured_at or timezone.now()
 
             elif event == 'payment.canceled' and yookassa_status == 'canceled':
                 payment.status = Payment.Status.FAILED
+                payment.capture_state = Payment.CaptureState.CANCELED
                 if payment.appointment.status not in Appointment.TERMINAL_STATUSES:
                     payment.appointment.status = Appointment.Status.CANCELLED
                     payment.appointment.save(update_fields=['status'])
@@ -565,6 +596,7 @@ class PaymentWebhookView(APIView):
                 payment.refunded_amount = refunded_val
                 if refunded_val >= payment.amount:
                     payment.status = Payment.Status.REFUNDED
+                    payment.capture_state = Payment.CaptureState.REFUNDED
                 else:
                     payment.status = Payment.Status.PARTIALLY_REFUNDED
 
@@ -776,6 +808,15 @@ def _execute_payment_retry(
     except PaymentRetryStatusError as exc:
         return error_response(
             'INVALID_STATUS', exc.message, status_code=exc.http_status,
+        )
+    except SpecialistPayoutNotConfiguredError as exc:
+        # D8 — split per-master: no sub-account ⇒ online payment
+        # unavailable; the no-prepayment path (D6) still works.
+        logger.info('Online payment unavailable on retry: %s', exc)
+        return error_response(
+            'ONLINE_PAYMENT_UNAVAILABLE',
+            'Online payment is not available for this specialist.',
+            status_code=422,
         )
     except PaymentConfigError as exc:
         logger.error('YooKassa not configured on retry: %s', exc)

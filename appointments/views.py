@@ -474,6 +474,23 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             return error_response(
                 "INVALID_STATUS", str(e.message), status_code=422,
             )
+        # D9 — schedule the two-stage capture for any held payment of
+        # the just-completed appointment (pilot: immediate, delay 0).
+        # Runs after the atomic block: the booking is durably completed
+        # even if the broker/provider is down — reconciliation (and the
+        # retry_capture command) covers the rest. No-op when the booking
+        # has no held payment (no-prepayment path, D6).
+        from payments.services import schedule_capture_for_appointment
+        try:
+            schedule_capture_for_appointment(
+                appointment, completed_at=timezone.now(),
+            )
+        except Exception:  # noqa: BLE001 — broker/DB hiccup must not
+            # 500 a booking that is already durably completed; the
+            # reconciliation job + retry_capture command pick it up.
+            logger.exception(
+                'capture.schedule_failed appointment_id=%s', appointment.id,
+            )
         return success_response(AppointmentDetailSerializer(appointment).data)
 
     # -- No-show ------------------------------------------------------------

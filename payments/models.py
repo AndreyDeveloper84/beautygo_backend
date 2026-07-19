@@ -36,6 +36,22 @@ class Payment(models.Model):
         REFUNDED = "refunded", "Возвращён"
         PARTIALLY_REFUNDED = "partially_refunded", "Частичный возврат"
 
+    class CaptureState(models.TextChoices):
+        """Two-stage capture lifecycle (D9, C3 payout-preview vocabulary).
+
+        NONE — single-stage or not yet held. The payout preview (C3)
+        counts exactly SCHEDULED + CAPTURED_PENDING_SETTLEMENT.
+        """
+        NONE = "", "Не применимо"
+        SCHEDULED = "scheduled", "Холд есть, capture запланирован"
+        CAPTURED_PENDING_SETTLEMENT = (
+            "captured_pending_settlement", "Capture выполнен, ждёт выплаты ЮKassa"
+        )
+        SETTLED = "settled", "Выплачено мастеру"
+        CAPTURE_FAILED = "capture_failed", "Capture не удался"
+        CANCELED = "canceled", "Холд отменён"
+        REFUNDED = "refunded", "Возвращено клиенту"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     appointment = models.ForeignKey(
         # String FK target avoids a circular import between
@@ -80,6 +96,22 @@ class Payment(models.Model):
     last_webhook_event_id = models.CharField(
         max_length=200, blank=True, default="",
     )
+
+    # --- Two-stage capture lifecycle (D9) --------------------------------
+    capture_state = models.CharField(
+        max_length=32,
+        choices=CaptureState.choices,
+        default=CaptureState.NONE,
+        db_index=True,
+    )
+    # When the capture task is planned (complete() + CAPTURE_DELAY_HOURS,
+    # clamped to expires_at − safety buffer). Null until scheduled.
+    capture_scheduled_for = models.DateTimeField(null=True, blank=True)
+    # Hold deadline reported by YooKassa — capture must happen before
+    # this minus CAPTURE_SAFETY_BUFFER_MINUTES, else the hold auto-cancels
+    # (expired_on_capture). Null until the waiting_for_capture webhook.
+    yookassa_expires_at = models.DateTimeField(null=True, blank=True)
+    captured_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
