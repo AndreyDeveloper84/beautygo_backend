@@ -99,3 +99,15 @@ def subscription(db, specialist_user, tariff_solo):
         current_period_start=date(2026, 7, 1),
         current_period_end=date(2026, 7, 31),
     )
+
+
+@pytest.fixture
+def salon_subscription(db, specialist_user, tenant, tariff_salon):
+    return SpecialistSubscription.objects.create(
+        user=specialist_user,
+        tenant=tenant,
+        tariff=tariff_salon,
+        status=SpecialistSubscription.Status.ACTIVE,
+        current_period_start=date(2026, 7, 1),
+        current_period_end=date(2026, 7, 31),
+    )

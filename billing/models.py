@@ -78,10 +78,14 @@ class TariffPlan(models.Model):
 
 
 class SpecialistSubscription(models.Model):
-    """Billing account of a solo master (user) or a salon (tenant).
+    """Billing account: personal (solo master) or salon.
 
-    Exactly one owner: `user` XOR `tenant` (CheckConstraint). One row per
-    owner — the subscription is updated in place, not versioned (pilot).
+    `user` is the PAYER — always set (AMD-005: keyed by Ayla User UUID;
+    also the receipt/customer contact for 54-ФЗ and the `specialist_id`
+    in subscription.* events). `tenant` NULL = personal account of a
+    solo master; set = salon account covering that tenant's masters.
+    One personal account per user, one account per salon; the same user
+    may hold both (salon owner with a personal practice).
     """
 
     class Status(models.TextChoices):
@@ -91,11 +95,9 @@ class SpecialistSubscription(models.Model):
         CANCELED = "canceled", "Отменена"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    # AMD-005: keyed by Ayla User UUID. NULL iff this is a salon account.
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
-        null=True, blank=True,
         related_name='billing_subscriptions',
     )
     tenant = models.ForeignKey(
@@ -131,17 +133,10 @@ class SpecialistSubscription(models.Model):
         verbose_name = 'Подписка специалиста'
         verbose_name_plural = 'Подписки специалистов'
         constraints = [
-            models.CheckConstraint(
-                condition=(
-                    models.Q(user__isnull=False, tenant__isnull=True)
-                    | models.Q(user__isnull=True, tenant__isnull=False)
-                ),
-                name='billing_subscription_exactly_one_owner',
-            ),
             models.UniqueConstraint(
                 fields=['user'],
-                condition=models.Q(user__isnull=False),
-                name='billing_subscription_unique_user',
+                condition=models.Q(tenant__isnull=True),
+                name='billing_subscription_unique_personal',
             ),
             models.UniqueConstraint(
                 fields=['tenant'],
@@ -151,8 +146,8 @@ class SpecialistSubscription(models.Model):
         ]
 
     def __str__(self) -> str:
-        owner = f"user={self.user_id}" if self.user_id else f"tenant={self.tenant_id}"
-        return f"Subscription({owner}, {self.tariff_id}, {self.status})"
+        scope = f"tenant={self.tenant_id}" if self.tenant_id else "solo"
+        return f"Subscription(user={self.user_id}, {scope}, {self.status})"
 
 
 class BookingFee(models.Model):
