@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
@@ -207,19 +208,20 @@ def build_billing_status(specialist: "SpecialistProfile") -> dict:
     subscription_amount = quantize_money(subscription.tariff.price)
 
     # next_charge: what the upcoming monthly charge will collect. Null
-    # for canceled accounts (nothing more is charged); the charge date
-    # is the start of the current billing period (charge-in-advance).
+    # for canceled accounts (nothing more is charged). The charge runs
+    # the day after the paid period ends (renewal, charge-in-advance).
     if subscription.status == SpecialistSubscription.Status.CANCELED:
         next_charge = None
     else:
+        next_date = (
+            subscription.current_period_end + timedelta(days=1)
+            if subscription.current_period_end else None
+        )
         next_charge = {
             "subscription_amount": f"{subscription_amount:.2f}",
             "fees_amount": f"{fees_amount:.2f}",
             "total_amount": f"{subscription_amount + fees_amount:.2f}",
-            "date": (
-                subscription.current_period_start.isoformat()
-                if subscription.current_period_start else None
-            ),
+            "date": next_date.isoformat() if next_date else None,
         }
 
     last_invoice = subscription.invoices.order_by("-created_at").first()

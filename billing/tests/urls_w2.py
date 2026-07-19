@@ -11,4 +11,7 @@ from djangoProject.urls import urlpatterns as base_urlpatterns
 
 urlpatterns = base_urlpatterns + [
     path("api/v1/internal/billing/", include("billing.internal_urls")),
+    # Webhook under the AppType-exempt internal prefix (YooKassa is a
+    # server-to-server caller, see billing/urls.py docstring).
+    path("api/v1/internal/billing/", include("billing.urls")),
 ]

@@ -257,7 +257,7 @@ class TestBuildBillingStatus:
             "subscription_amount": "690.00",
             "fees_amount": "270.00",
             "total_amount": "960.00",
-            "date": "2026-07-01",
+            "date": "2026-08-01",
         }
         assert payload["fees"] == {"pending_total": "270.00", "pending_count": 3}
         assert payload["last_invoice"]["id"] == str(invoice.id)

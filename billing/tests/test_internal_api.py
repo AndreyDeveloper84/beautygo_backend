@@ -70,7 +70,94 @@ class TestBillingStatusEndpoint:
             "subscription_amount": "690.00",
             "fees_amount": "90.00",
             "total_amount": "780.00",
-            "date": "2026-07-01",
+            "date": "2026-08-01",
         }
         assert data["fees"] == {"pending_total": "90.00", "pending_count": 1}
         assert data["last_invoice"] is None
+
+
+class TestCardSetupEndpoint:
+    URL = "/api/v1/internal/billing/specialists/{user_id}/card-setup/"
+
+    def test_requires_bearer(self, db, specialist):
+        resp = APIClient().post(self.URL.format(user_id=specialist.user_id), {})
+        assert resp.status_code in (401, 403)
+
+    def test_unknown_specialist_404(self, api, db):
+        resp = api.post(
+            self.URL.format(user_id=uuid4()),
+            {"tariff": "solo", "return_url": "https://x.example"},
+            format="json",
+        )
+        assert resp.status_code == 404
+
+    def test_validation_error_on_bad_body(self, api, specialist):
+        resp = api.post(self.URL.format(user_id=specialist.user_id), {}, format="json")
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    def test_happy_path_returns_confirmation_url(self, api, specialist):
+        from unittest.mock import patch
+
+        from billing.charges import CardSetupResult
+
+        fake = CardSetupResult(
+            subscription_id=uuid4(), invoice_id=uuid4(),
+            confirmation_url="https://pay.example/confirm",
+        )
+        with patch("billing.internal_api.start_card_setup", return_value=fake) as setup:
+            resp = api.post(
+                self.URL.format(user_id=specialist.user_id),
+                {"tariff": "solo", "return_url": "https://miniapp.example/back"},
+                format="json",
+            )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["confirmation_url"] == "https://pay.example/confirm"
+        assert data["subscription_id"] == str(fake.subscription_id)
+        _, kwargs = setup.call_args
+        assert kwargs["tariff_code"] == "solo"
+        assert kwargs["tenant"] is None
+
+    def test_salon_without_tenant_400(self, api, specialist):
+        from users.models import SpecialistProfile as SP
+
+        SP.objects.filter(pk=specialist.pk).update(tenant=None)
+        resp = api.post(
+            self.URL.format(user_id=specialist.user_id),
+            {"tariff": "salon", "return_url": "https://x.example"},
+            format="json",
+        )
+        assert resp.status_code == 400
+
+    def test_provider_config_error_503(self, api, specialist):
+        from unittest.mock import patch
+
+        from billing.yookassa import BillingPaymentConfigError
+
+        with patch(
+            "billing.internal_api.start_card_setup",
+            side_effect=BillingPaymentConfigError("no creds"),
+        ):
+            resp = api.post(
+                self.URL.format(user_id=specialist.user_id),
+                {"tariff": "solo", "return_url": "https://x.example"},
+                format="json",
+            )
+        assert resp.status_code == 503
+
+    def test_provider_client_error_502(self, api, specialist):
+        from unittest.mock import patch
+
+        from billing.yookassa import BillingPaymentClientError
+
+        with patch(
+            "billing.internal_api.start_card_setup",
+            side_effect=BillingPaymentClientError("network"),
+        ):
+            resp = api.post(
+                self.URL.format(user_id=specialist.user_id),
+                {"tariff": "solo", "return_url": "https://x.example"},
+                format="json",
+            )
+        assert resp.status_code == 502
