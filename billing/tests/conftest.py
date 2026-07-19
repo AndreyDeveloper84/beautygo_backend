@@ -1,14 +1,24 @@
-"""Fixtures for billing tests — mirrors appointments/tests/conftest.py style."""
+"""Fixtures for billing tests — mirrors appointments/tests/conftest.py style.
+
+B-1 handoff: until W1 registers `billing` in INSTALLED_APPS these tests
+run only under the W2 shim (--ds=billing.tests.settings_w2). Under the
+canonical settings the whole directory is skipped at collection — the
+canonical suite must stay green for the other streams TODAY, and
+importing billing.models without the app installed raises RuntimeError.
+"""
 from datetime import date
 
 import pytest
+from django.conf import settings
 from django.utils import timezone
 
 from appointments.models import Appointment
-from billing.models import SpecialistSubscription, TariffPlan
 from services.models import Service, ServiceCategory
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
+
+if "billing" not in settings.INSTALLED_APPS:
+    collect_ignore_glob = ["test_*.py"]
 
 
 @pytest.fixture
@@ -82,16 +92,22 @@ def appointment(db, client_user, specialist, service):
 @pytest.fixture
 def tariff_solo(db):
     # Seeded by billing/migrations/0002_seed_tariff_plans.py.
+    from billing.models import TariffPlan
+
     return TariffPlan.objects.get(code=TariffPlan.Code.SOLO)
 
 
 @pytest.fixture
 def tariff_salon(db):
+    from billing.models import TariffPlan
+
     return TariffPlan.objects.get(code=TariffPlan.Code.SALON)
 
 
 @pytest.fixture
 def subscription(db, specialist_user, tariff_solo):
+    from billing.models import SpecialistSubscription
+
     return SpecialistSubscription.objects.create(
         user=specialist_user,
         tariff=tariff_solo,
@@ -103,6 +119,8 @@ def subscription(db, specialist_user, tariff_solo):
 
 @pytest.fixture
 def salon_subscription(db, specialist_user, tenant, tariff_salon):
+    from billing.models import SpecialistSubscription
+
     return SpecialistSubscription.objects.create(
         user=specialist_user,
         tenant=tenant,
