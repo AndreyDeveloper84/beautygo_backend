@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     'appointments',
     'reviews',
     'payments',
+    'billing',
     'ai',
     'notifications',
     'nutrition',
@@ -757,6 +758,19 @@ CELERY_BEAT_SCHEDULE = {
     "reconcile-captures": {
         "task": "payments.tasks.reconcile_captures",
         "schedule": 300.0,
+    },
+    # W2 billing (P2): monthly recurrent charge — subscription + accrued
+    # BookingFee for the period (AYLA-DEC-0007). 04:30 UTC = 07:30 MSK,
+    # inside the quiet window before the workday.
+    "billing-charge-subscriptions-monthly": {
+        "task": "billing.tasks.charge_subscriptions_monthly",
+        "schedule": crontab(hour=4, minute=30),
+    },
+    # W2 billing (P2): dunning retry for failed charges (T+1d/T+3d per
+    # W2's task windowing), 05:15 UTC = 08:15 MSK.
+    "billing-retry-failed-subscription-charges": {
+        "task": "billing.tasks.retry_failed_subscription_charges",
+        "schedule": crontab(hour=5, minute=15),
     },
     # Water reminders fire twice daily at 14:00 and 18:00 UTC. Pilot is
     # single-tz Penza (MSK = UTC+3), so 17:00 / 21:00 local — afternoon
