@@ -1,0 +1,69 @@
+Ты — агент потока W5 (AI-core → Concierge), ФАЗА 1 — релиз памяти в ayla-ai-core. Проект Ayla (BeautyGO), пилот 2026-08-15, Пенза, MAX-бот + MAX Mini App. Оркестратор (главное окно) координирует 6 потоков.
+
+Твоя рабочая папка (ФАЗА 1): C:\Users\user\PycharmProjects\ayla-ai-core (существующий checkout — в репо работаешь только ты).
+Твоя ветка: feat/memory-context-builder (НЕ создавай новую — rebase существующей).
+Нормативные документы читаешь из основной папки C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\.
+
+ПОДГОТОВКА ОКРУЖЕНИЯ: pip install -e ".[dev]" (или существующий venv). Тесты: pytest.
+
+СНАЧАЛА — PREFLIGHT-ОТЧЁТ, до любого кода. Формат (пришли в чат):
+1) текущая ветка и SHA; 2) рабочее дерево чистое? (git status — там удалён uv.lock и untracked .hex-skills/: не трогай, отметь);
+3) какие нормативные документы прочитал (список ниже);
+4) файлы, которые планируешь менять; 5) пересечения с другими потоками
+(по таблице владения в PILOT_CONTRACTS §8); 6) план первых двух коммитов;
+7) блокирующие контракты — что не даёт начать прямо сейчас.
+
+ОБЯЗАТЕЛЬНО прочитай:
+1. C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\PILOT_CONTRACTS_2026-08-15.md
+2. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\00 Foundation\Ayla Constitution.md
+3. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\02 Strategy\Ayla Decision Log.md
+   (если нет — ветка review; продолжай, отметь в отчёте).
+4. README.md, CHANGELOG.md, RELEASING.md, LTS_POLICY.md в корне репо.
+5. src/ayla_ai_core/memory.py и tests/test_memory.py, tests/test_public_api_surface.py.
+
+ПРАВИЛА:
+- Scope строго свой. Всё вне брифа — post-pilot (PILOT_CONTRACTS §9).
+- ЗАПРЕЩЕНО самостоятельно: merge в main, release, tag, force-push, bump версии
+  в pyproject без решения оркестратора. Ты готовишь и передаёшь точные
+  команды — исполняет оркестратор.
+- Коммиты — conventional (feat/fix/docs(scope): ...).
+- Публичный API библиотеки — только добавление (pre-1.0, но потребители пинятся
+  по SHA); ничего не переименовывай и не удаляй.
+- Новая логика = тесты. Перед отчётом полный pytest зелёный.
+- Секреты не читаешь. Не додумывай; неясно — вопрос в отчёте.
+
+ОТЧЁТ в конце сессии: 1) сделано (коммит-хэши); 2) заблокировано; 3) нужны
+решения; 4) тесты: было → стало, статус.
+
+=== SCOPE W5 ФАЗА 1: релиз памяти (build_memory_block) ===
+
+Контекст: ветка feat/memory-context-builder добавляет src/ayla_ai_core/memory.py
+(build_memory_block — рендер зелёной зоны персональной памяти в system prompt,
+confidence-пороги ≥0.8 утверждать / <0.4 уточнить, лимит top-8 фактов). Но символ
+НЕ экспортирован из __init__.py — до потребителей (beautygo_backend, ai-bot-platform)
+не доходит. Твоя задача — довести фичу до релизного состояния.
+
+1. git fetch --all. Rebase feat/memory-context-builder на main (отставание 2
+   коммита: merge PR #14 + docs ADR-0009 mirror — код не затронут, конфликтов
+   быть не должно).
+2. Экспорт build_memory_block (и MEMORY_BLOCK_HEADER, если нужен потребителям)
+   из src/ayla_ai_core/__init__.py — добавить в импорты и __all__.
+3. Обновить snapshot-тест tests/test_public_api_surface.py (drift-гейт публичного
+   API) — новый snapshot должен включать добавленные символы.
+4. CHANGELOG.md: секция [Unreleased] — описать добавление (по стилю прошлых
+   записей, с rationale).
+5. Полный прогон pytest (227+ тестов) — зелёный, включая новый snapshot.
+6. РЕЛИЗНЫЙ ПАКЕТ для оркестратора (НЕ исполнять самому):
+   - предлагаемая версия (рекомендация: 0.9.0 — новая фича; обоснуй по
+     RELEASING.md/CHANGELOG «Why v0.8.1 not v1.0.0»);
+   - готовый diff (git log main..HEAD --oneline + git diff --stat);
+   - точные команды для tag/release/merge в main;
+   - SHA финального коммита, который предлагаешь пинить потребителям.
+7. uv.lock удалён в рабочем дереве — не восстанавливай и не трогай; отметь
+   в отчёте (решение о нём — отдельно).
+
+DoD фазы 1: `from ayla_ai_core import build_memory_block` работает; тесты зелёные;
+CHANGELOG обновлён; релизный пакет передан оркестратору (diff, версия, команды, SHA).
+
+ФАЗА 2 (concierge wiring в ai-bot-platform) — НЕ сейчас: начнётся после релиза и
+сигналов W1/W3, отдельным промптом, в папке ai-bot-platform-w5.
