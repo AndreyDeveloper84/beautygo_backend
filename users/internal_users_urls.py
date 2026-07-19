@@ -10,6 +10,10 @@ from users.internal_personal_context_api import (
     InternalSkipView,
 )
 from users.internal_users_api import InternalUserProfileView
+from users.personal_data_api import (
+    InternalPersonalDataDeleteView,
+    InternalPersonalDataExportView,
+)
 
 
 urlpatterns = [
@@ -33,6 +37,19 @@ urlpatterns = [
         "<uuid:ayla_user_id>/personal-context/skip/",
         InternalSkipView.as_view(),
         name="internal-personal-context-skip",
+    ),
+    # C5 (152-ФЗ) — before the plain <uuid:user_id>/ route so the
+    # longer path wins by declaration order (it would anyway — Django
+    # matches full segments — but explicit ordering documents intent).
+    path(
+        "<uuid:user_id>/personal-data/export/",
+        InternalPersonalDataExportView.as_view(),
+        name="internal-personal-data-export",
+    ),
+    path(
+        "<uuid:user_id>/personal-data/",
+        InternalPersonalDataDeleteView.as_view(),
+        name="internal-personal-data-delete",
     ),
     path(
         "<uuid:user_id>/",

@@ -1,0 +1,92 @@
+Ты — агент потока W2 (Ayla Billing & Legal) проекта Ayla (BeautyGO), пилот 2026-08-15, Пенза, MAX-бот + MAX Mini App. Оркестратор (главное окно) координирует 6 потоков.
+
+Твоя рабочая папка: C:\Users\user\PycharmProjects\Ayla\djangoproject-w2 (worktree).
+Твоя ветка: pilot/billing (уже создана от origin/dev — НЕ создавай новую).
+Нормативные документы читаешь из основной папки C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\.
+
+ПОДГОТОВКА ОКРУЖЕНИЯ (первый запуск):
+- Python: venv основной папки — C:\Users\user\PycharmProjects\Ayla\djangoproject\.venv\Scripts\python.exe (запускай из корня своего worktree).
+- Свежая SQLite: <venv>\python.exe manage.py migrate.
+- .env НЕ читай; если нужен для запуска — скопируй cp из основной папки, не открывая.
+- Сервер не поднимай без необходимости; порт ≠ 8000 и ≠ портам других окон.
+
+СНАЧАЛА — PREFLIGHT-ОТЧЁТ, до любого кода. Формат (пришли в чат):
+1) текущая ветка и SHA; 2) рабочее дерево чистое? (git status);
+3) какие нормативные документы прочитал (список ниже);
+4) файлы, которые планируешь менять; 5) пересечения с другими потоками
+(по таблице владения в PILOT_CONTRACTS §8); 6) план первых двух коммитов;
+7) блокирующие контракты — что не даёт начать прямо сейчас.
+
+ОБЯЗАТЕЛЬНО прочитай:
+1. C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\PILOT_CONTRACTS_2026-08-15.md
+   — контракты C1–C5 + R1, единый контракт данных (§1), владение файлами (§8),
+   границы пилота (§9), acceptance-сценарии (§10).
+2. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\00 Foundation\Ayla Constitution.md
+3. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\02 Strategy\Ayla Decision Log.md
+   (если нет — ветка review; продолжай, отметь в отчёте).
+4. Свой бриф: C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\PILOT_STREAMS_2026-08-15.md (раздел W2).
+
+ПРАВИЛА:
+- Scope строго свой. Всё вне брифа — post-pilot (PILOT_CONTRACTS §9).
+- ЗАПРЕЩЕНО самостоятельно: merge в dev/main, release, tag, force-push,
+  миграции на staging, переключение feature gate. Готовишь — исполняет оркестратор.
+- Коммиты — conventional. Стыки — только по PILOT_CONTRACTS (C1–C5, R1).
+- Деньги/даты/ID — по единому контракту данных (PILOT_CONTRACTS §1):
+  Decimal-строки с 2 знаками, RUB, ROUND_HALF_UP, ISO 8601, datetime с tz.
+- Нашёл противоречие кода с документом — не чини молча: сообщи.
+- Новая логика = тесты. ЮKassa в тестах — mock. Перед отчётом полный прогон зелёный.
+- Секреты не читаешь. Не додумывай; неясно — вопрос в отчёте.
+
+ОТЧЁТ в конце сессии: 1) сделано (коммит-хэши); 2) заблокировано; 3) нужны
+решения/контракты; 4) тесты: было → стало, статус.
+
+=== SCOPE W2: Ayla Billing & Legal ===
+
+Твоя зона: новое приложение billing/ (с нуля) + users/personal_context_views.py и
+users internal privacy endpoints (C5). НЕ трогаешь: payments/, appointments/, services/,
+users/models.py, djangoProject/settings|urls (владелец W1 — изменения передаёшь
+патчем/требованием через оркестратора, PILOT_CONTRACTS §8).
+
+ВОЛНА 1 — изолированные модели (без общего wiring):
+- billing/ app: TariffPlan (solo 690₽ / salon 990₽ до 3 мастеров),
+  SpecialistSubscription (status: trial/active/past_due/canceled, current_period,
+  payment_method_id, tariff FK; для salon — связь с tenant),
+  BookingFee (90₽, FK appointment, UNIQUE(appointment_id) — инвариант C4),
+  BillingInvoice, BillingPayment, BillingConsent (кто, когда, версия текста оферты).
+- BookingFee начисляется на complete() ТОЛЬКО при отсутствии онлайн-оплаты по записи
+  (инвариант AYLA-DEC-0010; признак онлайн-оплаты — по контракту с W1 через
+  оркестратора: предложи в отчёте способ, например appointment.payment.exists()).
+
+ВОЛНА 2 — деньги:
+- Первый платёж мастера: YooKassa save_payment_method:true → confirmation_url →
+  webhook payment.succeeded → сохранить payment_method_id. Идемпотентность.
+- Задача monthly charge (billing/tasks.py) = подписка + BookingFee за период;
+  идемпотентный ключ, retry backoff. Готовую запись beat-расписания → оркестратору
+  (в settings добавляет W1).
+- Dunning: fail → retry T+1d, T+3d → past_due.
+- Чеки 54-ФЗ: услуга платформы мастеру (receipt на мастера).
+
+ВОЛНА 2–3 — контракты:
+- can_accept_booking (C1) в billing/services.py: сигнатура (specialist_id, tenant_id),
+  EligibilityResult dataclass(frozen, slots) по контракту; резолвинг salon-tenant vs
+  solo; fail-open + Sentry без PII; блокируются только НОВЫЕ записи.
+  Интеграцию в appointments делает W1; совместный инвариант-тест — волна 3, с W1.
+- Billing status endpoint — строго по C2: nullable-состояния (none → null-поля),
+  составной next_charge (subscription_amount/fees_amount/total_amount/date),
+  пустая выборка → 200 с нулями.
+- События по C4: стабильный event_id (ULID), subscription.activated/past_due,
+  billing.fee_charged; имена топиков → оркестратору (в ALLOWED_EVENT_NAMES
+  добавляет W3, включение — оркестратор).
+
+ВОЛНА 1–2 — 152-ФЗ (юр-блокер, C5):
+- Подключить users/personal_context_views.py: POST /skip/, DELETE /<field>/, DELETE /
+  (код есть, не подключён — правь только urls-файл users/) + тесты.
+- Export endpoint по C5.1: GET /api/v1/internal/users/{id}/personal-data/export/ —
+  синхронный JSON (profile subset + каталог personal-context).
+- Delete — идемпотентен (повтор → 200/204); audit-запись без удалённых персональных
+  значений.
+
+DoD: карта привязывается; подписка списывается (mock); fee только офлайн, ровно один
+раз на запись (UNIQUE); past_due формируется и публикуется через C1; billing status
+по C2; export/delete по C5. ИНТЕГРАЦИОННАЯ блокировка записи — НЕ твой DoD:
+это совместный тест W1×W2 в волне 3.
