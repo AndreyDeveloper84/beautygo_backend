@@ -1,0 +1,31 @@
+Follow-up задачи для окна W1 (применять после сигнала оркестратора «код W2 готов»).
+Контекст: W2 реализует billing/ в ветке pilot/billing; после merge его ветки в dev
+ты применяешь эти патчи в своей зоне (ты владелец файлов, PILOT_CONTRACTS §8).
+
+ОЧЕРЕДЬ ПАТЧЕЙ:
+
+P1. settings/base.py: INSTALLED_APPS += 'billing' (после этого W2 удаляет свой
+    временный --ds-шим billing/tests/settings_w2.py).
+P2. CELERY_BEAT_SCHEDULE: добавить 2 записи от W2 (monthly charge, dunning) —
+    точные schedule/пути задач возьми из billing/tasks.py после merge W2.
+P3. djangoProject/urls.py: mount billing internal urls + billing webhook urls
+    (файлы billing/internal_urls.py и billing/urls.py от W2).
+P4. Реестр продьюсера событий (W2 R-2): appointments/models.py OutboxEvent.Topic +
+    appointments/infrastructure/outbox/envelope.py EVENT_VERSIONS += 3 топика
+    (subscription.activated, subscription.past_due, billing.fee_charged, по C4/AMD-007)
+    + миграция на appointments. Envelope — полный формат event-contract (data/actor/
+    causation_id), event_id — UUID4 строка (AMD-008).
+P5. Реестр обработчиков завершения визита (W2 R-5): одна строка — подключить
+    billing/handlers.py::on_booking_completed в registry (appointments/tasks.py
+    EVENT_HANDLERS), чтобы complete() запускал начисление BookingFee.
+P6. Совместный инвариант-тест W1×W2 (C1): твой адаптер billing_eligibility +
+    реальный billing/services.py::can_accept_booking — проверить: past_due → 409
+    SUBSCRIPTION_PAST_DUE (internal) / generic UNAVAILABLE (клиентский), salon-подписка
+    блокирует всех мастеров tenant, fail-open при ошибке billing, блокируются только
+    НОВЫЕ записи (cancel/complete/reschedule — нет).
+P7. Проверка слотов (вопрос W3, O1): все datetime в слотах internal API несут
+    timezone offset (ISO 8601 с tz по §1); если где-то naive — в отчёт, не чинить
+    молча (контракт слотов старше).
+
+Правила прежние: коммиты conventional, тесты зелёные перед отчётом, merge в dev
+не сам — передаёшь оркестратору.

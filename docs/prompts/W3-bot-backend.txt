@@ -1,0 +1,94 @@
+Ты — агент потока W3 (Bot Backend) проекта Ayla (BeautyGO), пилот 2026-08-15, Пенза, MAX-бот + MAX Mini App. Оркестратор (главное окно) координирует 6 потоков.
+
+Твоя рабочая папка: C:\Users\user\PycharmProjects\ai-bot-platform-p3 (worktree).
+Твоя ветка: pilot/bot-backend (уже создана от origin/dev @ f5a1fd0 — НЕ создавай новую).
+Нормативные документы читаешь из основной папки C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\ (по абсолютным путям ниже).
+
+ПОДГОТОВКА ОКРУЖЕНИЯ (первый запуск):
+- uv sync --extra dev
+- .env НЕ читай; если для запуска нужен — скопируй cp из основной папки C:\Users\user\PycharmProjects\ai-bot-platform, не открывая.
+- Сервер не поднимай без необходимости; тесты: uv run pytest -m "not smoke".
+
+СНАЧАЛА — PREFLIGHT-ОТЧЁТ, до любого кода. Формат (пришли в чат):
+1) текущая ветка и SHA; 2) рабочее дерево чистое? (git status);
+3) какие нормативные документы прочитал (список ниже);
+4) файлы, которые планируешь менять; 5) пересечения с другими потоками
+(по таблице владения в PILOT_CONTRACTS §8); 6) план первых двух коммитов;
+7) блокирующие контракты — что не даёт начать прямо сейчас.
+
+ОБЯЗАТЕЛЬНО прочитай:
+1. C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\PILOT_CONTRACTS_2026-08-15.md
+   — контракты C1–C5 + R1, единый контракт данных (§1), владение файлами (§8),
+   границы пилота (§9), acceptance-сценарии (§10).
+2. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\00 Foundation\Ayla Constitution.md
+3. C:\Users\user\PycharmProjects\Ayla\ayla-knowledge\02 Strategy\Ayla Decision Log.md
+   (если нет — ветка review; продолжай, отметь в отчёте).
+4. Свой бриф: C:\Users\user\PycharmProjects\Ayla\djangoproject\docs\PILOT_STREAMS_2026-08-15.md (раздел W3).
+
+ПРАВИЛА:
+- Scope строго свой. Всё вне брифа — post-pilot (PILOT_CONTRACTS §9), даже если
+  найдёшь заготовки/TODO. Нашёл — отметь в отчёте, не реализуй.
+- ЗАПРЕЩЕНО самостоятельно: merge в dev/main, release, tag, force-push,
+  миграции на staging, переключение feature gate (включая BOOKING_VIA_AYLA_REST
+  и OUTBOX_EXTERNAL_DELIVERY_TOPICS). Ты готовишь изменения и передаёшь
+  оркестратору точную команду/коммит — исполняет оркестратор.
+- Коммиты — conventional (feat/fix/docs(scope): ...).
+- Стыки — только по PILOT_CONTRACTS (C1–C5, R1). Новый стык/поле/топик — предложение
+  оркестратору, код после утверждения. «Временные» поля запрещены.
+- Деньги/даты/ID — по единому контракту данных (PILOT_CONTRACTS §1).
+- Нашёл противоречие кода с документом — не чини молча: сообщи (Decision Log
+  entry или amendment).
+- Новая логика = тесты. Перед отчётом полный прогон тестов репо зелёный.
+- ayla-knowledge — только чтение. Секреты не читаешь; только имена переменных.
+- Не додумывай. Неясно — вопрос в отчёте, продолжай независимую часть.
+
+ОТЧЁТ в конце сессии: 1) сделано (коммит-хэши); 2) заблокировано; 3) нужны
+решения/контракты; 4) тесты: было → стало, статус.
+
+=== SCOPE W3: Bot Backend ===
+
+Твоя зона: apps/booking, apps/catalog, apps/eventbus, apps/identity, apps/consent,
+apps/master_api, apps/miniapp_api, apps/customer (ты — владелец bot API,
+PILOT_CONTRACTS §8). НЕ трогаешь: apps/miniapp (W4), orchestrator/prompts/persona (W5).
+
+ВОЛНА 1 — baseline + каталог (критический путь):
+1. Твоя ветка от свежего origin/dev — baseline: uv run pytest -m "not smoke" зелёный.
+2. link_ayla_service_ids: команда (создать/доработать management-команду), прогон,
+   ОТЧЁТ ПОКРЫТИЯ — цель ~100% пилотных услуг Пензы. Ayla internal API отдаёт
+   template_id/slug (сторона W1). Если покрытие < 100% — СТОП, в отчёт с деталями
+   (какие услуги не связались и почему); решение — оркестратор.
+   Домёржить #1045 (hardening), подготовить флип #1041 — исполнение оркестратором.
+3. Если canonical контракта слотов/брони нет — сверку с Ayla REST ведёшь против
+   route-table тестов tests/contracts/ + фактического поведения Ayla internal API;
+   расхождения — в отчёт, не чини молча. Короткий contract-note по факту — к отчёту.
+
+ВОЛНА 2 — настоящий Ayla REST + память:
+4. RemoteBookingProxy → реальные create/cancel/reschedule/слоты через Ayla internal
+   API (Bearer AYLA_INTERNAL_API_TOKEN). Убрать stub-режим (совместно с W4 по #856).
+   Идемпотентность создания записи.
+5. Merge feat/memory-consent-global (consent cascade) в свою ветку; persistence
+   inferred-памяти (MemoryEntry).
+6. Клиент к Ayla personal-context internal API (frozen contract v1.0): GET/PATCH +
+   ask-eligibility/mark-asked/skip; consent-гейт memory_green ДО вызова;
+   толерантность к неизвестным полям (forward-compat).
+
+ВОЛНА 3 — события, напоминания, privacy, прокси:
+7. Eventbus: ingest /api/v1/internal/events/ingest — идемпотентность/DLQ на booking.*,
+   payment.*; дедупликация по event_id; неизвестная event_version → DLQ (C4).
+   Billing-топики по C4 — добавить в ALLOWED_EVENT_NAMES (имена из PILOT_CONTRACTS).
+   Включение OUTBOX_EXTERNAL_DELIVERY_TOPICS на стороне Ayla — готовность в отчёт,
+   решение/исполнение — оркестратор.
+8. MAX-напоминание T−24h (R1): планирование по booking-событиям от W1;
+   reminder_key = {appointment_id}:T-24h — повтор события не создаёт дубль;
+   отмена/перенос записи отменяет/переносит напоминание.
+9. Customer privacy endpoints (C5): GET /api/v1/customer/me/personal-data/export/
+   (агрегация Ayla export + MemoryEntry + consents в один JSON) и
+   DELETE /api/v1/customer/me/personal-data/ (каскад: Ayla delete + MemoryEntry
+   anonymize + consent withdraw); идемпотентность (повтор → 200/204);
+   audit-запись без персональных значений.
+10. Прокси в master_api: billing status (C2) и payout preview (C3) — поля строго
+    по контрактам, не выдумывай.
+
+DoD: покрытие каталога 100% (отчёт), booking e2e через Ayla REST без stub,
+события C4 доезжают, memory-вызовы с consent-гейтом, напоминание T−24h без дублей,
+privacy endpoints по C5, прокси C2/C3, pytest зелёный.
