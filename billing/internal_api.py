@@ -4,8 +4,8 @@
 Bearer ``AYLA_INTERNAL_API_TOKEN``. ``specialist_id`` is the Ayla **User
 UUID** (AMD-005); resolution user → SpecialistProfile happens here.
 
-URL mounting is W1-owned (djangoProject/urls.py patch, B-5); tests run
-against the W2 shim urlconf (billing/tests/urls_w2.py).
+URL mounting is W1-owned (djangoProject/urls.py, P3 — done); tests run
+against the canonical settings.
 """
 from __future__ import annotations
 
