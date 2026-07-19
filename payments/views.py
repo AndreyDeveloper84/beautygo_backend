@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+from decimal import Decimal
 from uuid import uuid4
 
 from django.conf import settings
@@ -19,10 +20,18 @@ from rest_framework.views import APIView
 from appointments.infrastructure.outbox import emit_outbox_event, safe_tenant_id
 from appointments.models import Appointment, OutboxEvent
 from payments.models import Payment
-from users.permissions import IsBotServiceWithVerifiedClient, IsClient
+from users.permissions import (
+    IsBotServiceWithVerifiedClient,
+    IsClient,
+    IsInternalBearer,
+)
 from users.response import error_response, success_response
 
-from .exceptions import PaymentClientError, PaymentConfigError
+from .exceptions import (
+    PaymentClientError,
+    PaymentConfigError,
+    SpecialistPayoutNotConfiguredError,
+)
 from .serializers import (
     InternalPaymentRetrySerializer,
     PaymentCreateSerializer,
@@ -344,6 +353,20 @@ class PaymentCreateView(APIView):
                 idempotency_key=idempotency_key,
                 capture=False,  # two-stage: hold first
                 receipt=receipt,
+                specialist_account_id=getattr(
+                    appointment.specialist, 'yookassa_account_id', '',
+                ),
+            )
+        except SpecialistPayoutNotConfiguredError as exc:
+            # D8 — split per-master: no sub-account ⇒ online payment is
+            # unavailable for this specialist; the no-prepayment booking
+            # path (D6) still works. Distinct code so the bot/client can
+            # fall back deliberately instead of retrying.
+            logger.info('Online payment unavailable: %s', exc)
+            return error_response(
+                'ONLINE_PAYMENT_UNAVAILABLE',
+                'Online payment is not available for this specialist.',
+                status_code=422,
             )
         except PaymentConfigError as exc:
             logger.error('YooKassa not configured: %s', exc)
@@ -548,14 +571,27 @@ class PaymentWebhookView(APIView):
 
             if event == 'payment.waiting_for_capture' and yookassa_status == 'waiting_for_capture':
                 payment.status = Payment.Status.AUTHORIZED
+                # D9 — the hold is on: capture becomes schedulable.
+                # Remember the provider's deadline so capture planning
+                # clamps to expires_at − safety buffer (never a
+                # hardcoded "7 days").
+                payment.capture_state = Payment.CaptureState.SCHEDULED
+                payment.yookassa_expires_at = info.get('expires_at') or None
                 payment.appointment.status = Appointment.Status.CONFIRMED
                 payment.appointment.save(update_fields=['status'])
 
             elif event == 'payment.succeeded' and yookassa_status == 'succeeded':
                 payment.status = Payment.Status.PAID
+                # D9 — capture confirmed provider-side (idempotent with
+                # the capture task's own state advance).
+                payment.capture_state = (
+                    Payment.CaptureState.CAPTURED_PENDING_SETTLEMENT
+                )
+                payment.captured_at = payment.captured_at or timezone.now()
 
             elif event == 'payment.canceled' and yookassa_status == 'canceled':
                 payment.status = Payment.Status.FAILED
+                payment.capture_state = Payment.CaptureState.CANCELED
                 if payment.appointment.status not in Appointment.TERMINAL_STATUSES:
                     payment.appointment.status = Appointment.Status.CANCELLED
                     payment.appointment.save(update_fields=['status'])
@@ -565,6 +601,7 @@ class PaymentWebhookView(APIView):
                 payment.refunded_amount = refunded_val
                 if refunded_val >= payment.amount:
                     payment.status = Payment.Status.REFUNDED
+                    payment.capture_state = Payment.CaptureState.REFUNDED
                 else:
                     payment.status = Payment.Status.PARTIALLY_REFUNDED
 
@@ -776,6 +813,15 @@ def _execute_payment_retry(
     except PaymentRetryStatusError as exc:
         return error_response(
             'INVALID_STATUS', exc.message, status_code=exc.http_status,
+        )
+    except SpecialistPayoutNotConfiguredError as exc:
+        # D8 — split per-master: no sub-account ⇒ online payment
+        # unavailable; the no-prepayment path (D6) still works.
+        logger.info('Online payment unavailable on retry: %s', exc)
+        return error_response(
+            'ONLINE_PAYMENT_UNAVAILABLE',
+            'Online payment is not available for this specialist.',
+            status_code=422,
         )
     except PaymentConfigError as exc:
         logger.error('YooKassa not configured on retry: %s', exc)
@@ -1002,3 +1048,96 @@ class PaymentRefundView(APIView):
         )
 
         return success_response(PaymentDetailSerializer(payment).data)
+
+
+# ---------------------------------------------------------------------------
+# C3 — Payout preview (internal, bot → master dashboard «К выплате»)
+# ---------------------------------------------------------------------------
+
+# Contract-frozen hint text (PILOT_CONTRACTS C3 example): «ожидается»,
+# never «гарантированно».
+_PAYOUT_SETTLEMENT_HINT = "~следующий рабочий день по расписанию ЮKassa"
+
+# States counted into pending_amount (C3 state table): the money is
+# either held with capture planned, or captured and awaiting the
+# YooKassa payout. settled / capture_failed / canceled / refunded are
+# excluded by definition.
+_PAYOUT_PENDING_STATES = (
+    Payment.CaptureState.SCHEDULED,
+    Payment.CaptureState.CAPTURED_PENDING_SETTLEMENT,
+)
+
+
+def _money(value) -> str:
+    """Data contract §1: amounts are Decimal strings, exactly 2dp."""
+    from decimal import Decimal, ROUND_HALF_UP
+    return str(Decimal(value).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP))
+
+
+class InternalPayoutPreviewView(APIView):
+    """GET /api/v1/internal/specialists/{specialist_id}/payout-preview/
+
+    Read-only payout vitrine for the bot (W3 → W4 master dashboard).
+    Empty selection is a 200 with "0.00" (C3), 404 only when the
+    specialist does not exist.
+    """
+
+    # Bot bearer is not a JWT — same pattern as the other internal views.
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearer]
+
+    @extend_schema(
+        operation_id="internal_specialists_payout_preview",
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(description="Payout preview (may be empty)"),
+            404: OpenApiResponse(description="SPECIALIST_NOT_FOUND"),
+        },
+    )
+    def get(self, request: Request, specialist_id) -> Response:
+        from users.models import SpecialistProfile
+
+        if not SpecialistProfile.objects.filter(id=specialist_id).exists():
+            return error_response(
+                'SPECIALIST_NOT_FOUND',
+                'Specialist not found.',
+                status_code=404,
+            )
+
+        payments = (
+            Payment.objects
+            .select_related('appointment')
+            .filter(
+                appointment__specialist_id=specialist_id,
+                capture_state__in=_PAYOUT_PENDING_STATES,
+            )
+            .order_by('appointment__completed_at', 'created_at')
+        )
+
+        items = []
+        pending_total = Decimal('0.00')
+        for payment in payments:
+            appointment = payment.appointment
+            items.append({
+                'appointment_id': str(payment.appointment_id),
+                # Null while the visit is still ahead (capture_state
+                # scheduled) — W4 renders the two states explicitly.
+                'completed_at': (
+                    appointment.completed_at.isoformat()
+                    if appointment.completed_at else None
+                ),
+                'amount': _money(payment.amount),
+                'platform_fee': _money(payment.platform_fee),
+                'specialist_income': _money(payment.specialist_income),
+                'capture_state': payment.capture_state,
+            })
+            pending_total += payment.specialist_income
+
+        return success_response({
+            'pending_amount': _money(pending_total),
+            'currency': 'RUB',
+            'expected_settlement_hint': (
+                _PAYOUT_SETTLEMENT_HINT if items else None
+            ),
+            'items': items,
+        })

@@ -39,6 +39,9 @@ SALON_SERVICE_FIELDS = {
 }
 SPECIALIST_SERVICE_FIELDS = {
     "id", "salon_service", "specialist", "user_id", "tenant", "template",
+    # C6 link keys (additive 2026-07-19, orchestrator decision) — the bot
+    # matches (category_slug, normalized name) + duration tiebreaker.
+    "name", "category_slug",
     "duration_minutes", "resolved_duration",
     "requires_health_check", "resolved_requires_health_check",
     "price", "buffer_after_minutes", "is_active",

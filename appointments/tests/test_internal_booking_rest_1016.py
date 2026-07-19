@@ -20,7 +20,7 @@ from uuid import uuid4
 import pytest
 from rest_framework.test import APIClient
 
-from appointments.models import Appointment
+from appointments.models import Appointment, OutboxEvent
 from services.models import Service, ServiceCategory
 from tenants.models import Tenant
 from users.models import SpecialistProfile, TenantUserRelationship, User
@@ -283,3 +283,57 @@ class TestInternalCancelReschedule:
         assert r.status_code == 200, r.data
         appt = Appointment.objects.get(id=booking_id)
         assert appt.start_datetime.isoformat() == new_start
+
+
+@pytest.mark.django_db
+class TestInternalCreateNoPrepayment:
+    """D6 — the bot can book a customer WITHOUT prepayment: the booking
+    lands directly in CONFIRMED (no Payment row) and booking.confirmed
+    is emitted (R1 — W3 schedules the T-24h reminder off it). The
+    online-payment path (default) is preserved byte-for-byte."""
+
+    def test_create_without_prepayment_confirms(
+        self, customer, specialist, service,
+    ):
+        body = _create_body(customer, specialist, service)
+        body["payment_required"] = False
+        r = _api().post(CREATE_URL, body, format="json")
+        assert r.status_code == 201, r.data
+        appt = Appointment.objects.get()
+        assert appt.status == Appointment.Status.CONFIRMED
+        assert appt.payments.count() == 0
+        topics = set(OutboxEvent.objects.values_list("topic", flat=True))
+        assert OutboxEvent.Topic.BOOKING_CREATED in topics
+        assert OutboxEvent.Topic.BOOKING_CONFIRMED in topics
+
+    def test_default_path_still_awaits_payment(
+        self, customer, specialist, service,
+    ):
+        r = _api().post(
+            CREATE_URL, _create_body(customer, specialist, service),
+            format="json",
+        )
+        assert r.status_code == 201, r.data
+        appt = Appointment.objects.get()
+        assert appt.status == Appointment.Status.AWAITING_PAYMENT
+        assert appt.payments.filter(status="pending").count() == 1
+        # No hold yet → not confirmed → no booking.confirmed.
+        topics = set(OutboxEvent.objects.values_list("topic", flat=True))
+        assert OutboxEvent.Topic.BOOKING_CONFIRMED not in topics
+
+    def test_no_prepayment_booking_is_cancellable(
+        self, customer, specialist, service,
+    ):
+        body = _create_body(customer, specialist, service)
+        body["payment_required"] = False
+        r = _api().post(CREATE_URL, body, format="json")
+        assert r.status_code == 201, r.data
+        booking_id = r.data["data"]["id"]
+        r = _api().post(
+            _cancel_url(booking_id), {"reason": "client changed mind"},
+            format="json",
+        )
+        assert r.status_code == 200, r.data
+        assert Appointment.objects.get(id=booking_id).status == (
+            Appointment.Status.CANCELLED
+        )

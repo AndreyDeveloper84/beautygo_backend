@@ -11,13 +11,24 @@ from uuid import UUID
 from django.conf import settings
 from django.db import transaction
 
-from .exceptions import PaymentClientError, PaymentConfigError
+from .exceptions import (
+    PaymentClientError,
+    PaymentConfigError,
+    SpecialistPayoutNotConfiguredError,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _get_commission_percent() -> Decimal:
-    return Decimal(str(getattr(settings, 'BOOKING_COMMISSION_PERCENT', 8.0)))
+def get_platform_fee(amount: Decimal) -> Decimal:
+    """Flat platform fee per successful booking (AYLA-DEC-0001/D1: 90₽).
+
+    Replaces the pre-pilot 8% commission. Capped at the charge amount so
+    ``specialist_income`` never goes negative (data contract §1:
+    negative amounts are forbidden).
+    """
+    flat = Decimal(str(getattr(settings, 'BOOKING_PLATFORM_FEE_RUB', '90.00')))
+    return min(flat, amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
 class YooKassaService:
@@ -58,6 +69,7 @@ class YooKassaService:
         idempotency_key: str,
         capture: bool = False,
         receipt: dict[str, Any] | None = None,
+        specialist_account_id: str = "",
     ) -> dict[str, Any]:
         """
         Create a YooKassa payment.
@@ -74,14 +86,23 @@ class YooKassaService:
                 фискальных данных). Mandatory for production payments
                 in Russia — without it the merchant is non-compliant.
                 Build via ``build_appointment_receipt(appointment, ...)``.
+            specialist_account_id: YooKassa sub-account of THIS specialist
+                (SpecialistProfile.yookassa_account_id) — split per-master
+                (AYLA-DEC-0008/D8): ``specialist_income`` is transferred to
+                the master's sub-account at capture, the platform keeps the
+                flat fee. Empty → SpecialistPayoutNotConfiguredError:
+                online payment is unavailable for this specialist, the
+                no-prepayment booking path (D6) still works.
 
         Returns:
             dict with keys: provider_payment_id, confirmation_url, status
         """
-        commission_pct = _get_commission_percent()
-        platform_fee = (amount * commission_pct / 100).quantize(
-            Decimal('0.01'), rounding=ROUND_HALF_UP,
-        )
+        if not specialist_account_id:
+            raise SpecialistPayoutNotConfiguredError(
+                "Specialist has no YooKassa sub-account — "
+                "online payment unavailable (booking without prepayment works)"
+            )
+        platform_fee = get_platform_fee(amount)
         specialist_income = amount - platform_fee
 
         payload: dict[str, Any] = {
@@ -106,13 +127,12 @@ class YooKassaService:
         if receipt:
             payload['receipt'] = receipt
 
-        # Split payment (transfer to specialist sub-account) if configured
-        agent_id = getattr(settings, 'YOOKASSA_AGENT_ID', '')
-        if agent_id:
-            payload['transfers'] = [{
-                'account_id': agent_id,
-                'amount': {'value': str(specialist_income), 'currency': 'RUB'},
-            }]
+        # Split payment per-master (D8): transfer the specialist's income
+        # to their own sub-account; the platform keeps the flat fee.
+        payload['transfers'] = [{
+            'account_id': specialist_account_id,
+            'amount': {'value': str(specialist_income), 'currency': 'RUB'},
+        }]
 
         try:
             payment = self._payment_cls.create(payload, idempotency_key)
@@ -142,10 +162,14 @@ class YooKassaService:
         provider_payment_id: str,
         amount: Decimal,
         idempotency_key: str,
-    ) -> None:
-        """Capture a previously held payment."""
+    ) -> dict[str, Any]:
+        """Capture a previously held payment.
+
+        Returns the provider payment state (``status``) so the caller
+        (capture task) can advance local state without a second fetch.
+        """
         try:
-            self._payment_cls.capture(
+            payment = self._payment_cls.capture(
                 provider_payment_id,
                 {'amount': {'value': str(amount), 'currency': 'RUB'}},
                 idempotency_key,
@@ -154,6 +178,38 @@ class YooKassaService:
             raise PaymentClientError(
                 f"YooKassa capture_payment failed: {exc}"
             ) from exc
+        return {
+            'provider_payment_id': getattr(payment, 'id', provider_payment_id),
+            'status': getattr(payment, 'status', ''),
+        }
+
+    # ------------------------------------------------------------------
+    # Cancel (release a hold, two-stage payment)
+    # ------------------------------------------------------------------
+
+    def cancel_payment(
+        self,
+        provider_payment_id: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Cancel a payment in ``waiting_for_capture`` — releases the hold.
+
+        Only possible BEFORE capture; after ``succeeded`` use refund.
+        Returns the provider payment state for local convergence.
+        """
+        try:
+            payment = self._payment_cls.cancel(
+                provider_payment_id,
+                idempotency_key,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise PaymentClientError(
+                f"YooKassa cancel_payment failed: {exc}"
+            ) from exc
+        return {
+            'provider_payment_id': getattr(payment, 'id', provider_payment_id),
+            'status': getattr(payment, 'status', ''),
+        }
 
     # ------------------------------------------------------------------
     # Refund
@@ -192,10 +248,16 @@ class YooKassaService:
             raise PaymentClientError(
                 f"YooKassa find_one failed: {exc}"
             ) from exc
+        expires_at = getattr(payment, 'expires_at', None)
         return {
             'provider_payment_id': payment.id,
             'status': payment.status,
             'paid': getattr(payment, 'paid', False),
+            # Capture deadline for two-stage payments (D9): the hold
+            # auto-cancels after this moment — capture must be planned
+            # relative to it (minus the safety buffer), never to a
+            # hardcoded "7 days". None for single-stage payments.
+            'expires_at': expires_at,
             'refunded_amount': Decimal(
                 str(getattr(getattr(payment, 'refunded_amount', None), 'value', '0'))
             ),
@@ -384,6 +446,9 @@ class PaymentRetryService:
             idempotency_key=idempotency_key,
             capture=False,
             receipt=receipt,
+            specialist_account_id=getattr(
+                appointment.specialist, 'yookassa_account_id', '',
+            ),
         )
 
         with transaction.atomic():
@@ -416,3 +481,113 @@ class PaymentRetryService:
             confirmation_url=result['confirmation_url'],
             amount=float(new_payment.amount),
         )
+
+
+# ---------------------------------------------------------------------------
+# Capture scheduling (D9) + hold cancellation — appointment lifecycle hooks
+# ---------------------------------------------------------------------------
+
+
+def compute_capture_at(*, completed_at, expires_at) -> "Any":
+    """When the capture task should fire for a completed appointment.
+
+    Per the capture-strategy ADR (D9): never plan against a hardcoded
+    "7 days" — the real hold deadline is YooKassa's ``expires_at`` and
+    varies by payment method (2h … 7d). The delay is clamped to
+    ``expires_at − CAPTURE_SAFETY_BUFFER_MINUTES`` so a long configured
+    delay cannot outlive a short hold. With the pilot default
+    ``CAPTURE_DELAY_HOURS=0`` this resolves to "now" in practice.
+    """
+    from datetime import timedelta as _td
+
+    delay = float(getattr(settings, 'CAPTURE_DELAY_HOURS', 0))
+    buffer_min = int(getattr(settings, 'CAPTURE_SAFETY_BUFFER_MINUTES', 60))
+    capture_at = completed_at + _td(hours=delay)
+    if expires_at is not None:
+        capture_at = min(capture_at, expires_at - _td(minutes=buffer_min))
+    return capture_at
+
+
+def schedule_capture_for_appointment(appointment, *, completed_at) -> int:
+    """Enqueue the deferred capture task for every held payment of a
+    just-completed appointment. Returns the number of tasks enqueued.
+
+    Called from the complete() write path AFTER the booking transitioned
+    (the appointment row is already ``completed``). Only payments that
+    are actually held (AUTHORIZED + capture_state=scheduled) qualify —
+    a pending/unpaid or already-captured payment is left alone, which
+    also makes a repeated complete() call a no-op here.
+    """
+    from payments.models import Payment
+    from payments.tasks import capture_payment_task
+
+    now = completed_at
+    enqueued = 0
+    held = appointment.payments.filter(
+        status=Payment.Status.AUTHORIZED,
+        capture_state=Payment.CaptureState.SCHEDULED,
+    )
+    for payment in held:
+        capture_at = compute_capture_at(
+            completed_at=now, expires_at=payment.yookassa_expires_at,
+        )
+        countdown = max(0.0, (capture_at - now).total_seconds())
+        payment.capture_scheduled_for = capture_at
+        payment.save(update_fields=['capture_scheduled_for', 'updated_at'])
+        capture_payment_task.apply_async(
+            args=[str(payment.id)], countdown=countdown,
+        )
+        enqueued += 1
+        logger.info(
+            'capture.scheduled payment_id=%s appointment_id=%s '
+            'capture_at=%s countdown=%.0fs',
+            payment.id, appointment.id, capture_at.isoformat(), countdown,
+        )
+    return enqueued
+
+
+def cancel_authorized_hold_for_appointment(
+    appointment, *, yookassa: YooKassaService | None = None,
+) -> int:
+    """Release the hold of every authorized payment of a cancelled
+    appointment (acceptance #5: booking cancel ⇒ hold auto-cancelled).
+
+    Best-effort by design: a provider outage must NOT block the booking
+    cancellation itself — the booking is already cancelled when this
+    runs. Failures are logged and left in capture_state=scheduled for
+    the reconciliation job to finish (the hold also auto-expires at
+    ``expires_at``). Returns the number of holds released.
+
+    Idempotency: the key is stable per payment (``cancel-{payment.id}``),
+    so a retried call converges provider-side; already-terminal payments
+    (canceled / captured) are skipped locally.
+    """
+    from payments.models import Payment
+
+    released = 0
+    held = appointment.payments.filter(
+        status=Payment.Status.AUTHORIZED,
+        capture_state=Payment.CaptureState.SCHEDULED,
+    )
+    for payment in held:
+        try:
+            svc = yookassa or YooKassaService()
+            svc.cancel_payment(
+                provider_payment_id=payment.provider_payment_id,
+                idempotency_key=f'cancel-{payment.id}',
+            )
+        except (PaymentClientError, PaymentConfigError) as exc:
+            logger.error(
+                'hold.cancel_failed payment_id=%s appointment_id=%s: %s '
+                '— left for reconciliation',
+                payment.id, appointment.id, exc,
+            )
+            continue
+        payment.capture_state = Payment.CaptureState.CANCELED
+        payment.save(update_fields=['capture_state', 'updated_at'])
+        released += 1
+        logger.info(
+            'hold.canceled payment_id=%s appointment_id=%s',
+            payment.id, appointment.id,
+        )
+    return released

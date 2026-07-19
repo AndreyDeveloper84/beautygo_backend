@@ -160,3 +160,17 @@ class TestSpecialistServiceRead:
         results = results.get("results", results) if isinstance(results, dict) else results
         assert len(results) == 1
         assert str(results[0]["id"]) == str(specialist_service.id)
+
+    def test_detail_exposes_c6_link_keys(self, specialist_service, salon_service, category):
+        """C6 catalog-link contract (orchestrator 2026-07-19): the bot
+        links by (category_slug, normalized name) + duration tiebreaker,
+        so the mirror must expose raw name + category_slug + template +
+        duration. Normalization happens bot-side (W3)."""
+        r = _api().get(f"{SPEC_URL}{specialist_service.id}/")
+        assert r.status_code == 200, r.data
+        data = r.json().get("data", r.json())
+        assert data["name"] == salon_service.name
+        assert data["category_slug"] == category.slug
+        assert str(data["template"]) == str(salon_service.template_id)
+        assert data["duration_minutes"] == 45
+        assert data["resolved_duration"] == 45
