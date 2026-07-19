@@ -70,6 +70,7 @@ Decision Log (AYLA-DEC-*), фактические deploy-артефакты ре
 | F8 | `MAX_BOT_TOKEN`, `MAX_BOT_TENANT_SLUG` | bot env | — | staging-бот | — |
 | F9 | `NUTRITION_ENABLED` | bot env | `false` | по готовности food-flow (вне критпути) | `false` |
 | F10 | `MULTI_TENANT_STRICT` | Ayla env | `false` | `true` + `X-Tenant` после проверки tenant-данных | `false` |
+| F11 | `CONCIERGE_MEMORY_ENABLED` | bot env | `true` | `true` (default; гасит всю memory-поверхность консьержа: блок + memory-ask; диалог работает) | `false` |
 
 Каталог/данные: `seed_canonical_catalog`, `seed_service_templates`, `seed_regional_pricing`,
 `backfill_tenants`; тарифы — миграцией `billing/0002`. Расписание/слоты мастеров — через админку
