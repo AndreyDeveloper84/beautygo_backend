@@ -76,3 +76,18 @@ def emit_context_used(user, *, fields_used: list[str], surface: str,
         "surface": surface,
         "recommendation_id": recommendation_id,
     })
+
+
+def emit_personal_data_deleted(user, *, scope: list[str], initiator: str) -> None:
+    """C5.2 / AMD-010 — 152-ФЗ deletion audit via AnalyticsEvent.
+
+    Records WHOSE data was deleted, the deletion SCOPE and the
+    INITIATING service. The deleted personal values themselves are
+    NEVER written here (AMD-010: audit without personal data).
+    ``created_at`` on the event row is the audit timestamp.
+    """
+    _emit(user, event_catalogue.PERSONAL_DATA_DELETED, {
+        "user_id": str(user.pk),
+        "scope": scope,
+        "initiator": initiator,
+    })

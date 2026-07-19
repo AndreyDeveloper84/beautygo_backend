@@ -78,6 +78,12 @@ SPECIALIST_VIEWED = "specialist_viewed"
 SPECIALIST_FAVORITED = "specialist_favorited"
 SPECIALIST_UNFAVORITED = "specialist_unfavorited"
 
+# ── 152-ФЗ / C5.2 (PILOT_CONTRACTS AMD-010) ──
+# Audit trail for internal personal-data deletion. Server-side emit
+# only (users/personal_context_events.emit_personal_data_deleted);
+# payload carries actor/scope, NEVER the deleted personal values.
+PERSONAL_DATA_DELETED = "personal_data_deleted"
+
 
 EVENT_NAMES: frozenset[str] = frozenset({
     BOOKING_VIEWED, BOOKING_CREATED, BOOKING_CANCELLED,
@@ -96,4 +102,5 @@ EVENT_NAMES: frozenset[str] = frozenset({
     PRO_DASHBOARD_VIEWED, PRO_BOOKING_VIEWED, PRO_BOOKING_ACTIONED,
     SEARCH_PERFORMED, SPECIALIST_VIEWED,
     SPECIALIST_FAVORITED, SPECIALIST_UNFAVORITED,
+    PERSONAL_DATA_DELETED,
 })
