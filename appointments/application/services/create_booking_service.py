@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction
@@ -183,15 +182,13 @@ class CreateBookingService:
             status=BookingStatus.COMPLETED.value,
         ).exists()
 
-        # Commission snapshot
-        commission_percent = Decimal(str(
-            self._commission_policy.get_percent(dto.client_id, dto.specialist_id)
-        ))
+        # Platform fee snapshot (flat 90₽, AYLA-DEC-0001)
+        platform_fee = self._commission_policy.get_platform_fee(service.price)
         snapshot = BookingSnapshot.create(
             service_name=service.name,
             duration_minutes=service.duration_minutes,
             price=service.price,
-            commission_percent=commission_percent,
+            platform_fee=platform_fee,
             specialist_timezone=specialist.timezone,
             buffer_after_minutes=getattr(service, "buffer_after_minutes", 0),
         )

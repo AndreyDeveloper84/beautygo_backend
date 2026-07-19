@@ -12,8 +12,8 @@ not by modifying existing ones.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Protocol, runtime_checkable
-from uuid import UUID
 
 from django.conf import settings
 
@@ -31,9 +31,9 @@ from .value_objects import BookingStatus
 
 @runtime_checkable
 class CommissionPolicy(Protocol):
-    """Determines platform commission for a booking."""
+    """Determines the platform fee for a booking."""
 
-    def get_percent(self, client_id: UUID, specialist_id: UUID) -> float:
+    def get_platform_fee(self, price: Decimal) -> Decimal:
         ...
 
 
@@ -87,13 +87,15 @@ class BookingWindowPolicy(Protocol):
 # ---------------------------------------------------------------------------
 
 class DefaultCommissionPolicy:
-    """
-    Configurable commission rate. Reads from settings with 8% fallback.
-    In v2, this can be replaced with tiered/specialist-specific rates.
+    """Flat platform fee per booking (AYLA-DEC-0001/D1: 90₽).
+
+    Replaces the pre-pilot 8% split. The fee is independent of who books
+    or how much the service costs; the BookingSnapshot caps it at the
+    price so specialist income never goes negative (data contract §1).
     """
 
-    def get_percent(self, client_id: UUID, specialist_id: UUID) -> float:
-        return float(getattr(settings, 'BOOKING_COMMISSION_PERCENT', 8.0))
+    def get_platform_fee(self, price: Decimal) -> Decimal:
+        return Decimal(str(getattr(settings, 'BOOKING_PLATFORM_FEE_RUB', '90.00')))
 
 
 class StandardCancellationPolicy:
