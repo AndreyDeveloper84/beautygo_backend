@@ -11,12 +11,12 @@
 ## Общий прогресс
 
 ```
-Код:     ████████████░░░░░░░░░░░░░░  45% done (82/184 SP)
+Код:     ████████████░░░░░░░░░░░░░░  60% done (110/184 SP)
          ░░░░████░░░░░░░░░░░░░░░░░░  16% in-progress (29 SP)
          ░░░░░░░░░░████████████░░░░  40% pending (73 SP)
 ```
 
-- **Done:** 82 SP · **In-progress:** 29 SP · **Pending (код):** 57 SP · **Pending (внешнее):** 16 SP
+- **Done:** 110 SP · **In-progress:** 29 SP · **Pending (код):** 57 SP · **Pending (внешнее):** 16 SP
 - Осталось дней: **26** (пилот 15.08). Сделано за дни 1–2: 78 SP.
 - Требуемый темп: ~4 SP/день суммарно по окнам — достижимо при текущей скорости.
 
@@ -25,12 +25,12 @@
 | Поток | Готовность | Done SP | В работе | Осталось | Комментарий |
 |---|---|---|---|---|---|
 | W1 Booking Core | **84%** | 27/32 | — | 5 SP (follow-up патчи — ждут W2) | ✅ в dev; очередь P1–P7 готова |
-| W2 Billing | **0%** | 0/30 | 11 SP | 19 SP | 🔥 главная текущая работа |
+| W2 Billing | **93%** | 28/30 | — | 2 SP (совместный тест — W1) | ✅ в dev (41a5133c); очередь W1 разблокирована |
 | W3 Bot Backend | **88%** | 29/33 | — | 4 SP (follow-up) | ✅ в dev + #1045 |
 | W4 Mini App | **36%** | 12/33 | — | 21 SP | ✅ 152-ФЗ + stub-gate; фаза 3: каталог real — GO |
 | W5 Concierge | **15%** | 3/20 | 17 SP | — | 🔥 фаза 2 запущена (память) |
 | W6 QA/Docs | **55%** | 11/20 | 1 SP | 8 SP (волна 3) | ✅ документы в Git |
-| **ИТОГО код** | **45%** | **82/184** | 29 SP | 57 SP | |
+| **ИТОГО код** | **60%** | **110/184** | 18 SP | 40 SP | |
 | Внешнее | **0%** | 0/16 | — | 16 SP | юрист/KYC/мастера |
 
 ## W1 — Ayla Booking Core (84%)
@@ -50,19 +50,19 @@
 | Бамп ai-core v0.9.0 | 1 | ✅ |
 | Follow-up патчи P1–P7 (INSTALLED_APPS, beat, urls, топики, handler, совместный тест, слоты-offset) | 5 | ⏳ после merge W2 |
 
-## W2 — Billing & Legal (0%)
+## W2 — Billing & Legal (93%)
 
 | Задача | SP | Статус |
 |---|---|---|
-| Модели (TariffPlan, Subscription, BookingFee, Invoice, Payment, Consent) | 5 | 🔄 |
-| C5 export/delete endpoints | 3 | 🔄 |
-| C1 can_accept_booking | 3 | 🔄 |
-| Первый платёж + save_payment_method | 3 | ⏳ |
-| Рекуррент monthly charge | 5 | ⏳ |
-| Dunning → past_due | 3 | ⏳ |
-| Чеки 54-ФЗ платформа→мастер | 2 | ⏳ |
-| C2 status endpoint | 2 | ⏳ |
-| C4 события | 2 | ⏳ |
+| Модели (TariffPlan, Subscription, BookingFee, Invoice, Payment, Consent) | 5 |✅ |
+| C5 export/delete endpoints | 3 |✅ |
+| C1 can_accept_booking | 3 |✅ |
+| Первый платёж + save_payment_method | 3 |✅ |
+| Рекуррент monthly charge | 5 |✅ |
+| Dunning → past_due | 3 |✅ |
+| Чеки 54-ФЗ платформа→мастер | 2 |✅ |
+| C2 status endpoint | 2 |✅ |
+| C4 события | 2 |✅ |
 | Совместный инвариант-тест W1×W2 | 2 | ⏳ |
 
 ## W3 — Bot Backend (88%)
@@ -140,6 +140,8 @@
 | Staging: прогон link + флип гейта | 3 | оркестратор | нед. 3 |
 
 ## Журнал обновлений
+
+- **2026-07-19 (день 2, вечер):** +28 SP — W2 полный объём в dev `41a5133c` (модели, C1/C2/C4/C5, рекуррент, dunning, чеки; конфликт internal_users_urls разрешён оркестратором). W2 → 93%. Контракты v1.5.0 (AMD-013/014). Очередь W1 (P1–P8) разблокирована, ⚠️ P8 — проверка 403 payments webhook. Done: 110/184 (60%).
 
 - **2026-07-19 (день 2, вечер):** +4 SP — W4 коммиты 3+4 (stub-gate prod + ComingSoonScreen + гейт каталога) в dev `7b56816`/`8853fed`. W4 → 36% (12/33). Фазе 3 (каталог real) дан зелёный свет. Done: 82/184 (45%).
 - **2026-07-19 (день 2, вечер):** +2 SP — W4 коммит 3 (stub-gate prod) в dev `7b56816`. W4 → 32% (10/31). Решение по home-маршруту: interim ComingSoonCard → цель «Мои записи»; catalog fake-data → gate до фазы 3. Done: 80/182 (44%).

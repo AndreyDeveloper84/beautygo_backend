@@ -1,8 +1,8 @@
 # Волна 0 — Frozen Contracts пилота (2026-08-15)
 
-**Contract version:** 1.4.0
+**Contract version:** 1.5.0
 **Frozen at:** 2026-07-18 (после пакета amendments READY-WITH-AMENDMENTS)
-**Last amendment:** AMD-012 (2026-07-19, см. §14)
+**Last amendment:** AMD-014 (2026-07-19, см. §14)
 **Effective for pilot:** 2026-08-15
 **Владелец:** оркестратор (Chief Product Architect); изменения — только amendment'ом (§13).
 
@@ -447,3 +447,27 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
   оба. Дополнительных offsets в пилоте не вводить.
 - **Потоки:** W3 (уже работает — соответствует), W6 (smoke: оба offset'а, без дублей).
 - **Решение:** оркестратор (по матрице W6).
+
+
+### AMD-013 — C2: семантика `next_charge.date` (2026-07-19, MINOR)
+
+- **Причина (W2):** пример в C2 был внутренне противоречив (`current_period_end`
+  08-31, `next_charge.date` 08-01).
+- **Контракт (уточнение):** `next_charge.date` = `current_period_end + 1 день`
+  (день продления, charge-in-advance — списание подписки за следующий период).
+  Для `status: canceled` → `next_charge: null`. Пример в C2 считать устаревшим.
+- **Потоки:** W2 (уже реализовано), W3/W4 (отображение: «следующее списание»).
+- **Решение:** оркестратор (по запросу W2).
+
+### AMD-014 — Billing webhook: AppType-exempt path (2026-07-19, MINOR)
+
+- **Причина (W2):** YooKassa server-to-server не может передать заголовок
+  `X-App-Type` — webhook под AppTypeMiddleware получил бы 403.
+- **Контракт:** billing webhook —
+  `POST /api/v1/internal/billing/webhook/` (префикс AppType-exempt).
+  Безопасность: IP allowlist + Basic Auth (по образцу payments webhook).
+  Настройка webhook URL в кабинете ЮKassa — задача W6/оркестратора при
+  staging-фазе.
+- **Потоки:** W2 (уже реализовано), W6 (чеклист staging), W1 (см. P8 — та же
+  проверка для payments webhook).
+- **Решение:** оркестратор (по запросу W2).
