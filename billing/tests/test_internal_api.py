@@ -1,7 +1,7 @@
 """C2 endpoint tests — GET /api/v1/internal/billing/specialists/{id}/status/.
 
-Runs under the W2 shim (--ds=billing.tests.settings_w2): billing app +
-urlconf are not in the canonical settings yet (B-1/B-5 W1 patches).
+Runs under the canonical settings (billing app + urlconf are wired by
+W1's P1/P3 patches).
 """
 from datetime import date
 from decimal import Decimal
