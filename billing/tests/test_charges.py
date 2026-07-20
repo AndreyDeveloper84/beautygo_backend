@@ -4,6 +4,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from django.utils import timezone
 
 from billing.charges import (
@@ -361,6 +362,103 @@ class TestDunning:
         ) is False
         due_subscription.refresh_from_db()
         assert due_subscription.next_retry_at is None
+
+
+class TestPayDebt:
+    def _make_debt(self, subscription, *, with_card=True):
+        subscription.status = SpecialistSubscription.Status.PAST_DUE
+        subscription.payment_method_id = "pm_test_123" if with_card else ""
+        subscription.save(update_fields=["status", "payment_method_id"])
+        return BillingInvoice.objects.create(
+            subscription=subscription,
+            period_start=date(2026, 7, 11), period_end=date(2026, 8, 10),
+            subscription_amount=Decimal("690.00"),
+            fees_amount=Decimal("0.00"),
+            total_amount=Decimal("690.00"),
+            status=BillingInvoice.Status.FAILED,
+            idempotency_key=f"charge:debt-test:{subscription.id}",
+        )
+
+    def test_no_debt_raises(self, db, subscription):
+        from billing.charges import NoDebtError, pay_debt
+
+        with pytest.raises(NoDebtError):
+            pay_debt(subscription=subscription, client=FakeYooKassaClient())
+
+    def test_instant_charge_via_saved_method(
+        self, db, due_subscription, appointment,
+    ):
+        from billing.charges import pay_debt
+
+        invoice = self._make_debt(due_subscription)
+        BookingFee.objects.create(
+            appointment=appointment, subscription=due_subscription,
+            amount=Decimal("90.00"), period_start=date(2026, 7, 1),
+        )
+        client = FakeYooKassaClient(status="succeeded")
+        result = pay_debt(subscription=due_subscription, client=client)
+
+        # Charge = invoice (690) + pending fee accrued after it (90).
+        assert result.amount == Decimal("780.00")
+        assert result.confirmation_url == ""
+        assert result.status == BillingPayment.Status.SUCCEEDED
+        call = client.recurrent_calls[0]
+        assert call["payment_method_id"] == "pm_test_123"
+        assert call["amount"] == Decimal("780.00")
+        assert call["metadata"]["kind"] == "debt"
+
+        due_subscription.refresh_from_db()
+        invoice.refresh_from_db()
+        fee = BookingFee.objects.get(appointment=appointment)
+        assert due_subscription.status == SpecialistSubscription.Status.ACTIVE
+        assert invoice.status == BillingInvoice.Status.PAID
+        assert invoice.fees_amount == Decimal("90.00")
+        assert fee.status == BookingFee.Status.CHARGED
+        assert fee.invoice_id == invoice.id
+        # Period advances to the settled invoice period.
+        assert due_subscription.current_period_start == date(2026, 7, 11)
+        assert due_subscription.current_period_end == date(2026, 8, 10)
+
+    def test_inflight_replay_returns_same_payment(self, db, due_subscription):
+        from billing.charges import pay_debt
+
+        self._make_debt(due_subscription)
+        client = FakeYooKassaClient(status="pending")
+        first = pay_debt(subscription=due_subscription, client=client)
+        second = pay_debt(subscription=due_subscription, client=client)
+        assert first.payment_id == second.payment_id
+        assert len(client.recurrent_calls) == 1
+        assert BillingPayment.objects.count() == 1
+
+    def test_redirect_path_when_no_saved_card(self, db, due_subscription):
+        from billing.charges import pay_debt
+
+        self._make_debt(due_subscription, with_card=False)
+        client = FakeYooKassaClient()
+        result = pay_debt(
+            subscription=due_subscription,
+            return_url="https://miniapp.example/debt",
+            client=client,
+        )
+        assert result.confirmation_url == "https://pay.example/confirm"
+        assert result.status == BillingPayment.Status.PENDING
+        assert len(client.setup_calls) == 1
+        assert client.setup_calls[0]["return_url"] == "https://miniapp.example/debt"
+        assert client.setup_calls[0]["metadata"]["kind"] == "debt"
+
+    def test_provider_canceled_keeps_past_due(self, db, due_subscription):
+        from billing.charges import pay_debt
+
+        self._make_debt(due_subscription)
+        result = pay_debt(
+            subscription=due_subscription,
+            client=FakeYooKassaClient(status="canceled"),
+        )
+        due_subscription.refresh_from_db()
+        assert result.status == BillingPayment.Status.FAILED
+        assert due_subscription.status == SpecialistSubscription.Status.PAST_DUE
+        assert due_subscription.failed_attempts == 1
+        assert due_subscription.next_retry_at is not None
 
 
 class TestYooKassaClientPayload:
