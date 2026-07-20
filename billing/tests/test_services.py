@@ -223,10 +223,24 @@ class TestBuildBillingStatus:
                 "tariff": None,
                 "current_period_end": None,
                 "next_charge": None,
+                "card": None,
             },
             "fees": {"pending_total": "0.00", "pending_count": 0},
             "last_invoice": None,
         }
+
+    def test_card_read_model_in_status(self, db, specialist, subscription):
+        subscription.card_last4 = "4242"
+        subscription.card_brand = "Visa"
+        subscription.save(update_fields=["card_last4", "card_brand"])
+        payload = build_billing_status(specialist)
+        assert payload["subscription"]["card"] == {
+            "last4": "4242", "brand": "Visa",
+        }
+
+    def test_card_null_without_binding(self, db, specialist, subscription):
+        payload = build_billing_status(specialist)
+        assert payload["subscription"]["card"] is None
 
     def test_active_shape_with_fees_and_invoice(
         self, db, specialist, subscription, service,
