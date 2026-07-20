@@ -9,7 +9,7 @@ from drf_spectacular.views import (
 )
 
 from .health import liveness, readiness
-from payments.views import InternalPayoutPreviewView
+from payments.views import InternalPaymentStatusView, InternalPayoutPreviewView
 
 
 urlpatterns = [
@@ -63,6 +63,12 @@ urlpatterns = [
     path(
         'api/v1/internal/catalog/',
         include('services.internal_catalog_urls'),
+    ),
+    # C7.3 — on-demand payment status read model for the bot (Bearer).
+    path(
+        'api/v1/internal/payments/<uuid:payment_id>/',
+        InternalPaymentStatusView.as_view(),
+        name='internal-payment-status',
     ),
     path(
         'api/v1/internal/appointments/',

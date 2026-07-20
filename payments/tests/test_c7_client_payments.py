@@ -154,7 +154,9 @@ class TestInternalPaymentCreate:
         data = r.data["data"]
         assert data["amount"] == "2000.00"
         assert data["currency"] == "RUB"
-        assert data["capture_state"] == "authorized"
+        # AMD-016: actual state at response time — pending on creation
+        # (the hold lands later, via the waiting_for_capture webhook).
+        assert data["capture_state"] == "pending"
         assert data["confirmation_url"] == "https://yookassa.ru/confirm/c7"
         call = svc.create_payment.call_args
         assert call.kwargs["amount"] == Decimal("2000.00")  # snapshot!
