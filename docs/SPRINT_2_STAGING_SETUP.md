@@ -1,76 +1,147 @@
-# Спринт 2 — Staging Setup: провижининг и чеклисты
+# Спринт 2 — Staging Setup: провижининг и чеклисты (v2)
 
-Приложение к `docs/SPRINT_2_STAGING_INTEGRATION.md` (S0–S1, E2–E4).
-Дата: 2026-07-20. Основание: deploy.sh, docker-compose*.yml, nginx/dev.gobeauty.site.conf (beautygo_backend); infra/deploy, infra/systemd (ai-bot-platform).
+Приложение к `docs/SPRINT_2_STAGING_INTEGRATION.md` (v2). Переработано по review:
+устранён конфликт портов, одна модель управления, security baseline, размеры,
+домены, Mini App deploy, политика ПДн. Дата: 2026-07-20.
 
 ## 1. Провижининг staging (S0)
 
-### 1.1. Вариант A — тот же VPS (быстрый путь, если E1 подтверждает `dev.gobeauty.site` как staging Ayla)
+### 1.1. Порты и процессы (без конфликтов)
 
-1. Ayla backend: деплой по существующему `deploy.sh` (ветка `dev`, gunicorn :8000).
-2. Bot staging: на том же VPS — отдельный compose-проект из `ai-bot-platform/docker-compose.yml`:
-   - `docker compose -p ayla-bot-staging up -d` (web :8001, worker, beat, postgres :5433, redis :6380, chromadb :8001, minio :9002 — порты смещены от основного проекта).
-   - systemd-юниты по образцу `infra/systemd/` (web/worker/beat, env-файл отдельный).
-3. nginx: `staging.gobeauty.site` → bot web :8001 (конфиг по образцу `nginx/dev.gobeauty.site.conf`); TLS через существующий certbot-процесс.
-4. Проверка: `/health/` и `/health/ready/` на обоих; Celery worker+beat живы (`celery inspect ping`).
-
-### 1.2. Вариант B — отдельный хост (если VPS нет/занят)
-
-- Минимум: 1 VPS (2 CPU / 4 GB). Порядок: Ayla (compose) → bot (compose) → nginx → TLS → §2 env-инвентарь.
-
-### 1.3. Env-инвентарь (по F0–F11 из runbook §3, заполняется до smoke)
-
-| Где | Ключ | Значение |
+| Сервис | В контейнере | Host binding |
 |---|---|---|
-| Ayla | `AYLA_INTERNAL_API_TOKEN` | общий секрет (генерируем один, обе стороны) |
-| Ayla | `BOT_PLATFORM_BASE_URL` | `https://staging.gobeauty.site` |
-| Ayla | `AYLA_OUTBOUND_HMAC_SECRET` | = bot `EVENT_INGEST_HMAC_SECRET` (одна пара) |
-| Ayla | `YOOKASSA_SHOP_ID/SECRET_KEY` | тест-магазин (E2) |
-| bot | `AYLA_BASE_URL` | `https://dev.gobeauty.site` (или staging Ayla) |
-| bot | `EVENT_INGEST_HMAC_SECRET` | = Ayla outbound (O1 закрыт в коде — ddf9818) |
-| bot | `MAX_BOT_TOKEN` | staging-бот (E3) |
-| bot | `MAX_MINIAPP_URL` | staging miniapp URL |
+| Ayla web | 8000 | 127.0.0.1:8000 |
+| Bot web | 8000 | 127.0.0.1:8001 |
+| ChromaDB | 8000 | 127.0.0.1:8002 (или не публиковать) |
+| Bot PostgreSQL | 5432 | не публиковать (или 127.0.0.1:5433) |
+| Bot Redis | 6379 | не публиковать (или 127.0.0.1:6380) |
+| MinIO API | 9000 | 127.0.0.1:9002 (только если нужен host) |
+| MinIO Console | 9001 | 127.0.0.1:9003 |
+
+PostgreSQL, Redis, Chroma, MinIO — никогда наружу через 0.0.0.0.
+
+**Модель управления — одна:** `systemd → docker compose up/down` всего проекта.
+Никаких отдельных systemd-юнитов для web/worker/beat параллельно с compose
+(иначе двойные задачи/напоминания/списания).
+
+### 1.2. docker-compose.staging.yml (обязателен)
+
+Ключ `-p` не изолирует: фиксированные `container_name`, host-порты, внешние
+networks, именованные volumes, общий `.env`. Нужен override-файл:
+
+```bash
+docker compose -p ayla-bot-staging \
+  -f docker-compose.yml -f docker-compose.staging.yml up -d
+# Перед запуском — проверка итоговой конфигурации:
+docker compose -f docker-compose.yml -f docker-compose.staging.yml config
+```
+
+В override: уникальные container_name/volumes/networks, порты из §1.1,
+staging env-файл (не общий `.env`).
+
+### 1.3. Размеры хоста
+
+Минимум для стабильного стенда (2 backend + 2 PG + 2 Redis + MinIO + Chroma +
+workers + beat + nginx): **4 CPU / 8 GB RAM / 60–80 GB SSD / swap 2–4 GB**
+(страховка, не основная память). Если компонент не нужен сценариям спринта
+(Chroma/MinIO), — не поднимать.
+
+### 1.4. Домены и маршрутизация
+
+Рекомендуемые имена (иначе — явная routing-таблица по существующим):
+
+```
+api-staging.gobeauty.site → Ayla web (127.0.0.1:8000)
+bot-staging.gobeauty.site → bot web (127.0.0.1:8001)
+app-staging.gobeauty.site → Mini App статика
+```
+
+### 1.5. Mini App deploy (S0.4)
+
+`npm ci` → `npm run build` → `dist/` → nginx статика: cache headers (immutable
+для хэш-ассетов), без source maps в проде, CSP по чеклисту §4.3, переменные
+сборки (`VITE_API_BASE_URL`, `VITE_SUPPORT_DEEPLINK`), проверка авторизации
+MAX launch context на app-staging.
 
 ## 2. Чеклист E2 — тестовый магазин ЮKassa
 
-1. В кабинете ЮKassa создать тестовый магазин (если нет): взять `shopId` + `secret key` (test).
-2. Webhook URLs (2):
-   - payments: `https://<ayla-staging>/api/v1/payments/webhook/`
-   - billing: `https://<ayla-staging>/api/v1/internal/billing/webhook/` (AMD-014)
-3. Включить события webhook: `payment.succeeded`, `payment.canceled`, `payment.waiting_for_capture`, `refund.succeeded`.
-4. Тестовые карты (из доки ЮKassa): успешная, отказ, 3DS — записать в runbook §5 (smoke S3).
-5. Split: регистрация платформы как агента (для transfers per-master) — проверить, что тест-магазин поддерживает split; `YOOKASSA_AGENT_ID` в env.
+1. Тестовый магазин: `shopId` + `secret key` (test) — в env staging, не в код.
+2. Webhook URLs:
+   - payments: `https://api-staging…/api/v1/payments/webhook/`
+   - billing: `https://api-staging…/api/v1/internal/billing/webhook/` (AMD-014;
+     **оба пути — AppType-exempt, защита = IP allowlist + Basic, НЕ Bearer**).
+3. События webhook: payment.succeeded / canceled / waiting_for_capture,
+   refund.succeeded.
+4. Тестовые карты (доки ЮKassa): успешная, отказ, без 3DS (для автоплатежа).
+5. Split: проверить, что тест-магазин поддерживает transfers; верифицировать
+   `YOOKASSA_AGENT_ID` против реального кода и договорной схемы (см. Gate 3).
 
 ## 3. Чеклист E3 — MAX staging-бот
 
-1. Создать staging-бота в MAX (или выделить существующего): получить `MAX_BOT_TOKEN`.
-2. Webhook бота → `https://staging.gobeauty.site/api/v1/ingress/max/` (проверить путь по config/urls.py).
-3. Mini App staging: зарегистрировать URL `https://staging.gobeauty.site/miniapp/` (или путь из `MAX_MINIAPP_URL`).
-4. Проверка: echo-сообщение боту → ответ; ingress лог без 4xx.
+1. Создать staging-бота → `MAX_BOT_TOKEN` (в env bot staging).
+2. Подписка webhook через API → `https://bot-staging…/api/v1/ingress/`;
+   проверить актуальный API host MAX (platform-api2.max.ru) в bot-platform.
+3. Mini App: зарегистрировать `https://app-staging…` (MAX_MINIAPP_URL).
+4. Replay/дубликаты webhook; старые подписки удалить.
+5. Проверка: echo-сообщение → ответ; ingress без 4xx.
 
-## 4. Чеклист KYC — на мастера (E4, per-master)
+## 4. Security baseline (обязателен до smoke)
 
-Повторять для каждого из 15+ мастеров списка:
+### 4.1. Сеть и секреты
 
-1. Данные: ФИО, телефон, специализация; статус (самозанятый/ИП) + ИНН + реквизиты для выплат.
-2. ЮKassa суб-аккаунт (split per-master): онбординг-форма → `yookassa_account_id` → записать в `SpecialistProfile` (поле из W1, users/0014).
-3. В системе: профиль мастера, услуги (из каталога), расписание (working hours), фото.
-4. Онбординг-звонок (15 мин): приложение/кабинет, подписка 690₽, привязка карты (C7.2 мастера → W2-флоу), как работают записи/выплаты.
-5. Тест-запись на каждого: создана → confirmed → завершена → 90₽ начислено/удержано верно.
+- Наружу: 80, 443, 22 (allowlist). Закрыты: PostgreSQL, Redis, MinIO, ChromaDB,
+  Celery-monitoring.
+- Секреты: отдельные staging; запрет копий production `.env`; права 0600;
+  вне Git; ротация после спринта; не выводить в CI/логи; отдельные креды на
+  каждую БД; разные `DJANGO_SECRET_KEY`. «Один секрет» — только на одно
+  соединение (Ayla outbound ↔ bot ingest).
 
-## 5. Спека тестовых данных staging
+### 4.2. Доступ по зонам
 
-Минимум для реального прогона:
+- Provider webhooks (ЮKassa, MAX): публичные пути со своей защитой (IP/подпись).
+- Mini App: подписанный MAX-контекст.
+- Internal API: Bearer/HMAC.
+- Админки: VPN/IP allowlist/Basic Auth.
+- `/health/` (live): минимальный ответ; `/health/ready/`: сеть/авторизация.
 
-- Tenant: салон «Формула тела» (Пенза) + 1 соло-мастер (для tenant-NULL проверок, AMD-015).
-- Услуги: пилотный набор из canonical seed (1223) — отобрать 20–30 реальных услуг салона с `requires_health_check`/длительностями; каталог-синк YClients (если салон на YClients).
-- Расписание: рабочие часы на 2 недели вперёд + 1 отпуск/выходной (краевой случай слотов).
-- Пользователи: 2 тестовых клиента (с consent memory_green и без — для S2 и гейта памяти).
-- Платёжное: 1 мастер с привязанной картой + активной подпиской; 1 — past_due (для C1-блокировки).
+### 4.3. Web-security чеклист
 
-## 6. Что осталось открытым (за владельцем)
+`DEBUG=False`; точные `ALLOWED_HOSTS`; CORS allowlist; CSRF trusted origins;
+secure cookies; HSTS (после проверки); CSP для Mini App;
+`X-Content-Type-Options`; `Referrer-Policy`; запрет индексации staging
+(robots/X-Robots-Tag); отдельный Sentry environment `staging` + release SHA;
+скрытие stack traces.
 
-- E1: подтверждение варианта A или B (по факту `dev.gobeauty.site`).
-- E2: доступ в кабинет ЮKassa (кто выполняет §2).
+## 5. Чеклист KYC — на мастера (per-master)
+
+Статусы: `not_started → submitted → verification_pending → active` (+ rejected /
+blocked). В пилот — только `active`.
+
+1. Данные: ФИО, телефон, специализация; статус (самозанятый/ИП), ИНН, реквизиты.
+   **ИНН/реквизиты не попадают в логи/Sentry/отчёты.**
+2. ЮKassa суб-аккаунт (split per-master): онбординг-форма → активация →
+   `yookassa_account_id` → `SpecialistProfile` (users/0014).
+3. Профиль, услуги, расписание (working hours), фото.
+4. Онбординг-звонок 15 мин: кабинет, подписка 690₽, привязка карты (W2-флоу),
+   записи/выплаты.
+5. Тест-запись: создана → confirmed → complete → **два раздельных сценария
+   проверки:** online → split 90₽ платформе, income = цена − 90₽ мастеру;
+   offline → BookingFee 90₽ ровно один раз (никогда оба — AYLA-DEC-0010).
+
+## 6. Спека тестовых данных staging
+
+- Tenant: салон «Формула тела» + 1 соло-мастер (tenant-NULL проверки, AMD-015).
+- Услуги: 20–30 реальных из canonical seed с `requires_health_check`/длит.;
+  знаменатель coverage — активные bookable услуги пилотных мастеров.
+- Расписание: 2 недели вперёд + 1 выходной (краевой случай слотов).
+- Клиенты: 2 синтетических (с memory_green и без — гейт памяти).
+- Платёжное: 1 мастер с картой + active-подпиской; 1 — past_due (для C1).
+- ПДн: синтетика предпочтительна; настоящие мастера — по политике §документа
+  спринта (минимизация, журнал доступа, срок удаления, план очистки).
+
+## 7. Открытые пункты (за владельцем)
+
+- E1: вариант хоста (тот же VPS / отдельный) + подтверждение `dev.gobeauty.site`.
+- E2: кто выполняет §2 в кабинете ЮKassa.
 - E3: кто создаёт MAX staging-бота (§3, шаг 1).
-- E4: именованный список мастеров для §4.
+- E4: именованный список мастеров (≥15) для §5/KYC-трека.
