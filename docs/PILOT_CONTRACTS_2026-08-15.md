@@ -1,8 +1,8 @@
 # Волна 0 — Frozen Contracts пилота (2026-08-15)
 
-**Contract version:** 1.8.0
+**Contract version:** 1.9.0
 **Frozen at:** 2026-07-18 (после пакета amendments READY-WITH-AMENDMENTS)
-**Last amendment:** AMD-015 (2026-07-19, tenant_id nullable для billing-событий)
+**Last amendment:** AMD-016 (2026-07-20, семантика capture_state в C7.1)
 **Effective for pilot:** 2026-08-15
 **Владелец:** оркестратор (Chief Product Architect); изменения — только amendment'ом (§13).
 
@@ -554,3 +554,16 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
 - **Потоки:** W2 (эмитит как есть — NULL для соло), W3 (ingest: nullable для
   этих топиков).
 - **Решение:** оркестратор (по эскалации W3 D-1).
+
+
+### AMD-016 — C7.1: семантика `capture_state` в ответе (2026-07-20, MINOR)
+
+- **Причина (W1):** frozen-пример ответа C7.1 показывал `"capture_state":
+  "authorized"`, но фактический lifecycle на создании — `pending` (переход в
+  `authorized` по webhook `waiting_for_capture`).
+- **Контракт (уточнение):** `capture_state` в ответе C7.1 = **фактическое
+  состояние платежа на момент ответа**: `pending` при создании → `authorized`
+  после webhook. Пример «authorized» — иллюстрация установившегося состояния,
+  не обещание мгновенного authorized.
+- **Потоки:** W1 (реализовано), W3 (passthrough — читать как текущее состояние).
+- **Решение:** оркестратор (по замечанию W1).
