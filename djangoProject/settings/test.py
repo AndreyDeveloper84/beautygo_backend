@@ -38,6 +38,12 @@ MULTI_TENANT_STRICT = False
 CROSS_DOMAIN_ENABLED = True
 
 
+# Webhook tests post from the test client (127.0.0.1). Allow ONLY loopback
+# — never an empty list (empty = allow-all, amendment J). Security tests
+# override this per-test with their own ranges.
+YOOKASSA_WEBHOOK_ALLOWED_IPS = ["127.0.0.1/32"]
+
+
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
