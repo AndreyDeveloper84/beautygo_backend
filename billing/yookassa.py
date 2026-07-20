@@ -101,10 +101,21 @@ class BillingYooKassaClient:
         """Re-fetch provider state — webhooks verify, never trust payload."""
         payment = self._wrap(lambda: self._payment_cls.find_one(provider_payment_id))
         method = getattr(payment, "payment_method", None)
+        card = getattr(method, "card", None) if method else None
+        card_last4 = ""
+        card_brand = ""
+        if card is not None:
+            card_last4 = getattr(card, "last4", "") or ""
+            # YooKassa exposes the scheme as brand (or card_type by SDK ver).
+            card_brand = (
+                getattr(card, "brand", "") or getattr(card, "card_type", "") or ""
+            )
         return {
             "provider_payment_id": payment.id,
             "status": payment.status,
             "paid": getattr(payment, "paid", False),
             "payment_method_id": getattr(method, "id", "") if method else "",
             "payment_method_saved": bool(getattr(method, "saved", False)) if method else False,
+            "card_last4": card_last4,
+            "card_brand": card_brand,
         }
