@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
+from decimal import Decimal
 from uuid import UUID
 
 import sentry_sdk
@@ -394,6 +395,160 @@ def retry_open_invoice(*, subscription: SpecialistSubscription, client=None) -> 
         payment_row=payment_row, reason=f"provider_{result['status']}",
     )
     return False
+
+
+class NoDebtError(Exception):
+    """No outstanding debt — the pay-debt endpoint maps this to 409."""
+
+
+def find_outstanding_invoice(
+    subscription: SpecialistSubscription,
+) -> BillingInvoice | None:
+    """The invoice constituting the current debt (FAILED or still OPEN),
+    or None when the subscription owes nothing."""
+    return (
+        subscription.invoices
+        .filter(
+            status__in=(
+                BillingInvoice.Status.FAILED,
+                BillingInvoice.Status.OPEN,
+            ),
+        )
+        .order_by("-created_at")
+        .first()
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DebtPaymentResult:
+    payment_id: UUID
+    invoice_id: UUID
+    provider_payment_id: str
+    confirmation_url: str  # "" when charged instantly via the saved method
+    amount: Decimal
+    status: str
+
+
+def pay_debt(
+    *, subscription: SpecialistSubscription, return_url: str = "", client=None,
+) -> DebtPaymentResult:
+    """One-shot collection of the outstanding debt (the past_due path).
+
+    Debt = the latest unpaid invoice (FAILED or still OPEN) + any fees
+    accrued after it was issued (PENDING). Charged instantly via the
+    saved payment method when one exists; otherwise a redirect payment
+    with save_payment_method (re-binds the card, D7).
+
+    Idempotent: an in-flight (PENDING) debt payment is returned
+    unchanged; once the invoice is settled a replay raises NoDebtError.
+    On instant success the subscription returns to active (C1 unblocks)
+    via settle_charge_success.
+    """
+    invoice = find_outstanding_invoice(subscription)
+    if invoice is None:
+        raise NoDebtError("Subscription has no outstanding debt")
+
+    with transaction.atomic():
+        # Fees accrued after the invoice was issued join the debt charge.
+        pending = BookingFee.objects.filter(
+            subscription=subscription, status=BookingFee.Status.PENDING,
+        )
+        extra = quantize_money(
+            pending.aggregate(total=Sum("amount"))["total"] or 0,
+        )
+        if extra:
+            invoice.fees_amount = quantize_money(invoice.fees_amount + extra)
+            invoice.total_amount = quantize_money(
+                invoice.subscription_amount + invoice.fees_amount,
+            )
+            invoice.save(
+                update_fields=["fees_amount", "total_amount", "updated_at"],
+            )
+            pending.update(status=BookingFee.Status.INVOICED, invoice=invoice)
+        if invoice.status == BillingInvoice.Status.FAILED:
+            invoice.status = BillingInvoice.Status.OPEN
+            invoice.save(update_fields=["status", "updated_at"])
+
+        # Idempotent replay: return the in-flight provider payment.
+        inflight = (
+            invoice.payments
+            .filter(status=BillingPayment.Status.PENDING)
+            .order_by("-created_at")
+            .first()
+        )
+        if inflight is not None:
+            return DebtPaymentResult(
+                payment_id=inflight.id,
+                invoice_id=invoice.id,
+                provider_payment_id=inflight.provider_payment_id,
+                confirmation_url=inflight.confirmation_url,
+                amount=inflight.amount,
+                status=inflight.status,
+            )
+
+    attempt = invoice.payments.count() + 1
+    client = client or BillingYooKassaClient()
+    description = f"Оплата долга Ayla Pro ({subscription.tariff.code})"
+    metadata = {
+        "subscription_id": str(subscription.id),
+        "invoice_id": str(invoice.id),
+        "kind": "debt",
+    }
+    idempotency_key = f"pay:{invoice.idempotency_key}:attempt-{attempt}"
+    receipt = build_platform_receipt(
+        subscription, amount=invoice.total_amount, description=description,
+    )
+    # Provider errors (config/client) propagate — the view maps them.
+    if subscription.payment_method_id:
+        result = client.create_recurrent_payment(
+            amount=invoice.total_amount,
+            payment_method_id=subscription.payment_method_id,
+            description=description,
+            idempotency_key=idempotency_key,
+            receipt=receipt,
+            metadata=metadata,
+        )
+        confirmation_url = ""
+    else:
+        result = client.create_setup_payment(
+            amount=invoice.total_amount,
+            description=description,
+            return_url=return_url,
+            idempotency_key=idempotency_key,
+            receipt=receipt,
+            metadata=metadata,
+        )
+        confirmation_url = result["confirmation_url"]
+
+    payment_row = BillingPayment.objects.create(
+        invoice=invoice,
+        kind=BillingPayment.Kind.RECURRENT,
+        amount=invoice.total_amount,
+        idempotency_key=idempotency_key,
+        provider_payment_id=result["provider_payment_id"],
+        confirmation_url=confirmation_url,
+    )
+    status = result["status"]
+    if status == "succeeded":
+        settle_charge_success(
+            subscription=subscription, invoice=invoice, payment_row=payment_row,
+        )
+        status = BillingPayment.Status.SUCCEEDED
+    elif status == "canceled":
+        register_charge_failure(
+            subscription=subscription, invoice=invoice,
+            payment_row=payment_row, reason="provider_canceled",
+        )
+        status = BillingPayment.Status.FAILED
+    # else "pending" — the webhook settles it.
+    return DebtPaymentResult(
+        payment_id=payment_row.id,
+        invoice_id=invoice.id,
+        provider_payment_id=result["provider_payment_id"],
+        confirmation_url=confirmation_url,
+        amount=invoice.total_amount,
+        status=status,
+    )
 
 
 def handle_webhook_event(
