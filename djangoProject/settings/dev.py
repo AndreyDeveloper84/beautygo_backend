@@ -76,3 +76,9 @@ STORAGES = {
         "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
     },
 }
+
+# local dev only — allow-all webhook sources (base.py defaults to the
+# official YooKassa networks; test.py pins 127.0.0.1/32; prod requires
+# the env explicitly). YooKassa can't reach localhost anyway, and local
+# smoke posts would 403 otherwise.
+YOOKASSA_WEBHOOK_ALLOWED_IPS = []

@@ -692,7 +692,9 @@ class TestPaymentWebhook:
         ):
             response = anon_app.post(WEBHOOK_URL, {
                 'event': 'refund.succeeded',
-                'object': {'id': 'wh_pay_001'},
+                # Real YooKassa refund payload: object.id is the REFUND
+                # id; the parent payment lives in payment_id (E).
+                'object': {'id': 'refund_wh_001', 'payment_id': 'wh_pay_001'},
             }, format='json')
 
         assert response.status_code == 200
@@ -734,7 +736,9 @@ class TestPaymentWebhook:
         ):
             anon_app.post(WEBHOOK_URL, {
                 'event': 'refund.succeeded',
-                'object': {'id': 'wh_pay_001'},
+                # Real YooKassa refund payload: object.id is the REFUND
+                # id; the parent payment lives in payment_id (E).
+                'object': {'id': 'refund_wh_002', 'payment_id': 'wh_pay_001'},
             }, format='json')
 
         payment.refresh_from_db()
@@ -806,12 +810,11 @@ class TestPaymentWebhookSecurity:
     def test_respects_x_forwarded_for_when_behind_proxy(
         self, anon_app, settings,
     ):
-        """Standard nginx-only setup (TRUSTED_PROXY_COUNT=1): nginx appends
-        the TCP source it received the request from to XFF. With YooKassa
-        sending us a request directly, that's the only XFF entry — and
-        Django reads xff[-1]."""
+        """nginx-only setup: the peer (REMOTE_ADDR) is our trusted proxy,
+        so its appended XFF entry (xff[-1]) is the truthful client IP —
+        YooKassa's address passes the allowlist."""
         settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
-        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = 1
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS = ['10.0.0.1']
         response = anon_app.post(
             WEBHOOK_URL,
             {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
@@ -822,15 +825,13 @@ class TestPaymentWebhookSecurity:
         assert response.status_code == status.HTTP_200_OK
 
     def test_xff_spoofing_rejected(self, anon_app, settings):
-        """Regression for the leftmost-XFF bypass: an attacker who can
-        reach nginx sets ``X-Forwarded-For: <yookassa_ip>``; nginx
-        appends its own TCP source (the attacker), so Django sees
-        ``XFF = "yookassa_ip, attacker_ip"``. Reading the leftmost
-        entry would let this through; reading the rightmost (xff[-1])
-        is the attacker's real IP, which fails the allowlist.
-        """
+        """An attacker who can reach nginx sets ``X-Forwarded-For:
+        <yookassa_ip>``; nginx appends its own TCP source (the attacker),
+        so Django sees ``XFF = "yookassa_ip, attacker_ip"``. Reading
+        xff[-1] (the nginx-appended, truthful entry) yields the
+        attacker's real IP → 403."""
         settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
-        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = 1
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS = ['10.0.0.1']
         response = anon_app.post(
             WEBHOOK_URL,
             {'event': 'payment.succeeded', 'object': {'id': 'wh_spoof'}},
@@ -841,20 +842,46 @@ class TestPaymentWebhookSecurity:
         assert response.status_code == status.HTTP_403_FORBIDDEN
         assert response.data['error']['code'] == 'PERMISSION_DENIED'
 
-    def test_two_trusted_proxies_reads_correct_depth(
+    def test_xff_ignored_from_untrusted_peer(self, anon_app, settings):
+        """Amendment C: forwarded headers are honoured ONLY from our own
+        proxy. A direct caller (untrusted REMOTE_ADDR) presenting a
+        spoofed XFF gets its TCP-level address checked instead → 403."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS = ['127.0.0.1']
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'wh_spoof2'}},
+            format='json',
+            REMOTE_ADDR='1.2.3.4',                            # attacker, direct
+            HTTP_X_FORWARDED_FOR='185.71.76.10',              # spoofed
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+
+    def test_cdn_chain_requires_allowlisting_last_proxy(
         self, anon_app, settings,
     ):
-        """CDN + nginx setup (TRUSTED_PROXY_COUNT=2): each proxy appends
-        once, so the YooKassa IP sits at index -2. xff[-1] would be the
-        CDN's IP and would fail the allowlist."""
+        """Model change (amendment C): only OUR nginx's appended XFF entry
+        is trusted — there is no multi-proxy depth anymore. CDN + nginx:
+        xff[-1] is the CDN's egress IP, and it must itself be allowlisted
+        (or the CDN must not front the webhook path)."""
         settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['185.71.76.0/27']
-        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = 2
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS = ['10.0.0.1']
         response = anon_app.post(
             WEBHOOK_URL,
             {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
             format='json',
             REMOTE_ADDR='10.0.0.1',                              # nginx
             HTTP_X_FORWARDED_FOR='185.71.76.10, 203.0.113.5',    # YooKassa, then CDN
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        # …and with the CDN egress allowlisted the chain passes:
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ['203.0.113.5/32']
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            REMOTE_ADDR='10.0.0.1',
+            HTTP_X_FORWARDED_FOR='185.71.76.10, 203.0.113.5',
         )
         assert response.status_code == status.HTTP_200_OK
 
@@ -912,7 +939,10 @@ class TestWebhookBasicAuth:
                 'yookassa', 'wrong-pass',
             ),
         )
-        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert response.headers['WWW-Authenticate'] == (
+            'Basic realm="YooKassa webhook"'
+        )
 
     def test_rejects_when_creds_required_but_missing(
         self, anon_app, settings,
@@ -925,7 +955,7 @@ class TestWebhookBasicAuth:
             {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
             format='json',
         )
-        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
     def test_skips_when_creds_unset(self, anon_app, settings):
         settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
@@ -940,8 +970,7 @@ class TestWebhookBasicAuth:
 
     def test_malformed_basic_header_rejected(self, anon_app, settings):
         """Header starts with ``Basic`` but the rest is not valid base64 —
-        view returns 403 (not 500). Using ``Bearer`` would trip JWT auth
-        layer first → 401 before our check runs."""
+        401 (never 500). A ``Bearer`` scheme is a 401 too (amendment I)."""
         settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
         settings.YOOKASSA_WEBHOOK_BASIC_AUTH_USER = 'yookassa'
         settings.YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = 'secret-pass-1'
@@ -951,7 +980,7 @@ class TestWebhookBasicAuth:
             format='json',
             HTTP_AUTHORIZATION='Basic !!!not-valid-base64!!!',
         )
-        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
 
 # ---------------------------------------------------------------------------
