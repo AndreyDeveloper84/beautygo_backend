@@ -161,3 +161,91 @@ class TestCardSetupEndpoint:
                 format="json",
             )
         assert resp.status_code == 502
+
+
+class TestPayDebtEndpoint:
+    URL = "/api/v1/internal/billing/specialists/{user_id}/pay-debt/"
+
+    @pytest.fixture
+    def debt_invoice(self, db, subscription):
+        """An unpaid (FAILED) invoice — without it the endpoint 409s."""
+        from billing.models import BillingInvoice
+
+        return BillingInvoice.objects.create(
+            subscription=subscription,
+            period_start=date(2026, 7, 11), period_end=date(2026, 8, 10),
+            subscription_amount=Decimal("690.00"),
+            total_amount=Decimal("690.00"),
+            status=BillingInvoice.Status.FAILED,
+            idempotency_key="charge:endpoint-debt:1",
+        )
+
+    def test_requires_bearer(self, db, specialist):
+        resp = APIClient().post(self.URL.format(user_id=specialist.user_id), {})
+        assert resp.status_code in (401, 403)
+
+    def test_unknown_specialist_404(self, api, db):
+        resp = api.post(self.URL.format(user_id=uuid4()), {}, format="json")
+        assert resp.status_code == 404
+
+    def test_no_account_is_409(self, api, specialist):
+        resp = api.post(self.URL.format(user_id=specialist.user_id), {}, format="json")
+        assert resp.status_code == 409
+        assert resp.json()["error"]["code"] == "NO_DEBT"
+
+    def test_no_debt_is_409(self, api, specialist, subscription):
+        # Active subscription without unpaid invoices has no debt.
+        resp = api.post(self.URL.format(user_id=specialist.user_id), {}, format="json")
+        assert resp.status_code == 409
+
+    def test_return_url_required_without_card(
+        self, api, specialist, subscription, debt_invoice,
+    ):
+        # Debt exists, but no saved payment method and no return_url → 400.
+        resp = api.post(self.URL.format(user_id=specialist.user_id), {}, format="json")
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
+
+    def test_happy_path_response_shape(
+        self, api, specialist, subscription, debt_invoice,
+    ):
+        from unittest.mock import patch
+
+        from billing.charges import DebtPaymentResult
+
+        fake = DebtPaymentResult(
+            payment_id=uuid4(), invoice_id=uuid4(),
+            provider_payment_id="yk_debt_1",
+            confirmation_url="", amount=Decimal("780.00"), status="succeeded",
+        )
+        with patch("billing.internal_api.pay_debt", return_value=fake) as pay:
+            resp = api.post(
+                self.URL.format(user_id=specialist.user_id),
+                {"return_url": "https://miniapp.example/debt"},
+                format="json",
+            )
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["payment_id"] == str(fake.payment_id)
+        assert data["provider_payment_id"] == "yk_debt_1"
+        assert data["confirmation_url"] is None  # instant charge
+        assert data["amount"] == "780.00"
+        assert data["status"] == "succeeded"
+        assert data["subscription_status"] == "active"
+        pay.assert_called_once()
+
+    def test_provider_config_error_503(
+        self, api, specialist, subscription, debt_invoice,
+    ):
+        from unittest.mock import patch
+
+        from billing.yookassa import BillingPaymentConfigError
+
+        subscription.payment_method_id = "pm_x"
+        subscription.save(update_fields=["payment_method_id"])
+        with patch(
+            "billing.internal_api.pay_debt",
+            side_effect=BillingPaymentConfigError("no creds"),
+        ):
+            resp = api.post(self.URL.format(user_id=specialist.user_id), {}, format="json")
+        assert resp.status_code == 503
