@@ -129,6 +129,9 @@ class ErrorCode(str, Enum):
     REFUND_AMOUNT_EXCEEDS_PAID = "REFUND_AMOUNT_EXCEEDS_PAID"
     REFUND_NOT_ALLOWED = "REFUND_NOT_ALLOWED"
     PAYMENT_PROVIDER_ERROR = "PAYMENT_PROVIDER_ERROR"
+    # W2 billing — pay-debt endpoint: 409 when the subscription has no
+    # outstanding debt (no failed/open invoice).
+    NO_DEBT = "NO_DEBT"
 
     # --- AI Chat (spec §AI) ---
     CONVERSATION_NOT_FOUND = "CONVERSATION_NOT_FOUND"
