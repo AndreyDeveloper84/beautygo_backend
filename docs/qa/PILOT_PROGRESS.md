@@ -11,12 +11,12 @@
 ## Общий прогресс
 
 ```
-Код:     ████████████░░░░░░░░░░░░░░  80% done (165/207 SP)
+Код:     ████████████░░░░░░░░░░░░░░  83% done (171/207 SP)
          ░░░░████░░░░░░░░░░░░░░░░░░  16% in-progress (29 SP)
          ░░░░░░░░░░████████████░░░░  40% pending (73 SP)
 ```
 
-- **Done:** 165 SP · **In-progress:** 29 SP · **Pending (код):** 57 SP · **Pending (внешнее):** 16 SP
+- **Done:** 171 SP · **In-progress:** 29 SP · **Pending (код):** 57 SP · **Pending (внешнее):** 16 SP
 - Осталось дней: **26** (пилот 15.08). Сделано за дни 1–2: 78 SP.
 - Требуемый темп: ~4 SP/день суммарно по окнам — достижимо при текущей скорости.
 
@@ -30,7 +30,7 @@
 | W4 Mini App | **61%** | 23/38 | 5 SP | 10 SP | ✅ 3.1-3.3 в dev; booking create + payment live — после W3 |
 | W5 Concierge | **100%** | 20/20 | — | 0 | ✅ фазы 1+2 в dev (a5e215d): память в диалоге |
 | W6 QA/Docs | **95%** | 19/20 | 1 SP/нед | 1 SP | ✅ smoke-runner + runbook в dev (105ffd1b) |
-| **ИТОГО код** | **80%** | **165/207** | 1 SP | 42 SP | |
+| **ИТОГО код** | **83%** | **171/207** | 1 SP | 42 SP | |
 | Внешнее | **0%** | 0/16 | — | 16 SP | юрист/KYC/мастера |
 
 ## W1 — Ayla Booking Core (100%)
@@ -135,9 +135,9 @@
 | C7.1 internal payment create (hold, idempotent) | 3 | W1 | ✅ |
 | C7.2 card binding клиента (setup/list/delete) | 5 | W1 | ✅ |
 | payment.authorized event (проверить/эмитить) | 1 | W1 | ✅ n/a — решением не вводится (сигнал = booking.confirmed) |
-| C7 passthrough в miniapp_api (payment + cards) | 3 | W3 | ⏳ |
-| Платёжные поля в BookingItem + статусы | 2 | W3 | ⏳ |
-| Маппинг C1 → клиентский slug UNAVAILABLE | 1 | W3 | ⏳ |
+| C7 passthrough в miniapp_api (payment + cards) | 3 | W3 | ✅ |
+| Платёжные поля в BookingItem + статусы | 2 | W3 | ✅ |
+| Маппинг C1 → клиентский slug UNAVAILABLE | 1 | W3 | ✅ |
 | Выбор оплаты на summary + webview | 3 | W4 ✅ |
 | Статусы оплаты в records/detail | 2 | W4 ✅ |
 | Экран карт в профиле | 2 | W4 ✅ |
@@ -157,6 +157,8 @@
 | Staging: прогон link + флип гейта | 3 | оркестратор | нед. 3 |
 
 ## Журнал обновлений
+
+- **2026-07-20 (день 3):** +6 SP — W3 followup2 в dev `398435d`: C7 passthrough целиком (verified binding, payments, cards, PaymentMirror, BookingItem.payment), C1 slug, AMD-015, O1 (HMAC secret из env), 5 падений W5 закрыты. **Bot suite впервые 5540/0 — абсолютный ноль падений.** Done: 171/207 (83%).
 
 - **2026-07-20 (день 3):** +9 SP — W1 C7 backend в dev `ade20092`: C7.1 payment create (snapshot-amount, идемпотентность), C7.2 card binding (consent-поля, saved-флаг, revoke), C7.6 ownership. Тесты backend: 2240 → 2264. payment.authorized — решением не вводится (AMD-016: сигнал = booking.confirmed). Контракты v1.9.0. Done: 165/207 (80%).
 
