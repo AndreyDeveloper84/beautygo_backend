@@ -51,6 +51,7 @@ class TestBillingStatusEndpoint:
                 "tariff": None,
                 "current_period_end": None,
                 "next_charge": None,
+                "card": None,
             },
             "fees": {"pending_total": "0.00", "pending_count": 0},
             "last_invoice": None,
