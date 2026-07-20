@@ -10,6 +10,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 
 from .exceptions import (
     PaymentClientError,
@@ -212,6 +213,61 @@ class YooKassaService:
         }
 
     # ------------------------------------------------------------------
+    # Card binding (C7.2) — zero-amount, save_payment_method: true
+    # ------------------------------------------------------------------
+
+    def create_card_binding(
+        self,
+        *,
+        user_id: uuid.UUID,
+        consent_version: str,
+        return_url: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Create a zero-amount binding payment (YooKassa card setup).
+
+        A binding is a SEPARATE voluntary action (consent boundary,
+        C7.2) — never a side effect of a service payment. The method is
+        persisted locally ONLY when the webhook later confirms
+        ``payment_method.saved == true``. Consent proof travels in the
+        provider metadata so the webhook can store it verbatim.
+        """
+        payload: dict[str, Any] = {
+            'amount': {'value': '0.00', 'currency': 'RUB'},
+            'confirmation': {
+                'type': 'redirect',
+                'return_url': return_url,
+            },
+            'capture': True,
+            'save_payment_method': True,
+            'description': 'Ayla: привязка карты',
+            'metadata': {
+                'purpose': 'card_binding',
+                'ayla_user_id': str(user_id),
+                'consent_version': consent_version,
+                # Consent timestamp == the setup moment (the user just
+                # accepted the consent text); the webhook stores it
+                # verbatim on the saved method.
+                'consented_at': timezone.now().isoformat(),
+            },
+        }
+        try:
+            payment = self._payment_cls.create(payload, idempotency_key)
+        except Exception as exc:  # noqa: BLE001
+            raise PaymentClientError(
+                f"YooKassa create_card_binding failed: {exc}"
+            ) from exc
+
+        confirmation_url = ''
+        if hasattr(payment, 'confirmation') and payment.confirmation:
+            confirmation_url = getattr(payment.confirmation, 'confirmation_url', '')
+        return {
+            'provider_payment_id': payment.id,
+            'confirmation_url': confirmation_url,
+            'status': payment.status,
+        }
+
+    # ------------------------------------------------------------------
     # Refund
     # ------------------------------------------------------------------
 
@@ -249,6 +305,11 @@ class YooKassaService:
                 f"YooKassa find_one failed: {exc}"
             ) from exc
         expires_at = getattr(payment, 'expires_at', None)
+        # C7.2 — card-binding confirmations carry the saved method's
+        # details; booking payments leave these empty.
+        method = getattr(payment, 'payment_method', None)
+        card = getattr(method, 'card', None) if method else None
+        metadata = getattr(payment, 'metadata', None) or {}
         return {
             'provider_payment_id': payment.id,
             'status': payment.status,
@@ -261,6 +322,13 @@ class YooKassaService:
             'refunded_amount': Decimal(
                 str(getattr(getattr(payment, 'refunded_amount', None), 'value', '0'))
             ),
+            'metadata': metadata,
+            'payment_method': {
+                'id': getattr(method, 'id', '') if method else '',
+                'saved': bool(getattr(method, 'saved', False)) if method else False,
+                'last4': getattr(card, 'last4', '') if card else '',
+                'brand': getattr(card, 'brand', '') if card else '',
+            },
         }
 
 

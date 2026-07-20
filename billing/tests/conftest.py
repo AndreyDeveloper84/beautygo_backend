@@ -1,4 +1,8 @@
-"""Fixtures for billing tests — mirrors appointments/tests/conftest.py style."""
+"""Fixtures for billing tests — mirrors appointments/tests/conftest.py style.
+
+Runs under the canonical settings: billing is in INSTALLED_APPS (W1's
+P1 patch) and the temporary W2 ds-shim is removed.
+"""
 from datetime import date
 
 import pytest

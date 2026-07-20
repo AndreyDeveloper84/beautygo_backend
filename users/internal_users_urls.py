@@ -3,6 +3,11 @@ from __future__ import annotations
 
 from django.urls import path
 
+from payments.views import (
+    InternalCardDeleteView,
+    InternalCardListView,
+    InternalCardSetupView,
+)
 from users.internal_personal_context_api import (
     InternalAskEligibilityView,
     InternalMarkAskedView,
@@ -17,6 +22,24 @@ from users.personal_data_api import (
 
 
 urlpatterns = [
+    # C7.2 — client card binding (payments app owns the views). Placed
+    # before the plain <uuid:user_id>/ route for explicitness (Django
+    # matches full segments anyway).
+    path(
+        "<uuid:ayla_user_id>/cards/setup/",
+        InternalCardSetupView.as_view(),
+        name="internal-cards-setup",
+    ),
+    path(
+        "<uuid:ayla_user_id>/cards/",
+        InternalCardListView.as_view(),
+        name="internal-cards-list",
+    ),
+    path(
+        "<uuid:ayla_user_id>/cards/<uuid:card_id>/",
+        InternalCardDeleteView.as_view(),
+        name="internal-cards-delete",
+    ),
     # Personal-context memory API for the bot (A1a) — Bearer, keyed by ayla_user_id.
     path(
         "<uuid:ayla_user_id>/personal-context/",
