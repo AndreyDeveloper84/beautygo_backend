@@ -11,12 +11,12 @@
 ## Общий прогресс
 
 ```
-Код:     ████████████░░░░░░░░░░░░░░  83% done (174/210 SP)
+Код:     ████████████░░░░░░░░░░░░░░  83% done (175/211 SP)
          ░░░░████░░░░░░░░░░░░░░░░░░  16% in-progress (29 SP)
          ░░░░░░░░░░████████████░░░░  40% pending (73 SP)
 ```
 
-- **Done:** 174 SP · **In-progress:** 29 SP · **Pending (код):** 57 SP · **Pending (внешнее):** 16 SP
+- **Done:** 175 SP · **In-progress:** 29 SP · **Pending (код):** 57 SP · **Pending (внешнее):** 16 SP
 - Осталось дней: **26** (пилот 15.08). Сделано за дни 1–2: 78 SP.
 - Требуемый темп: ~4 SP/день суммарно по окнам — достижимо при текущей скорости.
 
@@ -30,7 +30,7 @@
 | W4 Mini App | **63%** | 26/41 | 5 SP | 10 SP | ✅ C7 live в dev (7352d23); 2б + booking seam |
 | W5 Concierge | **100%** | 20/20 | — | 0 | ✅ фазы 1+2 в dev (a5e215d): память в диалоге |
 | W6 QA/Docs | **95%** | 19/20 | 1 SP/нед | 1 SP | ✅ smoke-runner + runbook в dev (105ffd1b) |
-| **ИТОГО код** | **83%** | **174/210** | 1 SP | 42 SP | |
+| **ИТОГО код** | **83%** | **175/211** | 1 SP | 42 SP | |
 | Внешнее | **0%** | 0/16 | — | 16 SP | юрист/KYC/мастера |
 
 ## W1 — Ayla Booking Core (100%)
@@ -135,6 +135,7 @@
 | C7.1 internal payment create (hold, idempotent) | 3 | W1 | ✅ |
 | C7.2 card binding клиента (setup/list/delete) | 5 | W1 | ✅ |
 | payment.authorized event (проверить/эмитить) | 1 | W1 | ✅ n/a — решением не вводится (сигнал = booking.confirmed) |
+| C7.3 read endpoint (on-demand status) | 1 | W1 | ✅ |
 | C7 passthrough в miniapp_api (payment + cards) | 3 | W3 | ✅ |
 | Платёжные поля в BookingItem + статусы | 2 | W3 | ✅ |
 | Маппинг C1 → клиентский slug UNAVAILABLE | 1 | W3 | ✅ |
@@ -157,6 +158,8 @@
 | Staging: прогон link + флип гейта | 3 | оркестратор | нед. 3 |
 
 ## Журнал обновлений
+
+- **2026-07-20 (день 3):** +1 SP — W1 C7.3 read endpoint в dev `3123a2e1` (+ ретро-фикс C7.1 на фактический pending по AMD-016). **C7 backend закрыт целиком (C7.1/2/3/6).** Тесты backend: 2264 → 2275. Done: 175/211 (83%).
 
 - **2026-07-20 (день 3):** +3 SP — W4 C7 live-интеграция в dev `7352d23`: payment create с отказоустойчивостью (запись не теряется при падении payment create), cards live с consent-гейтом, C1 против реального slug. Тесты FE: 127/127. Done: 174/210 (83%).
 
