@@ -32,6 +32,16 @@
 2. SSH-доступ (кто имеет, sudo, ключи) — для деплоя и миграций.
 3. DNS-контроль gobeauty.site (где управляется) — для поддоменов bot-/app-staging.
 
+**Факты 2026-07-20 (проверено напрямую):**
+- VPS: Rucloud Королёв, Ubuntu 18.04, **2 CPU**, 8 GB RAM (доступно ~4 GB), 80 GB HDD.
+  IP `194.87.99.126`, Docker 28.1.1. CPU=2 — подтверждённый лимит: staging-профиль
+  урезанный (без ChromaDB на старте, gunicorn/celery с ограниченной concurrency).
+- SSH: доступ есть (ключи на месте, taximeter@194.87.99.126).
+- DNS: панель reg.ru (аккаунт tikhonov-a-s@yandex.ru), 3 домена, `gobeauty.site`
+  до 28.02.2027 — поддомены добавляются там.
+- ⚠️ **Диск заполнен на 95% (3.8 GB свободно)** — блокер подъёма bot staging:
+  сначала очистка (docker prune, логи, старые данные), диагностика в работе.
+
 **Блокирует:** весь спринт 2 (S0–S6): прогон link coverage, round-trip событий,
 деньги на staging, smoke-runner, rehearsal.
 **Fallback:** один VPS с docker-compose обоих backend (минимум), staging-флаг.
