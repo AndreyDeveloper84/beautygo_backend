@@ -1,8 +1,8 @@
 # Волна 0 — Frozen Contracts пилота (2026-08-15)
 
-**Contract version:** 1.9.0
+**Contract version:** 1.10.0
 **Frozen at:** 2026-07-18 (после пакета amendments READY-WITH-AMENDMENTS)
-**Last amendment:** AMD-016 (2026-07-20, семантика capture_state в C7.1)
+**Last amendment:** AMD-017 (2026-07-20, C2 read-модель карты)
 **Effective for pilot:** 2026-08-15
 **Владелец:** оркестратор (Chief Product Architect); изменения — только amendment'ом (§13).
 
@@ -567,3 +567,17 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
   не обещание мгновенного authorized.
 - **Потоки:** W1 (реализовано), W3 (passthrough — читать как текущее состояние).
 - **Решение:** оркестратор (по замечанию W1).
+
+
+### AMD-017 — C2: read-модель карты мастера `subscription.card` (2026-07-20, MINOR)
+
+- **Причина (W4 Gap 2):** отображение привязанной карты в кабинете мастера
+  требовало last4/brand, которых не было в read-модели.
+- **Контракт (аддитивно):** объект `subscription` в C2 получает поле
+  `card: {last4, brand} | null`. Заполняется **только из webhook при
+  фактическом `payment_method.saved == true`** (consent-граница: не из ввода
+  пользователя, не по одному `payment.succeeded`). none-shape несёт
+  `card: null` (единый набор ключей).
+- **Потоки:** W2 (реализовано, миграция billing/0003), W3 (verbatim-прокси без
+  маппинга), W4 (отображение).
+- **Решение:** оркестратор (по запросу W2/W4).
