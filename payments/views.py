@@ -1168,6 +1168,28 @@ class InternalPayoutPreviewView(APIView):
 # C7 — Client payments (internal, bot-driven): payment create + card binding
 # ---------------------------------------------------------------------------
 
+def _c7_capture_state(payment: Payment) -> str:
+    """C7.1/C7.3 wire vocabulary for the hold lifecycle (AMD-016):
+    the ACTUAL state at response time, derived from the internal
+    status + capture_state pair. Never ``waiting_for_capture`` (ADR —
+    that raw provider state is internal-only)."""
+    if payment.status == Payment.Status.PAID:
+        return 'captured'
+    if payment.status == Payment.Status.AUTHORIZED:
+        return 'authorized'
+    if payment.status in (
+        Payment.Status.REFUNDED, Payment.Status.PARTIALLY_REFUNDED,
+    ):
+        return 'refunded'
+    if payment.status == Payment.Status.FAILED:
+        return (
+            'canceled'
+            if payment.capture_state == Payment.CaptureState.CANCELED
+            else 'failed'
+        )
+    return 'pending'
+
+
 class _InternalPaymentCreateSerializer(drf_serializers.Serializer):
     """C7.1 body. NOTE: there is deliberately NO amount field — the
     charge amount comes ONLY from the authoritative Booking snapshot
@@ -1344,10 +1366,52 @@ class InternalPaymentCreateView(APIView):
             'confirmation_url': payment.provider_client_secret,
             'amount': _money(payment.amount),
             'currency': 'RUB',
-            # C7.1 frozen response shape: the payment is an authorization
-            # (two-stage hold), not an instant charge — reported in the
-            # hold vocabulary regardless of the current lifecycle step.
-            'capture_state': 'authorized',
+            # AMD-016: the ACTUAL state at response time — "pending" on
+            # creation, "authorized" once the hold webhook landed.
+            'capture_state': _c7_capture_state(payment),
+        })
+
+
+class InternalPaymentStatusView(APIView):
+    """GET /api/v1/internal/payments/{payment_id}/ (C7.3) — on-demand
+    read model for the bot's status mirror, alongside the payment.*
+    events. Bearer service token; the customer-side verified binding is
+    W3's duty (C7.6) — this surface carries no end-user session and the
+    payment_id itself is the capability (info-hidden 404).
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearer]
+
+    @extend_schema(
+        operation_id="internal_payments_status",
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(description="Payment status read model"),
+            404: OpenApiResponse(description="PAYMENT_NOT_FOUND"),
+        },
+    )
+    def get(self, request: Request, payment_id) -> Response:
+        payment = Payment.objects.filter(id=payment_id).first()
+        if payment is None:
+            # Info-hidden 404 — unknown and foreign are indistinguishable.
+            return error_response(
+                'PAYMENT_NOT_FOUND', 'Payment not found.', status_code=404,
+            )
+        return success_response({
+            'payment_id': str(payment.id),
+            'status': payment.status,
+            # AMD-016 — actual state at response time (C7 vocabulary).
+            'capture_state': _c7_capture_state(payment),
+            'amount': _money(payment.amount),
+            'captured_at': (
+                payment.captured_at.isoformat() if payment.captured_at else None
+            ),
+            'expires_at': (
+                payment.yookassa_expires_at.isoformat()
+                if payment.yookassa_expires_at else None
+            ),
+            'last_webhook_event_id': payment.last_webhook_event_id,
         })
 
 
