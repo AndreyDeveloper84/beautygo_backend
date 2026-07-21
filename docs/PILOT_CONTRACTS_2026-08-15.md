@@ -1,8 +1,8 @@
 # Волна 0 — Frozen Contracts пилота (2026-08-15)
 
-**Contract version:** 1.12.0
+**Contract version:** 1.13.0
 **Frozen at:** 2026-07-18 (после пакета amendments READY-WITH-AMENDMENTS)
-**Last amendment:** AMD-019 (2026-07-21, резолюция service_id на internal booking surface)
+**Last amendment:** AMD-019 (2026-07-21, service_id resolver + persistence option A)
 **Effective for pilot:** 2026-08-15
 **Владелец:** оркестратор (Chief Product Architect); изменения — только amendment'ом (§13).
 
@@ -607,7 +607,7 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
 - **Решение:** оркестратор (по эскалации W3 от 2026-07-20).
 
 
-### AMD-019 — Резолюция `service_id` на internal booking surface (2026-07-21, MINOR)
+### AMD-019 — `service_id` resolver на internal booking surface + persistence option A (2026-07-21, MINOR)
 
 - **Причина (находка оркестратора при staging-подъёме SM-01):** пилотный
   каталог живёт в `SalonService` (58) + `SpecialistService` (232 связки,
@@ -635,25 +635,40 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
 - **Ошибки:** нет специалиста в tenant → прежний 404; услуга не существует
   или не связана со специалистом → доменная ошибка «service unavailable for
   specialist»; услуги другого tenant не раскрываются.
-- **СТОП-УСЛОВИЕ (подтверждено разведкой оркестратора заранее):**
-  `Appointment.service` — обязательный FK на marketplace `Service`
-  (PROTECT, NOT NULL). Снапшоты (`snapshot_service_name` и др.) штампуются
-  при создании, но строку `Appointment` без `services.Service.id` сохранить
-  нельзя. Поэтому: create **понимает** тот же `service_id` через общий
-  resolver (резолюция + валидация связки + доменные ошибки идентичны
-  slots), но **останавливается на границе персистентности** — запись не
-  создаётся, SalonService.id в FK marketplace-модели не пишется, схема
-  nullable/polymorphic НЕ делается. Поведение create для SalonService-id —
-  осмысленная доменная ошибка на границе персистентности (НЕ «service not
-  found» — услуга валидна), структура кода позволяет включить запись одной
-  точкой после решения по схеме.
-- **Отложенное решение (владелец, отдельным amendment'ом):** модель
-  персистентности записи по SalonService-каталогу. Варианты, снятые
-  разведкой: (A) exactly-one FK — `Appointment.service → null=True` +
-  `Appointment.salon_service FK (PROTECT)` + CHECK «ровно один», чтение на
-  снапшоты (6 точек: records_api, payments ×3, reviews, — снапшоты уже
-  штампуются); (B) write-through проекция в marketplace `Service` —
-  **отклонён** (скрытый dual-write, утечка пилотного каталога в публичные
-  API); (C) slots-only — SM-01 остаётся заблокирован.
+- **FK-барьер (факт разведки):** `Appointment.service` — обязательный FK на
+  marketplace `Service` (PROTECT, NOT NULL); строку `Appointment` без
+  `services.Service.id` сохранить нельзя. Снапшоты штампуются при создании.
+- **Модель персистентности (утверждена владельцем 2026-07-21, вариант A,
+  ДО начала кодирования):** `Appointment` хранит **ровно одну
+  типизированную ссылку**: `service` → marketplace `Service` ИЛИ
+  `salon_service` → `SalonService`. Оба FK `null=True, PROTECT`;
+  CheckConstraint «ровно один не NULL»
+  (`appointment_exactly_one_service_source`). Существующие строки валидны
+  без data-миграции (`service` заполнен, `salon_service` NULL).
+  **Snapshot-поля — источник исторических и коммерческих данных; FK — для
+  идентичности, трассировки и referential integrity.**
+- **Create:** общий resolver → marketplace-ветка заполняет
+  `Appointment.service`, salon-ветка — `Appointment.salon_service`; ровно
+  одна ссылка; все snapshot-поля штампуются (`BookingSnapshot.create`;
+  flat fee 90₽, AYLA-DEC-0001/D1 — не меняется); запись проходит весь
+  существующий booking pipeline. Никаких временных persistence-boundary
+  ошибок и временного поведения — create реальный с первого прохода.
+- **Читатели:** records_api и payments/receipt-описания (payments/services,
+  payments/views) обязаны корректно отдавать salon-записи (из снапшотов);
+  поведение для marketplace-записей не меняется.
+- **Reviews — вне scope (post-pilot, §9):** модель Review, её миграция,
+  рейтинги и публичный review API НЕ меняются. Известная зависимость:
+  `reviews/views.py` пишет `appointment.service` (marketplace FK) — создание
+  Review для salon-записи не поддерживается до отдельного AMD / post-pilot
+  задания; фиксируется в отчёте. **Стоп-условие:** если существующий
+  create/complete pipeline синхронно обязан создавать Review или regression
+  suite падает без изменения Review — стоп и эскалация владельцу, scope
+  молча не расширять.
+- **Отклонённые варианты:** (B) write-through проекция в marketplace
+  `Service` — скрытый dual-write + утечка пилотного каталога в публичные
+  API; (C) slots-only — SM-01 остаётся заблокирован.
+- **Порядок работ:** один исполнитель (W1), одна ветка, **два логических
+  коммита** (resolver/slots, затем persistence+create), без промежуточного
+  merge; параллельный persistence-агент запрещён.
 - **Решение:** владелец продукта (GO от 2026-07-21), канонизация —
   оркестратор. Исполнитель: W1 (Ayla backend, booking seam).
