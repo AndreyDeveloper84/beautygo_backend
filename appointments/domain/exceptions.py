@@ -72,18 +72,3 @@ class BillingEligibilityError(BookingDomainError):
     def __init__(self, reason: str = "SUBSCRIPTION_PAST_DUE"):
         self.reason = reason
         super().__init__(reason)
-
-
-class SalonServiceBookingNotPersistableError(BookingDomainError):
-    """AMD-019 stop-condition — a SalonService-catalog booking passed
-    resolution and validation (the service IS valid), but the
-    Appointment row cannot be persisted: ``Appointment.service`` is a
-    mandatory FK to the marketplace ``Service`` model (PROTECT, NOT
-    NULL) and writing a SalonService.id there is forbidden (no
-    dual-write, no polymorphic schema).
-
-    Raised at the SINGLE persistence boundary in CreateBookingService —
-    the point a later owner decision (schema variant A) replaces with
-    the real write. Maps to 409 SALON_SERVICE_BOOKING_UNSUPPORTED (NOT
-    ServiceNotActiveError — the service is valid)."""
-    pass
