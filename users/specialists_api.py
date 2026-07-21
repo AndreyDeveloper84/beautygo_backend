@@ -195,6 +195,7 @@ def compute_specialist_day_slots(
     *,
     service_id: str | None,
     date_param: str | None,
+    allow_salon_fallback: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Compute available booking slots for one specialist/service/day.
 
@@ -203,6 +204,12 @@ def compute_specialist_day_slots(
     {id}/slots/``, #1016) so both honour the same
     SpecialistWorkingHours + SpecialistTimeOff + active-booking logic
     via ``AvailabilityQueryService``.
+
+    ``allow_salon_fallback`` (AMD-019, INTERNAL surface only): resolve
+    ``service_id`` through the shared resolver — marketplace ``Service``
+    first, then ``SalonService`` with an active SpecialistService link
+    in the current tenant. The public path keeps the marketplace-only
+    lookup (observable behaviour unchanged).
 
     Returns ``(payload, None)`` on success or ``(None, error)`` on
     failure, where ``error`` carries an ``_status`` key the caller pops
@@ -222,15 +229,45 @@ def compute_specialist_day_slots(
             'message': 'service_id is required',
         }
 
-    try:
-        service = Service.objects.get(
-            id=service_id, specialist=specialist, is_active=True,
+    duration_override: int | None = None
+    buffer_override: int | None = None
+    if allow_salon_fallback:
+        # AMD-019 — shared resolver (services/service_resolver.py), the
+        # SAME one CreateBookingService uses. Unavailable → the same
+        # 404 shape as the marketplace miss below (no existence leak).
+        from services.service_resolver import (
+            ServiceUnavailableForSpecialistError,
+            resolve_bookable_service,
         )
-    except (Service.DoesNotExist, ValueError, django_exceptions.ValidationError):
-        return None, {
-            '_status': 404, 'code': 'NOT_FOUND',
-            'message': 'Service not found',
-        }
+        try:
+            resolved = resolve_bookable_service(
+                service_id=service_id, specialist=specialist,
+            )
+        except (
+            ServiceUnavailableForSpecialistError,
+            ValueError,
+            django_exceptions.ValidationError,
+        ):
+            return None, {
+                '_status': 404, 'code': 'NOT_FOUND',
+                'message': 'Service not found',
+            }
+        duration_override = resolved.duration_minutes
+        buffer_override = resolved.buffer_after_minutes
+        resolved_service_id = resolved.service_id
+    else:
+        try:
+            service = Service.objects.get(
+                id=service_id, specialist=specialist, is_active=True,
+            )
+        except (Service.DoesNotExist, ValueError, django_exceptions.ValidationError):
+            return None, {
+                '_status': 404, 'code': 'NOT_FOUND',
+                'message': 'Service not found',
+            }
+        duration_override = service.duration_minutes
+        buffer_override = service.buffer_after_minutes
+        resolved_service_id = service.pk
 
     specialist_tz = ZoneInfo(specialist.timezone)
     try:
@@ -249,8 +286,10 @@ def compute_specialist_day_slots(
         GetAvailabilityDTO(
             specialist_id=specialist.pk,
             target_date=slot_date,
-            service_id=service.pk,
-        )
+            service_id=resolved_service_id,
+        ),
+        duration_override=duration_override,
+        buffer_override=buffer_override,
     )
 
     # Mobile contract: slots as ISO-8601 strings in the specialist's

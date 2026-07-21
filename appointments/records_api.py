@@ -159,9 +159,13 @@ def _build_item(appointment) -> dict:
         "end_datetime": appointment.end_datetime,
         "price": appointment.price,
         "service": {
-            "id": str(appointment.service_id),
-            "name": appointment.service.name,
-            "duration_minutes": appointment.service.duration_minutes,
+            # AMD-019 option A: the typed reference is XOR — marketplace
+            # ``service_id`` or ``salon_service_id``. Display fields come
+            # from the booking-time SNAPSHOTS (the historical source),
+            # so salon bookings read identically to marketplace ones.
+            "id": str(appointment.service_id or appointment.salon_service_id),
+            "name": appointment.snapshot_service_name,
+            "duration_minutes": appointment.snapshot_duration_minutes,
         },
         "specialist": {
             "id": str(appointment.specialist_id),

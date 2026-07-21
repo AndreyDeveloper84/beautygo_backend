@@ -169,19 +169,20 @@ def _idempotency_key_from(request: Request) -> str:
 
 
 def _verify_basic_auth(request: Request) -> bool:
-    """Verify the Authorization: Basic header against the configured creds.
+    """Verify the Authorization: Basic header against the configured creds
+    (amendment I). Comparison via ``hmac.compare_digest`` (constant-time,
+    no timing side-channel on user-controlled strings).
 
     Returns True when:
     - either env var (user OR pass) is empty (no auth configured — skip), OR
-    - the header is present AND base64-decoded creds match the env values
+    - the header is present, well-formed AND creds match
 
-    Returns False when creds are configured but the header is missing or
-    doesn't match. Constant-time comparison via secrets.compare_digest to
-    avoid the timing side-channel that ``==`` on user-controlled strings
-    introduces.
+    Returns False on: creds configured AND (header missing / scheme is not
+    Basic (incl. Bearer) / undecodable Base64 / wrong pair). Every False
+    maps to 401 at the call site — never a 500, never a 403.
     """
     import base64
-    import secrets
+    import hmac
 
     expected_user = getattr(settings, "YOOKASSA_WEBHOOK_BASIC_AUTH_USER", "")
     expected_pass = getattr(settings, "YOOKASSA_WEBHOOK_BASIC_AUTH_PASS", "")
@@ -197,35 +198,88 @@ def _verify_basic_auth(request: Request) -> bool:
     except (ValueError, UnicodeDecodeError):
         return False
 
-    user_ok = secrets.compare_digest(user, expected_user)
-    pass_ok = secrets.compare_digest(password, expected_pass)
+    user_ok = hmac.compare_digest(user, expected_user)
+    pass_ok = hmac.compare_digest(password, expected_pass)
     return user_ok and pass_ok
 
 
+def _basic_auth_denied_response() -> Response:
+    """401 for any Basic-auth failure (amendment I). The realm header is
+    the RFC 7617 contract YooKassa's dashboard expects; the log line at
+    the call site carries NO password, NO Authorization header and NO
+    payload (log hygiene test pins this)."""
+    return Response(
+        {"error": {"code": "UNAUTHORIZED", "message": "Invalid webhook credentials."}},
+        status=401,
+        headers={"WWW-Authenticate": 'Basic realm="YooKassa webhook"'},
+    )
+
+
 def _client_ip(request: Request) -> str:
-    """Return the IP of the outermost trusted proxy's source.
+    """Real client IP for the webhook allowlist (amendment C).
 
-    Standard nginx config (``proxy_set_header X-Forwarded-For
-    $proxy_add_x_forwarded_for;``) APPENDS one entry on each pass — the
-    IP that proxy received the request from. So with N trusted proxies
-    in front of Django, the real client lives at index ``-N`` in XFF;
-    everything before it is *client-controlled and untrusted*. Reading
-    ``xff[0]`` (the leftmost entry) is the classic spoofing bypass:
-    attacker sets ``X-Forwarded-For: <victim_ip>``, our proxy appends
-    its own view, and the leftmost entry is the attacker's lie.
+    Trust model: forwarded headers are honoured ONLY when the direct peer
+    (``REMOTE_ADDR``) is our own proxy — ``YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS``
+    (loopback nginx / docker gateway by default). In that case the LAST
+    X-Forwarded-For entry is the one our nginx appended (the truthful
+    peer it saw); earlier XFF entries are client-controlled and ignored.
 
-    Falls back to ``REMOTE_ADDR`` (Django's TCP source) when XFF is
-    missing or shorter than ``YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT`` —
-    typical when Django is reached directly without a proxy in front.
+    From any other peer the XFF header is untrusted by definition and
+    ignored entirely — a direct caller presenting a spoofed XFF gets its
+    TCP-level address checked instead (spoof → 403).
     """
-    from django.conf import settings
+    trusted = getattr(settings, "YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS", None)
+    if trusted is None:
+        trusted = ["127.0.0.1", "::1", "172.16.0.0/12"]
+    remote = request.META.get("REMOTE_ADDR", "")
+    if remote and _ip_in_allowlist(remote, trusted):
+        xff = [
+            s.strip()
+            for s in request.META.get("HTTP_X_FORWARDED_FOR", "").split(",")
+            if s.strip()
+        ]
+        if xff:
+            return xff[-1]
+    return remote
 
-    trusted = max(1, getattr(settings, "YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT", 1))
-    xff_raw = request.META.get("HTTP_X_FORWARDED_FOR", "")
-    xff = [s.strip() for s in xff_raw.split(",") if s.strip()]
-    if len(xff) >= trusted:
-        return xff[-trusted]
-    return request.META.get("REMOTE_ADDR", "")
+
+def extract_provider_payment_id(event: str, obj: dict) -> str | None:
+    """Event-aware provider id extraction (amendment E).
+
+    ``payment.*`` events carry the payment object (its ``id`` IS the
+    payment). ``refund.succeeded`` carries a REFUND object — the parent
+    payment lives in ``payment_id`` (extracting ``id`` there would look
+    up a refund id and silently miss). Anything else → None (unsupported
+    event shape, ignored upstream).
+    """
+    if event.startswith("payment."):
+        return obj.get("id")
+    if event == "refund.succeeded":
+        return obj.get("payment_id")
+    return None
+
+
+def _audit_unknown_webhook(event: str, provider_payment_id: str) -> None:
+    """Sanitized audit marker for webhooks with no local owner (amendment H).
+
+    Covers the "webhook arrives BEFORE the owner row commits" race —
+    reconciliation greps this marker. Only the event name and the
+    provider-side id (NOT PII, not card data) are recorded; payload is
+    deliberately never logged.
+    """
+    logger.warning(
+        "webhook.unknown_payment event=%s provider_payment_id=%s",
+        event, provider_payment_id,
+    )
+    try:
+        import sentry_sdk
+        sentry_sdk.capture_message(
+            f"webhook.unknown_payment event={event} "
+            f"provider_payment_id={provider_payment_id}",
+            level="warning",
+        )
+    except Exception:  # noqa: BLE001 — sentry uninstalled/uninitialized
+        pass
 
 
 def _ip_in_allowlist(ip: str, allowlist: list[str]) -> bool:
@@ -334,8 +388,12 @@ class PaymentCreateView(APIView):
             )
 
         idempotency_key = _idempotency_key_from(request)
+        # AMD-019 option A: salon bookings read the name from the
+        # booking-time snapshot (marketplace behavior unchanged).
         description = (
-            f'BeautyGO: {appointment.service.name} у {appointment.specialist.display_name}'
+            'BeautyGO: '
+            f'{appointment.service.name if appointment.service_id else appointment.snapshot_service_name}'
+            f' у {appointment.specialist.display_name}'
         )
 
         # 54-ФЗ receipt — mandatory for production payments in RF.
@@ -505,34 +563,117 @@ class PaymentWebhookView(APIView):
             )
             raise PermissionDenied("Source IP not allowed.")
 
-        # Basic Auth — second layer on top of the IP allowlist. YooKassa
-        # supports `https://user:pass@host/...` URLs in their webhook
-        # config; we verify here. When the env is unset we skip silently
-        # (dev mode); prod.py enforces both env vars present.
+        # Basic Auth — second layer on top of the IP allowlist (amendment
+        # I): any failure (missing / wrong scheme / bad Base64 / wrong
+        # pair) → 401 + realm, never 403/500, and the log line carries NO
+        # password, header or payload (log hygiene).
         if not _verify_basic_auth(request):
-            logger.warning(
-                "Rejected YooKassa webhook — invalid Basic Auth credentials"
-            )
-            raise PermissionDenied("Invalid credentials.")
+            logger.warning("Rejected YooKassa webhook — invalid Basic Auth")
+            return _basic_auth_denied_response()
 
+        # --- parse + validate + extract (F) ------------------------------
         event = request.data.get('event')
         obj = request.data.get('object', {})
-        provider_payment_id = obj.get('id', '')
-        event_id = request.META.get('HTTP_X_REQUEST_ID', f'{event}:{provider_payment_id}')
-
-        if not event or not provider_payment_id:
+        if not event or not isinstance(obj, dict):
             return Response({'status': 'ignored'}, status=200)
 
-        try:
-            payment = Payment.objects.select_related(
-                'appointment',
-            ).get(provider_payment_id=provider_payment_id)
-        except Payment.DoesNotExist:
-            # Unknown payment — either a test notification, or a
-            # card-binding confirmation (C7.2): binding payments have no
-            # booking Payment row by design. Verify against the provider
-            # (never trust the payload alone) and persist the saved
-            # method only when payment_method.saved == true.
+        # Event-aware id extraction (E): payment.* carry the payment
+        # object; refund.succeeded carries a refund object whose parent
+        # payment lives in ``payment_id``.
+        provider_payment_id = extract_provider_payment_id(event, obj)
+        if not provider_payment_id:
+            logger.info("webhook.unsupported_event event=%s", event)
+            return Response({'status': 'ignored'}, status=200)
+
+        event_id = request.META.get('HTTP_X_REQUEST_ID', f'{event}:{provider_payment_id}')
+
+        # --- owner dispatch (router) -------------------------------------
+        # One YooKassa shop → one webhook URL → this view routes by payment
+        # ownership: client payments first, billing second. Invariant (A):
+        # BillingInvoice NEVER owns provider_payment_id — every invoice
+        # payment is a BillingPayment row with an invoice FK.
+        #
+        # Legacy note (L): /api/v1/internal/billing/webhook/ (W2) stays
+        # working but is DEPRECATED as an intake — the YooKassa dashboard
+        # registers ONLY this payments URL; parallel intake is not allowed.
+        # W2 gets a follow-up to delete/delegate after this merges.
+        payment = (
+            Payment.objects
+            .select_related('appointment')
+            .filter(provider_payment_id=provider_payment_id)
+            .first()
+        )
+        from billing.models import BillingPayment
+        billing_row = (
+            BillingPayment.objects
+            .filter(provider_payment_id=provider_payment_id)
+            .first()
+        )
+        if payment is not None and billing_row is not None:
+            # Collision guard (D): the same provider id in BOTH tables —
+            # the client handler wins, and it is NEVER silent.
+            logger.error(
+                "webhook.collision provider_payment_id=%s present in "
+                "payments.Payment AND billing.BillingPayment — "
+                "client handler wins",
+                provider_payment_id,
+            )
+            try:
+                import sentry_sdk
+                sentry_sdk.capture_message(
+                    f"webhook.collision provider_payment_id={provider_payment_id}",
+                    level="error",
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        if payment is None and billing_row is not None:
+            # Billing-owned payment — dispatch to the W2 handler (it does
+            # its own provider re-fetch + idempotency).
+            from billing.charges import handle_webhook_event
+            from billing.yookassa import (
+                BillingPaymentClientError,
+                BillingPaymentConfigError,
+            )
+            try:
+                status_ = handle_webhook_event(
+                    event=event, provider_payment_id=provider_payment_id,
+                )
+            except BillingPaymentClientError as exc:
+                # Provider unreachable — 200 stops retries; the billing
+                # reconciliation job picks it up (G).
+                logger.error("billing webhook verify failed: %s", exc)
+                return Response({'status': 'ok'}, status=200)
+            except BillingPaymentConfigError as exc:
+                # Startup-time wiring bug — critical alert (G).
+                logger.critical("billing webhook config error: %s", exc)
+                try:
+                    import sentry_sdk
+                    sentry_sdk.capture_exception(exc)
+                except Exception:  # noqa: BLE001
+                    pass
+                return Response({'status': 'ok'}, status=200)
+            except Exception as exc:
+                # Unexpected handler failure → 500 + Sentry (G), the
+                # provider MAY retry. NO blanket 200 here by design.
+                logger.exception("billing webhook handler failed")
+                try:
+                    import sentry_sdk
+                    sentry_sdk.capture_exception(exc)
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+            return Response({'status': status_}, status=200)
+
+        if payment is None:
+            # Not found anywhere → exactly ONE provider re-fetch as the
+            # legacy card-binding probe (B): binding payments have no
+            # booking/billing row by design. No purpose in metadata →
+            # sanitized audit marker (H) + 200 (NEVER 4xx — an invalid
+            # response means YooKassa retries for up to 24h).
+            #
+            # TODO: payment_method.active uses payment_method_id, not payment_id.
+            # Route by persisted card-setup attempt record, not Payment/BillingPayment lookup.
             try:
                 svc = _get_yookassa()
                 binding_info = svc.get_payment_info(provider_payment_id)
@@ -540,7 +681,8 @@ class PaymentWebhookView(APIView):
                 logger.error('YooKassa get_payment_info failed: %s', exc)
                 # Return 200 to stop YooKassa retries; we'll reconcile later
                 return Response({'status': 'ok'}, status=200)
-            _handle_card_binding_webhook(event, binding_info)
+            if not _handle_card_binding_webhook(event, binding_info):
+                _audit_unknown_webhook(event, provider_payment_id)
             return Response({'status': 'ok'}, status=200)
 
         # Idempotency: skip if we already processed this event
@@ -551,9 +693,19 @@ class PaymentWebhookView(APIView):
         try:
             svc = _get_yookassa()
             info = svc.get_payment_info(provider_payment_id)
-        except (PaymentClientError, PaymentConfigError) as exc:
+        except PaymentClientError as exc:
+            # Provider unreachable — 200 stops retries; reconciliation
+            # picks it up (G).
             logger.error('YooKassa get_payment_info failed: %s', exc)
-            # Return 200 to stop YooKassa retries; we'll reconcile later
+            return Response({'status': 'ok'}, status=200)
+        except PaymentConfigError as exc:
+            # Startup-time wiring bug — critical alert (G).
+            logger.critical('YooKassa config error: %s', exc)
+            try:
+                import sentry_sdk
+                sentry_sdk.capture_exception(exc)
+            except Exception:  # noqa: BLE001
+                pass
             return Response({'status': 'ok'}, status=200)
 
         yookassa_status = info['status']
@@ -1301,8 +1453,9 @@ class InternalPaymentCreateView(APIView):
                 amount=amount,
                 appointment_id=appointment.id,
                 description=(
-                    f'Ayla: {appointment.service.name} у '
-                    f'{appointment.specialist.display_name}'
+                    'Ayla: '
+                    f'{appointment.service.name if appointment.service_id else appointment.snapshot_service_name}'
+                    f' у {appointment.specialist.display_name}'
                 ),
                 return_url=serializer.validated_data['return_url'],
                 idempotency_key=_idempotency_key_from(request),

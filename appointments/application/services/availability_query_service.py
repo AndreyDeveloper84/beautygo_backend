@@ -39,7 +39,17 @@ class AvailabilityQueryService:
         self._builder = slot_builder or SlotBuilderService()
         self._cache = cache or SlotCacheService()
 
-    def get_day_availability(self, dto: GetAvailabilityDTO) -> DayAvailabilityDTO:
+    def get_day_availability(
+        self,
+        dto: GetAvailabilityDTO,
+        *,
+        duration_override: int | None = None,
+        buffer_override: int | None = None,
+    ) -> DayAvailabilityDTO:
+        """Day slots. When the caller already resolved the service
+        (AMD-019 salon fallback), ``duration_override`` /
+        ``buffer_override`` carry the values the slot builder needs and
+        the marketplace ``Service`` lookup is skipped entirely."""
         cached = self._cache.get(dto.specialist_id, dto.target_date, dto.service_id)
         if cached is not None:
             logger.debug(
@@ -52,6 +62,8 @@ class AvailabilityQueryService:
             specialist_id=dto.specialist_id,
             target_date=dto.target_date,
             service_id=dto.service_id,
+            duration_override=duration_override,
+            buffer_override=buffer_override,
         )
 
         self._cache.set(dto.specialist_id, dto.target_date, dto.service_id, result)
@@ -126,12 +138,24 @@ class AvailabilityQueryService:
         specialist_id,
         target_date: date,
         service_id,
+        *,
+        duration_override: int | None = None,
+        buffer_override: int | None = None,
     ) -> DayAvailabilityDTO:
         from users.models import SpecialistProfile
-        from services.models import Service
 
         specialist = SpecialistProfile.objects.get(id=specialist_id)
-        service = Service.objects.get(id=service_id)
+        if duration_override is not None:
+            # AMD-019 — caller resolved the service already (salon
+            # fallback); the slot builder is fed the SAME shape of values
+            # the marketplace branch passes.
+            duration_minutes = duration_override
+            buffer_after = buffer_override or 0
+        else:
+            from services.models import Service
+            service = Service.objects.get(id=service_id)
+            duration_minutes = service.duration_minutes
+            buffer_after = service.buffer_after_minutes
 
         working_hours = self._get_working_hours(specialist, target_date)
         if working_hours is None:
@@ -151,8 +175,8 @@ class AvailabilityQueryService:
             specialist_timezone=specialist.timezone,
             working_start_local=working_hours["start"],
             working_end_local=working_hours["end"],
-            service_duration_minutes=service.duration_minutes,
-            buffer_after_minutes=service.buffer_after_minutes,
+            service_duration_minutes=duration_minutes,
+            buffer_after_minutes=buffer_after,
             busy_intervals=busy_intervals,
             break_start_local=working_hours.get("break_start"),
             break_end_local=working_hours.get("break_end"),

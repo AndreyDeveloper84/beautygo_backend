@@ -463,25 +463,66 @@ CAPTURE_SAFETY_BUFFER_MINUTES = int(
 YOOKASSA_VAT_CODE = int(os.environ.get("YOOKASSA_VAT_CODE", "1"))
 
 # YooKassa webhook security.
-# Comma-separated list of CIDR ranges or single IPs permitted to POST to
-# /api/v1/payments/webhook/. YooKassa publishes its source IP ranges at
-# https://yookassa.ru/developers/using-api/webhooks — copy the current list
-# into the env. If left empty in dev, the view logs a warning but still
-# accepts requests; prod.py refuses to start without it (matching the
-# Phase 2.1 OAuth fail-fast pattern).
-YOOKASSA_WEBHOOK_ALLOWED_IPS = [
-    entry.strip()
-    for entry in os.environ.get("YOOKASSA_WEBHOOK_ALLOWED_IPS", "").split(",")
-    if entry.strip()
+# Official YooKassa source networks for webhook POSTs
+# (https://yookassa.ru/developers/using-api/webhooks). Single source of
+# truth — .env.example mirrors this list.
+YOOKASSA_OFFICIAL_WEBHOOK_NETWORKS = [
+    "185.71.76.0/27",
+    "185.71.77.0/27",
+    "77.75.153.0/25",
+    "77.75.156.11",
+    "77.75.156.35",
+    "77.75.154.128/25",
+    "2a02:5180::/32",
 ]
 
-# Number of trusted reverse proxies between the public internet and Django.
-# The webhook IP-allowlist check reads X-Forwarded-For at depth N from the
-# right (the IP the outermost trusted proxy received the request from);
-# anything earlier in XFF is client-controlled and ignored. Default 1 = a
-# single nginx in front of Django. Set higher only if a CDN sits before
-# nginx — getting this wrong opens spoofing (too high) or rejects real
-# traffic (too low).
+
+def _validated_networks(entries, *, setting_name: str) -> list:
+    """CIDR/single-IP validation at settings load (amendment J): a
+    malformed entry is a startup-time config error, not a runtime
+    silent-skip (a bad line must never weaken the webhook allowlist
+    unnoticed)."""
+    import ipaddress
+
+    validated = []
+    for entry in entries:
+        cleaned = entry.strip()
+        if not cleaned:
+            continue
+        try:
+            ipaddress.ip_network(cleaned, strict=False)
+        except ValueError as exc:
+            from django.core.exceptions import ImproperlyConfigured
+            raise ImproperlyConfigured(
+                f"{setting_name}: invalid network {cleaned!r} ({exc})"
+            ) from exc
+        validated.append(cleaned)
+    return validated
+
+
+# env override (comma-separated, trimmed); empty env → official networks.
+# Prod.py still enforces the env explicitly; settings/dev.py overrides to
+# allow-all for local development.
+YOOKASSA_WEBHOOK_ALLOWED_IPS = _validated_networks(
+    os.environ.get("YOOKASSA_WEBHOOK_ALLOWED_IPS", "").split(","),
+    setting_name="YOOKASSA_WEBHOOK_ALLOWED_IPS",
+) or list(YOOKASSA_OFFICIAL_WEBHOOK_NETWORKS)
+
+# Proxies whose forwarded headers (X-Forwarded-For) may be trusted for the
+# webhook client-IP check (amendment C): only OUR nginx (loopback in
+# compose setups) and docker gateway ranges. Anything else — REMOTE_ADDR
+# is used and XFF is ignored entirely (spoofed XFF from an untrusted
+# source must not bypass the allowlist).
+YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS = _validated_networks(
+    os.environ.get(
+        "YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS", "127.0.0.1,::1,172.16.0.0/12",
+    ).split(","),
+    setting_name="YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS",
+)
+
+# DEPRECATED (amendment C): superseded by YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS.
+# Kept readable so existing envs don't crash; payments/views.py no longer
+# consults it (removal candidate next cleanup).
 YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT = int(
     os.environ.get("YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT", "1"),
 )
