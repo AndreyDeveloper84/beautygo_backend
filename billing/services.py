@@ -196,6 +196,7 @@ def build_billing_status(specialist: "SpecialistProfile") -> dict:
                 "tariff": None,
                 "current_period_end": None,
                 "next_charge": None,
+                "card": None,
             },
             "fees": {"pending_total": "0.00", "pending_count": 0},
             "last_invoice": None,
@@ -235,6 +236,14 @@ def build_billing_status(specialist: "SpecialistProfile") -> dict:
                 if subscription.current_period_end else None
             ),
             "next_charge": next_charge,
+            # Card read-model (additive): null until a card is bound.
+            "card": (
+                {
+                    "last4": subscription.card_last4,
+                    "brand": subscription.card_brand,
+                }
+                if subscription.card_last4 else None
+            ),
         },
         "fees": {
             "pending_total": f"{fees_amount:.2f}",

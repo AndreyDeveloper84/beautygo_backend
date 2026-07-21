@@ -27,10 +27,13 @@ from billing.yookassa import BillingPaymentClientError
 class FakeYooKassaClient:
     """Test double for BillingYooKassaClient (records calls, no network)."""
 
-    def __init__(self, status="succeeded", method_id="pm_saved_1", method_saved=True):
+    def __init__(self, status="succeeded", method_id="pm_saved_1", method_saved=True,
+                 card_last4="4242", card_brand="Visa"):
         self.status = status
         self.method_id = method_id
         self.method_saved = method_saved
+        self.card_last4 = card_last4
+        self.card_brand = card_brand
         self.setup_calls = []
         self.recurrent_calls = []
         self._counter = 0
@@ -59,6 +62,8 @@ class FakeYooKassaClient:
             "paid": self.status == "succeeded",
             "payment_method_id": self.method_id,
             "payment_method_saved": self.method_saved,
+            "card_last4": self.card_last4,
+            "card_brand": self.card_brand,
         }
 
 
@@ -147,7 +152,10 @@ class TestSetupWebhook:
 
     def test_success_activates_and_saves_method(self, db, specialist_user):
         payment = self._setup_payment(specialist_user)
-        client = FakeYooKassaClient(status="succeeded", method_id="pm_card_42")
+        client = FakeYooKassaClient(
+            status="succeeded", method_id="pm_card_42",
+            card_last4="4242", card_brand="Visa",
+        )
         with patch("billing.events.emit_subscription_activated") as emit:
             result = handle_webhook_event(
                 event="payment.succeeded",
@@ -159,9 +167,26 @@ class TestSetupWebhook:
         subscription = SpecialistSubscription.objects.get(user=specialist_user)
         assert payment.status == BillingPayment.Status.SUCCEEDED
         assert subscription.payment_method_id == "pm_card_42"
+        # Card read-model filled from the provider's payment_method data.
+        assert subscription.card_last4 == "4242"
+        assert subscription.card_brand == "Visa"
         assert subscription.status == SpecialistSubscription.Status.ACTIVE
         assert subscription.invoices.get().status == BillingInvoice.Status.PAID
         emit.assert_called_once()
+
+    def test_card_read_model_not_saved_without_saved_flag(self, db, specialist_user):
+        # Consent boundary: payment_method.saved == false → no method,
+        # no card read-model (never trust payment.succeeded alone).
+        payment = self._setup_payment(specialist_user)
+        client = FakeYooKassaClient(status="succeeded", method_saved=False)
+        handle_webhook_event(
+            event="payment.succeeded",
+            provider_payment_id=payment.provider_payment_id, client=client,
+        )
+        subscription = SpecialistSubscription.objects.get(user=specialist_user)
+        assert subscription.payment_method_id == ""
+        assert subscription.card_last4 == ""
+        assert subscription.card_brand == ""
 
     def test_replay_is_duplicate(self, db, specialist_user):
         payment = self._setup_payment(specialist_user)
@@ -512,3 +537,44 @@ class TestYooKassaClientPayload:
         assert "confirmation" not in payload
         assert "receipt" not in payload
         assert key == "k2"
+
+    def test_get_payment_info_maps_method_and_card(self):
+        from billing.yookassa import BillingYooKassaClient
+
+        class FakePayment:
+            @staticmethod
+            def find_one(provider_payment_id):
+                return SimpleNamespace(
+                    id=provider_payment_id, status="succeeded", paid=True,
+                    payment_method=SimpleNamespace(
+                        id="pm_1", saved=True,
+                        card=SimpleNamespace(last4="4242", brand="Visa"),
+                    ),
+                )
+
+        client = BillingYooKassaClient.__new__(BillingYooKassaClient)
+        client._payment_cls = FakePayment
+        info = client.get_payment_info("yk_1")
+        assert info["payment_method_id"] == "pm_1"
+        assert info["payment_method_saved"] is True
+        assert info["card_last4"] == "4242"
+        assert info["card_brand"] == "Visa"
+
+    def test_get_payment_info_without_method(self):
+        from billing.yookassa import BillingYooKassaClient
+
+        class FakePayment:
+            @staticmethod
+            def find_one(provider_payment_id):
+                return SimpleNamespace(
+                    id=provider_payment_id, status="succeeded",
+                    paid=True, payment_method=None,
+                )
+
+        client = BillingYooKassaClient.__new__(BillingYooKassaClient)
+        client._payment_cls = FakePayment
+        info = client.get_payment_info("yk_1")
+        assert info["payment_method_id"] == ""
+        assert info["payment_method_saved"] is False
+        assert info["card_last4"] == ""
+        assert info["card_brand"] == ""

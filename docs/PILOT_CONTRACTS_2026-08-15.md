@@ -1,8 +1,8 @@
 # Волна 0 — Frozen Contracts пилота (2026-08-15)
 
-**Contract version:** 1.9.0
+**Contract version:** 1.12.0
 **Frozen at:** 2026-07-18 (после пакета amendments READY-WITH-AMENDMENTS)
-**Last amendment:** AMD-016 (2026-07-20, семантика capture_state в C7.1)
+**Last amendment:** AMD-019 (2026-07-21, резолюция service_id на internal booking surface)
 **Effective for pilot:** 2026-08-15
 **Владелец:** оркестратор (Chief Product Architect); изменения — только amendment'ом (§13).
 
@@ -567,3 +567,93 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
   не обещание мгновенного authorized.
 - **Потоки:** W1 (реализовано), W3 (passthrough — читать как текущее состояние).
 - **Решение:** оркестратор (по замечанию W1).
+
+
+### AMD-017 — C2: read-модель карты мастера `subscription.card` (2026-07-20, MINOR)
+
+- **Причина (W4 Gap 2):** отображение привязанной карты в кабинете мастера
+  требовало last4/brand, которых не было в read-модели.
+- **Контракт (аддитивно):** объект `subscription` в C2 получает поле
+  `card: {last4, brand} | null`. Заполняется **только из webhook при
+  фактическом `payment_method.saved == true`** (consent-граница: не из ввода
+  пользователя, не по одному `payment.succeeded`). none-shape несёт
+  `card: null` (единый набор ключей).
+- **Потоки:** W2 (реализовано, миграция billing/0003), W3 (verbatim-прокси без
+  маппинга), W4 (отображение).
+- **Решение:** оркестратор (по запросу W2/W4).
+
+
+### AMD-018 — `booking.no_show` как событие #13 (2026-07-20, MINOR, supersedes S4-pin)
+
+- **Причина (находка W3, #946):** Ayla эмитит `booking.no_show` отдельным
+  событием (`OutboxEvent.Topic.BOOKING_NO_SHOW`, appointments/models.py:416,
+  миграции, state-emit тесты), а S4 vocab-контракт бота запрещал это имя
+  (раннее решение: «no-show = booking.cancelled + reason_code»). Issue #946
+  оставлял решение открытым («decide before enabling delivery»).
+- **Решение:** `booking.no_show` — отдельное cross-service событие **#13,
+  event_version: 1**. НЕ моделируется как `booking.cancelled + reason_code`.
+  **Семантика:** cancelled — отмена до визита по инициативе стороны;
+  no_show — клиент не пришёл при состоявшемся слоте.
+- **Бот (W3):** allowlist/`_KNOWN_NAMES` + consumer `handle_booking_no_show`
+  (`RemoteBookingProxy.Status.NO_SHOW` + отмена только PENDING-напоминаний;
+  идемпотентность/DLQ по общему правилу). Старый отрицательный S4-пин
+  заменяется положительным (событие разрешено).
+- **Деньги (пилот):** consumer не инициирует capture/cancel/refund/BookingFee.
+  Capture — только на `completed` (D9); при no_show холд сгорает по
+  `expired_on_capture` или отменяется операционно. Штрафная политика no-show —
+  post-pilot, отдельное решение владельца.
+- **Delivery gate:** включение `OUTBOX_EXTERNAL_DELIVERY_TOPICS` и replay
+  backlog — только оркестратор, после merge.
+- **Решение:** оркестратор (по эскалации W3 от 2026-07-20).
+
+
+### AMD-019 — Резолюция `service_id` на internal booking surface (2026-07-21, MINOR)
+
+- **Причина (находка оркестратора при staging-подъёме SM-01):** пилотный
+  каталог живёт в `SalonService` (58) + `SpecialistService` (232 связки,
+  #1044), а booking-контур Ayla резолвит `service_id` против старой
+  marketplace-модели `Service` — **0 строк** в пилоте. Два слоя одного
+  разрыва: (1) `SpecialistFilter.filter_by_service` фильтрует по пустому M2M
+  `services` → slots 404 ещё до вычисления; (2)
+  `compute_specialist_day_slots` и `CreateBookingService` резолвят
+  `Service.objects.get(id=service_id, specialist=…)` → всегда промах.
+- **Решение владельца (GO 2026-07-21):** fallback-резолюция `service_id`
+  **только на internal booking surface** Ayla: сначала marketplace
+  `Service`; если не найден — `SalonService`, но **только при активной
+  `SpecialistService`-связке** с выбранным специалистом **в текущем
+  tenant**. При совпадении UUID приоритет у marketplace `Service`.
+- **Контракт #1027 не меняется:** `specialist_id` — Ayla UUID специалиста;
+  `service_id` — UUID услуги каталога Ayla; новые поля и endpoint'ы не
+  добавляются.
+- **Границы:** `SalonService`+`SpecialistService` остаются каноническим
+  пилотным каталогом; marketplace `Service` НЕ становится вторым источником
+  истины; dual-write запрещён; миграция услуг запрещена; intake не меняется;
+  публичные API не меняются.
+- **Scope:** общий resolver (один модуль) используется slots и create
+  **одинаково**. Reschedule — только если реально принимает/проверяет
+  `service_id`. Cancel — не трогается (не использует `service_id`).
+- **Ошибки:** нет специалиста в tenant → прежний 404; услуга не существует
+  или не связана со специалистом → доменная ошибка «service unavailable for
+  specialist»; услуги другого tenant не раскрываются.
+- **СТОП-УСЛОВИЕ (подтверждено разведкой оркестратора заранее):**
+  `Appointment.service` — обязательный FK на marketplace `Service`
+  (PROTECT, NOT NULL). Снапшоты (`snapshot_service_name` и др.) штампуются
+  при создании, но строку `Appointment` без `services.Service.id` сохранить
+  нельзя. Поэтому: create **понимает** тот же `service_id` через общий
+  resolver (резолюция + валидация связки + доменные ошибки идентичны
+  slots), но **останавливается на границе персистентности** — запись не
+  создаётся, SalonService.id в FK marketplace-модели не пишется, схема
+  nullable/polymorphic НЕ делается. Поведение create для SalonService-id —
+  осмысленная доменная ошибка на границе персистентности (НЕ «service not
+  found» — услуга валидна), структура кода позволяет включить запись одной
+  точкой после решения по схеме.
+- **Отложенное решение (владелец, отдельным amendment'ом):** модель
+  персистентности записи по SalonService-каталогу. Варианты, снятые
+  разведкой: (A) exactly-one FK — `Appointment.service → null=True` +
+  `Appointment.salon_service FK (PROTECT)` + CHECK «ровно один», чтение на
+  снапшоты (6 точек: records_api, payments ×3, reviews, — снапшоты уже
+  штампуются); (B) write-through проекция в marketplace `Service` —
+  **отклонён** (скрытый dual-write, утечка пилотного каталога в публичные
+  API); (C) slots-only — SM-01 остаётся заблокирован.
+- **Решение:** владелец продукта (GO от 2026-07-21), канонизация —
+  оркестратор. Исполнитель: W1 (Ayla backend, booking seam).

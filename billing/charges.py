@@ -268,6 +268,7 @@ def charge_subscription(
 def settle_charge_success(
     *, subscription: SpecialistSubscription, invoice: BillingInvoice,
     payment_row: BillingPayment, payment_method_id: str = "",
+    card_last4: str = "", card_brand: str = "",
 ) -> None:
     """Mark everything paid and advance the billing period."""
     with transaction.atomic():
@@ -287,6 +288,9 @@ def settle_charge_success(
         if payment_method_id:
             subscription.payment_method_id = payment_method_id
             subscription.payment_method_saved_at = timezone.now()
+            # Card read-model for C2 (provider data, may be blank).
+            subscription.card_last4 = card_last4
+            subscription.card_brand = card_brand
         became_active = subscription.status == SpecialistSubscription.Status.TRIAL
         subscription.status = SpecialistSubscription.Status.ACTIVE
         subscription.save()
@@ -597,6 +601,8 @@ def handle_webhook_event(
             settle_charge_success(
                 subscription=subscription, invoice=invoice,
                 payment_row=locked, payment_method_id=method_id,
+                card_last4=info["card_last4"] if method_id else "",
+                card_brand=info["card_brand"] if method_id else "",
             )
         elif event == "payment.canceled" and info["status"] == "canceled":
             register_charge_failure(

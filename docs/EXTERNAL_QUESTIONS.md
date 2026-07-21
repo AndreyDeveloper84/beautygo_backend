@@ -6,9 +6,9 @@
 
 | # | Вопрос | Владелец | Дедлайн | Статус |
 |---|---|---|---|---|
-| E1 | Staging-инфраструктура | Founder | 2026-07-21 | ⏳ ожидает |
+| E1 | Staging-инфраструктура | Founder | 2026-07-21 | 🔄 частично решено |
 | E2 | Тестовый магазин ЮKassa | Founder | 2026-07-22 | ⏳ ожидает |
-| E3 | MAX staging-бот | Founder | 2026-07-22 | ⏳ ожидает |
+| E3 | MAX staging-бот | Founder | 2026-07-22 | 🔄 токен получен (20.07) |
 | E4 | Список пилотных мастеров (15+) | Founder | 2026-07-25 | ⏳ ожидает |
 
 ---
@@ -18,10 +18,31 @@
 **Вопрос:** `dev.gobeauty.site` — это действующий staging или нужен новый стенд?
 Где поднимать bot staging (ai-bot-platform) — тот же VPS?
 
-**Что нужно от владельца:**
-1. Подтвердить, что `dev.gobeauty.site` — staging Ayla backend (состояние, доступы).
-2. Решение по bot staging: тот же VPS (отдельный compose/порты) или отдельный хост.
-3. Доступы: SSH/деплой-процесс (deploy.sh), где лежат env-файлы.
+**Решено 2026-07-20:**
+- `dev.gobeauty.site` подтверждён фактами как staging Ayla backend (nginx+TLS,
+  `/home/taximeter/beautygo/dev`, deploy.sh compose-based).
+- **Bot staging — на том же VPS**, отдельный compose-проект `ayla-bot-staging`
+  (вариант A из SPRINT_2_STAGING_SETUP v2): bot web 127.0.0.1:8001, смещённые
+  порты, отдельные volumes/networks/env, compose под одним systemd-юнитом.
+- Домены: `bot-staging.gobeauty.site` (bot), `app-staging.gobeauty.site` (miniapp).
+
+**Осталось для закрытия (3 факта):**
+1. Размер VPS (CPU/RAM — нужно ≥4 CPU/8 GB; если меньше — поднимаем только
+   нужные компоненты, без Chroma/MinIO).
+2. SSH-доступ (кто имеет, sudo, ключи) — для деплоя и миграций.
+3. DNS-контроль gobeauty.site (где управляется) — для поддоменов bot-/app-staging.
+
+**Факты 2026-07-20 (проверено напрямую):**
+- VPS: Rucloud Королёв, Ubuntu 18.04, **2 CPU**, 8 GB RAM (доступно ~4 GB), 80 GB HDD.
+  IP `194.87.99.126`, Docker 28.1.1. CPU=2 — подтверждённый лимит: staging-профиль
+  урезанный (без ChromaDB на старте, gunicorn/celery с ограниченной concurrency).
+- SSH: доступ есть (ключи на месте, taximeter@194.87.99.126).
+- DNS: панель reg.ru (аккаунт tikhonov-a-s@yandex.ru), 3 домена, `gobeauty.site`
+  до 28.02.2027. **Новые записи не нужны** — существующие поддомены покрывают всё:
+  `dev` → Ayla backend (жив), `api-dev` → bot backend (502, поднять),
+  `miniapp-dev` → Mini App (старый билд есть, обновить до dev).
+- ~~⚠️ Диск заполнен на 95%~~ → **РЕШЕНО 2026-07-20:** docker builder prune
+  освободил ~39 GB (build cache); диск 43% занято, 43 GB свободно.
 
 **Блокирует:** весь спринт 2 (S0–S6): прогон link coverage, round-trip событий,
 деньги на staging, smoke-runner, rehearsal.
