@@ -50,16 +50,33 @@ class CreateBookingService:
         self._booking_window_policy = booking_window_policy or DefaultBookingWindowPolicy()
 
     def execute(self, dto: CreateBookingDTO) -> BookingResultDTO:
-        specialist, service = self._validate_pre_transaction(dto)
+        specialist, resolved = self._validate_pre_transaction(dto)
 
-        end_at = dto.start_at + timedelta(minutes=service.duration_minutes)
+        end_at = dto.start_at + timedelta(minutes=resolved.duration_minutes)
         target_interval = TimeInterval(start_at=dto.start_at, end_at=end_at)
+
+        # AMD-019 persistence option A (v1.13.0): the booking carries
+        # EXACTLY ONE typed service reference. Marketplace branch → the
+        # marketplace Service row (the atomic write path keeps its
+        # original shape for direct callers); salon branch →
+        # Appointment.salon_service (by id, from the resolver).
+        from services.models import Service
+        service = None
+        salon_service_id = None
+        if resolved.kind == "marketplace":
+            service = Service.objects.get(
+                id=resolved.service_id, specialist=specialist,
+            )
+        else:
+            salon_service_id = resolved.service_id
 
         appointment, payment = self._execute_atomic(
             dto=dto,
             specialist=specialist,
             service=service,
             target_interval=target_interval,
+            resolved=resolved,
+            salon_service_id=salon_service_id,
         )
 
         logger.info(
@@ -72,16 +89,15 @@ class CreateBookingService:
             status=appointment.status,
             start_at=appointment.start_datetime,
             end_at=appointment.end_datetime,
-            service_name=service.name,
-            duration_minutes=service.duration_minutes,
-            price=str(service.price),
+            service_name=resolved.name,
+            duration_minutes=resolved.duration_minutes,
+            price=str(resolved.price),
             payment_id=payment.id if payment else None,
             payment_client_secret=None,
         )
 
     def _validate_pre_transaction(self, dto: CreateBookingDTO):
         from users.models import SpecialistProfile
-        from services.models import Service
 
         try:
             specialist = SpecialistProfile.objects.select_related("user").get(
@@ -92,33 +108,69 @@ class CreateBookingService:
                 f"Specialist {dto.specialist_id} not found"
             )
 
-        try:
-            service = Service.objects.get(
-                id=dto.service_id, specialist=specialist,
-            )
-        except Service.DoesNotExist:
-            raise ServiceNotActiveError(
-                f"Service {dto.service_id} not found"
-            )
-
         if not specialist.is_booking_enabled:
             raise SpecialistNotActiveError("Specialist is not accepting bookings")
 
         if specialist.status != SpecialistProfile.ProfileStatus.ACTIVE:
             raise SpecialistNotActiveError("Specialist profile is not active")
 
-        if not service.is_active:
-            raise ServiceNotActiveError("This service is not available for booking")
+        # AMD-019 — shared resolver (services/service_resolver.py), the
+        # SAME one the internal slots path uses: marketplace Service
+        # first (UUID priority), then SalonService with an active
+        # SpecialistService link in the booking tenant context.
+        from services.service_resolver import (
+            ServiceUnavailableForSpecialistError,
+            resolve_bookable_service,
+        )
+        try:
+            resolved = resolve_bookable_service(
+                service_id=dto.service_id,
+                specialist=specialist,
+                tenant=specialist.tenant,
+            )
+        except ServiceUnavailableForSpecialistError:
+            # Same public shape as before: marketplace-inactive and
+            # missing/unlinked/unavailable all map to the existing
+            # 422 SERVICE_NOT_ACTIVE (no existence leak).
+            raise ServiceNotActiveError(
+                "This service is not available for booking"
+            )
+
+        if resolved.duration_minutes is None:
+            # Degenerate catalog row (no duration anywhere in the
+            # cascade) — cannot price a slot; treat as unavailable.
+            raise ServiceNotActiveError(
+                "This service is not available for booking"
+            )
 
         self._booking_window_policy.validate_booking_window(dto.start_at)
 
         if dto.start_at.tzinfo is None:
             raise ValueError("start_at must be timezone-aware (UTC)")
 
-        return specialist, service
+        return specialist, resolved
 
     @transaction.atomic
-    def _execute_atomic(self, dto, specialist, service, target_interval: TimeInterval):
+    def _execute_atomic(
+        self,
+        dto,
+        specialist,
+        service,
+        target_interval: TimeInterval,
+        *,
+        resolved=None,
+        salon_service_id=None,
+    ):
+        """Atomic write path.
+
+        ``service`` is the marketplace Service for marketplace bookings
+        (and the ONLY argument direct callers pass — tests build bookings
+        this way). ``resolved`` + ``salon_service_id`` are the AMD-019
+        additions: when ``resolved`` is given the snapshot stamps from it
+        (identical fields for marketplace), and salon-catalog bookings
+        persist with ``Appointment.salon_service`` instead of
+        ``Appointment.service``.
+        """
         from appointments.models import Appointment, SpecialistTimeOff
         from payments.models import Payment
 
@@ -197,15 +249,30 @@ class CreateBookingService:
             status=BookingStatus.COMPLETED.value,
         ).exists()
 
-        # Platform fee snapshot (flat 90₽, AYLA-DEC-0001)
-        platform_fee = self._commission_policy.get_platform_fee(service.price)
+        # Platform fee snapshot (flat 90₽, AYLA-DEC-0001). With the
+        # resolver present (the execute() path) the snapshot stamps from
+        # the NORMALIZED resolution result — identical values for
+        # marketplace bookings, the salon offer's own name/duration/
+        # price for salon bookings. Direct callers without a resolver
+        # keep the marketplace object fields.
+        if resolved is not None:
+            snapshot_name = resolved.name
+            snapshot_duration = resolved.duration_minutes
+            snapshot_price = resolved.price
+            snapshot_buffer = resolved.buffer_after_minutes
+        else:
+            snapshot_name = service.name
+            snapshot_duration = service.duration_minutes
+            snapshot_price = service.price
+            snapshot_buffer = getattr(service, "buffer_after_minutes", 0)
+        platform_fee = self._commission_policy.get_platform_fee(snapshot_price)
         snapshot = BookingSnapshot.create(
-            service_name=service.name,
-            duration_minutes=service.duration_minutes,
-            price=service.price,
+            service_name=snapshot_name,
+            duration_minutes=snapshot_duration,
+            price=snapshot_price,
             platform_fee=platform_fee,
             specialist_timezone=specialist.timezone,
-            buffer_after_minutes=getattr(service, "buffer_after_minutes", 0),
+            buffer_after_minutes=snapshot_buffer,
         )
 
         # Grant-on-first-booking — single platform-wide rule (#1014).
@@ -293,11 +360,15 @@ class CreateBookingService:
         )
 
         # Create appointment. tenant_id mirrors specialist.tenant_id —
-        # the canonical "owner tenant" of the row.
+        # the canonical "owner tenant" of the row. AMD-019 option A:
+        # exactly one typed service reference — marketplace bookings
+        # fill ``service``, salon-catalog bookings fill ``salon_service``
+        # (the CHECK constraint enforces the XOR at the DB level).
         appointment = Appointment.objects.create(
             client_id=dto.client_id,
             specialist_id=dto.specialist_id,
-            service_id=dto.service_id,
+            service_id=service.id if service is not None else None,
+            salon_service_id=salon_service_id,
             tenant_id=specialist.tenant_id,
             start_datetime=target_interval.start_at,
             end_datetime=target_interval.end_at,

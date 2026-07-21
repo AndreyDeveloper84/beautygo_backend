@@ -15,8 +15,16 @@ class — no ``X-External-User-ID`` second factor needed.
 """
 from __future__ import annotations
 
+from django.http import Http404
+from rest_framework.decorators import action
+from rest_framework.response import Response
+
+from users.models import SpecialistProfile
 from users.permissions import IsInternalBearer
-from users.specialists_api import SpecialistViewSet
+from users.specialists_api import (
+    SpecialistViewSet,
+    compute_specialist_day_slots,
+)
 
 
 class InternalSpecialistViewSet(SpecialistViewSet):
@@ -33,3 +41,29 @@ class InternalSpecialistViewSet(SpecialistViewSet):
     # IsInternalBearer runs (same rationale as masters/internal #92).
     authentication_classes: list = []
     permission_classes = [IsInternalBearer]
+
+    @action(detail=True, methods=['get'], url_path='slots')
+    def slots(self, request, pk=None) -> Response:
+        """AMD-019 — internal slots resolve ``service_id`` through the
+        shared resolver (marketplace Service OR SalonService with an
+        active SpecialistService link in the tenant).
+
+        The public action stays untouched: its service filter
+        (marketplace M2M) would 404 a SalonService id BEFORE any slot
+        math, so here the specialist is fetched through the base
+        queryset (same active+available constraints, no service filter)
+        and the service is validated by the resolver itself.
+        """
+        try:
+            specialist = self.get_queryset().get(pk=pk)
+        except SpecialistProfile.DoesNotExist:
+            raise Http404
+        payload, error = compute_specialist_day_slots(
+            specialist,
+            service_id=request.query_params.get('service_id'),
+            date_param=request.query_params.get('date'),
+            allow_salon_fallback=True,
+        )
+        if error is not None:
+            return Response({'error': error}, status=error.pop('_status'))
+        return Response(payload)

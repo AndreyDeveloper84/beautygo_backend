@@ -493,8 +493,9 @@ class PaymentRetryService:
             )
 
         description = (
-            f"Ayla: {appointment.service.name} у "
-            f"{appointment.specialist.display_name}"
+            "Ayla: "
+            f"{appointment.service.name if appointment.service_id else appointment.snapshot_service_name}"
+            f" у {appointment.specialist.display_name}"
         )
         # 54-ФЗ receipt — mandatory for every YooKassa payment session,
         # not just first-attempt.
