@@ -167,6 +167,8 @@
 
 ## Журнал обновлений
 
+- **2026-07-21 (день 4, вечер):** AMD-019 в dev (`6b224574`, merge W1: resolver + salon persistence + webhook router `3a7c7ea3`) + дрифт-миграции закоммичены (`eb4cb85f`). Деплой на staging: users.0015/services.0014/appointments.0014 применены. **SM-01/SM-02 пройдены фактом**: слоты через резолвер (17 слотов SalonService), create → salon_service FK + snapshots + AWAITING_PAYMENT + pending Payment, cancel → cancelled + холд-хук no-op по дизайну (холда не было), outbox booking.created/cancelled — pending (гейт выключен). Осталось для полного денежного e2e: тест-карта (ручной шаг miniapp).
+
 - **2026-07-21 (день 4):** +1 SP — W3 покрытие staging 58/58 (закрывает W3 на 100%). Staging-ops: MAX webhook подписан и жив (ingress→worker→global discovery), OPENAI_PROXY — concierge отвечает моделью (~4с тёплый путь), consumer groups Redis созданы вручную (W3-кандидат на бутстрап). Канонизирован AMD-019 (контракты v1.13.0, `301b2d48`): resolver + persistence option A. W1: commit 1 `531d3020` (resolver+slots) принят, commit 2 (persistence) в работе. Запущен трек «Память и дифференциация»: выделен W7, первое задание ADR-0012. Done: 196/219 (90%).
 
 - **2026-07-20 (день 3):** +2 SP — W3 booking.no_show в dev `e27802d` (consumer #13, миграция 0016, S4-пин → положительный; 5581/0). AMD-018 записан в контракты (v1.11.0, ded1d750). Done: 195/219 (89%).
