@@ -1,8 +1,8 @@
 # Волна 0 — Frozen Contracts пилота (2026-08-15)
 
-**Contract version:** 1.11.0
+**Contract version:** 1.12.0
 **Frozen at:** 2026-07-18 (после пакета amendments READY-WITH-AMENDMENTS)
-**Last amendment:** AMD-018 (2026-07-20, booking.no_show как событие #13)
+**Last amendment:** AMD-019 (2026-07-21, резолюция service_id на internal booking surface)
 **Effective for pilot:** 2026-08-15
 **Владелец:** оркестратор (Chief Product Architect); изменения — только amendment'ом (§13).
 
@@ -605,3 +605,55 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
 - **Delivery gate:** включение `OUTBOX_EXTERNAL_DELIVERY_TOPICS` и replay
   backlog — только оркестратор, после merge.
 - **Решение:** оркестратор (по эскалации W3 от 2026-07-20).
+
+
+### AMD-019 — Резолюция `service_id` на internal booking surface (2026-07-21, MINOR)
+
+- **Причина (находка оркестратора при staging-подъёме SM-01):** пилотный
+  каталог живёт в `SalonService` (58) + `SpecialistService` (232 связки,
+  #1044), а booking-контур Ayla резолвит `service_id` против старой
+  marketplace-модели `Service` — **0 строк** в пилоте. Два слоя одного
+  разрыва: (1) `SpecialistFilter.filter_by_service` фильтрует по пустому M2M
+  `services` → slots 404 ещё до вычисления; (2)
+  `compute_specialist_day_slots` и `CreateBookingService` резолвят
+  `Service.objects.get(id=service_id, specialist=…)` → всегда промах.
+- **Решение владельца (GO 2026-07-21):** fallback-резолюция `service_id`
+  **только на internal booking surface** Ayla: сначала marketplace
+  `Service`; если не найден — `SalonService`, но **только при активной
+  `SpecialistService`-связке** с выбранным специалистом **в текущем
+  tenant**. При совпадении UUID приоритет у marketplace `Service`.
+- **Контракт #1027 не меняется:** `specialist_id` — Ayla UUID специалиста;
+  `service_id` — UUID услуги каталога Ayla; новые поля и endpoint'ы не
+  добавляются.
+- **Границы:** `SalonService`+`SpecialistService` остаются каноническим
+  пилотным каталогом; marketplace `Service` НЕ становится вторым источником
+  истины; dual-write запрещён; миграция услуг запрещена; intake не меняется;
+  публичные API не меняются.
+- **Scope:** общий resolver (один модуль) используется slots и create
+  **одинаково**. Reschedule — только если реально принимает/проверяет
+  `service_id`. Cancel — не трогается (не использует `service_id`).
+- **Ошибки:** нет специалиста в tenant → прежний 404; услуга не существует
+  или не связана со специалистом → доменная ошибка «service unavailable for
+  specialist»; услуги другого tenant не раскрываются.
+- **СТОП-УСЛОВИЕ (подтверждено разведкой оркестратора заранее):**
+  `Appointment.service` — обязательный FK на marketplace `Service`
+  (PROTECT, NOT NULL). Снапшоты (`snapshot_service_name` и др.) штампуются
+  при создании, но строку `Appointment` без `services.Service.id` сохранить
+  нельзя. Поэтому: create **понимает** тот же `service_id` через общий
+  resolver (резолюция + валидация связки + доменные ошибки идентичны
+  slots), но **останавливается на границе персистентности** — запись не
+  создаётся, SalonService.id в FK marketplace-модели не пишется, схема
+  nullable/polymorphic НЕ делается. Поведение create для SalonService-id —
+  осмысленная доменная ошибка на границе персистентности (НЕ «service not
+  found» — услуга валидна), структура кода позволяет включить запись одной
+  точкой после решения по схеме.
+- **Отложенное решение (владелец, отдельным amendment'ом):** модель
+  персистентности записи по SalonService-каталогу. Варианты, снятые
+  разведкой: (A) exactly-one FK — `Appointment.service → null=True` +
+  `Appointment.salon_service FK (PROTECT)` + CHECK «ровно один», чтение на
+  снапшоты (6 точек: records_api, payments ×3, reviews, — снапшоты уже
+  штампуются); (B) write-through проекция в marketplace `Service` —
+  **отклонён** (скрытый dual-write, утечка пилотного каталога в публичные
+  API); (C) slots-only — SM-01 остаётся заблокирован.
+- **Решение:** владелец продукта (GO от 2026-07-21), канонизация —
+  оркестратор. Исполнитель: W1 (Ayla backend, booking seam).
