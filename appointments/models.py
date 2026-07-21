@@ -61,6 +61,23 @@ class Appointment(models.Model):
         'services.Service',
         on_delete=models.PROTECT,
         related_name='appointments',
+        # AMD-019 (v1.13.0, persistence option A): nullable — a booking
+        # carries EXACTLY ONE typed service reference: this marketplace FK
+        # OR ``salon_service`` (enforced by the
+        # appointment_exactly_one_service_source CHECK). Snapshot fields
+        # are the historical/commercial source; the FK is identity +
+        # referential integrity.
+        null=True, blank=True,
+    )
+    # AMD-019 persistence option A — the salon-catalog reference for
+    # bookings created against SalonService/SpecialistService (internal
+    # surface). NULL for marketplace bookings. PROTECT: catalog rows
+    # referenced by a booking are never hard-deleted.
+    salon_service = models.ForeignKey(
+        'services.SalonService',
+        on_delete=models.PROTECT,
+        related_name='salon_appointments',
+        null=True, blank=True,
     )
 
     start_datetime = models.DateTimeField()
@@ -164,6 +181,21 @@ class Appointment(models.Model):
             models.CheckConstraint(
                 check=models.Q(tenant__isnull=False),
                 name='appt_tenant_not_null',
+            ),
+            # AMD-019 (v1.13.0, persistence option A): exactly one typed
+            # service reference per booking — marketplace ``service`` XOR
+            # ``salon_service``. Both NULL and both set are rejected at
+            # the DB level. Existing rows (service set, salon NULL) are
+            # valid as-is — no data migration.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(
+                        service__isnull=False, salon_service__isnull=True,
+                    ) | models.Q(
+                        service__isnull=True, salon_service__isnull=False,
+                    )
+                ),
+                name='appointment_exactly_one_service_source',
             ),
         ]
 

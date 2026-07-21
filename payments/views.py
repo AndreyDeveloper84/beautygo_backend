@@ -388,8 +388,12 @@ class PaymentCreateView(APIView):
             )
 
         idempotency_key = _idempotency_key_from(request)
+        # AMD-019 option A: salon bookings read the name from the
+        # booking-time snapshot (marketplace behavior unchanged).
         description = (
-            f'BeautyGO: {appointment.service.name} у {appointment.specialist.display_name}'
+            'BeautyGO: '
+            f'{appointment.service.name if appointment.service_id else appointment.snapshot_service_name}'
+            f' у {appointment.specialist.display_name}'
         )
 
         # 54-ФЗ receipt — mandatory for production payments in RF.
@@ -1449,8 +1453,9 @@ class InternalPaymentCreateView(APIView):
                 amount=amount,
                 appointment_id=appointment.id,
                 description=(
-                    f'Ayla: {appointment.service.name} у '
-                    f'{appointment.specialist.display_name}'
+                    'Ayla: '
+                    f'{appointment.service.name if appointment.service_id else appointment.snapshot_service_name}'
+                    f' у {appointment.specialist.display_name}'
                 ),
                 return_url=serializer.validated_data['return_url'],
                 idempotency_key=_idempotency_key_from(request),

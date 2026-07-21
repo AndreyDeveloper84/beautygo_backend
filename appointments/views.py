@@ -423,7 +423,12 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 try:
                     appointment = (
                         Appointment.objects
-                        .select_for_update()
+                        # of=('self',) — lock ONLY the base table. AMD-019
+                        # made Appointment.service nullable → select_related
+                        # now emits an outer join on the nullable side,
+                        # and bare FOR UPDATE is rejected by Postgres
+                        # (same trap as billing.charges' nullable invoice).
+                        .select_for_update(of=("self",))
                         .select_related('specialist', 'client', 'service')
                         .get(pk=pk)
                     )
@@ -532,7 +537,12 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                 try:
                     appointment = (
                         Appointment.objects
-                        .select_for_update()
+                        # of=('self',) — lock ONLY the base table. AMD-019
+                        # made Appointment.service nullable → select_related
+                        # now emits an outer join on the nullable side,
+                        # and bare FOR UPDATE is rejected by Postgres
+                        # (same trap as billing.charges' nullable invoice).
+                        .select_for_update(of=("self",))
                         .select_related('specialist', 'client', 'service')
                         .get(pk=pk)
                     )

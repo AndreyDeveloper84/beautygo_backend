@@ -159,7 +159,6 @@ def _handle_booking_domain(exc: Exception) -> Optional[Response]:
             CancellationNotAllowedError,
             InvalidStateTransitionError,
             RescheduleNotAllowedError,
-            SalonServiceBookingNotPersistableError,
             ServiceNotActiveError,
             SlotNotAvailableError,
             SpecialistNotActiveError,
@@ -167,14 +166,6 @@ def _handle_booking_domain(exc: Exception) -> Optional[Response]:
     except ImportError:  # pragma: no cover
         return None
 
-    if isinstance(exc, SalonServiceBookingNotPersistableError):
-        # AMD-019 stop-condition — 409, dedicated stable slug (the
-        # service is valid; persistence model pending owner decision).
-        return _envelope(
-            ErrorCode.SALON_SERVICE_BOOKING_UNSUPPORTED.value,
-            str(exc),
-            status_code=409,
-        )
     if isinstance(exc, SlotNotAvailableError):
         return _envelope(
             ErrorCode.SLOT_NOT_AVAILABLE.value, str(exc), status_code=409,
