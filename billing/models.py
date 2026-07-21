@@ -121,6 +121,10 @@ class SpecialistSubscription(models.Model):
     # with save_payment_method:true succeeds (webhook payment.succeeded).
     payment_method_id = models.CharField(max_length=200, blank=True, default="")
     payment_method_saved_at = models.DateTimeField(null=True, blank=True)
+    # Card read-model for the master billing screen (C2) — filled from
+    # the provider's payment_method data on save, never from user input.
+    card_last4 = models.CharField(max_length=4, blank=True, default="")
+    card_brand = models.CharField(max_length=32, blank=True, default="")
 
     # Dunning (wave 2): fail → retry T+1d, T+3d → past_due.
     failed_attempts = models.PositiveSmallIntegerField(default=0)
