@@ -50,10 +50,34 @@ class CreateBookingService:
         self._booking_window_policy = booking_window_policy or DefaultBookingWindowPolicy()
 
     def execute(self, dto: CreateBookingDTO) -> BookingResultDTO:
-        specialist, service = self._validate_pre_transaction(dto)
+        specialist, resolved = self._validate_pre_transaction(dto)
 
-        end_at = dto.start_at + timedelta(minutes=service.duration_minutes)
+        # AMD-019 STOP-CONDITION — persistence boundary. A SalonService-
+        # catalog booking is valid (resolution + link validation passed,
+        # identically to the slots path), but ``Appointment.service`` is
+        # a mandatory FK to the marketplace ``Service`` model and writing
+        # a SalonService.id there is forbidden (no dual-write, no
+        # polymorphic schema). This is the SINGLE point a later owner
+        # decision (schema variant A) replaces with the real write.
+        if resolved.kind == "salon":
+            from appointments.domain.exceptions import (
+                SalonServiceBookingNotPersistableError,
+            )
+            raise SalonServiceBookingNotPersistableError(
+                "Запись по этой услуге пока недоступна онлайн — "
+                "модель хранения согласуется (AMD-019)."
+            )
+
+        end_at = dto.start_at + timedelta(minutes=resolved.duration_minutes)
         target_interval = TimeInterval(start_at=dto.start_at, end_at=end_at)
+
+        # Marketplace branch only below: fetch the Service row the
+        # resolver already validated (one query; the atomic write path
+        # keeps its original shape for direct callers).
+        from services.models import Service
+        service = Service.objects.get(
+            id=resolved.service_id, specialist=specialist,
+        )
 
         appointment, payment = self._execute_atomic(
             dto=dto,
@@ -72,16 +96,15 @@ class CreateBookingService:
             status=appointment.status,
             start_at=appointment.start_datetime,
             end_at=appointment.end_datetime,
-            service_name=service.name,
-            duration_minutes=service.duration_minutes,
-            price=str(service.price),
+            service_name=resolved.name,
+            duration_minutes=resolved.duration_minutes,
+            price=str(resolved.price),
             payment_id=payment.id if payment else None,
             payment_client_secret=None,
         )
 
     def _validate_pre_transaction(self, dto: CreateBookingDTO):
         from users.models import SpecialistProfile
-        from services.models import Service
 
         try:
             specialist = SpecialistProfile.objects.select_related("user").get(
@@ -92,30 +115,47 @@ class CreateBookingService:
                 f"Specialist {dto.specialist_id} not found"
             )
 
-        try:
-            service = Service.objects.get(
-                id=dto.service_id, specialist=specialist,
-            )
-        except Service.DoesNotExist:
-            raise ServiceNotActiveError(
-                f"Service {dto.service_id} not found"
-            )
-
         if not specialist.is_booking_enabled:
             raise SpecialistNotActiveError("Specialist is not accepting bookings")
 
         if specialist.status != SpecialistProfile.ProfileStatus.ACTIVE:
             raise SpecialistNotActiveError("Specialist profile is not active")
 
-        if not service.is_active:
-            raise ServiceNotActiveError("This service is not available for booking")
+        # AMD-019 — shared resolver (services/service_resolver.py), the
+        # SAME one the internal slots path uses: marketplace Service
+        # first (UUID priority), then SalonService with an active
+        # SpecialistService link in the booking tenant context.
+        from services.service_resolver import (
+            ServiceUnavailableForSpecialistError,
+            resolve_bookable_service,
+        )
+        try:
+            resolved = resolve_bookable_service(
+                service_id=dto.service_id,
+                specialist=specialist,
+                tenant=specialist.tenant,
+            )
+        except ServiceUnavailableForSpecialistError:
+            # Same public shape as before: marketplace-inactive and
+            # missing/unlinked/unavailable all map to the existing
+            # 422 SERVICE_NOT_ACTIVE (no existence leak).
+            raise ServiceNotActiveError(
+                "This service is not available for booking"
+            )
+
+        if resolved.duration_minutes is None:
+            # Degenerate catalog row (no duration anywhere in the
+            # cascade) — cannot price a slot; treat as unavailable.
+            raise ServiceNotActiveError(
+                "This service is not available for booking"
+            )
 
         self._booking_window_policy.validate_booking_window(dto.start_at)
 
         if dto.start_at.tzinfo is None:
             raise ValueError("start_at must be timezone-aware (UTC)")
 
-        return specialist, service
+        return specialist, resolved
 
     @transaction.atomic
     def _execute_atomic(self, dto, specialist, service, target_interval: TimeInterval):

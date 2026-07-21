@@ -112,6 +112,9 @@ class ErrorCode(str, Enum):
     CANCELLATION_NOT_ALLOWED = "CANCELLATION_NOT_ALLOWED"
     SPECIALIST_NOT_ACTIVE = "SPECIALIST_NOT_ACTIVE"
     SERVICE_NOT_ACTIVE = "SERVICE_NOT_ACTIVE"
+    # AMD-019 stop-condition: valid SalonService-catalog booking stopped
+    # at the persistence boundary (Appointment.service FK barrier).
+    SALON_SERVICE_BOOKING_UNSUPPORTED = "SALON_SERVICE_BOOKING_UNSUPPORTED"
     BOOKING_ERROR = "BOOKING_ERROR"
 
     # --- Reviews (spec §Отзывы) ---
