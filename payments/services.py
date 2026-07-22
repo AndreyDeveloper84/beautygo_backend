@@ -128,11 +128,21 @@ class YooKassaService:
         if receipt:
             payload['receipt'] = receipt
 
-        # Split payment per-master (D8): transfer the specialist's income
-        # to their own sub-account; the platform keeps the flat fee.
+        # Split payment per-master (D8) — YooKassa split contract: the
+        # transfer carries the FULL payment amount to the master's
+        # sub-account, and the platform's commission as
+        # ``platform_fee_amount`` withheld inside the transfer (the sum
+        # of transfers must equal the payment amount — the previous
+        # income-only amount was rejected provider-side with
+        # marketplace.transfers_amount_not_equal_payment_sum). The
+        # master receives amount − platform_fee_amount; the platform
+        # keeps the flat 90₽ fee (AYLA-DEC-0001 unchanged).
         payload['transfers'] = [{
             'account_id': specialist_account_id,
-            'amount': {'value': str(specialist_income), 'currency': 'RUB'},
+            'amount': {'value': str(amount), 'currency': 'RUB'},
+            'platform_fee_amount': {
+                'value': str(platform_fee), 'currency': 'RUB',
+            },
         }]
 
         try:
