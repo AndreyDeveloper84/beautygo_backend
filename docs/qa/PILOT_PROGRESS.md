@@ -27,10 +27,10 @@
 | W1 Booking Core | **100%** | 32/32 | — | 0 | ✅ очередь P1–P8 в dev (2ebde419); 2240 тестов зелёных |
 | W2 Billing | **100%** | 30/30 | — | 0 | ✅ в dev (26835bee); shim удалён, канон 112/112 |
 | W3 Bot Backend | **100%** | 33/33 | — | 0 | ✅ покрытие staging 58/58 (оркестратор 21.07) |
-| W4 Mini App | **93%** | 40/43 | — | 3 SP | ✅ денежный UX сквозной с отображением карты; booking seam |
+| W4 Mini App | **100%** | 43/43 | — | 0 | ✅ booking flow live в dev (`f0815f1`→`445035b`), FE на staging |
 | W5 Concierge | **100%** | 20/20 | — | 0 | ✅ фазы 1+2 в dev (a5e215d): память в диалоге |
 | W6 QA/Docs | **95%** | 19/20 | 1 SP/нед | 1 SP | ✅ smoke-runner + runbook в dev (105ffd1b) |
-| **ИТОГО код** | **90%** | **196/219** | 1 SP | 42 SP | |
+| **ИТОГО код** | **91%** | **199/219** | 1 SP | 42 SP | |
 | Внешнее | **0%** | 0/16 | — | 16 SP | юрист/KYC/мастера |
 
 ## W1 — Ayla Booking Core (100%)
@@ -102,7 +102,7 @@
 | Привязка карты мастера (D7 UI) | 2 | W4 | ✅ |
 | pay-debt CTA (погашение долга) | 1 | W4 | ✅ |
 | Отображение привязанной карты (AMD-017) | 1 | W4 | ✅ |
-| Booking flow на реальном API (3) | 5 | ⏳ |
+| Booking flow на реальном API (3) | 5 | ✅ (merge 445035b, FE на staging) |
 | UX-статусы оплаты (3) | 2 | ✅ |
 | C1 нейтральное сообщение (3) | 1 | ✅ |
 | Profile polish + notification prefs | 3 | ✅ |
@@ -166,6 +166,8 @@
 | Staging: прогон link + флип гейта | 3 | оркестратор | нед. 3 |
 
 ## Журнал обновлений
+
+- **2026-07-22 (день 5, вечер):** +3 SP — **W4 booking flow на реальном API в dev** (`f0815f1` → merge `445035b`): матрица ошибок, два payment-пути, идемпотентность, 174/174 тестов. **W4 закрыт на 100% — весь код Wave 0 в dev.** Попутные staging-мерджи дня: payment_required passthrough (`37e2b8a`), masters mirror 4 мастера (`53f7f02`), sentinel exclusion (`094677f`, beat честный `tenants_failed: 0`). FE задеплоен; click-through W4 с minted initData — следующий шаг. Done: 199/219 (91%).
 
 - **2026-07-22 (день 5):** **Round-trip Ayla→bot ЗЕЛЁНЫЙ.** Цепь доказана живьём на staging: booking.created/confirmed → outbox (HMAC) → bot ingest 200 → RemoteBookingProxy (идемпотентно, dedup) → 2 напоминания PENDING (T−24h/T−2h) привязанному MAX-пользователю; booking.cancelled → proxy cancelled. Три staging-находки закрыты: (1) tenant middleware strict_block → opt-out `/api/v1/internal/events/` (`5d4c604`, cross-zone W5 по задаче W3); (2) EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN/PROXY_DEPTH не были объявлены в settings → `fca0419`; (3) image drift: pip-слой с ai-core 0.6.0 вместо пина 0.9.0 — пересборка --no-cache. Урок ops: `git pull` на сервере молча не применялся из-за локальной правки compose — теперь fetch + ff-only.
 
