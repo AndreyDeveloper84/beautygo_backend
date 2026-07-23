@@ -160,9 +160,15 @@ class TestFlatPlatformFee:
         assert result['platform_fee'] == Decimal('90.00')
         assert result['specialist_income'] == Decimal('1910.00')
         payload = sdk_payment.create.call_args.args[0]
+        # YooKassa split contract: the transfer carries the FULL payment
+        # amount; the platform's 90₽ is withheld INSIDE the transfer as
+        # platform_fee_amount (sum(transfers) == payment amount —
+        # staging finding: marketplace.transfers_amount_not_equal_payment_sum).
+        # Master receives 2000 − 90 = 1910 (economics unchanged).
         assert payload['transfers'] == [{
             'account_id': 'yk-subacc-master-1',
-            'amount': {'value': '1910.00', 'currency': 'RUB'},
+            'amount': {'value': '2000.00', 'currency': 'RUB'},
+            'platform_fee_amount': {'value': '90.00', 'currency': 'RUB'},
         }]
         assert payload['metadata']['platform_fee'] == '90.00'
         assert payload['capture'] is False  # two-stage hold
