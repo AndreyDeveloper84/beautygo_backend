@@ -10,7 +10,7 @@
 Архитектура: Two Apps (Ayla 🟢 client + Ayla Pro 🟣 specialist)
 Пилот:       Пенза → Казахстан (Phase 5)
 Backend:     Python 3.12+ / Django 5.0 + DRF · PostgreSQL 16 · Redis 7 · Celery
-AI:          Claude Sonnet 4 (Anthropic) + OpenAI GPT-4 Vision (food scanning)
+AI:          Claude Sonnet 4 (Anthropic)+ OpenAI GPT-4 Vision (food scanning)
 Mobile:      React Native (репо beautygo-mobile, rename→ayla-mobile pending)
 Запуск:      make up (Docker) / make init (первый раз) · Тесты: make test · Lint: make lint
 ```
