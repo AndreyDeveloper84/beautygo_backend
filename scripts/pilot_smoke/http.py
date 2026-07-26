@@ -10,7 +10,7 @@ import hmac
 import json
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from urllib.parse import urlencode
 
 import requests
