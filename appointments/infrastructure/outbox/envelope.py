@@ -61,6 +61,10 @@ EVENT_VERSIONS: dict[str, int] = {
     "booking.confirmed": 1,
     "booking.cancelled": 1,
     "booking.rescheduled": 1,
+    # Wave 1 Simple Reschedule canonical topic — see OutboxEvent.Topic
+    # docstring. v1 payload: appointment_id, version, revision_id,
+    # old/new start+end, actor, basis, command_key.
+    "appointment.rescheduled": 1,
     "booking.completed": 1,
     "booking.no_show": 1,
     # B-1a (Block B, Variant C): renamed payment.confirmed →

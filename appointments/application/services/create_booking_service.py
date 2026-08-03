@@ -174,6 +174,14 @@ class CreateBookingService:
         from appointments.models import Appointment, SpecialistTimeOff
         from payments.models import Payment
 
+        # Advisory lock (Wave 1 Simple Reschedule hardening) — serialises
+        # all create/reschedule attempts for this specialist so the
+        # conflict check below can't race an empty-slot phantom insert
+        # (select_for_update on the conflict queryset locks nothing when
+        # no overlapping row exists yet). See infrastructure/db_locks.py.
+        from appointments.infrastructure.db_locks import specialist_advisory_lock
+        specialist_advisory_lock(dto.specialist_id)
+
         # Idempotency check
         existing = Appointment.objects.filter(
             idempotency_key=dto.idempotency_key

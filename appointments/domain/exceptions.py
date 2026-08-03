@@ -59,6 +59,47 @@ class CancellationNotAllowedError(BookingDomainError):
     pass
 
 
+class StaleVersionError(BookingDomainError):
+    """Raised when ``expected_version`` no longer matches the locked row.
+
+    Distinct from ``AppointmentTerminalError`` — the appointment is still
+    active, but some other write beat this one to it (e.g. another
+    reschedule). The caller should refetch and retry with the new version.
+    """
+    pass
+
+
+class AppointmentTerminalError(BookingDomainError):
+    """Raised when the locked row is terminal (cancelled/completed/no_show).
+
+    Distinct from ``RescheduleNotAllowedError`` — this specifically means
+    the appointment reached a terminal state *concurrently*, between the
+    pre-lock validation and the row lock (e.g. a racing cancel committed
+    first). ``RescheduleNotAllowedError`` covers the non-race case (e.g.
+    still PENDING, never confirmed).
+    """
+    pass
+
+
+class ExpectedVersionRequiredError(BookingDomainError):
+    """Raised when ``expected_version`` is omitted and the temporary
+    mobile compatibility gate (``settings.RESCHEDULE_MOBILE_UNVERSIONED_
+    ALLOWED``) has been turned off.
+
+    Distinct from ``StaleVersionError`` — this fires when the caller
+    provides no version to check at all (the omission itself is
+    rejected), not when a provided version fails to match.
+    """
+    pass
+
+
+class TenantMismatchError(BookingDomainError):
+    """Raised when the locked row's tenant doesn't match the caller's
+    tenant context. Views map this to a 404 (info-hiding), mirroring the
+    cross-tenant checks in AppointmentViewSet.complete()/no_show()."""
+    pass
+
+
 class BillingEligibilityError(BookingDomainError):
     """C1 — billing refused a NEW booking (subscription past due).
 
