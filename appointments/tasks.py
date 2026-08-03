@@ -49,6 +49,14 @@ EVENT_HANDLERS: dict[str, EventHandler] = {
     OutboxEvent.Topic.BOOKING_CONFIRMED: _log_handler("booking.confirmed"),
     OutboxEvent.Topic.BOOKING_CANCELLED: _log_handler("booking.cancelled"),
     OutboxEvent.Topic.BOOKING_RESCHEDULED: _log_handler("booking.rescheduled"),
+    # Wave 1 canonical topic — log-only in-process stub. Real push
+    # notification + cache invalidation stay wired to the legacy
+    # BOOKING_RESCHEDULED topic below (via _register_notification_handlers)
+    # so they fire exactly once per reschedule; this topic exists purely
+    # so cross-service consumption can be turned on later (Block C
+    # publisher gate, OUTBOX_EXTERNAL_DELIVERY_TOPICS) without the
+    # dispatcher dead-lettering it in the meantime.
+    OutboxEvent.Topic.APPOINTMENT_RESCHEDULED: _log_handler("appointment.rescheduled"),
     OutboxEvent.Topic.BOOKING_COMPLETED: _log_handler("booking.completed"),
     OutboxEvent.Topic.BOOKING_NO_SHOW: _log_handler("booking.no_show"),
     # B-1a — renamed payment.confirmed → payment.captured (Variant C).

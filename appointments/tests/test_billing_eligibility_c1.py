@@ -173,7 +173,9 @@ class TestEligibilityRefusal:
         _fake_billing(monkeypatch, lambda **kw: FakeEligibilityResult(
             ok=False, reason="SUBSCRIPTION_PAST_DUE",
         ))
-        r = _internal_api().post(
+        c = _internal_api()
+        c.defaults["HTTP_X_IDEMPOTENCY_KEY"] = "c1-cancel-not-blocked"
+        r = c.post(
             f"/api/v1/internal/appointments/{booking_id}/cancel/",
             {"reason": "client changed mind"}, format="json",
         )

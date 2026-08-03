@@ -169,7 +169,8 @@ def s1_booking_crud(cfg: SmokeConfig, http: SmokeHttp, probes: Probes, ctx: Ctx,
         add(Check(S, "create payment_required=true → AWAITING_PAYMENT", PASS,
                   f"id={body2.get('id')}"))
         http.ayla("POST", f"/api/v1/internal/appointments/{body2.get('id')}/cancel/",
-                  json_body={"reason": "smoke cleanup"}, external_user=ext)
+                  json_body={"reason": "smoke cleanup"}, external_user=ext,
+                  idempotency_key=f"smoke-cancel-{uuid.uuid4()}")
     elif resp2.status == 422:
         add(Check(S, "create payment_required=true", SKIP,
                   "422 ONLINE_PAYMENT_UNAVAILABLE — у специалиста нет yookassa sub-account"))
@@ -182,7 +183,8 @@ def s1_booking_crud(cfg: SmokeConfig, http: SmokeHttp, probes: Probes, ctx: Ctx,
 
     # --- cancel
     resp3 = http.ayla("POST", f"/api/v1/internal/appointments/{booking_id}/cancel/",
-                      json_body={"reason": "smoke cleanup"}, external_user=ext)
+                      json_body={"reason": "smoke cleanup"}, external_user=ext,
+                      idempotency_key=f"smoke-cancel-{uuid.uuid4()}")
     if resp3.ok:
         verify = http.ayla("GET", f"/api/v1/internal/me/bookings/{booking_id}/",
                            external_user=ext)

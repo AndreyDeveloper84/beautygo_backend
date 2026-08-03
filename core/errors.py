@@ -34,6 +34,10 @@ class ErrorCode(str, Enum):
     INVALID_FORMAT = "INVALID_FORMAT"
     MISSING_PARAM = "MISSING_PARAM"
     INVALID_PARAM = "INVALID_PARAM"
+    # Internal (bot) reschedule/cancel — X-Idempotency-Key is mandatory,
+    # not just recommended (see appointments.internal_api). Same
+    # missing-required-header shape as TENANT_REQUIRED (users.middleware).
+    IDEMPOTENCY_KEY_REQUIRED = "IDEMPOTENCY_KEY_REQUIRED"
 
     # --- Authentication / authorization (spec §Аутентификация) ---
     AUTH_ERROR = "AUTH_ERROR"
@@ -109,6 +113,10 @@ class ErrorCode(str, Enum):
     RESCHEDULE_TOO_LATE = "RESCHEDULE_TOO_LATE"
     BOOKING_WINDOW_INVALID = "BOOKING_WINDOW_INVALID"
     RESCHEDULE_NOT_ALLOWED = "RESCHEDULE_NOT_ALLOWED"
+    # Wave 1 concurrency contract — see appointments.domain.exceptions.
+    STALE_VERSION = "STALE_VERSION"
+    APPOINTMENT_TERMINAL = "APPOINTMENT_TERMINAL"
+    EXPECTED_VERSION_REQUIRED = "EXPECTED_VERSION_REQUIRED"
     CANCELLATION_NOT_ALLOWED = "CANCELLATION_NOT_ALLOWED"
     SPECIALIST_NOT_ACTIVE = "SPECIALIST_NOT_ACTIVE"
     SERVICE_NOT_ACTIVE = "SERVICE_NOT_ACTIVE"
