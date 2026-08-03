@@ -29,10 +29,15 @@ from .application.services.cancel_reschedule_service import (
 )
 from .application.services.create_booking_service import CreateBookingService
 from .domain.exceptions import (
+    AppointmentTerminalError,
+    BookingWindowError,
     CancellationNotAllowedError,
+    ExpectedVersionRequiredError,
     InvalidStateTransitionError,
     RescheduleNotAllowedError,
     SlotNotAvailableError,
+    StaleVersionError,
+    TenantMismatchError,
 )
 from .infrastructure.idempotency import (
     IdempotencyConflict,
@@ -699,6 +704,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         serializer = AppointmentRescheduleSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        request_tenant = getattr(request, "tenant", None)
         dto = RescheduleBookingDTO(
             booking_id=appointment.id,
             initiator_user_id=request.user.id,
@@ -706,10 +712,18 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             initiator_role=(
                 "specialist" if request.user.is_specialist else "client"
             ),
+            expected_version=serializer.validated_data.get('expected_version'),
+            # Defense-in-depth tenant boundary (Wave 1) — mirrors the
+            # post-lock tenant assertion in complete()/no_show(); those
+            # comments explain why get_queryset's filter alone isn't
+            # enough (select_for_update bypasses it).
+            tenant_id=request_tenant.id if request_tenant else None,
+            command_key=request.META.get('HTTP_X_IDEMPOTENCY_KEY') or None,
+            basis="mobile_app",
         )
 
         try:
-            self.reschedule_booking_service_class().execute(dto)
+            result = self.reschedule_booking_service_class().execute(dto)
         except SlotNotAvailableError as e:
             return error_response(
                 "SLOT_NOT_AVAILABLE", str(e), status_code=409,
@@ -722,6 +736,42 @@ class AppointmentViewSet(viewsets.GenericViewSet):
             return error_response(
                 "INVALID_STATUS", str(e), status_code=422,
             )
+        except BookingWindowError as e:
+            # New failure mode (Wave 1) — the shared guard now also
+            # checks min-ahead/horizon/grid-alignment on reschedule.
+            # Caught locally (not left to the global exception handler)
+            # so the idempotency wrapper's record_response still runs —
+            # same status/code the global handler would produce anyway.
+            return error_response(
+                "BOOKING_WINDOW_INVALID", str(e), status_code=400,
+            )
+        except StaleVersionError as e:
+            return error_response(
+                "STALE_VERSION", str(e), status_code=409,
+            )
+        except AppointmentTerminalError as e:
+            return error_response(
+                "APPOINTMENT_TERMINAL", str(e), status_code=409,
+            )
+        except ExpectedVersionRequiredError as e:
+            # Only reachable once settings.RESCHEDULE_MOBILE_UNVERSIONED_
+            # ALLOWED is flipped to False (default True today — see that
+            # setting's docstring).
+            return error_response(
+                "EXPECTED_VERSION_REQUIRED", str(e), status_code=400,
+            )
+        except TenantMismatchError:
+            # Info-hiding — same rationale as complete()/no_show(): don't
+            # reveal that a booking exists in another tenant.
+            return error_response(
+                "NOT_FOUND", "Appointment not found.", status_code=404,
+            )
 
         appointment.refresh_from_db()
-        return success_response(AppointmentDetailSerializer(appointment).data)
+        data = AppointmentDetailSerializer(appointment).data
+        # revision_id has no FK on Appointment (it's the audit row this
+        # command just created) — echoed from the service result rather
+        # than the serializer. version above already comes from the
+        # refreshed model field.
+        data['revision_id'] = str(result.revision_id)
+        return success_response(data)

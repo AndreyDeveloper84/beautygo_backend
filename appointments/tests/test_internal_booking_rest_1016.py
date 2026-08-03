@@ -40,9 +40,14 @@ def _reschedule_url(booking_id) -> str:
 
 
 def _future_iso(hours: int = 3) -> str:
-    return (
+    # Floored to the 30-minute slot grid — Wave 1 Simple Reschedule
+    # added a grid-alignment guard to reschedule (see test_services.py's
+    # _future_utc for the full rationale).
+    dt = (
         datetime.now(tz=timezone.utc) + timedelta(hours=hours)
-    ).replace(second=0, microsecond=0).isoformat()
+    ).replace(second=0, microsecond=0)
+    floored_minute = dt.minute - (dt.minute % 30)
+    return dt.replace(minute=floored_minute).isoformat()
 
 
 @pytest.fixture(autouse=True)
@@ -99,12 +104,15 @@ def service(specialist, category):
 def _api(
     *, bearer: str | None = VALID_TOKEN,
     external_user_id: str | None = EXTERNAL_USER_ID,
+    idem_key: str | None = None,
 ) -> APIClient:
     c = APIClient()
     if bearer is not None:
         c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {bearer}"
     if external_user_id is not None:
         c.defaults["HTTP_X_EXTERNAL_USER_ID"] = external_user_id
+    if idem_key is not None:
+        c.defaults["HTTP_X_IDEMPOTENCY_KEY"] = idem_key
     return c
 
 
@@ -248,7 +256,7 @@ class TestInternalCancelReschedule:
 
     def test_cancel_on_behalf(self, customer, specialist, service):
         booking_id = self._book(customer, specialist, service)
-        r = _api().post(
+        r = _api(idem_key="i1016-cancel-1").post(
             _cancel_url(booking_id), {"reason": "client changed mind"},
             format="json",
         )
@@ -256,13 +264,33 @@ class TestInternalCancelReschedule:
         appt = Appointment.objects.get(id=booking_id)
         assert appt.status == Appointment.Status.CANCELLED
 
+    def test_cancel_without_idempotency_key_400(
+        self, customer, specialist, service,
+    ):
+        # X-Idempotency-Key is mandatory on this path (targeted patch —
+        # AGENT_BE_ENFORCE_INTERNAL_IDEMPOTENCY_BEFORE_COMMIT.md).
+        booking_id = self._book(customer, specialist, service)
+        r = _api().post(
+            _cancel_url(booking_id), {"reason": "client changed mind"},
+            format="json",
+        )
+        assert r.status_code == 400, r.data
+        assert r.data["error"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+        assert Appointment.objects.get(id=booking_id).status != (
+            Appointment.Status.CANCELLED
+        )
+
     def test_cancel_other_customers_booking_404(
         self, customer, specialist, service,
     ):
         booking_id = self._book(customer, specialist, service)
         # A different external identity resolves to a different proxy
-        # user who does not own the booking → info-hidden 404.
-        r = _api(external_user_id="bot:stranger").post(
+        # user who does not own the booking → info-hidden 404. A valid
+        # X-Idempotency-Key is supplied so this exercises the ownership
+        # check, not the (separately tested) missing-key rejection.
+        r = _api(
+            external_user_id="bot:stranger", idem_key="i1016-cancel-stranger",
+        ).post(
             _cancel_url(booking_id), {"reason": "not mine"}, format="json",
         )
         assert r.status_code == 404
@@ -276,13 +304,50 @@ class TestInternalCancelReschedule:
             status=Appointment.Status.CONFIRMED,
         )
         new_start = _future_iso(72)
-        r = _api().post(
-            _reschedule_url(booking_id), {"new_start_datetime": new_start},
+        r = _api(idem_key="i1016-reschedule-1").post(
+            _reschedule_url(booking_id),
+            {"new_start_datetime": new_start, "expected_version": 1},
             format="json",
         )
         assert r.status_code == 200, r.data
         appt = Appointment.objects.get(id=booking_id)
         assert appt.start_datetime.isoformat() == new_start
+        assert appt.version == 2
+
+    def test_reschedule_missing_expected_version_400(
+        self, customer, specialist, service,
+    ):
+        # Wave 1 bot contract — unlike the mobile app, expected_version
+        # is REQUIRED on the internal reschedule path. A valid
+        # X-Idempotency-Key is supplied so this isolates the
+        # expected_version validation from the (separately tested)
+        # missing-key rejection, which also returns 400.
+        booking_id = self._book(customer, specialist, service, hours=48)
+        Appointment.objects.filter(id=booking_id).update(
+            status=Appointment.Status.CONFIRMED,
+        )
+        r = _api(idem_key="i1016-reschedule-novers").post(
+            _reschedule_url(booking_id),
+            {"new_start_datetime": _future_iso(72)},
+            format="json",
+        )
+        assert r.status_code == 400, r.data
+
+    def test_reschedule_without_idempotency_key_400(
+        self, customer, specialist, service,
+    ):
+        booking_id = self._book(customer, specialist, service, hours=48)
+        Appointment.objects.filter(id=booking_id).update(
+            status=Appointment.Status.CONFIRMED,
+        )
+        r = _api().post(
+            _reschedule_url(booking_id),
+            {"new_start_datetime": _future_iso(72), "expected_version": 1},
+            format="json",
+        )
+        assert r.status_code == 400, r.data
+        assert r.data["error"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+        assert Appointment.objects.get(id=booking_id).version == 1
 
 
 @pytest.mark.django_db
@@ -329,7 +394,7 @@ class TestInternalCreateNoPrepayment:
         r = _api().post(CREATE_URL, body, format="json")
         assert r.status_code == 201, r.data
         booking_id = r.data["data"]["id"]
-        r = _api().post(
+        r = _api(idem_key="i1016-noprepay-cancel").post(
             _cancel_url(booking_id), {"reason": "client changed mind"},
             format="json",
         )

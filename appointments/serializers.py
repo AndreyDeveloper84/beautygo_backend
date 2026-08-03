@@ -67,6 +67,11 @@ class AppointmentDetailSerializer(serializers.ModelSerializer):
             'id', 'status', 'start_datetime', 'end_datetime',
             'price', 'notes', 'cancellation_reason',
             'idempotency_key', 'is_first_visit',
+            # Optimistic-concurrency counter (Wave 1). Always present
+            # (model default=1) so exposing it here is a pure additive
+            # change for every existing AppointmentDetailSerializer
+            # consumer, not just reschedule responses.
+            'version',
             # Snapshot fields
             'snapshot_service_name', 'snapshot_duration_minutes',
             'snapshot_price', 'snapshot_commission_percent',
@@ -157,6 +162,24 @@ class WalkInCreateSerializer(serializers.Serializer):
 class AppointmentRescheduleSerializer(serializers.Serializer):
     """Validates input for rescheduling."""
     new_start_datetime = serializers.DateTimeField()
+    # Wave 1 Simple Reschedule — optional optimistic-concurrency check.
+    # Omitted entirely by existing clients (backward compatible); when
+    # present, RescheduleBookingService raises StaleVersionError (409)
+    # if it no longer matches the appointment's current version.
+    expected_version = serializers.IntegerField(required=False, min_value=1)
+
+
+class InternalAppointmentRescheduleSerializer(AppointmentRescheduleSerializer):
+    """Bot REST path variant of :class:`AppointmentRescheduleSerializer`.
+
+    Wave 1 contract for ``ai-bot-platform`` Phase 2 (owner decision):
+    ``expected_version`` is OPTIONAL for the existing mobile app (older
+    client builds never send it), but REQUIRED for the new internal bot
+    path — the bot always reads the appointment (and its current
+    ``version``) immediately before offering a reschedule, so there is
+    no legacy caller to stay compatible with here.
+    """
+    expected_version = serializers.IntegerField(required=True, min_value=1)
 
 
 class AppointmentCancelSerializer(serializers.Serializer):

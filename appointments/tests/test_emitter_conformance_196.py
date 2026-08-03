@@ -126,9 +126,14 @@ def client_user(db):
 
 
 def _future_utc(hours: int = 3) -> datetime:
-    return (
+    # Floored to the 30-minute slot grid — Wave 1 Simple Reschedule
+    # added a grid-alignment guard to reschedule (see test_services.py's
+    # _future_utc for the full rationale).
+    dt = (
         datetime.now(tz=timezone.utc) + timedelta(hours=hours)
     ).replace(second=0, microsecond=0)
+    floored_minute = dt.minute - (dt.minute % 30)
+    return dt.replace(minute=floored_minute)
 
 
 def _create_booking(client_user, specialist, service, *, start_in_hours: int = 3):
