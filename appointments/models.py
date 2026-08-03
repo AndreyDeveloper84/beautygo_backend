@@ -138,6 +138,14 @@ class Appointment(models.Model):
     # stuck captures (D9). Null until completed.
     completed_at = models.DateTimeField(null=True, blank=True)
 
+    # Optimistic-concurrency counter — Wave 1 Simple Reschedule hardening.
+    # Bumped by RescheduleBookingService on every successful reschedule;
+    # a caller may pass ``expected_version`` so a stale client (reading
+    # an old snapshot) gets a distinguishable 409 instead of silently
+    # clobbering a change it never saw. Starts at 1 (not 0) so "no
+    # expected_version yet" and "version 0" aren't confusable in logs.
+    version = models.PositiveIntegerField(default=1)
+
     class Meta:
         ordering = ['-start_datetime']
         verbose_name = 'Запись'
@@ -314,6 +322,81 @@ class Appointment(models.Model):
 
 
 # ---------------------------------------------------------------------------
+# AppointmentRevision — immutable reschedule audit trail (Wave 1)
+# ---------------------------------------------------------------------------
+
+class AppointmentRevision(models.Model):
+    """One row per successful reschedule — never updated or deleted.
+
+    ``version`` is the Appointment.version value AFTER this reschedule
+    (i.e. the revision that produced version N is the row with
+    ``version=N``). Combined with the unique constraint below, this
+    gives a gap-free, append-only history: for any appointment you can
+    reconstruct every time it moved, by whom, and why.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    appointment = models.ForeignKey(
+        Appointment,
+        on_delete=models.CASCADE,
+        related_name='revisions',
+    )
+    version = models.PositiveIntegerField(
+        help_text="Appointment.version AFTER this reschedule.",
+    )
+    old_start_datetime = models.DateTimeField()
+    old_end_datetime = models.DateTimeField()
+    new_start_datetime = models.DateTimeField()
+    new_end_datetime = models.DateTimeField()
+    # SET_NULL (not PROTECT) — matches Appointment.cancelled_by. An
+    # audit row must survive the actor's account being deleted; it just
+    # loses the FK link and keeps actor_role/basis for context.
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='appointment_revisions',
+    )
+    actor_role = models.CharField(
+        max_length=20,
+        help_text="'client' | 'specialist' | 'system' — who initiated.",
+    )
+    basis = models.CharField(
+        max_length=20,
+        default='mobile_app',
+        help_text="Request channel: 'mobile_app' | 'internal_bot' | 'system'.",
+    )
+    reason = models.CharField(max_length=500, blank=True, default="")
+    command_key = models.CharField(
+        max_length=128, blank=True, default="",
+        help_text=(
+            "X-Idempotency-Key of the command that produced this "
+            "revision, if any — ties the audit row back to the "
+            "originating request for cross-service tracing."
+        ),
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-version']
+        verbose_name = 'Ревизия переноса записи'
+        verbose_name_plural = 'Ревизии переноса записей'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['appointment', 'version'],
+                name='apptrevision_unique_appointment_version',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"{self.appointment_id} v{self.version}: "
+            f"{self.old_start_datetime:%Y-%m-%d %H:%M} -> "
+            f"{self.new_start_datetime:%Y-%m-%d %H:%M}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # SpecialistWorkingHours — weekly schedule template
 # ---------------------------------------------------------------------------
 
@@ -444,6 +527,13 @@ class OutboxEvent(models.Model):
         BOOKING_CONFIRMED = "booking.confirmed", "Запись подтверждена"
         BOOKING_CANCELLED = "booking.cancelled", "Запись отменена"
         BOOKING_RESCHEDULED = "booking.rescheduled", "Запись перенесена"
+        # Wave 1 Simple Reschedule — canonical replacement for
+        # BOOKING_RESCHEDULED (see 02_AGENT_KB_CANON_SYNC.md). Emitted
+        # ALONGSIDE the legacy topic (not instead of) until the bot-side
+        # consumer migrates; RescheduleBookingService writes both events
+        # in the same transaction. Do not remove BOOKING_RESCHEDULED
+        # until that migration lands.
+        APPOINTMENT_RESCHEDULED = "appointment.rescheduled", "Запись перенесена (canonical)"
         BOOKING_COMPLETED = "booking.completed", "Запись завершена"
         BOOKING_NO_SHOW = "booking.no_show", "Клиент не пришёл"
         # B-1a (Block B, Variant C): renamed payment.confirmed →

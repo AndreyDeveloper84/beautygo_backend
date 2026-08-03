@@ -378,6 +378,30 @@ BOOKING_MIN_AHEAD_MINUTES = 60          # Min booking lead time
 BOOKING_MAX_AHEAD_DAYS = 60             # Max days in advance
 BOOKING_SLOT_GRID_MINUTES = 30          # Slot interval grid
 
+# Temporary mobile compatibility gate (code review 2026-08-03): the
+# mobile reschedule endpoint accepts a request that omits
+# expected_version (older app builds never send it), which means two
+# such requests can silently lost-update each other — the advisory
+# lock only prevents physical slot collisions, not this. NOT a
+# permanent design choice — tracked as an open risk while True.
+#
+# Metric: every unversioned request logs
+# "reschedule.unversioned_command" (RescheduleBookingService) —
+# structured/JSON in prod (docs/OBSERVABILITY.md §2), so it's
+# countable per-environment via the log aggregator without a code
+# change. See docs/OBSERVABILITY.md §6 for the full rollout plan and
+# the alerting-table row that turns this into a tracked signal.
+#
+# Removal criterion (no fixed calendar date — we have no adoption data
+# yet to justify one; this is the objective trigger instead):
+#   flip to False once the unversioned-request share of total
+#   reschedule volume has stayed at or below the owner-set threshold
+#   (docs/OBSERVABILITY.md §6) for 14 consecutive days AND mobile
+#   confirms no actively-supported app store build predates the
+#   version field. Reversible in one line if EXPECTED_VERSION_REQUIRED
+#   volume spikes post-flip.
+RESCHEDULE_MOBILE_UNVERSIONED_ALLOWED = True
+
 # SMS.RU Configuration
 SMS_RU_API_ID = os.environ.get("SMS_RU_API_ID", "")
 SMS_ENABLED = os.environ.get("SMS_ENABLED", "false").lower() == "true"

@@ -101,3 +101,55 @@ scripts should poll `/health/ready/` until 200 before flipping traffic.
 | Liveness 503 for 30s | LB callback | P1 | Page on-call |
 | Readiness 503 for 5 min | Deploy never completed | P2 | Look at deploy log |
 | `auth_sensitive` throttle hits per minute > 100 | (PR2 logs) | P3 | Investigate brute-force |
+| `reschedule.unversioned_command` share of reschedule volume | > owner-set threshold, sustained | P3 | Review §6 rollout readiness |
+
+## 6. Temporary compatibility flags
+
+Flags kept for backward compatibility with older clients, each with an
+explicit metric and removal criterion — tracked here so they don't
+silently become permanent.
+
+### `RESCHEDULE_MOBILE_UNVERSIONED_ALLOWED` (`djangoProject/settings/base.py`)
+
+**Risk while `True` (default, current state):** the mobile reschedule
+endpoint accepts a request that omits `expected_version` (pre-Wave-1
+app builds never send it). Two such requests race with zero
+lost-update protection — the PostgreSQL advisory lock
+(`appointments/infrastructure/db_locks.py`) only serialises concurrent
+writes against the *same physical slot*; it does not stop the second
+of two sequential unversioned reschedules from silently overwriting
+the first's result. Flagged in code review 2026-08-03.
+
+**Metric:** `RescheduleBookingService._execute_atomic` logs
+`reschedule.unversioned_command` (with `booking_id`, `basis`,
+`current_version`) every time this path is taken — structured JSON in
+prod (§2), so an aggregator query can turn it into
+"unversioned requests ÷ total reschedule requests" per day without a
+code change.
+
+**Rollout plan:**
+1. **Now — data collection.** Flag stays `True`; the metric above runs
+   in production and establishes a real baseline (today: unknown, no
+   prior instrumentation existed for this).
+2. **Threshold decision (owner).** Once the baseline is visible, the
+   owner sets the acceptable ceiling (starting proposal: ≤1% of
+   reschedule volume) and cross-checks it against mobile app-store
+   version-adoption data — a low log rate that's actually "one whale
+   client polling in a retry loop" reads differently from "5% of real
+   users on old builds."
+3. **Flip.** When the metric has stayed at/below that threshold for 14
+   consecutive days AND mobile confirms no supported app-store build
+   predates the version field, set
+   `RESCHEDULE_MOBILE_UNVERSIONED_ALLOWED = False` in a normal deploy.
+   Omitted-version requests then get `400 EXPECTED_VERSION_REQUIRED`
+   (`EXPECTED_VERSION_REQUIRED` in `core/errors.py`) instead of
+   executing unprotected.
+4. **Post-flip watch.** Monitor the `EXPECTED_VERSION_REQUIRED` 400
+   rate for a week. A rate matching (or below) the pre-flip metric
+   confirms the threshold call was right. A spike means the baseline
+   undercounted real traffic — revert with the same one-line change
+   and re-open data collection.
+
+**Removal criterion:** step 3 above — an objective, metric-driven
+trigger rather than a fixed calendar date, since no adoption data
+exists yet to justify picking one.

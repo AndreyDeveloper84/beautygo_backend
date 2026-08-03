@@ -220,7 +220,9 @@ class TestJointC1:
         _subscription(
             spec.user, status=SpecialistSubscription.Status.PAST_DUE,
         )
-        r = _internal_api().post(
+        c = _internal_api()
+        c.defaults["HTTP_X_IDEMPOTENCY_KEY"] = "jw2-cancel-past-due"
+        r = c.post(
             f"/api/v1/internal/appointments/{booking_id}/cancel/",
             {"reason": "changed mind"}, format="json",
         )

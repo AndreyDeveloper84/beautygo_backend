@@ -145,6 +145,28 @@ def _send_if_template_exists(
     )
 
 
+def _invalidate_reschedule_cache(event: OutboxEvent, old_start_at: str | None) -> None:
+    """Invalidate the slot-availability cache for both the new and old
+    dates of a reschedule. Best-effort — ``SlotCacheService`` already
+    swallows its own errors and logs, so this just needs valid inputs.
+    """
+    from datetime import date
+
+    from appointments.infrastructure.cache.slot_cache import SlotCacheService
+
+    specialist_id = event.data.get("specialist_id")
+    if not specialist_id:
+        return
+    cache_svc = SlotCacheService()
+
+    new_start_at = event.data.get("start_at")
+    if new_start_at:
+        cache_svc.invalidate(specialist_id, date.fromisoformat(new_start_at[:10]))
+
+    if old_start_at:
+        cache_svc.invalidate(specialist_id, date.fromisoformat(old_start_at[:10]))
+
+
 # ---------------------------------------------------------------------------
 # Booking handlers
 # ---------------------------------------------------------------------------
@@ -236,7 +258,15 @@ def handle_booking_cancelled(event: OutboxEvent) -> None:
 
 
 def handle_booking_rescheduled(event: OutboxEvent) -> None:
-    """Notify both sides when a booking moves to a new time."""
+    """Notify both sides when a booking moves to a new time, and
+    invalidate the slot cache for BOTH the old and new dates.
+
+    Cache invalidation was missing on this (the actually-running)
+    dispatch path — ``infrastructure/outbox_worker.py`` has the correct
+    old+new logic but that worker is not scheduled (CLAUDE.md gate).
+    Without this, a reschedule left the old date's slot looking booked
+    and the new date's slot looking free until the 60s TTL expired.
+    """
     appointment = _load_appointment(event)
     if appointment is None:
         return
@@ -252,6 +282,8 @@ def handle_booking_rescheduled(event: OutboxEvent) -> None:
         parsed = parse_datetime(old_start_at)
         if parsed is not None:
             ctx["old_date_time"] = parsed.strftime("%H:%M %d.%m")
+
+    _invalidate_reschedule_cache(event, old_start_at)
 
     _send_if_template_exists(
         user=appointment.client,

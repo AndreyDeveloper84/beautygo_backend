@@ -92,10 +92,18 @@ def client_user(db):
 
 
 def _future_utc(hours: int = 3) -> datetime:
-    """Returns a datetime `hours` from now in UTC, rounded to the minute."""
-    return (
+    """Returns a datetime `hours` from now in UTC, floored to the
+    30-minute slot grid (BOOKING_SLOT_GRID_MINUTES). Wave 1 Simple
+    Reschedule added a grid-alignment guard to both create and
+    reschedule (appointments/application/services/_booking_guards.py)
+    — floor-to-grid (not just round-to-minute) keeps this helper
+    producing valid inputs for both.
+    """
+    dt = (
         datetime.now(tz=timezone.utc) + timedelta(hours=hours)
     ).replace(second=0, microsecond=0)
+    floored_minute = dt.minute - (dt.minute % 30)
+    return dt.replace(minute=floored_minute)
 
 
 # ---------------------------------------------------------------------------

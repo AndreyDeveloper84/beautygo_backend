@@ -66,6 +66,29 @@ class RescheduleBookingDTO:
     # ADR-0009 actor consistently across both flows. Default "client"
     # keeps pre-#486 test fixtures green.
     initiator_role: str = "client"
+    # Wave 1 Simple Reschedule hardening (all optional — omitting them
+    # preserves the exact pre-Wave-1 behaviour for any existing caller):
+    #
+    # Optimistic-concurrency check. When set, the service compares it
+    # against the LOCKED row's Appointment.version and raises
+    # StaleVersionError on mismatch instead of silently overwriting a
+    # change the caller never saw.
+    expected_version: Optional[int] = None
+    # Defense-in-depth tenant boundary — mirrors AppointmentViewSet
+    # .complete()/.no_show()'s post-lock tenant assertion. None means
+    # "no tenant context to check against" (e.g. the bot-facing internal
+    # endpoint, which has no client tenant scope — same rationale as
+    # CreateBookingDTO.request_tenant_id for the bot path).
+    tenant_id: Optional[UUID] = None
+    # X-Idempotency-Key of the originating request, if any. Stored on
+    # the AppointmentRevision audit row for cross-service tracing —
+    # NOT used for idempotency itself (that's handled at the view layer
+    # via infrastructure/idempotency.py before the service ever runs).
+    command_key: Optional[str] = None
+    # Request channel — distinct from initiator_role (who acted) in
+    # that this captures HOW/WHERE (mobile app vs bot-facing internal
+    # API vs a future system-initiated reschedule).
+    basis: str = "mobile_app"
 
 
 @dataclass(frozen=True)
@@ -101,6 +124,24 @@ class BookingResultDTO:
     price: str                  # Decimal as string to avoid float precision
     payment_id: Optional[UUID] = None
     payment_client_secret: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RescheduleResultDTO:
+    """Returned by RescheduleBookingService.execute() after success.
+
+    ``version``/``revision_id`` let the API layer echo the exact values
+    just written inside the lock (targeted patch — see 03_AGENT
+    ...FINAL_TARGETED_PATCH_BEFORE_COMMIT.md item 2) without a second
+    query. ``correlation_id`` is the value shared by BOTH the canonical
+    ``appointment.rescheduled`` and legacy ``booking.rescheduled``
+    events emitted for this command (item 1) — exposed mainly for
+    tests/tracing, not required by API consumers.
+    """
+    booking_id: UUID
+    version: int
+    revision_id: UUID
+    correlation_id: UUID
 
 
 @dataclass(frozen=True)
