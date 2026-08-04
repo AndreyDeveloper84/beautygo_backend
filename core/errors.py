@@ -163,6 +163,7 @@ class ErrorCode(str, Enum):
 
     # --- Resource ---
     NOT_FOUND = "NOT_FOUND"
+    CONFLICT = "CONFLICT"
 
     # --- Rate limiting ---
     THROTTLED = "THROTTLED"

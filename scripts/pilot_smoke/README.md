@@ -17,6 +17,7 @@ read-only SQL-пробы). Ничего не деплоит, ничего не �
 |---|---|---|
 | `AYLA_BASE_URL` | базовый URL Ayla (напр. `https://dev.gobeauty.site`) | Ayla-сценарии SKIP |
 | `AYLA_INTERNAL_API_TOKEN` | internal Bearer (Ayla) | Ayla-сценарии SKIP |
+| `AYLA_IDENTITY_PROVISIONING_TOKEN` | provisioning-only Bearer для `POST /api/v1/internal/users/bind-external/` (E2E-BOT-02B); отдельный секрет, НЕ равный `AYLA_INTERNAL_API_TOKEN` (равенство = fail-closed, system check `users.E001`), на bot-platform не деплоится | endpoint выключен (fail-closed 403); авто-проб bind в раннере НЕТ — endpoint проверяется вручную по runbook |
 | `BOT_BASE_URL` | базовый URL bot backend | bot-сценарии SKIP |
 | `MAX_BOT_TOKEN` | токен MAX-бота — минт `MaxInitData` для customer API | customer/master ноги SKIP |
 | `AYLA_OUTBOUND_HMAC_SECRET` (= `EVENT_INGEST_HMAC_SECRET` бота) | подпись ingest-проб | S4 SKIP |

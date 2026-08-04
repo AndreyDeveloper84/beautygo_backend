@@ -44,8 +44,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from users.models import Profile, SpecialistProfile, User
-from users.permissions import IsInternalBearer
-from users.response import error_response
+from users.permissions import IsIdentityProvisioningBearer, IsInternalBearer
+from users.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
 
@@ -173,3 +173,146 @@ class InternalUserProfileView(APIView):
                 {"display_name": display_name, "avatar_url": avatar_url},
             ).data
         )
+
+
+class _BindExternalIdentityRequestSerializer(serializers.Serializer):
+    """Request body for POST /internal/users/bind-external/.
+
+    Both sides are named explicitly in the body — same defense-in-depth
+    idea as ``client_id`` on the payments surface: a leaked bearer alone
+    is not enough to silently re-point an identity, the caller must know
+    the target ``ayla_user_id``.
+    """
+
+    external_user_id = serializers.CharField(max_length=200)
+    ayla_user_id = serializers.UUIDField()
+
+
+class _BindExternalIdentityResponseSerializer(serializers.Serializer):
+    external_user_id = serializers.CharField()
+    ayla_user_id = serializers.UUIDField()
+    proxy_user_id = serializers.UUIDField()
+    proxy_created = serializers.BooleanField()
+    bound = serializers.BooleanField()
+
+
+class InternalBindExternalIdentityView(APIView):
+    """POST /api/v1/internal/users/bind-external/ — E2E-BOT-02B.
+
+    Establishes the Phase C proxy→real binding: after this call,
+    ``resolve_external_user(external_user_id)`` — and therefore every
+    ``IsBotServiceWithVerifiedClient`` surface (records, booking,
+    payments, nutrition) — resolves the bound REAL account instead of
+    the isolated proxy.
+
+    PROVISIONING-ONLY (security review P1-1). The request body names
+    the target account explicitly and the endpoint performs no
+    server-side proof of ownership, so it is gated by
+    ``IsIdentityProvisioningBearer`` — a credential provisioned
+    independently of the general bot service token. The standard BOT
+    runtime credential (``AYLA_INTERNAL_API_TOKEN``) is rejected here
+    by construction. Production bot-driven binding is NOT supported
+    until a verified ownership flow exists (AYLA-DEC-0016 §6: relink
+    only for verified identity references); until then this endpoint
+    serves trusted provisioning / E2E bootstrap / ops only.
+
+    Contract narrowing (security review P1-2): the target must be a
+    real, active, non-soft-deleted CLIENT account — binding an external
+    identity to a staff/admin or proxy account is rejected with the
+    same info-hidden 404 as an unknown id. Binding is one-way: a
+    re-bind to a different account is a 409 conflict, never a silent
+    overwrite; concurrent binds serialize on the proxy row lock
+    (P1-1). Success/idempotent outcomes are audited ATOMICALLY with
+    the binding (the audit write joins the binding transaction and its
+    failure rolls the binding back); conflict/rejected outcomes are
+    audited best-effort since no mutation happened (P1-3).
+
+    Bearer-only auth (IsIdentityProvisioningBearer); no
+    X-External-User-ID header — the identity being bound is named in
+    the body. Catalog-shaped lookup is N/A here: the operation is keyed
+    by the pair (external_user_id, ayla_user_id), both required.
+
+    Post-bind contract: the caller MUST persist the returned
+    ``ayla_user_id`` and send it wherever a ``client_id`` cross-check
+    applies (payments internal) — from the bind on, s2s surfaces
+    resolve the REAL account, and a stale proxy id 403s by design.
+    Binding re-points resolution only; pre-binding proxy-held data
+    (food logs, personal context, appointments) is NOT migrated —
+    a separate managed operation, Wave 2.
+
+    Responses: 200 bound (idempotent when re-binding the same pair),
+    400 malformed external_user_id, 403 missing/invalid bearer —
+    including a valid GENERAL bot token (DRF permission denial — the
+    endpoint declares no authentication classes, so a failed bearer
+    check is 403, not 401), 404 unknown/unbindable ayla_user_id,
+    409 external identity already bound to a DIFFERENT account or
+    naming an existing non-proxy account.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsIdentityProvisioningBearer]
+    serializer_class = _BindExternalIdentityRequestSerializer
+
+    @extend_schema(
+        operation_id="internal_users_bind_external",
+        tags=["internal"],
+        request=_BindExternalIdentityRequestSerializer,
+        responses={
+            200: _BindExternalIdentityResponseSerializer,
+            400: OpenApiResponse(description="Malformed external_user_id"),
+            403: OpenApiResponse(
+                description="Missing / invalid provisioning bearer token "
+                            "(the general bot service token is NOT accepted)",
+            ),
+            404: OpenApiResponse(description="ayla_user_id not bindable"),
+            409: OpenApiResponse(
+                description="External identity bound to a different account "
+                            "or names an existing non-proxy account",
+            ),
+        },
+        description=(
+            "PROVISIONING-ONLY: bind a bot external identity "
+            "(X-External-User-ID value) to a real Ayla account. Gated by a "
+            "dedicated provisioning credential — the standard BOT runtime "
+            "token cannot call this endpoint. Production bot-driven binding "
+            "is not supported until a verified ownership flow exists. "
+            "After binding, all on-behalf-of-user s2s endpoints resolve "
+            "the real account for this external id."
+        ),
+    )
+    def post(self, request: Request) -> Response:
+        from users.services import (
+            IdentityBindingError,
+            InvalidExternalUserIDError,
+            bind_external_identity,
+        )
+
+        serializer = _BindExternalIdentityRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        external_user_id = serializer.validated_data["external_user_id"]
+        ayla_user_id = serializer.validated_data["ayla_user_id"]
+
+        request_id = getattr(request, "request_id", None)
+        try:
+            proxy, created = bind_external_identity(
+                external_user_id, ayla_user_id,
+                initiator="identity_provisioning", request_id=request_id,
+            )
+        except InvalidExternalUserIDError as exc:
+            return error_response("VALIDATION_ERROR", str(exc))
+        except IdentityBindingError as exc:
+            return error_response(exc.code, str(exc), status_code=exc.status_code)
+
+        logger.info(
+            "internal.users.bind_external external_user_id=%s ayla_user_id=%s "
+            "proxy_created=%s request_id=%s",
+            external_user_id, ayla_user_id, created,
+            request_id or "-",
+        )
+        return success_response({
+            "external_user_id": external_user_id,
+            "ayla_user_id": str(ayla_user_id),
+            "proxy_user_id": str(proxy.pk),
+            "proxy_created": created,
+            "bound": True,
+        })

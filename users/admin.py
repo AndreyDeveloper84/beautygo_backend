@@ -75,10 +75,15 @@ class UserAdmin(BaseUserAdmin):
     list_filter = ('role', 'is_active', 'is_verified', 'is_staff')
     search_fields = ('phone', 'email', 'first_name', 'last_name', 'username')
     ordering = ('-date_joined',)
-    readonly_fields = ('date_joined', 'last_login')
+    readonly_fields = ('date_joined', 'last_login', 'is_proxy', 'linked_user')
 
     fieldsets = BaseUserAdmin.fieldsets + (
         ('BeautyGO', {'fields': ('role', 'phone', 'is_verified', 'deleted_at')}),
+        # Phase C binding (E2E-BOT-02B): visible for ops investigation,
+        # read-only — bind_external_identity / unlink_external_identity
+        # in users/services.py are the ONLY write paths (managed,
+        # audited operations per AYLA-DEC-0016 §4).
+        ('Identity binding', {'fields': ('is_proxy', 'linked_user')}),
     )
     add_fieldsets = BaseUserAdmin.add_fieldsets + (
         ('BeautyGO', {'fields': ('role', 'phone')}),
