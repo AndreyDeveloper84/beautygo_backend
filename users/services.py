@@ -6,6 +6,7 @@ import re
 from datetime import timedelta
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -79,9 +80,17 @@ def resolve_external_user(external_user_id: str) -> User:
     Used by service-to-service endpoints (e.g. nutrition/internal/scan/,
     the #1016 booking surface) when the caller acts on behalf of an
     external identity that does not yet have an Ayla account. The created
-    User has `is_proxy=True`, `role='client'`, `is_guest=False`. Phase C
-    migration links proxy → real account by setting `User.linked_proxy_id`
-    and migrating data.
+    User has `is_proxy=True`, `role='client'`, `is_guest=False`.
+
+    Phase C binding (E2E-BOT-02B): when the proxy row carries a
+    ``linked_user_id`` — set via ``bind_external_identity`` — the
+    resolver follows the pointer and returns the bound REAL account.
+    The mapping is explicit server-side state, so resolution is
+    deterministic: bound → the one bound user; unbound → the isolated
+    proxy (a controlled empty per-user result, never another
+    customer's data). A binding whose target was deactivated or
+    soft-deleted is treated as void — resolution falls back to the
+    isolated proxy (fail-closed).
 
     Format: a lowercase-alphanumeric source (e.g. `bot`, `formula`)
     followed by one or more colon-separated segments, each up to 64 chars
@@ -94,11 +103,354 @@ def resolve_external_user(external_user_id: str) -> User:
             "external_user_id must match '<source>:<id>[:<id>...]', "
             f"got {external_user_id!r}"
         )
-    user, _ = User.objects.get_or_create(
+    # select_related: bound identities follow the linked_user pointer on
+    # EVERY s2s call (IsBotServiceWithVerifiedClient + nutrition views) —
+    # one JOIN instead of a lazy extra SELECT per request.
+    user, _ = User.objects.select_related("linked_user").get_or_create(
         username=external_user_id,
         defaults={"role": "client", "is_proxy": True, "is_guest": False},
     )
+    if user.is_proxy and user.linked_user_id is not None:
+        linked = user.linked_user
+        # Fail-closed: a binding to a deactivated / soft-deleted account
+        # is void — fall back to the isolated proxy (controlled empty
+        # result) rather than resolving an anonymized identity.
+        if linked.is_active and linked.deleted_at is None:
+            return linked
     return user
+
+
+class IdentityBindingError(ValueError):
+    """Base error for bind_external_identity failures."""
+    code = "VALIDATION_ERROR"
+    status_code = 400
+
+
+class BindTargetNotFoundError(IdentityBindingError):
+    """ayla_user_id does not name an existing, bindable account."""
+    code = "NOT_FOUND"
+    status_code = 404
+
+
+class IdentityBindingConflictError(IdentityBindingError):
+    """The external identity is already bound to a DIFFERENT account."""
+    code = "CONFLICT"
+    status_code = 409
+
+
+def bind_external_identity(
+    external_user_id: str,
+    ayla_user_id,
+    *,
+    initiator: str = "internal_api",
+    request_id: str | None = None,
+) -> tuple[User, bool]:
+    """Bind an external identity to a real Ayla account (E2E-BOT-02B).
+
+    This is the write half of the Phase C proxy→real linking the
+    ``User.linked_user_id`` field was reserved for: the proxy row keyed
+    by ``external_user_id`` (lazily created with the same defaults as
+    ``resolve_external_user``) is pointed at the real account, and every
+    subsequent ``resolve_external_user`` call resolves the real account.
+
+    Rules (fail-closed, deterministic):
+
+    - Target must exist and be a REAL, active, non-soft-deleted CLIENT
+      account (``is_proxy=False``, ``role='client'`` — no proxy→proxy
+      chains, no binding to staff/admin accounts). Otherwise
+      ``BindTargetNotFoundError`` (info-hidden: same 404 whether the id
+      is unknown or unbindable).
+    - Re-binding to a DIFFERENT account raises
+      ``IdentityBindingConflictError`` — re-linking is a deliberate
+      support/privacy operation (decision-brief AYLA-DEC-0016), not a
+      side effect of a retry.
+    - Re-binding to the SAME account is a no-op (idempotent retry).
+
+    Race safety (P1-1): the proxy row is taken under
+    ``SELECT ... FOR UPDATE`` inside a transaction, and ALL checks are
+    repeated against the LOCKED row. Two concurrent binds to different
+    targets serialize on the row lock — the first commit wins, the
+    loser sees the stored binding and raises
+    ``IdentityBindingConflictError``. Concurrent binds to the same
+    target are both safe (one binding, idempotent). No partial state:
+    the binding write commits or rolls back as a unit.
+
+    Username collision (P2): if the external id matches the username of
+    an existing NON-proxy account (or the row stopped being a proxy
+    between lookup and lock), the bind is refused with a controlled
+    ``IdentityBindingConflictError`` — never an unhandled
+    ``IntegrityError`` from the ``user_linked_user_only_proxy``
+    constraint.
+
+    Audit (P1-3): mutating outcomes (created / idempotent) are audited
+    STRICTLY inside the binding transaction via
+    ``users.identity_events.emit_identity_binding(strict=True)`` — the
+    audit row commits or rolls back together with the binding, so a
+    committed binding ALWAYS has its audit row. Non-mutating outcomes
+    (conflict / rejected) are audited best-effort after the fact.
+    ``initiator`` names the trusted caller (``identity_provisioning`` /
+    ``e2e_fixture_bootstrap``); ``request_id`` carries the HTTP
+    correlation id when called over the s2s endpoint.
+
+    Post-bind contract (client_id): before binding, s2s surfaces
+    resolve the isolated proxy; after binding they resolve the REAL
+    account. The caller MUST persist the ``ayla_user_id`` returned here
+    and send THAT id (never the proxy id) wherever a ``client_id``
+    cross-check applies (payments internal surface) — a stale proxy id
+    403s by design.
+
+    Data migration (explicit non-goal): binding re-points RESOLUTION
+    only. It does NOT move pre-binding proxy-held data (food logs,
+    personal context, appointments recorded against the proxy) onto
+    the real account — that history stays on the proxy row and becomes
+    invisible through the resolver after binding. Migrating proxy-held
+    data is a separate managed operation (Wave 2 ticket; flagged for
+    the AYLA-DEC-0016 mapping audit).
+
+    Erasure scope (152-ФЗ, pre-prod gate — tracked in
+    `beautygo_backend#220
+    <https://github.com/AndreyDeveloper84/beautygo_backend/issues/220>`_):
+    the personal-data
+    delete/export surface (``users/personal_data_api.py``) operates on
+    ONE explicit ``user_id`` and does NOT walk linked proxies. Before
+    binding, proxy-held personal data was reachable (and erasable) via
+    the proxy id; after binding, callers resolve and send the REAL
+    account id, so the proxy row — and any personal data on it — falls
+    outside BOTH resolution AND the per-user delete/export scope.
+    Before the provisioning token is first enabled in production, the
+    domain owner must EITHER extend delete/export to cover linked
+    proxies OR refuse binding when the proxy holds personal data
+    (#220; AYLA-DEC-0016 §4).
+
+    Returns ``(proxy_user, created)`` where ``created`` tells whether the
+    proxy row was created by this call.
+    """
+    from users.identity_events import (
+        REASON_ALREADY_BOUND_OTHER,
+        REASON_ALREADY_BOUND_SAME,
+        REASON_BOUND,
+        REASON_EXTERNAL_ID_COLLISION,
+        REASON_INVALID_EXTERNAL_ID,
+        REASON_TARGET_NOT_BINDABLE,
+        emit_identity_binding,
+    )
+
+    if not external_user_id or not _EXTERNAL_USER_ID_RE.match(external_user_id):
+        emit_identity_binding(
+            actor=None, external_user_id=external_user_id or "",
+            result="rejected", reason=REASON_INVALID_EXTERNAL_ID,
+            initiator=initiator, request_id=request_id,
+        )
+        raise InvalidExternalUserIDError(
+            "external_user_id must match '<source>:<id>[:<id>...]', "
+            f"got {external_user_id!r}"
+        )
+    try:
+        target = User.objects.get(
+            pk=ayla_user_id, is_proxy=False, role="client",
+            is_active=True, deleted_at=None,
+        )
+    except (User.DoesNotExist, ValueError, TypeError, ValidationError) as exc:
+        emit_identity_binding(
+            actor=None, external_user_id=external_user_id,
+            target_user_id=ayla_user_id,
+            result="rejected", reason=REASON_TARGET_NOT_BINDABLE,
+            initiator=initiator, request_id=request_id,
+        )
+        raise BindTargetNotFoundError(
+            f"ayla_user_id {ayla_user_id!r} does not name a bindable account"
+        ) from exc
+
+    with transaction.atomic():
+        proxy, created = User.objects.get_or_create(
+            username=external_user_id,
+            defaults={"role": "client", "is_proxy": True, "is_guest": False},
+        )
+        # Lock the row BEFORE any check: a concurrent bind on the same
+        # external identity blocks here until the winner commits, then
+        # re-reads the authoritative state.
+        proxy = User.objects.select_for_update().get(pk=proxy.pk)
+        if not proxy.is_proxy:
+            # The external id names an existing REAL account (username
+            # collision) — or the row changed type between lookup and
+            # lock. Refusing to write linked_user here also keeps the
+            # user_linked_user_only_proxy constraint from surfacing as
+            # an unhandled IntegrityError.
+            outcome, reason = "collision", REASON_EXTERNAL_ID_COLLISION
+        else:
+            # Re-validate the target UNDER LOCK inside the transaction
+            # (lock order is always proxy → target, so no deadlock
+            # cycle): a soft-delete / deactivation landing between the
+            # pre-check above and the commit must not produce a binding
+            # — and a strict audit row — pointing at a deleted account.
+            target = (
+                User.objects.select_for_update()
+                .filter(
+                    pk=target.pk, is_proxy=False, role="client",
+                    is_active=True, deleted_at=None,
+                )
+                .first()
+            )
+            if target is None:
+                outcome, reason = "target_void", REASON_TARGET_NOT_BINDABLE
+            elif (
+                proxy.linked_user_id is not None
+                and proxy.linked_user_id != target.pk
+            ):
+                outcome, reason = "conflict", REASON_ALREADY_BOUND_OTHER
+            elif proxy.linked_user_id != target.pk:
+                proxy.linked_user = target
+                proxy.save(update_fields=["linked_user"])
+                outcome, reason = "created", REASON_BOUND
+            else:
+                outcome, reason = "idempotent", REASON_ALREADY_BOUND_SAME
+        if outcome in ("created", "idempotent"):
+            # STRICT + in-transaction: if the audit write fails, the
+            # exception propagates and the binding rolls back with it.
+            emit_identity_binding(
+                actor=target, external_user_id=external_user_id,
+                proxy_user_id=proxy.pk, target_user_id=target.pk,
+                result=outcome, reason=reason,
+                initiator=initiator, request_id=request_id,
+                strict=True,
+            )
+
+    if outcome in ("created", "idempotent"):
+        return proxy, created
+
+    # Non-mutating outcomes: nothing to keep consistent, audit is
+    # best-effort (a lost row is logged, not fatal).
+    emit_identity_binding(
+        actor=target, external_user_id=external_user_id,
+        proxy_user_id=proxy.pk,
+        target_user_id=ayla_user_id if target is None else target.pk,
+        result="conflict" if outcome == "conflict" else "rejected",
+        reason=reason,
+        initiator=initiator, request_id=request_id,
+    )
+    if outcome == "collision":
+        raise IdentityBindingConflictError(
+            f"external identity {external_user_id!r} names an existing "
+            "non-proxy account and cannot be bound"
+        )
+    if outcome == "target_void":
+        raise BindTargetNotFoundError(
+            f"ayla_user_id {ayla_user_id!r} does not name a bindable account"
+        )
+    raise IdentityBindingConflictError(
+        f"external identity {external_user_id!r} is already bound "
+        "to a different account"
+    )
+
+
+class ExternalIdentityNotFoundError(IdentityBindingError):
+    """The external identity has no proxy row to operate on."""
+    code = "NOT_FOUND"
+    status_code = 404
+
+
+def unlink_external_identity(
+    external_user_id: str,
+    *,
+    initiator: str = "identity_provisioning",
+    request_id: str | None = None,
+) -> tuple[User, bool]:
+    """Managed, audited unlink — the tombstone lifecycle for a binding.
+
+    Soft-deleting or deactivating the bound account makes the binding
+    VOID for resolution (resolver falls back to the isolated proxy)
+    but deliberately does NOT clear ``linked_user_id``: the pointer is
+    a tombstone preserving who the identity was bound to. Clearing it
+    is a deliberate support/privacy operation (AYLA-DEC-0016 §4 —
+    relink/deletion are managed operations with audit), not a side
+    effect of a retry, and it is the ONLY way to make a previously
+    bound external identity bindable to a different account.
+
+    Rules (fail-closed, deterministic):
+
+    - Unknown / malformed external identity →
+      ``InvalidExternalUserIDError`` / ``ExternalIdentityNotFoundError``.
+    - Proxy exists but unbound → idempotent no-op.
+    - Otherwise ``linked_user`` is cleared under the row lock and the
+      operation is audited STRICTLY inside the same transaction
+      (mutation and audit commit or roll back together).
+
+    There is deliberately NO HTTP endpoint for this operation: it runs
+    from trusted provisioning / ops code paths only.
+
+    Returns ``(proxy_user, was_bound)``.
+    """
+    from users.identity_events import (
+        REASON_ALREADY_UNBOUND,
+        REASON_EXTERNAL_IDENTITY_UNKNOWN,
+        REASON_INVALID_EXTERNAL_ID,
+        REASON_SUPPORT_UNLINK,
+        emit_identity_binding,
+    )
+
+    if not external_user_id or not _EXTERNAL_USER_ID_RE.match(external_user_id):
+        emit_identity_binding(
+            actor=None, external_user_id=external_user_id or "",
+            result="rejected", reason=REASON_INVALID_EXTERNAL_ID,
+            initiator=initiator, request_id=request_id,
+            operation="unlink_external_identity",
+        )
+        raise InvalidExternalUserIDError(
+            "external_user_id must match '<source>:<id>[:<id>...]', "
+            f"got {external_user_id!r}"
+        )
+
+    with transaction.atomic():
+        proxy = (
+            User.objects.select_for_update()
+            .filter(username=external_user_id, is_proxy=True)
+            .first()
+        )
+        if proxy is None:
+            unknown = True
+            was_bound = False
+        else:
+            unknown = False
+            was_bound = proxy.linked_user_id is not None
+            previous_target = proxy.linked_user  # fetch before clearing
+            previous_target_id = proxy.linked_user_id
+            if was_bound:
+                proxy.linked_user = None
+                proxy.save(update_fields=["linked_user"])
+            emit_identity_binding(
+                # The FORMER target is the actor when one exists (per
+                # the emit contract): "when was this client unbound"
+                # stays answerable via the (actor, -created_at) index,
+                # and the strict row falls under the (actor,
+                # client_event_id) dedup constraint. None only for the
+                # already-unbound no-op, where no target ever resolved.
+                actor=previous_target, external_user_id=external_user_id,
+                proxy_user_id=proxy.pk,
+                target_user_id=previous_target_id,
+                result="unlinked",
+                reason=(
+                    REASON_SUPPORT_UNLINK if was_bound
+                    else REASON_ALREADY_UNBOUND
+                ),
+                initiator=initiator, request_id=request_id,
+                operation="unlink_external_identity",
+                # Strict only for the MUTATING outcome — an
+                # already-unbound no-op has nothing to roll back,
+                # so its audit is best-effort per the emit contract.
+                strict=was_bound,
+            )
+
+    if unknown:
+        emit_identity_binding(
+            actor=None, external_user_id=external_user_id,
+            result="rejected", reason=REASON_EXTERNAL_IDENTITY_UNKNOWN,
+            initiator=initiator, request_id=request_id,
+            operation="unlink_external_identity",
+        )
+        raise ExternalIdentityNotFoundError(
+            f"external identity {external_user_id!r} has no proxy row"
+        )
+    return proxy, was_bound
 
 
 def get_or_create_walkin_client(name: str, phone: str | None = None) -> User:
@@ -118,7 +470,7 @@ def get_or_create_walkin_client(name: str, phone: str | None = None) -> User:
       real account without their consent (152-ФЗ). A real customer who
       walks in is recorded as a fresh proxy stub; they reconcile their
       walk-in history when they later claim the number via OTP (a
-      separate Phase-C ``linked_proxy_id`` follow-up, out of scope here).
+      separate Phase-C ``linked_user_id`` follow-up, out of scope here).
     - Otherwise create a proxy stub: ``is_proxy=True`` (Phase-C
       proxy→real linking applies the same as ``resolve_external_user``),
       ``is_guest=True`` (no credentials, cannot log in), ``role=client``.

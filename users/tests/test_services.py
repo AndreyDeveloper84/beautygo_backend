@@ -7,6 +7,8 @@ from django.utils import timezone
 from users.models import OTPCode, User
 from users.services import (
     AuthService,
+    BindTargetNotFoundError,
+    IdentityBindingConflictError,
     InvalidExternalUserIDError,
     InvalidOTPError,
     MaxAttemptsError,
@@ -14,6 +16,7 @@ from users.services import (
     PhoneAlreadyRegisteredError,
     RateLimitError,
     UserNotFoundError,
+    bind_external_identity,
     resolve_external_user,
 )
 
@@ -201,3 +204,121 @@ class TestResolveExternalUser:
     def test_invalid_forms_rejected(self, bad):
         with pytest.raises(InvalidExternalUserIDError):
             resolve_external_user(bad)
+
+
+def _real_user(username="real-customer", phone="+79997770001"):
+    return User.objects.create_user(
+        username=username, password="x", role="client", phone=phone,
+        is_proxy=False,
+    )
+
+
+@pytest.mark.django_db
+class TestResolveExternalUserBinding:
+    """E2E-BOT-02B: resolve_external_user follows the Phase C
+    ``linked_user`` binding deterministically — bound identity resolves
+    the real account, unbound identity keeps its isolated proxy."""
+
+    def test_unbound_proxy_resolves_to_isolated_proxy(self):
+        user = resolve_external_user("bot:max:unbound")
+        assert user.is_proxy is True
+        assert user.username == "bot:max:unbound"
+        assert user.linked_user_id is None
+
+    def test_bound_proxy_resolves_to_real_account(self):
+        real = _real_user()
+        bind_external_identity("bot:max:bound", real.pk)
+        resolved = resolve_external_user("bot:max:bound")
+        assert resolved.pk == real.pk
+        assert resolved.is_proxy is False
+
+    def test_resolution_is_deterministic_across_calls(self):
+        real = _real_user()
+        bind_external_identity("bot:max:det", real.pk)
+        first = resolve_external_user("bot:max:det")
+        second = resolve_external_user("bot:max:det")
+        assert first.pk == second.pk == real.pk
+
+    def test_binding_does_not_touch_other_external_ids(self):
+        real = _real_user()
+        bind_external_identity("bot:max:one", real.pk)
+        other = resolve_external_user("bot:max:two")
+        assert other.is_proxy is True
+        assert other.pk != real.pk
+
+    def test_real_user_without_binding_resolves_normally(self):
+        """A real account whose username happens to match the external-id
+        shape is returned as-is (no linked_user hop for non-proxy rows)."""
+        real = _real_user(username="bot:max:real")
+        resolved = resolve_external_user("bot:max:real")
+        assert resolved.pk == real.pk
+
+
+@pytest.mark.django_db
+class TestBindExternalIdentity:
+    """bind_external_identity — the write half of E2E-BOT-02B."""
+
+    def test_bind_creates_proxy_and_links(self):
+        real = _real_user()
+        proxy, created = bind_external_identity("bot:max:new", real.pk)
+        assert created is True
+        assert proxy.is_proxy is True
+        assert proxy.linked_user_id == real.pk
+
+    def test_bind_existing_unbound_proxy(self):
+        pre = resolve_external_user("bot:max:pre")
+        proxy, created = bind_external_identity("bot:max:pre", _real_user().pk)
+        assert created is False
+        assert proxy.pk == pre.pk
+        assert proxy.linked_user_id is not None
+
+    def test_rebind_same_target_is_idempotent(self):
+        real = _real_user()
+        bind_external_identity("bot:max:idem", real.pk)
+        proxy, created = bind_external_identity("bot:max:idem", real.pk)
+        assert created is False
+        assert proxy.linked_user_id == real.pk
+
+    def test_rebind_different_target_conflicts(self):
+        first = _real_user(username="real-a", phone="+79997770002")
+        second = _real_user(username="real-b", phone="+79997770003")
+        bind_external_identity("bot:max:conflict", first.pk)
+        with pytest.raises(IdentityBindingConflictError):
+            bind_external_identity("bot:max:conflict", second.pk)
+        # Failed rebind must not move the original binding.
+        assert resolve_external_user("bot:max:conflict").pk == first.pk
+
+    def test_target_must_be_real_account(self):
+        other_proxy = resolve_external_user("bot:max:target-proxy")
+        with pytest.raises(BindTargetNotFoundError):
+            bind_external_identity("bot:max:to-proxy", other_proxy.pk)
+
+    def test_target_soft_deleted_rejected(self):
+        real = _real_user()
+        real.is_active = False
+        real.deleted_at = timezone.now()
+        real.save(update_fields=["is_active", "deleted_at"])
+        with pytest.raises(BindTargetNotFoundError):
+            bind_external_identity("bot:max:to-deleted", real.pk)
+
+    def test_target_unknown_id_rejected(self):
+        from uuid import uuid4
+        with pytest.raises(BindTargetNotFoundError):
+            bind_external_identity("bot:max:to-missing", uuid4())
+
+    def test_invalid_external_id_rejected(self):
+        with pytest.raises(InvalidExternalUserIDError):
+            bind_external_identity("not-an-external-id", _real_user().pk)
+
+    def test_binding_to_soft_deleted_target_is_void(self):
+        """Fail-closed: if the bound real account is later deactivated /
+        soft-deleted (152-ФЗ delete flow), resolution reverts to the
+        isolated proxy instead of the anonymized identity."""
+        real = _real_user()
+        bind_external_identity("bot:max:void", real.pk)
+        real.is_active = False
+        real.deleted_at = timezone.now()
+        real.save(update_fields=["is_active", "deleted_at"])
+        resolved = resolve_external_user("bot:max:void")
+        assert resolved.is_proxy is True
+        assert resolved.pk != real.pk

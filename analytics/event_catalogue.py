@@ -84,6 +84,13 @@ SPECIALIST_UNFAVORITED = "specialist_unfavorited"
 # payload carries actor/scope, NEVER the deleted personal values.
 PERSONAL_DATA_DELETED = "personal_data_deleted"
 
+# ── Identity binding audit (E2E-BOT-02B hardening) ──
+# Durable audit trail for the internal proxy→real identity binding.
+# Server-side emit only (users/identity_events.emit_identity_binding);
+# payload carries operation/result/reason + id references, NEVER
+# bearer tokens or other secrets.
+EXTERNAL_IDENTITY_BOUND = "external_identity_bound"
+
 
 EVENT_NAMES: frozenset[str] = frozenset({
     BOOKING_VIEWED, BOOKING_CREATED, BOOKING_CANCELLED,
@@ -103,4 +110,5 @@ EVENT_NAMES: frozenset[str] = frozenset({
     SEARCH_PERFORMED, SPECIALIST_VIEWED,
     SPECIALIST_FAVORITED, SPECIALIST_UNFAVORITED,
     PERSONAL_DATA_DELETED,
+    EXTERNAL_IDENTITY_BOUND,
 })

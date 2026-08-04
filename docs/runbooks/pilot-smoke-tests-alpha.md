@@ -32,10 +32,31 @@ for v in DJANGO_SECRET_KEY GOOGLE_CLIENT_ID APPLE_CLIENT_ID \
          YOOKASSA_WEBHOOK_ALLOWED_IPS AYLA_INTERNAL_API_TOKEN; do
   printf '%-32s : %s\n' "$v" "${!v:+set}"
 done
+
+# 3a. Identity provisioning (E2E-BOT-02B) — OPTIONAL, off by default:
+printf '%-32s : %s\n' AYLA_IDENTITY_PROVISIONING_TOKEN \
+       "${AYLA_IDENTITY_PROVISIONING_TOKEN:+set}"
 ```
 
 `AYLA_INTERNAL_API_TOKEN` is technically not in `_REQUIRED_PROD_ENV`
 yet (see ai-bot-platform#868); set it manually.
+
+`AYLA_IDENTITY_PROVISIONING_TOKEN` gates
+`POST /api/v1/internal/users/bind-external/` (identity binding,
+provisioning-only). Empty = endpoint disabled (fail-closed, 403 for
+every caller). To provision: generate an independent secret
+(`openssl rand -hex 32`), set it ONLY on the Ayla side (never deploy
+to bot-platform), and keep it DISTINCT from
+`AYLA_INTERNAL_API_TOKEN` — equal values are a hard misconfiguration
+(system check `users.E001` fails at boot and the permission fails
+closed). Production bot-driven binding is not supported until a
+verified ownership flow exists; the token is for trusted
+provisioning / E2E bootstrap / ops only. Pre-prod gate: binding moves
+proxy-held personal data outside the per-user delete/export surface
+(152-ФЗ) — enabling the token in production requires the domain
+owner's decision to either extend erasure to linked proxies or refuse
+binding data-holding proxies (tracked in beautygo_backend#220,
+AYLA-DEC-0016 §4).
 
 ## Smoke scenarios — 13 PR coverage
 

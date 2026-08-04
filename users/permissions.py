@@ -251,6 +251,59 @@ class IsInternalBearer(permissions.BasePermission):
         return True
 
 
+class IsIdentityProvisioningBearer(permissions.BasePermission):
+    """Provisioning-only Bearer for the identity-binding endpoint.
+
+    Used ONLY by ``POST /api/v1/internal/users/bind-external/``
+    (E2E-BOT-02B hardening). Identity binding takes a caller-named
+    ``(external_user_id, ayla_user_id)`` pair with no server-side proof
+    of ownership, so it must NOT be reachable by the standard BOT
+    runtime credential: this class checks
+    ``settings.AYLA_IDENTITY_PROVISIONING_TOKEN``, a secret provisioned
+    independently of ``AYLA_INTERNAL_API_TOKEN`` and never deployed to
+    the bot service.
+
+    Auth contract:
+
+    1. ``Authorization: Bearer <token>`` matches
+       ``settings.AYLA_IDENTITY_PROVISIONING_TOKEN`` (constant-time).
+       Empty setting fails closed — the endpoint is disabled until ops
+       explicitly provisions the credential.
+    2. A valid ``AYLA_INTERNAL_API_TOKEN`` is REJECTED here by
+       construction (different setting, different value).
+    3. Misconfiguration hard-fail: if the two settings hold the SAME
+       non-empty value, every request is denied (and system check
+       ``users.E001`` fails at boot) — the boundary must not depend on
+       ops discipline alone.
+
+    Production bot-driven binding is not supported until a verified
+    ownership flow exists (AYLA-DEC-0016 §6: relink only for verified
+    identity references). Until then the endpoint serves trusted
+    provisioning / E2E bootstrap / ops only.
+    """
+
+    message = "Identity provisioning auth required"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        expected = getattr(settings, "AYLA_IDENTITY_PROVISIONING_TOKEN", "") or ""
+        if not expected:
+            return False
+        general = getattr(settings, "AYLA_INTERNAL_API_TOKEN", "") or ""
+        if general and compare_digest(expected, general):
+            # Equal-values misconfiguration: the general bot credential
+            # would pass. Fail closed rather than trusting ops to keep
+            # the two secrets distinct.
+            return False
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        prefix = "Bearer "
+        if not auth_header.startswith(prefix):
+            return False
+        provided = auth_header[len(prefix):].strip()
+        if not provided or not compare_digest(provided, expected):
+            return False
+        return True
+
+
 class IsTenantAdmin(permissions.BasePermission):
     """Caller must hold an active ``admin``-role TUR in ``request.tenant``.
 

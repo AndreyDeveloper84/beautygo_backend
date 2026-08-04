@@ -20,6 +20,23 @@ Before the first solo provider onboarding:
       matching `dev` HEAD.
 - [ ] `AYLA_INTERNAL_API_TOKEN` env var set on both sides (bot-platform
       → Ayla service auth). Rotated < 30 days.
+- [ ] `AYLA_IDENTITY_PROVISIONING_TOKEN` decided (E2E-BOT-02B identity
+      binding): either left EMPTY (endpoint disabled, fail-closed —
+      default for pilot) or provisioned as an independent secret on the
+      Ayla side only, DISTINCT from `AYLA_INTERNAL_API_TOKEN` (equal
+      values trip system check `users.E001` and fail closed). Never
+      deployed to bot-platform; production bot-driven binding is not
+      supported until a verified ownership flow exists. Pre-prod gate
+      before enabling: binding moves proxy-held personal data outside
+      the per-user delete/export surface (152-ФЗ) — the domain owner
+      must either extend erasure to linked proxies or refuse binding
+      data-holding proxies (tracked in beautygo_backend#220,
+      AYLA-DEC-0016 §4).
+- [ ] Deploy note: migration `users.0016` (identity binding:
+      `linked_user` + two CHECK constraints) takes ACCESS EXCLUSIVE on
+      `users_user` and validates both constraints with a full table
+      scan — painless at pilot volume, but schedule it outside live
+      traffic peaks.
 - [ ] `YOOKASSA_*` env vars set (see
       `docs/runbooks/webhook-readiness-2026-05-26.md`).
 - [ ] At least one bot channel token configured (MAX bot for pilot —
