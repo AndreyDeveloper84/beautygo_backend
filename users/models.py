@@ -28,6 +28,35 @@ class User(AbstractUser):
             "(e.g. 'bot:12345'). Phase C migration links proxy to a real account."
         ),
     )
+    # Phase C proxy→real binding (E2E-BOT-02B). Set ONLY on proxy rows
+    # (is_proxy=True); points at the real account this external identity is
+    # bound to. resolve_external_user() follows the pointer, so every
+    # s2s surface (records, booking, nutrition, payments) resolves the
+    # bound real user deterministically instead of the isolated proxy.
+    # NULL = unbound → controlled empty per-user result, never a fallback
+    # to another customer's data. SET_NULL on real-account delete reverts
+    # the proxy to unbound (fail-closed).
+    #
+    # Lifecycle: soft-deleting/deactivating the target makes the binding
+    # VOID for resolution but keeps the pointer as a tombstone; clearing
+    # it is a managed support/privacy operation — unlink_external_identity
+    # in users/services.py (audited, no HTTP endpoint). Write paths are
+    # ONLY bind_external_identity / unlink_external_identity; the field
+    # is read-only in admin. The DB constraints below (proxy-only pointer,
+    # no self-link) do NOT cover cross-row target properties (proxy→proxy
+    # via a direct ORM write remains physically possible — service layer
+    # is the enforcement boundary, resolver takes at most one hop).
+    linked_user = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="linked_proxies",
+        help_text=(
+            "Phase C proxy→real binding: set on a proxy row, points at the "
+            "real account this external identity is bound to."
+        ),
+    )
     onboarding_completed = models.BooleanField(
         default=False,
         help_text="User has completed the onboarding flow (name + location saved)",
@@ -58,6 +87,30 @@ class User(AbstractUser):
             models.Index(
                 fields=["tenant", "role"],
                 name="user_tenant_role_idx",
+            ),
+        ]
+        constraints = [
+            # Phase C binding invariants (E2E-BOT-02B hardening):
+            # linked_user may be set ONLY on proxy rows (a real account
+            # never carries a binding pointer), and a row can never
+            # point at itself. Target-must-be-real and no-cycle are
+            # structural consequences enforced at the service layer
+            # (bind_external_identity rejects proxy/non-client targets);
+            # cross-row target properties can't be expressed as a
+            # portable CHECK — the gap is covered by service tests.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(is_proxy=True)
+                    | models.Q(linked_user__isnull=True)
+                ),
+                name="user_linked_user_only_proxy",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(linked_user__isnull=True)
+                    | ~models.Q(linked_user=models.F("id"))
+                ),
+                name="user_linked_user_not_self",
             ),
         ]
 
