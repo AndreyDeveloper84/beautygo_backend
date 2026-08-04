@@ -597,6 +597,21 @@ NUTRITION_SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN", "")
 # quarterly; treat as production secret.
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
+# Provisioning-only Bearer for POST /api/v1/internal/users/bind-external/
+# (E2E-BOT-02B hardening). Identity binding accepts a caller-named
+# (external_user_id, ayla_user_id) pair with NO server-side proof of
+# ownership, so it is deliberately gated behind a credential that is
+# SEPARATE from the general bot service token: the standard BOT runtime
+# credential (AYLA_INTERNAL_API_TOKEN) must NOT be able to call it.
+# Production bot-driven binding is NOT supported until a verified
+# ownership flow exists — this token is for trusted provisioning /
+# E2E bootstrap / ops only. Empty value disables the endpoint
+# (IsIdentityProvisioningBearer fails closed). Treat as a top-tier
+# production secret, rotate independently of AYLA_INTERNAL_API_TOKEN.
+AYLA_IDENTITY_PROVISIONING_TOKEN = os.environ.get(
+    "AYLA_IDENTITY_PROVISIONING_TOKEN", "",
+)
+
 # S3C — YClients catalog intake (read-only pull of the pilot salon's
 # services + staff). Dual-token auth: partner (application) token +
 # optional user token, both in one Authorization header. Empty partner

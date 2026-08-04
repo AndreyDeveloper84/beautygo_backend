@@ -14,7 +14,10 @@ from users.internal_personal_context_api import (
     InternalPersonalContextView,
     InternalSkipView,
 )
-from users.internal_users_api import InternalUserProfileView
+from users.internal_users_api import (
+    InternalBindExternalIdentityView,
+    InternalUserProfileView,
+)
 from users.personal_data_api import (
     InternalPersonalDataDeleteView,
     InternalPersonalDataExportView,
@@ -22,6 +25,15 @@ from users.personal_data_api import (
 
 
 urlpatterns = [
+    # E2E-BOT-02B — identity binding. Static segment, declared before the
+    # <uuid:...> routes so it can never be swallowed by a uuid converter
+    # (it wouldn't anyway — "bind-external" is not a uuid — explicit
+    # ordering documents intent).
+    path(
+        "bind-external/",
+        InternalBindExternalIdentityView.as_view(),
+        name="internal-users-bind-external",
+    ),
     # C7.2 — client card binding (payments app owns the views). Placed
     # before the plain <uuid:user_id>/ route for explicitness (Django
     # matches full segments anyway).

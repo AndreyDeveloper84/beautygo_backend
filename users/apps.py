@@ -6,6 +6,7 @@ class UsersConfig(AppConfig):
     name = 'users'
 
     def ready(self):
+        import users.checks  # noqa: F401
         import users.signals  # noqa: F401
 
         # Handoff A9 — log resolved ayla-ai-core version once at boot
