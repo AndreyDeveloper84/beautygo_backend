@@ -39,6 +39,14 @@ urlpatterns = [
         'api/v1/internal/me/catalog/recommendations/',
         include('users.catalog_recommendations_urls'),
     ),
+    # DRF-1043 (backend half of DRF-1035) — identity read-back: lets the
+    # bot learn the canonical Ayla user-id of the subject it already
+    # authenticated as. `me/` is a namespace prefix here, not a resource,
+    # so the endpoint hangs off `me/identity/` like `me/bookings/`.
+    path(
+        'api/v1/internal/me/identity/',
+        include('users.internal_identity_urls'),
+    ),
     # #1016 S2 — internal Bearer REST surface the Ayla bot reads/writes
     # (slots + catalog mirror + booking create/cancel/reschedule).
     # Contract co-owned with S1: ai-bot-platform/docs/architecture/.
