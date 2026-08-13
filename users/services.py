@@ -74,6 +74,21 @@ class InvalidExternalUserIDError(ValueError):
     `<source>:<id>[:<id>...]` shape."""
 
 
+def is_valid_external_user_id(value: str) -> bool:
+    """Side-effect-free format check for an external user id (DRF-1043).
+
+    ``resolve_external_user`` performs the same check, but it also
+    *creates* the proxy row — so it cannot be used to answer "was this
+    header well-formed?" on a rejected request without provisioning an
+    account for the rejected caller. Callers that only need the
+    predicate (denial-reason logging on the internal surface) use this.
+
+    Shares the single ``_EXTERNAL_USER_ID_RE`` source of truth; the
+    resolver's own validation path is untouched.
+    """
+    return bool(value) and bool(_EXTERNAL_USER_ID_RE.match(value))
+
+
 def resolve_external_user(external_user_id: str) -> User:
     """Resolve `<source>:<id>[:<id>...]` to a User, lazily creating.
 
@@ -106,10 +121,22 @@ def resolve_external_user(external_user_id: str) -> User:
     # select_related: bound identities follow the linked_user pointer on
     # EVERY s2s call (IsBotServiceWithVerifiedClient + nutrition views) —
     # one JOIN instead of a lazy extra SELECT per request.
-    user, _ = User.objects.select_related("linked_user").get_or_create(
+    user, created = User.objects.select_related("linked_user").get_or_create(
         username=external_user_id,
         defaults={"role": "client", "is_proxy": True, "is_guest": False},
     )
+    if created:
+        # DRF-1043 §7 observability. Provisioning of a brand-new external
+        # subject is the one event on this path that is neither a plain
+        # read nor visible anywhere else — DRF-1035's root cause was
+        # precisely that nobody could tell when (or whether) a proxy got
+        # created. Logged ONLY on creation, so the hot repeat-call path
+        # stays silent. No PII: the external id is an opaque channel
+        # handle, and a freshly created proxy carries no phone/email/name.
+        logger.info(
+            "identity.proxy_created user_id=%s external_user_id=%s",
+            user.id, external_user_id,
+        )
     if user.is_proxy and user.linked_user_id is not None:
         linked = user.linked_user
         # Fail-closed: a binding to a deactivated / soft-deleted account
