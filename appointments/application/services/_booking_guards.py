@@ -98,6 +98,10 @@ def check_schedule_frame(specialist_id: UUID, target_interval: TimeInterval) -> 
     from appointments.infrastructure.availability.slot_builder import (
         SlotBuilderService,
     )
+    from appointments.models import (
+        SpecialistScheduleException,
+        SpecialistWorkingHours,
+    )
     from users.models import SpecialistProfile
 
     specialist = SpecialistProfile.objects.filter(id=specialist_id).first()
@@ -108,6 +112,29 @@ def check_schedule_frame(specialist_id: UUID, target_interval: TimeInterval) -> 
 
     tz = ZoneInfo(specialist.timezone)
     local_date = target_interval.start_at.astimezone(tz).date()
+
+    # "No schedule declared" is not "closed". A specialist who has never
+    # published hours shows no slots either way, so nothing can reach this
+    # guard from the product — only a caller that fabricated a time. What
+    # this guard exists to stop is booking a salon that HAS declared its
+    # hours outside them, so enforcement starts once a schedule exists.
+    #
+    # The alternative — refusing every specialist without hours — would
+    # silently make unknown numbers of live specialists unbookable, a
+    # production change well outside this task, and it buys nothing the
+    # moment a salon configures a schedule (which is what this task is
+    # for). Enforcement is monotone: declaring more never loosens it.
+    #
+    # Residual gap, named deliberately: an unconfigured specialist can
+    # still be booked at any hour by a caller that supplies its own time.
+    # It closes the moment any schedule row exists for them.
+    has_exception = SpecialistScheduleException.objects.filter(
+        specialist=specialist, date=local_date,
+    ).exists()
+    if not has_exception and not SpecialistWorkingHours.objects.filter(
+        specialist=specialist,
+    ).exists():
+        return
 
     frame = AvailabilityQueryService._get_working_hours(specialist, local_date)
     if frame is None:
@@ -163,6 +190,8 @@ def apply_common_booking_guards(
     specialist_id: UUID,
     target_interval: TimeInterval,
     booking_window_policy: BookingWindowPolicy | None = None,
+    *,
+    enforce_schedule: bool = True,
 ) -> None:
     """Run the shared create/reschedule guards against ``target_interval``.
 
@@ -170,11 +199,18 @@ def apply_common_booking_guards(
     ``SlotNotAvailableError`` (outside working hours, break, salon closure
     or time-off block). Callers run this inside the locked atomic block so
     every check sees committed state.
+
+    ``enforce_schedule=False`` skips the working-hours and closure checks
+    for staff-initiated moves (DRF-1062). Time-off is NOT skipped: it is a
+    statement about the specialist's own availability rather than about
+    when clients may book, so overriding it needs a deliberate decision to
+    lift the absence, not a side effect of who pressed the button.
     """
     (booking_window_policy or DefaultBookingWindowPolicy()).validate_booking_window(
         target_interval.start_at
     )
     _validate_grid_alignment(target_interval.start_at)
-    check_schedule_frame(specialist_id, target_interval)
-    check_tenant_closure(specialist_id, target_interval)
+    if enforce_schedule:
+        check_schedule_frame(specialist_id, target_interval)
+        check_tenant_closure(specialist_id, target_interval)
     _check_time_off(specialist_id, target_interval)

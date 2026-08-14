@@ -308,3 +308,107 @@ class TestWritePathHonoursSchedule:
         scheduled_specialist.save(update_fields=["tenant"])
 
         check_tenant_closure(scheduled_specialist.id, _interval(_next_weekday(0), 11))
+
+
+class TestEnforcementStartsWithADeclaredSchedule:
+    """"No hours declared" is not "closed".
+
+    A specialist who never published hours shows no slots either way, so
+    nothing reaches the guard from the product. Refusing them outright
+    would make an unknown number of live specialists unbookable for no
+    gain. Enforcement is monotone — declaring a schedule only tightens it.
+    """
+
+    def test_specialist_without_any_hours_is_not_constrained(self, specialist):
+        check_schedule_frame(specialist.id, _interval(_next_weekday(6), 3))
+
+    def test_a_single_declared_day_turns_enforcement_on(self, specialist):
+        SpecialistWorkingHours.objects.create(
+            specialist=specialist,
+            day_of_week=0,
+            is_working_day=True,
+            start_time=time(10, 0),
+            end_time=time(19, 0),
+        )
+
+        check_schedule_frame(specialist.id, _interval(_next_weekday(0), 11))
+
+        with pytest.raises(SlotNotAvailableError):
+            check_schedule_frame(specialist.id, _interval(_next_weekday(0), 3))
+
+        with pytest.raises(SlotNotAvailableError):
+            check_schedule_frame(specialist.id, _interval(_next_weekday(6), 11))
+
+    def test_an_exception_alone_turns_enforcement_on(self, specialist):
+        """A per-date override counts as a declared schedule for that date."""
+        sunday = _next_weekday(6)
+        SpecialistScheduleException.objects.create(
+            specialist=specialist,
+            date=sunday,
+            is_working_day=True,
+            start_time=time(11, 0),
+            end_time=time(16, 0),
+        )
+
+        check_schedule_frame(specialist.id, _interval(sunday, 11))
+
+        with pytest.raises(SlotNotAvailableError):
+            check_schedule_frame(specialist.id, _interval(sunday, 17))
+
+
+class TestGuardAppliesToClientsNotStaff:
+    """Who the schedule constrains.
+
+    The schedule says when clients may book the salon. It does not
+    overrule a master recording someone who is physically present: being
+    told "нельзя" while the client stands in front of you is the exact
+    failure this task exists to remove, only pointed at staff instead of
+    at the sick master.
+    """
+
+    def _dto(self, client_user, specialist, service, start_at, actor_role):
+        from uuid import uuid4
+
+        from appointments.application.dto import CreateBookingDTO
+
+        return CreateBookingDTO(
+            client_id=client_user.id,
+            specialist_id=specialist.id,
+            service_id=service.id,
+            start_at=start_at,
+            idempotency_key=str(uuid4()),
+            payment_required=False,
+            confirm_immediately=True,
+            actor_role=actor_role,
+        )
+
+    def test_client_cannot_book_a_closed_sunday_through_the_service(
+        self, client_user, scheduled_specialist, service,
+    ):
+        from appointments.application.services.create_booking_service import (
+            CreateBookingService,
+        )
+
+        dto = self._dto(
+            client_user, scheduled_specialist, service,
+            _utc(_next_weekday(6), 10), actor_role="user",
+        )
+
+        with pytest.raises(SlotNotAvailableError):
+            CreateBookingService().execute(dto)
+
+    def test_walk_in_on_the_same_closed_sunday_is_allowed(
+        self, client_user, scheduled_specialist, service,
+    ):
+        from appointments.application.services.create_booking_service import (
+            CreateBookingService,
+        )
+
+        dto = self._dto(
+            client_user, scheduled_specialist, service,
+            _utc(_next_weekday(6), 10), actor_role="specialist",
+        )
+
+        result = CreateBookingService().execute(dto)
+
+        assert result.booking_id
