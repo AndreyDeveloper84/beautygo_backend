@@ -492,6 +492,223 @@ class SpecialistTimeOff(models.Model):
         return f"{self.specialist} — {self.start_at:%Y-%m-%d} - {self.end_at:%Y-%m-%d}"
 
 
+# ---------------------------------------------------------------------------
+# SpecialistScheduleException — per-date override of the weekly template
+# ---------------------------------------------------------------------------
+
+class SpecialistScheduleException(models.Model):
+    """One-off schedule for a specialist on a specific date (DRF-1062).
+
+    The booking engine resolves a day in two layers: the *frame* (what
+    shape the day has) and the *holes* cut out of it (appointments,
+    time-off, tenant closures). This model is a **frame** source: it
+    replaces ``SpecialistWorkingHours`` for exactly one date.
+
+    A frame source is needed because holes can only subtract.
+    ``SpecialistTimeOff`` expresses "работаю в пятницу до 15:00" fine
+    (it narrows an already-working day), but cannot express "в это
+    воскресенье выйдем поработать" at all: on a non-working weekday
+    ``AvailabilityQueryService._get_working_hours`` returns ``None`` and
+    there is nothing for a busy interval to subtract from.
+
+    Keeping the two apart also keeps the semantics honest — ``TimeOff``
+    means "отсутствие" and is explained to the client as such, whereas
+    this means "другой график".
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    specialist = models.ForeignKey(
+        'users.SpecialistProfile',
+        on_delete=models.CASCADE,
+        related_name='schedule_exceptions',
+    )
+    date = models.DateField()
+    is_working_day = models.BooleanField(default=True)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
+    break_start = models.TimeField(null=True, blank=True)
+    break_end = models.TimeField(null=True, blank=True)
+    note = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-date']
+        verbose_name = 'Исключение в графике'
+        verbose_name_plural = 'Исключения в графике'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['specialist', 'date'],
+                name='schedule_exception_unique_specialist_date',
+            ),
+            # A working exception must carry its frame; a non-working one
+            # must not carry any times at all (mirrors the invariant the
+            # weekly template relies on in _get_working_hours).
+            models.CheckConstraint(
+                check=(
+                    models.Q(
+                        is_working_day=True,
+                        start_time__isnull=False,
+                        end_time__isnull=False,
+                    )
+                    | models.Q(
+                        is_working_day=False,
+                        start_time__isnull=True,
+                        end_time__isnull=True,
+                        break_start__isnull=True,
+                        break_end__isnull=True,
+                    )
+                ),
+                name='schedule_exception_times_match_working_flag',
+            ),
+            models.CheckConstraint(
+                check=(
+                    models.Q(break_start__isnull=True, break_end__isnull=True)
+                    | models.Q(break_start__isnull=False, break_end__isnull=False)
+                ),
+                name='schedule_exception_break_both_or_neither',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=['specialist', 'date'],
+                name='sched_exception_lookup_idx',
+            ),
+        ]
+
+    def clean(self) -> None:
+        """Ordering rules the DB check constraints cannot express portably.
+
+        Mirrors ``users.schedule_api.WorkingHoursSerializer.validate`` so
+        the weekly template and a per-date override reject the same shapes.
+        """
+        if not self.is_working_day:
+            return
+        if self.start_time and self.end_time and self.start_time >= self.end_time:
+            raise ValidationError(
+                {'end_time': 'End must be after start.'}
+            )
+        if self.break_start and self.break_end:
+            if self.break_start >= self.break_end:
+                raise ValidationError(
+                    {'break_end': 'Break end must be after break start.'}
+                )
+            if (
+                self.start_time
+                and self.end_time
+                and (self.break_start < self.start_time or self.break_end > self.end_time)
+            ):
+                raise ValidationError(
+                    {'break_start': 'Break must be within working hours.'}
+                )
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        if not self.is_working_day:
+            return f"{self.specialist} — {self.date:%Y-%m-%d}: не работает"
+        return (
+            f"{self.specialist} — {self.date:%Y-%m-%d}: "
+            f"{self.start_time:%H:%M}-{self.end_time:%H:%M}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TenantClosure — salon-wide closure (holiday, renovation)
+# ---------------------------------------------------------------------------
+
+class TenantClosure(models.Model):
+    """The whole salon is closed on a date, or for part of it (DRF-1062).
+
+    A closure only ever *subtracts* availability, so it is a **hole**, not
+    a frame: it reaches the booking engine as one more
+    ``BusyIntervalProvider`` and needs no change to
+    ``AvailabilityQueryService``.
+
+    Deliberately one row per closure rather than a fan-out of
+    ``SpecialistTimeOff`` rows per specialist. A fan-out turns a single
+    decision into N rows of derived data: a specialist hired after the
+    closure was set would still be bookable, and lifting the closure
+    becomes N deletes that can fail halfway and leave the salon half
+    closed — silently.
+
+    ``start_time``/``end_time`` are **local wall-clock** times and are
+    resolved to UTC per specialist at query time, because a tenant has no
+    timezone of its own (``Tenant`` is slug/name/is_active) while each
+    ``SpecialistProfile`` does. Both NULL means the whole day.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        'tenants.Tenant',
+        on_delete=models.PROTECT,
+        related_name='closures',
+    )
+    date = models.DateField()
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
+    reason = models.CharField(max_length=200, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-date']
+        verbose_name = 'Закрытие салона'
+        verbose_name_plural = 'Закрытия салона'
+        constraints = [
+            # Postgres treats NULLs as distinct, so a plain unique_together
+            # would let two whole-day closures coexist. Split in two: one
+            # partial-unique for the whole-day row, one for timed rows.
+            models.UniqueConstraint(
+                fields=['tenant', 'date'],
+                condition=models.Q(start_time__isnull=True),
+                name='tenant_closure_unique_full_day',
+            ),
+            models.UniqueConstraint(
+                fields=['tenant', 'date', 'start_time'],
+                name='tenant_closure_unique_partial',
+            ),
+            models.CheckConstraint(
+                check=(
+                    models.Q(start_time__isnull=True, end_time__isnull=True)
+                    | models.Q(start_time__isnull=False, end_time__isnull=False)
+                ),
+                name='tenant_closure_times_both_or_neither',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=['tenant', 'date'],
+                name='tenant_closure_lookup_idx',
+            ),
+        ]
+
+    @property
+    def is_full_day(self) -> bool:
+        return self.start_time is None and self.end_time is None
+
+    def clean(self) -> None:
+        if (
+            self.start_time
+            and self.end_time
+            and self.start_time >= self.end_time
+        ):
+            raise ValidationError({'end_time': 'End must be after start.'})
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        self.clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        if self.is_full_day:
+            return f"{self.tenant} — {self.date:%Y-%m-%d}: закрыто"
+        return (
+            f"{self.tenant} — {self.date:%Y-%m-%d}: "
+            f"закрыто {self.start_time:%H:%M}-{self.end_time:%H:%M}"
+        )
+
+
 # Payment used to live here. Moved to `payments.models.Payment` in
 # issue #426 (Phase 0 Bucket 5). Import from `payments.models` directly;
 # don't re-export here to keep ownership unambiguous.

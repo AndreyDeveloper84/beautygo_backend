@@ -26,6 +26,16 @@ from appointments.infrastructure.cache.slot_cache import SlotCacheService
 logger = logging.getLogger(__name__)
 
 
+def _frame(start, end, break_start, break_end) -> dict:
+    """Shape a resolved working day the way SlotBuilderService expects it."""
+    return {
+        "start": start.strftime("%H:%M"),
+        "end": end.strftime("%H:%M"),
+        "break_start": break_start.strftime("%H:%M") if break_start else None,
+        "break_end": break_end.strftime("%H:%M") if break_end else None,
+    }
+
+
 class AvailabilityQueryService:
     """Read-side availability query service with caching."""
 
@@ -184,24 +194,51 @@ class AvailabilityQueryService:
 
     @staticmethod
     def _get_working_hours(specialist, target_date: date) -> dict | None:
-        from appointments.models import SpecialistWorkingHours
-        day_of_week = target_date.weekday()
+        """Resolve the day's *frame* — the shape of the working day.
+
+        Two sources, most specific first (DRF-1062):
+
+        1. ``SpecialistScheduleException`` — a one-off override for this
+           exact date. Replaces the weekly template outright, which is
+           what lets a salon open on a normally-closed day. A row with
+           ``is_working_day=False`` closes the date.
+        2. ``SpecialistWorkingHours`` — the weekly template, by weekday.
+
+        ``None`` means "not a working day" and the caller reports zero
+        slots. Holes cut out of the frame (appointments, time-off, tenant
+        closures) are NOT resolved here — they arrive as busy intervals
+        from the provider chain.
+        """
+        from appointments.models import (
+            SpecialistScheduleException,
+            SpecialistWorkingHours,
+        )
+
+        exception = SpecialistScheduleException.objects.filter(
+            specialist=specialist,
+            date=target_date,
+        ).first()
+
+        if exception is not None:
+            if not exception.is_working_day:
+                return None
+            return _frame(
+                exception.start_time,
+                exception.end_time,
+                exception.break_start,
+                exception.break_end,
+            )
 
         wh = SpecialistWorkingHours.objects.filter(
             specialist=specialist,
-            day_of_week=day_of_week,
+            day_of_week=target_date.weekday(),
             is_working_day=True,
         ).first()
 
         if not wh:
             return None
 
-        return {
-            "start": wh.start_time.strftime("%H:%M"),
-            "end": wh.end_time.strftime("%H:%M"),
-            "break_start": wh.break_start.strftime("%H:%M") if wh.break_start else None,
-            "break_end": wh.break_end.strftime("%H:%M") if wh.break_end else None,
-        }
+        return _frame(wh.start_time, wh.end_time, wh.break_start, wh.break_end)
 
     @staticmethod
     def _date_to_utc_start(target_date: date, timezone_str: str) -> datetime:
