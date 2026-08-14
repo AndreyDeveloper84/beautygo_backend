@@ -72,6 +72,19 @@ class User(AbstractUser):
         blank=True,
         related_name="users",
     )
+    # DRF-1062 — Ayla platform staff, deliberately NOT is_superuser.
+    # The brief requires an operator who can fix any tenant's schedule
+    # without inheriting the Django superuser's total absence of tenant
+    # limits (DRF-1025). Permission classes that honour this flag still
+    # require an explicit target tenant on the request, so the grant is
+    # "may act on any salon you name", never "sees everything".
+    is_platform_admin = models.BooleanField(
+        default=False,
+        help_text=(
+            "Ayla platform operator: may administer any tenant, but only "
+            "one explicitly addressed per request. Not a Django superuser."
+        ),
+    )
     deleted_at = models.DateTimeField(null=True, blank=True)
 
     class Meta(AbstractUser.Meta):
