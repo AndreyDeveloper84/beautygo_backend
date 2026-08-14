@@ -342,3 +342,43 @@ class IsTenantAdmin(permissions.BasePermission):
             role=TenantUserRelationship.Role.ADMIN,
             is_active=True,
         ).exists()
+
+
+class IsTenantAdminOrPlatformAdmin(permissions.BasePermission):
+    """Salon administrator of THIS tenant, or Ayla platform staff (DRF-1062).
+
+    The salon-admin surface has two legitimate actors and one shared rule:
+    the tenant is always taken from ``request.tenant`` (X-Tenant header or
+    the JWT claim, resolved by ``TenantContextMiddleware``), never from the
+    request body. A platform operator therefore has to name the salon it is
+    acting on, exactly like a salon admin does — the flag widens *which*
+    tenants may be addressed, not how many at once.
+
+    Deliberately not honouring ``is_superuser``: DRF-1025 records that the
+    Django superuser has no tenant limits at all, and inheriting that here
+    would reintroduce the defect this surface exists to avoid.
+    """
+
+    message = "Доступ только для администратора салона или платформы"
+
+    def has_permission(self, request, view) -> bool:
+        user = request.user
+        if not user or not getattr(user, "is_authenticated", False):
+            return False
+
+        request_tenant = getattr(request, "tenant", None)
+        if request_tenant is None:
+            # No addressed salon → nothing to authorise against, for
+            # either actor. Fail closed.
+            return False
+
+        if getattr(user, "is_platform_admin", False):
+            return True
+
+        from users.models import TenantUserRelationship
+        return TenantUserRelationship.objects.filter(
+            user=user,
+            tenant=request_tenant,
+            role=TenantUserRelationship.Role.ADMIN,
+            is_active=True,
+        ).exists()
