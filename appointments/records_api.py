@@ -22,6 +22,10 @@ client JWT exists in bot-platform per memory
     ``service_id``, ``specialist_id``, ``last_price``, suggested
     slots (slot suggestions are out of MVP scope — empty list for
     now; the bot falls back to opening catalog with master filter).
+    ``service_id`` resolves the AMD-019 XOR (marketplace ``service``
+    vs salon ``salon_service``) exactly like the list/detail items do;
+    an unresolvable reference is a 422, never a ``"None"`` string
+    (DRF-1049).
 
 Status field shape: every booking carries a ``derived_status`` per
 the canonical taxonomy in ``appointments/records_status.py``. UI
@@ -142,6 +146,24 @@ class _RepeatIntentResponseSerializer(serializers.Serializer):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _resolve_service_id(appointment) -> str | None:
+    """Return the id of whichever typed service reference is filled.
+
+    AMD-019 option A made the reference a XOR: a booking carries either
+    the marketplace ``service`` or the salon-catalog ``salon_service``,
+    never both (CHECK ``appointment_exactly_one_service_source``, see
+    ``appointments/models.py``). Bot-created salon bookings have
+    ``service_id IS NULL``, so any reader that touches ``service_id``
+    directly renders the literal string ``"None"`` (DRF-1049).
+
+    Returns ``None`` when neither side is set — only reachable for rows
+    predating the constraint. Callers MUST treat that as an error, never
+    as a value.
+    """
+    service_id = appointment.service_id or appointment.salon_service_id
+    return str(service_id) if service_id else None
 
 
 def _build_item(appointment) -> dict:
@@ -397,6 +419,15 @@ class MeBookingRepeatIntentView(APIView):
     MVP: surfaces service_id + specialist_id + last_price. Suggested
     slots are deferred — the bot falls back to opening the catalog
     with a master filter per Tau's customer-records-flow.md §R6.
+
+    ``service_id`` follows the same XOR resolution as the list/detail
+    endpoints (``_build_item``): marketplace ``service`` OR salon
+    ``salon_service``, whichever the booking actually carries. Reading
+    ``service_id`` directly used to emit the literal string ``"None"``
+    with HTTP 200 for every salon booking — i.e. for 100% of the
+    bookings the bot creates (DRF-1049). When neither reference
+    resolves the endpoint now fails loudly (422) instead of handing
+    the caller an unusable value.
     """
     authentication_classes: list = []
     permission_classes = [IsBotServiceWithVerifiedClient]
@@ -408,6 +439,13 @@ class MeBookingRepeatIntentView(APIView):
         responses={
             200: _RepeatIntentResponseSerializer,
             404: OpenApiResponse(description="Booking not found"),
+            422: OpenApiResponse(
+                description=(
+                    "Booking carries no resolvable service reference "
+                    "(neither `service` nor `salon_service`) — prefill "
+                    "cannot be built"
+                ),
+            ),
         },
     )
     def post(self, request: Request, booking_id: UUID) -> Response:
@@ -415,15 +453,32 @@ class MeBookingRepeatIntentView(APIView):
             appointment = (
                 Appointment.objects
                 .filter(client=request.user)
-                .select_related("specialist", "service")
+                .select_related("specialist", "service", "salon_service")
                 .get(pk=booking_id)
             )
         except Appointment.DoesNotExist:
             return error_response(
                 "NOT_FOUND", "Запись не найдена.", status_code=404,
             )
+
+        service_id = _resolve_service_id(appointment)
+        if service_id is None:
+            # Unreachable for rows created under the XOR CHECK; a hit
+            # here means legacy/corrupt data. Surface it as an explicit
+            # failure so the bot can branch, and log so it is findable.
+            logger.error(
+                "repeat_intent.unresolved_service booking_id=%s "
+                "service_id=None salon_service_id=None",
+                appointment.id,
+            )
+            return error_response(
+                "SERVICE_NOT_FOUND",
+                "У записи не указана услуга — повтор невозможен.",
+                status_code=422,
+            )
+
         return success_response({
-            "service_id": str(appointment.service_id),
+            "service_id": service_id,
             "specialist_id": str(appointment.specialist_id),
             "last_price": appointment.price,
             # Slot suggestions deferred — see class docstring.
