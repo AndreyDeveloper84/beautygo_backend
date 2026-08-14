@@ -373,9 +373,19 @@ class RescheduleBookingService:
         old_end_at = appointment.end_datetime
 
         # Common create/reschedule guards: booking window (min-ahead +
-        # horizon), slot-grid alignment, specialist time-off.
+        # horizon), slot-grid alignment, working hours, salon closure,
+        # specialist time-off.
+        #
+        # DRF-1062 — the schedule constrains clients, not staff. A master
+        # moving a booking to 19:30 at the client's request is making an
+        # operational decision; refusing it because the weekly template
+        # ends at 19:00 is the same "system says no" dead end this task
+        # removes. initiator_role contract: {client, specialist, system}.
         apply_common_booking_guards(
-            specialist_id, new_interval, self._booking_window_policy,
+            specialist_id,
+            new_interval,
+            self._booking_window_policy,
+            enforce_schedule=(initiator_role == "client"),
         )
 
         conflicting = Appointment.objects.filter(
