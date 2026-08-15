@@ -236,33 +236,56 @@ jobs:
             # drift surfaced later as runtime errors on the first request that
             # touched a column the running code already expected.
             #
-            # Wait for readiness explicitly instead of sleeping, then let a
-            # failure be a failure. `pg_isready` reports whether the server
-            # accepts connections and performs no authentication, so it needs
-            # no credentials here.
+            # Wait for readiness explicitly instead of sleeping. `pg_isready`
+            # reports whether the server accepts connections and performs no
+            # authentication, so it needs no credentials here.
             for i in $(seq 1 30); do
               docker compose exec -T db pg_isready -q && break
               echo "waiting for db to accept connections ($i/30)"
               sleep 2
             done
 
-            # No `script_stop` on this action, so the step's exit code is the
-            # last command's — a bare failing migrate would still be followed
-            # by `docker compose ps` and the success echo. Fail explicitly.
-            if ! docker compose exec -T web python manage.py migrate --noinput; then
-              echo "::error::migrate failed — deploy aborted"
-              exit 1
-            fi
+            # Migrations are owned by `entrypoint.sh` (line 32), which runs
+            # `manage.py migrate --noinput` on every container start. This
+            # script must NOT run migrate as well.
+            #
+            # Why, concretely: on 2026-08-15 it did, and the two raced. The
+            # entrypoint created the table, the script's attempt hit
+            #   IntegrityError: duplicate key value violates unique constraint
+            #   "pg_type_typname_nsp_index"
+            #   Key (typname, typnamespace)=(appointments_specialistscheduleexception, …)
+            # and the deploy went red over a pilot whose schema was in fact
+            # correct — both migrations applied, nothing pending. The race had
+            # existed for months, invisible because the `|| true` that this
+            # gate replaced swallowed it.
+            #
+            # So the deploy waits for the entrypoint and then VERIFIES. The
+            # verification is the part that must be loud: a schema the running
+            # code already expects but the database lacks is worse than no
+            # deploy at all, and it surfaces as runtime errors on the first
+            # request that touches the new column (the 2026-08-15 bot
+            # incident, where containers were healthy and /healthz answered
+            # 200 while a required migration sat unapplied).
+            #
+            # An empty plan means the web container is not answering yet — that
+            # is "keep waiting", not "nothing pending". Distinguishing the two
+            # is the whole reason this loop tracks `ok` instead of just
+            # breaking on an empty grep.
+            ok=""
+            for i in $(seq 1 60); do
+              plan=$(docker compose exec -T web python manage.py showmigrations --plan 2>/dev/null || true)
+              if [ -n "$plan" ]; then
+                unapplied=$(echo "$plan" | grep '^\[ \]' || true)
+                if [ -z "$unapplied" ]; then ok=1; break; fi
+              fi
+              echo "waiting for entrypoint migrations to finish ($i/60)"
+              sleep 5
+            done
 
-            # migrate can exit 0 while leaving work undone (an app whose
-            # migrations were never discovered, a partially applied state).
-            # Prove nothing is left rather than trusting the exit code: this
-            # is the check that would have caught the 2026-08-15 bot incident,
-            # where containers were healthy and /healthz answered 200 while a
-            # required migration sat unapplied.
-            if docker compose exec -T web python manage.py showmigrations --plan | grep -q '^\[ \]'; then
-              echo "::error::unapplied migrations remain after migrate:"
-              docker compose exec -T web python manage.py showmigrations --plan | grep '^\[ \]'
+            if [ -z "$ok" ]; then
+              echo "::error::migrations did not settle within 5 minutes"
+              docker compose exec -T web python manage.py showmigrations --plan 2>&1 | grep '^\[ \]' || true
+              docker compose logs --tail 40 web
               exit 1
             fi
 
