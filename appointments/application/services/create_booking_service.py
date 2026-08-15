@@ -234,6 +234,28 @@ class CreateBookingService:
                 f"Slot {target_interval} is blocked by specialist"
             )
 
+        # DRF-1062 — the schedule itself. Until this call, create checked
+        # time-off but never the working day: a POST for a Sunday landed
+        # even with Sunday marked non-working, because
+        # SpecialistWorkingHours was read by the slot query and by nothing
+        # else. Both checks are shared with the reschedule path so the two
+        # writers cannot drift apart again.
+        #
+        # Client-initiated bookings only (actor_role contract
+        # {user, specialist, system}). A walk-in is recorded by the master
+        # for someone physically present — refusing it at 19:30 because the
+        # template says 19:00 would be the same "the system says no while
+        # the human on the spot knows better" trap this task exists to
+        # remove. Staff and system actors are trusted to mean it; the
+        # schedule constrains who may book the salon, not the salon itself.
+        if dto.actor_role == "user":
+            from appointments.application.services._booking_guards import (
+                check_schedule_frame,
+                check_tenant_closure,
+            )
+            check_schedule_frame(dto.specialist_id, target_interval)
+            check_tenant_closure(dto.specialist_id, target_interval)
+
         # S3-CAL recheck-at-confirm (Level-1): external busy must be
         # re-validated inside this atomic block so an interval that arrived
         # after the read-path slot check still blocks the booking (TOCTOU-safe).
