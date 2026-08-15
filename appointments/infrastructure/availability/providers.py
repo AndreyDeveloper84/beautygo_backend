@@ -8,7 +8,7 @@ without touching AvailabilityQueryService.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time, timedelta, timezone
 from typing import Protocol, runtime_checkable
 
 from appointments.domain.value_objects import TimeInterval, ACTIVE_BOOKING_STATUSES
@@ -90,6 +90,83 @@ class TimeOffBusyIntervalProvider:
         return intervals
 
 
+class TenantClosureBusyIntervalProvider:
+    """Returns busy intervals from salon-wide closures (DRF-1062).
+
+    A closure is stored once per tenant as a local date (plus optional
+    local wall-clock window) and is resolved to UTC **here**, using the
+    specialist's own timezone — a ``Tenant`` has none of its own. That
+    keeps one stored decision correct for specialists in different
+    timezones, which matters once the pilot expands past Moscow.
+    """
+
+    def get_busy_intervals(
+        self,
+        specialist_id,
+        day_start_utc: datetime,
+        day_end_utc: datetime,
+    ) -> list[TimeInterval]:
+        from zoneinfo import ZoneInfo
+
+        from appointments.models import TenantClosure
+        from users.models import SpecialistProfile
+
+        row = (
+            SpecialistProfile.objects
+            .filter(id=specialist_id)
+            .values('tenant_id', 'timezone')
+            .first()
+        )
+        # tenant is nullable on SpecialistProfile — a specialist outside
+        # any salon simply has no closures to honour.
+        if not row or not row['tenant_id']:
+            return []
+
+        tz = ZoneInfo(row['timezone'])
+
+        # Widen by a day on each side: a UTC window can straddle three
+        # local dates once offsets are applied, and over-fetching a row
+        # is cheaper than missing a closure. Clipping below discards
+        # anything that does not actually overlap.
+        first_local_date = (day_start_utc.astimezone(tz) - timedelta(days=1)).date()
+        last_local_date = (day_end_utc.astimezone(tz) + timedelta(days=1)).date()
+
+        closures = TenantClosure.objects.filter(
+            tenant_id=row['tenant_id'],
+            date__gte=first_local_date,
+            date__lte=last_local_date,
+        )
+
+        intervals: list[TimeInterval] = []
+        for closure in closures:
+            if closure.start_time is None:
+                # Whole day: local midnight to local midnight. Built from
+                # two dates rather than +24h so DST transitions keep the
+                # closure aligned to the calendar day.
+                local_start = datetime.combine(
+                    closure.date, time(0, 0), tzinfo=tz,
+                )
+                local_end = datetime.combine(
+                    closure.date + timedelta(days=1), time(0, 0), tzinfo=tz,
+                )
+            else:
+                local_start = datetime.combine(
+                    closure.date, closure.start_time, tzinfo=tz,
+                )
+                local_end = datetime.combine(
+                    closure.date, closure.end_time, tzinfo=tz,
+                )
+
+            clipped_start = max(local_start.astimezone(timezone.utc), day_start_utc)
+            clipped_end = min(local_end.astimezone(timezone.utc), day_end_utc)
+            if clipped_start < clipped_end:
+                intervals.append(TimeInterval(
+                    start_at=clipped_start,
+                    end_at=clipped_end,
+                ))
+        return intervals
+
+
 class CompositeAvailabilityProvider:
     """Aggregates multiple BusyIntervalProvider implementations."""
 
@@ -130,6 +207,7 @@ def make_read_provider() -> CompositeAvailabilityProvider:
     return CompositeAvailabilityProvider([
         BookingBusyIntervalProvider(for_update=False),
         TimeOffBusyIntervalProvider(),
+        TenantClosureBusyIntervalProvider(),
         *_external_busy_providers(),
     ])
 
@@ -139,5 +217,6 @@ def make_write_provider() -> CompositeAvailabilityProvider:
     return CompositeAvailabilityProvider([
         BookingBusyIntervalProvider(for_update=True),
         TimeOffBusyIntervalProvider(),
+        TenantClosureBusyIntervalProvider(),
         *_external_busy_providers(),
     ])

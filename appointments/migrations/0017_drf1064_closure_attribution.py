@@ -4,10 +4,8 @@
 # non-null default, no backfill, no constraint. Existing rows read as
 # "unattributed", which is the truth about them.
 #
-# Numbering note: DRF-1062 (branch feat/drf1062-schedule-frame-holes, not
-# merged at the time of writing) also introduces an 0016. Whichever lands
-# second renumbers and re-points `dependencies` — both are AddField-only
-# against 0015, so they commute and no merge migration is needed.
+# Numbered after DRF-1062's 0016 (merged in PR #225) so the graph stays
+# linear — no merge migration, single leaf.
 
 from django.db import migrations, models
 
@@ -15,7 +13,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("appointments", "0015_appointment_version_alter_outboxevent_topic_and_more"),
+        ("appointments", "0016_drf1062_schedule_exception_tenant_closure"),
     ]
 
     operations = [

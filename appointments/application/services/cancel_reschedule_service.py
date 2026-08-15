@@ -193,6 +193,21 @@ class CancelBookingService:
                 "appointment_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
                 "start_at": appointment.start_datetime.isoformat(),
+                # DRF-1062 — the service, so a consumer can offer the
+                # client another slot for the SAME thing they booked
+                # instead of restarting the funnel. Both ids are carried
+                # because a booking hangs off either the marketplace
+                # Service or the salon catalog (service XOR salon_service),
+                # and the consumer knows which one it books with.
+                "service_id": (
+                    str(appointment.service_id) if appointment.service_id else None
+                ),
+                "salon_service_id": (
+                    str(appointment.salon_service_id)
+                    if appointment.salon_service_id else None
+                ),
+                "service_name": appointment.snapshot_service_name or "",
+                "duration_minutes": appointment.snapshot_duration_minutes,
                 "cancelled_by": cancelled_by,
                 "reason_code": reason_code,
                 "cancelled_at": timezone.now().isoformat(),
@@ -378,9 +393,19 @@ class RescheduleBookingService:
         old_end_at = appointment.end_datetime
 
         # Common create/reschedule guards: booking window (min-ahead +
-        # horizon), slot-grid alignment, specialist time-off.
+        # horizon), slot-grid alignment, working hours, salon closure,
+        # specialist time-off.
+        #
+        # DRF-1062 — the schedule constrains clients, not staff. A master
+        # moving a booking to 19:30 at the client's request is making an
+        # operational decision; refusing it because the weekly template
+        # ends at 19:00 is the same "system says no" dead end this task
+        # removes. initiator_role contract: {client, specialist, system}.
         apply_common_booking_guards(
-            specialist_id, new_interval, self._booking_window_policy,
+            specialist_id,
+            new_interval,
+            self._booking_window_policy,
+            enforce_schedule=(initiator_role == "client"),
         )
 
         conflicting = Appointment.objects.filter(

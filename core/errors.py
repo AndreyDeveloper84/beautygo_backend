@@ -98,6 +98,13 @@ class ErrorCode(str, Enum):
     DATE_TOO_FAR = "DATE_TOO_FAR"
     INVALID_TIME_RANGE = "INVALID_TIME_RANGE"
     INVALID_BREAK = "INVALID_BREAK"
+    # DRF-1062 — salon-admin schedule management.
+    CLOSURE_EXISTS = "CLOSURE_EXISTS"
+    # The bookings displaced by an absence changed between the preview the
+    # administrator decided on and the confirmation — re-ask rather than
+    # apply decisions to a set that no longer exists.
+    IMPACT_CHANGED = "IMPACT_CHANGED"
+    UNSUPPORTED_RESOLUTION = "UNSUPPORTED_RESOLUTION"
     WORKING_DAY_OFF = "WORKING_DAY_OFF"
 
     # --- Booking domain (spec §Записи) ---
