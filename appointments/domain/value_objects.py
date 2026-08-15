@@ -113,6 +113,133 @@ ACTIVE_BOOKING_STATUSES: FrozenSet[BookingStatus] = frozenset({
 })
 
 
+# ---------------------------------------------------------------------------
+# Operational actor — who performed an action on a booking
+# ---------------------------------------------------------------------------
+
+class OperationalActor(str, Enum):
+    """Who performed an operational action on a booking.
+
+    ONE closed vocabulary for every actor-bearing field in the booking
+    domain: the ``initiator_role`` DTOs, ``AppointmentRevision.actor_role``,
+    ``Appointment.completed_by`` / ``no_show_marked_by``, and the
+    corresponding ``data`` fields of the outbox events.
+
+    ``SALON`` is the value DRF-1064 adds. Until it existed, a salon
+    employee acting on a booking had no honest representation: the closest
+    fit was ``SYSTEM`` + a separate ``initiator_user_id``, which files a
+    human decision under "automation". That mattered twice over — the
+    §3.2 ``reason_code`` default for ``system`` is ``other`` (so the
+    client would learn nothing about why their booking moved), and
+    DRF-1064's block B introduces a *real* automatic closure, after which
+    "the salon closed it" and "the 3-hour sweep closed it" would have been
+    the same value.
+
+    Nothing new leaks across the service boundary: both external
+    vocabularies already declare a slot for a salon employee and simply
+    never produced it —
+    ``booking.cancelled.cancelled_by`` (event-contract.md §3.2) is
+    ``{user, admin, master, system}``, and the Domain Event Registry's
+    payload ``actor`` for ``appointment.rescheduled`` is
+    ``user | specialist | admin | owner | system | external_system``.
+    See ``envelope_actor_for`` / ``cancelled_by_for`` for the mapping.
+
+    The internal names stay domain-flavoured (``client``, not ``user``;
+    ``specialist``, not ``master``) because ``admin`` is already taken
+    twice inside Ayla — ``TenantUserRelationship.Role.ADMIN`` and
+    ``User.is_platform_admin`` — and reusing it here would conflate the
+    role someone holds with the capacity they acted in.
+    """
+    CLIENT = "client"
+    SPECIALIST = "specialist"
+    SALON = "salon"
+    SYSTEM = "system"
+
+
+# ADR-0009 envelope ``actor`` is a deliberately coarse three-value enum
+# (see infrastructure/outbox/envelope.py VALID_ACTORS). event-contract.md
+# §2.2: "The actor field does NOT identify which specific admin. If
+# consumers need that, it goes in data." Hence salon and specialist share
+# ``admin`` in the envelope and are told apart by the payload field.
+#
+# ``"user"`` appears alongside ``"client"`` because ``CreateBookingDTO``
+# spells the client actor that way and predates this vocabulary. Listed
+# explicitly rather than left to the fallback: relying on a default to
+# produce the right answer for a value we know about is an accident
+# waiting to be broken by the next person who changes the default.
+_ENVELOPE_ACTOR: dict[str, str] = {
+    OperationalActor.CLIENT.value: "user",
+    "user": "user",
+    OperationalActor.SPECIALIST.value: "admin",
+    OperationalActor.SALON.value: "admin",
+    OperationalActor.SYSTEM.value: "system",
+}
+
+# event-contract.md §3.2 ``cancelled_by`` — {user, admin, master, system}.
+# ``admin`` has been in that closed set since the contract was written and
+# no Ayla call site produced it until DRF-1064. The bot consumer already
+# branches on it (§3.2 consumer contract step 3: notify the customer when
+# cancelled_by ∈ {admin, master, system}), so a salon-initiated
+# cancellation lands in the right branch with no bot-side change.
+_CANCELLED_BY: dict[str, str] = {
+    OperationalActor.CLIENT.value: "user",
+    OperationalActor.SPECIALIST.value: "master",
+    OperationalActor.SALON.value: "admin",
+    OperationalActor.SYSTEM.value: "system",
+}
+
+
+# event-contract.md §3.1 ``booking.created.source`` — the coarse origin
+# channel: {mobile_app, admin_console, automation, yclients_sync}. This is
+# the ``origin`` that Ayla MVP Appointment Contract §10 names when it says
+# manual salon booking "uses the same Appointment Domain and lifecycle…
+# It differs by `origin`, actor and authorization context".
+#
+# ``walk_in`` for a master-recorded booking predates the enum and is kept
+# as-is: the consumer stores `source` verbatim and changing it now would
+# reclassify every historical walk-in.
+_BOOKING_SOURCE: dict[str, str] = {
+    OperationalActor.CLIENT.value: "mobile_app",
+    "user": "mobile_app",          # CreateBookingDTO's legacy spelling
+    OperationalActor.SPECIALIST.value: "walk_in",
+    OperationalActor.SALON.value: "admin_console",
+    OperationalActor.SYSTEM.value: "automation",
+}
+
+
+def envelope_actor_for(actor: str) -> str:
+    """Map an :class:`OperationalActor` value → ADR-0009 envelope ``actor``.
+
+    Unknown values fall back to ``"user"`` rather than raising: the
+    envelope builder validates its own enum, and an emit site should not
+    500 a committed domain change over an attribution label.
+    """
+    return _ENVELOPE_ACTOR.get(actor, "user")
+
+
+def cancelled_by_for(actor: str) -> str:
+    """Map an :class:`OperationalActor` value → §3.2 ``cancelled_by``."""
+    return _CANCELLED_BY.get(actor, "user")
+
+
+def booking_source_for(actor: str) -> str:
+    """Map an :class:`OperationalActor` value → §3.1 ``source``."""
+    return _BOOKING_SOURCE.get(actor, "mobile_app")
+
+
+# §3.2 ``reason_code`` values a salon employee may legitimately assert
+# about their own booking. Deliberately NOT the full enum: `user_*` codes
+# are the client's business and `payment_hold_expired` is the payment
+# system's fact, so letting the salon claim either would let one party
+# author another's attribution. The remaining three are things the salon
+# genuinely knows.
+SALON_CANCELLATION_REASON_CODES: FrozenSet[str] = frozenset({
+    "master_unavailable",
+    "tenant_closed_slot",
+    "other",
+})
+
+
 class BookingStateMachine:
     """
     Enforces state transitions.

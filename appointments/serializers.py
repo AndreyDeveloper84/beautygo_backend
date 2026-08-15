@@ -67,6 +67,11 @@ class AppointmentDetailSerializer(serializers.ModelSerializer):
             'id', 'status', 'start_datetime', 'end_datetime',
             'price', 'notes', 'cancellation_reason',
             'idempotency_key', 'is_first_visit',
+            # Closure attribution (DRF-1064). Additive: always present
+            # (model default="") so existing consumers are unaffected,
+            # and a client that wants to render "closed by the salon"
+            # no longer has to infer it from the event stream.
+            'completed_at', 'completed_by', 'no_show_marked_by',
             # Optimistic-concurrency counter (Wave 1). Always present
             # (model default=1) so exposing it here is a pure additive
             # change for every existing AppointmentDetailSerializer
@@ -184,3 +189,26 @@ class InternalAppointmentRescheduleSerializer(AppointmentRescheduleSerializer):
 
 class AppointmentCancelSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class AppointmentCompleteSerializer(serializers.Serializer):
+    """Validates ``POST /appointments/{id}/complete/`` and ``…/no-show/``.
+
+    ``expected_version`` is the same optimistic-concurrency check Wave 1
+    gave reschedule, extended to closure (DRF-1064). Optional, for the
+    same reason it is optional on
+    :class:`AppointmentRescheduleSerializer`: existing mobile builds and
+    the ``PATCH /status/`` alias never send it, and turning a working
+    call into a 400 is not the change this task is making. New surfaces
+    — the master app and the salon console — are expected to always send
+    it; they read the appointment (and its ``version``) immediately
+    before offering the button.
+
+    Note for callers: a successful closure does NOT bump ``version``
+    (it is a reschedule counter — see ``Appointment.version``), so a
+    replayed close with the same ``expected_version`` passes the version
+    check and fails on state instead: 422 ``INVALID_STATUS``, not 409
+    ``STALE_VERSION``. Both mean "re-read the appointment"; only the
+    second means "someone moved it".
+    """
+    expected_version = serializers.IntegerField(required=False, min_value=1)

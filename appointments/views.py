@@ -27,7 +27,12 @@ from .application.services.cancel_reschedule_service import (
     CancelBookingService,
     RescheduleBookingService,
 )
+from .application.services.completion import (
+    close_booking,
+    schedule_capture_safely,
+)
 from .application.services.create_booking_service import CreateBookingService
+from .authz import may_operate_on_bookings, resolve_booking_operator
 from .domain.exceptions import (
     AppointmentTerminalError,
     BookingWindowError,
@@ -39,6 +44,7 @@ from .domain.exceptions import (
     StaleVersionError,
     TenantMismatchError,
 )
+from .domain.value_objects import cancelled_by_for, envelope_actor_for
 from .infrastructure.idempotency import (
     IdempotencyConflict,
     IdempotencyInFlight,
@@ -49,6 +55,7 @@ from .infrastructure.outbox import emit_outbox_event, safe_tenant_id
 from .models import Appointment, OutboxEvent
 from .serializers import (
     AppointmentCancelSerializer,
+    AppointmentCompleteSerializer,
     AppointmentCreateSerializer,
     AppointmentDetailSerializer,
     AppointmentListSerializer,
@@ -400,15 +407,35 @@ class AppointmentViewSet(viewsets.GenericViewSet):
     # -- Complete ------------------------------------------------------------
 
     @extend_schema(
-        request=None,
+        request=AppointmentCompleteSerializer,
         responses={200: AppointmentDetailSerializer},
     )
     @action(detail=True, methods=['post'])
     def complete(self, request: Request, pk: Any = None) -> Response:
-        if not request.user.is_specialist:
+        """POST /api/v1/appointments/{id}/complete/ — close a visit.
+
+        Two actors, one command (DRF-1064 / owner decision OD-V1): the
+        assigned specialist, and an administrator of the tenant the
+        booking belongs to. Before this, the salon could not close a
+        visit at all — and neither could the master of the pilot salon,
+        who has no way to log in. That is why no booking in this system
+        had ever reached ``completed``, and why everything hanging off
+        completion (commission, payment capture, review request, RFM)
+        had never run once.
+
+        The state machine, row lock, event emission and capture
+        scheduling below are reused verbatim; what changed is who is
+        allowed to reach them and that the closure now records WHO.
+        """
+        serializer = AppointmentCompleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        expected_version = serializer.validated_data.get('expected_version')
+
+        if not may_operate_on_bookings(request):
             return error_response(
                 "FORBIDDEN",
-                "Only specialists can mark appointments as complete.",
+                "Only the assigned specialist or a salon administrator "
+                "can mark appointments as complete.",
                 status_code=403,
             )
         try:
@@ -441,14 +468,18 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                     return error_response(
                         "NOT_FOUND", "Appointment not found.", status_code=404,
                     )
-                if appointment.specialist.user_id != request.user.id:
-                    # Defence-in-depth: a specialist cannot complete a
-                    # booking that isn't theirs even if get_queryset's
-                    # filter is later refactored. Distinct from the
-                    # is_specialist check above — that gates the role;
-                    # this gates the row.
+                # Row-aware capacity check, replacing the old
+                # "is it my row?" test. Distinct from the role gate
+                # above — that asks whether the caller has any
+                # operational standing at all; this asks in what
+                # capacity they act on THIS booking, and returns the
+                # OperationalActor value stamped on the row and the
+                # event below. None → 404, never 403: answering
+                # "forbidden" would confirm the id exists.
+                actor = resolve_booking_operator(request, appointment)
+                if actor is None:
                     return error_response(
-                        "NOT_FOUND",  # don't leak existence to other specialists
+                        "NOT_FOUND",
                         "Appointment not found.",
                         status_code=404,
                     )
@@ -469,29 +500,34 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         status_code=404,
                     )
 
-                # complete() raises ValidationError if status not
-                # CONFIRMED. Under the row lock that re-check sees the
-                # committed status of any racing transaction.
-                appointment.complete()
-                emit_outbox_event(
-                    topic=OutboxEvent.Topic.BOOKING_COMPLETED,
-                    data={
-                        "appointment_id": str(appointment.id),
-                        "client_id": str(appointment.client_id),
-                        "specialist_id": str(appointment.specialist_id),
-                        # Contract §3.4 field the consumer reads for the
-                        # completion timestamp (consumers/booking.py:
-                        # data.get("completed_at")).
-                        "completed_at": timezone.now().isoformat(),
-                    },
-                    user_id=request.user.id,
-                    tenant_id=safe_tenant_id(
-                        appointment, context="booking.completed",
-                    ),
-                    # Specialist-initiated; per ADR-0009 actor mapping
-                    # (specialist → 'admin', client → 'user').
-                    actor="admin",
-                )
+                # Optimistic concurrency (master MVP contract). Inside
+                # the transaction, AFTER the lock, BEFORE any state
+                # change: a stale caller must not complete, must not
+                # emit, must not mutate. Reuses the existing
+                # Appointment.version counter — no second concurrency
+                # system. Version is NOT bumped by completion (it counts
+                # reschedules); see AppointmentCompleteSerializer.
+                if (
+                    expected_version is not None
+                    and appointment.version != expected_version
+                ):
+                    return error_response(
+                        "STALE_VERSION",
+                        f"Appointment {appointment.id} expected_version="
+                        f"{expected_version} but current version is "
+                        f"{appointment.version}.",
+                        status_code=409,
+                    )
+
+                # State transition + event, shared verbatim with the
+                # 3-hour sweep and the backlog command (see
+                # application/services/completion.py) so a booking closed
+                # by the front desk and one closed by the sweep are
+                # indistinguishable to any consumer. complete() raises
+                # ValidationError if the status is not CONFIRMED; under
+                # the row lock that re-check sees the committed status of
+                # any racing transaction.
+                close_booking(appointment, completed_by=actor)
         except DjangoValidationError as e:
             return error_response(
                 "INVALID_STATUS", str(e.message), status_code=422,
@@ -502,36 +538,36 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         # even if the broker/provider is down — reconciliation (and the
         # retry_capture command) covers the rest. No-op when the booking
         # has no held payment (no-prepayment path, D6).
-        from payments.services import schedule_capture_for_appointment
-        try:
-            schedule_capture_for_appointment(
-                appointment, completed_at=timezone.now(),
-            )
-        except Exception:  # noqa: BLE001 — broker/DB hiccup must not
-            # 500 a booking that is already durably completed; the
-            # reconciliation job + retry_capture command pick it up.
-            logger.exception(
-                'capture.schedule_failed appointment_id=%s', appointment.id,
-            )
+        schedule_capture_safely(appointment)
         return success_response(AppointmentDetailSerializer(appointment).data)
 
     # -- No-show ------------------------------------------------------------
 
     @extend_schema(
-        request=None,
+        request=AppointmentCompleteSerializer,
         responses={200: AppointmentDetailSerializer},
     )
     @action(detail=True, methods=['post'], url_path='no-show')
     def no_show(self, request: Request, pk: Any = None) -> Response:
-        """Specialist marks the client as no-show. Transition
-        confirmed → no_show. Distinct from cancel — preserves the
-        "specialist held the slot" signal for revenue loss tracking
-        + future reliability scoring (#511).
+        """The specialist or a salon administrator marks the client as
+        no-show. Transition confirmed → no_show. Distinct from cancel —
+        preserves the "specialist held the slot" signal for revenue loss
+        tracking + future reliability scoring (#511).
+
+        Same two-actor model and the same ``expected_version`` contract
+        as ``complete`` (DRF-1064): in a salon the person who sees that
+        the client never arrived is usually at the front desk, not in
+        the chair.
         """
-        if not request.user.is_specialist:
+        serializer = AppointmentCompleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        expected_version = serializer.validated_data.get('expected_version')
+
+        if not may_operate_on_bookings(request):
             return error_response(
                 "FORBIDDEN",
-                "Only specialists can mark appointments as no-show.",
+                "Only the assigned specialist or a salon administrator "
+                "can mark appointments as no-show.",
                 status_code=403,
             )
         try:
@@ -555,9 +591,12 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                     return error_response(
                         "NOT_FOUND", "Appointment not found.", status_code=404,
                     )
-                if appointment.specialist.user_id != request.user.id:
+                # Same row-aware capacity check as `complete` — see that
+                # action for why None becomes 404 rather than 403.
+                actor = resolve_booking_operator(request, appointment)
+                if actor is None:
                     return error_response(
-                        "NOT_FOUND",  # don't leak existence cross-specialist
+                        "NOT_FOUND",
                         "Appointment not found.",
                         status_code=404,
                     )
@@ -573,7 +612,20 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         "Appointment not found.",
                         status_code=404,
                     )
-                appointment.mark_no_show()
+                # Optimistic concurrency — same placement rule as
+                # `complete`: after the lock, before any state change.
+                if (
+                    expected_version is not None
+                    and appointment.version != expected_version
+                ):
+                    return error_response(
+                        "STALE_VERSION",
+                        f"Appointment {appointment.id} expected_version="
+                        f"{expected_version} but current version is "
+                        f"{appointment.version}.",
+                        status_code=409,
+                    )
+                appointment.mark_no_show(marked_by=actor)
                 # Internal no-show signal — kept for in-process handlers
                 # (#511 reliability scoring, revenue-loss tracking). This
                 # topic is NOT in the cross-service taxonomy, so it stays
@@ -585,12 +637,21 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         "appointment_id": str(appointment.id),
                         "client_id": str(appointment.client_id),
                         "specialist_id": str(appointment.specialist_id),
+                        # Attribution counterpart of completed_by. The
+                        # Domain Event Registry already reserves an
+                        # optional `marked_by` on appointment.no_show;
+                        # this is the value behind it. Internal topic —
+                        # no cross-service versioning consequence.
+                        "no_show_marked_by": actor,
                     },
-                    user_id=request.user.id,
+                    # The affected user is the customer, not the operator
+                    # — same §2.2 rule corrected in `complete` above. The
+                    # booking.cancelled emit below already got this right.
+                    user_id=appointment.client_id,
                     tenant_id=safe_tenant_id(
                         appointment, context="booking.no_show",
                     ),
-                    actor="admin",  # specialist-initiated
+                    actor=envelope_actor_for(actor),
                 )
                 # Cross-service representation of a no-show. The bot's
                 # ingest taxonomy has no "booking.no_show" name (it would
@@ -609,13 +670,21 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         "appointment_id": str(appointment.id),
                         "specialist_id": str(appointment.specialist_id),
                         "start_at": appointment.start_datetime.isoformat(),
-                        "cancelled_by": "master",
+                        # §3.2 vocabulary {user, admin, master, system}.
+                        # `admin` has been in that closed set since the
+                        # contract was written and no Ayla call site
+                        # produced it until now — a front-desk no-show is
+                        # the first. The bot consumer already branches on
+                        # it (§3.2 step 3: notify the customer when
+                        # cancelled_by ∈ {admin, master, system}), so this
+                        # needs no bot-side change.
+                        "cancelled_by": cancelled_by_for(actor),
                         "reason_code": "user_no_show",
                         "cancelled_at": timezone.now().isoformat(),
                     },
                     user_id=appointment.client_id,
                     tenant_id=tenant_id,
-                    actor="admin",  # specialist-initiated
+                    actor=envelope_actor_for(actor),
                 )
         except DjangoValidationError as e:
             return error_response(

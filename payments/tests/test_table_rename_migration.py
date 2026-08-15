@@ -41,9 +41,41 @@ def _table_exists(table_name: str) -> bool:
 class TestPaymentTableRenameMigration:
     """Forward = 0002 applied. Reverse = back to 0001 (PR 1 state)."""
 
+    @pytest.fixture(autouse=True)
+    def _restore_payments_schema(self):
+        """Put the ``payments`` app back on its latest migration.
+
+        Not belt-and-braces — load-bearing. ``transaction=True`` means
+        pytest-django does NOT wrap the test in a transaction (that is
+        the whole point: DDL needs to be able to commit), so every
+        ``executor.migrate`` here lands permanently in the test database.
+        These tests deliberately rewind ``payments`` to 0001/0002, and
+        without this teardown they leave it there — for the rest of the
+        session. Every test that runs afterwards in the same process
+        sees a Payment table with no ``capture_state`` and no
+        ``UserPaymentMethod``.
+
+        That is not hypothetical: it is what turned CI red on PR #227.
+        The suite stayed green for months only because nothing collected
+        after ``payments/`` happened to touch those columns; the salon's
+        manual-booking path (DRF-1063 block D) was the first that did,
+        and it looked like a defect in the new code rather than a
+        pre-existing hole here.
+
+        Targets the graph's leaf rather than a hardcoded name so the
+        next migration this app gains is restored automatically.
+        """
+        yield
+        executor = MigrationExecutor(connection)
+        leaves = executor.loader.graph.leaf_nodes("payments")
+        if leaves:
+            executor.migrate(leaves)
+
     def _migrate(self, app: str, target: str) -> None:
-        # transaction=True on the django_db fixture means we own the
-        # outer transaction — MigrationExecutor can issue DDL inside.
+        # transaction=True on the django_db fixture means there is NO
+        # enclosing transaction, so MigrationExecutor can issue DDL —
+        # and that DDL commits. See _restore_payments_schema for the
+        # consequence and why the teardown above is mandatory.
         executor = MigrationExecutor(connection)
         executor.migrate([(app, target)])
 
@@ -73,9 +105,15 @@ class TestPaymentTableRenameMigration:
         assert _table_exists("appointments_payment")
         assert not _table_exists("payments_payment")
 
-        # Belt + suspenders — pytest-django's transaction=True rollback
-        # would restore the canonical state anyway, but re-applying
-        # keeps the assertion line above (line 70) the last thing the
-        # reader's eye lands on instead of an unwind that could be
+        # Re-apply so the assertion above stays the last thing the
+        # reader's eye lands on, rather than an unwind that could be
         # mistaken for the test's main behaviour.
+        #
+        # This used to be described as "belt + suspenders — pytest-
+        # django's transaction=True rollback would restore the canonical
+        # state anyway". That was wrong, and the error is worth keeping
+        # visible: transaction=True means there is no rollback to speak
+        # of, and stopping at 0002 left 0003/0004 unapplied for the rest
+        # of the session. The autouse teardown is what actually restores
+        # the schema now.
         self._migrate("payments", "0002_rename_table")
