@@ -1217,3 +1217,162 @@ class AuthService:
         user.social_accounts.all().delete()
 
         logger.info("Account deleted: user_id=%s", user.pk)
+
+
+# ---------------------------------------------------------------------------
+# DRF-1062 §C — record an absence together with a decision per booking
+# ---------------------------------------------------------------------------
+
+class ImpactChangedError(Exception):
+    """Bookings in the window changed between preview and confirm."""
+
+    def __init__(self, impact) -> None:
+        super().__init__("The affected bookings changed; review them again.")
+        self.impact = impact
+
+
+class UnresolvedBookingsError(Exception):
+    """Some affected bookings were left without a decision."""
+
+    def __init__(self, impact, missing) -> None:
+        super().__init__("Every affected booking needs a decision.")
+        self.impact = impact
+        self.missing = missing
+
+
+class UnsupportedResolutionError(Exception):
+    """Asked for an action this release does not implement."""
+
+
+SUPPORTED_RESOLUTIONS = frozenset({"cancel"})
+
+
+def apply_absence_with_resolutions(
+    *,
+    specialist,
+    start_at,
+    end_at,
+    reason: str,
+    resolutions: list[dict],
+    impact_token: str,
+    actor,
+) -> dict:
+    """Block a specialist's time and settle every booking it displaces.
+
+    The invariant this exists to hold: **an absence is never recorded
+    without a decision about each person already booked into it.** Today
+    the API refuses outright (409 HAS_ACTIVE_APPOINTMENTS), which protects
+    the data and strands the product exactly when a master falls ill.
+    Removing the refusal without replacing it would strand the clients
+    instead. So both happen or neither does, in one transaction.
+
+    ``impact_token`` comes from the preview the administrator was looking
+    at. Recomputing the set under the advisory lock and comparing tokens
+    closes the window in which a client books into the very hours being
+    closed — the same technique reschedule uses with ``expected_version``.
+
+    Cancellation is the only supported action. Reassigning to another
+    master is out of scope (it moves money: snapshot price, specialist
+    income and the service XOR constraint all have to be answered first),
+    and "offer a reschedule" was deliberately replaced by cancel-then-
+    offer: moving someone's appointment without asking is the same as
+    cancelling it, only they find out later. The bot picks the offer up
+    from ``booking.cancelled`` with ``reason_code=master_unavailable``.
+
+    Returns a summary for the caller's audit log.
+    """
+    from django.db import transaction
+
+    from appointments.application.dto import CancelBookingDTO
+    from appointments.application.services.cancel_reschedule_service import (
+        CancelBookingService,
+    )
+    from appointments.application.services.schedule_impact_service import (
+        get_schedule_impact,
+    )
+    from appointments.domain.policies import ForceFullRefundCancellationPolicy
+    from appointments.infrastructure.db_locks import specialist_advisory_lock
+    from appointments.models import SpecialistTimeOff
+
+    requested = {
+        str(item.get("appointment_id")): str(item.get("action", "")).lower()
+        for item in resolutions or []
+    }
+    unsupported = set(requested.values()) - SUPPORTED_RESOLUTIONS
+    if unsupported:
+        raise UnsupportedResolutionError(
+            f"Unsupported resolution(s): {', '.join(sorted(unsupported))}"
+        )
+
+    summary = {
+        "cancelled_count": 0,
+        "refunded_count": 0,
+        "refund_failures": [],
+        "time_off_id": None,
+    }
+    cancelled_appointments = []
+
+    with transaction.atomic():
+        # Same lock create/reschedule take, so a booking cannot land in
+        # the window between the recount and the block.
+        specialist_advisory_lock(specialist.id)
+
+        impact = get_schedule_impact(specialist, start_at, end_at)
+
+        if impact.impact_token != impact_token:
+            raise ImpactChangedError(impact)
+
+        missing = [
+            booking.appointment_id
+            for booking in impact.bookings
+            if booking.appointment_id not in requested
+        ]
+        if missing:
+            raise UnresolvedBookingsError(impact, missing)
+
+        cancel_service = CancelBookingService(
+            cancellation_policy=ForceFullRefundCancellationPolicy(),
+        )
+        for booking in impact.bookings:
+            # reason is the trusted internal token, NOT free text: it maps
+            # to reason_code "master_unavailable" and selects the
+            # "салон обещает связаться" template for the client.
+            cancel_service.execute(CancelBookingDTO(
+                booking_id=booking.appointment_id,
+                initiator_user_id=actor.pk,
+                initiator_role="system",
+                reason="specialist_departure",
+            ))
+            summary["cancelled_count"] += 1
+            cancelled_appointments.append(booking.appointment_id)
+
+        time_off = SpecialistTimeOff.objects.create(
+            specialist=specialist,
+            start_at=start_at,
+            end_at=end_at,
+            reason=reason or "",
+        )
+        summary["time_off_id"] = str(time_off.id)
+
+    # After commit, deliberately. Refunds call YooKassa; holding an
+    # advisory lock across an external call would serialise every booking
+    # for this specialist behind a third party's latency. A refund that
+    # fails is logged for manual follow-up and never un-cancels a booking
+    # — same rule cascade_specialist_departure follows.
+    from appointments.models import Appointment
+    for appointment_id in cancelled_appointments:
+        appointment = Appointment.objects.filter(id=appointment_id).first()
+        if appointment is not None:
+            _refund_paid_payments_for(appointment, summary=summary)
+
+    from users.schedule_api import _invalidate_slots
+    _invalidate_slots(specialist.id, start_at.date(), end_at.date())
+
+    logger.info(
+        "schedule.absence_applied actor=%s specialist=%s from=%s to=%s "
+        "cancelled=%d refunded=%d refund_failures=%d",
+        actor.pk, specialist.pk, start_at.isoformat(), end_at.isoformat(),
+        summary["cancelled_count"], summary["refunded_count"],
+        len(summary["refund_failures"]),
+    )
+    return summary

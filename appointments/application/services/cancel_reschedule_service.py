@@ -188,6 +188,21 @@ class CancelBookingService:
                 "appointment_id": str(booking_id),
                 "specialist_id": str(appointment.specialist_id),
                 "start_at": appointment.start_datetime.isoformat(),
+                # DRF-1062 — the service, so a consumer can offer the
+                # client another slot for the SAME thing they booked
+                # instead of restarting the funnel. Both ids are carried
+                # because a booking hangs off either the marketplace
+                # Service or the salon catalog (service XOR salon_service),
+                # and the consumer knows which one it books with.
+                "service_id": (
+                    str(appointment.service_id) if appointment.service_id else None
+                ),
+                "salon_service_id": (
+                    str(appointment.salon_service_id)
+                    if appointment.salon_service_id else None
+                ),
+                "service_name": appointment.snapshot_service_name or "",
+                "duration_minutes": appointment.snapshot_duration_minutes,
                 "cancelled_by": cancelled_by,
                 "reason_code": reason_code,
                 "cancelled_at": timezone.now().isoformat(),
