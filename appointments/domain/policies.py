@@ -104,13 +104,21 @@ class StandardCancellationPolicy:
     - Free cancellation up to 24h before the appointment
     - 50% fee for cancellation 2-24h before
     - No refund for cancellation < 2h before
-    - Specialist-initiated cancellation -> always full refund
+    - Provider-initiated cancellation -> always full refund
 
     These rules are configurable per marketplace requirements.
     """
     FREE_CANCEL_HOURS = 24
     PARTIAL_REFUND_HOURS = 2
     PARTIAL_REFUND_PERCENT = 50.0
+
+    # Initiators on the provider's side of the transaction. The fee
+    # schedule below prices the CLIENT's change of mind; charging it when
+    # the salon or the master cancels would bill a customer for a
+    # decision that was never theirs. DRF-1064 added "salon": a front
+    # desk cancelling an hour before would otherwise have handed the
+    # client a 0% refund.
+    PROVIDER_INITIATORS = frozenset({"specialist", "salon"})
 
     # States from which cancellation is permitted
     CANCELLABLE_STATUSES = frozenset({
@@ -129,8 +137,8 @@ class StandardCancellationPolicy:
                 f"Cannot cancel booking with status '{booking_status.value}'"
             )
 
-        # Specialists can always cancel (their time, their call)
-        if initiator == "specialist":
+        # The provider side can always cancel (their time, their call)
+        if initiator in self.PROVIDER_INITIATORS:
             return
 
         now = datetime.now(tz=timezone.utc)
@@ -146,7 +154,7 @@ class StandardCancellationPolicy:
         booking_start_at: datetime,
         initiator: str,
     ) -> float:
-        if initiator == "specialist":
+        if initiator in self.PROVIDER_INITIATORS:
             return 100.0
 
         now = datetime.now(tz=timezone.utc)

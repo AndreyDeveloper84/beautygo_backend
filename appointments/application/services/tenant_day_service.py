@@ -82,6 +82,13 @@ class DayMaster:
     status: str
     timezone_name: str
     is_working_day: bool
+    # Which source shaped the day: "exception" when a one-off override
+    # exists for this date, otherwise "weekly". Shown because "10:00-19:00"
+    # from the template and "10:00-19:00" set by hand for today look
+    # identical in a journal, and an administrator deciding whether to
+    # change something needs to know which one they are looking at.
+    schedule_source: str = "weekly"
+    schedule_note: str = ""
     working_intervals: list[DayInterval] = field(default_factory=list)
     breaks: list[DayInterval] = field(default_factory=list)
     absences: list[DayAbsence] = field(default_factory=list)
@@ -89,9 +96,20 @@ class DayMaster:
 
 
 @dataclass(frozen=True)
+class DayClosure:
+    """The whole salon closed, for the day or part of it."""
+    id: str
+    start_local: str | None      # "HH:MM"; None = from the start of the day
+    end_local: str | None        # "HH:MM"; None = until the end of the day
+    is_full_day: bool
+    reason: str
+
+
+@dataclass(frozen=True)
 class TenantDay:
     date: str
     generated_at: str
+    closures: list[DayClosure] = field(default_factory=list)
     masters: list[DayMaster] = field(default_factory=list)
     summary: dict = field(default_factory=dict)
 
@@ -125,15 +143,29 @@ def _client_name(user) -> str:
 def build_tenant_day(tenant, target_date: date_cls) -> TenantDay:
     """Assemble the day journal for one salon.
 
-    Query budget is flat in the number of masters: one query for the
-    roster, one for the weekly template, one for absences, one for
-    bookings. The per-master slicing below is done in Python over those
-    result sets rather than by re-querying.
+    Query budget is flat in the number of masters: one query each for
+    salon closures, the roster, the weekly template, one-off schedule
+    exceptions, absences and bookings. The per-master slicing below is
+    done in Python over those result sets rather than by re-querying.
     """
     from appointments.models import (
-        Appointment, SpecialistTimeOff, SpecialistWorkingHours,
+        Appointment, SpecialistScheduleException, SpecialistTimeOff,
+        SpecialistWorkingHours, TenantClosure,
     )
     from users.models import SpecialistProfile
+
+    closures = [
+        DayClosure(
+            id=str(row.id),
+            start_local=_hhmm(row.start_time),
+            end_local=_hhmm(row.end_time),
+            is_full_day=row.start_time is None and row.end_time is None,
+            reason=row.reason or "",
+        )
+        for row in TenantClosure.objects
+        .filter(tenant=tenant, date=target_date)
+        .order_by("start_time")
+    ]
 
     masters = list(
         SpecialistProfile.objects
@@ -145,8 +177,14 @@ def build_tenant_day(tenant, target_date: date_cls) -> TenantDay:
         return TenantDay(
             date=target_date.isoformat(),
             generated_at=timezone.now().isoformat(),
+            closures=closures,
             masters=[],
-            summary={"masters": 0, "bookings": 0, "by_status": {}},
+            summary={
+                "masters": 0,
+                "bookings": 0,
+                "by_status": {},
+                "is_salon_closed": any(c.is_full_day for c in closures),
+            },
         )
 
     # Each master's day is their own local calendar day. In practice a
@@ -171,6 +209,18 @@ def build_tenant_day(tenant, target_date: date_cls) -> TenantDay:
         day_of_week=target_date.weekday(),
     ):
         hours_by_master.setdefault(str(row.specialist_id), []).append(row)
+
+    # One-off overrides REPLACE the weekly template for this date — the
+    # same precedence AvailabilityQueryService._get_working_hours applies
+    # when it decides which slots to sell. A journal that showed the
+    # template while the engine sold the exception would be worse than no
+    # journal, because it would look authoritative.
+    exception_by_master: dict[str, SpecialistScheduleException] = {
+        str(row.specialist_id): row
+        for row in SpecialistScheduleException.objects.filter(
+            specialist_id__in=master_ids, date=target_date,
+        )
+    }
 
     absences_by_master: dict[str, list[SpecialistTimeOff]] = {}
     for row in SpecialistTimeOff.objects.filter(
@@ -203,14 +253,23 @@ def build_tenant_day(tenant, target_date: date_cls) -> TenantDay:
         tz = ZoneInfo(master.timezone)
         window_start, window_end = windows[key]
 
-        template = hours_by_master.get(key, [])
-        is_working_day = any(row.is_working_day for row in template)
+        exception = exception_by_master.get(key)
+        if exception is not None:
+            frame_rows = [exception]
+            schedule_source = "exception"
+            schedule_note = exception.note or ""
+        else:
+            frame_rows = hours_by_master.get(key, [])
+            schedule_source = "weekly"
+            schedule_note = ""
+
+        is_working_day = any(row.is_working_day for row in frame_rows)
         working_intervals = [
             DayInterval(
                 start_local=_hhmm(row.start_time),
                 end_local=_hhmm(row.end_time),
             )
-            for row in template
+            for row in frame_rows
             if row.is_working_day and row.start_time and row.end_time
         ]
         breaks = [
@@ -218,7 +277,7 @@ def build_tenant_day(tenant, target_date: date_cls) -> TenantDay:
                 start_local=_hhmm(row.break_start),
                 end_local=_hhmm(row.break_end),
             )
-            for row in template
+            for row in frame_rows
             if row.is_working_day and row.break_start and row.break_end
         ]
 
@@ -272,6 +331,8 @@ def build_tenant_day(tenant, target_date: date_cls) -> TenantDay:
             status=master.status,
             timezone_name=master.timezone,
             is_working_day=is_working_day,
+            schedule_source=schedule_source,
+            schedule_note=schedule_note,
             working_intervals=working_intervals,
             breaks=breaks,
             absences=absences,
@@ -281,10 +342,12 @@ def build_tenant_day(tenant, target_date: date_cls) -> TenantDay:
     return TenantDay(
         date=target_date.isoformat(),
         generated_at=timezone.now().isoformat(),
+        closures=closures,
         masters=day_masters,
         summary={
             "masters": len(day_masters),
             "bookings": total,
             "by_status": by_status,
+            "is_salon_closed": any(c.is_full_day for c in closures),
         },
     )

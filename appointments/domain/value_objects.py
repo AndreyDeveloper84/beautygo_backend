@@ -161,8 +161,15 @@ class OperationalActor(str, Enum):
 # §2.2: "The actor field does NOT identify which specific admin. If
 # consumers need that, it goes in data." Hence salon and specialist share
 # ``admin`` in the envelope and are told apart by the payload field.
+#
+# ``"user"`` appears alongside ``"client"`` because ``CreateBookingDTO``
+# spells the client actor that way and predates this vocabulary. Listed
+# explicitly rather than left to the fallback: relying on a default to
+# produce the right answer for a value we know about is an accident
+# waiting to be broken by the next person who changes the default.
 _ENVELOPE_ACTOR: dict[str, str] = {
     OperationalActor.CLIENT.value: "user",
+    "user": "user",
     OperationalActor.SPECIALIST.value: "admin",
     OperationalActor.SALON.value: "admin",
     OperationalActor.SYSTEM.value: "system",
@@ -182,6 +189,24 @@ _CANCELLED_BY: dict[str, str] = {
 }
 
 
+# event-contract.md §3.1 ``booking.created.source`` — the coarse origin
+# channel: {mobile_app, admin_console, automation, yclients_sync}. This is
+# the ``origin`` that Ayla MVP Appointment Contract §10 names when it says
+# manual salon booking "uses the same Appointment Domain and lifecycle…
+# It differs by `origin`, actor and authorization context".
+#
+# ``walk_in`` for a master-recorded booking predates the enum and is kept
+# as-is: the consumer stores `source` verbatim and changing it now would
+# reclassify every historical walk-in.
+_BOOKING_SOURCE: dict[str, str] = {
+    OperationalActor.CLIENT.value: "mobile_app",
+    "user": "mobile_app",          # CreateBookingDTO's legacy spelling
+    OperationalActor.SPECIALIST.value: "walk_in",
+    OperationalActor.SALON.value: "admin_console",
+    OperationalActor.SYSTEM.value: "automation",
+}
+
+
 def envelope_actor_for(actor: str) -> str:
     """Map an :class:`OperationalActor` value → ADR-0009 envelope ``actor``.
 
@@ -195,6 +220,24 @@ def envelope_actor_for(actor: str) -> str:
 def cancelled_by_for(actor: str) -> str:
     """Map an :class:`OperationalActor` value → §3.2 ``cancelled_by``."""
     return _CANCELLED_BY.get(actor, "user")
+
+
+def booking_source_for(actor: str) -> str:
+    """Map an :class:`OperationalActor` value → §3.1 ``source``."""
+    return _BOOKING_SOURCE.get(actor, "mobile_app")
+
+
+# §3.2 ``reason_code`` values a salon employee may legitimately assert
+# about their own booking. Deliberately NOT the full enum: `user_*` codes
+# are the client's business and `payment_hold_expired` is the payment
+# system's fact, so letting the salon claim either would let one party
+# author another's attribution. The remaining three are things the salon
+# genuinely knows.
+SALON_CANCELLATION_REASON_CODES: FrozenSet[str] = frozenset({
+    "master_unavailable",
+    "tenant_closed_slot",
+    "other",
+})
 
 
 class BookingStateMachine:

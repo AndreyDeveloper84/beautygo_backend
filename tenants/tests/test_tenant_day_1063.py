@@ -23,7 +23,8 @@ import pytest
 from rest_framework.test import APIClient
 
 from appointments.models import (
-    Appointment, SpecialistTimeOff, SpecialistWorkingHours,
+    Appointment, SpecialistScheduleException, SpecialistTimeOff,
+    SpecialistWorkingHours, TenantClosure,
 )
 from services.models import Service, ServiceCategory
 from tenants.models import Tenant
@@ -249,6 +250,128 @@ class TestDayJournal:
         assert master["is_working_day"] is False
         assert master["working_intervals"] == []
 
+    def test_a_one_off_exception_replaces_the_weekly_template(
+        self, salon, admin_user, olga,
+    ):
+        """Frame precedence must match the booking engine's.
+
+        ``AvailabilityQueryService._get_working_hours`` lets a one-off
+        exception replace the weekly template outright. A journal that
+        showed the template while the engine sold the exception would be
+        worse than no journal — it would look authoritative and be wrong.
+        """
+        SpecialistWorkingHours.objects.create(
+            specialist=olga, day_of_week=DAY.weekday(), is_working_day=True,
+            start_time=time(10, 0), end_time=time(19, 0),
+        )
+        SpecialistScheduleException.objects.create(
+            specialist=olga, date=DAY, is_working_day=True,
+            start_time=time(12, 0), end_time=time(16, 0),
+            note="короткий день",
+        )
+
+        resp = _get(admin_user, salon.slug, date=DAY.isoformat())
+
+        master = [
+            m for m in resp.data["data"]["masters"]
+            if m["display_name"] == "Ольга"
+        ][0]
+        assert master["schedule_source"] == "exception"
+        assert master["schedule_note"] == "короткий день"
+        assert master["working_intervals"] == [
+            {"start_local": "12:00", "end_local": "16:00"},
+        ]
+
+    def test_an_exception_can_close_a_normally_working_day(
+        self, salon, admin_user, olga,
+    ):
+        SpecialistWorkingHours.objects.create(
+            specialist=olga, day_of_week=DAY.weekday(), is_working_day=True,
+            start_time=time(10, 0), end_time=time(19, 0),
+        )
+        SpecialistScheduleException.objects.create(
+            specialist=olga, date=DAY, is_working_day=False,
+        )
+
+        resp = _get(admin_user, salon.slug, date=DAY.isoformat())
+
+        master = [
+            m for m in resp.data["data"]["masters"]
+            if m["display_name"] == "Ольга"
+        ][0]
+        assert master["is_working_day"] is False
+        assert master["working_intervals"] == []
+        assert master["schedule_source"] == "exception"
+
+    def test_the_weekly_template_is_labelled_as_such(
+        self, salon, admin_user, olga,
+    ):
+        """"10:00-19:00" from the template and the same hours set by hand
+        for today look identical; an administrator about to change
+        something needs to know which one they are reading."""
+        SpecialistWorkingHours.objects.create(
+            specialist=olga, day_of_week=DAY.weekday(), is_working_day=True,
+            start_time=time(10, 0), end_time=time(19, 0),
+        )
+
+        resp = _get(admin_user, salon.slug, date=DAY.isoformat())
+
+        master = [
+            m for m in resp.data["data"]["masters"]
+            if m["display_name"] == "Ольга"
+        ][0]
+        assert master["schedule_source"] == "weekly"
+
+    def test_a_salon_closure_is_shown_for_the_whole_day(
+        self, salon, admin_user, olga,
+    ):
+        TenantClosure.objects.create(
+            tenant=salon, date=DAY, reason="санитарный день",
+        )
+
+        resp = _get(admin_user, salon.slug, date=DAY.isoformat())
+
+        data = resp.data["data"]
+        assert len(data["closures"]) == 1
+        closure = data["closures"][0]
+        assert closure["is_full_day"] is True
+        assert closure["start_local"] is None
+        assert closure["reason"] == "санитарный день"
+        assert data["summary"]["is_salon_closed"] is True
+
+    def test_a_partial_closure_carries_its_hours(
+        self, salon, admin_user, olga,
+    ):
+        TenantClosure.objects.create(
+            tenant=salon, date=DAY,
+            start_time=time(9, 0), end_time=time(12, 0),
+            reason="ремонт",
+        )
+
+        resp = _get(admin_user, salon.slug, date=DAY.isoformat())
+
+        data = resp.data["data"]
+        assert data["closures"][0] == {
+            "id": data["closures"][0]["id"],
+            "start_local": "09:00",
+            "end_local": "12:00",
+            "is_full_day": False,
+            "reason": "ремонт",
+        }
+        # A partial closure does not close the salon.
+        assert data["summary"]["is_salon_closed"] is False
+
+    def test_another_salons_closure_is_not_shown(
+        self, salon, other_salon, admin_user, olga,
+    ):
+        TenantClosure.objects.create(
+            tenant=other_salon, date=DAY, reason="не наш",
+        )
+
+        resp = _get(admin_user, salon.slug, date=DAY.isoformat())
+
+        assert resp.data["data"]["closures"] == []
+
     def test_a_booking_on_another_date_is_not_included(
         self, salon, admin_user, olga, service, client_user,
     ):
@@ -315,7 +438,7 @@ class TestDayJournal:
                 phone=f"+7999104064{i}", name=f"Мастер {i}",
             )
 
-        with django_assert_max_num_queries(12):
+        with django_assert_max_num_queries(14):
             resp = _get(admin_user, salon.slug, date=DAY.isoformat())
 
         assert resp.status_code == 200
