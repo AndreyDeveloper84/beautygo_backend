@@ -20,6 +20,12 @@ from users.schedule_admin_api import (
     TenantClosureListView,
 )
 
+from .appointments_api import (
+    SalonBookingCancelView,
+    SalonBookingCreateView,
+    SalonBookingRescheduleView,
+    SalonCustomerLookupView,
+)
 from .day_api import TenantDayView
 from .relationships_admin_api import TenantRelationshipRevokeView
 
@@ -36,6 +42,30 @@ urlpatterns = [
         "me/day/",
         TenantDayView.as_view(),
         name="tenants-day",
+    ),
+    # DRF-1063 block D — the three things a front desk does all day.
+    # Customer lookup lives here rather than under a customers tab
+    # because the Master Schedule UX Contract puts it inside the booking
+    # flow.
+    path(
+        "me/customers/",
+        SalonCustomerLookupView.as_view(),
+        name="tenants-customer-lookup",
+    ),
+    path(
+        "me/appointments/",
+        SalonBookingCreateView.as_view(),
+        name="tenants-booking-create",
+    ),
+    path(
+        "me/appointments/<uuid:appointment_id>/reschedule/",
+        SalonBookingRescheduleView.as_view(),
+        name="tenants-booking-reschedule",
+    ),
+    path(
+        "me/appointments/<uuid:appointment_id>/cancel/",
+        SalonBookingCancelView.as_view(),
+        name="tenants-booking-cancel",
     ),
     # DRF-1062 — schedule of any master in this tenant. The pro-app
     # routes under /specialists/me/ stay untouched; these are the same
