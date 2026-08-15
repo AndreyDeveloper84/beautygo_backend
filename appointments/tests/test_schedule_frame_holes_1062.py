@@ -412,3 +412,125 @@ class TestGuardAppliesToClientsNotStaff:
         result = CreateBookingService().execute(dto)
 
         assert result.booking_id
+
+
+class TestFrameAndHolesCompose:
+    """The invariant the owner named: a frame that OPENS a day must not
+    swallow an absence sitting inside it.
+
+    Ratified 2026-08-15 — resolution order is
+    ``exception → weekly template → time-off → slots``. The exception
+    decides the *shape* of the day; time-off is subtracted from whatever
+    shape wins. Getting this wrong is absurd rather than subtly wrong:
+    a master marked absent 15:00–18:00 would be put back to work by an
+    override that was only meant to open the day.
+
+    It holds by construction — ``_get_working_hours`` resolves only the
+    frame, and absences arrive as busy intervals from the provider chain
+    — which is exactly why it needs a test. A refactor that moved
+    time-off resolution into the frame resolver would break this and not
+    fail a single other test in this file.
+    """
+
+    def _sunday_open_with_absence(self, specialist):
+        """Sunday is a day off in the template. Open it 10:00–20:00, then
+        mark the master absent 15:00–18:00 inside that window."""
+        from appointments.models import SpecialistTimeOff
+
+        sunday = _next_weekday(6)
+        SpecialistScheduleException.objects.create(
+            specialist=specialist,
+            date=sunday,
+            is_working_day=True,
+            start_time=time(10, 0),
+            end_time=time(20, 0),
+            note="работаем в это воскресенье",
+        )
+        SpecialistTimeOff.objects.create(
+            specialist=specialist,
+            start_at=_utc(sunday, 15),
+            end_at=_utc(sunday, 18),
+            reason="личное",
+        )
+        return sunday
+
+    def test_absence_is_subtracted_from_the_opened_day(
+        self, scheduled_specialist, service,
+    ):
+        sunday = self._sunday_open_with_absence(scheduled_specialist)
+
+        slots = _slots(scheduled_specialist, service, sunday)
+
+        # 60-minute service on a 30-minute grid: everything that fits
+        # before the absence, nothing that touches it, then the tail.
+        assert slots == [
+            "10:00", "10:30", "11:00", "11:30", "12:00", "12:30",
+            "13:00", "13:30", "14:00",
+            "18:00", "18:30", "19:00",
+        ]
+
+    def test_the_day_would_be_solid_without_the_absence(
+        self, scheduled_specialist, service,
+    ):
+        """Guards the test above: proves the gap comes from the time-off
+        and not from the frame being narrower than we think."""
+        sunday = _next_weekday(6)
+        SpecialistScheduleException.objects.create(
+            specialist=scheduled_specialist,
+            date=sunday,
+            is_working_day=True,
+            start_time=time(10, 0),
+            end_time=time(20, 0),
+        )
+
+        slots = _slots(scheduled_specialist, service, sunday)
+
+        assert "15:00" in slots
+        assert "17:00" in slots
+
+    def test_write_path_refuses_a_booking_inside_the_absence(
+        self, scheduled_specialist,
+    ):
+        sunday = self._sunday_open_with_absence(scheduled_specialist)
+
+        # The frame allows 16:00 — the absence is what must stop it.
+        check_schedule_frame(scheduled_specialist.id, _interval(sunday, 16))
+
+        from appointments.application.services._booking_guards import (
+            apply_common_booking_guards,
+        )
+        with pytest.raises(SlotNotAvailableError):
+            apply_common_booking_guards(
+                scheduled_specialist.id, _interval(sunday, 16),
+            )
+
+    def test_staff_override_does_not_reach_through_an_absence(
+        self, client_user, scheduled_specialist, service,
+    ):
+        """Staff may book outside working hours; they may not book over a
+        master who is marked absent. The schedule says when the salon
+        takes clients — an absence is the master's own statement, and
+        lifting it has to be a decision, not a side effect of who acted.
+        """
+        from uuid import uuid4
+
+        from appointments.application.dto import CreateBookingDTO
+        from appointments.application.services.create_booking_service import (
+            CreateBookingService,
+        )
+
+        sunday = self._sunday_open_with_absence(scheduled_specialist)
+
+        dto = CreateBookingDTO(
+            client_id=client_user.id,
+            specialist_id=scheduled_specialist.id,
+            service_id=service.id,
+            start_at=_utc(sunday, 16),
+            idempotency_key=str(uuid4()),
+            payment_required=False,
+            confirm_immediately=True,
+            actor_role="specialist",
+        )
+
+        with pytest.raises(SlotNotAvailableError):
+            CreateBookingService().execute(dto)
