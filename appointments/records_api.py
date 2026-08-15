@@ -54,13 +54,11 @@ logger = logging.getLogger(__name__)
 
 
 # Booking states that count as "upcoming" — anything non-terminal AND
-# still in the future. The 'in_progress' state stays in upcoming so
-# the customer can see/cancel it.
+# still in the future.
 _UPCOMING_STATUSES = (
     Appointment.Status.PENDING,
     Appointment.Status.AWAITING_PAYMENT,
     Appointment.Status.CONFIRMED,
-    Appointment.Status.IN_PROGRESS,
 )
 
 
