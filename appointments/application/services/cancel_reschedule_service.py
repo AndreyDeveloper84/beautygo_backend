@@ -42,6 +42,7 @@ from appointments.domain.value_objects import (
     BookingStateMachine,
     TimeInterval,
     ACTIVE_BOOKING_STATUSES,
+    cancelled_by_for,
 )
 from appointments.infrastructure.db_locks import specialist_advisory_lock
 
@@ -59,12 +60,16 @@ logger = logging.getLogger(__name__)
 _REASON_TOKEN_TO_CODE = {
     "specialist_departure": "master_unavailable",
 }
-# initiator_role → (cancelled_by enum, fallback reason_code). System falls
-# back to "other" (never None); §3.2 has no generic system-auto code.
-_ROLE_TO_CANCELLED_BY = {
-    "specialist": ("master", "master_unavailable"),
-    "system": ("system", "other"),
-}  # default → ("user", "user_changed_plans")
+# initiator_role → fallback §3.2 reason_code. The cancelled_by half is NOT
+# duplicated here: it comes from the shared OperationalActor mapping
+# (domain/value_objects.cancelled_by_for), which is the single source of
+# truth for that translation across cancel, no-show and any future
+# salon-initiated command. System falls back to "other" (never None);
+# §3.2 has no generic system-auto code.
+_ROLE_TO_REASON_CODE = {
+    "specialist": "master_unavailable",
+    "system": "other",
+}  # default → "user_changed_plans"
 
 
 def _resolve_cancellation_vocab(initiator_role: str, reason: str | None):
@@ -77,8 +82,8 @@ def _resolve_cancellation_vocab(initiator_role: str, reason: str | None):
     itself travels separately in the human-readable payload field. The
     result is always a non-null §3.2 ``reason_code``.
     """
-    cancelled_by, fallback = _ROLE_TO_CANCELLED_BY.get(
-        initiator_role, ("user", "user_changed_plans"))
+    cancelled_by = cancelled_by_for(initiator_role)
+    fallback = _ROLE_TO_REASON_CODE.get(initiator_role, "user_changed_plans")
     code = None
     if reason:
         code = _REASON_TOKEN_TO_CODE.get(reason.strip().lower())
