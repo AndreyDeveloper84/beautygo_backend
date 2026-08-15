@@ -14,6 +14,7 @@ from .domain.value_objects import (
     ACTIVE_BOOKING_STATUSES,
     BookingStateMachine,
     BookingStatus,
+    OperationalActor,
 )
 
 
@@ -137,6 +138,39 @@ class Appointment(models.Model):
     # payout preview (C3 items[].completed_at) and reconciliation of
     # stuck captures (D9). Null until completed.
     completed_at = models.DateTimeField(null=True, blank=True)
+
+    # --- Closure attribution (DRF-1064) ---
+    # WHO closed the visit, from the OperationalActor vocabulary
+    # {client, specialist, salon, system}. Added at build time rather than
+    # retrofitted: the alternative is a migration plus an already-emitted
+    # stream of booking.completed events with no such field.
+    #
+    # This answers the *actor* half of OQ-AC-3 ("Authoritative completion
+    # source and evidence model", Ayla MVP Appointment Contract §30) — the
+    # half owner decision OD-V1 settles. It deliberately does NOT claim to
+    # be evidence: what counts as proof that the service was rendered, and
+    # whether a completion can be corrected, stay open. Do not overload
+    # this field with either.
+    #
+    # Empty string on rows closed before the field existed — honestly
+    # "unattributed", as distinct from "closed by something nameless".
+    completed_by = models.CharField(
+        max_length=16, blank=True, default="",
+        help_text=(
+            "Who closed the visit: client | specialist | salon | system. "
+            "Empty for visits closed before this field existed."
+        ),
+    )
+    # Symmetric attribution for the no-show branch. The Domain Event
+    # Registry already reserves an optional ``marked_by`` on
+    # appointment.no_show; this is the field behind it.
+    no_show_marked_by = models.CharField(
+        max_length=16, blank=True, default="",
+        help_text=(
+            "Who marked the no-show: client | specialist | salon | system. "
+            "Empty for rows marked before this field existed."
+        ),
+    )
 
     # Optimistic-concurrency counter — Wave 1 Simple Reschedule hardening.
     # Bumped by RescheduleBookingService on every successful reschedule;
@@ -284,24 +318,54 @@ class Appointment(models.Model):
             'status', 'cancellation_reason', 'cancelled_by', 'updated_at',
         ])
 
-    def complete(self) -> None:
-        """Mark appointment as completed via state machine."""
+    @staticmethod
+    def _validated_actor(value: str) -> str:
+        """Reject an attribution label outside the closed vocabulary.
+
+        Empty is allowed and means "unattributed" — the domain method
+        stays usable from fixtures without inventing an actor. A non-empty
+        value that isn't an :class:`OperationalActor` is a programming
+        error, so it raises rather than silently persisting a label no
+        consumer can interpret.
+        """
+        if not value:
+            return ""
+        allowed = {actor.value for actor in OperationalActor}
+        if value not in allowed:
+            raise ValueError(
+                f"Unknown operational actor {value!r}; expected one of "
+                f"{sorted(allowed)}."
+            )
+        return value
+
+    def complete(self, *, completed_by: str = "") -> None:
+        """Mark appointment as completed via state machine.
+
+        ``completed_by`` records WHO closed the visit (DRF-1064) — see
+        the field docstring for why it is not evidence.
+        """
         if not self.can_complete():
             raise ValidationError(
                 f"Cannot complete appointment with status '{self.status}'."
             )
         self.status = self.Status.COMPLETED
         self.completed_at = timezone.now()
-        self.save(update_fields=['status', 'completed_at', 'updated_at'])
+        self.completed_by = self._validated_actor(completed_by)
+        self.save(update_fields=[
+            'status', 'completed_at', 'completed_by', 'updated_at',
+        ])
 
-    def mark_no_show(self) -> None:
+    def mark_no_show(self, *, marked_by: str = "") -> None:
         """Mark client as no-show via state machine.
 
-        Triggered by the specialist after the booking time elapsed
-        without the client arriving. Unlike ``cancel``, this preserves
-        the "specialist took the slot" signal — important for revenue
-        loss tracking, customer reliability scoring, and any future
-        automated reschedule offer (#511).
+        Triggered after the booking time elapsed without the client
+        arriving. Unlike ``cancel``, this preserves the "specialist took
+        the slot" signal — important for revenue loss tracking, customer
+        reliability scoring, and any future automated reschedule offer
+        (#511).
+
+        ``marked_by`` is the closure-attribution counterpart of
+        ``complete(completed_by=...)``.
         """
         if not self.can_mark_no_show():
             raise ValidationError(
@@ -309,7 +373,10 @@ class Appointment(models.Model):
                 f"'{self.status}'."
             )
         self.status = self.Status.NO_SHOW
-        self.save(update_fields=['status', 'updated_at'])
+        self.no_show_marked_by = self._validated_actor(marked_by)
+        self.save(update_fields=[
+            'status', 'no_show_marked_by', 'updated_at',
+        ])
 
     @property
     def duration_minutes(self) -> int:
