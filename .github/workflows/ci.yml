@@ -227,9 +227,44 @@ jobs:
             # are new in PR3 and would otherwise sit unstarted; --force-recreate
             # on web makes sure new env (REDIS_URL, SENTRY_*) reaches it.
             docker compose up -d --force-recreate
-            sleep 5
-            # Wait for db to be healthy before migrating; needed because
-            # django_celery_beat migrations land on this deploy.
-            docker compose exec -T web python manage.py migrate --noinput || true
+
+            # DRF-1046. The database does not necessarily accept connections
+            # the moment its container starts, so the migrate call used to be
+            # guarded with `sleep 5` + `|| true`. That guard made a genuinely
+            # broken migration indistinguishable from a merely slow database:
+            # the deploy printed "Deploy complete!" either way, and the schema
+            # drift surfaced later as runtime errors on the first request that
+            # touched a column the running code already expected.
+            #
+            # Wait for readiness explicitly instead of sleeping, then let a
+            # failure be a failure. `pg_isready` reports whether the server
+            # accepts connections and performs no authentication, so it needs
+            # no credentials here.
+            for i in $(seq 1 30); do
+              docker compose exec -T db pg_isready -q && break
+              echo "waiting for db to accept connections ($i/30)"
+              sleep 2
+            done
+
+            # No `script_stop` on this action, so the step's exit code is the
+            # last command's — a bare failing migrate would still be followed
+            # by `docker compose ps` and the success echo. Fail explicitly.
+            if ! docker compose exec -T web python manage.py migrate --noinput; then
+              echo "::error::migrate failed — deploy aborted"
+              exit 1
+            fi
+
+            # migrate can exit 0 while leaving work undone (an app whose
+            # migrations were never discovered, a partially applied state).
+            # Prove nothing is left rather than trusting the exit code: this
+            # is the check that would have caught the 2026-08-15 bot incident,
+            # where containers were healthy and /healthz answered 200 while a
+            # required migration sat unapplied.
+            if docker compose exec -T web python manage.py showmigrations --plan | grep -q '^\[ \]'; then
+              echo "::error::unapplied migrations remain after migrate:"
+              docker compose exec -T web python manage.py showmigrations --plan | grep '^\[ \]'
+              exit 1
+            fi
+
             docker compose ps
             echo "Deploy complete!"
