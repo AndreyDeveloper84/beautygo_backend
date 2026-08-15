@@ -43,6 +43,12 @@ class CreateBookingDTO:
     # maps to the ADR-0009 envelope actor ("specialist" → "admin").
     payment_required: bool = True
     confirm_immediately: bool = False
+    # OperationalActor vocabulary {client|user, specialist, salon, system}
+    # — see appointments/domain/value_objects.py. "user" is the legacy
+    # spelling of the client actor on this DTO and is kept because the
+    # schedule guard below keys off it; the newer paths pass the
+    # OperationalActor values directly. DRF-1064 added "salon": a booking
+    # the salon records on a customer's behalf.
     actor_role: str = "user"
 
 
@@ -51,8 +57,19 @@ class CancelBookingDTO:
     """Input to CancelBookingService."""
     booking_id: UUID
     initiator_user_id: UUID
-    initiator_role: str         # "client" | "specialist" | "system"
+    # OperationalActor vocabulary — "client" | "specialist" | "salon" |
+    # "system". See appointments/domain/value_objects.py.
+    initiator_role: str
     reason: Optional[str] = None
+    # §3.2 reason_code asserted by a TRUSTED caller, bypassing the
+    # role-default. Server-set only: the public cancel path leaves it
+    # None and gets the default for its role, because free-text from a
+    # client must never drive the attribution enum (see
+    # _resolve_cancellation_vocab). The salon surface sets it from a
+    # closed allowlist — a salon genuinely knows whether the master is
+    # unavailable or the slot was closed, and telling the client "other"
+    # when the salon said "мастер заболел" throws that away.
+    reason_code: Optional[str] = None
 
 
 @dataclass(frozen=True)

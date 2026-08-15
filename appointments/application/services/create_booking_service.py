@@ -33,6 +33,8 @@ from appointments.domain.value_objects import (
     BookingSnapshot,
     TimeInterval,
     ACTIVE_BOOKING_STATUSES,
+    booking_source_for,
+    envelope_actor_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -436,13 +438,11 @@ class CreateBookingService:
             emit_outbox_event, safe_tenant_id,
         )
         from appointments.models import OutboxEvent as _OutboxEvent
-        # actor_role contract {user, specialist, system} → ADR-0009 actor.
-        # A provider-initiated walk-in maps "specialist" → "admin".
-        actor = (
-            "admin" if dto.actor_role == "specialist"
-            else "system" if dto.actor_role == "system"
-            else "user"
-        )
+        # OperationalActor → ADR-0009 envelope actor. A provider-initiated
+        # walk-in and a salon-recorded booking both map to "admin"; the
+        # envelope is a coarse three-value enum by design and the finer
+        # attribution travels in `source` below (event-contract §2.2).
+        actor = envelope_actor_for(dto.actor_role)
         tenant_id = safe_tenant_id(appointment, context="booking.created")
         emit_outbox_event(
             topic=_OutboxEvent.Topic.BOOKING_CREATED,
@@ -459,14 +459,14 @@ class CreateBookingService:
                 # Omitting it crashed the booking.created handler with
                 # KeyError before delivery could ever succeed.
                 "status": str(appointment.status),
-                # Coarse origin channel — "walk_in" for a provider-
-                # initiated booking (actor_role 'specialist'), else the
-                # mobile client. Consumer stores it on the proxy; §3.1
-                # `source` accepts any string.
-                "source": (
-                    "walk_in" if dto.actor_role == "specialist"
-                    else "mobile_app"
-                ),
+                # Coarse origin channel (§3.1 `source`) — the `origin`
+                # that Ayla MVP Appointment Contract §10 names as the
+                # thing that distinguishes a manual salon booking from a
+                # customer one. "walk_in" for a master-recorded booking,
+                # "admin_console" when the salon books on a customer's
+                # behalf, "mobile_app" for the customer themselves.
+                # Consumer stores it on the proxy verbatim.
+                "source": booking_source_for(dto.actor_role),
                 # Contract field name for the booked total (§3.1
                 # `price_total`). ``amount`` is kept below for the
                 # in-process handlers that already read it.
