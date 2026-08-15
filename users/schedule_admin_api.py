@@ -91,21 +91,208 @@ class AdminScheduleView(_TenantScopedSpecialistMixin, ScheduleView):
         return super().patch(request)
 
 
+class ResolutionSerializer(serializers.Serializer):
+    appointment_id = serializers.UUIDField()
+    action = serializers.ChoiceField(choices=["cancel"])
+
+
+class AbsenceWithResolutionsSerializer(serializers.Serializer):
+    """An absence plus what happens to everyone booked into it.
+
+    ``impact_token`` is required, not optional: without it the caller
+    would be confirming decisions against a set of bookings it never
+    actually saw.
+    """
+
+    start_at = serializers.DateTimeField()
+    end_at = serializers.DateTimeField()
+    reason = serializers.CharField(required=False, allow_blank=True, default="")
+    impact_token = serializers.CharField()
+    resolutions = ResolutionSerializer(many=True)
+
+    def validate(self, data):
+        if data["end_at"] <= data["start_at"]:
+            raise serializers.ValidationError("end_at must be after start_at.")
+        seen = {str(item["appointment_id"]) for item in data["resolutions"]}
+        if len(seen) != len(data["resolutions"]):
+            raise serializers.ValidationError(
+                "Duplicate appointment_id in resolutions."
+            )
+        return data
+
+
+def _impact_to_dict(impact) -> dict:
+    return {
+        "specialist_id": impact.specialist_id,
+        "start_at": impact.start_at,
+        "end_at": impact.end_at,
+        "timezone": impact.timezone_name,
+        "impact_token": impact.impact_token,
+        "bookings": [
+            {
+                "appointment_id": b.appointment_id,
+                "version": b.version,
+                "status": b.status,
+                "start_at_local": b.start_at_local,
+                "end_at_local": b.end_at_local,
+                "service_name": b.service_name,
+                "duration_minutes": b.duration_minutes,
+                "price": b.price,
+                "payment_status": b.payment_status,
+                "refund_percent_if_cancelled": b.refund_percent_if_cancelled,
+            }
+            for b in impact.bookings
+        ],
+    }
+
+
+def _parse_window(request: Request):
+    """Read start_at/end_at from the query string. Returns (start, end, error)."""
+    from django.utils.dateparse import parse_datetime
+
+    raw_start = request.query_params.get("start_at")
+    raw_end = request.query_params.get("end_at")
+    if not raw_start or not raw_end:
+        return None, None, error_response(
+            "MISSING_PARAM", "start_at and end_at are required.", status_code=400,
+        )
+
+    def _parse(raw: str):
+        parsed = parse_datetime(raw)
+        if parsed is not None:
+            return parsed
+        # "2026-08-18T09:00:00+03:00" arrives as "...09:00:00 03:00" when
+        # the caller forgot to percent-encode the '+' — the single most
+        # common way to get an unreadable 400 out of a timestamp that
+        # looks perfectly valid in the logs. Accept it rather than make
+        # every caller rediscover this.
+        return parse_datetime(raw.replace(" ", "+", 1))
+
+    start_at, end_at = _parse(raw_start), _parse(raw_end)
+    if start_at is None or end_at is None:
+        return None, None, error_response(
+            "INVALID_PARAM", "start_at and end_at must be ISO-8601.", status_code=400,
+        )
+    if end_at <= start_at:
+        return None, None, error_response(
+            "INVALID_PARAM", "end_at must be after start_at.", status_code=400,
+        )
+    return start_at, end_at, None
+
+
+class AdminScheduleImpactView(_TenantScopedSpecialistMixin, APIView):
+    """GET .../masters/{specialist_id}/schedule/impact/?start_at=&end_at=
+
+    Which live bookings a proposed absence would displace. Read-only —
+    nothing is blocked and nothing is cancelled by looking.
+
+    The response carries an ``impact_token`` fingerprinting the set; the
+    write side rejects a stale one so a booking made while the
+    administrator was deciding cannot be silently swept up or missed.
+    """
+
+    permission_classes = _ADMIN_PERMISSIONS
+
+    @extend_schema(
+        responses={
+            200: OpenApiResponse(description="Affected bookings + impact_token"),
+            400: OpenApiResponse(description="Bad or missing window"),
+            404: OpenApiResponse(description="Specialist not found in this tenant"),
+        },
+    )
+    def get(self, request: Request, **kwargs) -> Response:
+        from appointments.application.services.schedule_impact_service import (
+            get_schedule_impact,
+        )
+
+        specialist = self._get_specialist(request)
+        if not specialist:
+            return error_response("NOT_FOUND", "Specialist not found.", status_code=404)
+
+        start_at, end_at, error = _parse_window(request)
+        if error is not None:
+            return error
+
+        impact = get_schedule_impact(specialist, start_at, end_at)
+        return success_response(_impact_to_dict(impact))
+
+
 class AdminTimeOffListView(_TenantScopedSpecialistMixin, TimeOffListView):
     """GET/POST /api/v1/tenants/me/masters/{specialist_id}/time-off/
 
-    POST still refuses with 409 HAS_ACTIVE_APPOINTMENTS when the period
-    covers live bookings. Resolving those bookings (cancel with client
-    notification) is the separate flow in DRF-1062 §C, deliberately not
-    folded in here: an absence must never be recorded without deciding
-    what happens to the people already booked into it.
+    Two shapes of POST:
+
+    * without ``resolutions`` — inherited behaviour, including the 409
+      HAS_ACTIVE_APPOINTMENTS refusal when live bookings sit in the
+      period. That refusal is right on its own: nobody should be able to
+      strand a booked client by accident.
+    * with ``resolutions`` — DRF-1062 §C. The absence and a decision for
+      every displaced booking are applied together, in one transaction.
+      Either the salon closes the time and settles with the people booked
+      into it, or nothing happens.
     """
 
     def get(self, request: Request, **kwargs) -> Response:
         return super().get(request)
 
     def post(self, request: Request, **kwargs) -> Response:
-        return super().post(request)
+        if "resolutions" not in request.data:
+            return super().post(request)
+        return self._post_with_resolutions(request)
+
+    def _post_with_resolutions(self, request: Request) -> Response:
+        from users.services import (
+            ImpactChangedError,
+            UnresolvedBookingsError,
+            UnsupportedResolutionError,
+            apply_absence_with_resolutions,
+        )
+
+        specialist = self._get_specialist(request)
+        if not specialist:
+            return error_response("NOT_FOUND", "Specialist not found.", status_code=404)
+
+        serializer = AbsenceWithResolutionsSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            summary = apply_absence_with_resolutions(
+                specialist=specialist,
+                start_at=data["start_at"],
+                end_at=data["end_at"],
+                reason=data.get("reason", ""),
+                resolutions=data["resolutions"],
+                impact_token=data["impact_token"],
+                actor=request.user,
+            )
+        except ImpactChangedError as exc:
+            # 409 with a fresh preview: the administrator decided against
+            # a set of bookings that no longer matches reality.
+            return error_response(
+                "IMPACT_CHANGED",
+                "The affected bookings changed. Review them and confirm again.",
+                status_code=409,
+                details=_impact_to_dict(exc.impact),
+            )
+        except UnresolvedBookingsError as exc:
+            return error_response(
+                "HAS_ACTIVE_APPOINTMENTS",
+                "Every affected booking needs a decision.",
+                status_code=409,
+                details={
+                    "unresolved": exc.missing,
+                    **_impact_to_dict(exc.impact),
+                },
+            )
+        except UnsupportedResolutionError as exc:
+            return error_response("UNSUPPORTED_RESOLUTION", str(exc), status_code=400)
+
+        logger.info(
+            "schedule.absence_with_resolutions actor=%s tenant=%s specialist=%s",
+            request.user.pk, request.tenant.pk, specialist.pk,
+        )
+        return success_response(summary, status_code=201)
 
 
 class AdminTimeOffDetailView(_TenantScopedSpecialistMixin, TimeOffDetailView):

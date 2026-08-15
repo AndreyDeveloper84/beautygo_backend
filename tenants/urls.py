@@ -10,6 +10,7 @@ from django.urls import path
 from users.schedule_admin_api import (
     AdminScheduleExceptionDetailView,
     AdminScheduleExceptionListView,
+    AdminScheduleImpactView,
     AdminScheduleView,
     AdminTimeOffDetailView,
     AdminTimeOffListView,
@@ -33,6 +34,12 @@ urlpatterns = [
         "me/masters/<uuid:specialist_id>/schedule/",
         AdminScheduleView.as_view(),
         name="tenants-master-schedule",
+    ),
+    # Preview before blocking: which live bookings this absence displaces.
+    path(
+        "me/masters/<uuid:specialist_id>/schedule/impact/",
+        AdminScheduleImpactView.as_view(),
+        name="tenants-master-schedule-impact",
     ),
     path(
         "me/masters/<uuid:specialist_id>/time-off/",
