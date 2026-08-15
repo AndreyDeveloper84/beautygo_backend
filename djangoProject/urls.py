@@ -10,6 +10,7 @@ from drf_spectacular.views import (
 
 from .health import liveness, readiness
 from payments.views import InternalPaymentStatusView, InternalPayoutPreviewView
+from users.internal_schedule_api import InternalSpecialistTimeOffView
 
 
 urlpatterns = [
@@ -57,6 +58,16 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/payout-preview/',
         InternalPayoutPreviewView.as_view(),
         name='internal-payout-preview',
+    ),
+    # DRF-1062 — the bot's Mini App approves a master's day-off request
+    # here, because the customer picker now reads slots from Ayla: an
+    # approval written into the bot's own store would change nothing a
+    # client can see. Same "explicit route BEFORE the include" reason as
+    # payout-preview above.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/time-off/',
+        InternalSpecialistTimeOffView.as_view(),
+        name='internal-specialist-time-off',
     ),
     path(
         'api/v1/internal/specialists/',
