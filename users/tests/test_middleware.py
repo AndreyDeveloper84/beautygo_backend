@@ -4,6 +4,11 @@ import pytest
 from django.urls import reverse
 from rest_framework import status
 
+from users import middleware as middleware_module
+from users.middleware import (
+    ACKNOWLEDGED_EXCLUSION_DIVERGENCE,
+    TenantContextMiddleware,
+)
 from users.models import User
 
 logger = logging.getLogger(__name__)
@@ -146,6 +151,56 @@ class TestEndpointRestrictions:
         )
         logger.info("pro app → /login/ → %s", response.status_code)
         assert response.status_code != status.HTTP_403_FORBIDDEN
+
+
+class TestExclusionListDivergence:
+    """DRF-1115 — AppTypeMiddleware and TenantContextMiddleware each keep
+    their own list of excluded path prefixes: AppTypeMiddleware's is the
+    module-level ``EXCLUDED_PATH_PREFIXES`` in users/middleware.py,
+    TenantContextMiddleware's is its own class attribute of the same
+    name. They're allowed to diverge (different headers, different
+    legitimate exemptions) but not *silently* — every prefix in one list
+    and not the other must be named in ACKNOWLEDGED_EXCLUSION_DIVERGENCE
+    with a reason. This is the mechanization: it doesn't require the
+    lists to match, it requires every mismatch to have been looked at by
+    a human.
+
+    No DB needed — this only touches the module-level tuples/dict.
+    """
+
+    def test_divergence_is_fully_acknowledged(self):
+        app_type_only = set(middleware_module.EXCLUDED_PATH_PREFIXES) - set(
+            TenantContextMiddleware.EXCLUDED_PATH_PREFIXES
+        )
+        tenant_only = set(TenantContextMiddleware.EXCLUDED_PATH_PREFIXES) - set(
+            middleware_module.EXCLUDED_PATH_PREFIXES
+        )
+        diverged = app_type_only | tenant_only
+        acknowledged = set(ACKNOWLEDGED_EXCLUSION_DIVERGENCE)
+
+        unacknowledged = diverged - acknowledged
+        assert not unacknowledged, (
+            f"New/unacknowledged divergence between AppTypeMiddleware's and "
+            f"TenantContextMiddleware's EXCLUDED_PATH_PREFIXES: {unacknowledged}. "
+            "Either this is a legitimate, deliberate difference — add it to "
+            "users.middleware.ACKNOWLEDGED_EXCLUSION_DIVERGENCE with a reason "
+            "— or one of the two lists is missing an entry it should have."
+        )
+
+    def test_no_stale_acknowledgement(self):
+        # An entry that stopped diverging (someone fixed the list, or
+        # removed the prefix from both) should be deleted from the
+        # registry — otherwise it silently hides the NEXT divergence at
+        # the same prefix.
+        app_type = set(middleware_module.EXCLUDED_PATH_PREFIXES)
+        tenant = set(TenantContextMiddleware.EXCLUDED_PATH_PREFIXES)
+        diverged = app_type ^ tenant
+
+        stale = set(ACKNOWLEDGED_EXCLUSION_DIVERGENCE) - diverged
+        assert not stale, (
+            f"ACKNOWLEDGED_EXCLUSION_DIVERGENCE entries no longer diverge: "
+            f"{stale}. Delete them from users.middleware."
+        )
 
 
 @pytest.mark.django_db
