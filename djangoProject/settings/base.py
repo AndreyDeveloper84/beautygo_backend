@@ -402,6 +402,41 @@ BOOKING_SLOT_GRID_MINUTES = 30          # Slot interval grid
 #   volume spikes post-flip.
 RESCHEDULE_MOBILE_UNVERSIONED_ALLOWED = True
 
+# --- Automatic completion of elapsed visits (DRF-1064, block B) --------
+#
+# A visit nobody closed is not a visit that did not happen. Without this
+# sweep every booking the salon forgets stays `confirmed` forever, and
+# everything downstream of completion — commission, payment capture,
+# review request, RFM — never fires.
+#
+# TWO keys, on purpose. `booking.completed` is not a log line: it charges
+# the platform fee (billing.handlers.on_booking_completed runs FIRST in
+# the handler chain) and asks the client for a review. Switching the beat
+# task on with a backlog of long-elapsed `confirmed` rows would bill and
+# message that whole backlog in one tick. So enabling requires naming the
+# point in time the sweep is allowed to reach back to; without it the
+# task refuses to run and says so. The historical tail has its own path —
+# `manage.py complete_elapsed_backlog`, which is deliberately manual.
+BOOKING_AUTO_COMPLETE_ENABLED = (
+    os.environ.get("BOOKING_AUTO_COMPLETE_ENABLED", "false").lower() == "true"
+)
+# Grace period after `end_datetime` before a confirmed visit is treated
+# as having happened. Owner decision: 3 hours.
+BOOKING_AUTO_COMPLETE_AFTER_HOURS = int(
+    os.environ.get("BOOKING_AUTO_COMPLETE_AFTER_HOURS", "3")
+)
+# ISO-8601 instant (e.g. "2026-08-20T00:00:00+03:00"). Bookings that
+# ended BEFORE this are never touched by the sweep. Set it to the moment
+# the feature goes live; the backlog before it is a separate, explicit
+# decision.
+BOOKING_AUTO_COMPLETE_NOT_BEFORE = os.environ.get(
+    "BOOKING_AUTO_COMPLETE_NOT_BEFORE", "",
+)
+# Bounds worst-case work on a tick. The queue is normally near-empty.
+BOOKING_AUTO_COMPLETE_BATCH_SIZE = int(
+    os.environ.get("BOOKING_AUTO_COMPLETE_BATCH_SIZE", "200")
+)
+
 # SMS.RU Configuration
 SMS_RU_API_ID = os.environ.get("SMS_RU_API_ID", "")
 SMS_ENABLED = os.environ.get("SMS_ENABLED", "false").lower() == "true"
@@ -814,6 +849,17 @@ CELERY_BEAT_SCHEDULE = {
     "publish-outbox-events-to-bot": {
         "task": "appointments.tasks.publish_outbox_events_to_bot",
         "schedule": 30.0,
+    },
+    # DRF-1064 block B — close visits that happened and that nobody
+    # closed. 15 minutes is deliberately unhurried: the trigger is a
+    # 3-hour grace period, so a quarter-hour of granularity is invisible
+    # operationally and keeps the sweep off the critical path. Gated by
+    # BOOKING_AUTO_COMPLETE_ENABLED + _NOT_BEFORE — with either missing
+    # the task logs and returns without touching a row, so registering
+    # it here is inert until ops deliberately switches it on.
+    "auto-complete-elapsed-bookings": {
+        "task": "appointments.tasks.auto_complete_elapsed_bookings",
+        "schedule": 900.0,                      # every 15 minutes
     },
     # 1h reminder beat. Window logic in the task itself absorbs the
     # 5-min jitter so we don't spam-send if a tick arrives early/late.

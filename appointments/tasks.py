@@ -20,6 +20,7 @@ from django.db import transaction
 from django.db.models import Min
 from django.utils import timezone
 
+from .domain.value_objects import OperationalActor
 from .infrastructure.outbox.publisher import (
     publish_outbox_events_to_bot as _publish_to_bot,
 )
@@ -267,6 +268,161 @@ def publish_outbox_events_to_bot() -> dict:
         "dead": summary.dead,
         "scanned": summary.scanned,
     }
+
+
+def _auto_complete_window() -> tuple[object, object] | None:
+    """Resolve (not_before, cutoff) for the sweep, or None if it must not run.
+
+    Returns None — after logging why — when the feature is off or when it
+    is on but nobody named the point in time it may reach back to. Fail
+    closed: see ``BOOKING_AUTO_COMPLETE_ENABLED`` in settings for why a
+    silent full-backlog sweep is the outcome worth refusing.
+    """
+    from django.conf import settings
+    from django.utils.dateparse import parse_datetime
+
+    if not getattr(settings, "BOOKING_AUTO_COMPLETE_ENABLED", False):
+        return None
+
+    raw_floor = getattr(settings, "BOOKING_AUTO_COMPLETE_NOT_BEFORE", "") or ""
+    not_before = parse_datetime(raw_floor) if raw_floor else None
+    if not_before is None or timezone.is_naive(not_before):
+        logger.error(
+            "booking.auto_complete.misconfigured — "
+            "BOOKING_AUTO_COMPLETE_ENABLED is on but "
+            "BOOKING_AUTO_COMPLETE_NOT_BEFORE is %s. Refusing to sweep: "
+            "without a floor this would complete (and bill, and request "
+            "reviews for) every elapsed booking in history. Set it to the "
+            "moment the feature goes live, and drain anything older with "
+            "manage.py complete_elapsed_backlog.",
+            "empty" if not raw_floor else f"unusable ({raw_floor!r})",
+        )
+        return None
+
+    hours = getattr(settings, "BOOKING_AUTO_COMPLETE_AFTER_HOURS", 3)
+    cutoff = timezone.now() - timedelta(hours=hours)
+    return not_before, cutoff
+
+
+def complete_elapsed_bookings(*, not_before, cutoff, batch_size: int) -> dict:
+    """Close confirmed bookings that ended before ``cutoff``.
+
+    Shared by the beat task and the backlog command so the two cannot
+    diverge in what they consider eligible or in what they emit.
+
+    Each booking is its own transaction. One row that cannot be closed
+    (a racing cancellation, a payment hook blowing up) must not roll back
+    the ones already done — and a batch-wide transaction would also hold
+    every row lock until the last handler finished.
+
+    Idempotency comes from the state machine, not from bookkeeping: the
+    status is re-read under ``select_for_update`` and
+    ``Appointment.complete()`` refuses anything that is no longer
+    CONFIRMED. Two workers racing the same row therefore produce one
+    transition and one event.
+    """
+    from appointments.application.services.completion import (
+        close_booking, schedule_capture_safely,
+    )
+    from django.core.exceptions import ValidationError
+
+    from .models import Appointment
+
+    candidate_ids = list(
+        Appointment.objects
+        .filter(
+            status=Appointment.Status.CONFIRMED,
+            end_datetime__lte=cutoff,
+            end_datetime__gte=not_before,
+        )
+        .order_by("end_datetime")
+        .values_list("id", flat=True)[:batch_size]
+    )
+
+    completed = 0
+    skipped = 0
+    failed = 0
+    for appointment_id in candidate_ids:
+        try:
+            with transaction.atomic():
+                appointment = (
+                    Appointment.objects
+                    # of=('self',) — lock ONLY the base table; the
+                    # nullable service FK would otherwise make Postgres
+                    # reject the FOR UPDATE (same trap as the HTTP path).
+                    .select_for_update(of=("self",))
+                    .select_related("specialist", "client", "service")
+                    .get(pk=appointment_id)
+                )
+                if appointment.status != Appointment.Status.CONFIRMED:
+                    # Closed, cancelled or moved between the scan and the
+                    # lock. Not an error — the sweep lost a benign race.
+                    skipped += 1
+                    continue
+                close_booking(
+                    appointment,
+                    completed_by=OperationalActor.SYSTEM.value,
+                )
+        except ValidationError:
+            skipped += 1
+            continue
+        except Exception:  # noqa: BLE001 — one bad row must not stop the batch
+            failed += 1
+            logger.exception(
+                "booking.auto_complete.failed appointment_id=%s",
+                appointment_id,
+            )
+            continue
+
+        completed += 1
+        logger.info(
+            "booking.auto_completed appointment_id=%s end_datetime=%s",
+            appointment.id, appointment.end_datetime.isoformat(),
+        )
+        # After the commit, for the same reason the HTTP path does it
+        # after its atomic block — the booking is durably completed even
+        # if the payment provider is unreachable.
+        schedule_capture_safely(appointment)
+
+    return {"completed": completed, "skipped": skipped, "failed": failed}
+
+
+@shared_task(name="appointments.tasks.auto_complete_elapsed_bookings")
+def auto_complete_elapsed_bookings() -> dict:
+    """Close visits that happened and that nobody closed (DRF-1064, block B).
+
+    Deliberately separate from the manual closure path: this task never
+    decides that a *particular* visit went well, it only records that a
+    confirmed booking whose time passed hours ago is not going to be
+    marked by hand. The closure is attributed to ``system`` so a consumer
+    can tell "the salon closed this" from "nobody did, so we did".
+
+    Elapsed time is weak evidence — ``Ayla MVP Appointment Contract §5``
+    says so outright ("elapsed time alone is not completion evidence"),
+    and OQ-AC-3 leaves the evidence model open. That is exactly why the
+    attribution field exists: the fact is recorded together with how
+    strongly it is known, rather than being laundered into a closure that
+    looks like a human one.
+    """
+    window = _auto_complete_window()
+    if window is None:
+        return {"completed": 0, "skipped": 0, "failed": 0, "ran": False}
+
+    from django.conf import settings
+    not_before, cutoff = window
+    result = complete_elapsed_bookings(
+        not_before=not_before,
+        cutoff=cutoff,
+        batch_size=getattr(
+            settings, "BOOKING_AUTO_COMPLETE_BATCH_SIZE", 200,
+        ),
+    )
+    if result["completed"] or result["failed"]:
+        logger.info(
+            "booking.auto_complete_summary completed=%d skipped=%d failed=%d",
+            result["completed"], result["skipped"], result["failed"],
+        )
+    return {**result, "ran": True}
 
 
 @shared_task(name="appointments.tasks.purge_expired_idempotency_keys")

@@ -27,6 +27,10 @@ from .application.services.cancel_reschedule_service import (
     CancelBookingService,
     RescheduleBookingService,
 )
+from .application.services.completion import (
+    close_booking,
+    schedule_capture_safely,
+)
 from .application.services.create_booking_service import CreateBookingService
 from .authz import may_operate_on_bookings, resolve_booking_operator
 from .domain.exceptions import (
@@ -515,47 +519,15 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         status_code=409,
                     )
 
-                # complete() raises ValidationError if status not
-                # CONFIRMED. Under the row lock that re-check sees the
-                # committed status of any racing transaction.
-                appointment.complete(completed_by=actor)
-                emit_outbox_event(
-                    topic=OutboxEvent.Topic.BOOKING_COMPLETED,
-                    data={
-                        "appointment_id": str(appointment.id),
-                        "client_id": str(appointment.client_id),
-                        "specialist_id": str(appointment.specialist_id),
-                        # Contract §3.4 field the consumer reads for the
-                        # completion timestamp (consumers/booking.py:
-                        # data.get("completed_at")).
-                        "completed_at": timezone.now().isoformat(),
-                        # DRF-1064 — WHO closed the visit, from the
-                        # OperationalActor vocabulary. New OPTIONAL field:
-                        # event-contract §4.1 lists "adding a new OPTIONAL
-                        # field that consumers ignore by default" as
-                        # non-breaking, so booking.completed stays at
-                        # event_version 1 and no deprecation window opens.
-                        # The envelope actor cannot carry this — it is a
-                        # coarse three-value enum by design (§2.2: "does
-                        # NOT identify which specific admin… it goes in
-                        # data").
-                        "completed_by": actor,
-                    },
-                    # event-contract §2.2: for an admin-actor event,
-                    # user_id is the AFFECTED user, not the operator.
-                    # This used to pass request.user.id, which made the
-                    # specialist the subject of their own client's
-                    # completion — and the bot's consumer contract (§3.4
-                    # step 2) fires the post-visit review skill at
-                    # user_id, i.e. at the wrong person. With a salon
-                    # administrator as a second possible operator the
-                    # bug would only widen, so it is corrected here.
-                    user_id=appointment.client_id,
-                    tenant_id=safe_tenant_id(
-                        appointment, context="booking.completed",
-                    ),
-                    actor=envelope_actor_for(actor),
-                )
+                # State transition + event, shared verbatim with the
+                # 3-hour sweep and the backlog command (see
+                # application/services/completion.py) so a booking closed
+                # by the front desk and one closed by the sweep are
+                # indistinguishable to any consumer. complete() raises
+                # ValidationError if the status is not CONFIRMED; under
+                # the row lock that re-check sees the committed status of
+                # any racing transaction.
+                close_booking(appointment, completed_by=actor)
         except DjangoValidationError as e:
             return error_response(
                 "INVALID_STATUS", str(e.message), status_code=422,
@@ -566,17 +538,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         # even if the broker/provider is down — reconciliation (and the
         # retry_capture command) covers the rest. No-op when the booking
         # has no held payment (no-prepayment path, D6).
-        from payments.services import schedule_capture_for_appointment
-        try:
-            schedule_capture_for_appointment(
-                appointment, completed_at=timezone.now(),
-            )
-        except Exception:  # noqa: BLE001 — broker/DB hiccup must not
-            # 500 a booking that is already durably completed; the
-            # reconciliation job + retry_capture command pick it up.
-            logger.exception(
-                'capture.schedule_failed appointment_id=%s', appointment.id,
-            )
+        schedule_capture_safely(appointment)
         return success_response(AppointmentDetailSerializer(appointment).data)
 
     # -- No-show ------------------------------------------------------------
