@@ -438,6 +438,14 @@ BOOKING_AUTO_COMPLETE_BATCH_SIZE = int(
     os.environ.get("BOOKING_AUTO_COMPLETE_BATCH_SIZE", "200")
 )
 
+# Goal layer (DRF-1190 / OD-1). Gates WIRING of goals.resolution into
+# callers (RecommendationQuery etc.) — the resolver itself, the API and
+# the decision-context document are always on (additive surface).
+# Default closed: подключение к вызывающим — отдельное решение.
+GOAL_RESOLUTION_ENABLED = (
+    os.environ.get("GOAL_RESOLUTION_ENABLED", "false").lower() == "true"
+)
+
 # SMS.RU Configuration
 SMS_RU_API_ID = os.environ.get("SMS_RU_API_ID", "")
 SMS_ENABLED = os.environ.get("SMS_ENABLED", "false").lower() == "true"

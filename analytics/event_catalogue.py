@@ -91,6 +91,16 @@ PERSONAL_DATA_DELETED = "personal_data_deleted"
 # bearer tokens or other secrets.
 EXTERNAL_IDENTITY_BOUND = "external_identity_bound"
 
+# ── Goal layer funnel (DRF-1190 / OD-1) ──
+# goal_selected: server-side emit (goals/api.GoalSelectView); payload
+# carries goal_key/has_text/source_channel, NEVER the verbatim goal_text
+# (personal phrasing stays in goals.ClientGoal, not in BI).
+# recommendation_shown: зарегистрировано заранее; точка подключения —
+# существующая ручка рекомендаций, поведение которой меняется только
+# отдельным решением (см. отчёт окна conversation-arch).
+GOAL_SELECTED = "goal_selected"
+RECOMMENDATION_SHOWN = "recommendation_shown"
+
 
 EVENT_NAMES: frozenset[str] = frozenset({
     BOOKING_VIEWED, BOOKING_CREATED, BOOKING_CANCELLED,
@@ -111,4 +121,5 @@ EVENT_NAMES: frozenset[str] = frozenset({
     SPECIALIST_FAVORITED, SPECIALIST_UNFAVORITED,
     PERSONAL_DATA_DELETED,
     EXTERNAL_IDENTITY_BOUND,
+    GOAL_SELECTED, RECOMMENDATION_SHOWN,
 })
