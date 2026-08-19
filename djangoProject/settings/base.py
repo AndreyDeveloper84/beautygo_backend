@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     'nutrition',
     'tenants',
     'analytics',
+    'goals',
 ]
 
 AUTH_USER_MODEL = 'users.User'
