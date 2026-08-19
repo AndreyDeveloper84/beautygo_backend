@@ -40,6 +40,17 @@ urlpatterns = [
         'api/v1/internal/me/catalog/recommendations/',
         include('users.catalog_recommendations_urls'),
     ),
+    # DRF-1190 — goal layer: эфемерный документ состояния (проекция
+    # понимания, экран-отрисовщик) + фиксация выбора цели. Новая
+    # аддитивная поверхность; поведение существующих ручек не меняется.
+    path(
+        'api/v1/internal/me/decision-context/',
+        include('goals.urls'),
+    ),
+    path(
+        'api/v1/internal/me/goals/select/',
+        include('goals.select_urls'),
+    ),
     # DRF-1043 (backend half of DRF-1035) — identity read-back: lets the
     # bot learn the canonical Ayla user-id of the subject it already
     # authenticated as. `me/` is a namespace prefix here, not a resource,

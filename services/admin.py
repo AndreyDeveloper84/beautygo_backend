@@ -7,6 +7,8 @@ from .models import (
     DraftSalonService,
     ExternalBusyInterval,
     ExternalSourceMapping,
+    GoalOption,
+    GoalOptionCategory,
     RegionalPricing,
     SalonService,
     Service,
@@ -172,3 +174,29 @@ class ExternalSourceMappingAdmin(admin.ModelAdmin):
     raw_id_fields = ('salon_service', 'specialist')
     readonly_fields = ('created_at', 'updated_at')
     ordering = ('tenant', 'external_type', 'external_id')
+
+
+class GoalOptionCategoryInline(admin.TabularInline):
+    model = GoalOptionCategory
+    extra = 0
+    fields = ('category', 'sort_order')
+    ordering = ('sort_order',)
+
+
+@admin.register(GoalOption)
+class GoalOptionAdmin(admin.ModelAdmin):
+    list_display = ('key', 'label', 'sort_order', 'is_active')
+    list_filter = ('is_active',)
+    search_fields = ('key', 'label')
+    list_editable = ('sort_order', 'is_active')
+    ordering = ('sort_order', 'key')
+    inlines = [GoalOptionCategoryInline]
+
+
+@admin.register(GoalOptionCategory)
+class GoalOptionCategoryAdmin(admin.ModelAdmin):
+    list_display = ('goal_option', 'category', 'sort_order')
+    list_filter = ('goal_option',)
+    search_fields = ('goal_option__key', 'goal_option__label', 'category__name')
+    raw_id_fields = ('category',)
+    ordering = ('goal_option', 'sort_order')
