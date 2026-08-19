@@ -726,3 +726,83 @@ class ExternalBusyInterval(models.Model):
             f"busy[{self.source}] {self.specialist_id} "
             f"{self.start_at:%Y-%m-%d %H:%M}–{self.end_at:%H:%M}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Goal layer (DRF-1190 / OD-1, 2026-08-19) — additive new layer.
+# Курируемые подсказки целей и маппинг «цель → категории услуг» как ДАННЫЕ,
+# заполняемые владельцем (тот же паттерн, что ServiceTemplate / RegionalPricing:
+# экспертное знание живёт в каталоге, не в коде скоринга). Наполнение —
+# management command + services/seeds/*.json, не миграции и не админка-вручную.
+# --------------------------------------------------------------------------- #
+class GoalOption(models.Model):
+    """Курируемая подсказка цели («чип») для слоя «цель → услуга».
+
+    Не является меню экрана: сервер отдаёт активные подсказки как часть
+    документа состояния, экран их только отрисовывает. Свободный текст
+    остаётся равноправным вводом (OD-1) и здесь не хранится — за него
+    отвечает goals.ClientGoal.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    key = models.SlugField(
+        max_length=64,
+        unique=True,
+        help_text="Стабильный ключ подсказки; уходит в ClientGoal.goal_key и события воронки",
+    )
+    label = models.CharField(
+        max_length=100,
+        help_text="Человекочитаемая подпись чипа (рус.)",
+    )
+    sort_order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['sort_order', 'key']
+        indexes = [
+            models.Index(
+                fields=['is_active', 'sort_order'],
+                name='goaloption_active_sort_idx',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.label} ({self.key})"
+
+
+class GoalOptionCategory(models.Model):
+    """Связь «подсказка цели → категория услуг» — курируемое знание владельца.
+
+    Резолвер (goals.resolution) отображает активную цель клиента в набор
+    category_id через эту таблицу; движок рекомендаций о целях не знает.
+    Одна подсказка может вести в несколько категорий; порядок выдачи —
+    sort_order.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    goal_option = models.ForeignKey(
+        GoalOption,
+        on_delete=models.CASCADE,
+        related_name='category_links',
+    )
+    category = models.ForeignKey(
+        ServiceCategory,
+        on_delete=models.PROTECT,
+        related_name='goal_option_links',
+    )
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        unique_together = [('goal_option', 'category')]
+        ordering = ['goal_option', 'sort_order']
+        indexes = [
+            models.Index(
+                fields=['goal_option', 'sort_order'],
+                name='goaloptcat_option_sort_idx',
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.goal_option.key} → {self.category.name}"
