@@ -22,10 +22,18 @@ class Appointment(models.Model):
     """A booking between a client and a specialist for a specific service."""
 
     class Status(models.TextChoices):
+        # DRF-1120: IN_PROGRESS was declared here and in the admin/records
+        # projections but never reachable — _BOOKING_TRANSITIONS
+        # (appointments/domain/value_objects.py) has no transition INTO it,
+        # so nothing but a manual admin edit could ever set it, and nothing
+        # could transition OUT of it once set (can_cancel/can_complete/
+        # can_mark_no_show all swallow the domain ValueError). Removed
+        # rather than wired up — no owner decision was made to add a real
+        # "in progress" status; see test_status_enum_sync.py for the
+        # invariant this removal restores.
         PENDING = "pending", "Ожидает подтверждения"
         AWAITING_PAYMENT = "awaiting_payment", "Ожидает оплаты"
         CONFIRMED = "confirmed", "Подтверждена"
-        IN_PROGRESS = "in_progress", "В процессе"
         COMPLETED = "completed", "Завершена"
         CANCELLED = "cancelled", "Отменена"
         NO_SHOW = "no_show", "Клиент не пришёл"
