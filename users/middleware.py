@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 __all__ = [
+    "ACKNOWLEDGED_EXCLUSION_DIVERGENCE",
     "AppTypeMiddleware",
     "JWTContextMiddleware",
     "RequestIDMiddleware",
@@ -337,3 +338,40 @@ class TenantContextMiddleware:
         except (InvalidToken, TokenError):
             return None
         return token.get("tenant_id")
+
+
+# ---------------------------------------------------------------------------
+# DRF-1115 — exclusion-list divergence must be conscious
+# ---------------------------------------------------------------------------
+#
+# The module-level EXCLUDED_PATH_PREFIXES above (AppTypeMiddleware's) and
+# TenantContextMiddleware.EXCLUDED_PATH_PREFIXES answer different
+# questions (does this path need X-App-Type? does it need X-Tenant?), so
+# they are ALLOWED to diverge — a path can legitimately need one header
+# and not the other. What is not allowed is an UNNOTICED divergence: the
+# two lists live in the same file, were meant to track each other for
+# the service-to-service/webhook prefixes, and drifted anyway (found by
+# DRF-1115, 2026-08-15). Every prefix present in exactly one of the two
+# lists must be named here with a reason, or
+# ``TestExclusionListDivergence`` in ``users/tests/test_middleware.py``
+# fails — same mechanism as ``import_boundaries.BASELINE`` on the bot
+# side: a new/removed divergence forces a human to look, rather than
+# silently drifting further.
+#
+# Key: path prefix. Value: why it's only in one list (or, for confirmed
+# debt, a pointer to the tracking issue instead of a justification).
+ACKNOWLEDGED_EXCLUSION_DIVERGENCE: dict[str, str] = {
+    "/api/v1/payments/webhook/": (
+        "In AppTypeMiddleware only, NOT confirmed legitimate. YooKassa's "
+        "webhook sends neither X-App-Type nor X-Tenant, so by the same "
+        "reasoning it should also sit in "
+        "TenantContextMiddleware.EXCLUDED_PATH_PREFIXES — under "
+        "MULTI_TENANT_STRICT=True (not the current default) this path "
+        "matches STRICT_REQUIRED_PREFIXES ('/api/v1/') and is not covered "
+        "by STRICT_OPT_OUT_PREFIXES, so the webhook would get 400 "
+        "TENANT_REQUIRED before the view runs. Left unfixed here — out of "
+        "DRF-1115's scope (mechanize the check, not patch the lists) — "
+        "tracked as a Linear candidate (arch review 2026-08-15, item C3). "
+        "This entry records known debt, not an endorsement."
+    ),
+}
