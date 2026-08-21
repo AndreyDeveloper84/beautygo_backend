@@ -86,8 +86,13 @@ def service(master, category):
 
 @pytest.fixture
 def admin_user(db, salon):
+    # The username is the external id the bot sends in
+    # X-External-User-ID: `resolve_external_user` keys off it, so this is
+    # what makes the header resolve to *this* actor rather than to a
+    # freshly provisioned proxy. Same shape as the pilot's real actor
+    # (`bot:max:83146139`).
     u = User.objects.create_user(
-        username="man_admin", password="x", role="admin",
+        username="bot:max:1063admin", password="x", role="admin",
         phone="+79991050643",
     )
     TenantUserRelationship.objects.create(
@@ -100,8 +105,11 @@ def admin_user(db, salon):
 @pytest.fixture
 def returning_client(db, salon):
     """Someone who already has a relationship with this salon."""
+    # External-id shaped for the same reason as admin_user: this fixture
+    # is both the customer being booked AND the actor in the negative
+    # test that a mere customer may not operate the salon surface.
     u = User.objects.create_user(
-        username="man_client", password="x", role="client",
+        username="bot:max:1063client", password="x", role="client",
         phone="+79991050644", first_name="Анна", last_name="Кузнецова",
     )
     TenantUserRelationship.objects.create(
@@ -120,12 +128,42 @@ def stranger(db):
     )
 
 
-def _api(user, *, tenant_slug=None, app_type="pro") -> APIClient:
+SERVICE_TOKEN = "salon-surface-token-under-test"  # pragma: allowlist secret
+
+
+@pytest.fixture(autouse=True)
+def _service_token(settings):
+    settings.AYLA_INTERNAL_API_TOKEN = SERVICE_TOKEN
+
+
+def _api(user, *, tenant_slug=None, app_type=None, token=SERVICE_TOKEN) -> APIClient:
+    """A client that authenticates the way the bot actually does.
+
+    This deliberately does NOT use ``force_authenticate`` (DRF-1231).
+    That helper installs ``request.user`` and skips authentication
+    entirely — which is exactly the layer that refused every live request
+    with 401 while this file stayed green. A test that bypasses the
+    failing layer cannot see the failure, and this one did not: the
+    endpoint was unreachable for as long as it existed, and a human found
+    it, not CI.
+
+    So: a real ``Authorization: Bearer`` plus ``X-External-User-ID``,
+    resolved server-side into ``user`` by ``resolve_external_user``
+    (hence the external-id-shaped usernames on the actor fixtures).
+
+    ``X-App-Type`` is sent only when a test asks for it. The booking
+    prefixes sit in ``EXCLUDED_PATH_PREFIXES``, so its absence is the
+    normal case and its presence must change nothing.
+    """
     c = APIClient()
-    c.defaults["HTTP_X_APP_TYPE"] = app_type
+    if app_type:
+        c.defaults["HTTP_X_APP_TYPE"] = app_type
     if tenant_slug:
         c.defaults["HTTP_X_TENANT"] = tenant_slug
-    c.force_authenticate(user=user)
+    if token:
+        c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {token}"
+    if user is not None:
+        c.defaults["HTTP_X_EXTERNAL_USER_ID"] = user.username
     return c
 
 
@@ -155,6 +193,176 @@ def _create(api, *, service, master, when=None, idempotency_key=None, **client_f
         format="json",
         HTTP_X_IDEMPOTENCY_KEY=idempotency_key or str(uuid4()),
     )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestTheDoorIsOpenToTheBotAndNobodyElse:
+    """DRF-1231 — the authentication layer, tested through the front door.
+
+    Live measurement 2026-08-21: this surface answered **401
+    token_not_valid** to the bot's service Bearer. The JWT authenticator
+    from ``DEFAULT_AUTHENTICATION_CLASSES`` ran before permissions and
+    refused a credential it was never meant to judge, so the console's
+    buttons had nowhere to point. Every test in this file passed
+    throughout, because they all went through ``force_authenticate``.
+
+    The fix has three visible states, and each means something different:
+
+    ===========================  =====  ==========================
+    state                        code   meaning
+    ===========================  =====  ==========================
+    before DRF-1231              401    we are not let in at all
+    after DRF-1231, no TUR       403    we are in; this actor may not
+    after DRF-1228 (admin TUR)   201    the booking happens
+    ===========================  =====  ==========================
+
+    The middle one is not a failure — it is the door working while the
+    key is still being cut in the other repo. These tests pin the two
+    states that exist in code; the first is gone by construction, which
+    ``test_a_service_bearer_is_no_longer_refused_at_authentication``
+    asserts directly.
+    """
+
+    def test_a_service_bearer_is_no_longer_refused_at_authentication(
+        self, salon, admin_user, master, service, returning_client,
+    ):
+        """The regression that started all of this: 401 must be gone.
+
+        Asserted as «not 401» rather than «is 201» on purpose — this is
+        about the authentication layer specifically, and it should keep
+        holding when the permission answer below changes.
+        """
+        resp = _create(
+            _api(admin_user, tenant_slug=salon.slug),
+            service=service, master=master,
+            client_id=str(returning_client.id),
+        )
+        assert resp.status_code != 401
+
+    def test_an_admin_of_this_salon_gets_in(
+        self, salon, admin_user, master, service, returning_client,
+    ):
+        resp = _create(
+            _api(admin_user, tenant_slug=salon.slug),
+            service=service, master=master,
+            client_id=str(returning_client.id),
+        )
+        assert resp.status_code == 201
+
+    def test_a_resolvable_actor_without_an_admin_tur_is_refused(
+        self, salon, master, service, returning_client, django_user_model,
+    ):
+        """The state the pilot is in until DRF-1228 lands.
+
+        `formula-tela` has no admin relationship for anyone at all
+        (measured in the live database, 2026-08-21), so this is the
+        answer the bot's actor gets today with the door already open.
+        """
+        actor = django_user_model.objects.create_user(
+            username="bot:max:noroleactor", password="x", role="client",
+            phone="+79991050649",
+        )
+        resp = _create(
+            _api(actor, tenant_slug=salon.slug),
+            service=service, master=master,
+            client_id=str(returning_client.id),
+        )
+        assert resp.status_code == 403
+        assert Appointment.objects.count() == 0
+
+    def test_no_bearer_at_all_is_refused(
+        self, salon, admin_user, master, service, returning_client,
+    ):
+        resp = _create(
+            _api(admin_user, tenant_slug=salon.slug, token=None),
+            service=service, master=master,
+            client_id=str(returning_client.id),
+        )
+        assert resp.status_code == 403
+        assert Appointment.objects.count() == 0
+
+    def test_a_wrong_bearer_is_refused(
+        self, salon, admin_user, master, service, returning_client,
+    ):
+        resp = _create(
+            _api(admin_user, tenant_slug=salon.slug, token="not-the-token"),
+            service=service, master=master,
+            client_id=str(returning_client.id),
+        )
+        assert resp.status_code == 403
+        assert Appointment.objects.count() == 0
+
+    def test_the_right_bearer_naming_nobody_is_refused(
+        self, salon, master, service, returning_client,
+    ):
+        """The token alone must not be enough to act.
+
+        It is a single shared secret; the actor header is what says who
+        is acting, and IsTenantAdmin is what says they may.
+        """
+        resp = _create(
+            _api(None, tenant_slug=salon.slug),
+            service=service, master=master,
+            client_id=str(returning_client.id),
+        )
+        assert resp.status_code == 403
+
+    def test_an_admin_of_another_salon_may_not_act_here(
+        self, salon, other_salon, master, service, returning_client,
+    ):
+        """The (actor, tenant) tuple, not the actor alone.
+
+        Without this, a leaked bearer plus any X-Tenant would be write
+        access to every salon in Ayla — which is the whole reason
+        IsTenantAdmin stays in the list next to the bearer check.
+        """
+        outsider = User.objects.create_user(
+            username="bot:max:otheradmin", password="x", role="admin",
+            phone="+79991050648",
+        )
+        TenantUserRelationship.objects.create(
+            user=outsider, tenant=other_salon,
+            role=TenantUserRelationship.Role.ADMIN, is_active=True,
+        )
+        resp = _create(
+            _api(outsider, tenant_slug=salon.slug),
+            service=service, master=master,
+            client_id=str(returning_client.id),
+        )
+        assert resp.status_code == 403
+        assert Appointment.objects.count() == 0
+
+    def test_the_tenant_header_is_still_required(
+        self, salon, admin_user, master, service, returning_client,
+    ):
+        """Excluded from X-App-Type, NOT from X-Tenant.
+
+        These two exclusion lists are separate on purpose: IsTenantAdmin
+        authorises against ``request.tenant``, which only exists because
+        TenantContextMiddleware still reads the header on this path.
+        """
+        resp = _create(
+            _api(admin_user),  # no tenant_slug
+            service=service, master=master,
+            client_id=str(returning_client.id),
+        )
+        assert resp.status_code == 403
+        assert Appointment.objects.count() == 0
+
+    def test_the_app_type_header_is_neither_required_nor_harmful(
+        self, salon, admin_user, master, service, returning_client,
+    ):
+        """The path is excluded, so the header is simply not consulted.
+
+        Sending it must not help and must not hurt — the bot is «neither
+        client nor pro» and should not have to pretend otherwise.
+        """
+        resp = _create(
+            _api(admin_user, tenant_slug=salon.slug, app_type="client"),
+            service=service, master=master,
+            client_id=str(returning_client.id),
+        )
+        assert resp.status_code == 201
 
 
 @pytest.mark.django_db(transaction=True)
