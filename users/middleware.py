@@ -90,6 +90,19 @@ EXCLUDED_PATH_PREFIXES = (
     # X-App-Type does not apply. Single broad prefix covers me/, users/,
     # specialists/, services/, appointments/ under the internal tree.
     "/api/v1/internal/",
+    # DRF-1231 — the salon-admin booking surface. Same service-to-service
+    # story as the tree above, but reached under /tenants/me/ because it
+    # is the salon's own data. Deliberately NOT the whole
+    # "/api/v1/tenants/me/" prefix: fourteen routes live under it, these
+    # two prefixes cover four of them, and every one of the other ten
+    # (the day journal, closures, master schedules and time-off, access
+    # revocation) still declares IsProApp. Excluding a path does not relax
+    # the app-type requirement — it sets request.app_type = None, which
+    # makes IsProApp unsatisfiable there for every caller, forever.
+    # Listing the two prefixes the bot actually calls keeps that one-way
+    # door as narrow as the change that needs it.
+    "/api/v1/tenants/me/appointments/",
+    "/api/v1/tenants/me/customers/",
 )
 
 
@@ -373,5 +386,21 @@ ACKNOWLEDGED_EXCLUSION_DIVERGENCE: dict[str, str] = {
         "DRF-1115's scope (mechanize the check, not patch the lists) — "
         "tracked as a Linear candidate (arch review 2026-08-15, item C3). "
         "This entry records known debt, not an endorsement."
+    ),
+    "/api/v1/tenants/me/appointments/": (
+        "In AppTypeMiddleware only, and deliberately so (DRF-1231). These "
+        "endpoints do NOT need X-App-Type — the caller is the bot, which "
+        "the project has settled is 'neither client nor pro' — but they "
+        "very much DO need X-Tenant: IsTenantAdmin authorises the actor "
+        "against request.tenant, which TenantContextMiddleware resolves "
+        "from that header. Adding these prefixes to the tenant list as "
+        "well would leave request.tenant None and turn the authorisation "
+        "check into an unconditional 403. The asymmetry is the point."
+    ),
+    "/api/v1/tenants/me/customers/": (
+        "Same as /api/v1/tenants/me/appointments/ above (DRF-1231): "
+        "customer lookup is the first step of the booking flow, shares "
+        "_SALON_WRITE_PERMISSIONS with it, and is authorised by the same "
+        "(actor, tenant) tuple — so it needs X-Tenant and not X-App-Type."
     ),
 }
