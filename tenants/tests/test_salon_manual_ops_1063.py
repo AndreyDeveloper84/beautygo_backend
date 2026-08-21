@@ -18,6 +18,7 @@ a new guest needs a name and a phone.
 """
 from __future__ import annotations
 
+from uuid import uuid4
 from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 
@@ -134,14 +135,131 @@ def _slot(hours_ahead: int = 30) -> datetime:
     return base.replace(minute=0, second=0, microsecond=0)
 
 
-def _create(api, *, service, master, when=None, **client_fields):
+def _create(api, *, service, master, when=None, idempotency_key=None, **client_fields):
+    """Book someone in.
+
+    ``X-Idempotency-Key`` is required by the endpoint (DRF-1232) and gets a
+    fresh value per call, because each test is an independent booking. Pass
+    ``idempotency_key`` explicitly to model a retry of the *same* request —
+    which is the only case where reusing it is meaningful.
+    """
     body = {
         "specialist_id": str(master.id),
         "service_id": str(service.id),
         "start_datetime": (when or _slot()).isoformat(),
     }
     body.update(client_fields)
-    return api.post("/api/v1/tenants/me/appointments/", body, format="json")
+    return api.post(
+        "/api/v1/tenants/me/appointments/",
+        body,
+        format="json",
+        HTTP_X_IDEMPOTENCY_KEY=idempotency_key or str(uuid4()),
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+class TestIdempotencyKeyIsRequired:
+    """DRF-1232 — the key must come from the caller, or de-duplication is a lie.
+
+    ``Appointment.idempotency_key`` is unique and CreateBookingService looks
+    the row up by it before creating anything. The view used to substitute a
+    fresh uuid whenever the header was absent, which kept that lookup running
+    against a value nothing had ever been stored under: the machinery
+    executed, matched nothing by construction, and every retry produced a
+    second booking behind a 201.
+
+    Worth stating what this is NOT: reschedule and cancel pass
+    ``command_key=... or None`` and never query by it — there the value is an
+    audit trace, and repeats are caught by ``expected_version`` instead.
+    Create is the only one of the three with key-based de-duplication, and so
+    the only one a missing key silently disarms.
+    """
+
+    def test_a_missing_header_is_refused(self, salon, admin_user, master, service, returning_client):
+        api = _api(admin_user, tenant_slug=salon.slug)
+        resp = api.post(
+            "/api/v1/tenants/me/appointments/",
+            {
+                "specialist_id": str(master.id),
+                "service_id": str(service.id),
+                "start_datetime": _slot().isoformat(),
+                "client_id": str(returning_client.id),
+            },
+            format="json",
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+        assert Appointment.objects.count() == 0
+
+    def test_a_blank_header_is_refused_too(self, salon, admin_user, master, service, returning_client):
+        api = _api(admin_user, tenant_slug=salon.slug)
+        resp = _create(
+            api,
+            service=service,
+            master=master,
+            client_id=str(returning_client.id),
+            idempotency_key="   ",
+        )
+        assert resp.status_code == 400
+        assert Appointment.objects.count() == 0
+
+    def test_the_same_key_returns_the_same_booking(
+        self, salon, admin_user, master, service, returning_client
+    ):
+        """The retry case the key exists for — and which never worked before.
+
+        A caller whose write timed out repeats it with the same key. One
+        appointment must exist afterwards, not two.
+        """
+        key = str(uuid4())
+        when = _slot()
+
+        api = _api(admin_user, tenant_slug=salon.slug)
+        first = _create(
+            api,
+            service=service,
+            master=master,
+            when=when,
+            client_id=str(returning_client.id),
+            idempotency_key=key,
+        )
+        assert first.status_code == 201
+
+        second = _create(
+            api,
+            service=service,
+            master=master,
+            when=when,
+            client_id=str(returning_client.id),
+            idempotency_key=key,
+        )
+
+        assert second.status_code in (200, 201)
+        assert Appointment.objects.count() == 1
+        assert second.json()["id"] == first.json()["id"]
+
+    def test_different_keys_are_different_bookings(
+        self, salon, admin_user, master, service, returning_client
+    ):
+        """Control for the test above: de-duplication keys off the value."""
+        api = _api(admin_user, tenant_slug=salon.slug)
+        first = _create(
+            api,
+            service=service,
+            master=master,
+            when=_slot(hours_ahead=30),
+            client_id=str(returning_client.id),
+        )
+        second = _create(
+            api,
+            service=service,
+            master=master,
+            when=_slot(hours_ahead=54),
+            client_id=str(returning_client.id),
+        )
+        assert first.status_code == 201
+        assert second.status_code == 201
+        assert Appointment.objects.count() == 2
 
 
 @pytest.mark.django_db(transaction=True)
