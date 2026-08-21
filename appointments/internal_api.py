@@ -519,11 +519,13 @@ class InternalAppointmentReadView(_InternalAuthMixin, APIView):
     from its own mirror, and each extra field here is a customer's data
     crossing a service boundary for no reason.
 
-    ``start_at`` rather than ``start_datetime``: the consumer is
-    bot-platform, where the mirror, the slots payload and the day journal
-    all call it ``start_at``. Renaming it here would put the translation
-    in the one place least able to notice it is wrong. Flagged in the PR
-    in case Ayla prefers internal consistency instead.
+    ``start_datetime``, matching the three sibling views in this file
+    rather than bot-platform's internal ``start_at``. The distinction is
+    wire versus DTO: these endpoints already take ``start_datetime`` on
+    the wire and translate to ``start_at`` inside, and bot-platform's
+    client already sends the wire name when it calls them. Naming this
+    one ``start_at`` would have made it the odd one out among exactly the
+    endpoints its only caller already speaks to.
 
     Visibility — either legitimate caller, each authorised by a fact about
     themselves rather than by a header:
@@ -541,7 +543,7 @@ class InternalAppointmentReadView(_InternalAuthMixin, APIView):
         operation_id="internal_appointments_read",
         tags=["internal"],
         responses={
-            200: OpenApiResponse(description="id, version, status, start_at"),
+            200: OpenApiResponse(description="id, version, status, start_datetime"),
             404: OpenApiResponse(
                 description="No such booking, or not visible to this actor",
             ),
@@ -575,5 +577,5 @@ class InternalAppointmentReadView(_InternalAuthMixin, APIView):
             "id": str(appointment.id),
             "version": appointment.version,
             "status": appointment.status,
-            "start_at": appointment.start_datetime.isoformat(),
+            "start_datetime": appointment.start_datetime.isoformat(),
         })

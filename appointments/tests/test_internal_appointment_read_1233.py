@@ -248,7 +248,7 @@ class TestShape:
         its own mirror.
         """
         data = _api().get(_url(booking.id)).json()["data"]
-        assert set(data) == {"id", "version", "status", "start_at"}
+        assert set(data) == {"id", "version", "status", "start_datetime"}
 
     def test_no_customer_identity_leaks(self, booking, customer):
         import json as _json
@@ -258,11 +258,23 @@ class TestShape:
         assert customer.phone not in body
         assert str(customer.id) not in body
 
-    def test_start_at_is_an_iso_timestamp(self, booking, customer):
+    def test_start_datetime_is_an_iso_timestamp(self, booking, customer):
         data = _api().get(_url(booking.id)).json()["data"]
-        assert data["start_at"].startswith(
+        assert data["start_datetime"].startswith(
             booking.start_datetime.isoformat()[:16]
         )
+
+    def test_the_wire_name_matches_the_sibling_views(self, booking, customer):
+        """`start_datetime` on the wire, not bot-platform's `start_at`.
+
+        The three internal write views in this file already take
+        `start_datetime` and translate to `start_at` inside their DTOs,
+        and the bot's client already sends the wire name when it calls
+        them. A read that answered `start_at` would be the odd one out
+        among exactly the endpoints its only caller already speaks to.
+        """
+        data = _api().get(_url(booking.id)).json()["data"]
+        assert "start_at" not in data
 
 
 @pytest.mark.django_db
