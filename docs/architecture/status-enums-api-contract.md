@@ -43,7 +43,6 @@ This doc is the human-readable contract those pinned names point at.
 | `pending` | Ожидает подтверждения | ✅ | — |
 | `awaiting_payment` | Ожидает оплаты | ✅ | — |
 | `confirmed` | Подтверждена | ✅ | — |
-| `in_progress` | В процессе | — | — |
 | `completed` | Завершена | — | ✅ |
 | `cancelled` | Отменена | — | ✅ |
 | `no_show` | Клиент не пришёл | — | ✅ |
@@ -73,20 +72,34 @@ Transition table — single source of truth is
 | `confirmed` | `completed`, `cancelled`, `no_show` |
 | `completed` / `cancelled` / `no_show` | — (terminal) |
 
-### ⚠️ Contract nuance: `in_progress` is model-only
+### Historical note: `in_progress` was removed (DRF-1120)
 
-`in_progress` exists on the **model** enum (`Appointment.Status`) but
-is **NOT** part of the domain `BookingStatus` enum or
-`_BOOKING_TRANSITIONS`. The `BookingStateMachine` neither produces nor
-accepts it. It is a presentational/manual status with no enforced
-transition path. Consumers must treat `in_progress`:
+Until 2026-08-20 the model enum carried a seventh value, `in_progress`
+(«В процессе»). It was **never** part of the domain `BookingStatus`
+enum or `_BOOKING_TRANSITIONS`: nothing could set it except a manual
+edit in the Django admin, and nothing could move a booking out of it
+once set. It was removed in `e2b218b` (DRF-1120) together with its
+references in admin colouring, the records "upcoming" projection and
+`records_status`.
 
-- as a **valid response value** (it can appear on a serialized
-  appointment), but
-- **not** as a state reachable via the documented transition table.
+**What this means for consumers:** `in_progress` is not a valid value
+of `AppointmentStatusEnum` and must not be sent or expected. Client
+code that still branches on it is dead code — but see the caveat below
+before deleting a defensive `else`.
 
-If a future ticket folds `in_progress` into the state machine, update
-both `_BOOKING_TRANSITIONS` and this section together.
+**Caveat — old rows.** Removing a value from `TextChoices` does not
+rewrite stored data. If any appointment was set to `in_progress` by
+hand before removal, that string is still in its column and will
+deserialize into a value the enum no longer knows. Before treating the
+status as impossible, confirm on the live database that no row holds
+it. This document does not assert that; nobody has counted.
+
+An earlier revision of this file described `in_progress` as a live
+"presentational/manual status" and told consumers to accept it as a
+valid response value. That guidance was correct when written and wrong
+by the time the document was merged — the enum changed while the pull
+request sat open. **When this file disagrees with
+`_BOOKING_TRANSITIONS` or the model enum, the code is right.**
 
 ---
 
