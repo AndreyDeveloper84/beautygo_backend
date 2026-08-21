@@ -45,7 +45,6 @@ customers' numbers.
 from __future__ import annotations
 
 import logging
-from uuid import uuid4
 
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import permissions, serializers
@@ -299,7 +298,12 @@ class SalonBookingCreateView(_SalonBookingBase):
         request=SalonBookingCreateSerializer,
         responses={
             201: AppointmentDetailSerializer,
-            400: OpenApiResponse(description="Validation error"),
+            400: OpenApiResponse(
+                description=(
+                    "Validation error, or X-Idempotency-Key header missing "
+                    "(DRF-1232 — required so a retry cannot duplicate a booking)"
+                ),
+            ),
             403: OpenApiResponse(description="Not an administrator of this salon"),
             404: OpenApiResponse(description="Specialist or customer not in this salon"),
             409: OpenApiResponse(description="Slot taken"),
@@ -356,14 +360,45 @@ class SalonBookingCreateView(_SalonBookingBase):
             )
             client_id = guest.id
 
+        # DRF-1232. The header is REQUIRED, and a missing one is a 400
+        # rather than a generated uuid.
+        #
+        # ``Appointment.idempotency_key`` is a real, unique de-duplication
+        # key: CreateBookingService looks the row up by it and returns the
+        # existing appointment instead of making a second one. Inventing a
+        # value per request kept that machinery running while guaranteeing
+        # it could never match — every retry arrived with a key nothing had
+        # ever been stored under, so the caller got a duplicate booking and
+        # a 201 that looked like success.
+        #
+        # The failure mode needs a caller who repeats a request, which is
+        # exactly what a caller does when a write times out and they cannot
+        # tell whether it landed. That is the moment idempotency exists for.
+        #
+        # Note for the reader who checks the sibling endpoints: reschedule
+        # and cancel pass ``command_key=... or None`` and look idempotent by
+        # comparison. They are not — nothing ever queries by
+        # ``command_key``; it is written to AppointmentRevision as an audit
+        # trace. Reschedule is protected from repeats by ``expected_version``
+        # instead. So this is not "make create behave like reschedule": create
+        # is the only one of the three with key-based de-duplication, and the
+        # only one where a missing key silently destroys it.
+        key = (request.META.get("HTTP_X_IDEMPOTENCY_KEY") or "").strip()
+        if not key:
+            return error_response(
+                "IDEMPOTENCY_KEY_REQUIRED",
+                "X-Idempotency-Key header is required. Reuse the same value "
+                "when retrying a booking, or a retry will create a second "
+                "appointment.",
+                status_code=400,
+            )
+
         dto = CreateBookingDTO(
             client_id=client_id,
             specialist_id=specialist.id,
             service_id=data["service_id"],
             start_at=data["start_datetime"],
-            idempotency_key=request.META.get(
-                "HTTP_X_IDEMPOTENCY_KEY", str(uuid4()),
-            ),
+            idempotency_key=key,
             request_tenant_id=tenant.id,
             # Pilot baseline: the salon books, the customer pays at the
             # salon. No Payment row, straight to CONFIRMED — the same
