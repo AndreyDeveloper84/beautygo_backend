@@ -153,6 +153,45 @@ class TestEndpointRestrictions:
         assert response.status_code != status.HTTP_403_FORBIDDEN
 
 
+class TestSalonExclusionIsNarrow:
+    """DRF-1231 — the exemption covers the booking flow and stops there.
+
+    Excluding a prefix does not «stop requiring X-App-Type» on it: the
+    middleware sets ``request.app_type = None``, and ``IsProApp`` reads
+    that attribute, so every view under an excluded prefix that still
+    declares ``IsProApp`` becomes permanently unsatisfiable — for the
+    bot, for a future Pro App, for everyone.
+
+    Fourteen routes live under ``/api/v1/tenants/me/``; the two prefixes
+    below cover four of them. Excluding the shared parent would have
+    quietly bricked the other ten — the day journal, closures, master
+    schedules and time-off, access revocation, all of which declare
+    IsProApp — none of which anyone asked to change, and the breakage
+    would only surface the first time someone pointed a working client at
+    them. Hence two narrow prefixes instead of one broad one; this test
+    is what keeps the next person from "simplifying" them back.
+    """
+
+    def test_the_booking_flow_is_exempt(self):
+        excluded = middleware_module.EXCLUDED_PATH_PREFIXES
+        assert "/api/v1/tenants/me/appointments/" in excluded
+        assert "/api/v1/tenants/me/customers/" in excluded
+
+    def test_the_rest_of_the_salon_surface_is_not(self):
+        excluded = middleware_module.EXCLUDED_PATH_PREFIXES
+        assert "/api/v1/tenants/me/" not in excluded
+        assert "/api/v1/tenants/" not in excluded
+
+        # Spot-check the routes that still rely on IsProApp being
+        # satisfiable, i.e. the ones a broad exemption would have killed.
+        for path in (
+            "/api/v1/tenants/me/day/",
+            "/api/v1/tenants/me/closures/",
+            "/api/v1/tenants/me/masters/00000000-0000-0000-0000-000000000000/schedule/",
+        ):
+            assert not any(path.startswith(p) for p in excluded), path
+
+
 class TestExclusionListDivergence:
     """DRF-1115 — AppTypeMiddleware and TenantContextMiddleware each keep
     their own list of excluded path prefixes: AppTypeMiddleware's is the

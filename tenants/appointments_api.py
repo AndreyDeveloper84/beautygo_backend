@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 
 from drf_spectacular.utils import OpenApiResponse, extend_schema
-from rest_framework import permissions, serializers
+from rest_framework import serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -80,7 +80,7 @@ from appointments.domain.value_objects import (
 )
 from appointments.models import Appointment
 from appointments.serializers import AppointmentDetailSerializer
-from users.permissions import IsProApp, IsTenantAdmin
+from users.permissions import IsBotServiceWithVerifiedClient, IsTenantAdmin
 from users.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
@@ -91,9 +91,51 @@ logger = logging.getLogger(__name__)
 # inside a tenant, and recording their action as `salon` would be false.
 # Schedule edits (DRF-1062) are unattributed configuration, so the wider
 # permission is right there and not here. Raised as an owner question.
+#
+# DRF-1231 — the caller is the MAX bot, not a mobile app.
+#
+# The old list could not be satisfied by anything: the surface's only
+# client is the bot, which authenticates with a service Bearer, and the
+# JWT authenticator installed by DEFAULT_AUTHENTICATION_CLASSES rejected
+# that credential with 401 *before* any permission ran. No permission
+# class can rescue a request the authenticator already refused, which is
+# why every existing test — all of them using force_authenticate, which
+# skips that layer — stayed green while the live endpoint was unreachable.
+#
+# So `authentication_classes` is emptied on the views below and the
+# permission classes become the sole authority. Two of them, and both
+# earn their place:
+#
+#   IsBotServiceWithVerifiedClient — proves the CALL comes from the bot
+#     (constant-time Bearer) and resolves X-External-User-ID into the
+#     acting Ayla user, so `request.user` is the administrator who
+#     pressed the button. Attribution downstream (initiator_user_id,
+#     `salon.booking_*` logs) keeps working unchanged.
+#   IsTenantAdmin — proves that PERSON may act in THIS salon.
+#
+# Dropping the second would be the whole security story: the bearer is a
+# single shared secret, so a leak would otherwise let its holder write
+# into any tenant by naming one in X-Tenant. It is also what makes
+# `permissions.IsAuthenticated` redundant here (it re-checks
+# `is_authenticated` itself) — and IsAuthenticated could not have stayed
+# first in the list anyway, since `request.user` is still anonymous until
+# IsBotServiceWithVerifiedClient resolves it.
+#
+# Note the defense-in-depth rule in that permission's docstring — "the
+# view MUST cross-check the body's client_id against request.user.id" —
+# does NOT apply on this surface and must not be copied here: the actor
+# is the administrator and `client_id` names the CUSTOMER being booked,
+# deliberately a different person. IsTenantAdmin is this surface's
+# equivalent second factor.
+#
+# Attribution rationale (unchanged, pre-dates DRF-1231): `IsTenantAdmin`
+# rather than DRF-1062's `IsTenantAdminOrPlatformAdmin` — there is no
+# canonical actor value for Ayla platform staff operating inside a
+# tenant, and recording their action as `salon` would be false. Schedule
+# edits (DRF-1062) are unattributed configuration, so the wider
+# permission is right there and not here. Raised as an owner question.
 _SALON_WRITE_PERMISSIONS = [
-    permissions.IsAuthenticated,
-    IsProApp,
+    IsBotServiceWithVerifiedClient,
     IsTenantAdmin,
 ]
 
@@ -173,6 +215,10 @@ class SalonCancelSerializer(serializers.Serializer):
 
 
 class _SalonBookingBase(APIView):
+    # Empty, not "one more authenticator": DEFAULT_AUTHENTICATION_CLASSES
+    # runs the JWT authenticator, which raises 401 on a service Bearer
+    # before permissions are consulted. See _SALON_WRITE_PERMISSIONS.
+    authentication_classes: list = []
     permission_classes = _SALON_WRITE_PERMISSIONS
 
     def _tenant(self, request):
@@ -225,6 +271,7 @@ class SalonCustomerLookupView(APIView):
       "which of my customers is this?" and not "list my customers".
     """
 
+    authentication_classes: list = []  # DRF-1231 — see _SalonBookingBase.
     permission_classes = _SALON_WRITE_PERMISSIONS
     MIN_QUERY = 2
     LIMIT = 20
