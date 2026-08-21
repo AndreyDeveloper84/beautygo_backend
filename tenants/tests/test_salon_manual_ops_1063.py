@@ -236,7 +236,10 @@ class TestIdempotencyKeyIsRequired:
 
         assert second.status_code in (200, 201)
         assert Appointment.objects.count() == 1
-        assert second.json()["id"] == first.json()["id"]
+        # ``success_response`` wraps every payload in ``{"data": ...}``; the
+        # first version of this assertion read the id off the top level and
+        # died on the envelope rather than on the behaviour.
+        assert second.json()["data"]["id"] == first.json()["data"]["id"]
 
     def test_different_keys_are_different_bookings(
         self, salon, admin_user, master, service, returning_client
