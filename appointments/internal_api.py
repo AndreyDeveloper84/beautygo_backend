@@ -497,3 +497,85 @@ class InternalBookingRescheduleView(_InternalAuthMixin, APIView):
         # (AppointmentViewSet._reschedule_inner in views.py).
         data['revision_id'] = str(result.revision_id)
         return success_response(data)
+
+
+class InternalAppointmentReadView(_InternalAuthMixin, APIView):
+    """GET /api/v1/internal/appointments/{id}/ — the canonical few facts.
+
+    Exists for one reason: ``expected_version``. Ayla requires it on every
+    reschedule, deliberately — it is what stops two people moving the same
+    booking with the second silently winning. But bot-platform had no way
+    to learn it. Its day journal is built from ``RemoteBookingProxy``,
+    whose ``last_applied_appointment_version`` is NULL unless a canonical
+    ``appointment.rescheduled`` event happened to be applied; measured on
+    the pilot 2026-08-21, 2 of 23 mirrored bookings carried a version and
+    the single future confirmed booking — the only one anybody could
+    actually move — carried none. So the console could not offer the move
+    at all, and any value it invented would have been aimed at the wrong
+    revision.
+
+    Four fields, no more. This is not a booking-detail endpoint and must
+    not grow into one: everything else the console shows it already has
+    from its own mirror, and each extra field here is a customer's data
+    crossing a service boundary for no reason.
+
+    ``start_datetime``, matching the three sibling views in this file
+    rather than bot-platform's internal ``start_at``. The distinction is
+    wire versus DTO: these endpoints already take ``start_datetime`` on
+    the wire and translate to ``start_at`` inside, and bot-platform's
+    client already sends the wire name when it calls them. Naming this
+    one ``start_at`` would have made it the odd one out among exactly the
+    endpoints its only caller already speaks to.
+
+    Visibility — either legitimate caller, each authorised by a fact about
+    themselves rather than by a header:
+
+    * the customer whose booking it is (same rule as the sibling internal
+      cancel/reschedule views), or
+    * an active ``admin`` of the booking's tenant, which is the salon
+      console's case.
+
+    Anyone else gets 404, not 403: this surface must not confirm which
+    appointment ids exist.
+    """
+
+    @extend_schema(
+        operation_id="internal_appointments_read",
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(description="id, version, status, start_datetime"),
+            404: OpenApiResponse(
+                description="No such booking, or not visible to this actor",
+            ),
+        },
+    )
+    def get(self, request: Request, booking_id: UUID) -> Response:
+        from users.models import TenantUserRelationship
+
+        appointment = Appointment.objects.filter(pk=booking_id).first()
+        if appointment is None:
+            return error_response(
+                "NOT_FOUND", "Запись не найдена.", status_code=404,
+            )
+
+        visible = appointment.client_id == request.user.id
+        if not visible and appointment.tenant_id is not None:
+            visible = TenantUserRelationship.objects.filter(
+                user=request.user,
+                tenant_id=appointment.tenant_id,
+                role=TenantUserRelationship.Role.ADMIN,
+                is_active=True,
+            ).exists()
+        if not visible:
+            # Info-hidden: an actor who may not see this booking learns
+            # nothing about whether it exists.
+            return error_response(
+                "NOT_FOUND", "Запись не найдена.", status_code=404,
+            )
+
+        return success_response({
+            "id": str(appointment.id),
+            "version": appointment.version,
+            "status": appointment.status,
+            "start_datetime": appointment.start_datetime.isoformat(),
+        })
