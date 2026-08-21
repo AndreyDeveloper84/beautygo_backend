@@ -87,12 +87,27 @@ of `AppointmentStatusEnum` and must not be sent or expected. Client
 code that still branches on it is dead code — but see the caveat below
 before deleting a defensive `else`.
 
-**Caveat — old rows.** Removing a value from `TextChoices` does not
-rewrite stored data. If any appointment was set to `in_progress` by
-hand before removal, that string is still in its column and will
-deserialize into a value the enum no longer knows. Before treating the
-status as impossible, confirm on the live database that no row holds
-it. This document does not assert that; nobody has counted.
+**Old rows — counted, not assumed.** Removing a value from
+`TextChoices` does not rewrite stored data: a booking set to
+`in_progress` by hand before removal would still carry that string and
+would deserialize into a value the enum no longer knows.
+
+Checked on the pilot database (`beautygo`) on 2026-08-21:
+
+```sql
+SELECT status, count(*) FROM appointments_appointment GROUP BY status;
+--  cancelled | 5
+--  confirmed | 2
+SELECT count(*) FROM appointments_appointment WHERE status = 'in_progress';
+--  0
+```
+
+**Zero rows hold it.** The status is therefore impossible in practice
+as well as in the enum, and defensive branches for it may be deleted.
+
+This holds for the pilot only. Re-run the count before assuming it on
+any other deployment — the removal migration did not touch data
+anywhere.
 
 An earlier revision of this file described `in_progress` as a live
 "presentational/manual status" and told consumers to accept it as a
