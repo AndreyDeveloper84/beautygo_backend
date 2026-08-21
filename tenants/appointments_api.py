@@ -601,3 +601,139 @@ class SalonBookingCancelView(_SalonBookingBase):
         return success_response(
             AppointmentDetailSerializer(appointment).data,
         )
+
+
+class SalonCompleteSerializer(serializers.Serializer):
+    """``expected_version`` is REQUIRED here, as on salon reschedule.
+
+    Optional on the mobile path because app builds predating the field
+    exist; the salon console has no such legacy. It reads the booking —
+    and its ``version`` — immediately before offering the button, which
+    is exactly the flow ``AppointmentCompleteSerializer`` describes for
+    «new surfaces» and which only became possible once the bot had a
+    canonical read (DRF-1233).
+
+    Closure does not bump ``version`` — that counter tracks reschedules —
+    so this is a guard against closing a booking that moved under you,
+    not a lock on closure itself.
+    """
+
+    expected_version = serializers.IntegerField(required=True, min_value=1)
+
+
+class SalonBookingCompleteView(_SalonBookingBase):
+    """POST /api/v1/tenants/me/appointments/{id}/complete/ — close a visit.
+
+    A thin wrapper, not a second implementation. ``POST
+    /api/v1/appointments/{id}/complete/`` (DRF-1064) already does this and
+    already accepts a salon administrator — but it lives on the mobile
+    client path, which the bot cannot reach: no ``X-App-Type``, a JWT
+    authenticator that refuses a service Bearer, and permissions built
+    for a logged-in person. Exempting THAT prefix was never an option —
+    an exclusion does not relax the app-type requirement, it sets
+    ``request.app_type = None`` and makes ``IsProApp`` unsatisfiable
+    permanently, and the blast radius there is the whole mobile app.
+
+    So the same steps run here, on a surface the bot already reaches:
+    lock, capacity, tenant assertion, version, ``close_booking``,
+    capture. The domain lives in
+    ``appointments.application.services.completion``, shared verbatim
+    with the mobile view and the three-hour sweep — a visit closed at the
+    front desk and one closed by the sweep stay indistinguishable to
+    every consumer, which is the property that would have been lost by
+    copying the logic instead of calling it.
+
+    ``no_show`` is deliberately NOT here. Its mobile implementation
+    shapes two outbox events inline (including the fact that the ingest
+    taxonomy has no ``booking.no_show``, so it travels as
+    ``booking.cancelled`` + ``reason_code``), and duplicating sixty lines
+    of event construction creates two paths that must agree forever.
+    Extracting it into a sibling of ``close_booking`` is its own task,
+    because it touches the live mobile path.
+    """
+
+    serializer_class = SalonCompleteSerializer
+
+    @extend_schema(
+        tags=["tenants"],
+        request=SalonCompleteSerializer,
+        responses={
+            200: AppointmentDetailSerializer,
+            404: OpenApiResponse(description="Not a booking of this salon"),
+            409: OpenApiResponse(description="Stale version"),
+            422: OpenApiResponse(description="Not completable from this state"),
+        },
+    )
+    def post(self, request: Request, appointment_id) -> Response:
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from django.db import transaction
+
+        from appointments.application.services.completion import (
+            close_booking,
+            schedule_capture_safely,
+        )
+        from appointments.authz import resolve_booking_operator
+
+        tenant = self._tenant(request)
+        if tenant is None:
+            return self._not_found()
+
+        serializer = SalonCompleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        expected_version = serializer.validated_data["expected_version"]
+
+        try:
+            with transaction.atomic():
+                # Locked inside the transaction so two concurrent closures
+                # serialise here. Without it both would see CONFIRMED,
+                # both would flip the status and both would emit — and
+                # bot-platform would process two completions of one visit.
+                # of=("self",): AMD-019 made `service` nullable, so
+                # select_related emits an outer join and bare FOR UPDATE
+                # is rejected by Postgres.
+                appointment = (
+                    Appointment.objects
+                    .select_for_update(of=("self",))
+                    .select_related("specialist", "client", "service")
+                    .filter(tenant=tenant)
+                    .filter(pk=appointment_id)
+                    .first()
+                )
+                if appointment is None:
+                    return self._not_found()
+
+                # In what capacity does this caller act on THIS row —
+                # reused from the mobile path rather than re-derived, so
+                # the two surfaces can never disagree about who the actor
+                # is. None → 404: «forbidden» would confirm the id exists.
+                actor = resolve_booking_operator(request, appointment)
+                if actor is None:
+                    return self._not_found()
+
+                if appointment.version != expected_version:
+                    return error_response(
+                        "STALE_VERSION",
+                        f"Appointment {appointment.id} expected_version="
+                        f"{expected_version} but current version is "
+                        f"{appointment.version}.",
+                        status_code=409,
+                    )
+
+                close_booking(appointment, completed_by=actor)
+        except DjangoValidationError as exc:
+            # A visit that is cancelled, or already closed. Settled, not
+            # contended: no retry and no other actor changes the answer.
+            return error_response(
+                "INVALID_STATUS", str(exc.message), status_code=422,
+            )
+
+        # Outside the atomic block on purpose: the closure is durable by
+        # now, and a broker hiccup must not surface as the failure of a
+        # fact that already happened. Reconciliation covers the rest.
+        schedule_capture_safely(appointment)
+
+        logger.info(
+            "salon.booking_completed appointment_id=%s tenant=%s by=%s actor=%s",
+            appointment.id, tenant.slug, request.user.id, actor,
+        )
+        return success_response(AppointmentDetailSerializer(appointment).data)
