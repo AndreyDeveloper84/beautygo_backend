@@ -162,10 +162,11 @@ class TestSalonExclusionIsNarrow:
     declares ``IsProApp`` becomes permanently unsatisfiable — for the
     bot, for a future Pro App, for everyone.
 
-    Eleven routes live under ``/api/v1/tenants/me/``. DRF-1231 needed two
-    of them. Excluding the shared parent would have quietly bricked the
-    other nine — the day journal, closures, master schedules and access
-    revocation — none of which anyone asked to change, and the breakage
+    Fourteen routes live under ``/api/v1/tenants/me/``; the two prefixes
+    below cover four of them. Excluding the shared parent would have
+    quietly bricked the other ten — the day journal, closures, master
+    schedules and time-off, access revocation, all of which declare
+    IsProApp — none of which anyone asked to change, and the breakage
     would only surface the first time someone pointed a working client at
     them. Hence two narrow prefixes instead of one broad one; this test
     is what keeps the next person from "simplifying" them back.

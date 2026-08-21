@@ -93,9 +93,10 @@ EXCLUDED_PATH_PREFIXES = (
     # DRF-1231 — the salon-admin booking surface. Same service-to-service
     # story as the tree above, but reached under /tenants/me/ because it
     # is the salon's own data. Deliberately NOT the whole
-    # "/api/v1/tenants/me/" prefix: eleven routes live under it and eight
-    # of them (the day journal, closures, master schedules, access
-    # revocation) still declare IsProApp. Excluding a path does not relax
+    # "/api/v1/tenants/me/" prefix: fourteen routes live under it, these
+    # two prefixes cover four of them, and every one of the other ten
+    # (the day journal, closures, master schedules and time-off, access
+    # revocation) still declares IsProApp. Excluding a path does not relax
     # the app-type requirement — it sets request.app_type = None, which
     # makes IsProApp unsatisfiable there for every caller, forever.
     # Listing the two prefixes the bot actually calls keeps that one-way
