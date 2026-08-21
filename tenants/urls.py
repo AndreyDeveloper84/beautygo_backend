@@ -22,6 +22,7 @@ from users.schedule_admin_api import (
 
 from .appointments_api import (
     SalonBookingCancelView,
+    SalonBookingCompleteView,
     SalonBookingCreateView,
     SalonBookingRescheduleView,
     SalonCustomerLookupView,
@@ -66,6 +67,15 @@ urlpatterns = [
         "me/appointments/<uuid:appointment_id>/cancel/",
         SalonBookingCancelView.as_view(),
         name="tenants-booking-cancel",
+    ),
+    # DRF-1234 — closing the visit. The mobile endpoint already accepts a
+    # salon administrator (DRF-1064); this is the same steps on a surface
+    # the bot can actually reach. `no_show` is deliberately not here —
+    # see the view docstring.
+    path(
+        "me/appointments/<uuid:appointment_id>/complete/",
+        SalonBookingCompleteView.as_view(),
+        name="tenants-booking-complete",
     ),
     # DRF-1062 — schedule of any master in this tenant. The pro-app
     # routes under /specialists/me/ stay untouched; these are the same
