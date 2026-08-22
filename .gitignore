@@ -28,10 +28,30 @@ staticfiles/
 
 # Environment
 .env
+.env.*
+!.env.example
+!.env.*.example
 *.env.local
 
 # Secrets — MCP server config contains plaintext API tokens
 .mcp.json
+!.mcp.json.example
+
+# Sensitive files (W0-X1 denylist) — credential-bearing filenames that
+# must never enter git even if entropy scanning would not flag them.
+# Placeholder templates keep an explicit `.example` suffix.
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+*firebase-adminsdk*.json
+*service-account*.json
+*service_account*.json
+credentials.json
+client_secret*.json
+!*.example
 
 # Claude Code local settings
 .claude/settings.local.json
