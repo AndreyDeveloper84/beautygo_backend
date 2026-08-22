@@ -201,7 +201,9 @@
 
 ### `POST /api/v1/auth/social/{provider}/`
 
-Providers: `vk`, `google`, `apple`, `yandex`
+Providers: `google`, `apple`. `vk` и `yandex` — принимаются, но отвергаются с 403.
+
+> **DRF-1245 — `vk` и `yandex` отключены.** Оба провайдера принимали голый `access_token` от клиента, а ни VK `users.get`, ни Yandex `login.yandex.ru/info` не сообщают, какому приложению этот токен выдан. Токен, полученный любым посторонним VK/Yandex-приложением, давал полноценный JWT Ayla; а так как `mobile_phone` (VK) и `default_email` / `default_phone` (Yandex) — самозаполняемые поля профиля, злоумышленник мог подставить телефон или почту жертвы и получить её аккаунт. Google пинует `aud` к `GOOGLE_CLIENT_ID`, Apple проверяет audience + issuer подписанного JWT — их это не касается. Запрос на `vk`/`yandex` отвечает `403 SOCIAL_PROVIDER_DISABLED`. Включать обратно — только после реальной привязки токена к приложению (VK `secure.checkToken` c `app_id`, Yandex — обмен authorization code). Денилист живёт в `settings.SOCIAL_AUTH_DISABLED_PROVIDERS`; env-переменная `SOCIAL_AUTH_DISABLED_PROVIDERS` может только **расширить** его (например, аварийно снять google/apple) — снять базовый `('vk','yandex')` она не может.
 
 **Headers:** `X-App-Type: client | pro`
 **Auth:** Не требуется
@@ -246,6 +248,7 @@ Providers: `vk`, `google`, `apple`, `yandex`
 |------|------|----------|
 | `INVALID_TOKEN` | 400 | Невалидный token провайдера |
 | `PROVIDER_ERROR` | 502 | Ошибка API провайдера |
+| `SOCIAL_PROVIDER_DISABLED` | 403 | Провайдер отключён (`vk`, `yandex` — DRF-1245) |
 | `ACCOUNT_LINKED_TO_OTHER` | 409 | Соцсеть привязана к другому аккаунту |
 
 ---
@@ -259,10 +262,10 @@ Providers: `vk`, `google`, `apple`, `yandex`
 | POST | `/api/v1/auth/register/` | Bearer | ⚪ да | Завершить регистрацию |
 | POST | `/api/v1/auth/token/refresh/` | — | — | Обновить access token |
 | POST | `/api/v1/auth/logout/` | Bearer | — | Logout (blacklist refresh) |
-| POST | `/api/v1/auth/social/vk/` | — | ⚪ да | Вход через VK |
+| POST | `/api/v1/auth/social/vk/` | — | ⚪ да | ❌ Отключён (DRF-1245) → 403 |
 | POST | `/api/v1/auth/social/google/` | — | ⚪ да | Вход через Google |
 | POST | `/api/v1/auth/social/apple/` | — | ⚪ да | Вход через Apple |
-| POST | `/api/v1/auth/social/yandex/` | — | ⚪ да | Вход через Yandex |
+| POST | `/api/v1/auth/social/yandex/` | — | ⚪ да | ❌ Отключён (DRF-1245) → 403 |
 
 ---
 
@@ -297,7 +300,7 @@ App (X-App-Type: pro)
 ```
 App (X-App-Type: client)
   │
-  ├─ POST /auth/social/vk/  {"access_token": "..."}
+  ├─ POST /auth/social/google/  {"token": "..."}   (vk/yandex → 403, DRF-1245)
   │  └─ 200 {"access": "...", "refresh": "...", "is_new_user": true}
   │
   └─ POST /auth/register/  {"first_name": "Анна"}   [Bearer token]

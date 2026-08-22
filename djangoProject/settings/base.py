@@ -458,6 +458,36 @@ APPLE_CLIENT_ID = os.environ.get("APPLE_CLIENT_ID") or None
 VK_CLIENT_SECRET = os.environ.get("VK_CLIENT_SECRET") or None
 YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID") or None
 
+# Social auth containment (W0-D1, AY-01 — ported into this repo under
+# DRF-1245; "W0-D2" is the not-yet-written verified re-enable slice).
+# VK/Yandex provider tokens are
+# verified only against the provider, not against the Ayla OAuth
+# application, so a token issued to another OAuth client could become a
+# confused-deputy account-takeover path via email/phone account linking.
+# Until W0-D2 implements app-ownership verification, requests for these
+# providers are rejected fail-closed in SocialAuthService BEFORE any
+# verifier call, SocialAccount lookup, email/phone matching, or user
+# creation.
+#
+# The ("vk", "yandex") baseline is enforced here and CANNOT be removed
+# via env in this slice — W0-D2 owns verified re-enable. The env var can
+# only EXTEND the denylist (e.g. take google/apple down in an incident).
+# Entries are lowercased and stripped; empty/malformed entries are
+# ignored, so a malformed env value can never silently re-enable a
+# contained provider.
+SOCIAL_AUTH_DISABLED_PROVIDERS: tuple[str, ...] = tuple(
+    sorted(
+        {"vk", "yandex"}
+        | {
+            entry.strip().lower()
+            for entry in os.environ.get(
+                "SOCIAL_AUTH_DISABLED_PROVIDERS", "",
+            ).split(",")
+            if entry.strip()
+        }
+    )
+)
+
 # OpenAI / LLM. api.openai.com is geo-blocked from RU; the deployed
 # environments tunnel via OPENAI_PROXY (HTTP/SOCKS proxy with non-RU exit
 # IP). OPENAI_BASE_URL is optional — only set when routing through an

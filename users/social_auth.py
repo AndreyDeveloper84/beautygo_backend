@@ -55,6 +55,21 @@ class PhoneAlreadyBoundError(SocialAuthError):
         super().__init__("Phone number already bound to another account")
 
 
+class SocialProviderDisabledError(SocialAuthError):
+    """Provider is administratively disabled (AY-01 containment gate).
+
+    See settings.SOCIAL_AUTH_DISABLED_PROVIDERS for what is contained
+    and why (DRF-1245).
+    """
+    code = "SOCIAL_PROVIDER_DISABLED"
+    status_code = 403
+
+    def __init__(self, provider: str):
+        super().__init__(
+            f"Authentication via '{provider}' is temporarily disabled",
+        )
+
+
 # --- Provider data ---
 
 @dataclass
@@ -247,25 +262,41 @@ class SocialAuthService:
         if not verifier:
             raise InvalidProviderError()
 
-        # 2. Verify token with provider
+        # 2. AY-01 containment (W0-D1 / DRF-1245): disabled providers are
+        #    rejected fail-closed BEFORE the verifier call, any SocialAccount
+        #    lookup, email/phone matching, or user creation. The token
+        #    value is never logged or echoed here.
+        disabled = {
+            str(p).strip().lower()
+            for p in getattr(
+                settings, "SOCIAL_AUTH_DISABLED_PROVIDERS", ("vk", "yandex"),
+            )
+        }
+        if provider.strip().lower() in disabled:
+            logger.warning(
+                "Rejected disabled social provider '%s'", provider,
+            )
+            raise SocialProviderDisabledError(provider)
+
+        # 3. Verify token with provider
         info = verifier(token)
 
-        # 3. Apple: overlay name from extra_fields
+        # 4. Apple: overlay name from extra_fields
         if extra_fields and provider == "apple":
             if extra_fields.get("first_name"):
                 info.first_name = extra_fields["first_name"]
             if extra_fields.get("last_name"):
                 info.last_name = extra_fields["last_name"]
 
-        # 4. Find or create user
+        # 5. Find or create user
         user, is_new = self._find_or_create_user(info, app_type)
 
-        # 5. Update extra_data
+        # 6. Update extra_data
         SocialAccount.objects.filter(
             provider=provider, provider_uid=info.provider_uid,
         ).update(extra_data=info.extra_data)
 
-        # 6. Generate tokens
+        # 7. Generate tokens
         return self._build_response(user, is_new, device_id)
 
     def bind_phone(self, user: User, phone: str, code: str) -> None:
