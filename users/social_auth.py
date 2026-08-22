@@ -1,31 +1,4 @@
-"""Social authentication service for OAuth providers.
-
-DRF-1245 — VK and Yandex are **disabled**. Both providers are driven by a
-bare ``access_token`` posted by the mobile client, and neither exposes a way
-to prove that token was minted for *our* OAuth application:
-
-- VK ``users.get`` accepts an access_token from any VK app and answers with
-  that token's owner. Nothing in the response names the issuing app.
-- Yandex ``login.yandex.ru/info`` behaves the same way — it returns the
-  token owner and never the ``client_id`` the token belongs to.
-
-Google and Apple do not share the flaw: ``verify_google_token`` pins the
-``aud`` claim to ``settings.GOOGLE_CLIENT_ID`` and ``verify_apple_token``
-verifies audience + issuer on a signed JWT (and ``settings/prod.py``
-fail-fasts when either client id is unset).
-
-So a token obtained by any unrelated VK/Yandex application — the classic
-confused-deputy setup — was enough to mint a full-privilege Ayla JWT for
-that provider account. Worse, ``_find_or_create_user`` adopts the identity
-attached to the token: VK's ``mobile_phone`` and Yandex's ``default_email``
-are self-declared profile fields, so an attacker who set them to a victim's
-phone/email got the victim's account rather than a fresh one.
-
-Re-enabling either provider needs a real verification path first — VK
-``secure.checkToken`` with ``VK_CLIENT_SECRET`` and an ``app_id`` assertion,
-Yandex the authorization-code exchange instead of a bare access_token —
-plus a decision about identity merging on unverified contacts.
-"""
+"""Social authentication service for OAuth providers."""
 
 import logging
 from dataclasses import dataclass, field
@@ -82,16 +55,14 @@ class PhoneAlreadyBoundError(SocialAuthError):
         super().__init__("Phone number already bound to another account")
 
 
-class ProviderDisabledError(SocialAuthError):
-    """Provider is known but deliberately switched off (DRF-1245)."""
-    code = "PROVIDER_DISABLED"
+class SocialProviderDisabledError(SocialAuthError):
+    """Provider is administratively disabled (AY-01 containment gate)."""
+    code = "SOCIAL_PROVIDER_DISABLED"
     status_code = 403
 
     def __init__(self, provider: str):
-        self.provider = provider
         super().__init__(
-            f"Login via {provider} is disabled: the provider token cannot "
-            f"be verified as issued to this application",
+            f"Authentication via '{provider}' is temporarily disabled",
         )
 
 
@@ -258,20 +229,12 @@ def verify_yandex_token(token: str) -> SocialUserInfo:
 
 # --- Main service ---
 
-# Providers whose token can be bound to *this* OAuth application.
-# Adding an entry here is a security decision, not a config change — see the
-# module docstring for what "verifiable" means.
 PROVIDER_VERIFIERS = {
+    "vk": verify_vk_token,
     "google": verify_google_token,
     "apple": verify_apple_token,
+    "yandex": verify_yandex_token,
 }
-
-# Known providers that are switched off. Kept separate from "unknown
-# provider" so the client gets an honest 403 PROVIDER_DISABLED instead of a
-# 400 that reads like a typo in the URL. ``verify_vk_token`` /
-# ``verify_yandex_token`` above stay in the module as the starting point for
-# a proper implementation, but nothing routes to them.
-DISABLED_PROVIDERS = frozenset({"vk", "yandex"})
 
 
 class SocialAuthService:
@@ -290,38 +253,46 @@ class SocialAuthService:
 
         Returns dict with JWT tokens, user info, is_new_user flag.
         """
-        # 1. Validate provider. The disabled check runs first and before
-        # any network call, so a VK/Yandex token is never presented to the
-        # provider and no User / SocialAccount row is ever created for it.
-        if provider in DISABLED_PROVIDERS:
-            logger.warning(
-                "Rejected social auth via disabled provider %s", provider,
-            )
-            raise ProviderDisabledError(provider)
-
+        # 1. Validate provider
         verifier = PROVIDER_VERIFIERS.get(provider)
         if not verifier:
             raise InvalidProviderError()
 
-        # 2. Verify token with provider
+        # 2. AY-01 containment (W0-D1): disabled providers are rejected
+        #    fail-closed BEFORE the verifier call, any SocialAccount
+        #    lookup, email/phone matching, or user creation. The token
+        #    value is never logged or echoed here.
+        disabled = {
+            str(p).strip().lower()
+            for p in getattr(
+                settings, "SOCIAL_AUTH_DISABLED_PROVIDERS", ("vk", "yandex"),
+            )
+        }
+        if provider.strip().lower() in disabled:
+            logger.warning(
+                "Rejected disabled social provider '%s'", provider,
+            )
+            raise SocialProviderDisabledError(provider)
+
+        # 3. Verify token with provider
         info = verifier(token)
 
-        # 3. Apple: overlay name from extra_fields
+        # 4. Apple: overlay name from extra_fields
         if extra_fields and provider == "apple":
             if extra_fields.get("first_name"):
                 info.first_name = extra_fields["first_name"]
             if extra_fields.get("last_name"):
                 info.last_name = extra_fields["last_name"]
 
-        # 4. Find or create user
+        # 5. Find or create user
         user, is_new = self._find_or_create_user(info, app_type)
 
-        # 5. Update extra_data
+        # 6. Update extra_data
         SocialAccount.objects.filter(
             provider=provider, provider_uid=info.provider_uid,
         ).update(extra_data=info.extra_data)
 
-        # 6. Generate tokens
+        # 7. Generate tokens
         return self._build_response(user, is_new, device_id)
 
     def bind_phone(self, user: User, phone: str, code: str) -> None:

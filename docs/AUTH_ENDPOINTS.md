@@ -201,9 +201,9 @@
 
 ### `POST /api/v1/auth/social/{provider}/`
 
-Providers: `google`, `apple`.
+Providers: `google`, `apple`. `vk` и `yandex` — принимаются, но отвергаются с 403.
 
-> **DRF-1245 — `vk` и `yandex` отключены.** Оба провайдера принимали голый `access_token` от клиента, а ни VK `users.get`, ни Yandex `login.yandex.ru/info` не сообщают, какому приложению этот токен выдан. Токен, полученный любым посторонним VK/Yandex-приложением, давал полноценный JWT Ayla; а так как `mobile_phone` (VK) и `default_email` / `default_phone` (Yandex) — самозаполняемые поля профиля, злоумышленник мог подставить телефон или почту жертвы и получить её аккаунт. Google пинует `aud` к `GOOGLE_CLIENT_ID`, Apple проверяет audience + issuer подписанного JWT — их это не касается. Запрос на `vk`/`yandex` отвечает `403 PROVIDER_DISABLED`. Включать обратно — только после реальной привязки токена к приложению (VK `secure.checkToken` c `app_id`, Yandex — обмен authorization code).
+> **DRF-1245 — `vk` и `yandex` отключены.** Оба провайдера принимали голый `access_token` от клиента, а ни VK `users.get`, ни Yandex `login.yandex.ru/info` не сообщают, какому приложению этот токен выдан. Токен, полученный любым посторонним VK/Yandex-приложением, давал полноценный JWT Ayla; а так как `mobile_phone` (VK) и `default_email` / `default_phone` (Yandex) — самозаполняемые поля профиля, злоумышленник мог подставить телефон или почту жертвы и получить её аккаунт. Google пинует `aud` к `GOOGLE_CLIENT_ID`, Apple проверяет audience + issuer подписанного JWT — их это не касается. Запрос на `vk`/`yandex` отвечает `403 SOCIAL_PROVIDER_DISABLED`. Включать обратно — только после реальной привязки токена к приложению (VK `secure.checkToken` c `app_id`, Yandex — обмен authorization code). Денилист живёт в `settings.SOCIAL_AUTH_DISABLED_PROVIDERS`; env-переменная `SOCIAL_AUTH_DISABLED_PROVIDERS` может только **расширить** его (например, аварийно снять google/apple) — снять базовый `('vk','yandex')` она не может.
 
 **Headers:** `X-App-Type: client | pro`
 **Auth:** Не требуется
@@ -248,7 +248,7 @@ Providers: `google`, `apple`.
 |------|------|----------|
 | `INVALID_TOKEN` | 400 | Невалидный token провайдера |
 | `PROVIDER_ERROR` | 502 | Ошибка API провайдера |
-| `PROVIDER_DISABLED` | 403 | Провайдер отключён (`vk`, `yandex` — DRF-1245) |
+| `SOCIAL_PROVIDER_DISABLED` | 403 | Провайдер отключён (`vk`, `yandex` — DRF-1245) |
 | `ACCOUNT_LINKED_TO_OTHER` | 409 | Соцсеть привязана к другому аккаунту |
 
 ---

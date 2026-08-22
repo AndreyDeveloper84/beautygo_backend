@@ -228,11 +228,14 @@ components:
       properties:
         provider:
           type: string
-          enum: [google, apple]
+          enum: [google, apple, vk, yandex]
           description: >-
-            vk и yandex отключены (DRF-1245) — их access_token нельзя
-            привязать к нашему OAuth-приложению. Запрос отвечает
-            403 PROVIDER_DISABLED.
+            vk и yandex отключены fail-closed (DRF-1245): их access_token
+            нельзя привязать к нашему OAuth-приложению, поэтому запрос
+            отвечает 403 SOCIAL_PROVIDER_DISABLED. Денилист живёт в
+            settings.SOCIAL_AUTH_DISABLED_PROVIDERS; env-переменная
+            SOCIAL_AUTH_DISABLED_PROVIDERS может только расширить его,
+            снять базовый ('vk','yandex') она не может.
         token:
           type: string
           description: OAuth токен от провайдера
@@ -1682,7 +1685,7 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
               example:
                 error:
-                  code: PROVIDER_DISABLED
+                  code: SOCIAL_PROVIDER_DISABLED
                   message: Login via vk is disabled
 
   /auth/token/refresh/:
