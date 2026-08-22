@@ -458,7 +458,9 @@ APPLE_CLIENT_ID = os.environ.get("APPLE_CLIENT_ID") or None
 VK_CLIENT_SECRET = os.environ.get("VK_CLIENT_SECRET") or None
 YANDEX_CLIENT_ID = os.environ.get("YANDEX_CLIENT_ID") or None
 
-# Social auth containment (W0-D1, AY-01). VK/Yandex provider tokens are
+# Social auth containment (W0-D1, AY-01 — ported into this repo under
+# DRF-1245; "W0-D2" is the not-yet-written verified re-enable slice).
+# VK/Yandex provider tokens are
 # verified only against the provider, not against the Ayla OAuth
 # application, so a token issued to another OAuth client could become a
 # confused-deputy account-takeover path via email/phone account linking.

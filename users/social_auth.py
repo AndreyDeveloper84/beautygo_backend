@@ -56,7 +56,11 @@ class PhoneAlreadyBoundError(SocialAuthError):
 
 
 class SocialProviderDisabledError(SocialAuthError):
-    """Provider is administratively disabled (AY-01 containment gate)."""
+    """Provider is administratively disabled (AY-01 containment gate).
+
+    See settings.SOCIAL_AUTH_DISABLED_PROVIDERS for what is contained
+    and why (DRF-1245).
+    """
     code = "SOCIAL_PROVIDER_DISABLED"
     status_code = 403
 
@@ -258,8 +262,8 @@ class SocialAuthService:
         if not verifier:
             raise InvalidProviderError()
 
-        # 2. AY-01 containment (W0-D1): disabled providers are rejected
-        #    fail-closed BEFORE the verifier call, any SocialAccount
+        # 2. AY-01 containment (W0-D1 / DRF-1245): disabled providers are
+        #    rejected fail-closed BEFORE the verifier call, any SocialAccount
         #    lookup, email/phone matching, or user creation. The token
         #    value is never logged or echoed here.
         disabled = {
