@@ -2,7 +2,7 @@ import os
 
 from .base import *
 
-from core.env_strictness import enforce_required_env
+from core.env_strictness import enforce_required_env, enforce_url_env
 
 # Security
 DEBUG = False
@@ -46,6 +46,84 @@ enforce_required_env(
     _missing_prod,
     "each disables a defence layer when unset; see djangoProject/settings/"
     "base.py for what each one gates",
+)
+
+# DRF-1244 — presence is not fitness.
+#
+# The gate above proves a variable was *set*. It says nothing about the
+# value: `AYLA_PUBLIC_BASE_URL=да`, `=TODO`, a half-pasted `=https://`
+# or a value with a stray trailing space all pass a presence check and
+# then fail at the first call that builds a URL out of them — which is
+# in production, on a real booking, long after the deploy went green.
+# The sibling report on the bot side is DRF-1221 (AYLA_BASE_URL).
+#
+# So: every setting whose value is *by contract* an absolute http(s) URL
+# gets its form checked at boot. Structural only — scheme, host, port,
+# no whitespace. No DNS, no TCP: startup must not depend on the network.
+#
+# Membership rule — a variable belongs here iff its value is handed to
+# urljoin / an HTTP client as a whole URL:
+#
+# - AYLA_INTERNAL_BASE_URL, AYLA_PUBLIC_BASE_URL: the two bases of
+#   core.ayla_urls.AylaUrlBuilder. Today the builder only checks them
+#   for emptiness (`if not self.internal_base: raise RuntimeError`) —
+#   at call time, i.e. exactly the late failure this gate removes. The
+#   public base also becomes the YooKassa `return_url`, where a
+#   malformed value is a payment the customer cannot come back from.
+# - BOT_PLATFORM_BASE_URL: appointments.infrastructure.outbox.publisher
+#   posts base + BOT_PLATFORM_INGEST_PATH. A malformed base makes every
+#   cross-service event delivery fail inside a beat task that logs and
+#   swallows — the quietest possible failure mode.
+# - YCLIENTS_API_BASE_URL: base for every YClients catalog call
+#   (services.integrations.yclients.client). Has a working default, so
+#   only an explicit override can break it — and an override is exactly
+#   when a typo happens.
+# - MINIO_ENDPOINT: `endpoint_url` for the S3 storage backend below. A
+#   malformed value takes every media upload and every signed URL with
+#   it, at first use rather than at boot.
+# - OPENAI_BASE_URL: `base_url` of the OpenAI client
+#   (ai.services.llm_client). Optional by design; when set it must be a
+#   URL.
+#
+# Deliberately NOT here:
+# - YOOKASSA_WEBHOOK_ALLOWED_IPS (list of IPs/CIDRs), AYLA_INTERNAL_API_TOKEN,
+#   GOOGLE_CLIENT_ID, APPLE_CLIENT_ID — not URLs. Checking them as URLs
+#   would be the same defect pointing the other way.
+# - REDIS_URL — a URL, but `redis://` / `rediss://`; the http-only scheme
+#   set would reject every valid value.
+# - OPENAI_PROXY — legitimately `socks5://` as well as `http://`.
+# - SENTRY_DSN — a credential-bearing URL whose only consumer degrades to
+#   a no-op. Making telemetry config abort a boot trades an observability
+#   gap for an outage; that call belongs to the owner, not to this gate.
+# - CORS_ALLOWED_ORIGINS / DJANGO_ALLOWED_HOSTS / CSRF_TRUSTED_ORIGINS —
+#   comma-separated lists of origins/hosts, not single URLs (and
+#   django-cors-headers already system-checks the first one).
+#
+# Absence is NOT an error here, and neither is an explicitly blank value
+# (`NAME=` in .env): for these settings empty is the documented
+# off-switch — the outbox publisher no-ops, OPENAI_BASE_URL falls back to
+# the OpenAI default, AylaUrlBuilder raises only when a caller needs the
+# base. None of them are in _REQUIRED_PROD_ENV, and adding a presence
+# requirement through this call would widen what a deploy must provide
+# and could stop a currently-working environment from booting. Whether
+# any of them should also be *mandatory* in production is a separate
+# decision that belongs in _REQUIRED_PROD_ENV above.
+#
+# Strictness is the same DJANGO_ENV gate as above — the pilot deploys
+# with DJANGO_ENV=staging (.github/workflows/ci.yml) and therefore gets a
+# warning, never a failed boot.
+_URL_SHAPED_ENV = (
+    "AYLA_INTERNAL_BASE_URL",
+    "AYLA_PUBLIC_BASE_URL",
+    "BOT_PLATFORM_BASE_URL",
+    "YCLIENTS_API_BASE_URL",
+    "MINIO_ENDPOINT",
+    "OPENAI_BASE_URL",
+)
+enforce_url_env(
+    _URL_SHAPED_ENV,
+    "Each value is used as a whole URL (urljoin / HTTP client base), so a "
+    "malformed one fails at first use in production rather than at boot.",
 )
 
 # CORS
