@@ -1,0 +1,38 @@
+# Pre-commit hooks for djangoproject (W0-X1 secret containment).
+#
+# Setup once after clone:
+#   pre-commit install
+#
+# Run on demand:
+#   pre-commit run --all-files
+#
+# Two complementary layers:
+#   1. detect-secrets — entropy/pattern scan against the checked-in
+#      baseline; fails on any NEW secret not present in the baseline.
+#   2. sensitive-file-guard — filename denylist that refuses
+#      credential-bearing names even when entropy scanning would not
+#      flag them (see scripts/sensitive_file_guard.py).
+
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        exclude: |
+          (?x)^(
+            \.secrets\.baseline|
+            .*\.lock
+          )$
+
+  - repo: local
+    hooks:
+      - id: sensitive-file-guard
+        name: Refuse credential-bearing filenames (.env, *.pem, service-account JSON, ...)
+        entry: python scripts/sensitive_file_guard.py
+        language: system
+        # The script inspects the staged diff itself (paths only, never
+        # contents), so pre-commit must not pass filenames and the hook
+        # must run on every commit.
+        pass_filenames: false
+        always_run: true
