@@ -228,7 +228,11 @@ components:
       properties:
         provider:
           type: string
-          enum: [google, vk, apple, yandex]
+          enum: [google, apple]
+          description: >-
+            vk и yandex отключены (DRF-1245) — их access_token нельзя
+            привязать к нашему OAuth-приложению. Запрос отвечает
+            403 PROVIDER_DISABLED.
         token:
           type: string
           description: OAuth токен от провайдера
@@ -1670,6 +1674,16 @@ paths:
                 error:
                   code: INVALID_TOKEN
                   message: Invalid OAuth token
+        '403':
+          description: Провайдер отключён (vk, yandex — DRF-1245)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: PROVIDER_DISABLED
+                  message: Login via vk is disabled
 
   /auth/token/refresh/:
     post:

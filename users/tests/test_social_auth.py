@@ -1,4 +1,4 @@
-"""Tests for Social Auth API (DRF-55)."""
+"""Tests for Social Auth API (DRF-55, DRF-1245)."""
 
 import logging
 from unittest.mock import MagicMock, patch
@@ -58,17 +58,24 @@ def pro_app():
 
 
 @pytest.mark.django_db
-class TestSocialAuthVK:
-    URL = SOCIAL_URL.format(provider='vk')
+class TestSocialAuthFlow:
+    """Provider-agnostic login flow.
+
+    Used to be exercised through VK; VK is disabled by DRF-1245, so the
+    same assertions now run against Google — the flow under test
+    (SocialAccount lookup, email linking, token error mapping) is shared
+    by every provider and is not VK-specific.
+    """
+    URL = SOCIAL_URL.format(provider='google')
 
     def test_new_user_created(self, client_app):
-        mock_vk = MagicMock(return_value=make_social_info(
-            provider="vk", uid="vk_001",
+        mock_google = MagicMock(return_value=make_social_info(
+            provider="google", uid="g_001",
         ))
-        verifiers = mock_verifiers(vk=mock_vk)
+        verifiers = mock_verifiers(google=mock_google)
         with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
             response = client_app.post(
-                self.URL, {'token': 'fake_vk_token'}, format='json',
+                self.URL, {'token': 'fake_google_token'}, format='json',
             )
         assert response.status_code == status.HTTP_200_OK
         data = response.data['data']
@@ -77,20 +84,20 @@ class TestSocialAuthVK:
         assert data['refresh_token']
         assert data['user']['role'] == 'client'
         assert SocialAccount.objects.filter(
-            provider='vk', provider_uid='vk_001',
+            provider='google', provider_uid='g_001',
         ).exists()
 
     def test_existing_user_login(self, client_app):
         user = User.objects.create(
-            username='existing_vk', role='client',
+            username='existing_google', role='client',
         )
         SocialAccount.objects.create(
-            user=user, provider='vk', provider_uid='vk_002',
+            user=user, provider='google', provider_uid='g_002',
         )
-        mock_vk = MagicMock(return_value=make_social_info(
-            provider="vk", uid="vk_002",
+        mock_google = MagicMock(return_value=make_social_info(
+            provider="google", uid="g_002",
         ))
-        verifiers = mock_verifiers(vk=mock_vk)
+        verifiers = mock_verifiers(google=mock_google)
         with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
             response = client_app.post(
                 self.URL, {'token': 'fake'}, format='json',
@@ -103,10 +110,10 @@ class TestSocialAuthVK:
         user = User.objects.create(
             username='email_match', email='match@test.com', role='client',
         )
-        mock_vk = MagicMock(return_value=make_social_info(
-            provider="vk", uid="vk_003", email="match@test.com",
+        mock_google = MagicMock(return_value=make_social_info(
+            provider="google", uid="g_003", email="match@test.com",
         ))
-        verifiers = mock_verifiers(vk=mock_vk)
+        verifiers = mock_verifiers(google=mock_google)
         with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
             response = client_app.post(
                 self.URL, {'token': 'fake'}, format='json',
@@ -115,13 +122,13 @@ class TestSocialAuthVK:
         assert response.data['data']['is_new_user'] is False
         assert response.data['data']['user']['id'] == user.pk
         assert SocialAccount.objects.filter(
-            user=user, provider='vk',
+            user=user, provider='google',
         ).exists()
 
     def test_invalid_token(self, client_app):
         from users.social_auth import SocialAuthTokenError
-        mock_vk = MagicMock(side_effect=SocialAuthTokenError())
-        verifiers = mock_verifiers(vk=mock_vk)
+        mock_google = MagicMock(side_effect=SocialAuthTokenError())
+        verifiers = mock_verifiers(google=mock_google)
         with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
             response = client_app.post(
                 self.URL, {'token': 'bad'}, format='json',
@@ -185,26 +192,6 @@ class TestSocialAuthApple:
 
 
 @pytest.mark.django_db
-class TestSocialAuthYandex:
-    URL = SOCIAL_URL.format(provider='yandex')
-
-    def test_yandex_with_phone(self, client_app):
-        mock_yandex = MagicMock(return_value=make_social_info(
-            provider="yandex", uid="yandex_001",
-            phone="+79001234567",
-        ))
-        verifiers = mock_verifiers(yandex=mock_yandex)
-        with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
-            response = client_app.post(
-                self.URL, {'token': 'ya_token'}, format='json',
-            )
-        assert response.status_code == status.HTTP_200_OK
-        data = response.data['data']
-        assert data['phone_required'] is False
-        assert data['user']['phone'] == '+79001234567'
-
-
-@pytest.mark.django_db
 class TestSocialAuthGeneral:
 
     def test_invalid_provider(self, client_app):
@@ -217,7 +204,7 @@ class TestSocialAuthGeneral:
 
     def test_missing_token(self, client_app):
         response = client_app.post(
-            SOCIAL_URL.format(provider='vk'),
+            SOCIAL_URL.format(provider='google'),
             {}, format='json',
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
@@ -225,32 +212,32 @@ class TestSocialAuthGeneral:
     def test_missing_app_type(self):
         client = APIClient()
         response = client.post(
-            SOCIAL_URL.format(provider='vk'),
+            SOCIAL_URL.format(provider='google'),
             {'token': 'x'}, format='json',
         )
         assert response.status_code == status.HTTP_403_FORBIDDEN
 
     def test_pro_app_creates_specialist(self, pro_app):
-        mock_vk = MagicMock(return_value=make_social_info(
-            provider="vk", uid="vk_pro_001",
+        mock_google = MagicMock(return_value=make_social_info(
+            provider="google", uid="g_pro_001",
         ))
-        verifiers = mock_verifiers(vk=mock_vk)
+        verifiers = mock_verifiers(google=mock_google)
         with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
             response = pro_app.post(
-                SOCIAL_URL.format(provider='vk'),
+                SOCIAL_URL.format(provider='google'),
                 {'token': 'x'}, format='json',
             )
         assert response.status_code == status.HTTP_200_OK
         assert response.data['data']['user']['role'] == 'specialist'
 
     def test_phone_required_when_no_phone(self, client_app):
-        mock_vk = MagicMock(return_value=make_social_info(
-            provider="vk", uid="vk_nophone", phone=None,
+        mock_google = MagicMock(return_value=make_social_info(
+            provider="google", uid="g_nophone", phone=None,
         ))
-        verifiers = mock_verifiers(vk=mock_vk)
+        verifiers = mock_verifiers(google=mock_google)
         with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
             response = client_app.post(
-                SOCIAL_URL.format(provider='vk'),
+                SOCIAL_URL.format(provider='google'),
                 {'token': 'x'}, format='json',
             )
         assert response.status_code == status.HTTP_200_OK
@@ -429,3 +416,150 @@ class TestProdOAuthFailFast:
         assert module.GOOGLE_CLIENT_ID == "google-id"
         assert module.APPLE_CLIENT_ID == "apple-id"
         assert module.YOOKASSA_WEBHOOK_ALLOWED_IPS == ["185.71.76.0/27"]
+
+
+@pytest.mark.django_db
+class TestDisabledProviders:
+    """DRF-1245 — VK and Yandex login must be unreachable.
+
+    Neither provider offers a way to prove that the ``access_token`` the
+    mobile client posts was minted for *our* OAuth application: VK
+    ``users.get`` and Yandex ``login.yandex.ru/info`` both answer for a
+    token from any application and never name the issuer. Google pins
+    ``aud`` (see TestGoogleAudienceEnforcement) and Apple verifies audience
+    + issuer on a signed JWT, so only VK and Yandex are affected.
+    """
+
+    @pytest.mark.parametrize('provider', ['vk', 'yandex'])
+    def test_login_rejected(self, client_app, provider):
+        response = client_app.post(
+            SOCIAL_URL.format(provider=provider),
+            {'token': 'anything'}, format='json',
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data['error']['code'] == 'PROVIDER_DISABLED'
+
+    @pytest.mark.parametrize('provider', ['vk', 'yandex'])
+    def test_no_account_is_created(self, client_app, provider):
+        users_before = User.objects.count()
+        client_app.post(
+            SOCIAL_URL.format(provider=provider),
+            {'token': 'anything'}, format='json',
+        )
+        assert User.objects.count() == users_before
+        assert not SocialAccount.objects.filter(provider=provider).exists()
+
+    @pytest.mark.parametrize('provider', ['vk', 'yandex'])
+    def test_provider_api_is_never_contacted(self, client_app, provider):
+        """The rejection happens before any outbound call.
+
+        Matters beyond tidiness: it means a disabled provider cannot be
+        used to make the backend fan out requests to a third-party host.
+        """
+        with patch('users.social_auth.requests') as mock_requests:
+            response = client_app.post(
+                SOCIAL_URL.format(provider=provider),
+                {'token': 'anything'}, format='json',
+            )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        mock_requests.get.assert_not_called()
+
+    @pytest.mark.parametrize('provider', ['vk', 'yandex'])
+    def test_guard_holds_even_if_a_verifier_is_wired_back_in(
+        self, client_app, provider,
+    ):
+        """Defence in depth.
+
+        Dropping VK/Yandex out of ``PROVIDER_VERIFIERS`` is not on its own
+        the control — someone restoring the dict entry must not silently
+        reopen the door. The explicit ``DISABLED_PROVIDERS`` check runs
+        first, so a fully wired verifier is still unreachable.
+        """
+        mock_verifier = MagicMock(return_value=make_social_info(
+            provider=provider, uid=f'{provider}_wired',
+        ))
+        verifiers = mock_verifiers(**{provider: mock_verifier})
+        with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
+            response = client_app.post(
+                SOCIAL_URL.format(provider=provider),
+                {'token': 'anything'}, format='json',
+            )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data['error']['code'] == 'PROVIDER_DISABLED'
+        mock_verifier.assert_not_called()
+
+    @pytest.mark.parametrize(
+        'provider,contact_field,contact_value',
+        [
+            ('vk', 'phone', '+79001234567'),
+            ('yandex', 'phone', '+79007654321'),
+            ('yandex', 'email', 'victim@example.com'),
+        ],
+    )
+    def test_cannot_adopt_an_existing_account_via_self_declared_contact(
+        self, client_app, provider, contact_field, contact_value,
+    ):
+        """The takeover path this ticket closes.
+
+        ``_find_or_create_user`` matches an incoming social identity
+        against an existing User by email and by phone. For VK the phone
+        comes from the ``mobile_phone`` profile field and for Yandex from
+        ``default_phone`` / ``default_email`` — all three are values the
+        provider account holder types in themselves, with no ownership
+        check. Setting one to a victim's phone or email was enough to be
+        handed the victim's account and a full-privilege JWT.
+        """
+        victim = User.objects.create(
+            username='victim', role='client',
+            **{contact_field: contact_value},
+        )
+        mock_verifier = MagicMock(return_value=make_social_info(
+            provider=provider, uid=f'{provider}_attacker',
+            **{contact_field: contact_value},
+        ))
+        verifiers = mock_verifiers(**{provider: mock_verifier})
+        with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
+            response = client_app.post(
+                SOCIAL_URL.format(provider=provider),
+                {'token': 'attacker_token'}, format='json',
+            )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert 'access_token' not in (response.data.get('data') or {})
+        assert not SocialAccount.objects.filter(user=victim).exists()
+
+    def test_registry_and_disabled_set_are_explicit(self):
+        """Pins the registry so re-enabling is a deliberate, reviewed act.
+
+        Adding "vk" or "yandex" back to ``PROVIDER_VERIFIERS`` requires a
+        real app-binding step first — VK ``secure.checkToken`` with an
+        ``app_id`` assertion, Yandex the authorization-code exchange —
+        plus a decision on identity merging by unverified contacts. This
+        test fails loudly if the dict grows without that work.
+        """
+        from users.social_auth import DISABLED_PROVIDERS, PROVIDER_VERIFIERS
+
+        assert set(PROVIDER_VERIFIERS) == {'google', 'apple'}
+        assert DISABLED_PROVIDERS == frozenset({'vk', 'yandex'})
+        assert not (set(PROVIDER_VERIFIERS) & DISABLED_PROVIDERS)
+
+    def test_unknown_provider_is_distinguishable_from_disabled(
+        self, client_app,
+    ):
+        """A disabled provider is a policy answer, a typo is a 400.
+
+        Collapsing the two would tell a client integrating VK that its URL
+        is wrong, sending it round a debugging loop instead of to the
+        supported OTP flow.
+        """
+        unknown = client_app.post(
+            SOCIAL_URL.format(provider='facebook'),
+            {'token': 'x'}, format='json',
+        )
+        disabled = client_app.post(
+            SOCIAL_URL.format(provider='vk'),
+            {'token': 'x'}, format='json',
+        )
+        assert unknown.status_code == status.HTTP_400_BAD_REQUEST
+        assert unknown.data['error']['code'] == 'INVALID_PROVIDER'
+        assert disabled.status_code == status.HTTP_403_FORBIDDEN
+        assert disabled.data['error']['code'] == 'PROVIDER_DISABLED'
