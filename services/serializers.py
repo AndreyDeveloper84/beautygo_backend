@@ -4,6 +4,7 @@ from typing import Any
 
 from rest_framework import serializers
 
+from .goal_resolution import build_category_goal_index
 from .models import (
     SalonService,
     Service,
@@ -164,15 +165,40 @@ class ServiceSerializer(serializers.ModelSerializer):
 
 
 class SalonServiceInternalSerializer(serializers.ModelSerializer):
-    """Read mirror of the salon-offer layer for the bot (S3B)."""
+    """Read mirror of the salon-offer layer for the bot (S3B).
+
+    ``goals`` (DRF-1308) — цели, уже разрешённые по дереву категорий на
+    стороне Ayla. У бота нет таблицы категорий вообще: он хранит UUID
+    категории в ``raw`` и разрешить его не может, поэтому обход дерева
+    делается здесь, а в зеркало едет готовый список. ADR-0009: зеркало —
+    read-replica, а не источник истины.
+
+    Список может быть пустым — это честное «цель не заявлена», а не сбой.
+    Ложную цель ради покрытия не подставляем (решение владельца, п. 4).
+    """
+
+    goals = serializers.SerializerMethodField()
 
     class Meta:
         model = SalonService
         fields = [
             'id', 'tenant', 'template', 'category', 'name',
             'duration_minutes', 'base_price', 'requires_health_check',
-            'is_active', 'source', 'created_at', 'updated_at',
+            'is_active', 'source', 'goals', 'created_at', 'updated_at',
         ]
+
+    def get_goals(self, obj: SalonService) -> list[dict[str, str]]:
+        """`[{"key": ..., "label": ...}, …]`, порядок — sort_order цели.
+
+        Индекс кладёт вьюсет в контекст один раз на запрос; сборка его
+        на лету здесь — запасной путь для вызова сериализатора вне
+        вьюсета (тесты, management-команды), а не рабочий режим.
+        """
+        index = self.context.get('category_goal_index')
+        if index is None:
+            index = build_category_goal_index()
+            self.context['category_goal_index'] = index
+        return index.goals_for_service(obj)
 
 
 class SpecialistServiceInternalSerializer(serializers.ModelSerializer):
