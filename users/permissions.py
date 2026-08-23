@@ -304,6 +304,53 @@ class IsIdentityProvisioningBearer(permissions.BasePermission):
         return True
 
 
+class ServiceCredentialIsReadOnly(permissions.BasePermission):
+    """A request authenticated by the Ayla service Bearer may only read.
+
+    The Ayla read grant is expressed as an authenticator
+    (``users.authentication.AylaServiceBearerAuthentication``) so the same
+    view can keep serving humans over JWT. An authenticator, unlike a
+    permission, cannot express "GET but not PUT" -- and four of the salon
+    surfaces it is attached to are mixed classes (``get`` + ``put`` /
+    ``post`` under one ``permission_classes``). Without this class,
+    granting Ayla the read half of ``AdminScheduleView`` would silently
+    grant it ``PUT`` on the weekly template too.
+
+    So the method rule lives here, next to the other permissions, and
+    keys off *how the caller authenticated* rather than off the view:
+
+    * authenticated by the service Bearer -> ``GET``/``HEAD``/``OPTIONS``
+      only, everything else is refused;
+    * authenticated any other way (a salon administrator's JWT) ->
+      unchanged, this class abstains.
+
+    It only ever subtracts. Adding it to a view cannot widen access, so
+    it is safe to list on every view the authenticator touches, and the
+    owner's rule -- "``GET``/``HEAD``/``OPTIONS`` may be opened;
+    ``POST``/``PUT``/``PATCH``/``DELETE`` must not open automatically" --
+    holds by construction rather than by remembering to split views.
+
+    Why not simply give Ayla its own read-only secret instead: the bot
+    already holds ``AYLA_INTERNAL_API_TOKEN`` and already has the salon
+    write surface under it, so a second secret for the same consumer
+    would add an ops artefact without removing any capability from the
+    holder of the first. What actually keeps this read grant safe is that
+    the tenant is still proved by ``IsTenantAdmin`` against the *human*
+    named in ``X-External-User-ID`` -- a stolen token alone cannot name an
+    arbitrary salon in ``X-Tenant`` and read it.
+    """
+
+    message = "Service credential is read-only on this surface"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        from users.authentication import AylaServiceBearerAuthentication
+
+        authenticator = getattr(request, "successful_authenticator", None)
+        if isinstance(authenticator, AylaServiceBearerAuthentication):
+            return request.method in permissions.SAFE_METHODS
+        return True
+
+
 class IsTenantAdmin(permissions.BasePermission):
     """Caller must hold an active ``admin``-role TUR in ``request.tenant``.
 
