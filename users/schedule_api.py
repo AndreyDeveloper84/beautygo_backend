@@ -17,7 +17,6 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from appointments.domain.value_objects import ACTIVE_BOOKING_STATUSES
 from appointments.models import SpecialistTimeOff, SpecialistWorkingHours
 
 from .permissions import IsSpecialist
@@ -414,14 +413,16 @@ class TimeOffListView(APIView):
         start_at = serializer.validated_data['start_at']
         end_at = serializer.validated_data['end_at']
 
-        # Block creation if there are active appointments in the range
-        from appointments.models import Appointment
-        active_count = Appointment.objects.filter(
-            specialist=specialist,
-            status__in=[s.value for s in ACTIVE_BOOKING_STATUSES],
-            start_datetime__lt=end_at,
-            end_datetime__gt=start_at,
-        ).count()
+        # Block creation if there are active appointments in the range.
+        # DRF-1297 B-4: one helper, three callers -- this endpoint, its
+        # internal twin, and the two new date-bounded guards. It was the
+        # same six lines copied verbatim before.
+        from appointments.application.services.schedule_impact_service import (
+            count_active_bookings_in_window,
+        )
+        active_count = count_active_bookings_in_window(
+            specialist, start_at, end_at,
+        )
 
         if active_count > 0:
             return error_response(

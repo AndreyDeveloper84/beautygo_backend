@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from appointments.domain.value_objects import ACTIVE_BOOKING_STATUSES
@@ -89,6 +89,80 @@ def _fingerprint(specialist_id, start_at, end_at, rows) -> str:
     ]
     parts += sorted(f"{row.id}:{row.version}" for row in rows)
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
+
+
+def count_active_bookings_in_window(specialist, start_at: datetime, end_at: datetime) -> int:
+    """Live bookings of this master overlapping ``[start_at, end_at)``.
+
+    DRF-1297 B-4. This exact query existed twice, character for
+    character, as an inline block inside two time-off endpoints
+    (``users/schedule_api.py`` and ``users/internal_schedule_api.py``).
+    Both asked the one question a cheap availability guard needs — *does
+    closing this window strand anyone?* — and both answered it by
+    counting rather than by listing, because the answer is a refusal and
+    not a preview.
+
+    Scope, stated so it is not widened by accident: this is **simple
+    interval overlap**, the same predicate ``get_schedule_impact`` uses
+    below and nothing more. It deliberately does NOT answer the shrinking
+    question — *which bookings fall OUTSIDE a proposed frame* — which is
+    a different comparison (old effective frame vs new, unrolled over a
+    horizon) and is why the weekly-template guard is a separate piece of
+    work rather than one more caller of this function. A booking may sit
+    outside working hours perfectly legally (walk-ins and salon-made
+    bookings skip the frame check by design), so "outside the new frame"
+    is not evidence of anything on its own.
+
+    Not transactional and takes no lock, exactly as the two originals
+    were: a booking can still be created between this count and the write
+    that follows. It catches an administrator's mistake, which is what it
+    is for; it is not a serialisation guarantee and must not be described
+    as one.
+    """
+    from appointments.models import Appointment
+
+    return (
+        Appointment.objects
+        .filter(
+            specialist=specialist,
+            status__in=[s.value for s in ACTIVE_BOOKING_STATUSES],
+            start_datetime__lt=end_at,
+            end_datetime__gt=start_at,
+        )
+        .count()
+    )
+
+
+def local_day_window_utc(
+    local_date,
+    tz: ZoneInfo,
+    start_time=None,
+    end_time=None,
+) -> tuple[datetime, datetime]:
+    """The UTC instants bounding a local date, or a slice of one.
+
+    Built from two dates rather than "+24h" for the full-day case, and
+    from the calendar date for a partial one, so a DST transition keeps
+    the window aligned to the day a human means. Same form as
+    ``TenantClosureBusyIntervalProvider``, which is the read-side of the
+    same conversion -- the two must not disagree about which instants a
+    closed Tuesday covers.
+    """
+    from datetime import time as _time
+
+    if start_time is None or end_time is None:
+        local_start = datetime.combine(local_date, _time(0, 0), tzinfo=tz)
+        local_end = datetime.combine(
+            local_date + timedelta(days=1), _time(0, 0), tzinfo=tz,
+        )
+    else:
+        local_start = datetime.combine(local_date, start_time, tzinfo=tz)
+        local_end = datetime.combine(local_date, end_time, tzinfo=tz)
+
+    return (
+        local_start.astimezone(timezone.utc),
+        local_end.astimezone(timezone.utc),
+    )
 
 
 def get_schedule_impact(

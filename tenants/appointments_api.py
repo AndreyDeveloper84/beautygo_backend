@@ -247,6 +247,38 @@ class _SalonBookingBase(APIView):
             "NOT_FOUND", "Appointment not found.", status_code=404,
         )
 
+    def _assert_authority(self, request, appointment) -> Response | None:
+        """In what capacity does this caller act on THIS row? None -> 404.
+
+        DRF-1297 B-2. Read this as consistency, not as a hole being
+        plugged: today the answer can only be ``salon``, because
+        ``IsTenantAdmin`` has already proved the grant in
+        ``request.tenant`` and ``_get_booking`` has already refused any
+        row outside it -- which is exactly the pair of conditions
+        ``resolve_booking_operator`` tests. The check cannot currently
+        fail, and that is the point of stating it.
+
+        What it buys is that all four salon operations now derive
+        authority from the same module in the same way. ``complete``
+        already did (see ``SalonBookingCompleteView``); ``reschedule``
+        and ``cancel`` inferred it from the composition of a permission
+        class and a queryset filter, which is correct but is not written
+        down anywhere a reader -- or a future change to either half --
+        would meet it.
+
+        The resolved capacity is deliberately NOT reused as the DTO's
+        ``initiator_role``. That value picks the cancellation-refund
+        policy, and a master who also holds an admin grant resolves as
+        ``specialist`` on their own row: feeding it through would quietly
+        reprice a front-desk cancellation. The salon surface asserts
+        ``salon`` because that is who pressed the button.
+        """
+        from appointments.authz import resolve_booking_operator
+
+        if resolve_booking_operator(request, appointment) is None:
+            return self._not_found()
+        return None
+
 
 class SalonCustomerLookupView(APIView):
     """GET /api/v1/tenants/me/customers/?q=… — find a returning customer.
@@ -501,6 +533,10 @@ class SalonBookingRescheduleView(_SalonBookingBase):
         if appointment is None:
             return self._not_found()
 
+        denied = self._assert_authority(request, appointment)
+        if denied is not None:
+            return denied
+
         serializer = SalonRescheduleSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -569,6 +605,10 @@ class SalonBookingCancelView(_SalonBookingBase):
         appointment = self._get_booking(request, appointment_id)
         if appointment is None:
             return self._not_found()
+
+        denied = self._assert_authority(request, appointment)
+        if denied is not None:
+            return denied
 
         serializer = SalonCancelSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
