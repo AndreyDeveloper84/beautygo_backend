@@ -35,7 +35,6 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from appointments.domain.value_objects import ACTIVE_BOOKING_STATUSES
 from appointments.models import SpecialistTimeOff
 
 from .permissions import IsInternalBearer
@@ -131,13 +130,12 @@ class InternalSpecialistTimeOffView(APIView):
 
         start_at, end_at = data["start_at"], data["end_at"]
 
-        from appointments.models import Appointment
-        active_count = Appointment.objects.filter(
-            specialist=specialist,
-            status__in=[s.value for s in ACTIVE_BOOKING_STATUSES],
-            start_datetime__lt=end_at,
-            end_datetime__gt=start_at,
-        ).count()
+        from appointments.application.services.schedule_impact_service import (
+            count_active_bookings_in_window,
+        )
+        active_count = count_active_bookings_in_window(
+            specialist, start_at, end_at,
+        )
         if active_count > 0:
             return error_response(
                 "HAS_ACTIVE_APPOINTMENTS",
