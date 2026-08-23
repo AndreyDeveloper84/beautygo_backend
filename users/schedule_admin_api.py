@@ -26,6 +26,7 @@ ids exist.
 from __future__ import annotations
 
 import logging
+from zoneinfo import ZoneInfo
 
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import permissions, serializers
@@ -178,6 +179,83 @@ def _parse_window(request: Request):
             "INVALID_PARAM", "end_at must be after start_at.", status_code=400,
         )
     return start_at, end_at, None
+
+
+def _refuse_if_bookings_are_stranded(
+    specialists,
+    local_date,
+    *,
+    start_time=None,
+    end_time=None,
+    when: bool = True,
+) -> Response | None:
+    """409 when closing this date would leave a live booking uncovered.
+
+    DRF-1297 B-4, the narrow half. The owner's ruling splits availability
+    reductions in two, and this function implements only the half that is
+    answerable with the question the codebase already knows how to ask:
+
+    * **date-bounded** reductions -- a master's "not working on the 3rd",
+      and a salon closure -- have an unambiguous affected range, so
+      simple interval overlap is the correct and complete test. Those get
+      a hard 409 here.
+    * **frame reductions** -- shrinking the weekly template, or trimming
+      the hours of a working-day override -- do not. Answering those
+      needs *old effective frame vs new*, unrolled over the booking
+      horizon, because a booking outside working hours can exist quite
+      legally (walk-ins and salon-made bookings skip the frame check by
+      design, ``create_booking_service.py`` / ``cancel_reschedule_service.py``).
+      A naive "anything outside the new frame is a conflict" would flag
+      bookings that were already outside the old one and were displaced
+      by nothing. Those stay an open gap on purpose; this function must
+      not grow a caller that pretends otherwise.
+
+    ``when=False`` makes the guard a no-op, so the one caller that is
+    conditional reads as a straight-line call instead of an ``if`` around
+    six lines.
+
+    Refusal is deliberately plain: a stable ``HAS_ACTIVE_APPOINTMENTS``
+    409, the same code and shape the time-off endpoint has always
+    returned, so a client has one thing to render for "you cannot close
+    this" across the whole surface. No impact preview and no resolution
+    path -- the owner's ruling reserves those for partial unavailability,
+    and nothing here cancels or moves a booking.
+
+    Like the time-off refusal it copies, this runs outside a transaction
+    and takes no lock. It catches an administrator closing time over a
+    client they forgot about; it is not a race guarantee.
+    """
+    if not when or not specialists:
+        return None
+
+    from appointments.application.services.schedule_impact_service import (
+        count_active_bookings_in_window,
+        local_day_window_utc,
+    )
+
+    affected = 0
+    for specialist in specialists:
+        # Per master, not per salon: ``Tenant`` carries no timezone, and
+        # the same local window resolves to a different UTC window for
+        # each master. Resolving it once from the first master would put
+        # the wrong hours on everyone else the moment a salon spans two.
+        tz = ZoneInfo(specialist.timezone)
+        start_at, end_at = local_day_window_utc(
+            local_date, tz, start_time, end_time,
+        )
+        affected += count_active_bookings_in_window(
+            specialist, start_at, end_at,
+        )
+
+    if affected == 0:
+        return None
+
+    return error_response(
+        "HAS_ACTIVE_APPOINTMENTS",
+        f"Cannot close this time: {affected} active appointment(s) "
+        "would be left without an available master.",
+        status_code=409,
+    )
 
 
 class AdminScheduleImpactView(_TenantScopedSpecialistMixin, APIView):
@@ -432,6 +510,18 @@ class AdminScheduleExceptionListView(_TenantScopedSpecialistMixin, APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
+        conflict = _refuse_if_bookings_are_stranded(
+            [specialist],
+            data["date"],
+            # A full-day override closes the whole local day; the range
+            # really affected is exactly that day and nothing wider.
+            start_time=None,
+            end_time=None,
+            when=not data["is_working_day"],
+        )
+        if conflict is not None:
+            return conflict
+
         row, _ = SpecialistScheduleException.objects.update_or_create(
             specialist=specialist,
             date=data["date"],
@@ -562,6 +652,20 @@ class TenantClosureListView(APIView):
         serializer = TenantClosureSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
+
+        from users.models import SpecialistProfile
+
+        # Every master the closure covers -- one row closes the salon for
+        # all of them, so all of them have to be asked. No status filter:
+        # a booking on a deactivated master is still a booked client.
+        conflict = _refuse_if_bookings_are_stranded(
+            list(SpecialistProfile.objects.filter(tenant=request.tenant)),
+            data["date"],
+            start_time=data.get("start_time"),
+            end_time=data.get("end_time"),
+        )
+        if conflict is not None:
+            return conflict
 
         from django.db import IntegrityError
         try:
