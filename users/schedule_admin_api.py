@@ -31,11 +31,17 @@ from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_seriali
 from rest_framework import permissions, serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.settings import api_settings
 from rest_framework.views import APIView
 
 from appointments.models import SpecialistScheduleException, TenantClosure
 
-from .permissions import IsProApp, IsTenantAdminOrPlatformAdmin
+from .authentication import AylaServiceBearerAuthentication
+from .permissions import (
+    IsProApp,
+    IsTenantAdminOrPlatformAdmin,
+    ServiceCredentialIsReadOnly,
+)
 from .response import error_response, success_response
 from .schedule_api import ScheduleView, TimeOffDetailView, TimeOffListView
 
@@ -45,12 +51,38 @@ _ADMIN_PERMISSIONS = [
     permissions.IsAuthenticated,
     IsProApp,
     IsTenantAdminOrPlatformAdmin,
+    # DRF-1297 B-1. Only ever subtracts: abstains for a JWT caller, and
+    # refuses anything that is not GET/HEAD/OPTIONS when the caller
+    # authenticated with the Ayla service Bearer. This is what makes it
+    # safe to put that authenticator on classes that also serve PUT/POST
+    # -- Ayla gets the read half of a mixed view and nothing more.
+    ServiceCredentialIsReadOnly,
+]
+
+# DRF-1297 B-1 -- Ayla reads the salon through the tenant-scoped tree.
+#
+# The alternative was the internal tree, and it is the wrong place: it is
+# excluded from TenantContextMiddleware, so ``request.tenant`` is always
+# None there and its read handles are not tenant-scoped at all (the
+# specialist list returns every active master on the platform). Here the
+# tenant comes from X-Tenant via middleware, every queryset is already
+# scoped to it, and IsTenantAdminOrPlatformAdmin still proves that the
+# HUMAN named by X-External-User-ID administers THAT salon -- so naming
+# an arbitrary slug in X-Tenant reads nothing.
+#
+# Order matters: the Ayla authenticator runs first and returns None for
+# anything that is not its token, so ordinary JWT callers -- the salon
+# console these views were built for -- are completely unaffected.
+_ADMIN_AUTHENTICATION = [
+    AylaServiceBearerAuthentication,
+    *api_settings.DEFAULT_AUTHENTICATION_CLASSES,
 ]
 
 
 class _TenantScopedSpecialistMixin:
     """Resolve the target master from the URL, scoped to the request tenant."""
 
+    authentication_classes = _ADMIN_AUTHENTICATION
     permission_classes = _ADMIN_PERMISSIONS
 
     def _get_specialist(self, request: Request):
@@ -191,6 +223,7 @@ class AdminScheduleImpactView(_TenantScopedSpecialistMixin, APIView):
     administrator was deciding cannot be silently swept up or missed.
     """
 
+    authentication_classes = _ADMIN_AUTHENTICATION
     permission_classes = _ADMIN_PERMISSIONS
 
     @extend_schema(
@@ -385,6 +418,7 @@ class AdminScheduleExceptionListView(_TenantScopedSpecialistMixin, APIView):
     setting an override twice for the same date must replace it, not fail.
     """
 
+    authentication_classes = _ADMIN_AUTHENTICATION
     permission_classes = _ADMIN_PERMISSIONS
     serializer_class = ScheduleExceptionSerializer
 
@@ -456,6 +490,7 @@ class AdminScheduleExceptionDetailView(_TenantScopedSpecialistMixin, APIView):
     """DELETE .../masters/{specialist_id}/schedule-exceptions/{date}/ —
     drop the override and fall back to the weekly template."""
 
+    authentication_classes = _ADMIN_AUTHENTICATION
     permission_classes = _ADMIN_PERMISSIONS
     serializer_class = ScheduleExceptionSerializer
 
@@ -526,6 +561,7 @@ class TenantClosureListView(APIView):
     roster changes.
     """
 
+    authentication_classes = _ADMIN_AUTHENTICATION
     permission_classes = _ADMIN_PERMISSIONS
     serializer_class = TenantClosureSerializer
 
@@ -589,6 +625,7 @@ class TenantClosureListView(APIView):
 class TenantClosureDetailView(APIView):
     """DELETE /api/v1/tenants/me/closures/{pk}/ — reopen the salon."""
 
+    authentication_classes = _ADMIN_AUTHENTICATION
     permission_classes = _ADMIN_PERMISSIONS
     serializer_class = TenantClosureSerializer
 

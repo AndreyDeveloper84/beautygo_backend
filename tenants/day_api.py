@@ -21,12 +21,18 @@ from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import permissions
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.settings import api_settings
 from rest_framework.views import APIView
 
 from appointments.application.services.tenant_day_service import (
     build_tenant_day,
 )
-from users.permissions import IsProApp, IsTenantAdmin
+from users.authentication import AylaServiceBearerAuthentication
+from users.permissions import (
+    IsProApp,
+    IsTenantAdmin,
+    ServiceCredentialIsReadOnly,
+)
 from users.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
@@ -39,6 +45,21 @@ class TenantDayView(APIView):
     one date. Defaults to today in the salon's own reckoning.
     """
 
+    # DRF-1297 B-1 -- this is Ayla's primary read of the salon, and it
+    # is deliberately the SAME view the console uses, not a parallel
+    # projection. The Ayla authenticator runs before JWT and steps aside
+    # for anything that is not its token, so the console path is byte-for
+    # -byte unchanged; the permission list below is unchanged too.
+    #
+    # What that buys: Ayla's tenant still comes from X-Tenant through
+    # middleware, and IsTenantAdmin still proves that the human named in
+    # X-External-User-ID administers THAT salon. Presenting the service
+    # token and naming someone else's slug reads nothing.
+    authentication_classes = [
+        AylaServiceBearerAuthentication,
+        *api_settings.DEFAULT_AUTHENTICATION_CLASSES,
+    ]
+
     # Same shape as the only other IsTenantAdmin consumer (the revoke
     # endpoint): IsProApp gates the surface to provider-side callers,
     # defeating a stolen admin JWT replayed from a client build, and
@@ -48,6 +69,10 @@ class TenantDayView(APIView):
         permissions.IsAuthenticated,
         IsProApp,
         IsTenantAdmin,
+        # The view is GET-only, so this is belt-and-braces rather than
+        # load-bearing here -- but it is what stops a later `post` on
+        # this class from inheriting Ayla's read grant by accident.
+        ServiceCredentialIsReadOnly,
     ]
 
     @extend_schema(
