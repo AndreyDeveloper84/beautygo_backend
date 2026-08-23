@@ -13,6 +13,7 @@ from rest_framework import viewsets
 
 from users.permissions import IsInternalBearer
 
+from .goal_resolution import build_category_goal_index
 from .models import SalonService, SpecialistService
 from .serializers import (
     SalonServiceInternalSerializer,
@@ -53,6 +54,16 @@ class InternalSalonServiceViewSet(viewsets.ReadOnlyModelViewSet):
         .select_related('tenant', 'template', 'category')
         .order_by('created_at')
     )
+
+    def get_serializer_context(self) -> dict:
+        """Индекс «категория → цели» строится один раз на запрос (DRF-1308).
+
+        Без этого каждая строка страницы тянула бы связи целей отдельно —
+        N+1 на каталоге из десятков услуг.
+        """
+        context = super().get_serializer_context()
+        context['category_goal_index'] = build_category_goal_index()
+        return context
 
 
 class InternalSpecialistServiceViewSet(viewsets.ReadOnlyModelViewSet):

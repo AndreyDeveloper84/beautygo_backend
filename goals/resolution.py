@@ -15,6 +15,11 @@ OD-1 / Ответ 3: свободный текст при низкой увер�
 Подключение резолвера к вызывающим (RecommendationQuery и др.) — за
 флагом ``GOAL_RESOLUTION_ENABLED`` и отдельным изменением; здесь только
 чистая функция.
+
+DRF-1308: цели курируются на корневых категориях, услуги висят на листьях,
+поэтому результат раскрывается вниз до подкатегорий
+(``services.goal_resolution.expand_categories_with_descendants``). Обратное
+направление — «услуга → цели» для каталожного зеркала бота — живёт там же.
 """
 from __future__ import annotations
 
@@ -22,17 +27,29 @@ from uuid import UUID
 
 from django.db.models.functions import Lower
 
+from services.goal_resolution import expand_categories_with_descendants
 from services.models import GoalOption, GoalOptionCategory
 
 from .models import ClientGoal
 
 
 def _categories_for_option(option: GoalOption) -> list[UUID]:
-    return list(
+    """Категории цели, раскрытые вниз до подкатегорий (DRF-1308).
+
+    Владелец курирует связи на КОРНЕВЫХ категориях, а услуги висят на
+    листьях, поэтому без раскрытия фильтр по ``SalonService.category_id``
+    не находит ни одной услуги — замерено на контуре 23.08: 19 связей,
+    все на корни, 0 совпадений напрямую.
+
+    Порядок сохраняется: сначала корень (по ``sort_order`` связи), сразу
+    за ним его подкатегории.
+    """
+    bound = list(
         GoalOptionCategory.objects.filter(goal_option=option)
         .order_by("sort_order")
         .values_list("category_id", flat=True)
     )
+    return expand_categories_with_descendants(bound)
 
 
 def resolve_goal_category_ids(client) -> list[UUID] | None:
