@@ -35,7 +35,12 @@ SPEC_URL = f"{CATALOG_BASE}specialist-services/"
 SALON_SERVICE_FIELDS = {
     "id", "tenant", "template", "category", "name",
     "duration_minutes", "base_price", "requires_health_check",
-    "is_active", "source", "created_at", "updated_at",
+    "is_active", "source",
+    # DRF-1308 (additive, 2026-08-23): цели, разрешённые по дереву
+    # категорий на стороне Ayla. Расширение контракта осознанное —
+    # у бота нет таблицы категорий, разрешать дерево он не может.
+    "goals",
+    "created_at", "updated_at",
 }
 SPECIALIST_SERVICE_FIELDS = {
     "id", "salon_service", "specialist", "user_id", "tenant", "template",
