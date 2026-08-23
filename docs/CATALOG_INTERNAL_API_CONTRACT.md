@@ -144,6 +144,48 @@ Example detail:
 
 ---
 
+## 2a. Specialists — the masters mirror (`?tenant=` since DRF-1313)
+
+`GET /api/v1/internal/specialists/`
+`GET /api/v1/internal/specialists/{id}/`
+
+This handle lives outside `/api/v1/internal/catalog/` (it predates S3A, #1016 S2)
+but the masters mirror reads it, so its tenant contract is pinned here.
+
+**Filters:** `tenant` (uuid), plus the public catalog filters
+(`is_available`, `min_rating`, `service_id`, `category_id`, `min_price`,
+`max_price`).
+
+| field | type | notes |
+|---|---|---|
+| `id` | uuid str | `SpecialistProfile.id` — the key `CatalogMaster.id` mirrors |
+| `tenant` | uuid str \| null | **owning salon.** Added DRF-1313; `null` only for a profile with no tenant assigned |
+| … | | remaining fields unchanged — the public specialist card / detail payload |
+
+### `tenant` is optional, and that is deliberate
+
+`/api/v1/internal/` is excluded from `TenantContextMiddleware`, so `request.tenant`
+is always `None` here — the tenant cannot be derived and must be named. Omitting
+`?tenant=` still returns **every active master on the platform** and logs a
+`WARNING` (`internal.specialists.list_without_tenant`).
+
+**A catalog mirror must always send it.** Without it every syncing tenant pulls
+the same roster and the first one to sync claims all of it. On 2026-08-23 that
+put the five masters of four salons under `mkt-spatrium` and left three of five
+pilot salons with services, no masters and no bookable edges (DRF-1313).
+
+A malformed uuid is a **400**, not an ignored filter. Answering a typo with the
+whole platform is the same failure wearing a different hat.
+
+### Verify, don't trust
+
+Every row states its own `tenant`. The consumer should re-check it before
+writing — `upsert_specialists` skips a row whose payload tenant differs from the
+tenant being synced, exactly as `upsert_master_services` already does for edges
+(§2). A `null` means *unverifiable*, not *foreign*, and must not be blocked.
+
+---
+
 ## 3. Stable-ID contract
 
 - All ids are immutable `UUIDv4`, stable across catalog syncs.
@@ -176,6 +218,9 @@ Additive-only within S3A. New fields may be appended; existing field names /
 types will not change without bumping this contract and notifying S3B.
 
 **Changelog**
+- 2026-08-23 — `/api/v1/internal/specialists/` accepts `?tenant=<uuid>` and every
+  row now carries `tenant` (both additive). The masters mirror was the only one of
+  the three catalog pulls without a tenant scope; see §2a (DRF-1313).
 - 2026-07-19 — added `name`, `category_slug` to specialist-services payload
   (additive) — C6 catalog-link keys: the bot matches
   `(category_slug, normalized name)` + duration tiebreaker; no
