@@ -88,6 +88,13 @@ make test-app APP=appointments  # exercises a slice of the migrated data
 The script does not roll back partial loads — `loaddata` is one shot.
 If something looks wrong, blow away Postgres and start clean:
 
+> **Local machines only.** `down -v` removes the project's named volumes,
+> `<project>_postgres_data` included. Run in a checkout whose compose project
+> name matches a live environment — `/home/taximeter/beautygo/dev` on the dev
+> VPS resolves to project `dev`, i.e. `dev_postgres_data` — and it deletes the
+> pilot's database. Nothing in `.github/workflows/` runs `down` in any form,
+> and nothing should.
+
 ```
 docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d db
