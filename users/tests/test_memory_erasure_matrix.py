@@ -23,7 +23,13 @@ from rest_framework.test import APIClient
 from appointments.models import Appointment
 from services.models import Service, ServiceCategory
 from users.models import SpecialistProfile, UserPersonalContext
-from users.personal_context_inference import infer_for_user
+from users.personal_context_erasure import (
+    ERASED,
+    declared_fields,
+    default_for,
+    erase_personal_context,
+)
+from users.personal_context_inference import infer_for_active_users, infer_for_user
 
 pytestmark = pytest.mark.django_db
 
@@ -83,6 +89,30 @@ def _internal(*, bearer: str | None = VALID_TOKEN) -> APIClient:
 
 def _url(user_id, suffix: str = "") -> str:
     return f"/api/v1/internal/users/{user_id}/personal-context/{suffix}"
+
+
+APP_PC_URL = "/api/v1/auth/users/me/personal-context/"
+
+
+def _app(user) -> APIClient:
+    """The authenticated mobile surface — X-App-Type per AppTypeMiddleware."""
+    api = APIClient(HTTP_X_APP_TYPE="client")
+    api.force_authenticate(user=user)
+    return api
+
+
+def _assert_all_twelve_at_default(ctx: UserPersonalContext) -> None:
+    """The matrix's definition of "erased": every declared field, from the
+    model, back at the model's own default. Not a list written down here —
+    a list written down here is the defect DRF-1367 describes.
+    """
+    remnants = {
+        name: getattr(ctx, name)
+        for name in declared_fields()
+        if getattr(ctx, name) != default_for(name)
+    }
+    assert remnants == {}, f"survived erasure: {remnants}"
+    assert len(declared_fields()) == 12
 
 
 def _make_specialist(suffix: str) -> SpecialistProfile:
@@ -196,31 +226,36 @@ class TestForgetAllPayload:
 
 
 class TestNightlyInferenceResurrection:
-    def test_inference_refills_favorites_after_a_full_wipe(self, user):
-        """GAP, P0 — the loudest hole. Erasure is not a terminal state.
+    def test_inference_does_not_refill_favorites_after_a_full_wipe(self, user):
+        """INVERTED by DRF-1366 — the loudest hole. Erasure is terminal now.
 
         ``users.infer_user_patterns`` is registered in ``CELERY_BEAT_SCHEDULE``
-        (settings/base.py, ``infer-user-personal-context``). It lazy-creates the
-        row and refills ``favorite_masters`` + ``busy_days`` from booking
-        history — which is precisely the class of fact the owner ruled must NOT
-        travel (OD_MEMORY.md §3: «узнали о нём — не переходит»). The next GET
-        the bot makes puts the master back in the prompt.
+        (settings/base.py, ``infer-user-personal-context``). It used to
+        lazy-create the row and refill ``favorite_masters`` + ``busy_days``
+        from booking history — precisely the class of fact the owner ruled
+        must NOT travel (OD_MEMORY.md §3: «узнали о нём — не переходит»).
+
+        The wipe now leaves a tombstone and inference refuses to write a
+        field the subject decided. The booking history is untouched: this is
+        a decision about what we may derive, not a rewrite of the record.
         """
         spec = _make_specialist("1")
         for i in range(3):
             _book(user, spec, day_offset=10 + i)
 
         # The user wipes everything through the authenticated surface.
-        UserPersonalContext.objects.filter(user=user).delete()
-        assert not UserPersonalContext.objects.filter(user=user).exists()
+        assert _app(user).delete(APP_PC_URL).status_code == 204
 
         infer_for_user(user)
 
         ctx = UserPersonalContext.objects.get(user=user)
-        assert ctx.favorite_masters == [str(spec.id)]
-        assert ctx.data_sources["favorite_masters"] == "inferred"
+        assert ctx.favorite_masters == []
+        assert ctx.data_sources["favorite_masters"] == ERASED
+        # The history that fed the inference is still there — we refused to
+        # derive from it, we did not destroy it.
+        assert Appointment.objects.filter(client=user).count() == 3
 
-    def test_inference_refills_busy_days_after_a_full_wipe(self, user):
+    def test_inference_does_not_refill_busy_days_after_a_full_wipe(self, user):
         spec = _make_specialist("2")
         # Eight Mondays — enough history, and only one weekday ever booked.
         monday = datetime.now(timezone.utc) - timedelta(days=60)
@@ -229,13 +264,118 @@ class TestNightlyInferenceResurrection:
             offset = (datetime.now(timezone.utc) - (monday - timedelta(days=7 * i))).days
             _book(user, spec, day_offset=offset)
 
+        assert _app(user).delete(APP_PC_URL).status_code == 204
+        infer_for_user(user)
+
+        ctx = UserPersonalContext.objects.get(user=user)
+        assert ctx.busy_days == []
+        assert ctx.data_sources["busy_days"] == ERASED
+
+    def test_inference_still_fills_a_user_who_never_erased(self, user):
+        """The negative. A fix that silenced inference for everybody is a
+        botch — it is useful to the people who never asked us to forget.
+        """
+        spec = _make_specialist("4")
+        for i in range(3):
+            _book(user, spec, day_offset=10 + i)
+
+        infer_for_user(user)
+
+        ctx = UserPersonalContext.objects.get(user=user)
+        assert ctx.favorite_masters == [str(spec.id)]
+        assert ctx.data_sources["favorite_masters"] == "inferred"
+
+    def test_a_bare_row_deletion_is_not_an_erasure_the_verb_is(self, user):
+        """The tombstone is what protects, not the absence of a row.
+
+        No product path deletes the row for a live account any more — both go
+        through ``erase_personal_context``. This cell pins WHY, so the next
+        person reaching for ``.filter(user=...).delete()`` sees the answer:
+        a deleted row is re-created by the nightly pass, a tombstone is not.
+        """
+        spec = _make_specialist("5")
+        for i in range(3):
+            _book(user, spec, day_offset=10 + i)
+
         UserPersonalContext.objects.filter(user=user).delete()
         infer_for_user(user)
 
         ctx = UserPersonalContext.objects.get(user=user)
-        assert ctx.busy_days  # непустой — дни «вернулись»
-        assert "mon" not in ctx.busy_days
-        assert ctx.data_sources["busy_days"] == "inferred"
+        assert ctx.favorite_masters == [str(spec.id)]
+
+    def test_the_erase_verb_protects_a_user_who_never_had_a_row(self, user):
+        """«Забудь всё» from someone who never personalised still has to be
+        terminal — otherwise tonight's pass invents favourite masters for a
+        person who just asked us to forget them.
+        """
+        spec = _make_specialist("6")
+        for i in range(3):
+            _book(user, spec, day_offset=10 + i)
+        assert not UserPersonalContext.objects.filter(user=user).exists()
+
+        erase_personal_context(user, initiator="app")
+        infer_for_user(user)
+
+        ctx = UserPersonalContext.objects.get(user=user)
+        assert ctx.favorite_masters == []
+
+    def test_a_field_reset_from_the_app_survives_the_night(self, user, ctx):
+        """One field wide. «Забудь моих любимых мастеров» is the same promise
+        as «забудь всё», and inference used to undo it just as cheaply.
+        """
+        spec = _make_specialist("7")
+        for i in range(3):
+            _book(user, spec, day_offset=10 + i)
+
+        resp = _app(user).delete(f"{APP_PC_URL}favorite_masters/")
+        assert resp.status_code == 204
+
+        infer_for_user(user)
+
+        ctx.refresh_from_db()
+        assert ctx.favorite_masters == []
+        assert ctx.data_sources["favorite_masters"] == ERASED
+
+    def test_the_nightly_pass_will_not_resurrect_a_deleted_account(
+        self, user, ctx,
+    ):
+        """DRF-1366 third proof — a deleted account comes back in no form at
+        all: not as a row, not as a field.
+
+        The booking history survives the deletion (statutory retention), so
+        without this guard the nightly pass has everything it needs to
+        re-derive a person who asked to be gone. The ``User`` row is its own
+        tombstone here — no context row is needed to protect it.
+        """
+        spec = _make_specialist("8")
+        for i in range(3):
+            _book(user, spec, day_offset=10 + i)
+
+        user.deleted_at = datetime.now(timezone.utc)
+        user.save(update_fields=["deleted_at"])
+        UserPersonalContext.objects.filter(user=user).delete()
+
+        counters = infer_for_active_users()
+        infer_for_user(user)  # and the single-user entry point too
+
+        assert not UserPersonalContext.objects.filter(user=user).exists()
+        assert counters["processed_users"] == 0
+
+    def test_the_engine_does_not_re_interview_an_erased_field(self, user):
+        """«Забудь всё» must not be answered by «а какая у тебя диета?» on
+        the next turn. Rule 5 treats an erasure like any other decision the
+        subject made about the field.
+        """
+        from users import personalization_engine as engine
+
+        user.onboarding_completed = True
+        user.save(update_fields=["onboarding_completed"])
+        erase_personal_context(user, initiator="app")
+
+        verdict = engine.should_ask_question(user, "diet_type")
+
+        assert verdict.allowed is False
+        assert verdict.reason == "already_have_data"
 
     def test_a_bot_cleared_field_is_marked_explicit_and_is_protected(self, user, ctx):
         """Refutation — the clear is not silently overwritten.
@@ -298,15 +438,23 @@ class TestAccountDeletion:
         assert resp.status_code == 200
         assert resp.data["data"]["context"]["diet_type"] == "vegan"
 
-    def test_bot_initiated_delete_does_wipe_the_row(self, user, ctx):
-        """Refutation — the OTHER account-delete flow is complete for this
-        storage. ``apps.identity.services.privacy.delete_personal_data`` calls
-        this endpoint, and it drops the row entirely.
+    def test_bot_initiated_delete_leaves_a_tombstone_not_a_dropped_row(
+        self, user, ctx,
+    ):
+        """INVERTED by DRF-1366 — the cell moved, the guarantee got stronger.
+
+        ``apps.identity.services.privacy.delete_personal_data`` calls this
+        endpoint. It used to drop the row; a dropped row was re-created by the
+        nightly inference the same night. Now it leaves a tombstone: all
+        twelve declared fields at their model default and every one of them
+        marked ``erased``, which inference refuses to write.
         """
         resp = _internal().delete(f"/api/v1/internal/users/{user.id}/personal-data/")
 
         assert resp.status_code == 200
-        assert not UserPersonalContext.objects.filter(user=user).exists()
+        row = UserPersonalContext.objects.get(user=user)
+        _assert_all_twelve_at_default(row)
+        assert set(row.data_sources.values()) == {ERASED}
 
     def test_bot_initiated_delete_refuses_a_deleted_user(self, user, ctx):
         """GAP — and the two flows do not compose. If the mobile delete ran

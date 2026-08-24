@@ -43,6 +43,10 @@ from users.personal_context_events import (
     emit_question_answered,
     emit_question_skipped,
 )
+from users.personal_context_erasure import (
+    erase_personal_context,
+    mark_field_erased,
+)
 from users.personalization_engine import mark_skipped
 
 logger = logging.getLogger("users.personal_context")
@@ -180,9 +184,13 @@ class UserPersonalContextView(APIView):
         responses={204: None},
     )
     def delete(self, request: Request) -> Response:
-        # 152-ФЗ total wipe — delete the row entirely. Next GET will
-        # lazy-create a fresh empty one.
-        UserPersonalContext.objects.filter(user=request.user).delete()
+        # 152-ФЗ total wipe. DRF-1366 — the row used to be dropped, which
+        # read as terminal and was not: ``users.infer_user_patterns``
+        # lazy-creates it again the same night and refills the inferred
+        # fields from booking history. The shared verb leaves a tombstone
+        # instead — same empty context on the wire, but inference now
+        # refuses to write into it.
+        erase_personal_context(request.user, initiator="app")
         logger.info(
             "personal_context.wiped user=%s reason=152-fz",
             request.user.pk,
@@ -233,7 +241,11 @@ class UserPersonalContextFieldDeleteView(APIView):
         ctx = _get_or_create_context(request.user)
         default_factory = self._FIELD_DEFAULTS[field]
         setattr(ctx, field, default_factory())
-        ctx.save(update_fields=[field, "updated_at"])
+        # DRF-1366 — one field wide, same terminal guarantee. Without the
+        # tombstone, resetting an inferred field (favorite_masters,
+        # busy_days) is undone by the next nightly pass.
+        mark_field_erased(ctx, field)
+        ctx.save(update_fields=[field, "data_sources", "updated_at"])
         logger.info(
             "personal_context.field_reset user=%s field=%s reason=152-fz",
             request.user.pk, field,
