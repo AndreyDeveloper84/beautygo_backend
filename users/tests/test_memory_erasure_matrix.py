@@ -153,10 +153,13 @@ def _book(client_user, spec, *, day_offset: int, hour: int = 10,
 
 class TestForgetAllPayload:
     def test_bot_forget_all_leaves_nine_of_twelve_fields_populated(self, user, ctx):
-        """GAP, P0 — the whole of P0-2, on real backend code.
+        """STILL A GAP after DRF-1367 — and it is now the bot's half.
 
-        The internal contract has no DELETE and no «clear everything» verb; the
-        bot can only name fields, and it names three.
+        The backend has the verb (see ``TestForgetAllPayload`` below). This
+        cell pins what the CURRENT bridge payload does, and it still leaves
+        nine fields standing, because ``apps/orchestrator/memory/
+        ayla_bridge.py:_CLEARABLE_FIELDS`` still names three fields instead of
+        calling DELETE. Invert this cell in the bot repo's PR, not here.
         """
         resp = _internal().patch(
             _url(user.id), {"updates": BOT_FORGET_ALL_UPDATES}, format="json"
@@ -191,11 +194,13 @@ class TestForgetAllPayload:
         assert resp.data["data"]["meta"]["filled_fields"] == 9
 
     def test_price_cannot_be_cleared_through_the_contract_at_all(self, user, ctx):
-        """The bridge refuses to guess an encoding — this is why.
+        """Still true after DRF-1367, and still the reason the verb exists.
 
         ``null`` is rejected by the serializer's JSONField and ``""`` blows up
         the Decimal column. There is no honest clear value for a price field on
-        this contract.
+        the PATCH contract — which is why erasure is not a PATCH. The bridge
+        must call DELETE (see ``test_the_erase_verb_clears_the_price_...``),
+        not learn a better encoding.
         """
         null_resp = _internal().patch(
             _url(user.id),
@@ -211,13 +216,103 @@ class TestForgetAllPayload:
                 format="json",
             )
 
-    def test_there_is_no_internal_erase_verb(self, user, ctx):
-        """The bot has no way to say «wipe the row» — only DELETE on the
-        authenticated ``/me/`` surface can, and the bot does not hold a user
-        JWT for the pilot MAX path.
+    def test_the_internal_contract_has_an_erase_verb(self, user, ctx):
+        """INVERTED by DRF-1367. The bot used to have no way to say «wipe the
+        row» — only DELETE on the authenticated ``/me/`` surface could, and
+        the bot holds no user JWT on the pilot MAX path. Now one call does it.
         """
-        assert _internal().delete(_url(user.id)).status_code in (403, 404, 405)
-        assert _internal().post(_url(user.id, "wipe/")).status_code in (403, 404, 405)
+        resp = _internal().delete(_url(user.id))
+
+        assert resp.status_code == 200
+        assert resp.data["data"]["erased"] == ["personal_context"]
+        ctx.refresh_from_db()
+        _assert_all_twelve_at_default(ctx)
+
+    def test_the_erase_verb_clears_the_price_the_contract_cannot(self, user, ctx):
+        """The sharpest edge of P0-2, closed.
+
+        ``price_range_max`` has no honest clear value on the PATCH contract
+        (see the test above: ``null`` → 400, ``""`` → Decimal blows up). The
+        verb never encodes a value at all — it asks the column for its own
+        default — so the field the bridge could not touch is gone.
+        """
+        _internal().delete(_url(user.id))
+
+        ctx.refresh_from_db()
+        assert ctx.price_range_min is None
+        assert ctx.price_range_max is None
+
+    def test_the_erase_verb_empties_what_the_bot_reads_for_the_prompt(
+        self, user, ctx,
+    ):
+        """The bot builds its memory block off this GET. Checked on the wire,
+        not in the table — a value nobody reads is not the thing that leaked.
+        """
+        _internal().delete(_url(user.id))
+
+        resp = _internal().get(_url(user.id))
+
+        assert resp.status_code == 200
+        assert resp.data["data"]["meta"]["filled_fields"] == 0
+        context = resp.data["data"]["context"]
+        assert not any(context.values()), f"still in the prompt source: {context}"
+
+    def test_the_erase_verb_empties_the_backend_chat_prompt_block(self, user, ctx):
+        """The second consumer of the same row. Checked through the very
+        function that assembles the prompt, per DRF-1367.
+        """
+        from ai.personal_context_hint import format_personal_context_hint
+
+        _internal().delete(_url(user.id))
+        ctx.refresh_from_db()
+
+        assert format_personal_context_hint(ctx) == ""
+
+    def test_the_erase_verb_empties_the_bot_prompt_block_itself(self, user, ctx):
+        """The strongest form of the DRF-1367 proof: not a table read, and not
+        even the backend's own renderer — the exact function the bot assembles
+        its memory block with, fed the exact dict the internal GET returns.
+
+        ``ayla_ai_core`` is a declared dependency of this repo
+        (requirements.txt), so the two halves of the pilot can be checked in
+        one process. Before the verb, seven of the nine survivors rendered
+        here: budget, favourite master, home district, work district, days
+        avoided, minimum rating, flexible cancellation.
+        """
+        from ayla_ai_core import build_memory_block
+
+        before = _internal().get(_url(user.id)).data["data"]["context"]
+        assert build_memory_block(before) != ""
+
+        _internal().delete(_url(user.id))
+
+        after = _internal().get(_url(user.id)).data["data"]["context"]
+        assert build_memory_block(after) == ""
+
+    def test_the_erase_verb_is_idempotent(self, user, ctx):
+        """Repeat honestly reports that there was nothing left to erase."""
+        assert _internal().delete(_url(user.id)).data["data"]["erased"] == [
+            "personal_context",
+        ]
+        second = _internal().delete(_url(user.id))
+        assert second.status_code == 200
+        assert second.data["data"]["erased"] == []
+
+    def test_the_erase_verb_does_not_leak_into_the_single_field_reset(
+        self, user, ctx,
+    ):
+        """The negative. Deleting ONE field from the app still deletes one.
+        A «forget everything» that fires on «forget my diet» is a worse bug
+        than the one being fixed.
+        """
+        resp = _app(user).delete(f"{APP_PC_URL}diet_type/")
+        assert resp.status_code == 204
+
+        ctx.refresh_from_db()
+        assert ctx.diet_type == ""
+        assert ctx.home_district == "Сокол"
+        assert ctx.preferred_districts == ["Арбат"]
+        assert str(ctx.price_range_max) == "3500.00"
 
 
 # ---------------------------------------------------------------------------
@@ -492,8 +587,11 @@ class TestBackendPromptConsumer:
         assert "бюджет" in hint
 
     def test_the_hint_survives_the_bot_forget_all(self, user, ctx):
-        """GAP, P0 — «забудь всё» in MAX leaves the backend chat's prompt
-        block populated too, through the same nine surviving fields.
+        """STILL A GAP after DRF-1367 — the bot half again. The current
+        bridge payload leaves the backend chat's prompt block populated too,
+        through the same nine surviving fields. The verb empties it (see
+        ``test_the_erase_verb_empties_the_backend_chat_prompt_block``); the
+        bridge has to start calling the verb.
         """
         from ai.personal_context_hint import format_personal_context_hint
 

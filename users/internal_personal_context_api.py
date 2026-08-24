@@ -7,6 +7,7 @@ Ayla — единственный владелец памяти. Бот ходи
 
     GET    /api/v1/internal/users/{ayla_user_id}/personal-context/
     PATCH  /api/v1/internal/users/{ayla_user_id}/personal-context/
+    DELETE /api/v1/internal/users/{ayla_user_id}/personal-context/
     GET    /api/v1/internal/users/{ayla_user_id}/personal-context/ask-eligibility/
     POST   /api/v1/internal/users/{ayla_user_id}/personal-context/mark-asked/
     POST   /api/v1/internal/users/{ayla_user_id}/personal-context/skip/
@@ -18,6 +19,16 @@ follow-up (A1b), сейчас доверяем internal-Bearer вызову.
 
 Scope A1a: green-зона, без шифрования/zone-поля (A1b) и без per-field confidence
 persist (принимаем в PATCH, source пишем в data_sources; confidence — с A1b/MemoryFact).
+
+DRF-1367 — DELETE это глагол стирания «забудь всё». До него у контракта не
+было ни одного способа сказать «сотри профиль»: только PATCH по именам
+полей, и цену через него нельзя очистить в принципе (``null`` → 400,
+пустая строка падает на Decimal-колонке). Мост называл три поля из
+двенадцати, и список расходился с моделью при каждом новом поле. Глагол
+не перечисляет полей — он спрашивает модель (см. ``personal_context_erasure``).
+
+Владелец, ``Ayla/docs/OD_MEMORY.md`` §1: источник истины — бэкенд. Значит
+операция «стереть то, чем владеешь» обязана быть здесь, а не на мосте.
 """
 from __future__ import annotations
 
@@ -31,6 +42,7 @@ from rest_framework.views import APIView
 from users import personalization_engine as engine
 from users.models import User, UserPersonalContext
 from users.permissions import IsInternalBearer
+from users.personal_context_erasure import erase_personal_context
 from users.personal_context_views import _GREEN_ZONE_FIELDS
 from users.response import error_response, success_response
 
@@ -122,6 +134,25 @@ class InternalPersonalContextView(APIView):
         ctx.save()
         return success_response({
             "ayla_user_id": str(user.id),
+            "context": _green_context(ctx),
+        })
+
+    def delete(self, request: Request, ayla_user_id: str) -> Response:
+        """DRF-1367 — «забудь всё». Одна операция вместо перечисления полей.
+
+        Идемпотентна: повтор возвращает 200 с пустым ``erased``. Ответ
+        отдаёт контекст после стирания, чтобы бот не ходил вторым запросом
+        проверять, что получилось, — все двенадцать полей в дефолте.
+        """
+        user = _resolve_user(ayla_user_id)
+        if user is None:
+            return error_response("USER_NOT_FOUND", "User not found.", status_code=404)
+
+        scope = erase_personal_context(user, initiator="bot_forget_all")
+        ctx, _ = UserPersonalContext.objects.get_or_create(user=user)
+        return success_response({
+            "ayla_user_id": str(user.id),
+            "erased": scope,
             "context": _green_context(ctx),
         })
 
