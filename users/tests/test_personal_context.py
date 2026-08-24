@@ -197,16 +197,29 @@ class TestDeleteField:
 
 @pytest.mark.django_db
 class TestTotalWipe:
-    def test_delete_removes_row_152fz(self, auth_client, client_user):
+    def test_delete_leaves_a_tombstone_not_a_dropped_row_152fz(
+        self, auth_client, client_user,
+    ):
+        """DRF-1366 — the row survives the wipe, empty and marked erased.
+
+        Dropping the row read as terminal and was not: the nightly
+        ``users.infer_user_patterns`` lazy-creates it again and refills the
+        inferred fields from booking history. The tombstone is the terminal
+        state — inference refuses to write a field marked ``erased``. What
+        the user sees is unchanged (see the GET test below): an empty
+        context either way.
+        """
         auth_client.patch(
             PC_URL, {"workplace_district": "Арбатская"}, format="json",
         )
         assert UserPersonalContext.objects.filter(user=client_user).exists()
         resp = auth_client.delete(PC_URL)
         assert resp.status_code == 204
-        assert not UserPersonalContext.objects.filter(user=client_user).exists()
+        row = UserPersonalContext.objects.get(user=client_user)
+        assert row.workplace_district == ""
+        assert row.data_sources["workplace_district"] == "erased"
 
-    def test_get_after_wipe_lazy_creates_fresh(self, auth_client, client_user):
+    def test_get_after_wipe_reads_empty(self, auth_client, client_user):
         auth_client.patch(
             PC_URL, {"workplace_district": "Арбатская"}, format="json",
         )

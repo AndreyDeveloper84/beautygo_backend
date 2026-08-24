@@ -16,9 +16,14 @@ maxbot side actually values:
    on the weekday in question.
 
 Both write under ``data_sources["<field>"] = "inferred"`` and refuse
-to overwrite a value the user explicitly typed
-(``data_sources["<field>"] == "explicit"``). This keeps user intent
-sticky across nightly runs.
+to overwrite a field whose value the subject decided themselves —
+either by typing it (``"explicit"``) or by erasing it (``"erased"``,
+DRF-1366). This keeps user intent sticky across nightly runs, and it
+is what makes erasure a terminal state rather than a moment in time.
+
+Soft-deleted accounts are skipped entirely and never get a row
+lazy-created: a deleted person must not be re-derived from the booking
+history they left behind.
 """
 from __future__ import annotations
 
@@ -30,6 +35,7 @@ from django.db.models import Count, Q
 
 from appointments.models import Appointment
 from users.models import UserPersonalContext
+from users.personal_context_erasure import ERASED
 
 
 logger = logging.getLogger("users.personal_context.inference")
@@ -57,10 +63,17 @@ class InferenceOutcome:
 # ----------------------------------------------------------------------------
 
 
+#: Provenance values that mean "the subject decided this field, not us".
+#: ``explicit`` — they typed a value. ``erased`` — they told us to forget
+#: it (DRF-1366). Inference must not write either one; an erasure that a
+#: nightly job can undo is not an erasure.
+_SUBJECT_OWNED = frozenset({"explicit", ERASED})
+
+
 def _user_owns_explicit(ctx: UserPersonalContext, field: str) -> bool:
-    """Did the user type this themselves? Then nightly inference shuts up."""
+    """Did the subject decide this field? Then nightly inference shuts up."""
     sources = ctx.data_sources or {}
-    return sources.get(field) == "explicit"
+    return sources.get(field) in _SUBJECT_OWNED
 
 
 def _stamp_inferred(ctx: UserPersonalContext, field: str) -> None:
@@ -159,7 +172,23 @@ def infer_for_user(user) -> InferenceOutcome:
 
     Lazy-creates the context row if missing — keeps the task safe to
     schedule for users who never opened personal-context endpoints.
+
+    Refuses soft-deleted accounts outright (DRF-1366): no row is created,
+    no field is written. Otherwise "удалить аккаунт" would be undone by
+    the next nightly pass, which reads the booking history the deletion
+    deliberately leaves in place for statutory retention.
     """
+    if getattr(user, "deleted_at", None) is not None:
+        logger.info(
+            "personal_context.inference_skipped_deleted_user user=%s", user.pk,
+        )
+        return InferenceOutcome(
+            user_id=str(user.pk),
+            favorite_masters_added=[],
+            busy_days_added=[],
+            skipped_explicit=[],
+        )
+
     ctx, _ = UserPersonalContext.objects.get_or_create(user=user)
     skipped: list[str] = []
 
@@ -204,6 +233,10 @@ def infer_for_active_users(*, since=None) -> dict[str, int]:
     users = (
         User.objects
         .filter(role="client")
+        # DRF-1366 — a deleted account is not an active user. Excluded in
+        # the queryset as well as in ``infer_for_user`` so the nightly pass
+        # does not even load them.
+        .filter(deleted_at__isnull=True)
         .filter(Q(appointments_as_client__isnull=False))
         .distinct()
     )

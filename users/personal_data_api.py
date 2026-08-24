@@ -33,7 +33,7 @@ from rest_framework.views import APIView
 
 from users.models import Profile, User, UserPersonalContext
 from users.permissions import IsInternalBearer
-from users.personal_context_events import emit_personal_data_deleted
+from users.personal_context_erasure import erase_personal_context
 from users.personal_context_views import UserPersonalContextSerializer
 from users.response import error_response, success_response
 
@@ -149,12 +149,12 @@ class InternalPersonalDataDeleteView(APIView):
         if user is None:
             return _not_found(request, user_id)
 
-        deleted_count, _ = UserPersonalContext.objects.filter(user=user).delete()
-        scope = ["personal_context"] if deleted_count else []
-
-        # AMD-010 audit — best-effort (emit helper never raises); every
-        # request is audited, repeats included (scope=[] = nothing left).
-        emit_personal_data_deleted(user, scope=scope, initiator="internal_api")
+        # DRF-1366 — one verb for every erasure path. It leaves a
+        # tombstone (all fields at their default, provenance ``erased``)
+        # so tonight's inference cannot refill what this call emptied,
+        # and it writes the AMD-010 audit itself — repeats included,
+        # scope=[] meaning nothing was left to remove.
+        scope = erase_personal_context(user, initiator="internal_api")
         logger.info(
             "internal.personal_data.deleted user_id=%s scope=%s request_id=%s",
             user_id, scope, getattr(request, "request_id", "-"),

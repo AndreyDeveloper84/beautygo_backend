@@ -168,15 +168,20 @@ class TestExport:
 
 class TestDelete:
     def test_deletes_context_and_reports_scope(self, api, user_with_context):
+        """DRF-1366 — the cascade now leaves a tombstone instead of dropping
+        the row, so tonight's inference cannot refill what it emptied. The
+        wire contract is unchanged: scope reports what was actually removed.
+        """
         resp = api.delete(DELETE_URL.format(user_id=user_with_context.pk))
         assert resp.status_code == 200
         assert resp.json()["data"] == {
             "user_id": str(user_with_context.pk),
             "deleted": ["personal_context"],
         }
-        assert not UserPersonalContext.objects.filter(
-            user=user_with_context,
-        ).exists()
+        row = UserPersonalContext.objects.get(user=user_with_context)
+        assert row.diet_type == ""
+        assert row.preferred_districts == []
+        assert set(row.data_sources.values()) == {"erased"}
 
     def test_idempotent_repeat_returns_200(self, api, user_with_context):
         url = DELETE_URL.format(user_id=user_with_context.pk)

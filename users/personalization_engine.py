@@ -15,7 +15,9 @@ Eight rules per CLAUDE.md / Notion 334b0dab295581d587cfeaf49efd2d5b:
 4. **Skip × 2 → 30-day pause** — skipped_questions[field].count >= 2
    AND last_at within 30 days.
 5. **Already have data → silent** — data_sources[field] in {explicit,
-   inferred} → skip.
+   inferred} → skip. ``erased`` (DRF-1366) silences the question too:
+   somebody who just said "забудь всё" must not be interviewed about
+   the same field on the next turn.
 6. **Organic or never** — wording responsibility on the caller; the
    engine just gates `should_ask`.
 7. **Explainability** — verdict tuple includes a ``reason`` string
@@ -34,6 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from users.models import UserPersonalContext
+from users.personal_context_erasure import ERASED
 
 
 logger = logging.getLogger("users.personalization")
@@ -116,9 +119,9 @@ def should_ask_question(user, field: str) -> Verdict:
         # The PATCH endpoint lazy-creates the row on the first answer.
         return Verdict(True, "ok", field)
 
-    # Rule 5 — already have data.
+    # Rule 5 — already have data, or the subject erased it on purpose.
     sources = ctx.data_sources or {}
-    if sources.get(field) in {"explicit", "inferred"}:
+    if sources.get(field) in {"explicit", "inferred", ERASED}:
         return Verdict(False, "already_have_data", field)
 
     # Rule 3 — 24h cooldown.
