@@ -499,30 +499,36 @@ class TestNightlyInferenceResurrection:
 
 
 class TestAccountDeletion:
-    def test_mobile_account_delete_leaves_the_whole_context_intact(self, user, ctx):
-        """GAP, P0 — ``AuthService.delete_account`` (the DELETE
-        ``/api/v1/auth/users/me/`` path used by the mobile app) anonymizes the
-        ``User`` row and blacklists tokens, but never touches
-        ``UserPersonalContext``. Districts, budget, diet, sensitivities and
-        favourite masters all survive «удалить аккаунт».
+    def test_mobile_account_delete_erases_the_whole_context(self, user, ctx):
+        """INVERTED by DRF-1368. ``AuthService.delete_account`` (the DELETE
+        ``/api/v1/auth/users/me/`` path used by the mobile app) anonymized the
+        ``User`` row and blacklisted tokens but never touched
+        ``UserPersonalContext`` — districts, budget, diet, sensitivities and
+        favourite masters all survived «удалить аккаунт». It was the only
+        deletion flow a person sees in the app, and it deleted no memory.
+
+        Owner ruling ``Ayla/docs/OD_MEMORY.md`` §4: «удалить всё» = удалить
+        память и профиль. The account is gone, so nothing is left behind at
+        all — not even a tombstone.
         """
         from users.services import AuthService
 
         AuthService.delete_account(user=user, reason="test")
 
         user.refresh_from_db()
+        # The anonymization that already worked is untouched.
         assert user.deleted_at is not None
         assert user.first_name == "Удалён"
-        ctx.refresh_from_db()
-        assert ctx.diet_type == "vegan"
-        assert ctx.skin_sensitivities == ["ретинол"]
-        assert ctx.favorite_masters == ["7f1d0f2e-0000-4000-8000-000000000001"]
+        assert not UserPersonalContext.objects.filter(user=user).exists()
 
-    def test_the_bot_can_still_read_a_deleted_users_context(self, user, ctx):
-        """GAP, P0 — and it is reachable. ``internal_personal_context_api``'s
-        ``_resolve_user`` has no ``deleted_at`` filter (unlike
-        ``personal_data_api._get_live_user``), so the internal GET the prompt
-        block is built from answers 200 for a deleted account.
+    def test_the_bot_cannot_read_a_deleted_users_context(self, user, ctx):
+        """INVERTED by DRF-1368 — the second half, and the worse one.
+
+        ``internal_personal_context_api._resolve_user`` had no ``deleted_at``
+        filter while its neighbour ``personal_data_api._get_live_user`` did,
+        so the internal GET the prompt block is built from answered 200 for a
+        deleted account. The filter is half the fix, not decoration: without
+        it a row that survived for any other reason is still readable.
         """
         from users.services import AuthService
 
@@ -530,8 +536,25 @@ class TestAccountDeletion:
 
         resp = _internal().get(_url(user.id))
 
-        assert resp.status_code == 200
-        assert resp.data["data"]["context"]["diet_type"] == "vegan"
+        assert resp.status_code == 404
+        assert resp.data["error"]["code"] == "USER_NOT_FOUND"
+
+    def test_every_internal_context_route_refuses_a_deleted_user(self, user, ctx):
+        """One resolver, four doors. A filter on GET only would be a hole on
+        PATCH — the write path can re-create what the read path refuses.
+        """
+        from users.services import AuthService
+
+        AuthService.delete_account(user=user, reason="test")
+        api = _internal()
+
+        assert api.get(_url(user.id)).status_code == 404
+        assert api.patch(
+            _url(user.id), {"updates": BOT_FORGET_ALL_UPDATES}, format="json",
+        ).status_code == 404
+        assert api.delete(_url(user.id)).status_code == 404
+        assert api.get(_url(user.id, "ask-eligibility/")).status_code == 404
+        assert not UserPersonalContext.objects.filter(user=user).exists()
 
     def test_bot_initiated_delete_leaves_a_tombstone_not_a_dropped_row(
         self, user, ctx,
@@ -551,11 +574,15 @@ class TestAccountDeletion:
         _assert_all_twelve_at_default(row)
         assert set(row.data_sources.values()) == {ERASED}
 
-    def test_bot_initiated_delete_refuses_a_deleted_user(self, user, ctx):
-        """GAP — and the two flows do not compose. If the mobile delete ran
-        first, the bot's erasure step can no longer address the user (404
-        ``USER_NOT_FOUND`` on ``_get_live_user``) and the row it would have
-        dropped stays forever.
+    def test_bot_initiated_delete_accepts_an_already_deleted_user(self, user, ctx):
+        """INVERTED by DRF-1368 — the two flows compose now.
+
+        If the mobile delete ran first, the bot's erasure step could no longer
+        address the user (404 ``USER_NOT_FOUND``) and gave up on a row that,
+        before this change, it had never emptied. The order in which a person
+        happened to press the buttons decided whether they were erased.
+        A delete addressed to someone already gone is not an error — it is an
+        erasure with nothing left to erase, and it says so.
         """
         from users.services import AuthService
 
@@ -563,8 +590,31 @@ class TestAccountDeletion:
 
         resp = _internal().delete(f"/api/v1/internal/users/{user.id}/personal-data/")
 
-        assert resp.status_code == 404
-        assert UserPersonalContext.objects.filter(user=user).exists()
+        assert resp.status_code == 200
+        assert resp.json()["data"]["deleted"] == []
+        assert not UserPersonalContext.objects.filter(user=user).exists()
+
+    def test_both_deletion_orders_end_in_the_same_place(self, user, ctx):
+        """The whole point of DRF-1368, in one cell. Deleted from the app or
+        deleted from the bot — same end state, and neither route depends on
+        the other having run first.
+        """
+        from users.services import AuthService
+
+        # Route A — the app first, then the bot's cascade.
+        AuthService.delete_account(user=user, reason="test")
+        _internal().delete(f"/api/v1/internal/users/{user.id}/personal-data/")
+        assert not UserPersonalContext.objects.filter(user=user).exists()
+
+        # Route B — the bot's cascade first, then the app.
+        other = User.objects.create_user(
+            username="erasure_owner_b", password="x", role="client",
+            phone="+79995559002",
+        )
+        UserPersonalContext.objects.create(user=other, **FILLED)
+        _internal().delete(f"/api/v1/internal/users/{other.id}/personal-data/")
+        AuthService.delete_account(user=other, reason="test")
+        assert not UserPersonalContext.objects.filter(user=other).exists()
 
 
 # ---------------------------------------------------------------------------

@@ -101,15 +101,30 @@ class TestAuth:
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "NOT_FOUND"
 
-    @pytest.mark.parametrize("url", [EXPORT_URL, DELETE_URL])
-    def test_soft_deleted_user_404(self, api, user, url):
+    def test_soft_deleted_user_cannot_be_exported(self, api, user):
+        """Export stays strict: a deleted account has nothing to hand out."""
         from django.utils import timezone
 
         user.deleted_at = timezone.now()
         user.save(update_fields=["deleted_at"])
-        resp = api.generic("GET" if "export" in url else "DELETE",
-                           url.format(user_id=user.pk))
+        resp = api.get(EXPORT_URL.format(user_id=user.pk))
         assert resp.status_code == 404
+
+    def test_soft_deleted_user_can_still_be_erased(self, api, user):
+        """DRF-1368 — delete stops being strict, on purpose.
+
+        This endpoint used to 404 for an account the app had already deleted,
+        so the bot's cascade gave up and whatever the app left behind stayed
+        forever. Erasure must not depend on the order the person pressed the
+        buttons; nothing left to erase is a 200 with an empty scope.
+        """
+        from django.utils import timezone
+
+        user.deleted_at = timezone.now()
+        user.save(update_fields=["deleted_at"])
+        resp = api.delete(DELETE_URL.format(user_id=user.pk))
+        assert resp.status_code == 200
+        assert resp.json()["data"]["deleted"] == []
 
 
 # ---------------------------------------------------------------------------
