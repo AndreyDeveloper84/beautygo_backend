@@ -50,6 +50,20 @@ def _get_live_user(user_id: UUID) -> User | None:
     )
 
 
+def _get_user_for_erasure(user_id: UUID) -> User | None:
+    """Fetch the user for a delete, soft-deleted accounts included.
+
+    DRF-1368 — erasure must not depend on the order the person happened to
+    press the buttons. When the mobile delete ran first, this endpoint used
+    to answer 404 ``NOT_FOUND`` and the bot's cascade gave up, so whoever
+    deleted from the app stayed in memory forever. A delete addressed to
+    someone already gone is not an error: it is an erasure with nothing left
+    to erase, and it says so (``deleted: []``). Export keeps the strict
+    ``_get_live_user`` — a deleted account has nothing to hand out.
+    """
+    return User.objects.filter(pk=user_id).first()
+
+
 def _not_found(request: Request, user_id: UUID) -> Response:
     logger.info(
         "internal.personal_data.user_not_found user_id=%s request_id=%s",
@@ -140,12 +154,13 @@ class InternalPersonalDataDeleteView(APIView):
         description=(
             "152-ФЗ personal-data delete (C5.2): wipes the Ayla-side "
             "personal context. Idempotent — a repeat DELETE returns 200 "
-            "with an empty scope. Every call writes an AnalyticsEvent "
-            "audit record (AMD-010) without personal values."
+            "with an empty scope, and so does a DELETE for an account that "
+            "was already deleted from the app (DRF-1368). Every call writes "
+            "an AnalyticsEvent audit record (AMD-010) without personal values."
         ),
     )
     def delete(self, request: Request, user_id: UUID) -> Response:
-        user = _get_live_user(user_id)
+        user = _get_user_for_erasure(user_id)
         if user is None:
             return _not_found(request, user_id)
 
