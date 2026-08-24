@@ -189,6 +189,37 @@ _CANCELLED_BY: dict[str, str] = {
 }
 
 
+# event-contract.md §3.3 ``rescheduled_by`` — {user, admin, master, system}.
+# ``admin`` has been in that closed set since the contract was written and,
+# exactly as with ``cancelled_by`` before DRF-1064, no Ayla call site
+# produced it. A salon reschedule was reported as ``user``: the front desk
+# moved somebody's appointment and the event said the customer did.
+_RESCHEDULED_BY: dict[str, str] = {
+    OperationalActor.CLIENT.value: "user",
+    "user": "user",                # CreateBookingDTO's legacy spelling
+    OperationalActor.SPECIALIST.value: "master",
+    OperationalActor.SALON.value: "admin",
+    OperationalActor.SYSTEM.value: "system",
+}
+
+
+# Ayla Domain Event Registry v0.4 §6.3 (registered — AYLA-DEC-0022 п.9)
+# payload ``actor`` enum: user | specialist | admin | owner | system |
+# external_system. Distinct from the ADR-0009 envelope ``actor`` above:
+# the envelope's is a coarse three-value routing bucket shared by every
+# outbox event, while this is the literal initiator role, so a
+# specialist-initiated reschedule says ``specialist`` here and ``admin``
+# there. The envelope value does NOT substitute for this one — they
+# answer different questions.
+_REGISTRY_ACTOR: dict[str, str] = {
+    OperationalActor.CLIENT.value: "user",
+    "user": "user",
+    OperationalActor.SPECIALIST.value: "specialist",
+    OperationalActor.SALON.value: "admin",
+    OperationalActor.SYSTEM.value: "system",
+}
+
+
 # event-contract.md §3.1 ``booking.created.source`` — the coarse origin
 # channel: {mobile_app, admin_console, automation, yclients_sync}. This is
 # the ``origin`` that Ayla MVP Appointment Contract §10 names when it says
@@ -220,6 +251,16 @@ def envelope_actor_for(actor: str) -> str:
 def cancelled_by_for(actor: str) -> str:
     """Map an :class:`OperationalActor` value → §3.2 ``cancelled_by``."""
     return _CANCELLED_BY.get(actor, "user")
+
+
+def rescheduled_by_for(actor: str) -> str:
+    """Map an :class:`OperationalActor` value → §3.3 ``rescheduled_by``."""
+    return _RESCHEDULED_BY.get(actor, "user")
+
+
+def registry_actor_for(actor: str) -> str:
+    """Map an :class:`OperationalActor` value → registry §6.3 ``actor``."""
+    return _REGISTRY_ACTOR.get(actor, "user")
 
 
 def booking_source_for(actor: str) -> str:
