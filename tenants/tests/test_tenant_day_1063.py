@@ -491,3 +491,103 @@ class TestDayJournalBoundaries:
         )
 
         assert resp.status_code == 403
+
+
+@pytest.mark.django_db
+class TestUsernameIsNeverAName:
+    """DRF-1039 held by construction, not by a blocklist.
+
+    ``_client_name`` used to fall back to ``User.username`` and screen it
+    with ``not username.startswith("+")``. That guard was written against
+    one shape of the problem and let the common one through:
+    ``AuthService.register`` (``users/services.py:1061``) stores every
+    OTP-registered customer as ``user_{phone digits}`` — no leading plus,
+    so a full unmasked phone reached the salon's day journal and the
+    customer-lookup response.
+
+    The two pre-existing privacy tests above and in
+    ``test_salon_manual_ops_1063.py`` both asserted ``"+7999…" not in
+    str(response)``. Both passed the whole time. The digits were there;
+    only the plus was missing.
+    """
+
+    # Every username writer in the repository. Not one stores a name a
+    # person chose, so none of them may reach a salon-facing field.
+    MACHINE_USERNAMES = [
+        "user_79991030699",              # users/services.py:1061 — the phone
+        "+79991030699",                  # provision_salon_admin.py:69
+        "bot:max:998877",                # users/services.py:125,293
+        "walkin:9f2c1ab34de5",           # users/services.py:534
+        "social_vk_5512340",             # users/social_auth.py:366
+        "anon_7fa21b",                   # users/views.py:303
+    ]
+
+    @pytest.mark.parametrize("username", MACHINE_USERNAMES)
+    def test_no_machine_username_survives_as_a_client_name(self, username):
+        from appointments.application.services.tenant_day_service import (
+            _client_name,
+        )
+
+        user = User(username=username, first_name="", last_name="")
+
+        assert _client_name(user) == ""
+
+    def test_a_real_profile_name_still_wins(self):
+        from appointments.application.services.tenant_day_service import (
+            _client_name,
+        )
+
+        user = User(
+            username="user_79991030699", first_name="Анна", last_name="К.",
+        )
+
+        assert _client_name(user) == "Анна К."
+
+    def test_the_journal_does_not_print_the_phone_of_a_nameless_client(
+        self, salon, admin_user, olga, service,
+    ):
+        """The live shape: a customer who registered by OTP and never
+        filled in a profile. The salon opens today and must not be handed
+        their number."""
+        nameless = User.objects.create_user(
+            username="user_79991030699", password="x", role="client",
+            phone="+79991030699",
+        )
+        _booking(salon, olga, service, nameless)
+
+        resp = _get(admin_user, salon.slug, date=DAY.isoformat())
+
+        assert resp.status_code == 200, resp.data
+        serialised = str(resp.data)
+        # The digits, with and without the country prefix — the previous
+        # tests only ever looked for the "+" form.
+        assert "79991030699" not in serialised
+        assert "user_79991030699" not in serialised
+
+        booking = [
+            b for m in resp.data["data"]["masters"] for b in m["bookings"]
+        ][0]
+        assert booking["client_name"] == ""
+        # The id is still there, so the console can still open the person.
+        assert booking["client_id"] == str(nameless.id)
+
+    def test_the_journal_does_not_print_the_bot_external_identifier(
+        self, salon, admin_user, olga, service,
+    ):
+        """A stable messenger id is not a name and is not the salon's.
+
+        Reported as O-8 / gap #11 of ``docs/REPORT_SALON_P0.md``: the
+        journal showed ``bot:telegram:123456789`` in the client-name
+        column.
+        """
+        from_bot = User.objects.create_user(
+            username="bot:max:998877", password="x", role="client",
+            phone="+79991030698",
+        )
+        _booking(salon, olga, service, from_bot)
+
+        resp = _get(admin_user, salon.slug, date=DAY.isoformat())
+
+        assert resp.status_code == 200, resp.data
+        assert "bot:max:998877" not in str(resp.data)
+        assert "998877" not in str(resp.data)
