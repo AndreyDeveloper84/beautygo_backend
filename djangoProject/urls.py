@@ -10,7 +10,10 @@ from drf_spectacular.views import (
 
 from .health import liveness, readiness
 from payments.views import InternalPaymentStatusView, InternalPayoutPreviewView
-from users.internal_schedule_api import InternalSpecialistTimeOffView
+from users.internal_schedule_api import (
+    InternalSpecialistScheduleView,
+    InternalSpecialistTimeOffView,
+)
 
 
 urlpatterns = [
@@ -79,6 +82,20 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/time-off/',
         InternalSpecialistTimeOffView.as_view(),
         name='internal-specialist-time-off',
+    ),
+    # DRF-1126 — the master's own schedule screen builds its days from
+    # the bot's local `apps.scheduling` mirror, which lost its last
+    # Ayla-syncing writer when DRF-1062 removed the invite-flow seeder.
+    # The salon edits the graph, the customer's picker (on Ayla since
+    # PR #1186) shows the new hours, the master's screen shows the old
+    # ones, and neither side reports an error. This is the read that
+    # lets the bot draw the master's day from the same source the
+    # customer is being sold. Same "explicit route BEFORE the include"
+    # reason as the two above.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/schedule/',
+        InternalSpecialistScheduleView.as_view(),
+        name='internal-specialist-schedule',
     ),
     path(
         'api/v1/internal/specialists/',
