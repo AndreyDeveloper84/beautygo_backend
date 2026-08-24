@@ -894,6 +894,44 @@ class TestCustomerLookup:
         assert "+79991050644" not in str(resp.data)
         assert "phone" not in str(resp.data)
 
+    def test_a_nameless_customer_is_not_answered_with_their_phone(
+        self, salon, admin_user,
+    ):
+        """The guarantee this endpoint's docstring makes, actually held.
+
+        ``_client_name`` used to fall back to ``User.username``, and
+        ``AuthService.register`` (``users/services.py:1061``) stores an
+        OTP-registered customer as ``user_{phone digits}``. Searching a
+        number you already had therefore handed it straight back inside
+        the ``name`` field — the exact "search endpoint leaks the number
+        back" failure the docstring names.
+
+        ``test_finds_by_exact_phone_but_never_returns_one`` above did not
+        catch it twice over: it asserts the ``+7…`` spelling, which the
+        username does not use, and its fixture has a profile name, so the
+        fallback never ran.
+        """
+        nameless = User.objects.create_user(
+            username="user_79991050699", password="x", role="client",
+            phone="+79991050699",
+        )
+        TenantUserRelationship.objects.create(
+            user=nameless, tenant=salon,
+            role=TenantUserRelationship.Role.CUSTOMER, is_active=True,
+        )
+
+        resp = _api(admin_user, tenant_slug=salon.slug).get(
+            "/api/v1/tenants/me/customers/?q=89991050699",
+        )
+
+        assert resp.status_code == 200, resp.data
+        results = resp.data["data"]["results"]
+        # Still findable — the id is what the booking flow needs.
+        assert [r["id"] for r in results] == [str(nameless.id)]
+        assert results[0]["name"] == ""
+        # Neither spelling of the number comes back.
+        assert "79991050699" not in str(resp.data)
+
     def test_does_not_find_people_who_are_not_your_customers(
         self, salon, admin_user, stranger,
     ):
