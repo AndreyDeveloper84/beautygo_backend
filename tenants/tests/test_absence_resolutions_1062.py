@@ -93,8 +93,45 @@ def sick_day(db):
     return start, start + timedelta(hours=10)
 
 
+# Client phone numbers are ALLOCATED, never derived from ``hash()``.
+#
+# DRF-1364. This file used to number its clients
+# ``f"+7999206{hash(username) % 10000:04d}"``. Two things were wrong with
+# that, and together they made the whole suite a lottery:
+#
+# * ``hash()`` of a str is salted per interpreter process — PYTHONHASHSEED
+#   is unset in CI (.github/workflows/ci.yml, the test step sets no seed),
+#   so the numbers this file inserted were different on every run;
+# * the band it drew from, ``+7999206xxxx``, CONTAINS the staff fixtures:
+#   the admin is +79992062001 and the master is +79992062002. A draw of
+#   2001 or 2002 hits ``users_user_phone_key`` and the test dies in setup,
+#   before it asserts anything.
+#
+# On 2026-08-24 the seed landed: run 32708650133 mapped "abs_r2" onto 2002
+# and turned dev red on
+# ``test_a_booking_made_while_deciding_invalidates_the_token``. Nothing
+# about absences had changed — the same test fails identically on
+# a734068, the last green commit, under PYTHONHASHSEED=1192.
+#
+# The replacement is unique BY CONSTRUCTION rather than by luck: a
+# sequential allocation, in a band no other fixture in this file uses.
+# There is no modulo left to collide on, so no future author has to know
+# which four digits the staff already hold.
+_CLIENT_PHONE_BAND = "+7999207"  # staff sit in +7999206xxxx — keep them apart
+_allocated_client_phones: dict[str, str] = {}
+
+
+def _client_phone(username: str) -> str:
+    """A distinct phone per client username, stable within a run."""
+    if username not in _allocated_client_phones:
+        _allocated_client_phones[username] = (
+            f"{_CLIENT_PHONE_BAND}{len(_allocated_client_phones):04d}"
+        )
+    return _allocated_client_phones[username]
+
+
 def _booking(master, service, at, client_username):
-    client = _make_user(username=client_username, phone=f"+7999206{hash(client_username) % 10000:04d}")
+    client = _make_user(username=client_username, phone=_client_phone(client_username))
     return Appointment.objects.create(
         client=client, specialist=master, service=service,
         start_datetime=at, end_datetime=at + timedelta(minutes=60),
