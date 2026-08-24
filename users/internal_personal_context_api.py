@@ -64,11 +64,18 @@ _MAX_BATCH = 10
 
 
 def _resolve_user(ayla_user_id: str) -> User | None:
+    """Resolve the subject. A soft-deleted account counts as gone.
+
+    DRF-1368 — this resolver had no ``deleted_at`` filter while its
+    neighbour ``personal_data_api._get_live_user`` did, so the internal GET
+    the prompt block is built from answered 200 for a deleted person. Two
+    adjacent resolvers, two different answers to «does this human exist».
+    """
     try:
         uuid_mod.UUID(str(ayla_user_id))
     except (ValueError, TypeError):
         return None
-    return User.objects.filter(id=ayla_user_id).first()
+    return User.objects.filter(id=ayla_user_id, deleted_at__isnull=True).first()
 
 
 def _green_context(ctx: UserPersonalContext) -> dict:

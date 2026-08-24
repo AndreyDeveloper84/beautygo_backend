@@ -1216,6 +1216,17 @@ class AuthService:
         # 6. Delete social accounts
         user.social_accounts.all().delete()
 
+        # 7. DRF-1368 — erase the personal context through the same verb the
+        # bot's C5.2 cascade uses. Until this line, «удалить аккаунт» in the
+        # app anonymized the User row and left all twelve declared
+        # preferences standing — the only deletion flow a person actually
+        # sees in the app deleted nothing from memory. Owner ruling
+        # (Ayla/docs/OD_MEMORY.md §4): «удалить всё» = удалить память и
+        # профиль. ``deleted_at`` is already set above, so the verb leaves
+        # nothing behind at all — no row, no tombstone.
+        from users.personal_context_erasure import erase_personal_context
+        erase_personal_context(user, initiator="account_delete")
+
         logger.info("Account deleted: user_id=%s", user.pk)
 
 
