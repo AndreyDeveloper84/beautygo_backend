@@ -124,20 +124,41 @@ def _hhmm(value: time | None) -> str | None:
 def _client_name(user) -> str:
     """The operational label for a customer — never their phone.
 
-    Falls back through the fields a real account might have filled in.
-    An empty result is honest: some clients arrive via the bot with
+    Only the profile name fields. ``username`` is deliberately NOT a
+    fallback, and that omission is the whole point of this function.
+
+    Every ``username`` in this repository is machine-generated. There are
+    six writers and not one of them stores a name a person chose:
+
+    * ``users/services.py:125,293`` — ``bot:{channel}:{external_id}``
+    * ``users/services.py:534`` — ``walkin:{uuid4hex}``
+    * ``users/services.py:1061`` — ``user_{phone digits}``
+    * ``users/social_auth.py:366`` — ``social_{provider}_{uid}``
+    * ``users/views.py:303`` — ``anon_{short_id}``
+    * ``users/management/commands/provision_salon_admin.py:69`` — the
+      raw phone
+
+    So the old ``username`` fallback could never produce a name, only an
+    identifier — while two of those six forms **are** the customer's
+    phone number. ``user_79991234567`` sailed straight through the
+    previous ``startswith("+")`` guard, which put a full, unmasked phone
+    into the salon's day journal and into the customer-lookup response
+    whose own docstring (``tenants/appointments_api.py:298-301``)
+    promises that "the phone is an input, never an output". That promise
+    is owner decision DRF-1039, and this function was the way around it.
+
+    Removed outright rather than blocklisted: a blocklist has to be
+    re-audited every time somebody adds a seventh writer, and this
+    guarantee has to hold by construction rather than by vigilance.
+
+    An empty result is honest. Some clients arrive from the bot with
     nothing but an identifier, and inventing "Client #4" would make the
-    journal look more certain than it is.
+    journal look more certain than it is. Handing the salon a phone
+    number it never asked for is not the better alternative.
     """
-    full = (
-        f"{user.first_name or ''} {user.last_name or ''}".strip()
-        if user else ""
-    )
-    if full:
-        return full
-    if user and user.username and not user.username.startswith("+"):
-        return user.username
-    return ""
+    if user is None:
+        return ""
+    return f"{user.first_name or ''} {user.last_name or ''}".strip()
 
 
 def build_tenant_day(tenant, target_date: date_cls) -> TenantDay:
