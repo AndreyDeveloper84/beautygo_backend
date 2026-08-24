@@ -29,6 +29,11 @@ DRF-1367 — DELETE это глагол стирания «забудь всё»
 
 Владелец, ``Ayla/docs/OD_MEMORY.md`` §1: источник истины — бэкенд. Значит
 операция «стереть то, чем владеешь» обязана быть здесь, а не на мосте.
+
+Происхождение (P0-3): GET и PATCH отдают `data_sources` рядом с `context`.
+Бот рендерит эти значения прямо в промпт LLM, и без происхождения выведенный
+`busy_days` приходил модели неотличимым от того, что человек ввёл сам. Поле
+хранилось в строке с самого начала — терялось ровно здесь, на границе API.
 """
 from __future__ import annotations
 
@@ -82,6 +87,28 @@ def _green_context(ctx: UserPersonalContext) -> dict:
     return {f: getattr(ctx, f) for f in _GREEN_ZONE_FIELDS}
 
 
+def _green_data_sources(ctx: UserPersonalContext) -> dict:
+    """Per-field origin for every green field — «кто это сказал».
+
+    P0-3 (`REPORT_AYLA_MEMORY_VS_KB.md` §24): the bot renders these values
+    straight into an LLM prompt, and until now it received values WITHOUT
+    origin. So `busy_days` — computed nightly from booking history by
+    `personal_context_inference` and stamped `data_sources["busy_days"] =
+    "inferred"` — arrived indistinguishable from a preference the person
+    typed, and the model could quote a guess back as a confirmed fact.
+    The provenance existed in the row all along; this endpoint dropped it.
+
+    Every green field gets an entry, `explicit` by default: an unstamped
+    field is a legacy mobile-app write, i.e. something the person typed.
+    Emitting the complete map (rather than only the stamped subset) means
+    a future inference pass that forgets to stamp cannot silently arrive
+    looking user-stated — the consumer's rule is simply «not `explicit`
+    ⇒ derived».
+    """
+    stamped = ctx.data_sources or {}
+    return {f: stamped.get(f) or "explicit" for f in _GREEN_ZONE_FIELDS}
+
+
 class _UpdateItemSerializer(serializers.Serializer):
     field = serializers.ChoiceField(choices=_GREEN_ZONE_FIELDS)
     value = serializers.JSONField()
@@ -109,6 +136,9 @@ class InternalPersonalContextView(APIView):
         return success_response({
             "ayla_user_id": str(user.id),
             "context": _green_context(ctx),
+            # Additive sibling of `context`, same keys (contract v1.0 §forward-compat:
+            # unknown keys ride along untouched, so old bots ignore it).
+            "data_sources": _green_data_sources(ctx),
             "meta": {"filled_fields": filled, "updated_at": ctx.updated_at.isoformat()},
         })
 
@@ -142,6 +172,7 @@ class InternalPersonalContextView(APIView):
         return success_response({
             "ayla_user_id": str(user.id),
             "context": _green_context(ctx),
+            "data_sources": _green_data_sources(ctx),
         })
 
     def delete(self, request: Request, ayla_user_id: str) -> Response:

@@ -25,6 +25,20 @@ Why an `extra_hint` string and not a structured field on AIConcierge:
 
 Empty contract: returns "" when no fields are set so the block is
 omitted entirely (ayla-ai-core 0.6.0's renderer skips empty hints).
+
+Происхождение факта (P0-3, `OD_C04_GROUNDED_WHY.md` §1)
+-------------------------------------------------------
+Модель обязана отличать «человек это ввёл» от «мы это вывели». Строка
+`UserPersonalContext.data_sources` хранит источник по полю; этот
+рендерер его не читал и печатал одни значения.
+
+Сегодня прямого вреда здесь нет, и это стоит записать честно: единственные
+поля, которые ставит ночной inference (`users/personal_context_inference.py`)
+— `favorite_masters` и `busy_days` — этот блок вообще не рендерит. Но
+`_SOURCE_CHOICES` внутреннего PATCH принимает `behavioral`/`conversational`/
+`transactional` для ЛЮБОГО зелёного поля, так что дыра открыта, просто в неё
+пока никто не пролез. Отмечаем сейчас, пока пометка ничего не стоит:
+при всех `explicit` вывод байт-в-байт прежний.
 """
 from __future__ import annotations
 
@@ -44,6 +58,12 @@ _TIME_SLOT_LABELS: dict[str, str] = {
     "evening": "вечер (17–21)",
     "late_evening": "после 21",
 }
+
+# Пометка выведенного значения. Ставится ПЕРЕД содержимым строки, чтобы
+# граница пережила усечение списка. Значение `data_sources[field]`, равное
+# «человек ввёл сам»; всё остальное (и незнакомое) — вывод системы.
+_STATED_SOURCE = "explicit"
+_INFERRED_MARK = "(вывод, клиент этого не говорил)"
 
 _DIET_LABELS: dict[str, str] = {
     "omnivore": "всеядное",
@@ -72,6 +92,16 @@ def format_personal_context_hint(
     if personal_context is None:
         return ""
 
+    # getattr: callers duck-type this object (tests, and the ChatService
+    # seam), and a missing map must mean «no marking», never a crash.
+    sources = getattr(personal_context, "data_sources", None) or {}
+
+    def bullet(field: str, body: str) -> str:
+        """One bullet, marked when the value is a derivation, not a statement."""
+        if sources.get(field, _STATED_SOURCE) == _STATED_SOURCE:
+            return f"- {body}"
+        return f"- {_INFERRED_MARK} {body}"
+
     lines: list[str] = []
 
     districts = list(personal_context.preferred_districts or [])
@@ -82,27 +112,32 @@ def format_personal_context_hint(
         suffix = (
             f" (+ещё {len(districts) - 5})" if len(districts) > 5 else ""
         )
-        lines.append(f"- предпочитаемые районы: {', '.join(shown)}{suffix}")
+        lines.append(
+            bullet(
+                "preferred_districts",
+                f"предпочитаемые районы: {', '.join(shown)}{suffix}",
+            )
+        )
 
     time_slots = list(personal_context.preferred_time_slots or [])
     if time_slots:
         labels = [
             _TIME_SLOT_LABELS.get(slot, slot) for slot in time_slots
         ]
-        lines.append(f"- удобное время: {', '.join(labels)}")
+        lines.append(bullet("preferred_time_slots", f"удобное время: {', '.join(labels)}"))
 
     lo = personal_context.price_range_min
     hi = personal_context.price_range_max
     if lo is not None and hi is not None:
-        lines.append(f"- бюджет: {_money(lo)}–{_money(hi)} ₽")
+        lines.append(bullet("price_range_min", f"бюджет: {_money(lo)}–{_money(hi)} ₽"))
     elif lo is not None:
-        lines.append(f"- бюджет: от {_money(lo)} ₽")
+        lines.append(bullet("price_range_min", f"бюджет: от {_money(lo)} ₽"))
     elif hi is not None:
-        lines.append(f"- бюджет: до {_money(hi)} ₽")
+        lines.append(bullet("price_range_max", f"бюджет: до {_money(hi)} ₽"))
 
     diet = personal_context.diet_type or ""
     if diet:
-        lines.append(f"- диета: {_DIET_LABELS.get(diet, diet)}")
+        lines.append(bullet("diet_type", f"диета: {_DIET_LABELS.get(diet, diet)}"))
 
     sensitivities = list(personal_context.skin_sensitivities or [])
     if sensitivities:
@@ -113,12 +148,18 @@ def format_personal_context_hint(
             else ""
         )
         lines.append(
-            f"- чувствительность / аллергии: {', '.join(shown)}{suffix}"
+            bullet(
+                "skin_sensitivities",
+                f"чувствительность / аллергии: {', '.join(shown)}{suffix}",
+            )
         )
 
     if personal_context.prefers_flexible_cancellation:
         lines.append(
-            "- ценит гибкую политику отмены (предлагай мастеров с такой)"
+            bullet(
+                "prefers_flexible_cancellation",
+                "ценит гибкую политику отмены (предлагай мастеров с такой)",
+            )
         )
 
     if not lines:
