@@ -136,7 +136,13 @@ def erase_personal_context(user, *, initiator: str) -> list[str]:
             # No row yet, and the subject just asked us to forget. Create
             # the tombstone anyway: without it tonight's inference is free
             # to invent favourite masters for someone who erased.
-            ctx = UserPersonalContext(user=user)
+            #
+            # get_or_create, not a bare construct: the nightly pass
+            # lazy-creates this same OneToOne row, and an erasure that
+            # collides with it must not answer 500. Django retries the
+            # fetch on IntegrityError, so whoever loses the race still
+            # gets a row back — and it is tombstoned a line later.
+            ctx, _ = UserPersonalContext.objects.get_or_create(user=user)
         _tombstone(ctx)
 
     scope = ["personal_context"] if had_data else []
