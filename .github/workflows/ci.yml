@@ -159,14 +159,105 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: python manage.py check
 
+  # ---------------------------------------------------------------------------
+  # deploy — DRF-1363. Rebuilt so that an abort can never take the pilot's
+  # database with it.
+  #
+  # ## What happened on 2026-08-24 (run 32708667905)
+  #
+  # One SSH action did everything: git fetch, docker build, and
+  # `docker compose up -d --force-recreate` with NO service list. The
+  # timeline from that run's log:
+  #
+  #   09:12:18  ssh command starts
+  #   09:16:28  `git fetch origin dev` finally returns      (4m10s)
+  #   09:17:16  `docker compose build` starts
+  #   09:26:21  web / celery_beat / celery_worker  Built    (9m05s)
+  #   09:26:32  Container dev-db-1     Recreate
+  #             Container dev-minio-1  Recreate
+  #             Container dev-redis-1  Recreate
+  #   09:27:30  Run Command Timeout — command_timeout: 15m exhausted
+  #
+  # Fetch + build consumed 14m03s of a 15m budget. The recreate of the
+  # STORAGE tier got the remaining 58 seconds, and was killed inside it.
+  # db / redis / minio were left `Created` — created, never started. `web`
+  # kept serving on yesterday's image with no database behind it, and the
+  # pilot answered
+  #     psycopg2.OperationalError: could not translate host name "db"
+  # for the next ~7 hours until it was started by hand.
+  #
+  # ## The three defects, and what replaces each
+  #
+  # 1. The storage tier was in the blast radius of a code deploy.
+  #    `up -d --force-recreate` with no service list recreates EVERY
+  #    service, db included. A code deploy has no business stopping
+  #    postgres. Fixed by scoping the recreate to the application tier
+  #    with `--no-deps` (step 3/4) and touching db / redis / minio only
+  #    with `--no-recreate`, which starts a stopped container and never
+  #    replaces a running one.
+  #
+  # 2. Build and restart shared one timeout, so the timeout landed inside
+  #    the restart. Split into separate SSH steps with separate budgets.
+  #    The guarantee is NOT that the numbers are now large enough — build
+  #    time grows with the project and will exceed any number eventually.
+  #    The guarantee is that an overrun in the long step (2/4, the build)
+  #    stops before a single container has been touched, so the running
+  #    contour is bit-for-bit what it was before the deploy started.
+  #
+  # 3. Nothing made a live request afterwards, and nothing said a word.
+  #    The old script's only post-deploy gate was
+  #    `docker compose exec web manage.py showmigrations --plan`, which
+  #    (a) is not a request through the serving stack and (b) sat AFTER
+  #    the recreate, so an abort during the recreate skipped it entirely.
+  #    Replaced by step 4/4: a real HTTP GET of /api/v1/health/ready/
+  #    (djangoProject/health.py), which returns 503 unless the database
+  #    answers `SELECT 1`, the cache round-trips, and the migration plan
+  #    is empty. On 2026-08-24 that request would have returned 503 with
+  #    `"db": {"ok": false}` roughly one minute in. It subsumes the old
+  #    migration-settle loop — `_check_migrations` runs the same
+  #    MigrationExecutor plan the loop grepped for — and adds the two
+  #    checks the loop had no opinion about.
+  #    Two more steps close the silence: a failure-only step that dumps
+  #    state and brings anything that is down back up, and a Telegram
+  #    ping (same runner-side pattern as smoke-on-dev.yml, whose egress
+  #    to api.telegram.org is clean where the VPS's is not).
+  #
+  # ## What an abort in the same place costs now
+  #
+  # Step 3/4 is the only step that stops a container, and the only
+  # containers it can stop are web / celery_worker / celery_beat. db,
+  # redis and minio are never arguments to a recreate, so no abort at any
+  # point in this job can leave the pilot without a database. Killed
+  # mid-recreate the worst case is `web` absent for as long as the
+  # failure-only step takes to run `up -d --no-recreate` — and the job
+  # still ends red, with the reason in the log and a Telegram ping out.
+  #
+  # ## Volumes
+  #
+  # No step here removes a volume. `down` in any form does not appear in
+  # this job, and must not: the pilot's data lives in `dev_postgres_data`.
+  # ---------------------------------------------------------------------------
   deploy:
     needs: test
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/dev' && github.event_name == 'push'
     environment: dev
+    timeout-minutes: 50
+    # One deploy at a time against one box. Two overlapping runs would
+    # interleave one's `git reset --hard` with the other's
+    # `docker compose build` on the same checkout. Queue instead of
+    # cancelling: a cancelled run is a run aborted at an arbitrary point,
+    # which is the class of event this job is built to survive, not invite.
+    concurrency:
+      group: deploy-dev-vps
+      cancel-in-progress: false
 
     steps:
-      - name: Deploy to dev server via SSH
+      # ---- 1/4 -----------------------------------------------------------
+      # Source + CI-managed env only. No container is created, stopped or
+      # recreated here, so any failure — including the 4-minute `git fetch`
+      # blowing its budget — leaves the running contour untouched.
+      - name: 1/4 Sync source + CI-managed env on the dev VPS
         uses: appleboy/ssh-action@v1
         env:
           # Sentry config managed by CI, not by hand-editing .env on the box.
@@ -191,18 +282,13 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
           timeout: 300s
-          # Docker build on the dev VPS regularly exceeds 5m: ayla-ai-core
-          # is a private git+https package (no wheel cache), so a layer
-          # invalidation triggers a fresh clone + install every time. The
-          # 5m cap raced the docker compose build step and timed out
-          # before the deploy could ack — see the 5x failures on the
-          # Block A merges (runs 26719649094-26719655346, all hit
-          # "Run Command Timeout" at ~5min). 15m gives docker enough
-          # headroom without letting a genuinely stuck deploy hang
-          # forever.
-          command_timeout: 15m
+          # `git fetch` from this box measured 4m10s on 2026-08-24 (RU
+          # egress to github.com). 10m is headroom for that, and a
+          # timeout here is a clean no-op.
+          command_timeout: 10m
           envs: SENTRY_DSN,SENTRY_ENVIRONMENT,SENTRY_RELEASE,DJANGO_ENV,FIREBASE_CREDENTIALS_JSON
           script: |
+            set -eo pipefail
             cd /home/taximeter/beautygo/dev
 
             # Configure git auth via deploy token (HTTPS)
@@ -210,6 +296,7 @@ jobs:
 
             git fetch origin dev
             git reset --hard origin/dev
+            echo "checkout now at $(git rev-parse --short HEAD)"
 
             # Refresh CI-managed env vars in .env without disturbing the rest.
             # Idempotent: drop any existing line for these keys, then append
@@ -241,72 +328,198 @@ jobs:
               printf '%s' "$FIREBASE_CREDENTIALS_JSON" > firebase-admin.json
             fi
 
-            docker compose build
-            # Bring up the full stack — redis + celery_worker + celery_beat
-            # are new in PR3 and would otherwise sit unstarted; --force-recreate
-            # on web makes sure new env (REDIS_URL, SENTRY_*) reaches it.
-            docker compose up -d --force-recreate
+      # ---- 2/4 -----------------------------------------------------------
+      # The long step, and deliberately the harmless one. `build` writes
+      # images; it does not stop, start or replace a container. The three
+      # named services are exactly the ones with a `build:` section in
+      # docker-compose.yml — naming them makes it impossible for a future
+      # storage service to acquire a build stanza and quietly join a code
+      # deploy.
+      - name: 2/4 Build application images (running contour untouched)
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          timeout: 300s
+          # 9m05s on 2026-08-24 and rising with the project. This number
+          # is not the fix and is not load-bearing: overrunning it now
+          # aborts before any container has been touched, which is the
+          # entire point of splitting this step out. When builds outgrow
+          # 20m, raise it — or better, move the build to the runner and
+          # ship an image — without any of that being an incident.
+          command_timeout: 20m
+          script: |
+            set -eo pipefail
+            cd /home/taximeter/beautygo/dev
+            docker compose build web celery_worker celery_beat
 
-            # DRF-1046. The database does not necessarily accept connections
-            # the moment its container starts, so the migrate call used to be
-            # guarded with `sleep 5` + `|| true`. That guard made a genuinely
-            # broken migration indistinguishable from a merely slow database:
-            # the deploy printed "Deploy complete!" either way, and the schema
-            # drift surfaced later as runtime errors on the first request that
-            # touched a column the running code already expected.
-            #
-            # Wait for readiness explicitly instead of sleeping. `pg_isready`
-            # reports whether the server accepts connections and performs no
-            # authentication, so it needs no credentials here.
-            for i in $(seq 1 30); do
-              docker compose exec -T db pg_isready -q && break
-              echo "waiting for db to accept connections ($i/30)"
-              sleep 2
-            done
+      # ---- 3/4 -----------------------------------------------------------
+      # The only step that stops anything, now scoped to the application
+      # tier and fast because the images already exist.
+      - name: 3/4 Restart application containers only
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          timeout: 300s
+          command_timeout: 6m
+          script: |
+            set -eo pipefail
+            cd /home/taximeter/beautygo/dev
 
-            # Migrations are owned by `entrypoint.sh` (line 32), which runs
-            # `manage.py migrate --noinput` on every container start. This
-            # script must NOT run migrate as well.
-            #
-            # Why, concretely: on 2026-08-15 it did, and the two raced. The
-            # entrypoint created the table, the script's attempt hit
-            #   IntegrityError: duplicate key value violates unique constraint
-            #   "pg_type_typname_nsp_index"
-            #   Key (typname, typnamespace)=(appointments_specialistscheduleexception, …)
-            # and the deploy went red over a pilot whose schema was in fact
-            # correct — both migrations applied, nothing pending. The race had
-            # existed for months, invisible because the `|| true` that this
-            # gate replaced swallowed it.
-            #
-            # So the deploy waits for the entrypoint and then VERIFIES. The
-            # verification is the part that must be loud: a schema the running
-            # code already expects but the database lacks is worse than no
-            # deploy at all, and it surfaces as runtime errors on the first
-            # request that touches the new column (the 2026-08-15 bot
-            # incident, where containers were healthy and /healthz answered
-            # 200 while a required migration sat unapplied).
-            #
-            # An empty plan means the web container is not answering yet — that
-            # is "keep waiting", not "nothing pending". Distinguishing the two
-            # is the whole reason this loop tracks `ok` instead of just
-            # breaking on an empty grep.
-            ok=""
-            for i in $(seq 1 60); do
-              plan=$(docker compose exec -T web python manage.py showmigrations --plan 2>/dev/null || true)
-              if [ -n "$plan" ]; then
-                unapplied=$(echo "$plan" | grep '^\[ \]' || true)
-                if [ -z "$unapplied" ]; then ok=1; break; fi
-              fi
-              echo "waiting for entrypoint migrations to finish ($i/60)"
-              sleep 5
-            done
+            # Storage tier: start what is down, replace nothing.
+            # `--no-recreate` is the opposite of what killed the pilot —
+            # a running db is left strictly alone, and a db left in
+            # `Created` by an earlier accident is started. It is also
+            # deliberately conservative: a change to db/redis/minio in
+            # docker-compose.yml will NOT be applied by a deploy. Storage
+            # config changes are an operator action, on purpose.
+            docker compose up -d --no-recreate db redis minio
 
-            if [ -z "$ok" ]; then
-              echo "::error::migrations did not settle within 5 minutes"
-              docker compose exec -T web python manage.py showmigrations --plan 2>&1 | grep '^\[ \]' || true
-              docker compose logs --tail 40 web
-              exit 1
-            fi
+            # Application tier. `--no-deps` is why this cannot reach the
+            # storage tier: without it, compose walks web's `depends_on`
+            # (db, redis, minio) and pulls them into the recreate.
+            # `--force-recreate` is kept so new .env values (SENTRY_*,
+            # DJANGO_ENV) actually reach the processes.
+            docker compose up -d --force-recreate --no-deps web celery_worker celery_beat
 
             docker compose ps
-            echo "Deploy complete!"
+
+      # ---- 4/4 -----------------------------------------------------------
+      # Live request through the real serving stack. This is the step that
+      # tells "deployed" apart from "working".
+      - name: 4/4 Smoke — live readiness request against the pilot
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          timeout: 300s
+          command_timeout: 8m
+          script: |
+            set -eo pipefail
+            cd /home/taximeter/beautygo/dev
+
+            # web publishes on 127.0.0.1:8000 only (docker-compose.yml),
+            # so the probe runs on the box. settings.prod builds
+            # ALLOWED_HOSTS from DJANGO_ALLOWED_HOSTS, and a request with
+            # `Host: 127.0.0.1` against a host list that does not include
+            # it comes back 400 DisallowedHost — a red smoke over a
+            # perfectly healthy contour. So borrow the box's own first
+            # configured hostname for the Host header. A hostname is not
+            # a secret; nothing else is read out of .env here.
+            HOST_HEADER=$(grep -m1 '^DJANGO_ALLOWED_HOSTS=' .env 2>/dev/null \
+              | cut -d= -f2- | tr ',' '\n' | grep -v '^[*]$' | head -n1 | tr -d '[:space:]' || true)
+            if [ -z "$HOST_HEADER" ]; then HOST_HEADER=127.0.0.1; fi
+            echo "probing http://127.0.0.1:8000/api/v1/health/ready/ with Host: $HOST_HEADER"
+
+            # /api/v1/health/ready/ answers 200 only when SELECT 1
+            # succeeds, the cache round-trips, and the migration plan is
+            # empty; 503 with a per-check JSON body otherwise (see
+            # djangoProject/health.py). Connection-refused while the
+            # entrypoint runs migrate + collectstatic is expected and
+            # shows as http=000 — keep waiting. 40 x 6s = 4 minutes.
+            for i in $(seq 1 40); do
+              code=$(curl -sS -m 10 -o /tmp/drf1363_ready.json -w '%{http_code}' \
+                -H "Host: $HOST_HEADER" \
+                http://127.0.0.1:8000/api/v1/health/ready/ 2>/dev/null || echo 000)
+              if [ "$code" = "200" ]; then
+                echo "readiness 200 — pilot is serving:"
+                cat /tmp/drf1363_ready.json; echo
+                rm -f /tmp/drf1363_ready.json
+                echo "Deploy complete!"
+                exit 0
+              fi
+              echo "readiness not green (attempt $i/40, http=$code)"
+              if [ -s /tmp/drf1363_ready.json ]; then
+                head -c 400 /tmp/drf1363_ready.json; echo
+              fi
+              sleep 6
+            done
+
+            echo "::error::readiness red after 4 minutes — the deploy is NOT live. Checks below."
+            if [ -s /tmp/drf1363_ready.json ]; then
+              echo "last readiness body:"; head -c 800 /tmp/drf1363_ready.json; echo
+            fi
+            rm -f /tmp/drf1363_ready.json
+            docker compose ps
+            docker compose logs --tail 60 web || true
+            exit 1
+
+      # ---- failure only --------------------------------------------------
+      # An aborted deploy must not also be an outage. Prints what state
+      # the box is actually in, then starts anything that is down —
+      # `--no-recreate` so this can only ever add, never replace. This is
+      # the automated form of the manual recovery that ended the
+      # 2026-08-24 incident.
+      - name: Diagnose and bring anything that is down back up
+        if: failure()
+        continue-on-error: true
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          timeout: 300s
+          command_timeout: 8m
+          script: |
+            cd /home/taximeter/beautygo/dev
+            echo "=== state as the failed deploy left it ==="
+            docker compose ps -a
+            echo
+            echo "=== start whatever is down (never recreate, never remove) ==="
+            docker compose up -d --no-recreate
+            echo
+            docker compose ps
+            echo
+            echo "=== readiness after recovery (informational) ==="
+            HOST_HEADER=$(grep -m1 '^DJANGO_ALLOWED_HOSTS=' .env 2>/dev/null \
+              | cut -d= -f2- | tr ',' '\n' | grep -v '^[*]$' | head -n1 | tr -d '[:space:]' || true)
+            if [ -z "$HOST_HEADER" ]; then HOST_HEADER=127.0.0.1; fi
+            curl -sS -m 10 -o - -w '\nhttp=%{http_code}\n' -H "Host: $HOST_HEADER" \
+              http://127.0.0.1:8000/api/v1/health/ready/ || echo "readiness unreachable"
+            echo
+            echo "=== web logs (tail 60) ==="
+            docker compose logs --tail 60 web || true
+
+      - name: Notify on failure (Telegram, runner-side)
+        # The 2026-08-24 deploy went red and nobody was told; the owner
+        # found the outage, not the pipeline. Runner-side because RKN
+        # egress filtering blocks api.telegram.org from the RU VPS — the
+        # same reason smoke-on-dev.yml alerts from the runner. Skips
+        # silently when either secret is unset, so an unconfigured repo
+        # gets no false alarms.
+        if: failure()
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          if [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ]; then
+            echo "No TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secret — skipping alert."
+            echo "Configure both secrets at repo level to enable deploy-failure pings."
+            exit 0
+          fi
+          SHA_SHORT="${GITHUB_SHA:0:7}"
+          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          MSG=$'\xf0\x9f\x94\xa5 <b>dev deploy failed</b>\n'
+          MSG+="Commit: <code>${SHA_SHORT}</code>"$'\n'
+          MSG+='Storage tier untouched — db/redis/minio are never recreated by a deploy.'$'\n'
+          MSG+="<a href=\"${RUN_URL}\">Open run</a>"
+          curl -sS --max-time 10 -o /tmp/tg_resp.json -X POST \
+            "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+            -d "chat_id=${TG_CHAT_ID}" \
+            -d "parse_mode=HTML" \
+            -d "disable_web_page_preview=true" \
+            --data-urlencode "text=${MSG}" \
+            || { echo "curl failed; alert dropped"; exit 0; }
+          echo "telegram response: $(head -c 200 /tmp/tg_resp.json)"
+          rm -f /tmp/tg_resp.json
