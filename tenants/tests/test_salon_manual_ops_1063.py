@@ -705,6 +705,99 @@ class TestSalonMovesABooking:
         assert revision.basis == "salon_console"
         assert revision.actor_id == admin_user.id
 
+    def test_the_event_says_the_salon_moved_it_not_the_customer(
+        self, salon, admin_user, master, service, returning_client,
+    ):
+        """The revision row said "salon" all along. The events did not.
+
+        Three emit sites mapped `initiator_role` with a hand-rolled
+        ternary that had no `salon` branch and fell through to the
+        client's value, so a booking moved at the front desk arrived at
+        every consumer as one the customer moved:
+
+        * ADR-0009 envelope `actor` — "user" instead of "admin";
+        * §3.3 `rescheduled_by` — "user" instead of "admin", a value
+          already in that closed enum and already read by the bot's
+          consumer (`apps/eventbus/consumers/booking.py:917`);
+        * registry §6.3 payload `actor` — "user" instead of "admin".
+
+        `test_moves_a_booking_and_records_who_moved_it` above is why this
+        survived: it asserts `AppointmentRevision.actor_role`, which is
+        stamped from the DTO directly and was always right. Nothing
+        asserted the events.
+        """
+        appt = self._booked(
+            salon, admin_user, master, service, returning_client,
+        )
+        OutboxEvent.objects.all().delete()
+
+        resp = _api(admin_user, tenant_slug=salon.slug).post(
+            f"/api/v1/tenants/me/appointments/{appt.id}/reschedule/",
+            {
+                "new_start_datetime": _slot(hours_ahead=54).isoformat(),
+                "expected_version": appt.version,
+            },
+            format="json",
+        )
+
+        assert resp.status_code == 200, resp.data
+
+        legacy = OutboxEvent.objects.get(
+            topic=OutboxEvent.Topic.BOOKING_RESCHEDULED,
+        )
+        assert legacy.payload["actor"] == "admin"
+        assert legacy.payload["data"]["rescheduled_by"] == "admin"
+
+        canonical = OutboxEvent.objects.get(
+            topic=OutboxEvent.Topic.APPOINTMENT_RESCHEDULED,
+        )
+        assert canonical.payload["actor"] == "admin"
+        # Registry §6.3 wants the literal initiator role, not the coarse
+        # envelope bucket. For the salon the two happen to agree; for a
+        # specialist they must not, which the next test pins.
+        assert canonical.payload["data"]["actor"] == "admin"
+
+    def test_a_master_moving_their_own_booking_is_still_told_apart(
+        self, salon, admin_user, master, service, returning_client,
+    ):
+        """The regression guard on the fix.
+
+        Routing `initiator_role` through shared tables must not collapse
+        the two vocabularies: the envelope buckets a specialist as
+        "admin", while the registry payload wants the literal
+        "specialist". A single mapping would have silently merged them.
+        """
+        from appointments.application.dto import RescheduleBookingDTO
+        from appointments.application.services.cancel_reschedule_service import (  # noqa: E501
+            RescheduleBookingService,
+        )
+
+        appt = self._booked(
+            salon, admin_user, master, service, returning_client,
+        )
+        OutboxEvent.objects.all().delete()
+
+        RescheduleBookingService().execute(RescheduleBookingDTO(
+            booking_id=appt.id,
+            initiator_user_id=master.user_id,
+            new_start_at=_slot(hours_ahead=54),
+            initiator_role="specialist",
+            expected_version=appt.version,
+        ))
+
+        legacy = OutboxEvent.objects.get(
+            topic=OutboxEvent.Topic.BOOKING_RESCHEDULED,
+        )
+        assert legacy.payload["actor"] == "admin"
+        # §3.3 spells a provider-side move "master", not "admin".
+        assert legacy.payload["data"]["rescheduled_by"] == "master"
+
+        canonical = OutboxEvent.objects.get(
+            topic=OutboxEvent.Topic.APPOINTMENT_RESCHEDULED,
+        )
+        assert canonical.payload["actor"] == "admin"
+        assert canonical.payload["data"]["actor"] == "specialist"
+
     def test_expected_version_is_mandatory_here(
         self, salon, admin_user, master, service, returning_client,
     ):
@@ -804,6 +897,36 @@ class TestSalonCancels:
         # produced it until the salon could act.
         assert evt.payload["data"]["cancelled_by"] == "admin"
         assert evt.payload["data"]["initiator_role"] == "salon"
+
+    def test_the_cancellation_envelope_is_routed_as_a_provider_action(
+        self, salon, admin_user, master, service, returning_client,
+    ):
+        """`cancelled_by` was already right; the envelope actor was not.
+
+        `_resolve_cancellation_vocab` goes through the shared
+        `cancelled_by_for` table, which has had a `salon` entry since
+        DRF-1064 — which is why the payload said "admin" and the
+        pre-existing test above passed. The envelope `actor` beside it
+        was a separate ternary with no `salon` branch, so ADR-0009
+        routing classified a front-desk cancellation as the customer's.
+        """
+        appt = self._booked(
+            salon, admin_user, master, service, returning_client,
+        )
+        OutboxEvent.objects.all().delete()
+
+        resp = _api(admin_user, tenant_slug=salon.slug).post(
+            f"/api/v1/tenants/me/appointments/{appt.id}/cancel/",
+            {"reason": "салон закрыт"}, format="json",
+        )
+
+        assert resp.status_code == 200, resp.data
+        evt = OutboxEvent.objects.get(
+            topic=OutboxEvent.Topic.BOOKING_CANCELLED,
+        )
+        assert evt.payload["actor"] == "admin"
+        # Unchanged, and asserted here so the two cannot drift apart.
+        assert evt.payload["data"]["cancelled_by"] == "admin"
 
     def test_the_salon_may_state_a_reason_the_client_can_be_told(
         self, salon, admin_user, master, service, returning_client,

@@ -78,10 +78,13 @@ class RescheduleBookingDTO:
     booking_id: UUID
     initiator_user_id: UUID
     new_start_at: datetime      # Must be UTC timezone-aware
-    # initiator_role: "client" | "specialist" | "system" — matches the
-    # CancelBookingDTO contract so the outbox envelope can map to
-    # ADR-0009 actor consistently across both flows. Default "client"
-    # keeps pre-#486 test fixtures green.
+    # OperationalActor vocabulary — "client" | "specialist" | "salon" |
+    # "system", the same closed set CancelBookingDTO names, so the outbox
+    # envelope maps to ADR-0009 actor consistently across both flows.
+    # "salon" was omitted from this comment when DRF-1064 introduced it,
+    # and the three emit sites downstream had no branch for it either:
+    # a reschedule made at the front desk reached every consumer as one
+    # the customer made. Default "client" keeps pre-#486 fixtures green.
     initiator_role: str = "client"
     # Wave 1 Simple Reschedule hardening (all optional — omitting them
     # preserves the exact pre-Wave-1 behaviour for any existing caller):

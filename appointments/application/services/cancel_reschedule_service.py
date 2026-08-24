@@ -43,6 +43,9 @@ from appointments.domain.value_objects import (
     TimeInterval,
     ACTIVE_BOOKING_STATUSES,
     cancelled_by_for,
+    envelope_actor_for,
+    registry_actor_for,
+    rescheduled_by_for,
 )
 from appointments.infrastructure.db_locks import specialist_advisory_lock
 
@@ -241,18 +244,14 @@ class CancelBookingService:
             },
             user_id=initiator_user_id,
             tenant_id=safe_tenant_id(appointment, context="booking.cancelled"),
-            # initiator_role contract (see dto.py:36) is the closed set
-            # {client, specialist, system}. Map to ADR-0009 actor:
-            #   client    → 'user'   (client cancels via mobile)
-            #   specialist→ 'admin'  (provider-side action; closer to
-            #                         'admin' than 'user' per ADR-0009
-            #                         §Mandatory event contract)
-            #   system    → 'system' (rare — TTL sweep, batch job, etc.)
-            actor=(
-                "admin" if initiator_role == "specialist"
-                else "system" if initiator_role == "system"
-                else "user"
-            ),
+            # ADR-0009 envelope actor. Via the shared table rather than
+            # a ternary here: the ternary had no `salon` branch and fell
+            # through to "user", so a cancellation made at the front desk
+            # was routed as one the customer made. `salon` has been a
+            # real initiator since DRF-1064 and the mapping for it has
+            # existed in value_objects the whole time — it just was not
+            # called from here. Same fix at the two reschedule sites.
+            actor=envelope_actor_for(initiator_role),
         )
 
 
@@ -469,31 +468,20 @@ class RescheduleBookingService:
             emit_outbox_event, safe_tenant_id,
         )
         from appointments.models import OutboxEvent as _OutboxEvent
-        actor = (
-            "admin" if initiator_role == "specialist"
-            else "system" if initiator_role == "system"
-            else "user"
-        )
-        rescheduled_by = (
-            "master" if initiator_role == "specialist"
-            else "system" if initiator_role == "system"
-            else "user"
-        )
-        # Ayla Domain Event Registry v0.4 §6.3 (registered —
-        # AYLA-DEC-0022 п.9) payload `actor` enum: user | specialist |
-        # admin | owner | system | external_system. Distinct from the
-        # ADR-0009 envelope `actor` bucket above (a coarser
-        # "admin"/"system"/"user" classification shared by ALL outbox
-        # events, used for internal routing) — the registry's canonical
-        # payload wants the literal initiator role, so a
-        # specialist-initiated reschedule must say "specialist" here,
-        # not "admin". The envelope actor does NOT substitute for this
-        # payload field (they answer different questions).
-        registry_actor = (
-            "specialist" if initiator_role == "specialist"
-            else "system" if initiator_role == "system"
-            else "user"
-        )
+        # All three below are shared tables, not ternaries. Each of the
+        # three ternaries they replace was missing its `salon` branch and
+        # fell through to the client's value, so a reschedule done at the
+        # front desk arrived at every consumer as one the customer did:
+        # `actor` "user" instead of "admin", `rescheduled_by` "user"
+        # instead of "admin" (a value already in the §3.3 closed set and
+        # already branched on by the bot), `actor` in the registry
+        # payload "user" instead of "admin".
+        actor = envelope_actor_for(initiator_role)
+        rescheduled_by = rescheduled_by_for(initiator_role)
+        # Registry §6.3 payload `actor` — the literal initiator role,
+        # deliberately NOT the coarse envelope bucket above. Rationale
+        # and the full enum live on `_REGISTRY_ACTOR` in value_objects.
+        registry_actor = registry_actor_for(initiator_role)
         # Wave 1 only supports same-ID, time-only reschedule (no
         # specialist/service change — that's the "Replacement" path in
         # registry §6.3, out of scope here), so exactly one field ever
