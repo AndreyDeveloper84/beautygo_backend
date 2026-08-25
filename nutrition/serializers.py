@@ -508,6 +508,8 @@ class NutritionProfileResponseSerializer(serializers.Serializer):
     goal_overridden_by = serializers.CharField(allow_null=True, allow_blank=True)
     bmi_warning_overridden_at = serializers.DateTimeField(allow_null=True)
     overrides_applied = serializers.ListField(child=serializers.DictField())
+    # DRF-1339: inputs substituted with defaults for the norm computation.
+    assumed_inputs = serializers.ListField(child=serializers.CharField())
 
     disclaimer_acked = serializers.JSONField(allow_null=True)
     onboarded_at = serializers.DateTimeField(allow_null=True)
