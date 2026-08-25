@@ -174,7 +174,13 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
     profile.goal = norms.goal
     profile.pace = norms.pace
     profile.goal_overridden_by = norms.goal_overridden_by
-    profile.last_overrides_applied = norms.overrides_applied
+    audit = list(norms.overrides_applied)
+    if profile.weight_kg is None:
+        # DRF-1339: the norms above were computed against DEFAULT_WEIGHT_KG,
+        # not a user-stated weight. Mark the assumed input in the same audit
+        # so consumers can tell substituted from real without parsing text.
+        audit.append({"reason": "assumed_input", "field": "weight_kg"})
+    profile.last_overrides_applied = audit
 
 
 def _flip_lifecycle_markers(profile: NutritionProfile, payload: dict) -> None:
@@ -220,6 +226,12 @@ def _serialize(
             profile.bmi_warning_overridden_at,
         ),
         "overrides_applied": profile.last_overrides_applied or [],
+        # DRF-1339: machine-readable list of inputs that were substituted
+        # with defaults for the norm computation (weight_kg is NULL → the
+        # norms came from DEFAULT_WEIGHT_KG). Derived from the profile
+        # itself so legacy rows persisted before the audit marker still
+        # report truthfully.
+        "assumed_inputs": ["weight_kg"] if profile.weight_kg is None else [],
         "disclaimer_acked": profile.disclaimer_acked,
         "onboarded_at": _strip_microseconds(profile.onboarded_at),
         "first_food_logged_at": _strip_microseconds(profile.first_food_logged_at),
