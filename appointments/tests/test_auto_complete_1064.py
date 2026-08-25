@@ -506,3 +506,34 @@ class TestEveryPassLeavesATrace:
         line = _one_pass_line(task_log)
         assert "cutoff=" in line
         assert "not_before=" in line
+
+
+@pytest.mark.django_db
+class TestTheSweepIsActuallyScheduled:
+    """The other half of "did it run": is it wired to run at all.
+
+    Three failures produce the same empty log — beat not firing the
+    entry, the entry naming a task the worker cannot resolve, and the
+    task firing and refusing. The pass line separates the third from the
+    first two; these two assertions pin the first two, so a rename or a
+    dropped beat entry fails here instead of in production silence.
+    """
+
+    def test_beat_schedules_it(self, settings):
+        entry = settings.CELERY_BEAT_SCHEDULE["auto-complete-elapsed-bookings"]
+        assert entry["task"] == "appointments.tasks.auto_complete_elapsed_bookings"
+        # Grace period is hours; a quarter-hour of granularity is
+        # invisible operationally. Pin the order of magnitude, not the
+        # number — the point is that it is minutes, not days.
+        assert 60 <= entry["schedule"] <= 3600
+
+    def test_the_worker_can_resolve_the_name_beat_sends(self, settings):
+        """A beat entry naming a task no worker has registered fails as
+        ``Received unregistered task`` on the worker — invisible from the
+        Django side, and indistinguishable from beat never firing."""
+        from djangoProject.celery import app
+
+        name = settings.CELERY_BEAT_SCHEDULE[
+            "auto-complete-elapsed-bookings"
+        ]["task"]
+        assert name in app.tasks
