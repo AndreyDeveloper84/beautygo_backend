@@ -12,12 +12,12 @@ real handlers in ``EVENT_HANDLERS`` without touching this file.
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
-from typing import Callable
+from datetime import datetime, timedelta
+from typing import Callable, NamedTuple
 
 from celery import shared_task
 from django.db import transaction
-from django.db.models import Min
+from django.db.models import Count, Min, Q
 from django.utils import timezone
 
 from .domain.value_objects import OperationalActor
@@ -270,19 +270,39 @@ def publish_outbox_events_to_bot() -> dict:
     }
 
 
-def _auto_complete_window() -> tuple[object, object] | None:
-    """Resolve (not_before, cutoff) for the sweep, or None if it must not run.
+class SweepWindow(NamedTuple):
+    """What the sweep is allowed to touch on this tick — or why it isn't.
 
-    Returns None — after logging why — when the feature is off or when it
-    is on but nobody named the point in time it may reach back to. Fail
-    closed: see ``BOOKING_AUTO_COMPLETE_ENABLED`` in settings for why a
-    silent full-backlog sweep is the outcome worth refusing.
+    ``refusal`` is a short, stable token (never a sentence) because it
+    goes into the pass line as ``reason=<token>`` and operators grep for
+    it. Empty means the sweep may run.
+    """
+    not_before: datetime | None = None
+    cutoff: datetime | None = None
+    refusal: str = ""
+
+    @property
+    def may_run(self) -> bool:
+        return not self.refusal
+
+
+def _auto_complete_window() -> SweepWindow:
+    """Resolve the window for the sweep, or the reason it must not run.
+
+    Fail closed: see ``BOOKING_AUTO_COMPLETE_ENABLED`` in settings for
+    why a silent full-backlog sweep is the outcome worth refusing.
+
+    The refusal used to be a bare ``None`` and — for the gated-off case —
+    a completely silent one. That is what made DRF-1048 take weeks to
+    read: a beat entry firing every 15 minutes and writing nothing looks
+    exactly like a beat entry that never fires. The reason now travels
+    back to the caller, which puts it on the one line every pass emits.
     """
     from django.conf import settings
     from django.utils.dateparse import parse_datetime
 
     if not getattr(settings, "BOOKING_AUTO_COMPLETE_ENABLED", False):
-        return None
+        return SweepWindow(refusal="disabled")
 
     raw_floor = getattr(settings, "BOOKING_AUTO_COMPLETE_NOT_BEFORE", "") or ""
     not_before = parse_datetime(raw_floor) if raw_floor else None
@@ -297,11 +317,56 @@ def _auto_complete_window() -> tuple[object, object] | None:
             "manage.py complete_elapsed_backlog.",
             "empty" if not raw_floor else f"unusable ({raw_floor!r})",
         )
-        return None
+        return SweepWindow(refusal="no_floor")
 
     hours = getattr(settings, "BOOKING_AUTO_COMPLETE_AFTER_HOURS", 3)
     cutoff = timezone.now() - timedelta(hours=hours)
-    return not_before, cutoff
+    return SweepWindow(not_before=not_before, cutoff=cutoff)
+
+
+def _empty_pass_diagnosis(*, not_before, cutoff) -> dict:
+    """Why a pass that swept the window came back with nothing.
+
+    An empty pass has two very different meanings and the count alone
+    cannot separate them: nothing had elapsed, or plenty had and none of
+    it was eligible. Two bounded counters answer the follow-up question
+    without anyone opening a shell against the pilot database:
+
+    ``elapsed_unconfirmed``
+        elapsed inside the window but never reached CONFIRMED — the
+        booking is stuck earlier in the lifecycle (unpaid hold, never
+        confirmed). Not this task's business to close; very much its
+        business to make visible, because the sweep is where the absence
+        shows up first.
+    ``below_floor``
+        CONFIRMED and elapsed, but older than the floor. The backlog
+        ``manage.py complete_elapsed_backlog`` exists to drain — a
+        standing number, not an anomaly, but one nobody can see today.
+
+    Only computed on an empty pass: on a productive tick the counts add
+    nothing and the query is pure overhead.
+    """
+    from .models import Appointment
+
+    return Appointment.objects.filter(end_datetime__lte=cutoff).aggregate(
+        elapsed_unconfirmed=Count(
+            "id",
+            filter=Q(
+                end_datetime__gte=not_before,
+                status__in=(
+                    Appointment.Status.PENDING,
+                    Appointment.Status.AWAITING_PAYMENT,
+                ),
+            ),
+        ),
+        below_floor=Count(
+            "id",
+            filter=Q(
+                end_datetime__lt=not_before,
+                status=Appointment.Status.CONFIRMED,
+            ),
+        ),
+    )
 
 
 def complete_elapsed_bookings(*, not_before, cutoff, batch_size: int) -> dict:
@@ -384,7 +449,15 @@ def complete_elapsed_bookings(*, not_before, cutoff, batch_size: int) -> dict:
         # if the payment provider is unreachable.
         schedule_capture_safely(appointment)
 
-    return {"completed": completed, "skipped": skipped, "failed": failed}
+    # ``candidates`` is what separates "the sweep found nothing" from "the
+    # sweep found things and closed none of them" — the two failures the
+    # completed/skipped/failed triple alone cannot tell apart.
+    return {
+        "candidates": len(candidate_ids),
+        "completed": completed,
+        "skipped": skipped,
+        "failed": failed,
+    }
 
 
 @shared_task(name="appointments.tasks.auto_complete_elapsed_bookings")
@@ -405,11 +478,26 @@ def auto_complete_elapsed_bookings() -> dict:
     looks like a human one.
     """
     window = _auto_complete_window()
-    if window is None:
-        return {"completed": 0, "skipped": 0, "failed": 0, "ran": False}
+    if not window.may_run:
+        # DRF-1048. This branch used to `return` in silence for the
+        # gated-off case, which is the whole reason the ticket sat open:
+        # a sweep that never runs and a sweep that runs and refuses look
+        # identical in an empty log. The refusal is now as loud as the
+        # work — INFO, one line, naming the switch that would change it.
+        logger.info(
+            "booking.auto_complete.pass ran=false reason=%s "
+            "candidates=0 completed=0 skipped=0 failed=0 "
+            "(gated by BOOKING_AUTO_COMPLETE_ENABLED + "
+            "BOOKING_AUTO_COMPLETE_NOT_BEFORE)",
+            window.refusal,
+        )
+        return {
+            "candidates": 0, "completed": 0, "skipped": 0, "failed": 0,
+            "ran": False, "reason": window.refusal,
+        }
 
     from django.conf import settings
-    not_before, cutoff = window
+    not_before, cutoff = window.not_before, window.cutoff
     result = complete_elapsed_bookings(
         not_before=not_before,
         cutoff=cutoff,
@@ -417,12 +505,39 @@ def auto_complete_elapsed_bookings() -> dict:
             settings, "BOOKING_AUTO_COMPLETE_BATCH_SIZE", 200,
         ),
     )
-    if result["completed"] or result["failed"]:
-        logger.info(
-            "booking.auto_complete_summary completed=%d skipped=%d failed=%d",
-            result["completed"], result["skipped"], result["failed"],
+
+    # One line per pass, unconditionally — including the pass that did
+    # nothing. Silence has to mean "the task did not run", and nothing
+    # else, or the next person reading this log is back where DRF-1048
+    # started. The window travels with the counts because a wrong window
+    # (timezone, grace period, floor) produces a legitimately empty pass
+    # that is indistinguishable from a correct one without it.
+    diagnosis = (
+        _empty_pass_diagnosis(not_before=not_before, cutoff=cutoff)
+        if result["candidates"] == 0
+        else {"elapsed_unconfirmed": None, "below_floor": None}
+    )
+    logger.info(
+        "booking.auto_complete.pass ran=true reason=ok "
+        "candidates=%d completed=%d skipped=%d failed=%d "
+        "cutoff=%s not_before=%s elapsed_unconfirmed=%s below_floor=%s",
+        result["candidates"], result["completed"], result["skipped"],
+        result["failed"], cutoff.isoformat(), not_before.isoformat(),
+        "n/a" if diagnosis["elapsed_unconfirmed"] is None
+        else diagnosis["elapsed_unconfirmed"],
+        "n/a" if diagnosis["below_floor"] is None
+        else diagnosis["below_floor"],
+    )
+    if result["failed"]:
+        # A row the sweep could not close is not a routine outcome: the
+        # visit happened, nothing downstream of completion fired, and no
+        # later tick will retry it any harder. Separate ERROR line so it
+        # is alertable without parsing the INFO summary.
+        logger.error(
+            "booking.auto_complete.rows_failed failed=%d candidates=%d",
+            result["failed"], result["candidates"],
         )
-    return {**result, "ran": True}
+    return {**result, "ran": True, "reason": "ok"}
 
 
 @shared_task(name="appointments.tasks.purge_expired_idempotency_keys")
