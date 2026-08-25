@@ -19,6 +19,7 @@ The task itself is small; what needs pinning is everything around it.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from io import StringIO
@@ -346,3 +347,193 @@ class TestBacklogCommand:
             status=Appointment.Status.COMPLETED,
         ).count() == 1
         assert "re-run to continue" in out.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# DRF-1048 — a pass that did nothing must be distinguishable from a pass
+# that never happened.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def task_log():
+    """Rendered records from the ``appointments.tasks`` logger.
+
+    Attaching a handler to that logger directly rather than using
+    ``caplog``: settings/base.py sets ``propagate=False`` on the
+    ``appointments`` logger, so caplog's root-attached handler never
+    sees these records (same reason test_tasks.py patches the logger).
+    Unlike a patched logger this keeps %-formatting, which matters here —
+    what is being pinned is the line an operator reads, not the call.
+    """
+    logger = logging.getLogger("appointments.tasks")
+    records: list[logging.LogRecord] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Collect(level=logging.DEBUG)
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+
+def _pass_lines(records):
+    """Every ``booking.auto_complete.pass`` line the run emitted."""
+    return [
+        r.getMessage() for r in records
+        if r.getMessage().startswith("booking.auto_complete.pass")
+    ]
+
+
+def _one_pass_line(records):
+    lines = _pass_lines(records)
+    assert len(lines) == 1, f"expected exactly one pass line, got {lines}"
+    return lines[0]
+
+
+@pytest.mark.django_db(transaction=True)
+class TestEveryPassLeavesATrace:
+    """The reason DRF-1048 was open for weeks: the sweep was registered in
+    beat, ran every 15 minutes, and wrote nothing to the log on any of
+    those ticks — neither when it was gated off, nor when it ran and
+    matched nothing. "No log lines" was therefore consistent with *three*
+    different failures at once, and told an operator which one it was: no
+    idea. Every exit path below now names itself.
+    """
+
+    def test_gated_off_still_says_so(
+        self, settings, task_log, client_user, specialist, service,
+    ):
+        settings.BOOKING_AUTO_COMPLETE_ENABLED = False
+        _booking(client_user, specialist, service, ended_hours_ago=9)
+
+        result = auto_complete_elapsed_bookings()
+
+        assert result["ran"] is False
+        assert result["reason"] == "disabled"
+        line = _one_pass_line(task_log)
+        assert "ran=false" in line
+        assert "reason=disabled" in line
+        # Names the knob, so the log line is actionable without the source.
+        assert "BOOKING_AUTO_COMPLETE_ENABLED" in line
+
+    def test_missing_floor_says_which_key_is_missing(
+        self, settings, task_log, client_user, specialist, service,
+    ):
+        settings.BOOKING_AUTO_COMPLETE_ENABLED = True
+        settings.BOOKING_AUTO_COMPLETE_NOT_BEFORE = ""
+        _booking(client_user, specialist, service, ended_hours_ago=9)
+
+        result = auto_complete_elapsed_bookings()
+
+        assert result["ran"] is False
+        assert result["reason"] == "no_floor"
+        assert "reason=no_floor" in _one_pass_line(task_log)
+
+    def test_a_pass_that_found_nothing_is_a_log_line_not_silence(
+        self, settings, task_log, client_user, specialist, service,
+    ):
+        """The empty pass — the case that used to be indistinguishable
+        from the task not running at all."""
+        _enabled(settings)
+
+        result = auto_complete_elapsed_bookings()
+
+        assert result["ran"] is True
+        assert result["candidates"] == 0
+        line = _one_pass_line(task_log)
+        assert "ran=true" in line
+        assert "candidates=0" in line
+        assert "completed=0" in line
+
+    def test_empty_pass_names_the_bookings_it_was_not_allowed_to_touch(
+        self, settings, task_log, client_user, specialist, service,
+    ):
+        """An empty pass has two very different meanings: nothing
+        happened, or plenty happened and none of it was eligible. The
+        line separates them so the next question is answerable from the
+        log alone.
+        """
+        _enabled(settings, floor_days_ago=2)
+        # Elapsed, inside the window, but never reached CONFIRMED — the
+        # sweep must not touch it, and an operator must be able to see
+        # that this is why the pass was empty.
+        stuck = _booking(client_user, specialist, service, ended_hours_ago=9)
+        Appointment.objects.filter(pk=stuck.pk).update(
+            status=Appointment.Status.AWAITING_PAYMENT,
+        )
+        # Elapsed and CONFIRMED, but older than the floor — the backlog
+        # the manual command exists for.
+        _booking(client_user, specialist, service, ended_hours_ago=24 * 9)
+
+        result = auto_complete_elapsed_bookings()
+
+        assert result["candidates"] == 0
+        line = _one_pass_line(task_log)
+        assert "elapsed_unconfirmed=1" in line
+        assert "below_floor=1" in line
+
+    def test_a_pass_that_worked_reports_its_counts(
+        self, settings, task_log, client_user, specialist, service,
+    ):
+        _enabled(settings)
+        _booking(client_user, specialist, service, ended_hours_ago=4)
+
+        result = auto_complete_elapsed_bookings()
+
+        assert result["completed"] == 1
+        line = _one_pass_line(task_log)
+        assert "candidates=1" in line
+        assert "completed=1" in line
+        assert "skipped=0" in line
+        assert "failed=0" in line
+
+    def test_the_line_carries_the_window_it_used(
+        self, settings, task_log, client_user, specialist, service,
+    ):
+        """Wrong-window bugs (timezone, grace period, floor) are invisible
+        unless the pass says which window it actually swept."""
+        _enabled(settings, hours=3)
+
+        auto_complete_elapsed_bookings()
+
+        line = _one_pass_line(task_log)
+        assert "cutoff=" in line
+        assert "not_before=" in line
+
+
+@pytest.mark.django_db
+class TestTheSweepIsActuallyScheduled:
+    """The other half of "did it run": is it wired to run at all.
+
+    Three failures produce the same empty log — beat not firing the
+    entry, the entry naming a task the worker cannot resolve, and the
+    task firing and refusing. The pass line separates the third from the
+    first two; these two assertions pin the first two, so a rename or a
+    dropped beat entry fails here instead of in production silence.
+    """
+
+    def test_beat_schedules_it(self, settings):
+        entry = settings.CELERY_BEAT_SCHEDULE["auto-complete-elapsed-bookings"]
+        assert entry["task"] == "appointments.tasks.auto_complete_elapsed_bookings"
+        # Grace period is hours; a quarter-hour of granularity is
+        # invisible operationally. Pin the order of magnitude, not the
+        # number — the point is that it is minutes, not days.
+        assert 60 <= entry["schedule"] <= 3600
+
+    def test_the_worker_can_resolve_the_name_beat_sends(self, settings):
+        """A beat entry naming a task no worker has registered fails as
+        ``Received unregistered task`` on the worker — invisible from the
+        Django side, and indistinguishable from beat never firing."""
+        from djangoProject.celery import app
+
+        name = settings.CELERY_BEAT_SCHEDULE[
+            "auto-complete-elapsed-bookings"
+        ]["task"]
+        assert name in app.tasks
