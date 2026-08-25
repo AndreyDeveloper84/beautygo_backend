@@ -6,6 +6,9 @@ Three actor classes, three rule sets on the create path:
    contract: booking window, slot grid, schedule frame, salon closures,
    time-off. DRF-1062 added the frame + closure; this task adds the grid,
    the one piece of the read-path contract the write path still skipped.
+   The grid engages under the same monotone rule as the frame guard:
+   once the specialist has declared a schedule (where nothing is offered
+   there is no grid to violate).
 2. **Staff booking** (walk-in, salon-recorded) — the schedule does not
    constrain: a client physically standing in front of the master at
    19:30 must be recordable even when the template ends at 19:00 and the
@@ -50,11 +53,23 @@ def _utc(day: date, hh: int, mm: int = 0) -> datetime:
     )
 
 
-def _grid_time_ahead(minutes: int) -> datetime:
-    """A grid-aligned UTC start less than BOOKING_MIN_AHEAD_MINUTES away."""
-    t = datetime.now(timezone.utc) + timedelta(minutes=minutes)
-    t = t.replace(second=0, microsecond=0)
-    return t.replace(minute=(t.minute // 30) * 30)
+def _grid_time_ahead() -> datetime:
+    """A grid-aligned UTC start in the near future, inside the client window.
+
+    Derived from the clock on every run, never written down: rounds UP to
+    the next grid point (rounding down would land in the PAST for any
+    "now" past the half hour) and steps one grid further when that point
+    is uncomfortably close. The result is always 5..35 minutes ahead —
+    strictly future, strictly under BOOKING_MIN_AHEAD_MINUTES (60), at
+    every hour of every day.
+    """
+    grid = timedelta(minutes=30)
+    now = datetime.now(timezone.utc)
+    floor = now.replace(minute=(now.minute // 30) * 30, second=0, microsecond=0)
+    nxt = floor + grid
+    if nxt - now < timedelta(minutes=5):
+        nxt += grid
+    return nxt
 
 
 def _dto(client_user, specialist, service, start_at, actor_role, **kwargs):
@@ -76,13 +91,32 @@ def _dto(client_user, specialist, service, start_at, actor_role, **kwargs):
 # ---------------------------------------------------------------------------
 
 class TestClientGridAlignment:
+    @pytest.fixture
+    def scheduled_specialist(self, specialist):
+        """Declare the weekly frame. The grid gate follows the frame
+        guard's monotone rule (no schedule declared → nothing offered →
+        no grid to violate), so these tests announce hours first."""
+        from datetime import time as dt_time
+
+        from appointments.models import SpecialistWorkingHours
+
+        for day in range(7):
+            SpecialistWorkingHours.objects.create(
+                specialist=specialist,
+                day_of_week=day,
+                is_working_day=True,
+                start_time=dt_time(9, 0),
+                end_time=dt_time(18, 0),
+            )
+        return specialist
+
     def test_client_off_grid_start_is_refused(
-        self, client_user, specialist, service,
+        self, client_user, scheduled_specialist, service,
     ):
         """The read path only ever offers grid-aligned slots; a client
         POST that fabricates a 10:15 start must not land."""
         dto = _dto(
-            client_user, specialist, service,
+            client_user, scheduled_specialist, service,
             _utc(_next_weekday(0), 10, 15), actor_role="user",
         )
 
@@ -90,22 +124,22 @@ class TestClientGridAlignment:
             CreateBookingService().execute(dto)
 
     def test_client_on_grid_start_is_accepted(
-        self, client_user, specialist, service,
+        self, client_user, scheduled_specialist, service,
     ):
         dto = _dto(
-            client_user, specialist, service,
+            client_user, scheduled_specialist, service,
             _utc(_next_weekday(0), 10, 30), actor_role="user",
         )
 
         assert CreateBookingService().execute(dto).booking_id
 
     def test_staff_off_grid_start_is_allowed(
-        self, client_user, specialist, service,
+        self, client_user, scheduled_specialist, service,
     ):
         """The grid is part of the client contract, not of the diary a
         master keeps for people who are physically present."""
         dto = _dto(
-            client_user, specialist, service,
+            client_user, scheduled_specialist, service,
             _utc(_next_weekday(0), 10, 15), actor_role="specialist",
         )
 
@@ -125,7 +159,7 @@ class TestStaffBookingWindow:
         planning their week, not a reason to refuse a human on the spot."""
         dto = _dto(
             client_user, specialist, service,
-            _grid_time_ahead(10), actor_role="specialist",
+            _grid_time_ahead(), actor_role="specialist",
         )
 
         assert CreateBookingService().execute(dto).booking_id
@@ -135,7 +169,7 @@ class TestStaffBookingWindow:
     ):
         dto = _dto(
             client_user, specialist, service,
-            _grid_time_ahead(10), actor_role="user",
+            _grid_time_ahead(), actor_role="user",
         )
 
         with pytest.raises(BookingWindowError):
@@ -195,11 +229,18 @@ class TestTimeOverride:
             time_override_reason="мастер подтвердил лично, отсутствие снято устно",
             actor_id=specialist_user.id,
         )
-        with caplog.at_level(
-            logging.WARNING,
-            logger="appointments.application.services.create_booking_service",
-        ):
-            result = CreateBookingService().execute(dto)
+        # The "appointments" logger is configured propagate=False
+        # (settings/base.py LOGGING), so caplog's root-logger handler
+        # never sees its records — attach the capture handler directly.
+        audit_logger = logging.getLogger(
+            "appointments.application.services.create_booking_service"
+        )
+        audit_logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.WARNING, logger=audit_logger.name):
+                result = CreateBookingService().execute(dto)
+        finally:
+            audit_logger.removeHandler(caplog.handler)
 
         assert result.booking_id
 
