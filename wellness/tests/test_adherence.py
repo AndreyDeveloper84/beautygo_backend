@@ -57,9 +57,15 @@ def _at(day: date, hour: int = 10) -> datetime:
 @pytest.mark.django_db
 class TestAcceptance:
     def test_fact_without_obligation_grows_nothing(self, customer, plan):
-        """Случай 1: вода записана, обязательства нет — adherence пуст."""
+        """Случай 1: вода записана, обязательства нет — adherence пуст.
+
+        Положительная стража на тех же данных: провайдер факт **видит**
+        (count_facts == 1), значит пустой ответ — следствие отсутствия
+        PlanAction, а не протухшей фикстуры. Пара test_fact_with_obligation_counts
+        проходит те же данные через тот же путь с обязательством."""
         today = timezone.localdate()
         _water(customer, at=_at(today))
+        assert count_facts("log_water", customer.pk, _at(today).replace(hour=0), _at(today + timedelta(days=1))) == 1
         assert compute_plan_adherence(plan, today, today + timedelta(days=1)) == []
 
     def test_fact_with_obligation_counts(self, customer, plan):
