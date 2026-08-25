@@ -41,6 +41,23 @@ django-celery-beat==2.8.1
 # Database
 psycopg2-binary==2.9.10
 
+# Transitive pin (not imported by our code).
+# sqlparse arrives with Django (Django requires sqlparse>=0.3.1). Versions
+# <= 0.5.6.dev0 carry three high-severity DoS advisories (ReDoS on
+# dollar-quoted literals, O(subtree) materialisation in TokenList.__init__,
+# quadratic group_comments) plus one medium (backslash escaping in generated
+# snippets). 0.6.0 is the first patched release.
+#
+# Reachability (DRF-1394): none of those paths run on the pilot. Django only
+# calls sqlparse from BaseDatabaseOperations.prepare_sql_script (RunSQL
+# migrations), the mysql/sqlite3 introspection backends, and the --debug-sql
+# test runner. The postgresql backend overrides prepare_sql_script to
+# `return [sql]`, dev/prod/test all run postgresql, we have zero RunSQL
+# migrations, and we run pytest-django rather than Django's test runner.
+# Pinned anyway because the bump costs nothing (we never import it) and it
+# clears all three highs so the next real high is not buried under them.
+sqlparse==0.6.0
+
 # Production server
 gunicorn==23.0.0
 
