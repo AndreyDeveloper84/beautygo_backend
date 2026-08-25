@@ -102,6 +102,44 @@ scripts should poll `/health/ready/` until 200 before flipping traffic.
 | Readiness 503 for 5 min | Deploy never completed | P2 | Look at deploy log |
 | `auth_sensitive` throttle hits per minute > 100 | (PR2 logs) | P3 | Investigate brute-force |
 | `reschedule.unversioned_command` share of reschedule volume | > owner-set threshold, sustained | P3 | Review §6 rollout readiness |
+| `booking.auto_complete.pass` **absent** for > 1h | Beat or worker is not running the sweep at all | P2 | Check celery_beat / celery_worker; the task fires every 15 min and logs on every tick, including the ticks where it does nothing |
+| `booking.auto_complete.rows_failed` | Any | P2 | A visit happened, the sweep could not close it, and no later tick retries harder — see the per-row ERROR for the appointment id |
+| `booking.auto_complete.pass … elapsed_unconfirmed=N` | N > 0, sustained | P2 | Visits are elapsing without ever reaching CONFIRMED — the lifecycle is broken upstream of completion, not in the sweep |
+
+## 5a. The visit-completion sweep (DRF-1064 / DRF-1048)
+
+`appointments.tasks.auto_complete_elapsed_bookings` closes confirmed
+visits that elapsed and that nobody closed by hand. It is registered in
+`CELERY_BEAT_SCHEDULE` unconditionally and gated by
+`BOOKING_AUTO_COMPLETE_ENABLED` + `BOOKING_AUTO_COMPLETE_NOT_BEFORE`.
+
+**Every tick writes exactly one line**, whatever it did or refused to do:
+
+```
+booking.auto_complete.pass ran=false reason=disabled candidates=0 ...
+booking.auto_complete.pass ran=true reason=ok candidates=0 completed=0
+  skipped=0 failed=0 cutoff=… not_before=…
+  elapsed_unconfirmed=1 below_floor=1
+```
+
+That is deliberate, and it is the fix DRF-1048 turned out to need. The
+sweep previously logged only when it closed or failed on something, so a
+log with no `booking.auto_complete` lines in it was equally consistent
+with beat not firing, the feature gate being closed, and the sweep
+running and matching nothing — three different problems with three
+different fixes. **Silence now means one thing: the task is not
+running.** Everything else says which of the remaining cases it is:
+
+- `reason=disabled` / `reason=no_floor` — gated off, one of the two
+  ignition keys is missing.
+- `candidates=0` with `elapsed_unconfirmed=N` — visits elapsed inside
+  the window but never reached `CONFIRMED`; the sweep is correct to skip
+  them and the problem is upstream.
+- `candidates=0` with `below_floor=N` — the standing backlog older than
+  the floor, drained deliberately via
+  `manage.py complete_elapsed_backlog`.
+- `cutoff` / `not_before` — the window actually swept, so a timezone or
+  grace-period bug is readable from the line instead of inferred.
 
 ## 6. Temporary compatibility flags
 
