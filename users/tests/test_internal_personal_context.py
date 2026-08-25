@@ -134,3 +134,47 @@ class TestMarkAskedAndSkip:
         )
         assert resp.status_code == 200
         assert resp.data["data"]["skip_count"] == 1
+
+
+class TestDataSourcesOnTheWire:
+    """P0-3 — бот рендерит эти значения прямо в промпт LLM, значит origin
+    обязан ехать вместе с ними. До этого он терялся ровно на границе API."""
+
+    def test_get_returns_a_source_for_every_green_field(self, user):
+        ctx = UserPersonalContext.objects.create(user=user, diet_type="vegan")
+        ctx.busy_days = ["tue"]
+        ctx.data_sources = {"busy_days": "inferred", "diet_type": "explicit"}
+        ctx.save()
+
+        body = _api().get(_url(user.id)).json()["data"]
+        sources = body["data_sources"]
+        # Полная карта: у каждого зелёного поля есть происхождение, поэтому
+        # правило потребителя простое — «не explicit ⇒ вывод».
+        assert set(sources) == set(body["context"])
+        assert sources["busy_days"] == "inferred"
+        assert sources["diet_type"] == "explicit"
+
+    def test_unstamped_field_defaults_to_explicit(self, user):
+        """Legacy-строка без штампа — это то, что человек ввёл в мобильном."""
+        UserPersonalContext.objects.create(user=user, diet_type="vegan")
+        sources = _api().get(_url(user.id)).json()["data"]["data_sources"]
+        assert sources["diet_type"] == "explicit"
+        assert all(v == "explicit" for v in sources.values())
+
+    def test_patch_echoes_the_source_it_just_recorded(self, user):
+        UserPersonalContext.objects.create(user=user)
+        resp = _api().patch(
+            _url(user.id),
+            {"updates": [{"field": "diet_type", "value": "keto", "source": "behavioral"}]},
+            format="json",
+        )
+        assert resp.status_code == 200
+        assert resp.json()["data"]["data_sources"]["diet_type"] == "behavioral"
+
+    def test_context_payload_itself_is_unchanged(self, user):
+        """Отрицательный: `context` — прежний, `data_sources` рядом, не внутри."""
+        UserPersonalContext.objects.create(user=user, diet_type="vegan")
+        data = _api().get(_url(user.id)).json()["data"]
+        assert "data_sources" not in data["context"]
+        assert data["context"]["diet_type"] == "vegan"
+        assert set(data) == {"ayla_user_id", "context", "data_sources", "meta"}
