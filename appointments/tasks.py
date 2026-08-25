@@ -12,7 +12,7 @@ real handlers in ``EVENT_HANDLERS`` without touching this file.
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Callable, NamedTuple
 
 from celery import shared_task
@@ -277,8 +277,8 @@ class SweepWindow(NamedTuple):
     goes into the pass line as ``reason=<token>`` and operators grep for
     it. Empty means the sweep may run.
     """
-    not_before: object = None
-    cutoff: object = None
+    not_before: datetime | None = None
+    cutoff: datetime | None = None
     refusal: str = ""
 
     @property
