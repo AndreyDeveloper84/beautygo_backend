@@ -357,3 +357,61 @@ class EvidenceRegistryEntry(models.Model):
             f"EvidenceRegistryEntry({self.outcome_target}, {self.observation_type},"
             f" {self.origin}, {self.instrument or '—'})"
         )
+
+
+class PlanAction(models.Model):
+    """Плановое обязательство внутри Personal Plan (DRF-1334, контракт §2).
+
+    Запись «что обещано» — НЕ engine: ни расписания, ни напоминаний, ни
+    пересчёта. Сопоставление с фактами — отдельная производная
+    (`wellness/adherence.py`).
+
+    `action_type` — курируемый ключ: первый срез — `log_food`, `log_water`
+    (ровно под факты, которые Nutrition уже сообщает); новый ключ — owner
+    approval, как в Evidence Registry.
+
+    Каденс сознательно бедный (вердикт 25.08): конкретные дни и время суток
+    — уже суждение о том, *когда* человек что-то сделал, а это за рубежом
+    «утверждение о плане, не о человеке».
+    """
+
+    class ActionType(models.TextChoices):
+        LOG_FOOD = "log_food", "Запись питания"
+        LOG_WATER = "log_water", "Запись воды"
+
+    class Cadence(models.TextChoices):
+        PER_DAY = "per_day", "Раз в день"
+        PER_WEEK = "per_week", "Раз в неделю"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan = models.ForeignKey(
+        PersonalPlan,
+        on_delete=models.PROTECT,
+        related_name="actions",
+    )
+    action_type = models.CharField(
+        max_length=32,
+        choices=ActionType.choices,
+        help_text="Курируемый ключ обязательства; расширение — owner approval",
+    )
+    cadence = models.CharField(
+        max_length=16,
+        choices=Cadence.choices,
+    )
+    target_count = models.PositiveSmallIntegerField(
+        default=1,
+        help_text="Сколько раз за ведро каденса (день для per_day, неделя для per_week)",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["plan"], name="planaction_plan_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"PlanAction<plan={self.plan_id}> {self.action_type}"
+            f" {self.target_count}x {self.cadence}"
+        )
