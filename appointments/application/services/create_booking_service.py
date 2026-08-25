@@ -314,13 +314,15 @@ class CreateBookingService:
         #   schedule frame, tenant closure, time-off. Until DRF-1072 the
         #   grid was the one rule the read path enforced and create did
         #   not.
-        # * STAFF without override: time-off only. The schedule says when
-        #   clients may book the salon, not when the salon may work — a
-        #   walk-in is recorded by the master for someone physically
-        #   present (DRF-1062), and the client self-service window is not
-        #   their constraint either. Time-off still blocks: an absence is
-        #   the master's own statement, so lifting it needs the explicit
-        #   override, not a side effect of who pressed the button.
+        # * STAFF without override: time-off here, plus the outer time
+        #   bounds pre-transaction. The schedule says when clients may
+        #   book the salon, not when the salon may work — a walk-in is
+        #   recorded by the master for someone physically present
+        #   (DRF-1062), and the client's 60-minute notice is not their
+        #   constraint either. Time-off still blocks: an absence is the
+        #   master's own statement about themselves, so lifting it needs
+        #   the explicit override, not a side effect of who pressed the
+        #   button.
         if dto.time_override:
             logger.warning(
                 "booking.time_override specialist=%s start=%s actor_role=%s "
