@@ -24,6 +24,7 @@ def _ctx(**kwargs):
         prefers_flexible_cancellation=kwargs.get(
             "prefers_flexible_cancellation", False,
         ),
+        data_sources=kwargs.get("data_sources"),
     )
 
 
@@ -175,3 +176,69 @@ class TestComposition:
         assert "ИЗВЕСТНЫЕ ПРЕДПОЧТЕНИЯ КЛИЕНТА" in out
         assert out.count("\n- ") == 1
         assert "халяль" in out
+
+
+# ---------------------------------------------------------------------------
+# Происхождение факта (P0-3) — выведенное значение не должно выглядеть
+# как введённое человеком.
+# ---------------------------------------------------------------------------
+
+
+class TestProvenanceMarking:
+    def test_derived_field_is_marked_stated_one_is_not(self):
+        ctx = _ctx(
+            diet_type="vegan",
+            preferred_time_slots=["evening"],
+            data_sources={"diet_type": "explicit", "preferred_time_slots": "behavioral"},
+        )
+        out = format_personal_context_hint(ctx)
+        assert "- диета: веганство" in out
+        assert "- (вывод, клиент этого не говорил) удобное время: вечер (17–21)" in out
+
+    def test_stated_and_derived_are_not_the_same_text(self):
+        stated = format_personal_context_hint(
+            _ctx(diet_type="vegan", data_sources={"diet_type": "explicit"})
+        )
+        derived = format_personal_context_hint(
+            _ctx(diet_type="vegan", data_sources={"diet_type": "inferred"})
+        )
+        assert stated != derived
+        assert "вывод" not in stated
+
+    def test_sensitivities_carry_their_origin(self):
+        """Чувствительность идёт в промпт отдельным путём (P0-4) — и тоже с меткой."""
+        out = format_personal_context_hint(
+            _ctx(
+                skin_sensitivities=["ретинол"],
+                data_sources={"skin_sensitivities": "transactional"},
+            )
+        )
+        assert "(вывод, клиент этого не говорил) чувствительность / аллергии: ретинол" in out
+
+    def test_without_data_sources_output_is_unchanged(self):
+        """Отрицательный: всё, что помечено верно сегодня, не изменилось.
+
+        Ни одно поле этого блока сегодня не ставится выводом
+        (`personal_context_inference` пишет только `favorite_masters` и
+        `busy_days`, которые здесь не рендерятся), поэтому реальный вывод
+        обязан остаться прежним до байта.
+        """
+        fields = dict(
+            preferred_districts=["Центр"],
+            preferred_time_slots=["evening"],
+            price_range_min=Decimal("1000"),
+            price_range_max=Decimal("2500"),
+            diet_type="vegan",
+            skin_sensitivities=["ретинол"],
+            prefers_flexible_cancellation=True,
+        )
+        baseline = format_personal_context_hint(_ctx(**fields))
+        assert format_personal_context_hint(_ctx(**fields, data_sources=None)) == baseline
+        assert format_personal_context_hint(_ctx(**fields, data_sources={})) == baseline
+        all_explicit = dict.fromkeys(
+            (*fields, "price_range_min", "price_range_max"), "explicit"
+        )
+        assert (
+            format_personal_context_hint(_ctx(**fields, data_sources=all_explicit)) == baseline
+        )
+        assert "вывод" not in baseline
