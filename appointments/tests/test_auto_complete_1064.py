@@ -354,16 +354,45 @@ class TestBacklogCommand:
 # that never happened.
 # ---------------------------------------------------------------------------
 
-def _pass_lines(caplog):
+@pytest.fixture
+def task_log():
+    """Rendered records from the ``appointments.tasks`` logger.
+
+    Attaching a handler to that logger directly rather than using
+    ``caplog``: settings/base.py sets ``propagate=False`` on the
+    ``appointments`` logger, so caplog's root-attached handler never
+    sees these records (same reason test_tasks.py patches the logger).
+    Unlike a patched logger this keeps %-formatting, which matters here —
+    what is being pinned is the line an operator reads, not the call.
+    """
+    logger = logging.getLogger("appointments.tasks")
+    records: list[logging.LogRecord] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = _Collect(level=logging.DEBUG)
+    previous_level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous_level)
+
+
+def _pass_lines(records):
     """Every ``booking.auto_complete.pass`` line the run emitted."""
     return [
-        r.getMessage() for r in caplog.records
+        r.getMessage() for r in records
         if r.getMessage().startswith("booking.auto_complete.pass")
     ]
 
 
-def _one_pass_line(caplog):
-    lines = _pass_lines(caplog)
+def _one_pass_line(records):
+    lines = _pass_lines(records)
     assert len(lines) == 1, f"expected exactly one pass line, got {lines}"
     return lines[0]
 
@@ -379,55 +408,52 @@ class TestEveryPassLeavesATrace:
     """
 
     def test_gated_off_still_says_so(
-        self, settings, caplog, client_user, specialist, service,
+        self, settings, task_log, client_user, specialist, service,
     ):
         settings.BOOKING_AUTO_COMPLETE_ENABLED = False
         _booking(client_user, specialist, service, ended_hours_ago=9)
 
-        with caplog.at_level(logging.INFO, logger="appointments.tasks"):
-            result = auto_complete_elapsed_bookings()
+        result = auto_complete_elapsed_bookings()
 
         assert result["ran"] is False
         assert result["reason"] == "disabled"
-        line = _one_pass_line(caplog)
+        line = _one_pass_line(task_log)
         assert "ran=false" in line
         assert "reason=disabled" in line
         # Names the knob, so the log line is actionable without the source.
         assert "BOOKING_AUTO_COMPLETE_ENABLED" in line
 
     def test_missing_floor_says_which_key_is_missing(
-        self, settings, caplog, client_user, specialist, service,
+        self, settings, task_log, client_user, specialist, service,
     ):
         settings.BOOKING_AUTO_COMPLETE_ENABLED = True
         settings.BOOKING_AUTO_COMPLETE_NOT_BEFORE = ""
         _booking(client_user, specialist, service, ended_hours_ago=9)
 
-        with caplog.at_level(logging.INFO, logger="appointments.tasks"):
-            result = auto_complete_elapsed_bookings()
+        result = auto_complete_elapsed_bookings()
 
         assert result["ran"] is False
         assert result["reason"] == "no_floor"
-        assert "reason=no_floor" in _one_pass_line(caplog)
+        assert "reason=no_floor" in _one_pass_line(task_log)
 
     def test_a_pass_that_found_nothing_is_a_log_line_not_silence(
-        self, settings, caplog, client_user, specialist, service,
+        self, settings, task_log, client_user, specialist, service,
     ):
         """The empty pass — the case that used to be indistinguishable
         from the task not running at all."""
         _enabled(settings)
 
-        with caplog.at_level(logging.INFO, logger="appointments.tasks"):
-            result = auto_complete_elapsed_bookings()
+        result = auto_complete_elapsed_bookings()
 
         assert result["ran"] is True
         assert result["candidates"] == 0
-        line = _one_pass_line(caplog)
+        line = _one_pass_line(task_log)
         assert "ran=true" in line
         assert "candidates=0" in line
         assert "completed=0" in line
 
     def test_empty_pass_names_the_bookings_it_was_not_allowed_to_touch(
-        self, settings, caplog, client_user, specialist, service,
+        self, settings, task_log, client_user, specialist, service,
     ):
         """An empty pass has two very different meanings: nothing
         happened, or plenty happened and none of it was eligible. The
@@ -446,40 +472,37 @@ class TestEveryPassLeavesATrace:
         # the manual command exists for.
         _booking(client_user, specialist, service, ended_hours_ago=24 * 9)
 
-        with caplog.at_level(logging.INFO, logger="appointments.tasks"):
-            result = auto_complete_elapsed_bookings()
+        result = auto_complete_elapsed_bookings()
 
         assert result["candidates"] == 0
-        line = _one_pass_line(caplog)
+        line = _one_pass_line(task_log)
         assert "elapsed_unconfirmed=1" in line
         assert "below_floor=1" in line
 
     def test_a_pass_that_worked_reports_its_counts(
-        self, settings, caplog, client_user, specialist, service,
+        self, settings, task_log, client_user, specialist, service,
     ):
         _enabled(settings)
         _booking(client_user, specialist, service, ended_hours_ago=4)
 
-        with caplog.at_level(logging.INFO, logger="appointments.tasks"):
-            result = auto_complete_elapsed_bookings()
+        result = auto_complete_elapsed_bookings()
 
         assert result["completed"] == 1
-        line = _one_pass_line(caplog)
+        line = _one_pass_line(task_log)
         assert "candidates=1" in line
         assert "completed=1" in line
         assert "skipped=0" in line
         assert "failed=0" in line
 
     def test_the_line_carries_the_window_it_used(
-        self, settings, caplog, client_user, specialist, service,
+        self, settings, task_log, client_user, specialist, service,
     ):
         """Wrong-window bugs (timezone, grace period, floor) are invisible
         unless the pass says which window it actually swept."""
         _enabled(settings, hours=3)
 
-        with caplog.at_level(logging.INFO, logger="appointments.tasks"):
-            auto_complete_elapsed_bookings()
+        auto_complete_elapsed_bookings()
 
-        line = _one_pass_line(caplog)
+        line = _one_pass_line(task_log)
         assert "cutoff=" in line
         assert "not_before=" in line
