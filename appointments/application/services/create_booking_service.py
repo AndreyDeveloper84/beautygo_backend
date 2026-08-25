@@ -10,13 +10,14 @@ Steps:
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as _dt_timezone
 
 from django.conf import settings
 from django.db import transaction
 
 from appointments.application.dto import CreateBookingDTO, BookingResultDTO
 from appointments.domain.exceptions import (
+    BookingWindowError,
     ExternalSlotTakenError,
     SlotNotAvailableError,
     SpecialistNotActiveError,
@@ -39,6 +40,10 @@ from appointments.domain.value_objects import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _now_utc() -> datetime:
+    return datetime.now(tz=_dt_timezone.utc)
 
 
 # The client actor has two spellings on CreateBookingDTO: "user" (legacy,
@@ -157,19 +162,30 @@ class CreateBookingService:
                 "This service is not available for booking"
             )
 
+        if dto.start_at.tzinfo is None:
+            # Checked before any comparison against "now" below: a naive
+            # datetime used to reach the window policy and die there with
+            # a raw TypeError instead of this sentence.
+            raise ValueError("start_at must be timezone-aware (UTC)")
+
         if dto.time_override:
             self._validate_time_override(dto)
         elif _is_client_actor(dto.actor_role):
-            # DRF-1072: the booking window is part of the CLIENT
-            # time contract. A master recording someone physically
-            # present at 19:30 is not bound by the 60-minute self-service
-            # notice any more than by the working-hours template
-            # (DRF-1062) — the schedule constrains who may book the
-            # salon, not the salon itself.
+            # DRF-1072: the whole booking window — the 60-minute notice
+            # AND the published horizon — is the CLIENT's rule.
             self._booking_window_policy.validate_booking_window(dto.start_at)
-
-        if dto.start_at.tzinfo is None:
-            raise ValueError("start_at must be timezone-aware (UTC)")
+        else:
+            # DRF-1072: staff lose the notice, keep the outer bounds.
+            # A master recording someone physically present at 19:30 is
+            # not bound by a 60-minute self-service notice any more than
+            # by the working-hours template (DRF-1062) — the schedule
+            # constrains who may book the salon, not the salon itself.
+            # But dropping the whole window with the notice would have
+            # been a different thing entirely: nothing would then bound
+            # a staff timestamp at all, and "any instant the caller
+            # cares to name" is not a context — it is the absence of
+            # one, which is exactly what this task exists to remove.
+            self._validate_staff_time_bounds(dto.start_at)
 
         return specialist, resolved
 
@@ -187,6 +203,29 @@ class CreateBookingService:
             )
         if not (dto.time_override_reason or "").strip():
             raise ValueError("time override requires a reason")
+
+    @staticmethod
+    def _validate_staff_time_bounds(start_at) -> None:
+        """The outer time bounds a staff booking keeps (DRF-1072).
+
+        Everything the client window enforces EXCEPT the min-ahead
+        notice: a booking is a future appointment, and it sits inside
+        the horizon the marketplace publishes. Reads the same setting
+        the client window reads, so the two cannot drift apart.
+
+        Backdating a visit that already happened is a real need and a
+        different act — it goes through the administrative override,
+        explicitly and with a reason, never as a side effect of which
+        endpoint the caller reached.
+        """
+        max_ahead = int(getattr(settings, "BOOKING_MAX_AHEAD_DAYS", 60))
+        now = _now_utc()
+        if start_at < now:
+            raise BookingWindowError("Booking cannot be created in the past")
+        if start_at > now + timedelta(days=max_ahead):
+            raise BookingWindowError(
+                f"Booking cannot be more than {max_ahead} days in advance"
+            )
 
     @transaction.atomic
     def _execute_atomic(

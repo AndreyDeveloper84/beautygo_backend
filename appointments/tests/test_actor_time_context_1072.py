@@ -12,8 +12,11 @@ Three actor classes, three rule sets on the create path:
 2. **Staff booking** (walk-in, salon-recorded) — the schedule does not
    constrain: a client physically standing in front of the master at
    19:30 must be recordable even when the template ends at 19:00 and the
-   client self-service window demands an hour's notice. Time-off still
-   blocks — an absence is the master's own statement.
+   client self-service window demands an hour's notice. What staff lose
+   is the notice, not time itself: the outer bounds (no past, nothing
+   beyond the published horizon) still hold — a timestamp bounded by
+   nothing is not a wider context, it is the absence of one. Time-off
+   still blocks too — an absence is the master's own statement.
 3. **Administrative override** — explicit, deliberate, audited: a trusted
    staff caller lifts even the absence, and the who/why is fixed in the
    existing audit mechanisms (log + the booking.created outbox payload).
@@ -174,6 +177,76 @@ class TestStaffBookingWindow:
 
         with pytest.raises(BookingWindowError):
             CreateBookingService().execute(dto)
+
+
+# ---------------------------------------------------------------------------
+# 2b. Staff context — relief from the notice is not relief from time
+# ---------------------------------------------------------------------------
+
+class TestStaffOuterBounds:
+    """Staff lose the client's 60-minute notice and keep the outer bounds.
+
+    The alternative — dropping the whole window along with the notice —
+    would leave a staff timestamp bounded by nothing at all, which is the
+    very "time outside any allowed context" this task exists to remove.
+    Each refusal below is paired with the acceptance that proves the
+    fixture can still create a booking.
+    """
+
+    def test_staff_booking_in_the_past_is_refused(
+        self, client_user, specialist, service,
+    ):
+        dto = _dto(
+            client_user, specialist, service,
+            datetime.now(timezone.utc) - timedelta(hours=2),
+            actor_role="specialist",
+        )
+
+        with pytest.raises(BookingWindowError):
+            CreateBookingService().execute(dto)
+
+    def test_staff_booking_beyond_the_horizon_is_refused(
+        self, client_user, specialist, service, settings,
+    ):
+        horizon = timedelta(days=settings.BOOKING_MAX_AHEAD_DAYS)
+        dto = _dto(
+            client_user, specialist, service,
+            datetime.now(timezone.utc) + horizon + timedelta(days=1),
+            actor_role="specialist",
+        )
+
+        with pytest.raises(BookingWindowError):
+            CreateBookingService().execute(dto)
+
+    def test_staff_booking_inside_the_horizon_is_accepted(
+        self, client_user, specialist, service, settings,
+    ):
+        """The positive guard for both refusals above."""
+        horizon = timedelta(days=settings.BOOKING_MAX_AHEAD_DAYS)
+        dto = _dto(
+            client_user, specialist, service,
+            datetime.now(timezone.utc) + horizon - timedelta(days=1),
+            actor_role="specialist",
+        )
+
+        assert CreateBookingService().execute(dto).booking_id
+
+    def test_override_is_the_door_for_backdating(
+        self, client_user, specialist_user, specialist, service,
+    ):
+        """Recording a visit that already happened is a real need — and
+        the task's own answer for it: the explicit, reasoned, audited
+        override, not a silent hole in the staff path."""
+        dto = _dto(
+            client_user, specialist, service,
+            datetime.now(timezone.utc) - timedelta(hours=2),
+            actor_role="specialist",
+            time_override=True,
+            time_override_reason="визит состоялся, записан задним числом",
+            actor_id=specialist_user.id,
+        )
+
+        assert CreateBookingService().execute(dto).booking_id
 
 
 # ---------------------------------------------------------------------------
