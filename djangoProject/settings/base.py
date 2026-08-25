@@ -64,6 +64,7 @@ INSTALLED_APPS = [
     'tenants',
     'analytics',
     'goals',
+    'wellness',
 ]
 
 AUTH_USER_MODEL = 'users.User'
