@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 
+from appointments.application.dto import CancelBookingDTO
 from appointments.domain.exceptions import (
     BookingWindowError,
     CancellationNotAllowedError,
@@ -17,6 +19,7 @@ from appointments.domain.policies import (
     DefaultCommissionPolicy,
     StandardCancellationPolicy,
     StandardReschedulePolicy,
+    UnknownInitiatorError,
 )
 from appointments.domain.value_objects import (
     ACTIVE_BOOKING_STATUSES,
@@ -260,6 +263,45 @@ class TestStandardCancellationPolicy:
         refund = policy.get_refund_percent(self._future(1), "specialist")
         assert refund == 100.0
 
+    def test_salon_always_full_refund(self):
+        policy = StandardCancellationPolicy()
+        refund = policy.get_refund_percent(self._future(1), "salon")
+        assert refund == 100.0
+
+    def test_system_initiator_is_no_fault_full_refund(self):
+        """``system`` is a KNOWN no-fault initiator, not a client-scale one.
+
+        ``schedule_impact_service`` passes ``"system"`` for salon closures
+        and documents the outcome as «always the no-fault one» — yet before
+        DRF-1156 the value was absent from the provider set and silently
+        took the client's time scale (0% inside 2h). The policy now says
+        so explicitly instead of letting the fall-through decide.
+        """
+        policy = StandardCancellationPolicy()
+        assert policy.get_refund_percent(self._future(1), "system") == 100.0
+
+    def test_legacy_user_spelling_gets_the_client_scale(self):
+        """``user`` is the pre-vocabulary spelling of the client actor —
+        known, and priced by time exactly like ``client``."""
+        policy = StandardCancellationPolicy()
+        assert policy.get_refund_percent(self._future(12), "user") == 50.0
+
+    def test_unknown_initiator_refund_raises(self):
+        """DRF-1156: the policy has no «I don't know» case — an unknown
+        initiator must refuse, not silently take the client scale down
+        to 0%. ``receptionist`` is the salon-admin role that does not
+        exist in the vocabulary yet."""
+        policy = StandardCancellationPolicy()
+        with pytest.raises(UnknownInitiatorError):
+            policy.get_refund_percent(self._future(48), "receptionist")
+
+    def test_unknown_initiator_can_cancel_raises(self):
+        """Same gate on the guard: an unknown actor must not inherit the
+        client's rules there either."""
+        policy = StandardCancellationPolicy()
+        with pytest.raises(UnknownInitiatorError):
+            policy.can_cancel(BookingStatus.CONFIRMED, self._future(48), "receptionist")
+
     def test_can_cancel_confirmed(self):
         policy = StandardCancellationPolicy()
         # Should not raise
@@ -275,6 +317,36 @@ class TestStandardCancellationPolicy:
         policy = StandardCancellationPolicy()
         with pytest.raises(CancellationNotAllowedError):
             policy.can_cancel(BookingStatus.PENDING, self._future(48), "client")
+
+
+# ---------------------------------------------------------------------------
+# CancelBookingDTO — initiator validation (DRF-1156)
+# ---------------------------------------------------------------------------
+
+class TestCancelBookingDTOInitiator:
+    """The DTO's own comment declares a closed vocabulary
+    ({client, specialist, salon, system}); DRF-1156 makes it real.
+
+    An unvalidated string was the mine: any new caller spelling
+    (``receptionist``, ``admin``, ``owner``) would sail through to the
+    refund policy. The DTO refuses it at construction — before any
+    money math runs.
+    """
+
+    def _dto(self, initiator_role: str) -> CancelBookingDTO:
+        return CancelBookingDTO(
+            booking_id=uuid4(),
+            initiator_user_id=uuid4(),
+            initiator_role=initiator_role,
+        )
+
+    @pytest.mark.parametrize("role", ["client", "specialist", "salon", "system"])
+    def test_known_vocabulary_accepted(self, role: str):
+        assert self._dto(role).initiator_role == role
+
+    def test_unknown_role_rejected(self):
+        with pytest.raises(ValueError, match="initiator_role"):
+            self._dto("receptionist")
 
 
 # ---------------------------------------------------------------------------
