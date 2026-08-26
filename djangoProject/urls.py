@@ -54,6 +54,13 @@ urlpatterns = [
         'api/v1/internal/me/goals/select/',
         include('goals.select_urls'),
     ),
+    # DRF-1344 — wellness-context read для решающего слоя бота: только
+    # коды состояний (никогда значения наблюдений), fail-closed через
+    # гейты wellness/services.py. Аддитивная поверхность.
+    path(
+        'api/v1/internal/me/wellness-context/',
+        include('wellness.urls'),
+    ),
     # DRF-1043 (backend half of DRF-1035) — identity read-back: lets the
     # bot learn the canonical Ayla user-id of the subject it already
     # authenticated as. `me/` is a namespace prefix here, not a resource,
