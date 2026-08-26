@@ -50,6 +50,20 @@ class CreateBookingDTO:
     # OperationalActor values directly. DRF-1064 added "salon": a booking
     # the salon records on a customer's behalf.
     actor_role: str = "user"
+    # DRF-1072 — administrative time override. Explicit, trusted-caller
+    # only: lifts the WHOLE time-context rule set (booking window, slot
+    # grid, schedule frame, tenant closure AND time-off — the deliberate
+    # absence-lift DRF-1062 deferred to exactly this flag). Refused for
+    # the client actor and without a non-empty reason; who/why is fixed
+    # in the service log and the booking.created outbox payload. The
+    # conflict check is NOT lifted — two bodies still cannot share a slot.
+    time_override: bool = False
+    time_override_reason: Optional[str] = None
+    # The acting user's id when the caller is a staff member recording a
+    # booking for someone else (master, front desk). Optional because the
+    # legacy call sites never identified the actor; carried into the
+    # override audit trail when the override is used.
+    actor_id: Optional[UUID] = None
 
 
 @dataclass(frozen=True)

@@ -3,21 +3,23 @@
 Reusable checks against a target interval: booking-window (min-ahead +
 horizon), slot-grid alignment, and specialist time-off.
 ``RescheduleBookingService`` wires all three (it previously only checked
-a 4h-notice rule, not window/grid/time-off at all). ``CreateBookingService``
-already has its own window + time-off checks (pre-dating this module,
-now interleaved with AMD-019 salon/marketplace service resolution) and
-is intentionally left untouched here — reusing this module there is a
-reasonable future refactor, but grid-alignment is a genuinely new
-constraint and forcing it onto create's several call paths (walk-in,
-salon, external-busy) without auditing each one first risks a regression
-outside this task's scope.
+a 4h-notice rule, not window/grid/time-off at all).
 
 DRF-1062 adds two more checks — ``check_schedule_frame`` and
 ``check_tenant_closure`` — and these ARE called from create as well, as
 individual functions rather than through ``apply_common_booking_guards``.
-That keeps the split above intact (create still does not inherit
-grid-alignment) while guaranteeing the thing this task exists to
-guarantee: the schedule is enforced identically on every write path.
+
+DRF-1072 closes the last read/write gap on the create path:
+``CreateBookingService`` now also calls ``check_grid_alignment``, but only
+for the client actor, and only once the specialist has declared a
+schedule (``schedule_declared``) — the same monotone-enforcement rule
+``check_schedule_frame`` follows: the grid is a property of the OFFERED
+slots, so where nothing is offered there is no grid to violate. The
+client contract (window, grid, frame, closure, time-off) is what the
+read path offers, so the write path must enforce all of it; staff
+recordings (walk-in, salon) are deliberately not bound by
+window/grid/frame/closure, and the administrative time override lifts
+even time-off — see ``CreateBookingService`` for the split.
 
 Grid-alignment note: the check is UTC-minute-modulo, not per-specialist-
 timezone-aware. This is exact for the pilot's whole-hour-offset timezones
@@ -37,7 +39,12 @@ from appointments.domain.policies import BookingWindowPolicy, DefaultBookingWind
 from appointments.domain.value_objects import TimeInterval
 
 
-def _validate_grid_alignment(start_at) -> None:
+def check_grid_alignment(start_at) -> None:
+    """Reject a start that does not sit on the slot grid.
+
+    Public since DRF-1072 (create path enforces it for the client actor;
+    ``apply_common_booking_guards`` has always run it for reschedule).
+    """
     grid_minutes = int(getattr(settings, 'BOOKING_SLOT_GRID_MINUTES', 30))
     if (
         start_at.second != 0
@@ -61,6 +68,31 @@ def _check_time_off(specialist_id: UUID, target_interval: TimeInterval) -> None:
         raise SlotNotAvailableError(
             f"Slot {target_interval} is blocked by specialist"
         )
+
+
+def schedule_declared(specialist, local_date) -> bool:
+    """Has the specialist announced ANY schedule context for booking?
+
+    DRF-1062 introduced the rule for the frame guard and DRF-1072 reuses
+    it for the client slot-grid gate: "no schedule declared" is not
+    "closed" — a specialist who never published hours offers no slots,
+    so only a caller that fabricated a time can reach the write path,
+    and enforcement starts (monotonically) once a schedule exists.
+    True when a per-date exception covers ``local_date`` or any weekly
+    working-hours row exists.
+    """
+    from appointments.models import (
+        SpecialistScheduleException,
+        SpecialistWorkingHours,
+    )
+
+    if SpecialistScheduleException.objects.filter(
+        specialist=specialist, date=local_date,
+    ).exists():
+        return True
+    return SpecialistWorkingHours.objects.filter(
+        specialist=specialist,
+    ).exists()
 
 
 def check_schedule_frame(specialist_id: UUID, target_interval: TimeInterval) -> None:
@@ -98,10 +130,6 @@ def check_schedule_frame(specialist_id: UUID, target_interval: TimeInterval) -> 
     from appointments.infrastructure.availability.slot_builder import (
         SlotBuilderService,
     )
-    from appointments.models import (
-        SpecialistScheduleException,
-        SpecialistWorkingHours,
-    )
     from users.models import SpecialistProfile
 
     specialist = SpecialistProfile.objects.filter(id=specialist_id).first()
@@ -128,12 +156,7 @@ def check_schedule_frame(specialist_id: UUID, target_interval: TimeInterval) -> 
     # Residual gap, named deliberately: an unconfigured specialist can
     # still be booked at any hour by a caller that supplies its own time.
     # It closes the moment any schedule row exists for them.
-    has_exception = SpecialistScheduleException.objects.filter(
-        specialist=specialist, date=local_date,
-    ).exists()
-    if not has_exception and not SpecialistWorkingHours.objects.filter(
-        specialist=specialist,
-    ).exists():
+    if not schedule_declared(specialist, local_date):
         return
 
     frame = AvailabilityQueryService._get_working_hours(specialist, local_date)
@@ -209,7 +232,7 @@ def apply_common_booking_guards(
     (booking_window_policy or DefaultBookingWindowPolicy()).validate_booking_window(
         target_interval.start_at
     )
-    _validate_grid_alignment(target_interval.start_at)
+    check_grid_alignment(target_interval.start_at)
     if enforce_schedule:
         check_schedule_frame(specialist_id, target_interval)
         check_tenant_closure(specialist_id, target_interval)
