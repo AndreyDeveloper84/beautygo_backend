@@ -85,6 +85,28 @@ class CancelBookingDTO:
     # when the salon said "мастер заболел" throws that away.
     reason_code: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        """DRF-1156: refuse an initiator outside the closed vocabulary.
+
+        The comment above declared the set; nothing enforced it, so any
+        new caller spelling (``receptionist``/``admin``/``owner`` from the
+        salon console) would sail through to the refund policy — which,
+        before its own gate, silently priced the unknown actor on the
+        CLIENT scale, down to a 0% refund for a cancellation the customer
+        never made. Fail at construction, before any money math runs.
+        """
+
+        from appointments.domain.value_objects import OperationalActor
+
+        known = {member.value for member in OperationalActor}
+        if self.initiator_role not in known:
+            raise ValueError(
+                f"CancelBookingDTO.initiator_role must be one of "
+                f"{sorted(known)}, got {self.initiator_role!r}. A new "
+                f"actor kind needs an OperationalActor member and an "
+                f"explicit refund-side decision first (DRF-1156)."
+            )
+
 
 @dataclass(frozen=True)
 class RescheduleBookingDTO:

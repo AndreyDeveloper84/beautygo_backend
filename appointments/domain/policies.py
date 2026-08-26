@@ -98,6 +98,17 @@ class DefaultCommissionPolicy:
         return Decimal(str(getattr(settings, 'BOOKING_PLATFORM_FEE_RUB', '90.00')))
 
 
+class UnknownInitiatorError(ValueError):
+    """DRF-1156: the cancellation policy has no «I don't know» case.
+
+    Any value outside the known vocabulary used to fall through to the
+    CLIENT time scale — down to a 0% refund for a cancellation the
+    customer never made (a salon-admin role like ``receptionist`` would
+    have done exactly that once the salon console started cancelling).
+    Unknown is now an exception, not a guess.
+    """
+
+
 class StandardCancellationPolicy:
     """
     Cancellation rules:
@@ -112,19 +123,50 @@ class StandardCancellationPolicy:
     PARTIAL_REFUND_HOURS = 2
     PARTIAL_REFUND_PERCENT = 50.0
 
-    # Initiators on the provider's side of the transaction. The fee
-    # schedule below prices the CLIENT's change of mind; charging it when
-    # the salon or the master cancels would bill a customer for a
-    # decision that was never theirs. DRF-1064 added "salon": a front
-    # desk cancelling an hour before would otherwise have handed the
-    # client a 0% refund.
-    PROVIDER_INITIATORS = frozenset({"specialist", "salon"})
+    # Initiators whose cancellation is no-fault for the customer: the
+    # provider side (their time, their call) and the platform itself.
+    # DRF-1064 added "salon": a front desk cancelling an hour before
+    # would otherwise have handed the client a 0% refund.
+    #
+    # DRF-1156 added "system": schedule_impact_service passes it for
+    # salon closures and documents the outcome as «always the no-fault
+    # one», yet the value was absent here and silently took the CLIENT
+    # scale (0% inside 2h). A platform-initiated cancellation is never
+    # the customer's fault, so the code now says what the call site
+    # already promised.
+    NO_FAULT_INITIATORS = frozenset({"specialist", "salon", "system"})
+
+    # The client-scale initiators: OperationalActor.CLIENT plus the
+    # legacy "user" spelling that predates the vocabulary (see
+    # appointments/domain/value_objects.py — the envelope mapping lists
+    # it explicitly for the same reason).
+    CLIENT_INITIATORS = frozenset({"client", "user"})
 
     # States from which cancellation is permitted
     CANCELLABLE_STATUSES = frozenset({
         BookingStatus.AWAITING_PAYMENT,
         BookingStatus.CONFIRMED,
     })
+
+    @classmethod
+    def _classify_initiator(cls, initiator: str) -> str:
+        """Map a known initiator to its fee side; refuse the unknown.
+
+        Every known value gets an explicit branch — no fall-through, so
+        the next vocabulary addition (``receptionist``/``admin``/``owner``
+        from the salon console) fails loudly here instead of billing a
+        customer for someone else's decision.
+        """
+        if initiator in cls.NO_FAULT_INITIATORS:
+            return "no_fault"
+        if initiator in cls.CLIENT_INITIATORS:
+            return "client"
+        raise UnknownInitiatorError(
+            f"Unknown cancellation initiator: {initiator!r}. Add it to "
+            f"OperationalActor and decide its refund side explicitly — "
+            f"silently pricing an unknown actor as a client is how a "
+            f"salon-side cancellation ends up charging the customer."
+        )
 
     def can_cancel(
         self,
@@ -138,7 +180,7 @@ class StandardCancellationPolicy:
             )
 
         # The provider side can always cancel (their time, their call)
-        if initiator in self.PROVIDER_INITIATORS:
+        if self._classify_initiator(initiator) == "no_fault":
             return
 
         now = datetime.now(tz=timezone.utc)
@@ -154,7 +196,7 @@ class StandardCancellationPolicy:
         booking_start_at: datetime,
         initiator: str,
     ) -> float:
-        if initiator in self.PROVIDER_INITIATORS:
+        if self._classify_initiator(initiator) == "no_fault":
             return 100.0
 
         now = datetime.now(tz=timezone.utc)
