@@ -10,13 +10,14 @@ Steps:
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as _dt_timezone
 
 from django.conf import settings
 from django.db import transaction
 
 from appointments.application.dto import CreateBookingDTO, BookingResultDTO
 from appointments.domain.exceptions import (
+    BookingWindowError,
     ExternalSlotTakenError,
     SlotNotAvailableError,
     SpecialistNotActiveError,
@@ -31,6 +32,7 @@ from appointments.domain.policies import (
 from appointments.domain.value_objects import (
     BookingStatus,
     BookingSnapshot,
+    OperationalActor,
     TimeInterval,
     ACTIVE_BOOKING_STATUSES,
     booking_source_for,
@@ -38,6 +40,21 @@ from appointments.domain.value_objects import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _now_utc() -> datetime:
+    return datetime.now(tz=_dt_timezone.utc)
+
+
+# The client actor has two spellings on CreateBookingDTO: "user" (legacy,
+# predates the OperationalActor vocabulary) and "client". Both mean
+# "the customer booking for themselves" and both get the full client
+# time contract (DRF-1072).
+_CLIENT_ACTOR_ROLES = frozenset({"user", OperationalActor.CLIENT.value})
+
+
+def _is_client_actor(actor_role: str) -> bool:
+    return actor_role in _CLIENT_ACTOR_ROLES
 
 
 class CreateBookingService:
@@ -145,12 +162,70 @@ class CreateBookingService:
                 "This service is not available for booking"
             )
 
-        self._booking_window_policy.validate_booking_window(dto.start_at)
-
         if dto.start_at.tzinfo is None:
+            # Checked before any comparison against "now" below: a naive
+            # datetime used to reach the window policy and die there with
+            # a raw TypeError instead of this sentence.
             raise ValueError("start_at must be timezone-aware (UTC)")
 
+        if dto.time_override:
+            self._validate_time_override(dto)
+        elif _is_client_actor(dto.actor_role):
+            # DRF-1072: the whole booking window — the 60-minute notice
+            # AND the published horizon — is the CLIENT's rule.
+            self._booking_window_policy.validate_booking_window(dto.start_at)
+        else:
+            # DRF-1072: staff lose the notice, keep the outer bounds.
+            # A master recording someone physically present at 19:30 is
+            # not bound by a 60-minute self-service notice any more than
+            # by the working-hours template (DRF-1062) — the schedule
+            # constrains who may book the salon, not the salon itself.
+            # But dropping the whole window with the notice would have
+            # been a different thing entirely: nothing would then bound
+            # a staff timestamp at all, and "any instant the caller
+            # cares to name" is not a context — it is the absence of
+            # one, which is exactly what this task exists to remove.
+            self._validate_staff_time_bounds(dto.start_at)
+
         return specialist, resolved
+
+    @staticmethod
+    def _validate_time_override(dto: CreateBookingDTO) -> None:
+        """Contract of the administrative override (DRF-1072).
+
+        Explicit and trusted-caller only: never for the client actor,
+        never without a reason. Violations are caller bugs, not user
+        input problems — hence ValueError, same as the tz-aware check.
+        """
+        if _is_client_actor(dto.actor_role):
+            raise ValueError(
+                "time override is not available for client bookings"
+            )
+        if not (dto.time_override_reason or "").strip():
+            raise ValueError("time override requires a reason")
+
+    @staticmethod
+    def _validate_staff_time_bounds(start_at) -> None:
+        """The outer time bounds a staff booking keeps (DRF-1072).
+
+        Everything the client window enforces EXCEPT the min-ahead
+        notice: a booking is a future appointment, and it sits inside
+        the horizon the marketplace publishes. Reads the same setting
+        the client window reads, so the two cannot drift apart.
+
+        Backdating a visit that already happened is a real need and a
+        different act — it goes through the administrative override,
+        explicitly and with a reason, never as a side effect of which
+        endpoint the caller reached.
+        """
+        max_ahead = int(getattr(settings, "BOOKING_MAX_AHEAD_DAYS", 60))
+        now = _now_utc()
+        if start_at < now:
+            raise BookingWindowError("Booking cannot be created in the past")
+        if start_at > now + timedelta(days=max_ahead):
+            raise BookingWindowError(
+                f"Booking cannot be more than {max_ahead} days in advance"
+            )
 
     @transaction.atomic
     def _execute_atomic(
@@ -224,39 +299,78 @@ class CreateBookingService:
                 f"Slot {target_interval} is already taken"
             )
 
-        # Check time-off blocks
-        blocked = SpecialistTimeOff.objects.filter(
-            specialist_id=dto.specialist_id,
-            start_at__lt=target_interval.end_at,
-            end_at__gt=target_interval.start_at,
-        ).exists()
-
-        if blocked:
-            raise SlotNotAvailableError(
-                f"Slot {target_interval} is blocked by specialist"
-            )
-
-        # DRF-1062 — the schedule itself. Until this call, create checked
-        # time-off but never the working day: a POST for a Sunday landed
-        # even with Sunday marked non-working, because
-        # SpecialistWorkingHours was read by the slot query and by nothing
-        # else. Both checks are shared with the reschedule path so the two
-        # writers cannot drift apart again.
+        # DRF-1072 — the time-context rule set now depends on the actor:
         #
-        # Client-initiated bookings only (actor_role contract
-        # {user, specialist, system}). A walk-in is recorded by the master
-        # for someone physically present — refusing it at 19:30 because the
-        # template says 19:00 would be the same "the system says no while
-        # the human on the spot knows better" trap this task exists to
-        # remove. Staff and system actors are trusted to mean it; the
-        # schedule constrains who may book the salon, not the salon itself.
-        if dto.actor_role == "user":
-            from appointments.application.services._booking_guards import (
-                check_schedule_frame,
-                check_tenant_closure,
+        # * OVERRIDE (explicit, trusted-caller, reasoned — validated
+        #   pre-transaction): lifts the whole set. The booking window was
+        #   already skipped pre-transaction; grid/frame/closure/time-off
+        #   are skipped here. The who/why is logged below and stamped
+        #   onto the booking.created outbox payload. The conflict check
+        #   above is NOT lifted — override rules on the time context,
+        #   not on physical double-booking.
+        # * CLIENT actor ("user"/"client"): the full contract — booking
+        #   window (pre-transaction), slot grid (once the specialist has
+        #   declared a schedule — same monotone rule as the frame),
+        #   schedule frame, tenant closure, time-off. Until DRF-1072 the
+        #   grid was the one rule the read path enforced and create did
+        #   not.
+        # * STAFF without override: time-off here, plus the outer time
+        #   bounds pre-transaction. The schedule says when clients may
+        #   book the salon, not when the salon may work — a walk-in is
+        #   recorded by the master for someone physically present
+        #   (DRF-1062), and the client's 60-minute notice is not their
+        #   constraint either. Time-off still blocks: an absence is the
+        #   master's own statement about themselves, so lifting it needs
+        #   the explicit override, not a side effect of who pressed the
+        #   button.
+        if dto.time_override:
+            logger.warning(
+                "booking.time_override specialist=%s start=%s actor_role=%s "
+                "actor_id=%s reason=%s",
+                dto.specialist_id, target_interval.start_at.isoformat(),
+                dto.actor_role, dto.actor_id, dto.time_override_reason,
             )
-            check_schedule_frame(dto.specialist_id, target_interval)
-            check_tenant_closure(dto.specialist_id, target_interval)
+        else:
+            # Check time-off blocks
+            blocked = SpecialistTimeOff.objects.filter(
+                specialist_id=dto.specialist_id,
+                start_at__lt=target_interval.end_at,
+                end_at__gt=target_interval.start_at,
+            ).exists()
+
+            if blocked:
+                raise SlotNotAvailableError(
+                    f"Slot {target_interval} is blocked by specialist"
+                )
+
+            # DRF-1062 — the schedule itself. Until this call, create
+            # checked time-off but never the working day: a POST for a
+            # Sunday landed even with Sunday marked non-working, because
+            # SpecialistWorkingHours was read by the slot query and by
+            # nothing else. The checks are shared with the reschedule
+            # path so the two writers cannot drift apart again.
+            if _is_client_actor(dto.actor_role):
+                from appointments.application.services._booking_guards import (
+                    check_grid_alignment,
+                    check_schedule_frame,
+                    check_tenant_closure,
+                    schedule_declared,
+                )
+                # The grid is a property of the OFFERED slots: where the
+                # specialist never declared a schedule nothing is offered
+                # and there is no grid to violate — the same monotone-
+                # enforcement rule check_schedule_frame follows (DRF-1062).
+                # Gating here keeps the guard strictly additive for every
+                # salon that has announced its hours, without turning
+                # unconfigured specialists unbookable overnight.
+                from zoneinfo import ZoneInfo
+                local_date = target_interval.start_at.astimezone(
+                    ZoneInfo(specialist.timezone)
+                ).date()
+                if schedule_declared(specialist, local_date):
+                    check_grid_alignment(target_interval.start_at)
+                check_schedule_frame(dto.specialist_id, target_interval)
+                check_tenant_closure(dto.specialist_id, target_interval)
 
         # S3-CAL recheck-at-confirm (Level-1): external busy must be
         # re-validated inside this atomic block so an interval that arrived
@@ -444,6 +558,19 @@ class CreateBookingService:
         # attribution travels in `source` below (event-contract §2.2).
         actor = envelope_actor_for(dto.actor_role)
         tenant_id = safe_tenant_id(appointment, context="booking.created")
+        # DRF-1072 — override audit. The keys exist ONLY when the
+        # administrative override was used, so an ordinary booking's
+        # payload is byte-identical to before; a bypassed guard always
+        # leaves a who (actor role + user id when known) and a why.
+        override_audit = {}
+        if dto.time_override:
+            override_audit = {
+                "time_override": True,
+                "time_override_reason": dto.time_override_reason,
+                "time_override_actor_id": (
+                    str(dto.actor_id) if dto.actor_id else None
+                ),
+            }
         emit_outbox_event(
             topic=_OutboxEvent.Topic.BOOKING_CREATED,
             data={
@@ -474,6 +601,7 @@ class CreateBookingService:
                 "payment_id": str(payment.id) if payment else None,
                 "amount": str(snapshot.price),
                 "specialist_timezone": snapshot.specialist_timezone,
+                **override_audit,
             },
             user_id=dto.client_id,
             tenant_id=tenant_id,
