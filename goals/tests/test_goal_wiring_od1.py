@@ -338,6 +338,30 @@ class TestCatalogRecommendationsRespectGoal:
 # ---------------------------------------------------------------------------
 
 
+class TestFlagOffCostsNothing:
+    def test_flag_off_does_not_touch_the_database(
+        self, settings, client_user, relax_option,
+    ):
+        """При OFF подключение не делает даже запроса.
+
+        Гарантия выкладки сильнее сравнения ответов: выключенный флаг
+        не добавляет к пути выдачи ни одного обращения к БД, поэтому
+        измениться не может ни поведение, ни бюджет запросов.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from goals.wiring import goal_category_ids_for
+
+        settings.GOAL_RESOLUTION_ENABLED = False
+        _select_goal(client_user)
+
+        with CaptureQueriesContext(connection) as captured:
+            assert goal_category_ids_for(client_user) is None
+
+        assert len(captured) == 0, "выключенный флаг не должен ходить в БД"
+
+
 class TestRecommendationCacheKey:
     def test_goal_categories_change_cache_key(self, db, goal_root, goal_leaf):
         """Иначе выдача одной цели утекла бы клиенту с другой целью."""

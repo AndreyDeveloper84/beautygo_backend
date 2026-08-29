@@ -88,6 +88,21 @@ class RecommendationQuery:
     price_max: Decimal | None = None
     min_rating: float | None = None  # falls back to settings.AI_SPECIALIST_MIN_RATING
     limit: int | None = None  # falls back to settings.AI_SPECIALIST_CONTEXT_LIMIT
+    # OD-1. Категории активной цели клиента, уже разрешённые вызывающей
+    # стороной (goals.wiring.goal_category_ids_for). Движок о целях
+    # по-прежнему НЕ знает — он получает готовые category_id, как и
+    # требует граница из goals/resolution.py.
+    #
+    # Отдельное поле, а не переиспользование ``category_id``: там один
+    # скаляр и явный запрос пользователя, здесь набор (цель курируется
+    # на корне и раскрывается вниз до подкатегорий, DRF-1308) и
+    # пассивный фон. Смешать их значило бы менять смысл существующего
+    # поля и его вклад в ``_score_service_match``.
+    #
+    # ``None`` — фильтр не применяется (флаг выключен либо цель
+    # разрешить нельзя). Кортеж — dataclass frozen и должен остаться
+    # хешируемым.
+    goal_category_ids: tuple[UUID, ...] | None = None
 
     def cache_key(self) -> str:
         payload = {
@@ -100,6 +115,19 @@ class RecommendationQuery:
             "min_rating": self.min_rating,
             "limit": self.limit,
         }
+        # Ключ добавляется ТОЛЬКО когда цель применена. Иначе digest
+        # каждого запроса изменился бы от одного факта появления поля,
+        # и выкладка с выключенным флагом разом обнулила бы кэш — то
+        # есть изменила бы поведение, которое обязана оставить прежним.
+        #
+        # Цель обязана входить в ключ: без этого выдача, отфильтрованная
+        # одной целью, досталась бы тому же клиенту после смены цели —
+        # и наоборот, прежняя нефильтрованная выдача пережила бы
+        # включение флага на весь TTL.
+        if self.goal_category_ids:
+            payload["goal_category_ids"] = [
+                str(category_id) for category_id in self.goal_category_ids
+            ]
         digest = hashlib.sha1(
             json.dumps(payload, sort_keys=True).encode("utf-8"),
         ).hexdigest()[:16]
@@ -280,6 +308,17 @@ class RecommendationEngine:
         if query.category_id:
             qs = qs.filter(
                 services__category_id=query.category_id,
+                services__is_active=True,
+            ).distinct()
+
+        # OD-1. Цель клиента — жёсткий фильтр, как и явная категория.
+        # В ``_score_service_match`` она сознательно НЕ участвует:
+        # цель уже сузила пул, а добавь мы её ещё и в 15%-й вес, при
+        # выключенном флаге ранжирование осталось бы прежним только
+        # случайно. Один эффект — одно место.
+        if query.goal_category_ids:
+            qs = qs.filter(
+                services__category_id__in=query.goal_category_ids,
                 services__is_active=True,
             ).distinct()
 

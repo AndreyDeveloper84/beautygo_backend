@@ -439,10 +439,25 @@ BOOKING_AUTO_COMPLETE_BATCH_SIZE = int(
     os.environ.get("BOOKING_AUTO_COMPLETE_BATCH_SIZE", "200")
 )
 
-# Goal layer (DRF-1190 / OD-1). Gates WIRING of goals.resolution into
-# callers (RecommendationQuery etc.) — the resolver itself, the API and
-# the decision-context document are always on (additive surface).
-# Default closed: подключение к вызывающим — отдельное решение.
+# Goal layer (DRF-1190 / OD-1). Влияет ли выбранная клиентом цель на
+# ПАССИВНУЮ выдачу. Резолвер, API целей и decision-context включены
+# всегда (аддитивная поверхность) — флаг гейтит только фильтрацию.
+#
+# Читается РОВНО В ОДНОМ месте — goals/wiring.py; там же записана
+# политика «что делать, когда цель разрешить нельзя». Точки применения
+# (2026-08-29): users/home_api.py (полка nearby_specialists) и
+# users/catalog_recommendations_api.py (полки 2 и 3 Mini App).
+#
+# ВНИМАНИЕ на будущее: до 2026-08-29 этот комментарий утверждал, что
+# подключение написано и лишь выключено. Это было неправдой — ни одного
+# потребителя флага в репозитории не существовало, а резолвер вызывался
+# только из тестов. Комментарий, обещающий код, обязан умирать вместе
+# с кодом.
+#
+# ON включает фильтрацию для тех, у кого есть разрешимая цель. На
+# 2026-08-29 ClientGoal = 0, поэтому выкладка ничего не меняет ни для
+# кого до первого выбора цели.
+# Default closed.
 GOAL_RESOLUTION_ENABLED = (
     os.environ.get("GOAL_RESOLUTION_ENABLED", "false").lower() == "true"
 )

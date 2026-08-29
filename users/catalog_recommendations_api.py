@@ -29,8 +29,24 @@ Pilot scope discipline:
 - Minimum eligibility filter only (active specialist + active tenant)
   — no rating/reviews thresholds in MVP per founder cut "simple
   eligibility".
-- Goal matching is ILIKE on ``service.name`` OR
-  ``category.slug``; semantic match is post-pilot.
+- Goal matching for the request-supplied ``goal`` string is ILIKE on
+  ``service.name`` OR ``category.slug``; semantic match is post-pilot.
+
+OD-1 (2026-08-29) — сохранённая цель клиента
+--------------------------------------------
+Когда запрос НЕ несёт ``goal``, полки 2 и 3 фильтруются категориями
+активной цели клиента (``goals.resolution`` через ``goals.wiring``), за
+флагом ``GOAL_RESOLUTION_ENABLED``. Это знание, курируемое владельцем в
+``GoalOptionCategory``, а не ILIKE по словам.
+
+Приоритет: сказанное сейчас старше выбранного когда-то. Явный ``goal``
+в запросе полностью вытесняет сохранённую цель — контракт параметра не
+меняется. Полка 1 остаётся goal-независимой по прежней причине: её
+якорь — отношения клиента с салоном, а не цель.
+
+Разрешить цель нельзя (нет цели / нет связей / свободный текст без
+точного совпадения) → фильтр не применяется, полки прежние. На пилоте
+``ClientGoal`` = 0, поэтому это и есть сегодняшнее поведение для всех.
 """
 from __future__ import annotations
 
@@ -46,6 +62,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from goals.wiring import goal_category_ids_for
 from services.models import ServiceCategory
 from users.models import SpecialistProfile, TenantUserRelationship
 from users.permissions import IsBotServiceWithVerifiedClient
@@ -300,6 +317,22 @@ def _apply_goal_filter(qs: QuerySet, goal: str) -> QuerySet:
     ).distinct()
 
 
+def _apply_goal_category_filter(qs: QuerySet, category_ids) -> QuerySet:
+    """Фильтр по разрешённым категориям цели (OD-1). No-op при ``None``.
+
+    В отличие от ``_apply_goal_filter`` здесь нет ни одного ILIKE:
+    категории пришли из курируемой владельцем таблицы
+    ``GoalOptionCategory`` через ``goals.resolution``, то есть это
+    знание, а не догадка о словах.
+    """
+    if not category_ids:
+        return qs
+    return qs.filter(
+        services__category_id__in=category_ids,
+        services__is_active=True,
+    ).distinct()
+
+
 def _build_layer_1(
     base_pool: QuerySet, *, history_tenant_ids: list,
     lat: float | None, lon: float | None,
@@ -428,8 +461,19 @@ class CatalogRecommendationsView(APIView):
         #   visible regardless of what the customer is searching for);
         # - layers 2 + 3 apply the goal filter (the picks + category
         #   counts should react to the search).
+        # OD-1: сохранённая цель говорит только когда клиент молчит.
+        # Явный `goal` в запросе — это сказанное сейчас, и оно старше
+        # выбранной когда-то цели: набравший «маникюр» получает
+        # маникюр, даже если его цель — «расслабиться». Контракт
+        # параметра `goal` при этом не меняется вовсе.
+        goal_category_ids = (
+            goal_category_ids_for(request.user) if not goal else None
+        )
+
         base_pool = _base_pool()
-        scoped_pool = _apply_goal_filter(base_pool, goal)
+        scoped_pool = _apply_goal_category_filter(
+            _apply_goal_filter(base_pool, goal), goal_category_ids,
+        )
 
         layer_1 = _build_layer_1(
             base_pool, history_tenant_ids=history_tenant_ids,
