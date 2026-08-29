@@ -39,6 +39,17 @@ OD-1 (2026-08-29) — сохранённая цель клиента
 флагом ``GOAL_RESOLUTION_ENABLED``. Это знание, курируемое владельцем в
 ``GoalOptionCategory``, а не ILIKE по словам.
 
+Фильтр цели идёт по КАНОНИЧЕСКОМУ каталогу (``SpecialistService`` ->
+``SalonService``), потому что легаси ``Service`` на пилоте пуст целиком
+(замер 2026-08-29: 0 строк против 292 канонических связок).
+
+⚠️ Остальная машинерия этого эндпоинта всё ещё читает легаси и потому
+на пилоте молчит: ``_build_layer_3`` считает категории через
+``ServiceCategory.services``, а ILIKE-фильтр явного ``goal`` join-ит
+``services__``. То есть полка 3 пуста, а любой явный ``goal`` даёт
+пустую полку 2 — пред-существующий дефект, не вызванный OD-1 и здесь
+НЕ чинимый (чанк S3-CUT).
+
 Приоритет: сказанное сейчас старше выбранного когда-то. Явный ``goal``
 в запросе полностью вытесняет сохранённую цель — контракт параметра не
 меняется. Полка 1 остаётся goal-независимой по прежней причине: её
@@ -320,16 +331,28 @@ def _apply_goal_filter(qs: QuerySet, goal: str) -> QuerySet:
 def _apply_goal_category_filter(qs: QuerySet, category_ids) -> QuerySet:
     """Фильтр по разрешённым категориям цели (OD-1). No-op при ``None``.
 
-    В отличие от ``_apply_goal_filter`` здесь нет ни одного ILIKE:
-    категории пришли из курируемой владельцем таблицы
-    ``GoalOptionCategory`` через ``goals.resolution``, то есть это
-    знание, а не догадка о словах.
+    Две вещи отличают его от ``_apply_goal_filter`` выше:
+
+    * ни одного ILIKE — категории пришли из курируемой владельцем
+      таблицы ``GoalOptionCategory`` через ``goals.resolution``, это
+      знание, а не догадка о словах;
+    * ходит по КАНОНИЧЕСКОМУ каталогу (``SpecialistService`` ->
+      ``SalonService``), а не по легаси ``Service``, который на пилоте
+      пуст целиком (замер 2026-08-29: 0 строк против 292 канонических
+      связок).
+
+    Предикат общий с движком рекомендаций
+    (``RecommendationEngine._goal_category_predicate``), чтобы две
+    поверхности не разъехались в трактовке фолбэка на шаблон.
     """
     if not category_ids:
         return qs
+    from ai.application.services.recommendation_engine import RecommendationEngine
+
     return qs.filter(
-        services__category_id__in=category_ids,
-        services__is_active=True,
+        RecommendationEngine._goal_category_predicate(tuple(category_ids)),
+        specialist_services__is_active=True,
+        specialist_services__salon_service__is_active=True,
     ).distinct()
 
 
