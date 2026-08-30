@@ -233,46 +233,110 @@ def _build_detail(appointment) -> dict:
 # ---------------------------------------------------------------------------
 
 
+CURSOR_SEPARATOR = "|"
+
+
 class _CursorPageMixin:
     """Tiny cursor-pagination helper.
 
-    Cursors are the appointment's ``start_datetime`` (ISO8601). For
+    Cursors are ``"<start_datetime ISO8601>|<appointment id>"``. For
     'upcoming' the sort is ascending; for 'history', descending. The
-    cursor points to the LAST item returned — the next page filters
-    strictly past it. Stable because ``start_datetime`` is unique per
-    customer+slot (the booking engine prevents double-booking) — ties
-    broken by ``id`` lexicographically.
+    cursor points to the LAST item returned — the next page starts
+    strictly after it *in sort order*.
+
+    DRF-1053 — why the id half exists. The sort key is the PAIR
+    ``(start_datetime, id)``, so the cursor filter has to compare the
+    same pair. The original filter compared ``start_datetime`` alone;
+    when a page boundary fell inside a group of bookings sharing one
+    timestamp, every remaining row of that group was excluded by
+    ``start_datetime__gt`` / ``__lt`` and never came back. The caller
+    saw a shorter list, not an error — a silent loss.
+
+    The old docstring claimed ``start_datetime`` is unique "because the
+    booking engine prevents double-booking". It does not: the guard is
+    per specialist, while this list spans every specialist and every
+    tenant the customer ever booked with. Two masters at the same
+    o'clock is ordinary, and a bulk import stamps whole batches
+    identically.
+
+    Legacy cursors carrying only the timestamp (issued before this fix
+    and possibly still in flight from the bot across a deploy) are
+    still accepted and fall back to the old timestamp-only comparison —
+    a stale cursor degrades to the previous behaviour instead of 400-ing
+    mid-scroll.
     """
 
     def _paginate(self, queryset, *, limit: int, cursor: str | None,
                   ascending: bool):
-        from django.utils.dateparse import parse_datetime
-
         order = "start_datetime" if ascending else "-start_datetime"
-        # Secondary key on id for deterministic tie-break (when two
-        # bookings somehow land on the same exact timestamp).
+        # Secondary key on id makes the sort a TOTAL order: bookings
+        # sharing a timestamp still each have one defined position.
+        # The cursor filter below must mirror this exact pair.
         qs = queryset.order_by(order, "id" if ascending else "-id")
 
         if cursor:
-            try:
-                cursor_dt = parse_datetime(cursor)
-                if cursor_dt is None:
-                    raise ValueError("invalid cursor")
-            except (ValueError, TypeError):
-                return None, None, "INVALID_CURSOR"
-            if ascending:
-                qs = qs.filter(start_datetime__gt=cursor_dt)
+            cursor_dt, cursor_id, err = self._decode_cursor(cursor)
+            if err is not None:
+                return None, None, err
+            if cursor_id is None:
+                # Legacy timestamp-only cursor — old semantics.
+                lookup = (
+                    "start_datetime__gt" if ascending
+                    else "start_datetime__lt"
+                )
+                qs = qs.filter(**{lookup: cursor_dt})
+            elif ascending:
+                qs = qs.filter(
+                    Q(start_datetime__gt=cursor_dt)
+                    | Q(start_datetime=cursor_dt, id__gt=cursor_id),
+                )
             else:
-                qs = qs.filter(start_datetime__lt=cursor_dt)
+                qs = qs.filter(
+                    Q(start_datetime__lt=cursor_dt)
+                    | Q(start_datetime=cursor_dt, id__lt=cursor_id),
+                )
 
         page = list(qs[: limit + 1])
         has_more = len(page) > limit
         page = page[:limit]
         next_cursor = (
-            page[-1].start_datetime.isoformat()
+            self._encode_cursor(page[-1])
             if has_more and page else None
         )
         return page, next_cursor, None
+
+    @staticmethod
+    def _encode_cursor(appointment) -> str:
+        """Serialise the full sort key of the last row on the page."""
+        return (
+            f"{appointment.start_datetime.isoformat()}"
+            f"{CURSOR_SEPARATOR}{appointment.id}"
+        )
+
+    @staticmethod
+    def _decode_cursor(raw: str):
+        """``raw`` -> ``(datetime, uuid | None, error | None)``.
+
+        ISO8601 never contains ``|``, so partitioning on it is
+        unambiguous. A missing id half means a legacy cursor, not an
+        error.
+        """
+        from django.utils.dateparse import parse_datetime
+
+        dt_part, separator, id_part = raw.partition(CURSOR_SEPARATOR)
+        try:
+            cursor_dt = parse_datetime(dt_part)
+        except (ValueError, TypeError):
+            return None, None, "INVALID_CURSOR"
+        if cursor_dt is None:
+            return None, None, "INVALID_CURSOR"
+        if not separator:
+            return cursor_dt, None, None
+        try:
+            cursor_id = UUID(id_part)
+        except (ValueError, TypeError, AttributeError):
+            return None, None, "INVALID_CURSOR"
+        return cursor_dt, cursor_id, None
 
 
 class MeBookingsListView(_CursorPageMixin, APIView):

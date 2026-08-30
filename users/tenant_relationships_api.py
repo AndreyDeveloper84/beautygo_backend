@@ -36,9 +36,20 @@ class MyTenantRelationshipsView(APIView):
     TUR rows allowed. JWT carries only the staff primary; this
     endpoint is the canonical source for the full list.
 
-    Returns rows ordered by `-granted_at` (most-recent first). Mobile
-    clients render this as "your providers" list; bot-platform reads
-    it to populate W2 payment_failed and similar memory.
+    Returns rows ordered by `-granted_at`, then `-id` (most-recent
+    first). Mobile clients render this as "your providers" list;
+    bot-platform reads it to populate W2 payment_failed and similar
+    memory.
+
+    DRF-1127 — why `-id` is there. `granted_at` is `auto_now_add`, so
+    every row written inside one transaction (a bulk grant, an import,
+    a single request that joins the user to several tenants) carries
+    the SAME stamp. `-granted_at` alone is a partial order: the DB may
+    return tied rows in any order it likes, and two identical requests
+    may disagree. That is invisible until a client diffs the list or
+    someone puts pagination on this endpoint, at which point tied rows
+    start vanishing between pages. The secondary key makes the order
+    total, so the answer is reproducible.
 
     Inactive (revoked) rows are NOT returned — this is the user's
     "current memberships" view, not an audit log.
@@ -61,7 +72,7 @@ class MyTenantRelationshipsView(APIView):
             TenantUserRelationship.objects
             .filter(user=request.user, is_active=True)
             .select_related("tenant")
-            .order_by("-granted_at")
+            .order_by("-granted_at", "-id")
         )
         return success_response({
             "data": [
