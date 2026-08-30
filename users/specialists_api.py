@@ -7,17 +7,31 @@ from datetime import date, datetime
 from typing import Any
 
 from django.core import exceptions as django_exceptions
-from django.db.models import Count, Prefetch, Q, QuerySet
+from django.db.models import Q, QuerySet
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, filters
 from rest_framework import permissions, serializers, viewsets
 from rest_framework.decorators import action
 from rest_framework.filters import OrderingFilter
 from rest_framework.response import Response
 
+from services.catalog_reads import (
+    annotate_catalog_services_count,
+    catalog_services_for,
+    catalog_services_prefetch,
+)
 from services.models import Service
 from .models import SpecialistProfile
 
 logger = logging.getLogger(__name__)
+
+
+# Активная бронируемая связка канонического каталога, от
+# ``SpecialistProfile``. Вынесено на уровень модуля: ``FilterSet``
+# разбирает атрибуты класса как объявления фильтров.
+_ACTIVE_CANONICAL = Q(
+    specialist_services__is_active=True,
+    specialist_services__salon_service__is_active=True,
+)
 
 
 # --- Mixins ---
@@ -44,11 +58,26 @@ class DistanceMixin:
 
 # --- Serializers ---
 
-class ServicePreviewSerializer(serializers.ModelSerializer):
-    """Top-3 services preview for specialist card."""
-    class Meta:
-        model = Service
-        fields = ['id', 'name', 'price', 'duration_minutes']
+class ServicePreviewSerializer(serializers.Serializer):
+    """Top-3 services preview for specialist card.
+
+    Читает ``services.catalog_reads.CatalogService`` — единую форму для
+    ОБОИХ слоёв каталога, а не модель ``Service``. Легаси-таблица на
+    пилоте пуста целиком (замер 2026-08-30: 0 строк против 292
+    канонических связок), и превью приходило пустым у каждого мастера.
+
+    ``id`` — ключ, который принимает бронирование этой услуги: для
+    маркетплейса ``Service.id``, для салонного каталога
+    ``SalonService.id`` (его разбирает ``resolve_bookable_service``).
+    """
+    id = serializers.UUIDField(read_only=True)
+    name = serializers.CharField(read_only=True)
+    price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, read_only=True,
+    )
+    duration_minutes = serializers.IntegerField(
+        read_only=True, allow_null=True,
+    )
 
 
 class SpecialistListSerializer(DistanceMixin, serializers.ModelSerializer):
@@ -69,9 +98,13 @@ class SpecialistListSerializer(DistanceMixin, serializers.ModelSerializer):
         ]
 
     def get_services_preview(self, obj: SpecialistProfile) -> list[dict[str, Any]]:
-        """Top-3 active services (uses prefetched data, no extra query)."""
+        """Top-3 active services from BOTH catalog layers.
+
+        Uses the queryset's prefetch (``catalog_services_prefetch``) —
+        no extra query.
+        """
         return ServicePreviewSerializer(
-            list(obj.services.all()[:3]), many=True,
+            catalog_services_for(obj)[:3], many=True,
         ).data
 
     def get_services_count(self, obj: SpecialistProfile) -> int:
@@ -79,18 +112,36 @@ class SpecialistListSerializer(DistanceMixin, serializers.ModelSerializer):
         return getattr(obj, 'active_services_count', 0)
 
 
-class ServiceFullSerializer(serializers.ModelSerializer):
-    """Full service details for specialist detail view."""
-    category_name = serializers.CharField(
-        source='category.name', default=None,
-    )
+class ServiceFullSerializer(serializers.Serializer):
+    """Full service details for specialist detail view.
 
-    class Meta:
-        model = Service
-        fields = [
-            'id', 'name', 'description', 'price', 'duration_minutes',
-            'image', 'category', 'category_name', 'is_active', 'sort_order',
-        ]
+    Та же смена источника, что и у ``ServicePreviewSerializer`` — поля
+    контракта сохранены один в один. ``image`` у салонного каталога
+    всегда ``None``: картинки там нет по схеме, и выдумывать её нельзя.
+    """
+    id = serializers.UUIDField(read_only=True)
+    name = serializers.CharField(read_only=True)
+    description = serializers.CharField(read_only=True)
+    price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, read_only=True,
+    )
+    duration_minutes = serializers.IntegerField(
+        read_only=True, allow_null=True,
+    )
+    image = serializers.CharField(
+        source='image_url', read_only=True, allow_null=True,
+    )
+    category = serializers.UUIDField(
+        source='category_id', read_only=True, allow_null=True,
+    )
+    category_name = serializers.CharField(read_only=True, allow_null=True)
+    is_active = serializers.SerializerMethodField()
+    sort_order = serializers.IntegerField(read_only=True)
+
+    def get_is_active(self, obj) -> bool:
+        # ``catalog_services_for`` отдаёт только активные — поле остаётся
+        # в контракте, но врать ему нечем.
+        return True
 
 
 class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
@@ -117,9 +168,9 @@ class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
         ]
 
     def get_services(self, obj: SpecialistProfile) -> list[dict[str, Any]]:
-        """All active services (uses prefetched data, no extra query)."""
+        """All active services from BOTH catalog layers (prefetched)."""
         return ServiceFullSerializer(
-            obj.services.all(), many=True,
+            catalog_services_for(obj), many=True,
         ).data
 
     def get_services_count(self, obj: SpecialistProfile) -> int:
@@ -210,6 +261,22 @@ def compute_specialist_day_slots(
     first, then ``SalonService`` with an active SpecialistService link
     in the current tenant. The public path keeps the marketplace-only
     lookup (observable behaviour unchanged).
+
+    ⚠️ ОТКРЫТАЯ ДЫРА, НЕ ЗАКРЫТАЯ ЗДЕСЬ (S3-EMPTY, 2026-08-30).
+    Публичный каталог (``SpecialistViewSet``) теперь ПОКАЗЫВАЕТ салонные
+    услуги — иначе на пилоте он показывал пустоту. Но эта ветка на
+    салонный ``service_id`` по-прежнему отдаёт 404: граница AMD-019
+    («резолвер только для внутренней поверхности») — решение владельца от
+    2026-07-21, и расширять её самовольно нельзя. То есть клиентское
+    приложение увидит услугу, слоты по которой не отдаются.
+
+    Это СОЗНАТЕЛЬНО видимая поломка вместо прежней невидимой пустоты:
+    404 попадает в логи и в жалобу, а пустой каталог не попадал никуда —
+    ровно поэтому дефект дожил до сегодня. Закрывается решением
+    владельца о снятии границы AMD-019 для публичной поверхности.
+
+    На боевом пилоте эта дыра не проявляется: бот и Mini App ходят через
+    внутреннюю поверхность, где ``allow_salon_fallback=True``.
 
     Returns ``(payload, None)`` on success or ``(None, error)`` on
     failure, where ``error`` carries an ``_status`` key the caller pops
@@ -334,28 +401,58 @@ class SpecialistFilter(FilterSet):
         model = SpecialistProfile
         fields = ['min_rating', 'is_available']
 
+    # Каждый фильтр ниже — ИЛИ по двум слоям каталога. Раньше все они
+    # join-или только легаси ``services__`` и на пилоте (0 легаси-строк
+    # против 292 канонических связок) отдавали пустой каталог на любой
+    # выбор категории, услуги или цены.
+
     def filter_by_category(self, queryset: QuerySet, name: str, value: Any) -> QuerySet:
+        """Категория: своя у салонной услуги, иначе — категория шаблона.
+
+        Фолбэк, а не объединение (см. ``services.catalog_reads``).
+        """
+        canonical = _ACTIVE_CANONICAL & (
+            Q(specialist_services__salon_service__category_id=value)
+            | Q(
+                specialist_services__salon_service__category_id__isnull=True,
+                specialist_services__salon_service__template__category_id=value,
+            )
+        )
         return queryset.filter(
-            services__category_id=value,
-            services__is_active=True,
+            (Q(services__category_id=value) & Q(services__is_active=True))
+            | canonical
         ).distinct()
 
     def filter_by_service(self, queryset: QuerySet, name: str, value: Any) -> QuerySet:
+        """``service_id`` — маркетплейсный ``Service.id`` ИЛИ ``SalonService.id``.
+
+        Тот же ключ, что принимает бронирование
+        (``services.service_resolver.resolve_bookable_service``).
+        """
         return queryset.filter(
-            services__id=value,
-            services__is_active=True,
+            (Q(services__id=value) & Q(services__is_active=True))
+            | (
+                _ACTIVE_CANONICAL
+                & Q(specialist_services__salon_service_id=value)
+            )
         ).distinct()
 
     def filter_by_min_price(self, queryset: QuerySet, name: str, value: Any) -> QuerySet:
         return queryset.filter(
-            services__price__gte=value,
-            services__is_active=True,
+            (Q(services__price__gte=value) & Q(services__is_active=True))
+            | (
+                _ACTIVE_CANONICAL
+                & Q(specialist_services__price__gte=value)
+            )
         ).distinct()
 
     def filter_by_max_price(self, queryset: QuerySet, name: str, value: Any) -> QuerySet:
         return queryset.filter(
-            services__price__lte=value,
-            services__is_active=True,
+            (Q(services__price__lte=value) & Q(services__is_active=True))
+            | (
+                _ACTIVE_CANONICAL
+                & Q(specialist_services__price__lte=value)
+            )
         ).distinct()
 
 
@@ -379,14 +476,10 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
     def services(self, request, pk=None):
         """GET /specialists/{id}/services/ — all active services."""
         specialist = self.get_object()
-        services = (
-            specialist.services
-            .filter(is_active=True)
-            .select_related('category')
-            .order_by('sort_order', 'name')
-        )
         return Response(
-            ServiceFullSerializer(services, many=True).data,
+            ServiceFullSerializer(
+                catalog_services_for(specialist), many=True,
+            ).data,
         )
 
     @action(detail=True, methods=['get'], url_path='slots')
@@ -418,15 +511,6 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
     # and the per-action permission_classes override that used to live here.
 
     def get_queryset(self) -> QuerySet:
-        active_services = Prefetch(
-            'services',
-            queryset=(
-                Service.objects
-                .filter(is_active=True)
-                .select_related('category')
-                .order_by('sort_order', 'name')
-            ),
-        )
         qs = (
             SpecialistProfile.objects
             .filter(
@@ -435,14 +519,13 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
                 user__is_active=True,
             )
             .select_related('user')
-            .prefetch_related(active_services, 'portfolio', 'working_hours')
-            .annotate(
-                active_services_count=Count(
-                    'services',
-                    filter=Q(services__is_active=True),
-                ),
+            .prefetch_related(
+                *catalog_services_prefetch(), 'portfolio', 'working_hours',
             )
         )
+        # Счётчик по обоим слоям каталога — раньше считались только
+        # легаси-строки, то есть на пилоте ноль у каждого мастера.
+        qs = annotate_catalog_services_count(qs)
 
         # Geo filter: lat, lon, radius (km)
         lat = self.request.query_params.get('lat')
