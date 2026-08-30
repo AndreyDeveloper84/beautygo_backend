@@ -26,12 +26,25 @@ class Notification(models.Model):
         PUSH = "push", "Push"
         SMS = "sms", "SMS"
         BOTH = "both", "Push + SMS fallback"
+        # DRF-1030 — delivered by bot-platform over MAX, not by Ayla.
+        # Ayla has no channel address for MAX (``BotUser.chat_id`` lives
+        # in bot-platform, ADR-0009 forbids reaching for it) and no send
+        # endpoint to call, so a row on this channel records an intent
+        # and a handoff, never a send. See notifications/delivery_routes.py.
+        MAX = "max", "MAX (доставляет бот)"
 
     class Status(models.TextChoices):
         PENDING = "pending", "В очереди"
         SENT = "sent", "Отправлено"
         FAILED = "failed", "Ошибка"
         SKIPPED = "skipped", "Пропущено"
+        # DRF-1030 — terminal for Ayla, and deliberately NOT "sent".
+        # The message was passed to bot-platform on the event bus; whether
+        # it reached the person is a fact only bot-platform holds. Ayla
+        # claims exactly what it can prove: the handoff. The corroborating
+        # evidence is the OutboxEvent row for ``data['delivery_topic']``
+        # and its ``bot_delivery_status``.
+        HANDED_OFF = "handed_off", "Передано боту (доставку владеет бот)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(

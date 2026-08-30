@@ -40,23 +40,31 @@ def specialist_user(db):
 @pytest.mark.django_db
 class TestSendQueuesNotification:
     def test_send_persists_pending_row_and_queues_task(self, client_user):
+        # ``appointment_reminder_1h`` rather than the booking-created
+        # template this used to exercise: DRF-1030 routes the three
+        # booking-lifecycle templates to bot-platform, which delivers
+        # them over MAX, so they no longer take the queue-a-delivery
+        # path at all (that route has its own module,
+        # test_max_delivery_ownership.py). The reminder is still Ayla's
+        # own to send, so it keeps this path covered.
         with patch(
             "notifications.tasks.deliver_notification.delay",
         ) as mock_delay:
             n = NotificationService().send(
                 user=client_user,
-                template_id="appointment_created_client",
+                template_id="appointment_reminder_1h",
                 context={
                     "service_name": "Маникюр",
                     "specialist_name": "Елена",
                     "client_name": "Анна",
                     "date_time": "14:00 26.04",
+                    "address": "ул. Ленина, 1",
                     "appointment_id": "a1",
                 },
             )
         assert n.status == Notification.Status.PENDING
-        assert n.title == "Запись подтверждена"
-        assert "Маникюр" in n.body
+        assert n.title == "Напоминание о записи"
+        assert "Елена" in n.body
         assert n.deep_link == "beautygo-client://appointment/a1"
         mock_delay.assert_called_once_with(str(n.id))
 
@@ -103,7 +111,10 @@ class TestDeliverPushChannel:
         NotificationService().deliver(n)
         n.refresh_from_db()
         assert n.status == Notification.Status.FAILED
-        assert "no tokens" in n.error.lower() or "failed" in n.error.lower()
+        # DRF-1030: the error distinguishes "this person has no app" from
+        # "the transport refused". The old single string covered both and
+        # made 51 pilot rows read as one transport problem.
+        assert "no registered device" in n.error.lower()
 
     def test_deliver_filters_tokens_by_template_app_type(self, specialist_user):
         # Specialist user has a `client` token that should NOT receive a
