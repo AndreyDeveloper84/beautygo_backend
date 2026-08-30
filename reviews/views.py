@@ -171,11 +171,16 @@ class SpecialistReviewsView(APIView):
             .select_related('client', 'service', 'salon_service')
         )
 
+        # '-id' closes the sort key. Without it rows sharing a
+        # created_at (a moderation backfill writes a batch in one
+        # transaction and auto_now_add stamps them identically) are left
+        # in no defined order, and each offset page is a separate
+        # execution free to order them differently — DRF-1128.
         sort = request.query_params.get('sort', 'recent')
         if sort == 'rating':
-            qs = qs.order_by('-rating', '-created_at')
+            qs = qs.order_by('-rating', '-created_at', '-id')
         else:
-            qs = qs.order_by('-created_at')
+            qs = qs.order_by('-created_at', '-id')
 
         paginator = ReviewPagination()
         page = paginator.paginate_queryset(qs, request)

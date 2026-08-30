@@ -63,7 +63,9 @@ class Conversation(models.Model):
     class Meta:
         verbose_name = "AI Conversation"
         verbose_name_plural = "AI Conversations"
-        ordering = ["-last_message_at", "-created_at"]
+        # "-id" makes the order total — see DRF-1128. last_message_at is
+        # NULL until the first reply and created_at is auto_now_add.
+        ordering = ["-last_message_at", "-created_at", "-id"]
         indexes = [
             models.Index(fields=["user", "-last_message_at"]),
             models.Index(fields=["is_active", "-last_message_at"]),

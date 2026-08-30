@@ -56,7 +56,9 @@ class Notification(models.Model):
     sent_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
-        ordering = ["-created_at"]
+        # "-id" makes the order total — see DRF-1128. created_at is
+        # auto_now_add, so a dispatch batch ties on it.
+        ordering = ["-created_at", "-id"]
         indexes = [
             # Reminder de-dup query: filter by user + template + appointment_id (in data).
             # The (user, template_id, created_at) index covers the
