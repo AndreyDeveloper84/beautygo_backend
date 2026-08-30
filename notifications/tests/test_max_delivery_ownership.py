@@ -158,8 +158,8 @@ def pilot_topics(settings):
 def bot_reachable(settings):
     """Give the publisher a target so a handoff can actually go out."""
     settings.BOT_PLATFORM_BASE_URL = "https://bot.example.test"
-    settings.AYLA_INTERNAL_API_TOKEN = "test-token"
-    settings.AYLA_OUTBOUND_HMAC_SECRET = "test-secret"
+    settings.AYLA_INTERNAL_API_TOKEN = "test-token"  # pragma: allowlist secret
+    settings.AYLA_OUTBOUND_HMAC_SECRET = "test-secret"  # pragma: allowlist secret
 
 
 @pytest.fixture
