@@ -89,7 +89,7 @@ class ReviewCreateView(APIView):
         # Fetch and validate appointment
         try:
             appointment = Appointment.objects.select_related(
-                'specialist', 'service',
+                'specialist', 'service', 'salon_service',
             ).get(id=appointment_id, client=request.user)
         except Appointment.DoesNotExist:
             return error_response(
@@ -116,7 +116,14 @@ class ReviewCreateView(APIView):
                 appointment=appointment,
                 client=request.user,
                 specialist=appointment.specialist,
+                # DRF-1421 — прямое копирование пары ссылок из брони.
+                # Разбирать случаи не нужно: XOR уже соблюдён на
+                # ``Appointment`` (CHECK appointment_exactly_one_service_
+                # source), и ``Review`` несёт тот же CHECK. До этого сюда
+                # шла одна ``appointment.service``, а у пилотной брони она
+                # NULL — отзыв падал на NOT NULL и не сохранялся вовсе.
                 service=appointment.service,
+                salon_service=appointment.salon_service,
                 rating=serializer.validated_data['rating'],
                 text=serializer.validated_data.get('text', ''),
                 is_anonymous=serializer.validated_data.get('is_anonymous', False),
@@ -161,7 +168,7 @@ class SpecialistReviewsView(APIView):
         qs = (
             Review.objects
             .filter(specialist=specialist, is_hidden=False)
-            .select_related('client', 'service')
+            .select_related('client', 'service', 'salon_service')
         )
 
         sort = request.query_params.get('sort', 'recent')
@@ -203,9 +210,9 @@ class ReviewUpdateView(APIView):
     )
     def patch(self, request: Request, pk) -> Response:
         try:
-            review = Review.objects.select_related('service').get(
-                id=pk, client=request.user,
-            )
+            review = Review.objects.select_related(
+                'service', 'salon_service',
+            ).get(id=pk, client=request.user)
         except Review.DoesNotExist:
             return error_response("NOT_FOUND", "Review not found.", status_code=404)
 
@@ -238,7 +245,7 @@ class ReviewReplyView(APIView):
     def post(self, request: Request, pk) -> Response:
         try:
             review = Review.objects.select_related(
-                'specialist__user', 'service',
+                'specialist__user', 'service', 'salon_service',
             ).get(id=pk)
         except Review.DoesNotExist:
             return error_response("NOT_FOUND", "Review not found.", status_code=404)
