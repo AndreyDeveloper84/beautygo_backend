@@ -226,6 +226,7 @@ class HomeView(APIView):
             RecommendationEngine,
             RecommendationQuery,
         )
+        from goals.wiring import goal_category_ids_for
 
         # If client didn't share geo, fall back to top-rated (RecommendationEngine
         # treats None lat/lon as neutral 0.5 distance score, so rating dominates).
@@ -234,6 +235,10 @@ class HomeView(APIView):
         if profile is not None:
             city = getattr(profile, "city", "") or None
 
+        # OD-1: цель влияет на пассивную выдачу. Здесь клиент ничего не
+        # запрашивал — экран открылся сам, — поэтому говорить о его
+        # намерении может только сохранённая цель. ``None`` (флаг
+        # выключен либо цель не разрешается) оставляет прежнюю выдачу.
         engine = RecommendationEngine()
         result = engine.recommend(
             RecommendationQuery(
@@ -242,6 +247,7 @@ class HomeView(APIView):
                 client_lon=lon,
                 city=city,
                 limit=LIMIT_NEARBY,
+                goal_category_ids=goal_category_ids_for(user),
             ),
         )
         return [
