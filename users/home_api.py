@@ -35,7 +35,6 @@ import logging
 from typing import Any
 
 from django.core.cache import cache as default_cache
-from django.db.models import Count, Q
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import permissions, serializers as drf_serializers
@@ -44,6 +43,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from appointments.models import Appointment
+from services.catalog_reads import category_specialist_counts
 from services.models import ServiceCategory
 from users.permissions import IsClient, IsClientApp
 from users.response import success_response
@@ -193,25 +193,33 @@ class HomeView(APIView):
         if cached is not None:
             return cached
 
-        qs = (
-            ServiceCategory.objects
-            .annotate(
-                specialists_count=Count(
-                    "services__specialist",
-                    filter=Q(services__is_active=True),
-                    distinct=True,
-                ),
-            )
-            .order_by("-specialists_count", "sort_order", "name")[:LIMIT_CATEGORIES]
-        )
-        result = [
+        # Считаем по ОБОИМ слоям каталога. Раньше здесь стояло
+        # ``Count("services__specialist")`` — обратная связь легаси
+        # ``Service``, пустой на пилоте целиком (замер 2026-08-30: 0 строк
+        # против 292 канонических связок). Полка «популярное» показывала
+        # ноль у КАЖДОЙ категории и выглядела как «пока никого нет».
+        # Разрешение категории с запасным путём через шаблон живёт в
+        # ``services.catalog_reads``.
+        counts = category_specialist_counts()
+        qs = ServiceCategory.objects.all()
+        rows = [
             {
                 "id": str(c.id),
                 "name": c.name,
                 "icon": c.icon,
-                "specialists_count": c.specialists_count,
+                "specialists_count": counts.get(c.id, 0),
+                "_sort_order": c.sort_order,
             }
             for c in qs
+        ]
+        rows.sort(
+            key=lambda row: (
+                -row["specialists_count"], row["_sort_order"], row["name"],
+            ),
+        )
+        result = [
+            {k: v for k, v in row.items() if k != "_sort_order"}
+            for row in rows[:LIMIT_CATEGORIES]
         ]
         default_cache.set(
             CACHE_KEY_POPULAR_CATEGORIES, result, timeout=CACHE_TTL_POPULAR_CATEGORIES,

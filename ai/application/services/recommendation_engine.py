@@ -43,6 +43,10 @@ from django.conf import settings
 from django.core.cache import cache as default_cache
 from django.db.models import Q
 
+from services.catalog_reads import (
+    catalog_services_for,
+    catalog_services_prefetch,
+)
 from users.models import SpecialistProfile
 
 logger = logging.getLogger(__name__)
@@ -372,7 +376,7 @@ class RecommendationEngine:
         # Pull ~3x limit so the scorer has headroom — cheaper than
         # paginating per filter combo.
         qs = qs.order_by("-rating", "-reviews_count")[: limit * 3]
-        return list(qs.prefetch_related("services"))
+        return list(qs.prefetch_related(*catalog_services_prefetch()))
 
     def _load_history_specialist_ids(self, client_id: UUID | None) -> set[UUID]:
         if client_id is None:
@@ -545,9 +549,13 @@ class RecommendationEngine:
         distance_km: float | None,
         breakdown: ScoreBreakdown,
     ) -> ScoredSpecialist:
+        # ОБА слоя каталога: легаси ``Service`` на пилоте пуст целиком
+        # (замер 2026-08-30: 0 строк против 292 канонических связок), и
+        # превью услуг молча приходило пустым везде, где его показывают —
+        # полка «рядом с вами» на главной, карточки мастеров в чате Ayla,
+        # системный промпт LLM. См. ``services.catalog_reads``.
         services = [
-            svc.name for svc in s.services.all()
-            if svc.is_active
+            svc.name for svc in catalog_services_for(s)
         ][:3]
         return ScoredSpecialist(
             id=s.id,
