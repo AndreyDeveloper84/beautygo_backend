@@ -300,3 +300,69 @@ class TestCursorTieBreak:
             )
         ]
         assert [it["id"] for it in items] == expected
+
+
+@pytest.mark.django_db
+class TestCursorFormatCompatibility:
+    """The cursor gained an id half — old ones must still be honoured.
+
+    A bot can hold a cursor issued by the previous build across a
+    deploy. Rejecting it would turn a fixed bug into a visible 400 in
+    the middle of someone's scroll, so a timestamp-only cursor keeps
+    the old (lossy) comparison instead.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
+    def test_legacy_timestamp_only_cursor_still_paginates(
+        self, customer, specialist, service,
+    ):
+        ids = _build_with_ties(customer, specialist, service, past=False)
+        first = Appointment.objects.filter(id__in=ids).order_by(
+            "start_datetime", "id",
+        ).first()
+
+        # Exactly what the previous build emitted: no id half.
+        legacy = first.start_datetime.isoformat()
+        r = _api().get(
+            LIST_URL,
+            {"section": "upcoming", "limit": str(PAGE_LIMIT),
+             "cursor": legacy},
+        )
+        assert r.status_code == 200, r.content
+        # Old semantics: strictly-later timestamps only.
+        returned = {it["id"] for it in r.json()["data"]["items"]}
+        assert returned
+        assert str(first.id) not in returned
+
+    def test_cursor_with_a_broken_id_half_is_rejected(
+        self, customer, specialist, service,
+    ):
+        ids = _build_with_ties(customer, specialist, service, past=False)
+        first = Appointment.objects.filter(id__in=ids).first()
+        bad = f"{first.start_datetime.isoformat()}|not-a-uuid"
+        r = _api().get(
+            LIST_URL, {"section": "upcoming", "cursor": bad},
+        )
+        assert r.status_code == 400
+
+    def test_next_cursor_round_trips_through_the_client(
+        self, customer, specialist, service,
+    ):
+        """The separator must survive URL encoding both ways."""
+        _build_with_ties(customer, specialist, service, past=False)
+        r = _api().get(
+            LIST_URL, {"section": "upcoming", "limit": str(PAGE_LIMIT)},
+        )
+        cursor = r.json()["data"]["next_cursor"]
+        assert cursor is not None and "|" in cursor
+
+        r2 = _api().get(
+            LIST_URL,
+            {"section": "upcoming", "limit": str(PAGE_LIMIT),
+             "cursor": cursor},
+        )
+        assert r2.status_code == 200, r2.content
+        assert r2.json()["data"]["items"]
