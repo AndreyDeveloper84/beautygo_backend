@@ -312,6 +312,13 @@ def dispatch_water_reminders() -> dict:
             user_id__in=active_user_ids,
             created_at__gte=today_start,
         )
+        # order_by() clears Meta.ordering. Django appends every ordering
+        # column to a SELECT DISTINCT list, so leaving it on would make
+        # the DISTINCT per (user_id, created_at, id) — i.e. one row per
+        # notification — instead of one row per user. DRF-1128 added id
+        # to Meta.ordering, which turned that from nearly-per-row into
+        # exactly-per-row.
+        .order_by()
         .values_list("user_id", flat=True).distinct()
     )
 
@@ -391,6 +398,9 @@ def dispatch_beauty_insights() -> dict:
             user_id__in=active_user_ids,
             created_at__gte=cutoff,
         )
+        # See the water-reminder task: order_by() keeps this DISTINCT
+        # per user_id rather than per notification row. DRF-1128.
+        .order_by()
         .values_list("user_id", flat=True).distinct()
     )
 

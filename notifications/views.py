@@ -46,7 +46,11 @@ class _NotificationPagination(PageNumberPagination):
 def _user_notifications(user) -> QuerySet:
     """Owner-scoped queryset. Reused by all three views so the
     is-this-mine check is in exactly one place."""
-    return Notification.objects.filter(user=user).order_by("-created_at")
+    # "-id" closes the sort key: a reminder fan-out writes the whole
+    # batch in one transaction and auto_now_add gives every row the same
+    # created_at, leaving the paginator free to reshuffle them between
+    # pages and silently drop entries from the feed — DRF-1128.
+    return Notification.objects.filter(user=user).order_by("-created_at", "-id")
 
 
 class NotificationListView(APIView):
