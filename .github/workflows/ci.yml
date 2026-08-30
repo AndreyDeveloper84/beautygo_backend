@@ -423,8 +423,25 @@ jobs:
             # empty; 503 with a per-check JSON body otherwise (see
             # djangoProject/health.py). Connection-refused while the
             # entrypoint runs migrate + collectstatic is expected and
-            # shows as http=000 — keep waiting. 40 x 6s = 4 minutes.
-            for i in $(seq 1 40); do
+            # shows as http=000 — keep waiting. 120 x 6s = 12 minutes.
+            #
+            # Почему 12, а не 4 (замер 30.08). Проход по merge PR #264
+            # покраснел на этом шаге при ПОЛНОСТЬЮ ЗДОРОВОМ пилоте:
+            #
+            #   06:21:49  шаг начал ждать
+            #   06:25:54  сдался через 244 с — в логе «Applying migrations…»
+            #   06:31:25  gunicorn: Listening at http://0.0.0.0:8000
+            #
+            # То есть не хватило ещё 5.5 минут: entrypoint гонит migrate +
+            # collectstatic, и на боевой базе это дольше четырёх минут.
+            # Проверено вручную сразу после: readiness отдаёт 200 с телом
+            # {"db":ok,"cache":ok,"migrations":"applied"} — контур был жив
+            # всё это время.
+            #
+            # Красный деплой при рабочем пилоте хуже отсутствующей проверки:
+            # он приучает не смотреть на красное. Один такой прогон уже
+            # стоил часа диагностики и ложного вывода «пилот лежит».
+            for i in $(seq 1 120); do
               code=$(curl -sS -m 10 -o /tmp/drf1363_ready.json -w '%{http_code}' \
                 -H "Host: $HOST_HEADER" \
                 http://127.0.0.1:8000/api/v1/health/ready/ 2>/dev/null || echo 000)
@@ -435,14 +452,14 @@ jobs:
                 echo "Deploy complete!"
                 exit 0
               fi
-              echo "readiness not green (attempt $i/40, http=$code)"
+              echo "readiness not green (attempt $i/120, http=$code)"
               if [ -s /tmp/drf1363_ready.json ]; then
                 head -c 400 /tmp/drf1363_ready.json; echo
               fi
               sleep 6
             done
 
-            echo "::error::readiness red after 4 minutes — the deploy is NOT live. Checks below."
+            echo "::error::readiness red after 12 minutes — the deploy is NOT live. Checks below."
             if [ -s /tmp/drf1363_ready.json ]; then
               echo "last readiness body:"; head -c 800 /tmp/drf1363_ready.json; echo
             fi
