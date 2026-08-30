@@ -34,6 +34,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -280,3 +281,53 @@ class TestMarketplaceReviewStillWorks:
         review = Review.objects.get()
         assert review.service_id == marketplace_service.id
         assert review.salon_service_id is None
+
+
+# ---------------------------------------------------------------------------
+# CHECK кусается: ровно одна ссылка, не ноль и не две
+# ---------------------------------------------------------------------------
+
+
+class TestExactlyOneServiceSource:
+    """Без этого класса «обнулили обе ссылки» прошло бы незамеченным.
+
+    Обнуляемость нужна была только чтобы дать салонной броне куда
+    сослаться. Отзыв без услуги вообще — не цель правки, и БД обязана
+    его отвергать так же, как отвергает бронь без услуги.
+    """
+
+    def test_both_references_null_is_rejected(
+        self, client_user, specialist, salon_service, salon_link,
+    ):
+        assert Service.objects.count() == 0
+        appointment = _completed_appointment(
+            client_user, specialist, salon=salon_service,
+        )
+        with pytest.raises(IntegrityError, match="review_exactly_one_service_source"):
+            with transaction.atomic():
+                Review.objects.create(
+                    appointment=appointment, client=client_user,
+                    specialist=specialist, service=None, salon_service=None,
+                    rating=5,
+                )
+        assert Review.objects.count() == 0
+
+    def test_both_references_set_is_rejected(
+        self, client_user, specialist, category, salon_service, salon_link,
+    ):
+        legacy = Service.objects.create(
+            specialist=specialist, category=category,
+            name=MARKETPLACE_SERVICE_NAME,
+            price=Decimal("1500.00"), duration_minutes=60, is_active=True,
+        )
+        appointment = _completed_appointment(
+            client_user, specialist, salon=salon_service,
+        )
+        with pytest.raises(IntegrityError, match="review_exactly_one_service_source"):
+            with transaction.atomic():
+                Review.objects.create(
+                    appointment=appointment, client=client_user,
+                    specialist=specialist, service=legacy,
+                    salon_service=salon_service, rating=5,
+                )
+        assert Review.objects.count() == 0

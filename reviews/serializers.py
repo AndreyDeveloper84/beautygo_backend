@@ -31,7 +31,10 @@ class ReviewCreateSerializer(serializers.Serializer):
 class ReviewListSerializer(serializers.ModelSerializer):
     """Serializer for GET /specialists/{id}/reviews/ listing."""
     client_name = serializers.SerializerMethodField()
-    service_name = serializers.CharField(source='service.name', read_only=True)
+    # DRF-1421 — читаем разрешённое имя услуги, а не FK напрямую:
+    # у салонного отзыва ``service`` NULL, и source='service.name'
+    # отдал бы ``null`` вместо названия. Разрешение — на модели.
+    service_name = serializers.CharField(read_only=True)
 
     class Meta:
         model = Review
@@ -52,7 +55,10 @@ class ReviewListSerializer(serializers.ModelSerializer):
 class ReviewDetailSerializer(serializers.ModelSerializer):
     """Full review for POST response."""
     client_name = serializers.SerializerMethodField()
-    service_name = serializers.CharField(source='service.name', read_only=True)
+    # DRF-1421 — читаем разрешённое имя услуги, а не FK напрямую:
+    # у салонного отзыва ``service`` NULL, и source='service.name'
+    # отдал бы ``null`` вместо названия. Разрешение — на модели.
+    service_name = serializers.CharField(read_only=True)
     appointment_id = serializers.UUIDField(source='appointment.id', read_only=True)
 
     class Meta:
