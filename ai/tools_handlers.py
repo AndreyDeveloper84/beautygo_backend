@@ -20,12 +20,13 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+
 from appointments.application.dto import GetAvailabilityDTO
 from appointments.application.services.availability_query_service import (
     AvailabilityQueryService,
 )
 from appointments.models import Appointment
-from services.models import Service
 from users.models import SpecialistProfile
 
 from ai.application.services.specialist_context_builder import (
@@ -63,6 +64,41 @@ def _fallback_clarification(reason: str) -> ToolResult:
             "options": [],
         },
     )
+
+
+def _resolve_service(service_id: UUID, specialist, surface: str):
+    """Разрешить ``service_id`` в обоих слоях каталога (AMD-019).
+
+    Возвращает ``ResolvedService`` или ``None``, если услуга не
+    существует / неактивна / не связана с этим мастером. Вызывающий
+    превращает ``None`` в свой уточняющий фолбэк.
+
+    Раньше оба хендлера читали ТОЛЬКО легаси ``Service``. На боевом
+    пилоте эта таблица пуста целиком (замер 2026-08-30: 0 строк против
+    292 канонических связок), поэтому консьерж на любой реальный
+    ``service_id`` отвечал «уточните, что вы хотели бы найти?» — и это
+    выглядело как непонятливый ассистент, а не как поломка.
+    """
+    from services.service_resolver import (
+        ServiceUnavailableForSpecialistError,
+        resolve_bookable_service,
+    )
+
+    try:
+        return resolve_bookable_service(
+            service_id=service_id, specialist=specialist,
+        )
+    except (
+        ServiceUnavailableForSpecialistError,
+        ValueError,
+        DjangoValidationError,
+    ):
+        logger.info(
+            "ai.tool_call.service_unresolved surface=%s service_id=%s "
+            "specialist_id=%s",
+            surface, service_id, specialist.id,
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -139,22 +175,31 @@ def handle_show_slots(
         return _fallback_clarification("show_slots_invalid_date")
 
     # Resolve service for response shape (name + duration + price).
-    service = (
-        Service.objects.filter(
-            id=service_id, specialist_id=specialist_id, is_active=True
-        ).first()
-    )
-    if service is None:
+    # ОБЩИЙ резолвер (AMD-019): маркетплейсный ``Service`` в приоритете,
+    # затем ``SalonService`` с активной связкой ``SpecialistService`` в
+    # тенанте мастера. Тот же, что у CreateBookingService и внутреннего
+    # слотового эндпоинта — второго пути разрешения не заводим.
+    specialist = SpecialistProfile.objects.filter(id=specialist_id).first()
+    if specialist is None:
+        return _fallback_clarification("show_slots_specialist_not_found")
+    resolved = _resolve_service(service_id, specialist, "show_slots")
+    if resolved is None:
         return _fallback_clarification("show_slots_service_not_found")
 
     svc = availability_service or AvailabilityQueryService()
     dto = GetAvailabilityDTO(
         specialist_id=specialist_id,
         target_date=target_date,
-        service_id=service_id,
+        service_id=resolved.service_id,
     )
     try:
-        result = svc.get_day_availability(dto)
+        # duration/buffer передаём явно: с ними ``AvailabilityQueryService``
+        # не ходит в легаси ``Service`` за длительностью, которой там нет.
+        result = svc.get_day_availability(
+            dto,
+            duration_override=resolved.duration_minutes,
+            buffer_override=resolved.buffer_after_minutes,
+        )
     except Exception as exc:  # noqa: BLE001 — best-effort fallback
         logger.exception("ai.show_slots availability_error: %s", exc)
         return _fallback_clarification("show_slots_availability_error")
@@ -163,13 +208,13 @@ def handle_show_slots(
         action_type=ActionType.SHOW_SLOTS,
         action_data={
             "specialist_id": str(specialist_id),
-            "service_id": str(service_id),
+            "service_id": str(resolved.service_id),
             "date": target_date.isoformat(),
             "service": {
-                "id": str(service.id),
-                "name": service.name,
-                "duration_minutes": service.duration_minutes,
-                "price": str(service.price),
+                "id": str(resolved.service_id),
+                "name": resolved.name,
+                "duration_minutes": resolved.duration_minutes,
+                "price": str(resolved.price),
             },
             "slots": [s.isoformat() for s in getattr(result, "slots", []) or []],
         },
@@ -193,10 +238,13 @@ def handle_confirm_booking(args: dict[str, Any]) -> ToolResult:
         return _fallback_clarification("confirm_booking_invalid_datetime")
 
     specialist = SpecialistProfile.objects.filter(id=specialist_id).first()
-    service = Service.objects.filter(
-        id=service_id, specialist_id=specialist_id
-    ).first()
-    if specialist is None or service is None:
+    if specialist is None:
+        return _fallback_clarification("confirm_booking_specialist_or_service_missing")
+    # Тот же общий резолвер, что и в show_slots — иначе карточка
+    # подтверждения и последующее создание записи разошлись бы в том,
+    # какой id считать бронируемым.
+    resolved = _resolve_service(service_id, specialist, "confirm_booking")
+    if resolved is None:
         return _fallback_clarification("confirm_booking_specialist_or_service_missing")
 
     return ToolResult(
@@ -204,12 +252,12 @@ def handle_confirm_booking(args: dict[str, Any]) -> ToolResult:
         action_data={
             "specialist_id": str(specialist.id),
             "specialist_name": specialist.display_name,
-            "service_id": str(service.id),
-            "service_name": service.name,
+            "service_id": str(resolved.service_id),
+            "service_name": resolved.name,
             "datetime": slot_dt.isoformat(),
-            "price": str(service.price),
+            "price": str(resolved.price),
             "address": specialist.address,
-            "duration_minutes": service.duration_minutes,
+            "duration_minutes": resolved.duration_minutes,
         },
     )
 

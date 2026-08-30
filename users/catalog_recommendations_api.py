@@ -43,12 +43,15 @@ OD-1 (2026-08-29) — сохранённая цель клиента
 ``SalonService``), потому что легаси ``Service`` на пилоте пуст целиком
 (замер 2026-08-29: 0 строк против 292 канонических связок).
 
-⚠️ Остальная машинерия этого эндпоинта всё ещё читает легаси и потому
-на пилоте молчит: ``_build_layer_3`` считает категории через
-``ServiceCategory.services``, а ILIKE-фильтр явного ``goal`` join-ит
-``services__``. То есть полка 3 пуста, а любой явный ``goal`` даёт
-пустую полку 2 — пред-существующий дефект, не вызванный OD-1 и здесь
-НЕ чинимый (чанк S3-CUT).
+S3-EMPTY (2026-08-30) — остальная машинерия переведена на оба слоя
+------------------------------------------------------------------
+Замер пилота показал, что предупреждение выше было не теорией: полка 3
+(``_build_layer_3``, счёт через ``ServiceCategory.services``) была пуста
+у каждого клиента, а любой явный непустой ``goal`` (ILIKE по
+``services__``) отдавал пустую полку 2. Обе поверхности теперь читают
+ОБА слоя каталога через ``services.catalog_reads`` — легаси ``Service``
+не выключен, к нему добавлен канонический слой. Разрешение категории
+там же: своя категория салона побеждает, шаблон — запасной путь.
 
 Приоритет: сказанное сейчас старше выбранного когда-то. Явный ``goal``
 в запросе полностью вытесняет сохранённую цель — контракт параметра не
@@ -66,7 +69,7 @@ import math
 from decimal import Decimal
 from typing import Any
 
-from django.db.models import Count, Q, QuerySet
+from django.db.models import QuerySet
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers
 from rest_framework.request import Request
@@ -74,6 +77,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from goals.wiring import goal_category_ids_for
+from services.catalog_reads import (
+    catalog_services_for,
+    catalog_services_prefetch,
+    category_service_counts,
+    specialist_service_text_q,
+)
 from services.models import ServiceCategory
 from users.models import SpecialistProfile, TenantUserRelationship
 from users.permissions import IsBotServiceWithVerifiedClient
@@ -230,19 +239,22 @@ def _goal_matches(specialist: SpecialistProfile, goal: str) -> bool:
     case where the upstream filter is OR-shape (service name OR
     category slug) — we still want to know if the match was on the
     name (more meaningful) vs slug (more abstract).
+
+    Ходит по ОБОИМ слоям каталога (``services.catalog_reads``). Читая
+    только легаси ``services``, эта проверка на пилоте всегда возвращала
+    False — и мастер, отобранный ИМЕННО по совпадению с целью, получал
+    reasoning_text «Принимает записи» вместо «Совпадает с твоей целью».
     """
     if not goal:
         return False
     needle = goal.lower()
-    for service in specialist.services.all():
+    for service in catalog_services_for(specialist):
         if needle in service.name.lower():
             return True
-        category = getattr(service, "category", None)
-        if category is not None:
-            if needle in (category.slug or "").lower():
-                return True
-            if needle in (category.name or "").lower():
-                return True
+        if needle in (service.category_slug or "").lower():
+            return True
+        if needle in (service.category_name or "").lower():
+            return True
     return False
 
 
@@ -309,23 +321,22 @@ def _base_pool() -> QuerySet:
             status=SpecialistProfile.ProfileStatus.ACTIVE,
         )
         .select_related("tenant")
-        .prefetch_related("services", "services__category")
+        .prefetch_related(*catalog_services_prefetch())
     )
 
 
 def _apply_goal_filter(qs: QuerySet, goal: str) -> QuerySet:
     """Apply the goal ILIKE filter to a base pool. No-op when goal=''.
 
-    ILIKE on service name OR category slug/name. Post-pilot:
+    ILIKE on service name OR category slug/name — по ОБОИМ слоям
+    каталога (``services.catalog_reads.specialist_service_text_q``).
+    Читая только легаси ``services``, этот фильтр на пилоте отдавал
+    пустую полку 2 на ЛЮБУЮ непустую строку goal. Post-pilot:
     tag-based or semantic match.
     """
     if not goal:
         return qs
-    return qs.filter(
-        Q(services__name__icontains=goal)
-        | Q(services__category__slug__icontains=goal)
-        | Q(services__category__name__icontains=goal)
-    ).distinct()
+    return qs.filter(specialist_service_text_q(goal)).distinct()
 
 
 def _apply_goal_category_filter(qs: QuerySet, category_ids) -> QuerySet:
@@ -404,21 +415,34 @@ def _build_layer_3(pool: QuerySet) -> dict[str, Any]:
     """Category counts across the eligible pool — feeds the Mini App's
     "browse by category" rail.
 
-    Simple GROUP BY: counts distinct services within the pool's
-    eligible specialists. Sorted by count descending, top-N.
+    Counts active services within the pool's eligible specialists across
+    BOTH catalog layers (``services.catalog_reads``). Раньше считалось
+    через ``ServiceCategory.services`` — обратную связь легаси
+    ``Service``, — и на пилоте полка была пуста у каждого клиента.
+
+    Категория услуги разрешается с запасным путём через шаблон: своя
+    категория салона побеждает, шаблон читается только когда своей нет
+    (см. докстринг ``services.catalog_reads``).
+
+    Sorted by count descending, then slug for a stable order across
+    replicas. Top-N.
     """
-    eligible_ids = pool.values_list("id", flat=True)
-    cat_rows = (
+    eligible_ids = list(pool.values_list("id", flat=True))
+    counts = category_service_counts(specialist_ids=eligible_ids)
+    if not counts:
+        return {"categories": []}
+
+    categories = (
         ServiceCategory.objects
-        .filter(
-            services__is_active=True,
-            services__specialist__in=eligible_ids,
-        )
-        .annotate(count=Count("services", distinct=True))
-        .values("slug", "name", "count")
-        .order_by("-count", "slug")[:LAYER_3_CATEGORY_LIMIT]
+        .filter(id__in=counts.keys())
+        .values("id", "slug", "name")
     )
-    return {"categories": list(cat_rows)}
+    rows = [
+        {"slug": row["slug"], "name": row["name"], "count": counts[row["id"]]}
+        for row in categories
+    ]
+    rows.sort(key=lambda row: (-row["count"], row["slug"]))
+    return {"categories": rows[:LAYER_3_CATEGORY_LIMIT]}
 
 
 # ---------------------------------------------------------------------------
