@@ -41,6 +41,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.core.cache import cache as default_cache
+from django.db.models import Q
 
 from users.models import SpecialistProfile
 
@@ -88,6 +89,21 @@ class RecommendationQuery:
     price_max: Decimal | None = None
     min_rating: float | None = None  # falls back to settings.AI_SPECIALIST_MIN_RATING
     limit: int | None = None  # falls back to settings.AI_SPECIALIST_CONTEXT_LIMIT
+    # OD-1. Категории активной цели клиента, уже разрешённые вызывающей
+    # стороной (goals.wiring.goal_category_ids_for). Движок о целях
+    # по-прежнему НЕ знает — он получает готовые category_id, как и
+    # требует граница из goals/resolution.py.
+    #
+    # Отдельное поле, а не переиспользование ``category_id``: там один
+    # скаляр и явный запрос пользователя, здесь набор (цель курируется
+    # на корне и раскрывается вниз до подкатегорий, DRF-1308) и
+    # пассивный фон. Смешать их значило бы менять смысл существующего
+    # поля и его вклад в ``_score_service_match``.
+    #
+    # ``None`` — фильтр не применяется (флаг выключен либо цель
+    # разрешить нельзя). Кортеж — dataclass frozen и должен остаться
+    # хешируемым.
+    goal_category_ids: tuple[UUID, ...] | None = None
 
     def cache_key(self) -> str:
         payload = {
@@ -100,6 +116,19 @@ class RecommendationQuery:
             "min_rating": self.min_rating,
             "limit": self.limit,
         }
+        # Ключ добавляется ТОЛЬКО когда цель применена. Иначе digest
+        # каждого запроса изменился бы от одного факта появления поля,
+        # и выкладка с выключенным флагом разом обнулила бы кэш — то
+        # есть изменила бы поведение, которое обязана оставить прежним.
+        #
+        # Цель обязана входить в ключ: без этого выдача, отфильтрованная
+        # одной целью, досталась бы тому же клиенту после смены цели —
+        # и наоборот, прежняя нефильтрованная выдача пережила бы
+        # включение флага на весь TTL.
+        if self.goal_category_ids:
+            payload["goal_category_ids"] = [
+                str(category_id) for category_id in self.goal_category_ids
+            ]
         digest = hashlib.sha1(
             json.dumps(payload, sort_keys=True).encode("utf-8"),
         ).hexdigest()[:16]
@@ -261,6 +290,37 @@ class RecommendationEngine:
     # ------------------------------------------------------------------
     # fetch
     # ------------------------------------------------------------------
+    @staticmethod
+    def _goal_category_predicate(category_ids: tuple[UUID, ...]) -> Q:
+        """Услуга попадает в цель по своей категории, иначе — по шаблону.
+
+        ``SalonService.category`` обнуляем по схеме (обязателен только
+        когда нет ``template``), а ``ServiceTemplate.category`` —
+        NOT NULL. Без запасного пути услуга, заведённая от шаблона без
+        собственной категории, выпала бы из цели молча.
+
+        Это ФОЛБЭК, а не объединение: своя категория салона побеждает.
+        Симметрично ``services.goal_resolution.goals_for_service``,
+        которое ходит в обратную сторону и следует тому же решению
+        владельца (DRF-1308 п.1 и п.4) — не приписывать услуге цель,
+        которой владелец для неё не заявлял. Поэтому шаблон читается
+        ТОЛЬКО когда своей категории нет вовсе.
+
+        На пилоте 2026-08-29 категория заполнена у всех 94 салонных
+        услуг, то есть сегодня обе ветки дают одно и то же. Условие
+        написано по схеме, а не по этому замеру: следующий тенант
+        заедет иначе.
+        """
+        return (
+            Q(specialist_services__salon_service__category_id__in=category_ids)
+            | Q(
+                specialist_services__salon_service__category_id__isnull=True,
+                specialist_services__salon_service__template__category_id__in=(
+                    category_ids
+                ),
+            )
+        )
+
     def _fetch_candidates(
         self,
         query: RecommendationQuery,
@@ -281,6 +341,26 @@ class RecommendationEngine:
             qs = qs.filter(
                 services__category_id=query.category_id,
                 services__is_active=True,
+            ).distinct()
+
+        # OD-1. Цель клиента — жёсткий фильтр, как и явная категория.
+        # В ``_score_service_match`` она сознательно НЕ участвует:
+        # цель уже сузила пул, а добавь мы её ещё и в 15%-й вес, при
+        # выключенном флаге ранжирование осталось бы прежним только
+        # случайно. Один эффект — одно место.
+        #
+        # Фильтр идёт по КАНОНИЧЕСКОМУ каталогу
+        # (``SpecialistService`` -> ``SalonService``), а НЕ по легаси
+        # ``Service`` рядом строкой выше. Замер пилота 2026-08-29:
+        # SpecialistService 292, SalonService 94, легаси Service — 0.
+        # Фильтр по легаси отдал бы пустую полку каждому, кто выбрал
+        # цель. Легаси-ветки (``category_id``/``price_max``) не
+        # трогаем: их перевод — отдельный чанк S3-CUT.
+        if query.goal_category_ids:
+            qs = qs.filter(
+                self._goal_category_predicate(query.goal_category_ids),
+                specialist_services__is_active=True,
+                specialist_services__salon_service__is_active=True,
             ).distinct()
 
         if query.price_max is not None:
