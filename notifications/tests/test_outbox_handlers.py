@@ -100,6 +100,25 @@ def _no_celery_dispatch():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _pilot_delivery_topics(settings):
+    """Publish what the pilot publishes (read off the live container
+    2026-08-14, DRF-1074).
+
+    Without it these tests run against the repo default — an empty
+    allowlist — where the three bot-delivered templates have no route to
+    anyone and DRF-1030 makes the dispatcher log that at ERROR. The
+    handler→row mapping under test is the same either way; this just
+    stops the suite exercising a configuration nobody runs.
+    """
+    settings.OUTBOX_EXTERNAL_DELIVERY_TOPICS = (
+        "booking.created",
+        "booking.confirmed",
+        "booking.cancelled",
+        "appointment.rescheduled",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
