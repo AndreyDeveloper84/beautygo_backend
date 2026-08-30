@@ -286,7 +286,10 @@ class ConversationListView(APIView):
         qs = (
             Conversation.objects.filter(user=request.user, is_active=True)
             .annotate(messages_count=Count("messages"))
-            .order_by("-last_message_at", "-created_at")
+            # "-id" closes the sort key. last_message_at is NULL until
+            # the first reply and created_at is auto_now_add, so freshly
+            # created conversations tie on both halves — DRF-1128.
+            .order_by("-last_message_at", "-created_at", "-id")
         )
 
         paginator = self.pagination_class()

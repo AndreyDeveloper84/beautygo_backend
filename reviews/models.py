@@ -100,7 +100,9 @@ class Review(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ['-created_at']
+        # '-id' makes the order total — see DRF-1128. created_at is
+        # auto_now_add, so a batch written in one transaction ties on it.
+        ordering = ['-created_at', '-id']
         verbose_name = 'Отзыв'
         verbose_name_plural = 'Отзывы'
         indexes = [
