@@ -410,6 +410,34 @@ def test_no_demo_master_gets_a_phone_number(catalog):
 
 
 @pytest.mark.django_db
+def test_every_master_carries_a_named_specialty(catalog):
+    """Роль мастера доезжает до профиля, а не лежит в файле мёртвой.
+
+    «Подбору не из чего выбирать» — это в равной мере про число мастеров
+    и про то, что они разные. Салон из семи безымянных специальностей
+    выбор не создаёт.
+    """
+    _run("--apply")
+    demo_tenants = list(Tenant.all_objects.filter(slug__in=DEMO_SLUGS))
+    profiles = SpecialistProfile.objects.filter(tenant__in=demo_tenants)
+
+    assert profiles.count() == 22
+    assert not profiles.filter(bio="").exists()
+    assert not profiles.filter(experience_years=0).exists()
+
+    document = json.loads(DEMO_SALONS.read_text(encoding="utf-8"))
+    for salon in document["salons"]:
+        tenant = Tenant.all_objects.get(slug=salon["slug"])
+        roles = {p["role"] for p in salon["specialists"]}
+        assert roles, salon["slug"]
+        for person in salon["specialists"]:
+            profile = SpecialistProfile.objects.get(
+                tenant=tenant, display_name=person["display_name"],
+            )
+            assert profile.bio.startswith(person["role"]), profile.bio
+
+
+@pytest.mark.django_db
 def test_every_bookable_row_hangs_on_a_leaf_category(catalog):
     """Услуга обязана висеть на категории шаблона, а не на корне.
 
