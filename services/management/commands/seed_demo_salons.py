@@ -356,7 +356,13 @@ class Command(BaseCommand):
             profile = SpecialistProfile.objects.get(user=user)
             profile.tenant = tenant
             profile.display_name = person["display_name"]
-            profile.bio = person.get("bio", "")
+            # Специальности мастера нет отдельного поля, а состав салона
+            # — половина ответа на вопрос «есть ли из чего выбирать».
+            # Поэтому роль едет в начало био, а не лежит в файле мёртвым
+            # комментарием.
+            role = person.get("role", "")
+            about = person.get("bio", "")
+            profile.bio = f"{role} — {about}" if role and about else (role or about)
             profile.experience_years = person.get("experience_years", 0)
             profile.address = salon["address"]
             profile.timezone = salon.get("timezone", "Europe/Moscow")
