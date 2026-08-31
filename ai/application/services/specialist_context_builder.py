@@ -7,7 +7,8 @@ as a flat candidate set; ranking quality comes from the engine.
 
 Filter chain (per spec v2.0 §AI ASSISTANT):
   status=active + is_available + is_booking_enabled
-  + rating >= AI_SPECIALIST_MIN_RATING
+  + rating >= AI_SPECIALIST_MIN_RATING — но ТОЛЬКО для мастеров с
+    отзывами; ``reviews_count == 0`` порог не отсекает (DRF-1433)
   + (optional) within ~25 km of client location
   weighted by RecommendationEngine
   LIMIT AI_SPECIALIST_CONTEXT_LIMIT
