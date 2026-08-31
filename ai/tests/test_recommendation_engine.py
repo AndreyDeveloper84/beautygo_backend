@@ -17,6 +17,7 @@ from ai.application.services.recommendation_engine import (
 )
 from ai.tests.factories import make_specialist, make_user
 from services.models import Service, ServiceCategory
+from users.models import SpecialistProfile
 
 
 pytestmark = pytest.mark.django_db
@@ -336,3 +337,136 @@ class TestScoreBreakdown:
         assert b.composite == pytest.approx(1.0)
         z = ScoreBreakdown(0.0, 0.0, 0.0, 0.0, 0.0)
         assert z.composite == 0.0
+
+
+# ---------------------------------------------------------------------------
+# DRF-1433 — «оценок нет» ≠ «оценки плохие»
+# ---------------------------------------------------------------------------
+
+
+class TestUnratedSpecialistIsNotCutOff:
+    """Порог отсекает плохие оценки, а не их отсутствие.
+
+    Замер боевого пилота 31.08: девять мастеров, у всех ``rating=0.0``
+    и ``reviews_count=0``; подбор с порогом по умолчанию
+    (``AI_SPECIALIST_MIN_RATING=4.0``) возвращал 0 кандидатов, с
+    ``min_rating=0`` — 9. Рейтинг берётся из отзывов, отзыв — после
+    визита, визит — после записи, запись — после подбора: новый мастер
+    из нуля выйти не мог.
+
+    Отличить одно состояние от другого позволяет ``reviews_count``: он
+    пересчитывается в ``reviews.views._recalculate_rating`` как
+    ``Count`` неспрятанных отзывов, то есть ``reviews_count == 0``
+    означает ровно «оценок нет».
+
+    Каждое отрицательное утверждение здесь идёт в паре с положительным
+    на тех же данных: иначе «никого лишнего не отсекли» было бы
+    неотличимо от «сняли порог совсем».
+    """
+
+    def test_result_exposes_candidates_and_has_no_items_field(self, db):
+        """Страж имени поля.
+
+        У ``RecommendationResult`` есть ``candidates`` и нет ``items``:
+        чтение ``getattr(result, "items", [])`` дало бы ложный ноль на
+        любой выдаче и читалось бы как «подбор никого не вернул».
+        """
+        make_specialist(display_name="Есть", rating=4.9, reviews_count=40)
+        result = RecommendationEngine().recommend(
+            RecommendationQuery(limit=10), use_cache=False,
+        )
+        assert hasattr(result, "candidates")
+        assert not hasattr(result, "items")
+        assert len(result.candidates) == 1
+
+    def test_specialist_without_reviews_is_in_output(self, db):
+        """Положительная сторона: мастер без отзывов попадает в выдачу."""
+        newcomer = make_specialist(
+            display_name="Новичок", rating=0.0, reviews_count=0,
+        )
+        result = RecommendationEngine().recommend(
+            RecommendationQuery(limit=10), use_cache=False,
+        )
+        assert [s.id for s in result.candidates] == [newcomer.id]
+
+    def test_specialist_with_bad_reviews_is_not_in_output(self, db):
+        """Отрицательная сторона на тех же данных: порог продолжает
+        работать против ПЛОХИХ оценок.
+
+        Без этой пары «починка» неотличима от снятия порога вовсе.
+        """
+        newcomer = make_specialist(
+            display_name="Новичок", rating=0.0, reviews_count=0,
+        )
+        good = make_specialist(
+            display_name="Хороший", rating=4.8, reviews_count=30,
+        )
+        bad = make_specialist(
+            display_name="Плохой", rating=2.0, reviews_count=12,
+        )
+        result = RecommendationEngine().recommend(
+            RecommendationQuery(limit=10), use_cache=False,
+        )
+        ids = [s.id for s in result.candidates]
+        assert newcomer.id in ids
+        assert good.id in ids
+        assert bad.id not in ids
+
+    def test_newcomer_ranks_below_well_reviewed_all_else_equal(self, db):
+        """Порядок выдачи: новичок не обгоняет хорошего мастера просто
+        потому, что перестал отсекаться.
+
+        Всё прочее одинаково (гео нет, услуг нет, истории нет), поэтому
+        различает их только компонент рейтинга: ``reviews_count=0``
+        обнуляет насыщение и весь его 30%-й вклад.
+        """
+        newcomer = make_specialist(
+            display_name="Новичок", rating=0.0, reviews_count=0,
+        )
+        good = make_specialist(
+            display_name="Хороший", rating=4.8, reviews_count=30,
+        )
+        result = RecommendationEngine().recommend(
+            RecommendationQuery(limit=10), use_cache=False,
+        )
+        ids = [s.id for s in result.candidates]
+        assert ids == [good.id, newcomer.id]
+
+    def test_newcomer_survives_prefetch_slice_on_a_full_catalog(self, db):
+        """Порог снят — но выборку до скоринга режет ``[: limit * 3]``
+        с сортировкой по ``-rating``, где мастер без оценок стоит
+        ПОСЛЕДНИМ.
+
+        На пилоте (9 мастеров) это незаметно, а на каталоге больше
+        ``limit * 3`` гарантия молча исчезает: новичок не доходит до
+        скоринга вовсе. Здесь 7 мастеров с оценками при ``limit=2``
+        (headroom 6) — ровно тот случай.
+
+        Новичок выигрывает по расстоянию: он в точке клиента, все
+        остальные дальше 25 км (``DEFAULT_MAX_DISTANCE_KM``). Дойди он
+        до скоринга — он первый.
+        """
+        from decimal import Decimal as D
+
+        client_lat, client_lon = 53.2007, 45.0046
+        for i in range(7):
+            far = make_specialist(
+                display_name=f"Дальний {i}", rating=4.0, reviews_count=100,
+            )
+            SpecialistProfile.objects.filter(id=far.id).update(
+                location_lat=D("54.0"), location_lng=D("45.0046"),
+            )
+        newcomer = make_specialist(
+            display_name="Новичок", rating=0.0, reviews_count=0,
+        )
+        SpecialistProfile.objects.filter(id=newcomer.id).update(
+            location_lat=D(str(client_lat)), location_lng=D(str(client_lon)),
+        )
+
+        result = RecommendationEngine().recommend(
+            RecommendationQuery(
+                client_lat=client_lat, client_lon=client_lon, limit=2,
+            ),
+            use_cache=False,
+        )
+        assert result.candidates[0].id == newcomer.id
