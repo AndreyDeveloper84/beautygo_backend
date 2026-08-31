@@ -575,3 +575,107 @@ class TestLayer3Explore:
         # Manicure has 2 services, massage has 1.
         assert by_slug["manicure"]["count"] == 2
         assert by_slug["massage"]["count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Состояние салона решает пул — DRF-1430
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestSalonStateGatesThePool:
+    """``_base_pool`` обязан исполнять то, что обещает его докстринг.
+
+    Докстринг говорил «active specialist in an active tenant taking
+    bookings», а фильтра по салону в коде не было вовсе:
+    ``select_related("tenant")`` служит только выводу
+    ``tenant_slug``/``tenant_name``. Отключённый салон попадал в «ваши
+    места» наравне с живыми.
+
+    Правило контура: рядом с каждым отрицательным утверждением стоит
+    положительная стража НА ТЕХ ЖЕ ДАННЫХ — иначе «мастера не видно»
+    зелено и на пустом ответе.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
+    @staticmethod
+    def _layer_1_ids() -> set[str]:
+        r = _api().post(URL, {}, format="json")
+        assert r.status_code == 200, r.content
+        return {i["id"] for i in r.json()["data"]["layer_1_your_places"]}
+
+    @staticmethod
+    def _layer_2_ids() -> set[str]:
+        r = _api().post(URL, {}, format="json")
+        assert r.status_code == 200, r.content
+        return {i["id"] for i in r.json()["data"]["layer_2_ayla_picks"]}
+
+    def test_deactivated_salon_drops_out_of_your_places(
+        self, customer, customer_known_tur, tenant_known, manicure_category,
+    ):
+        spec = _make_specialist(
+            tenant_known, suffix="0601", name="Мастер знакомого салона",
+        )
+        _make_service(spec, manicure_category, name="Маникюр")
+
+        # Положительная стража: салон включён — мастер на месте.
+        # Без неё отрицание ниже прошло бы и на пустом ответе.
+        assert str(spec.id) in self._layer_1_ids()
+
+        # Меняем РОВНО одно поле — состояние салона.
+        tenant_known.is_active = False
+        tenant_known.save(update_fields=["is_active"])
+        assert str(spec.id) not in self._layer_1_ids()
+
+        # И обратно, чтобы исключить любую другую причину.
+        tenant_known.is_active = True
+        tenant_known.save(update_fields=["is_active"])
+        assert str(spec.id) in self._layer_1_ids()
+
+    @pytest.mark.no_auto_tenant
+    def test_master_without_a_salon_does_not_500_the_endpoint(
+        self, customer, tenant_new, manicure_category,
+    ):
+        """Мастер без салона больше не роняет ВЕСЬ эндпоинт в 500.
+
+        ``_build_card`` разыменовывает ``specialist.tenant.slug`` и
+        ``.name`` без проверки на ``None``, а ``SpecialistProfile.tenant``
+        — ``null=True`` (бэкфилл DRF-242.4 не закрыт). До DRF-1430 такой
+        профиль попадал в пул и клал ответ целиком:
+
+            AttributeError: 'NoneType' object has no attribute 'slug'
+
+        То есть страдал не только он сам — 500 получал каждый клиент,
+        чей пул его зацепил. INNER JOIN в ``_base_pool`` превращает
+        жёсткое падение в корректное отсутствие.
+
+        Это НЕ то же решение, что в ``RecommendationEngine``: там
+        мастера без салона остаются в выдаче, потому что движок тенант
+        не разыменовывает и отдать такого мастера может.
+        """
+        orphan = _make_specialist(
+            None, suffix="0602", name="Мастер без салона",
+        )
+        _make_service(orphan, manicure_category, name="Маникюр")
+
+        # Стража на предусловие: профиль действительно без салона.
+        orphan.refresh_from_db()
+        assert orphan.tenant_id is None
+
+        # Положительная стража НА ТЕХ ЖЕ данных: мастер с живым салоном
+        # рядом — чтобы «200 и без сироты» не доказывалось пустым
+        # ответом, в котором нет вообще никого.
+        healthy = _make_specialist(
+            tenant_new, suffix="0603", name="Мастер живого салона",
+        )
+        _make_service(healthy, manicure_category, name="Маникюр")
+
+        r = _api().post(URL, {}, format="json")
+        assert r.status_code == 200, r.content
+
+        picks = {i["id"] for i in r.json()["data"]["layer_2_ayla_picks"]}
+        assert str(healthy.id) in picks
+        assert str(orphan.id) not in picks
