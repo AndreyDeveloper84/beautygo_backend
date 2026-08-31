@@ -335,6 +335,47 @@ jobs:
       # docker-compose.yml — naming them makes it impossible for a future
       # storage service to acquire a build stanza and quietly join a code
       # deploy.
+      #
+      # ## DRF-1431 — why the base image no longer comes from Docker Hub
+      #
+      # This step builds ON THE VPS, not on the runner. That is the whole
+      # reason the 2026-08-31 outage was possible: two consecutive deploys
+      # died here, before a line of project code was compiled, at
+      #
+      #   #4 ERROR: failed to authorize: failed to fetch anonymous token:
+      #        Get "https://auth.docker.io/token?scope=repository%3Alibrary..."
+      #   failed to run Build function: python:3.12-slim: failed to resolve
+      #        source metadata for docker.io/library/python:3.12-slim
+      #
+      # Lint and tests were green. The build never got as far as our code.
+      #
+      # Measured from the pilot the same day: no daemon.json, no
+      # docker.service.d drop-in, no proxy in ~/.docker/config.json, and a
+      # manual `docker pull python:3.12-slim` succeeding first try — so
+      # nothing on the box was at fault. Registry latency from that IP:
+      #
+      #   ghcr.io/v2/               401 in 0.26s / 0.31s / 0.26s  (3 of 3)
+      #   registry-1.docker.io/v2/  401 in 5.41s
+      #   auth.docker.io/token      200 on probe, but had refused twice
+      #                             inside the deploy hours earlier
+      #
+      # Intermittent refusal of the ANONYMOUS token endpoint, with the
+      # network otherwise healthy, is the signature of anonymous-pull rate
+      # limiting. It is not a thing this repo can retry its way out of, and
+      # "I pulled it by hand" only holds until the next image prune.
+      #
+      # So the base layer now comes from GHCR — the registry this deploy
+      # already depends on (step 1/4 fetches source from GitHub over the
+      # same egress) and which answers 20x faster. The mirror is a
+      # digest-identical copy of the upstream image, refreshed by
+      # .github/workflows/mirror-base-image.yml on a GitHub runner, where
+      # Hub connectivity is good. Hub is moved off the deploy's critical
+      # path rather than merely retried.
+      #
+      # Nothing here can make the deploy worse than it was: every way of
+      # obtaining the base image is tried in order of preference and the
+      # last one is the old behaviour. And this step still touches no
+      # container, so a failure at any point leaves the pilot as it was.
       - name: 2/4 Build application images (running contour untouched)
         uses: appleboy/ssh-action@v1
         with:
@@ -353,7 +394,87 @@ jobs:
           script: |
             set -eo pipefail
             cd /home/taximeter/beautygo/dev
-            docker compose build web celery_worker celery_beat
+
+            # --- where the base layer comes from (DRF-1431) --------------
+            # The Dockerfile's `ARG PYTHON_BASE_IMAGE=` line is the single
+            # source of truth for which base image and which tag; read it
+            # rather than repeating it, so the two can never drift.
+            UPSTREAM=$(grep -m1 -E '^ARG PYTHON_BASE_IMAGE=' Dockerfile | cut -d= -f2- || true)
+            UPSTREAM=${UPSTREAM:-python:3.12-slim}
+            OWNER=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+            MIRROR="ghcr.io/${OWNER}/beautygo-python:${UPSTREAM##*:}"
+            echo "upstream=$UPSTREAM  mirror=$MIRROR"
+
+            try_pull() {
+              for a in 1 2 3; do
+                if docker pull "$1" >/dev/null 2>&1; then return 0; fi
+                echo "  pull $1 — attempt $a/3 failed"
+                sleep $((a * 10))
+              done
+              return 1
+            }
+
+            # Preference order. Every branch is strictly better than the
+            # one below it, and the bottom branch is exactly what this
+            # step did before DRF-1431 — so this can only add options.
+            BASE=""
+            if try_pull "$MIRROR"; then
+              BASE="$MIRROR"; SOURCE="ghcr (anonymous)"
+            elif grep -q '^GH_DEPLOY_TOKEN=' .env 2>/dev/null; then
+              # The package is private (public is the recommended setup —
+              # it is a copy of a public image and needs no secret). Log in
+              # with the token ALREADY on this box; nothing new is written
+              # here that was not here before, and the value is never
+              # echoed. Needs `read:packages` on the token.
+              echo "anonymous GHCR pull failed — trying an authenticated one"
+              if grep -m1 '^GH_DEPLOY_TOKEN=' .env | cut -d= -f2- \
+                   | docker login ghcr.io -u "$OWNER" --password-stdin >/dev/null 2>&1 \
+                 && try_pull "$MIRROR"; then
+                BASE="$MIRROR"; SOURCE="ghcr (authenticated)"
+              fi
+            fi
+            if [ -z "$BASE" ] && docker image inspect "$MIRROR" >/dev/null 2>&1; then
+              # GHCR unreachable but a previous deploy left the mirror in
+              # the local image store. BuildKit resolves a locally present
+              # image without a registry round trip, so this builds offline.
+              BASE="$MIRROR"; SOURCE="local copy of the mirror"
+            fi
+            if [ -z "$BASE" ] && docker image inspect "$UPSTREAM" >/dev/null 2>&1; then
+              BASE="$UPSTREAM"; SOURCE="local copy of the upstream image"
+            fi
+            if [ -z "$BASE" ]; then
+              echo "::warning::falling back to Docker Hub for $UPSTREAM — this is the path that failed on 2026-08-31. Check that the GHCR mirror exists and is pullable (workflow: mirror-base-image)."
+              BASE="$UPSTREAM"; SOURCE="docker hub (fallback)"
+            fi
+
+            export PYTHON_BASE_IMAGE="$BASE"
+            echo "building on $PYTHON_BASE_IMAGE  — source: $SOURCE"
+            # Provenance for the run log: the exact bytes we built on.
+            docker image inspect --format '{{index .RepoDigests 0}}' "$BASE" 2>/dev/null \
+              || echo "(no repo digest recorded for $BASE)"
+
+            # --- the build ----------------------------------------------
+            # Retry is deliberately the junior partner here: the pull above
+            # is what takes Hub off the critical path, and this only covers
+            # a transient that slips past it. Bounded by BOTH attempts and
+            # wall clock so it can never turn one slow build into three —
+            # and overrunning this step is a clean no-op by design (see the
+            # header comment on the deploy job).
+            started=$SECONDS
+            attempt=1
+            while :; do
+              if docker compose build web celery_worker celery_beat; then
+                break
+              fi
+              elapsed=$((SECONDS - started))
+              if [ "$attempt" -ge 3 ] || [ "$elapsed" -ge 900 ]; then
+                echo "::error::build failed after ${attempt} attempt(s) in ${elapsed}s"
+                exit 1
+              fi
+              attempt=$((attempt + 1))
+              echo "build failed — retrying (attempt ${attempt}/3, ${elapsed}s elapsed)"
+              sleep 20
+            done
 
       # ---- 3/4 -----------------------------------------------------------
       # The only step that stops anything, now scoped to the application
