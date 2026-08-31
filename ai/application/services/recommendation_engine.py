@@ -340,6 +340,36 @@ class RecommendationEngine:
             is_booking_enabled=True,
         )
 
+        # DRF-1430. Отключённый салон уводит своих мастеров из выдачи.
+        #
+        # До этого фильтра движок спрашивал только про
+        # ``SpecialistProfile`` и таблицу салонов не соединял вовсе.
+        # ``Tenant.is_active=False`` прятал салон от того, кто
+        # спрашивает про салоны (дефолтный ``_ActiveTenantManager``), а
+        # мастер этого салона попадал в подбор нетронутым. То есть
+        # отключение салона не было средством убрать его из выдачи.
+        #
+        # Почему ``is_active``, а не «одно из трёх полей»: у ``Tenant``
+        # поле состояния РОВНО ОДНО (id, slug, name, is_active,
+        # created_at, updated_at). ``status`` и ``is_booking_enabled``
+        # — поля ``SpecialistProfile``, они про мастера, и они уже
+        # прочитаны строками выше. Салонное состояние в этой схеме
+        # выражается единственным флагом.
+        #
+        # Почему НЕ ``filter(tenant__is_active=True)``:
+        # ``SpecialistProfile.tenant`` — ``null=True`` (бэкфилл
+        # DRF-242.4 не закрыт), и такой фильтр дал бы INNER JOIN,
+        # молча выкосив КАЖДЫЙ профиль без салона. ``OR`` с
+        # ``isnull=True`` заставляет планировщик взять LEFT JOIN и
+        # оставляет их на месте: тикет просит, чтобы состояние салона
+        # влияло на выдачу, а не чтобы наличие салона стало новым
+        # требованием к мастеру.
+        #
+        # Salon-to-master — many-to-one, размножения строк нет, поэтому
+        # ``distinct()`` здесь не нужен (в отличие от фильтров по
+        # услугам ниже).
+        qs = qs.filter(Q(tenant__isnull=True) | Q(tenant__is_active=True))
+
         if query.city:
             qs = qs.filter(address__icontains=query.city)
 

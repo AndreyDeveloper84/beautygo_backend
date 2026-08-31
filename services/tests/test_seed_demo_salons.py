@@ -129,22 +129,30 @@ def _demo_rows() -> dict[str, int]:
 
 
 # --------------------------------------------------------------------- #
-# 1. Премисса владельца о единственном флаге — проверяем, а не верим
+# 1. Первый замок сида — держит ли он на самом деле (DRF-1430)
 # --------------------------------------------------------------------- #
 @pytest.mark.django_db
-def test_inactive_tenant_alone_does_not_hide_masters(catalog):
-    """``Tenant.is_active=False`` НЕ прячет мастера от подбора.
+def test_inactive_tenant_now_hides_masters_too(catalog):
+    """``Tenant.is_active=False`` прячет мастера от подбора — DRF-1430.
 
-    Владелец просил завести салоны выключенными, полагая, что обычный
-    менеджер тенанта скроет их от всего кода. Менеджер скрывает строку
-    от того, кто спрашивает про тенанты; ``RecommendationEngine``
-    спрашивает про ``SpecialistProfile`` и к таблице тенантов не
-    присоединяется вовсе.
+    Это то самое «желаемое падение», о котором предупреждала прежняя
+    редакция теста. Раньше здесь стояло обратное утверждение: владелец
+    просил завести салоны выключенными, полагая, что обычный менеджер
+    тенанта скроет их от всего кода, а на деле менеджер скрывал строку
+    лишь от того, кто спрашивает про тенанты — ``RecommendationEngine``
+    спрашивал про ``SpecialistProfile`` и к таблице тенантов не
+    присоединялся вовсе.
 
-    Тест фиксирует это как ФАКТ контура: пока он проходит, одного флага
-    мало и три замка в сиде — не перестраховка. Если однажды движок
-    научится фильтровать по тенанту, тест упадёт и его надо будет
-    переписать в обратное утверждение — это желаемое падение.
+    DRF-1430 это закрыл: движок соединяется с салоном по
+    ``tenant__is_active`` (через LEFT JOIN, чтобы не выкосить профили
+    без салона). Первый замок сида теперь держит наравне с двумя
+    другими — см. ``ai/tests/test_recommendation_tenant_state.py``,
+    где та же гарантия проверена со стороны движка.
+
+    Три замка при этом остаются оправданными: замок 1 держит только
+    подбор, а поиск (``search/views.py``) и публичный каталог
+    (``users/specialists_api.py``) состояние салона по-прежнему не
+    читают вовсе.
     """
     from ai.application.services.recommendation_engine import (
         RecommendationEngine,
@@ -180,26 +188,31 @@ def test_inactive_tenant_alone_does_not_hide_masters(catalog):
         price=Decimal("3450"), duration_minutes=60,
     )
 
-    result = RecommendationEngine().recommend(
-        RecommendationQuery(goal_category_ids=(template.category_id,)),
-        use_cache=False,
-    )
-    names = [c.display_name for c in result.candidates]
-    assert names == ["Мастер выключенного тенанта"], (
-        "премисса владельца изменилась: is_active=False теперь что-то "
-        "скрывает от подбора — перепроверь три замка в сиде"
+    def names() -> list[str]:
+        result = RecommendationEngine().recommend(
+            RecommendationQuery(goal_category_ids=(template.category_id,)),
+            use_cache=False,
+        )
+        return [c.display_name for c in result.candidates]
+
+    assert names() == [], (
+        "выключенный салон снова протёк в подбор — первый замок сида "
+        "перестал держать, перепроверь DRF-1430"
     )
 
-    # Положительная стража к обратному замку: как только выключен
-    # status, тот же запрос на тех же данных отдаёт пусто. То есть
-    # проверка умеет отличать «видно» от «не видно».
-    profile.status = SpecialistProfile.ProfileStatus.PENDING
-    profile.save(update_fields=["status"])
-    result = RecommendationEngine().recommend(
-        RecommendationQuery(goal_category_ids=(template.category_id,)),
-        use_cache=False,
-    )
-    assert [c.display_name for c in result.candidates] == []
+    # Положительная стража на ТЕХ ЖЕ данных: включаем один только
+    # ``is_active``, ничего больше не трогая, и мастер появляется.
+    # Без неё пустая выдача выше доказывалась бы чем угодно — хоть
+    # неразрешённой категорией, хоть порогом рейтинга.
+    tenant.is_active = True
+    tenant.save(update_fields=["is_active"])
+    assert names() == ["Мастер выключенного тенанта"]
+
+    # И обратно: выключаем салон — мастер снова уходит. Замер
+    # отличает «видно» от «не видно» именно по салонному флагу.
+    tenant.is_active = False
+    tenant.save(update_fields=["is_active"])
+    assert names() == []
 
 
 # --------------------------------------------------------------------- #
