@@ -432,6 +432,33 @@ class TestUnratedSpecialistIsNotCutOff:
         ids = [s.id for s in result.candidates]
         assert ids == [good.id, newcomer.id]
 
+    def test_newcomer_is_never_sold_as_highly_rated(self, db):
+        """Правдивость причин: новичок попал в выдачу, но «Высокий
+        рейтинг» ему приписать нельзя — оценок нет.
+
+        Пара к предыдущему тесту и страж против соблазна выдать
+        новичку стартовый рейтинг: владелец этот вариант отверг
+        именно потому, что он показывает клиенту выдуманную оценку
+        как настоящую (31.08).
+        """
+        newcomer = make_specialist(
+            display_name="Новичок", rating=0.0, reviews_count=0,
+        )
+        good = make_specialist(
+            display_name="Хороший", rating=4.8, reviews_count=30,
+        )
+        result = RecommendationEngine().recommend(
+            RecommendationQuery(limit=10), use_cache=False,
+        )
+        by_id = {s.id: s for s in result.candidates}
+        assert by_id[newcomer.id].breakdown.rating == 0.0
+        assert "Высокий рейтинг" not in by_id[newcomer.id].match_reasons
+        # Положительная сторона на тех же данных: у мастера с отзывами
+        # причина «Высокий рейтинг» есть — значит тест выше проверяет
+        # отсутствие, а не сломанный расчёт причин.
+        assert by_id[good.id].breakdown.rating > 0.0
+        assert "Высокий рейтинг" in by_id[good.id].match_reasons
+
     def test_newcomer_survives_prefetch_slice_on_a_full_catalog(self, db):
         """Порог снят — но выборку до скоринга режет ``[: limit * 3]``
         с сортировкой по ``-rating``, где мастер без оценок стоит
