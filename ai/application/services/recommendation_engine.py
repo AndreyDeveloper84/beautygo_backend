@@ -41,7 +41,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.core.cache import cache as default_cache
-from django.db.models import Q
+from django.db.models import Q, QuerySet
 
 from services.catalog_reads import (
     catalog_services_for,
@@ -331,11 +331,13 @@ class RecommendationEngine:
         min_rating: float,
         limit: int,
     ) -> list[SpecialistProfile]:
+        # Порог по рейтингу здесь НЕ применяется — он навешивается
+        # ниже, отдельно на «мастеров с оценками». См. DRF-1433 и
+        # докстринг ``_split_by_review_evidence``.
         qs = SpecialistProfile.objects.filter(
             status=SpecialistProfile.ProfileStatus.ACTIVE,
             is_available=True,
             is_booking_enabled=True,
-            rating__gte=min_rating,
         )
 
         if query.city:
@@ -373,10 +375,62 @@ class RecommendationEngine:
                 services__is_active=True,
             ).distinct()
 
-        # Pull ~3x limit so the scorer has headroom — cheaper than
-        # paginating per filter combo.
-        qs = qs.order_by("-rating", "-reviews_count")[: limit * 3]
-        return list(qs.prefetch_related(*catalog_services_prefetch()))
+        return self._split_by_review_evidence(qs, min_rating, limit)
+
+    @staticmethod
+    def _split_by_review_evidence(
+        qs: QuerySet[SpecialistProfile],
+        min_rating: float,
+        limit: int,
+    ) -> list[SpecialistProfile]:
+        """Две непересекающиеся выборки: «оценён» и «не оценён».
+
+        DRF-1433. Порог по рейтингу — защита от ПЛОХИХ оценок, а не от
+        их отсутствия. До этой правки оба состояния выглядели в базе
+        одинаково (``rating = 0.0``), и ``rating__gte=min_rating``
+        рубил их вместе: на боевом пилоте 31.08 у всех девяти мастеров
+        ``reviews_count = 0``, и подбор возвращал ноль кандидатов —
+        а значит ноль по всем семи целям в ``goal_master_coverage()``.
+        Выйти из этого мастер не мог: рейтинг берётся из отзывов, отзыв
+        — после визита, визит — после записи, запись — после подбора.
+
+        Различает состояния ``reviews_count``:
+        ``reviews.views._recalculate_rating`` пересчитывает его как
+        ``Count`` неспрятанных отзывов, то есть ``reviews_count == 0``
+        означает ровно «оценок нет вовсе», а не «оценки плохие».
+        Мастер с плохими оценками (``reviews_count > 0`` и рейтинг ниже
+        порога) отсекается ровно как раньше.
+
+        Почему ДВА запроса, а не один ``Q(...) | Q(reviews_count=0)``.
+        Headroom ``[: limit * 3]`` берётся по ``-rating``, где мастер
+        без оценок стоит последним — ниже любого оценённого. Одним
+        запросом порог был бы снят, но на каталоге больше ``limit * 3``
+        новичок просто не доходил бы до скоринга, и гарантия молча
+        исчезала бы по мере роста каталога. Отдельный headroom на
+        каждую группу этого не допускает; верхняя граница выборки
+        удваивается с ``3 * limit`` до ``6 * limit`` — ранжирование
+        всё равно делает скоринг, а не этот срез.
+
+        Порядок конкатенации (сначала оценённые) — это тай-брейк:
+        ``sort`` в ``_compute`` стабилен, поэтому при РАВНОМ composite
+        впереди останется мастер с подтверждёнными отзывами.
+        """
+        prefetch = catalog_services_prefetch()
+        reviewed = (
+            qs.filter(reviews_count__gt=0, rating__gte=min_rating)
+            .order_by("-rating", "-reviews_count", "id")[: limit * 3]
+            .prefetch_related(*prefetch)
+        )
+        # У группы без отзывов ``rating`` ничего не значит (0.0 у
+        # живого мастера, выдуманное число у демо-каталога из #272),
+        # поэтому сортировать по нему нельзя — только стабильный ``id``
+        # ради воспроизводимости выборки между репликами.
+        unreviewed = (
+            qs.filter(reviews_count=0)
+            .order_by("id")[: limit * 3]
+            .prefetch_related(*prefetch)
+        )
+        return [*reviewed, *unreviewed]
 
     def _load_history_specialist_ids(self, client_id: UUID | None) -> set[UUID]:
         if client_id is None:
@@ -414,6 +468,14 @@ class RecommendationEngine:
         Saturation: reviews_count / (reviews_count + REVIEWS_SATURATION).
         Composite: pure_rating × saturation. Fresh masters with
         few reviews but high rating still surface but not at full weight.
+
+        DRF-1433: при ``reviews_count == 0`` насыщение равно нулю, и
+        весь 30%-й вклад рейтинга обнуляется — независимо от значения
+        в поле ``rating``. Поэтому мастер без отзывов, которого порог
+        больше не отсекает, при прочих равных стоит НИЖЕ мастера с
+        хорошими отзывами и конкурирует оставшимися 70% (расстояние,
+        доступность, совпадение услуг, история). Отдельного правила
+        для этого не нужно — оно уже здесь.
         """
         if s.rating is None:
             return 0.0
