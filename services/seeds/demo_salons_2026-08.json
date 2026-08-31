@@ -1,0 +1,2292 @@
+{
+  "meta": {
+    "purpose": "Демонстрационные салоны для пилота: закрыть цели event и new_look (обе давали 0 мастеров на замере 30.08) и впервые проверить многосалонность на данных.",
+    "naming_policy": "Названия салонов, имена мастеров и адреса — ВЫМЫШЛЕННЫЕ, проверены поиском: ни одно не находится как живой бизнес в России. Телефоны не заводятся вовсе (User.phone = NULL): любой правдоподобный номер — чей-то настоящий. Отзывы не выдумываются (reviews_count = 0); рейтинг проставлен только потому, что движок подбора отсекает ниже AI_SPECIALIST_MIN_RATING = 4.0.",
+    "price_policy": "Названия услуг, цены и длительности взяты из прайсов настоящих российских салонов — см. sources. У каждой строки есть price_src; duration_src указан отдельно, когда длительность взята из другого прайса, чем цена. price_src = 'derived' означает, что цена выведена как сумма составляющих (комплексы) — на прайсе такой строки не было. duration_src = 'derived' означает, что прайс публикует цену без длительности; длительность отраслевая.",
+    "safety": "Тенанты заводятся с is_active = False, мастера — со status = pending и is_booking_enabled = False. Одного флага тенанта НЕ достаточно: RecommendationEngine к таблице тенантов не присоединяется. Снять все три замка можно только явным manage.py seed_demo_salons --activate --apply.",
+    "sources": {
+      "soco": {
+        "url": "https://soco-moscow.ru/tseny-direkt",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс салона"
+      },
+      "salonak": {
+        "url": "https://salonak.ru/uslugi-salona/stoimost-nashih-uslug/parikmaherskiy-zal/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс салона"
+      },
+      "gorod_krasoti": {
+        "url": "https://gorod-krasoti.com/czeny/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс салона"
+      },
+      "v4ruki": {
+        "url": "https://v4ruki.ru/price",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс студии (публикует длительности)"
+      },
+      "richnails": {
+        "url": "https://richnails.club/pricelist",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс студии"
+      },
+      "lashlevel": {
+        "url": "https://lashlevel.ru/price",
+        "city": "Санкт-Петербург",
+        "year": "2025–2026",
+        "kind": "прайс студии (публикует длительности)"
+      },
+      "studiosanti": {
+        "url": "https://studiosanti.ru/price_brow",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс студии"
+      },
+      "sisters": {
+        "url": "https://sisters.spb.ru/ceny/",
+        "city": "Санкт-Петербург",
+        "year": "2025–2026",
+        "kind": "прайс салона"
+      },
+      "golden_mandarin": {
+        "url": "https://goldenmandarin.ru/makiyaj",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс салона (публикует длительности)"
+      },
+      "venesa": {
+        "url": "https://venesa.ru/services/pilingi-chistki/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс клиники"
+      },
+      "cleoline": {
+        "url": "https://www.cleoline.ru/services/aesthetic-treatments/massazh-lica/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс клиники (публикует длительности)"
+      },
+      "borodach": {
+        "url": "https://borodach.com/prices/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс барбершопа (публикует длительности)"
+      },
+      "firm": {
+        "url": "https://firmbarbershop.ru/ceny/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс барбершопа (публикует длительности)"
+      },
+      "betone": {
+        "url": "https://betonebarber.ru/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс барбершопа"
+      },
+      "sem_barber": {
+        "url": "https://www.7barbershop.ru/ceny",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс барбершопа"
+      },
+      "barbershop_su": {
+        "url": "https://barber-shop.su/kamuflyazh-borody-i-sedeny/kamuflyazh-sediny/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс барбершопа"
+      },
+      "frant": {
+        "url": "https://b-frant.ru/price/kamuflyazh-golovy/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс барбершопа (публикует длительность)"
+      },
+      "lumirens": {
+        "url": "https://lumirens.ru/services/epilyatsiya/lazernaja-epiljatsija/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс студии эпиляции"
+      },
+      "bwclinic": {
+        "url": "https://bwclinic.ru/uslugi/lazernaya-ehpilyaciya-lica",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс клиники (публикует длительность)"
+      },
+      "depilon": {
+        "url": "https://depilon.ru/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс студии депиляции"
+      },
+      "vosksalon": {
+        "url": "https://vosksalon.ru/services/epilyatsiya/depilyatsiya-voskom/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс сети салонов"
+      },
+      "iphk": {
+        "url": "https://iphk.ru/price/kosmetologiya/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс клиники"
+      },
+      "lit_clinic": {
+        "url": "https://lit-clinic.ru/cosmetology/mikrotokovaya-terapiya/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс клиники (публикует длительность)"
+      },
+      "ice_face": {
+        "url": "https://ice-face.ru/led-terapija/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс студии (публикует длительность)"
+      },
+      "julia_permanent": {
+        "url": "https://juliapermanent.ru/price",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс студии перманента"
+      },
+      "pigment_lab": {
+        "url": "https://pigmentlab.ru/eyebrowworks",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс студии перманента"
+      },
+      "yudina": {
+        "url": "https://yudinastudio.ru/uslugi/tatuazh-brovej-mikroblejding/",
+        "city": "Москва",
+        "year": "2025–2026",
+        "kind": "прайс студии (публикует длительность)"
+      },
+      "derived": {
+        "url": "",
+        "city": "",
+        "year": "",
+        "kind": "ВЫВЕДЕНО: сумма цен составляющих из источников выше либо отраслевая длительность; НЕ взято с прайса"
+      }
+    }
+  },
+  "salons": [
+    {
+      "slug": "olhovyy-dvor",
+      "name": "Ольховый двор",
+      "format": "салон полного цикла",
+      "city": "Москва",
+      "address": "Москва, ул. Несуществующая, д. 1 (демо-данные)",
+      "timezone": "Europe/Moscow",
+      "note": "Формат по обзору форматов (mosekosila.ru): салон полного цикла — парикмахерский зал, ногтевой сервис, брови/ресницы, макияж и косметология в одном месте. Состав штата — по бизнес-плану beboss.ru: 3 парикмахера, мастер маникюра и педикюра, brow-мастер, lash-мастер и визажист.",
+      "specialists": [
+        {
+          "ref": "od-color",
+          "username": "demo.olhovyy-dvor.color",
+          "display_name": "Марина Гвоздева",
+          "role": "колорист",
+          "experience_years": 11,
+          "rating": "4.9",
+          "bio": "Сложное окрашивание, блонд, выход из тёмного."
+        },
+        {
+          "ref": "od-stylist",
+          "username": "demo.olhovyy-dvor.stylist",
+          "display_name": "Алиса Тертышная",
+          "role": "парикмахер-стилист",
+          "experience_years": 7,
+          "rating": "4.7",
+          "bio": "Стрижки и укладки, вечерние и свадебные причёски."
+        },
+        {
+          "ref": "od-nails",
+          "username": "demo.olhovyy-dvor.nails",
+          "display_name": "Вера Кондрашина",
+          "role": "мастер маникюра и педикюра",
+          "experience_years": 9,
+          "rating": "4.8",
+          "bio": "Комбинированный маникюр, укрепление, педикюр."
+        },
+        {
+          "ref": "od-brow",
+          "username": "demo.olhovyy-dvor.brow",
+          "display_name": "Зоя Милованова",
+          "role": "бровист",
+          "experience_years": 5,
+          "rating": "4.6",
+          "bio": "Архитектура, окрашивание и ламинирование бровей."
+        },
+        {
+          "ref": "od-lash",
+          "username": "demo.olhovyy-dvor.lash",
+          "display_name": "Полина Ратникова",
+          "role": "лешмейкер",
+          "experience_years": 6,
+          "rating": "4.8",
+          "bio": "Классика и объёмы, ламинирование ресниц."
+        },
+        {
+          "ref": "od-makeup",
+          "username": "demo.olhovyy-dvor.makeup",
+          "display_name": "Дарья Ушакова",
+          "role": "визажист",
+          "experience_years": 8,
+          "rating": "4.9",
+          "bio": "Дневной и вечерний макияж, свадебные образы, уроки."
+        },
+        {
+          "ref": "od-cosmo",
+          "username": "demo.olhovyy-dvor.cosmo",
+          "display_name": "Ксения Гольцова",
+          "role": "косметолог-эстетист",
+          "experience_years": 10,
+          "rating": "4.7",
+          "bio": "Чистки, пилинги, уходовые программы для лица."
+        }
+      ],
+      "services": [
+        {
+          "category": "Стрижки",
+          "template": "Женская стрижка",
+          "price": 3450,
+          "duration_minutes": 60,
+          "price_src": "soco",
+          "by": [
+            "od-stylist",
+            "od-color"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Стрижки",
+          "template": "Мужская стрижка",
+          "price": 2300,
+          "duration_minutes": 45,
+          "price_src": "soco",
+          "by": [
+            "od-stylist"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Стрижки",
+          "template": "Стрижка челки",
+          "price": 600,
+          "duration_minutes": 20,
+          "price_src": "salonak",
+          "by": [
+            "od-stylist"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Стрижки",
+          "template": "Мытье головы",
+          "price": 500,
+          "duration_minutes": 15,
+          "price_src": "derived",
+          "by": [
+            "od-stylist"
+          ]
+        },
+        {
+          "category": "Укладки и прически",
+          "template": "Повседневная укладка",
+          "price": 1900,
+          "duration_minutes": 45,
+          "price_src": "salonak",
+          "by": [
+            "od-stylist"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Укладки и прически",
+          "template": "Укладка на брашинг",
+          "price": 2200,
+          "duration_minutes": 50,
+          "price_src": "soco",
+          "by": [
+            "od-stylist"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Укладки и прически",
+          "template": "Вечерняя укладка",
+          "price": 3200,
+          "duration_minutes": 75,
+          "price_src": "salonak",
+          "by": [
+            "od-stylist"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Укладки и прически",
+          "template": "Свадебная прическа",
+          "price": 4500,
+          "duration_minutes": 120,
+          "price_src": "salonak",
+          "by": [
+            "od-stylist"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Окрашивание волос",
+          "template": "Окрашивание в один тон",
+          "price": 6500,
+          "duration_minutes": 120,
+          "price_src": "soco",
+          "by": [
+            "od-color"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Окрашивание волос",
+          "template": "Окрашивание корней",
+          "price": 2550,
+          "duration_minutes": 90,
+          "price_src": "gorod_krasoti",
+          "by": [
+            "od-color"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Окрашивание волос",
+          "template": "Тонирование волос",
+          "price": 2400,
+          "duration_minutes": 60,
+          "price_src": "salonak",
+          "by": [
+            "od-color"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Окрашивание волос",
+          "template": "Мелирование",
+          "price": 7800,
+          "duration_minutes": 180,
+          "price_src": "salonak",
+          "by": [
+            "od-color"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Окрашивание волос",
+          "template": "AirTouch",
+          "price": 14000,
+          "duration_minutes": 240,
+          "price_src": "soco",
+          "by": [
+            "od-color"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Окрашивание волос",
+          "template": "Балаяж",
+          "price": 13500,
+          "duration_minutes": 210,
+          "price_src": "soco",
+          "by": [
+            "od-color"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Окрашивание волос",
+          "template": "Шатуш",
+          "price": 13000,
+          "duration_minutes": 210,
+          "price_src": "soco",
+          "by": [
+            "od-color"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Уходы и восстановление волос",
+          "template": "Кератиновое выпрямление",
+          "price": 7500,
+          "duration_minutes": 180,
+          "price_src": "salonak",
+          "by": [
+            "od-color"
+          ]
+        },
+        {
+          "category": "Уходы и восстановление волос",
+          "template": "Ботокс для волос",
+          "price": 7200,
+          "duration_minutes": 150,
+          "price_src": "salonak",
+          "by": [
+            "od-color"
+          ]
+        },
+        {
+          "category": "Уходы и восстановление волос",
+          "template": "Глубокое увлажнение волос",
+          "price": 1600,
+          "duration_minutes": 30,
+          "price_src": "salonak",
+          "by": [
+            "od-stylist",
+            "od-color"
+          ]
+        },
+        {
+          "category": "Уходы и восстановление волос",
+          "template": "Маска для волос",
+          "price": 1200,
+          "duration_minutes": 30,
+          "price_src": "salonak",
+          "by": [
+            "od-stylist"
+          ]
+        },
+        {
+          "category": "Маникюр",
+          "template": "Классический маникюр",
+          "price": 1350,
+          "duration_minutes": 45,
+          "price_src": "v4ruki",
+          "by": [
+            "od-nails"
+          ]
+        },
+        {
+          "category": "Маникюр",
+          "template": "Комбинированный маникюр",
+          "price": 1900,
+          "duration_minutes": 60,
+          "price_src": "v4ruki",
+          "by": [
+            "od-nails"
+          ]
+        },
+        {
+          "category": "Маникюр",
+          "template": "Маникюр с покрытием гель-лак",
+          "price": 2800,
+          "duration_minutes": 90,
+          "price_src": "gorod_krasoti",
+          "by": [
+            "od-nails"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Покрытия",
+          "template": "Покрытие гель-лак",
+          "price": 1700,
+          "duration_minutes": 40,
+          "price_src": "v4ruki",
+          "by": [
+            "od-nails"
+          ]
+        },
+        {
+          "category": "Покрытия",
+          "template": "Снятие гель-лака",
+          "price": 300,
+          "duration_minutes": 15,
+          "price_src": "richnails",
+          "by": [
+            "od-nails"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Покрытия",
+          "template": "Укрепление гелем",
+          "price": 945,
+          "duration_minutes": 30,
+          "price_src": "v4ruki",
+          "by": [
+            "od-nails"
+          ]
+        },
+        {
+          "category": "Педикюр",
+          "template": "Классический педикюр",
+          "price": 2600,
+          "duration_minutes": 60,
+          "price_src": "v4ruki",
+          "by": [
+            "od-nails"
+          ]
+        },
+        {
+          "category": "Педикюр",
+          "template": "Экспресс-педикюр",
+          "price": 1800,
+          "duration_minutes": 40,
+          "price_src": "v4ruki",
+          "by": [
+            "od-nails"
+          ]
+        },
+        {
+          "category": "Архитектура и коррекция бровей",
+          "template": "Коррекция бровей пинцетом",
+          "price": 700,
+          "duration_minutes": 20,
+          "price_src": "lashlevel",
+          "by": [
+            "od-brow"
+          ]
+        },
+        {
+          "category": "Архитектура и коррекция бровей",
+          "template": "Коррекция бровей воском",
+          "price": 1000,
+          "duration_minutes": 25,
+          "price_src": "lashlevel",
+          "by": [
+            "od-brow"
+          ]
+        },
+        {
+          "category": "Архитектура и коррекция бровей",
+          "template": "Прореживание бровей",
+          "price": 400,
+          "duration_minutes": 15,
+          "price_src": "lashlevel",
+          "by": [
+            "od-brow"
+          ]
+        },
+        {
+          "category": "Архитектура и коррекция бровей",
+          "template": "Комплекс “форма + окрашивание”",
+          "price": 1800,
+          "duration_minutes": 40,
+          "price_src": "lashlevel",
+          "by": [
+            "od-brow"
+          ]
+        },
+        {
+          "category": "Окрашивание и уход",
+          "template": "Окрашивание бровей краской",
+          "price": 800,
+          "duration_minutes": 25,
+          "price_src": "studiosanti",
+          "by": [
+            "od-brow"
+          ],
+          "duration_src": "lashlevel"
+        },
+        {
+          "category": "Окрашивание и уход",
+          "template": "Окрашивание бровей хной",
+          "price": 2000,
+          "duration_minutes": 40,
+          "price_src": "studiosanti",
+          "by": [
+            "od-brow"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Окрашивание и уход",
+          "template": "Осветление бровей",
+          "price": 1500,
+          "duration_minutes": 30,
+          "price_src": "lashlevel",
+          "by": [
+            "od-brow"
+          ]
+        },
+        {
+          "category": "Ламинирование и долговременная укладка",
+          "template": "Ламинирование бровей",
+          "price": 3500,
+          "duration_minutes": 45,
+          "price_src": "studiosanti",
+          "by": [
+            "od-brow"
+          ],
+          "duration_src": "lashlevel"
+        },
+        {
+          "category": "Ламинирование и долговременная укладка",
+          "template": "Ламинирование + окрашивание",
+          "price": 4000,
+          "duration_minutes": 60,
+          "price_src": "studiosanti",
+          "by": [
+            "od-brow"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Классическое наращивание ресниц",
+          "price": 3000,
+          "duration_minutes": 120,
+          "price_src": "lashlevel",
+          "by": [
+            "od-lash"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Наращивание 2D",
+          "price": 3500,
+          "duration_minutes": 160,
+          "price_src": "lashlevel",
+          "by": [
+            "od-lash"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Наращивание 3D",
+          "price": 3700,
+          "duration_minutes": 180,
+          "price_src": "lashlevel",
+          "by": [
+            "od-lash"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Коррекция наращенных ресниц",
+          "price": 2100,
+          "duration_minutes": 90,
+          "price_src": "lashlevel",
+          "by": [
+            "od-lash"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Снятие наращенных ресниц",
+          "price": 500,
+          "duration_minutes": 20,
+          "price_src": "lashlevel",
+          "by": [
+            "od-lash"
+          ]
+        },
+        {
+          "category": "Ламинирование и окрашивание ресниц",
+          "template": "Ламинирование ресниц",
+          "price": 3500,
+          "duration_minutes": 75,
+          "price_src": "studiosanti",
+          "by": [
+            "od-lash"
+          ],
+          "duration_src": "lashlevel"
+        },
+        {
+          "category": "Ламинирование и окрашивание ресниц",
+          "template": "Ламинирование + ботокс",
+          "price": 4000,
+          "duration_minutes": 90,
+          "price_src": "studiosanti",
+          "by": [
+            "od-lash"
+          ],
+          "duration_src": "lashlevel"
+        },
+        {
+          "category": "Ламинирование и окрашивание ресниц",
+          "template": "Окрашивание ресниц краской",
+          "price": 500,
+          "duration_minutes": 15,
+          "price_src": "lashlevel",
+          "by": [
+            "od-lash"
+          ]
+        },
+        {
+          "category": "Макияж",
+          "template": "Дневной макияж",
+          "price": 4000,
+          "duration_minutes": 60,
+          "price_src": "studiosanti",
+          "by": [
+            "od-makeup"
+          ],
+          "duration_src": "golden_mandarin"
+        },
+        {
+          "category": "Макияж",
+          "template": "Вечерний макияж",
+          "price": 6000,
+          "duration_minutes": 60,
+          "price_src": "studiosanti",
+          "by": [
+            "od-makeup"
+          ],
+          "duration_src": "golden_mandarin"
+        },
+        {
+          "category": "Макияж",
+          "template": "Свадебный макияж",
+          "price": 8000,
+          "duration_minutes": 60,
+          "price_src": "golden_mandarin",
+          "by": [
+            "od-makeup"
+          ]
+        },
+        {
+          "category": "Макияж",
+          "template": "Макияж для фотосессии",
+          "price": 8000,
+          "duration_minutes": 90,
+          "price_src": "golden_mandarin",
+          "by": [
+            "od-makeup"
+          ]
+        },
+        {
+          "category": "Макияж",
+          "template": "Экспресс-макияж",
+          "price": 2900,
+          "duration_minutes": 30,
+          "price_src": "golden_mandarin",
+          "by": [
+            "od-makeup"
+          ]
+        },
+        {
+          "category": "Макияж",
+          "template": "Smoky eyes",
+          "price": 3500,
+          "duration_minutes": 30,
+          "price_src": "golden_mandarin",
+          "by": [
+            "od-makeup"
+          ]
+        },
+        {
+          "category": "Обучение и подбор образа",
+          "template": "Урок макияжа для себя",
+          "price": 13000,
+          "duration_minutes": 90,
+          "price_src": "golden_mandarin",
+          "by": [
+            "od-makeup"
+          ]
+        },
+        {
+          "category": "Чистки лица",
+          "template": "Ультразвуковая чистка лица",
+          "price": 5000,
+          "duration_minutes": 60,
+          "price_src": "venesa",
+          "by": [
+            "od-cosmo"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Чистки лица",
+          "template": "Механическая чистка лица",
+          "price": 7500,
+          "duration_minutes": 90,
+          "price_src": "venesa",
+          "by": [
+            "od-cosmo"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Чистки лица",
+          "template": "Комбинированная чистка лица",
+          "price": 10000,
+          "duration_minutes": 90,
+          "price_src": "venesa",
+          "by": [
+            "od-cosmo"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Маски и профессиональные уходовые комплексы",
+          "template": "Альгинатная маска",
+          "price": 3500,
+          "duration_minutes": 30,
+          "price_src": "venesa",
+          "by": [
+            "od-cosmo"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Пилинги",
+          "template": "Поверхностный химический пилинг",
+          "price": 5500,
+          "duration_minutes": 45,
+          "price_src": "venesa",
+          "by": [
+            "od-cosmo"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Пилинги",
+          "template": "Пилинг Джесснера",
+          "price": 10000,
+          "duration_minutes": 60,
+          "price_src": "venesa",
+          "by": [
+            "od-cosmo"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Комплексы красоты",
+          "template": "Маникюр + педикюр",
+          "price": 3950,
+          "duration_minutes": 105,
+          "price_src": "derived",
+          "by": [
+            "od-nails"
+          ]
+        },
+        {
+          "category": "Комплексы красоты",
+          "template": "Ламинирование ресниц + ламинирование бровей",
+          "price": 7000,
+          "duration_minutes": 105,
+          "price_src": "derived",
+          "by": [
+            "od-lash",
+            "od-brow"
+          ]
+        },
+        {
+          "category": "Комплексы красоты",
+          "template": "Макияж + укладка",
+          "price": 6200,
+          "duration_minutes": 110,
+          "price_src": "derived",
+          "by": [
+            "od-makeup"
+          ]
+        },
+        {
+          "category": "Комплексы красоты",
+          "template": "Образ для мероприятия",
+          "price": 9200,
+          "duration_minutes": 135,
+          "price_src": "derived",
+          "by": [
+            "od-makeup"
+          ]
+        },
+        {
+          "category": "Комплексы красоты",
+          "template": "Образ невесты",
+          "price": 12500,
+          "duration_minutes": 180,
+          "price_src": "derived",
+          "by": [
+            "od-makeup"
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "pylca-i-lyon",
+      "name": "Пыльца и лён",
+      "format": "студия бровей и ресниц",
+      "city": "Санкт-Петербург",
+      "address": "Санкт-Петербург, ул. Вымышленная, д. 2 (демо-данные)",
+      "timezone": "Europe/Moscow",
+      "note": "Формат «студия» по mosekosila.ru: узкая специализация, премиальные материалы, чек 2000–4000 ₽. Прайс целиком петербургский (lashlevel.ru, sisters.spb.ru) — второй город в контуре.",
+      "specialists": [
+        {
+          "ref": "pl-brow1",
+          "username": "demo.pylca-i-lyon.brow1",
+          "display_name": "Ева Пшеничная",
+          "role": "бровист",
+          "experience_years": 6,
+          "rating": "4.8",
+          "bio": "Архитектура и ламинирование бровей."
+        },
+        {
+          "ref": "pl-brow2",
+          "username": "demo.pylca-i-lyon.brow2",
+          "display_name": "Ника Друженькова",
+          "role": "бровист",
+          "experience_years": 4,
+          "rating": "4.5",
+          "bio": "Коррекция и окрашивание бровей."
+        },
+        {
+          "ref": "pl-lash1",
+          "username": "demo.pylca-i-lyon.lash1",
+          "display_name": "Таисия Коромыслова",
+          "role": "лешмейкер",
+          "experience_years": 8,
+          "rating": "4.9",
+          "bio": "Объёмы до 4D, ламинирование ресниц."
+        },
+        {
+          "ref": "pl-lash2",
+          "username": "demo.pylca-i-lyon.lash2",
+          "display_name": "Рита Забелина",
+          "role": "лешмейкер",
+          "experience_years": 3,
+          "rating": "4.4",
+          "bio": "Классическое наращивание и ламинирование."
+        }
+      ],
+      "services": [
+        {
+          "category": "Архитектура и коррекция бровей",
+          "template": "Коррекция бровей пинцетом",
+          "price": 700,
+          "duration_minutes": 20,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-brow1",
+            "pl-brow2"
+          ]
+        },
+        {
+          "category": "Архитектура и коррекция бровей",
+          "template": "Коррекция бровей воском",
+          "price": 1000,
+          "duration_minutes": 25,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-brow1",
+            "pl-brow2"
+          ]
+        },
+        {
+          "category": "Архитектура и коррекция бровей",
+          "template": "Прореживание бровей",
+          "price": 400,
+          "duration_minutes": 15,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-brow1",
+            "pl-brow2"
+          ]
+        },
+        {
+          "category": "Архитектура и коррекция бровей",
+          "template": "Комплекс “форма + окрашивание”",
+          "price": 1800,
+          "duration_minutes": 40,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-brow1",
+            "pl-brow2"
+          ]
+        },
+        {
+          "category": "Окрашивание и уход",
+          "template": "Окрашивание бровей краской",
+          "price": 1200,
+          "duration_minutes": 25,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-brow1",
+            "pl-brow2"
+          ]
+        },
+        {
+          "category": "Окрашивание и уход",
+          "template": "Осветление бровей",
+          "price": 1500,
+          "duration_minutes": 30,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-brow1"
+          ]
+        },
+        {
+          "category": "Ламинирование и долговременная укладка",
+          "template": "Ламинирование бровей",
+          "price": 2200,
+          "duration_minutes": 45,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-brow1",
+            "pl-brow2"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Классическое наращивание ресниц",
+          "price": 3000,
+          "duration_minutes": 120,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-lash1",
+            "pl-lash2"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Неполное наращивание",
+          "price": 2300,
+          "duration_minutes": 80,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-lash1",
+            "pl-lash2"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Наращивание 1.5D",
+          "price": 3200,
+          "duration_minutes": 140,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-lash1",
+            "pl-lash2"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Наращивание 2D",
+          "price": 3500,
+          "duration_minutes": 160,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-lash1",
+            "pl-lash2"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Наращивание 3D",
+          "price": 3700,
+          "duration_minutes": 180,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-lash1"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Наращивание 4D",
+          "price": 4400,
+          "duration_minutes": 200,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-lash1"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Коррекция наращенных ресниц",
+          "price": 2100,
+          "duration_minutes": 90,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-lash1",
+            "pl-lash2"
+          ]
+        },
+        {
+          "category": "Наращивание ресниц",
+          "template": "Снятие наращенных ресниц",
+          "price": 500,
+          "duration_minutes": 20,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-lash1",
+            "pl-lash2"
+          ]
+        },
+        {
+          "category": "Ламинирование и окрашивание ресниц",
+          "template": "Ламинирование ресниц",
+          "price": 2500,
+          "duration_minutes": 60,
+          "price_src": "sisters",
+          "by": [
+            "pl-lash1",
+            "pl-lash2"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Ламинирование и окрашивание ресниц",
+          "template": "Ламинирование + окрашивание",
+          "price": 2700,
+          "duration_minutes": 75,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-lash1",
+            "pl-lash2"
+          ]
+        },
+        {
+          "category": "Ламинирование и окрашивание ресниц",
+          "template": "Ламинирование + ботокс",
+          "price": 3000,
+          "duration_minutes": 90,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-lash1"
+          ]
+        },
+        {
+          "category": "Ламинирование и окрашивание ресниц",
+          "template": "Окрашивание ресниц краской",
+          "price": 500,
+          "duration_minutes": 15,
+          "price_src": "lashlevel",
+          "by": [
+            "pl-lash1",
+            "pl-lash2"
+          ]
+        },
+        {
+          "category": "Комплексы красоты",
+          "template": "Ресницы + брови",
+          "price": 4300,
+          "duration_minutes": 145,
+          "price_src": "derived",
+          "by": [
+            "pl-lash1",
+            "pl-brow1"
+          ]
+        },
+        {
+          "category": "Комплексы красоты",
+          "template": "Ламинирование ресниц + ламинирование бровей",
+          "price": 4700,
+          "duration_minutes": 105,
+          "price_src": "derived",
+          "by": [
+            "pl-lash1",
+            "pl-brow1"
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "mednyy-kovsh",
+      "name": "Медный ковш",
+      "format": "барбершоп",
+      "city": "Москва",
+      "address": "Москва, пер. Придуманный, д. 3 (демо-данные)",
+      "timezone": "Europe/Moscow",
+      "note": "Формат «барбершоп» по mosekosila.ru: 20–40 м², мужские стрижки, бритьё, уход за бородой. Цены по сетке рангов мастера — отраслевая норма (betone, 7barbershop): здесь взят средний ранг.",
+      "specialists": [
+        {
+          "ref": "mk-b1",
+          "username": "demo.mednyy-kovsh.barber1",
+          "display_name": "Артём Свиридов",
+          "role": "барбер",
+          "experience_years": 9,
+          "rating": "4.8",
+          "bio": "Классические мужские стрижки, бритьё, борода."
+        },
+        {
+          "ref": "mk-b2",
+          "username": "demo.mednyy-kovsh.barber2",
+          "display_name": "Глеб Наумочкин",
+          "role": "барбер",
+          "experience_years": 5,
+          "rating": "4.5",
+          "bio": "Стрижки машинкой, детские стрижки, мужской маникюр."
+        },
+        {
+          "ref": "mk-b3",
+          "username": "demo.mednyy-kovsh.barber3",
+          "display_name": "Роман Пасечник",
+          "role": "барбер",
+          "experience_years": 12,
+          "rating": "4.9",
+          "bio": "Борода и усы, камуфляж седины."
+        }
+      ],
+      "services": [
+        {
+          "category": "Стрижки",
+          "template": "Мужская стрижка",
+          "price": 1700,
+          "duration_minutes": 45,
+          "price_src": "sem_barber",
+          "by": [
+            "mk-b1",
+            "mk-b2",
+            "mk-b3"
+          ],
+          "duration_src": "borodach"
+        },
+        {
+          "category": "Стрижки",
+          "template": "Стрижка машинкой",
+          "price": 1500,
+          "duration_minutes": 30,
+          "price_src": "firm",
+          "by": [
+            "mk-b1",
+            "mk-b2",
+            "mk-b3"
+          ]
+        },
+        {
+          "category": "Стрижки",
+          "template": "Детская стрижка",
+          "price": 1400,
+          "duration_minutes": 45,
+          "price_src": "betone",
+          "by": [
+            "mk-b1",
+            "mk-b2"
+          ],
+          "duration_src": "borodach"
+        },
+        {
+          "category": "Стрижки",
+          "template": "Оформление бороды",
+          "price": 1500,
+          "duration_minutes": 30,
+          "price_src": "firm",
+          "by": [
+            "mk-b1",
+            "mk-b3"
+          ]
+        },
+        {
+          "category": "Стрижки",
+          "template": "Оформление усов",
+          "price": 700,
+          "duration_minutes": 20,
+          "price_src": "borodach",
+          "by": [
+            "mk-b1",
+            "mk-b3"
+          ]
+        },
+        {
+          "category": "Укладки и прически",
+          "template": "Экспресс-укладка",
+          "price": 1000,
+          "duration_minutes": 20,
+          "price_src": "firm",
+          "by": [
+            "mk-b1",
+            "mk-b2",
+            "mk-b3"
+          ]
+        },
+        {
+          "category": "Окрашивание волос",
+          "template": "Камуфляж седины",
+          "price": 1690,
+          "duration_minutes": 15,
+          "price_src": "barbershop_su",
+          "by": [
+            "mk-b1",
+            "mk-b3"
+          ],
+          "duration_src": "frant"
+        },
+        {
+          "category": "Мужской уход",
+          "template": "Мужская стрижка",
+          "price": 1700,
+          "duration_minutes": 45,
+          "price_src": "sem_barber",
+          "by": [
+            "mk-b1",
+            "mk-b2",
+            "mk-b3"
+          ],
+          "duration_src": "borodach"
+        },
+        {
+          "category": "Мужской уход",
+          "template": "Мужская укладка",
+          "price": 1000,
+          "duration_minutes": 20,
+          "price_src": "firm",
+          "by": [
+            "mk-b1",
+            "mk-b2",
+            "mk-b3"
+          ]
+        },
+        {
+          "category": "Мужской уход",
+          "template": "Оформление бороды",
+          "price": 1500,
+          "duration_minutes": 30,
+          "price_src": "firm",
+          "by": [
+            "mk-b1",
+            "mk-b3"
+          ]
+        },
+        {
+          "category": "Мужской уход",
+          "template": "Оформление усов",
+          "price": 700,
+          "duration_minutes": 20,
+          "price_src": "borodach",
+          "by": [
+            "mk-b1",
+            "mk-b3"
+          ]
+        },
+        {
+          "category": "Мужской уход",
+          "template": "Камуфляж седины",
+          "price": 1690,
+          "duration_minutes": 15,
+          "price_src": "barbershop_su",
+          "by": [
+            "mk-b1",
+            "mk-b3"
+          ],
+          "duration_src": "frant"
+        },
+        {
+          "category": "Мужской уход",
+          "template": "Мужской маникюр",
+          "price": 1900,
+          "duration_minutes": 45,
+          "price_src": "v4ruki",
+          "by": [
+            "mk-b2"
+          ]
+        },
+        {
+          "category": "Мужской уход",
+          "template": "Мужской педикюр",
+          "price": 3300,
+          "duration_minutes": 60,
+          "price_src": "v4ruki",
+          "by": [
+            "mk-b2"
+          ]
+        },
+        {
+          "category": "Маникюр",
+          "template": "Мужской маникюр",
+          "price": 1900,
+          "duration_minutes": 45,
+          "price_src": "v4ruki",
+          "by": [
+            "mk-b2"
+          ]
+        },
+        {
+          "category": "Педикюр",
+          "template": "Мужской педикюр",
+          "price": 3300,
+          "duration_minutes": 60,
+          "price_src": "v4ruki",
+          "by": [
+            "mk-b2"
+          ]
+        },
+        {
+          "category": "Комплексы красоты",
+          "template": "Маникюр + стрижка",
+          "price": 3600,
+          "duration_minutes": 90,
+          "price_src": "derived",
+          "by": [
+            "mk-b2"
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "sorok-okon",
+      "name": "Сорок окон",
+      "format": "студия маникюра и педикюра",
+      "city": "Москва",
+      "address": "Москва, б-р Небывалый, д. 4 (демо-данные)",
+      "timezone": "Europe/Moscow",
+      "note": "Формат «студия маникюра» по mosekosila.ru. Подология вынесена отдельным мастером: yclients.com/journal называет её самой рентабельной позицией ногтевого прайса.",
+      "specialists": [
+        {
+          "ref": "so-n1",
+          "username": "demo.sorok-okon.nails1",
+          "display_name": "Юлия Востренкова",
+          "role": "мастер маникюра",
+          "experience_years": 7,
+          "rating": "4.8",
+          "bio": "Комбинированный маникюр, укрепление, дизайн."
+        },
+        {
+          "ref": "so-n2",
+          "username": "demo.sorok-okon.nails2",
+          "display_name": "Ангелина Пимшина",
+          "role": "мастер маникюра",
+          "experience_years": 4,
+          "rating": "4.5",
+          "bio": "Аппаратный маникюр, гель-лак."
+        },
+        {
+          "ref": "so-n3",
+          "username": "demo.sorok-okon.nails3",
+          "display_name": "Милана Бердникова",
+          "role": "мастер по наращиванию",
+          "experience_years": 6,
+          "rating": "4.7",
+          "bio": "Наращивание гелем и полигелем, архитектура."
+        },
+        {
+          "ref": "so-pod",
+          "username": "demo.sorok-okon.podolog",
+          "display_name": "Софья Кулагина",
+          "role": "подолог",
+          "experience_years": 11,
+          "rating": "4.9",
+          "bio": "Медицинский педикюр, вросший ноготь, трещины."
+        }
+      ],
+      "services": [
+        {
+          "category": "Маникюр",
+          "template": "Классический маникюр",
+          "price": 1350,
+          "duration_minutes": 45,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n1",
+            "so-n2"
+          ]
+        },
+        {
+          "category": "Маникюр",
+          "template": "Аппаратный маникюр",
+          "price": 1500,
+          "duration_minutes": 45,
+          "price_src": "derived",
+          "by": [
+            "so-n1",
+            "so-n2"
+          ]
+        },
+        {
+          "category": "Маникюр",
+          "template": "Комбинированный маникюр",
+          "price": 1900,
+          "duration_minutes": 60,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n1",
+            "so-n2",
+            "so-n3"
+          ]
+        },
+        {
+          "category": "Маникюр",
+          "template": "Детский маникюр",
+          "price": 690,
+          "duration_minutes": 30,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n2"
+          ]
+        },
+        {
+          "category": "Маникюр",
+          "template": "Мужской маникюр",
+          "price": 1900,
+          "duration_minutes": 45,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n1"
+          ]
+        },
+        {
+          "category": "Маникюр",
+          "template": "Экспресс-маникюр",
+          "price": 1190,
+          "duration_minutes": 30,
+          "price_src": "richnails",
+          "by": [
+            "so-n2"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Покрытия",
+          "template": "Покрытие гель-лак",
+          "price": 1700,
+          "duration_minutes": 40,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n1",
+            "so-n2",
+            "so-n3"
+          ]
+        },
+        {
+          "category": "Покрытия",
+          "template": "Покрытие обычным лаком",
+          "price": 945,
+          "duration_minutes": 30,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n1",
+            "so-n2"
+          ]
+        },
+        {
+          "category": "Покрытия",
+          "template": "Покрытие френч",
+          "price": 1100,
+          "duration_minutes": 20,
+          "price_src": "richnails",
+          "by": [
+            "so-n1",
+            "so-n3"
+          ],
+          "duration_src": "v4ruki"
+        },
+        {
+          "category": "Покрытия",
+          "template": "Снятие гель-лака",
+          "price": 300,
+          "duration_minutes": 15,
+          "price_src": "richnails",
+          "by": [
+            "so-n1",
+            "so-n2",
+            "so-n3"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Покрытия",
+          "template": "Укрепление гелем",
+          "price": 945,
+          "duration_minutes": 30,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n1",
+            "so-n3"
+          ]
+        },
+        {
+          "category": "Покрытия",
+          "template": "Укрепление акриловой пудрой",
+          "price": 525,
+          "duration_minutes": 25,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n1",
+            "so-n3"
+          ]
+        },
+        {
+          "category": "Наращивание и моделирование ногтей",
+          "template": "Наращивание ногтей гелем",
+          "price": 3990,
+          "duration_minutes": 120,
+          "price_src": "richnails",
+          "by": [
+            "so-n3"
+          ],
+          "duration_src": "v4ruki"
+        },
+        {
+          "category": "Наращивание и моделирование ногтей",
+          "template": "Наращивание ногтей полигелем",
+          "price": 4890,
+          "duration_minutes": 120,
+          "price_src": "richnails",
+          "by": [
+            "so-n3"
+          ],
+          "duration_src": "v4ruki"
+        },
+        {
+          "category": "Наращивание и моделирование ногтей",
+          "template": "Коррекция наращенных ногтей",
+          "price": 4600,
+          "duration_minutes": 120,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n3"
+          ]
+        },
+        {
+          "category": "Дизайн ногтей",
+          "template": "Френч",
+          "price": 1100,
+          "duration_minutes": 20,
+          "price_src": "richnails",
+          "by": [
+            "so-n1",
+            "so-n3"
+          ],
+          "duration_src": "v4ruki"
+        },
+        {
+          "category": "Дизайн ногтей",
+          "template": "Дизайн одного ногтя",
+          "price": 50,
+          "duration_minutes": 15,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n1",
+            "so-n2",
+            "so-n3"
+          ]
+        },
+        {
+          "category": "Педикюр",
+          "template": "Классический педикюр",
+          "price": 2600,
+          "duration_minutes": 60,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n1",
+            "so-pod"
+          ]
+        },
+        {
+          "category": "Педикюр",
+          "template": "Экспресс-педикюр",
+          "price": 1800,
+          "duration_minutes": 40,
+          "price_src": "v4ruki",
+          "by": [
+            "so-n1",
+            "so-pod"
+          ]
+        },
+        {
+          "category": "Педикюр",
+          "template": "SMART-педикюр",
+          "price": 2600,
+          "duration_minutes": 45,
+          "price_src": "v4ruki",
+          "by": [
+            "so-pod"
+          ]
+        },
+        {
+          "category": "Педикюр",
+          "template": "Мужской педикюр",
+          "price": 3300,
+          "duration_minutes": 60,
+          "price_src": "v4ruki",
+          "by": [
+            "so-pod"
+          ]
+        },
+        {
+          "category": "Педикюр",
+          "template": "Детский педикюр",
+          "price": 1500,
+          "duration_minutes": 40,
+          "price_src": "derived",
+          "by": [
+            "so-pod"
+          ]
+        },
+        {
+          "category": "Подологические услуги",
+          "template": "Медицинский педикюр",
+          "price": 3500,
+          "duration_minutes": 75,
+          "price_src": "derived",
+          "by": [
+            "so-pod"
+          ]
+        },
+        {
+          "category": "Подологические услуги",
+          "template": "Консультация подолога",
+          "price": 1500,
+          "duration_minutes": 30,
+          "price_src": "derived",
+          "by": [
+            "so-pod"
+          ]
+        },
+        {
+          "category": "Подологические услуги",
+          "template": "Обработка мозолей",
+          "price": 1200,
+          "duration_minutes": 30,
+          "price_src": "derived",
+          "by": [
+            "so-pod"
+          ]
+        },
+        {
+          "category": "Подологические услуги",
+          "template": "Обработка трещин на пятках",
+          "price": 1500,
+          "duration_minutes": 40,
+          "price_src": "derived",
+          "by": [
+            "so-pod"
+          ]
+        },
+        {
+          "category": "Уходы для рук",
+          "template": "Парафинотерапия рук",
+          "price": 800,
+          "duration_minutes": 25,
+          "price_src": "derived",
+          "by": [
+            "so-n1",
+            "so-n2"
+          ]
+        },
+        {
+          "category": "Комплексы красоты",
+          "template": "Маникюр + педикюр",
+          "price": 3950,
+          "duration_minutes": 105,
+          "price_src": "derived",
+          "by": [
+            "so-n1",
+            "so-pod"
+          ]
+        }
+      ]
+    },
+    {
+      "slug": "fevralskiy-svet",
+      "name": "Февральский свет",
+      "format": "кабинет косметологии, эпиляции и перманентного макияжа",
+      "city": "Москва",
+      "address": "Москва, пр-д Несуществующий, д. 5 (демо-данные)",
+      "timezone": "Europe/Moscow",
+      "note": "Узкопрофильный кабинет: косметология лица, аппаратные методики, эпиляция и перманентный макияж. Перманент и лазер в прайсах российских студий всегда идут отдельным мастером — так и здесь.",
+      "specialists": [
+        {
+          "ref": "fs-cosmo1",
+          "username": "demo.fevralskiy-svet.cosmo1",
+          "display_name": "Ирина Залесская",
+          "role": "косметолог-эстетист",
+          "experience_years": 13,
+          "rating": "4.9",
+          "bio": "Чистки, пилинги, массаж лица."
+        },
+        {
+          "ref": "fs-cosmo2",
+          "username": "demo.fevralskiy-svet.cosmo2",
+          "display_name": "Наталья Хвостова",
+          "role": "косметолог",
+          "experience_years": 6,
+          "rating": "4.6",
+          "bio": "Аппаратные методики, уходовые программы."
+        },
+        {
+          "ref": "fs-epil",
+          "username": "demo.fevralskiy-svet.epil",
+          "display_name": "Аглая Мирошина",
+          "role": "мастер эпиляции",
+          "experience_years": 8,
+          "rating": "4.7",
+          "bio": "Лазерная эпиляция, шугаринг, воск."
+        },
+        {
+          "ref": "fs-pm",
+          "username": "demo.fevralskiy-svet.permanent",
+          "display_name": "Лидия Оборина",
+          "role": "мастер перманентного макияжа",
+          "experience_years": 10,
+          "rating": "4.8",
+          "bio": "Брови, губы, веки; коррекция и удаление."
+        }
+      ],
+      "services": [
+        {
+          "category": "Чистки лица",
+          "template": "Ультразвуковая чистка лица",
+          "price": 5000,
+          "duration_minutes": 60,
+          "price_src": "venesa",
+          "by": [
+            "fs-cosmo1",
+            "fs-cosmo2"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Чистки лица",
+          "template": "Механическая чистка лица",
+          "price": 7500,
+          "duration_minutes": 90,
+          "price_src": "venesa",
+          "by": [
+            "fs-cosmo1"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Чистки лица",
+          "template": "Комбинированная чистка лица",
+          "price": 10000,
+          "duration_minutes": 90,
+          "price_src": "venesa",
+          "by": [
+            "fs-cosmo1",
+            "fs-cosmo2"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Пилинги",
+          "template": "Поверхностный химический пилинг",
+          "price": 5500,
+          "duration_minutes": 45,
+          "price_src": "venesa",
+          "by": [
+            "fs-cosmo1",
+            "fs-cosmo2"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Пилинги",
+          "template": "Миндальный пилинг",
+          "price": 5500,
+          "duration_minutes": 45,
+          "price_src": "venesa",
+          "by": [
+            "fs-cosmo2"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Пилинги",
+          "template": "Салициловый пилинг",
+          "price": 5500,
+          "duration_minutes": 45,
+          "price_src": "venesa",
+          "by": [
+            "fs-cosmo2"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Пилинги",
+          "template": "Пилинг Джесснера",
+          "price": 10000,
+          "duration_minutes": 60,
+          "price_src": "venesa",
+          "by": [
+            "fs-cosmo1"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Маски и профессиональные уходовые комплексы",
+          "template": "Альгинатная маска",
+          "price": 3500,
+          "duration_minutes": 30,
+          "price_src": "venesa",
+          "by": [
+            "fs-cosmo1",
+            "fs-cosmo2"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Лифтинг и омоложение",
+          "template": "Микротоковая терапия лица",
+          "price": 3700,
+          "duration_minutes": 30,
+          "price_src": "lit_clinic",
+          "by": [
+            "fs-cosmo2"
+          ]
+        },
+        {
+          "category": "Лифтинг и омоложение",
+          "template": "RF-лифтинг лица",
+          "price": 14000,
+          "duration_minutes": 45,
+          "price_src": "iphk",
+          "by": [
+            "fs-cosmo2"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Лифтинг и омоложение",
+          "template": "Фотоомоложение",
+          "price": 20000,
+          "duration_minutes": 45,
+          "price_src": "iphk",
+          "by": [
+            "fs-cosmo1"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Аппаратная работа с проблемами кожи",
+          "template": "LED-терапия при акне",
+          "price": 2000,
+          "duration_minutes": 15,
+          "price_src": "ice_face",
+          "by": [
+            "fs-cosmo2"
+          ]
+        },
+        {
+          "category": "Базовый ручной массаж",
+          "template": "Массаж лица",
+          "price": 2300,
+          "duration_minutes": 30,
+          "price_src": "cleoline",
+          "by": [
+            "fs-cosmo1",
+            "fs-cosmo2"
+          ]
+        },
+        {
+          "category": "Женские и специальные массажи",
+          "template": "Скульптурный массаж лица",
+          "price": 2800,
+          "duration_minutes": 35,
+          "price_src": "cleoline",
+          "by": [
+            "fs-cosmo1"
+          ]
+        },
+        {
+          "category": "Женские и специальные массажи",
+          "template": "Буккальный массаж лица",
+          "price": 3500,
+          "duration_minutes": 40,
+          "price_src": "cleoline",
+          "by": [
+            "fs-cosmo1"
+          ]
+        },
+        {
+          "category": "Комплексы для лица",
+          "template": "Чистка + уход",
+          "price": 6500,
+          "duration_minutes": 90,
+          "price_src": "venesa",
+          "by": [
+            "fs-cosmo1"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Лазерная эпиляция",
+          "template": "Лазерная эпиляция подмышек",
+          "price": 1500,
+          "duration_minutes": 15,
+          "price_src": "lumirens",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Лазерная эпиляция",
+          "template": "Лазерная эпиляция верхней губы",
+          "price": 1500,
+          "duration_minutes": 15,
+          "price_src": "lumirens",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Лазерная эпиляция",
+          "template": "Лазерная эпиляция лица",
+          "price": 3500,
+          "duration_minutes": 15,
+          "price_src": "bwclinic",
+          "by": [
+            "fs-epil"
+          ]
+        },
+        {
+          "category": "Лазерная эпиляция",
+          "template": "Лазерная эпиляция глубокого бикини",
+          "price": 4900,
+          "duration_minutes": 30,
+          "price_src": "lumirens",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Лазерная эпиляция",
+          "template": "Лазерная эпиляция голеней",
+          "price": 5000,
+          "duration_minutes": 30,
+          "price_src": "lumirens",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Лазерная эпиляция",
+          "template": "Лазерная эпиляция ног полностью",
+          "price": 10000,
+          "duration_minutes": 60,
+          "price_src": "lumirens",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Лазерная эпиляция",
+          "template": "Лазерная эпиляция рук полностью",
+          "price": 6300,
+          "duration_minutes": 45,
+          "price_src": "lumirens",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Шугаринг",
+          "template": "Шугаринг подмышек",
+          "price": 500,
+          "duration_minutes": 20,
+          "price_src": "depilon",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Шугаринг",
+          "template": "Шугаринг верхней губы",
+          "price": 500,
+          "duration_minutes": 15,
+          "price_src": "depilon",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Шугаринг",
+          "template": "Шугаринг глубокого бикини",
+          "price": 2000,
+          "duration_minutes": 40,
+          "price_src": "depilon",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Шугаринг",
+          "template": "Шугаринг голеней",
+          "price": 1400,
+          "duration_minutes": 30,
+          "price_src": "depilon",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Шугаринг",
+          "template": "Шугаринг ног полностью",
+          "price": 2200,
+          "duration_minutes": 50,
+          "price_src": "depilon",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Восковая депиляция",
+          "template": "Восковая депиляция подмышек",
+          "price": 800,
+          "duration_minutes": 20,
+          "price_src": "vosksalon",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Восковая депиляция",
+          "template": "Восковая депиляция глубокого бикини",
+          "price": 1600,
+          "duration_minutes": 40,
+          "price_src": "vosksalon",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Восковая депиляция",
+          "template": "Восковая депиляция ног полностью",
+          "price": 1690,
+          "duration_minutes": 50,
+          "price_src": "vosksalon",
+          "by": [
+            "fs-epil"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Перманент бровей",
+          "template": "Перманентный макияж бровей",
+          "price": 12000,
+          "duration_minutes": 120,
+          "price_src": "julia_permanent",
+          "by": [
+            "fs-pm"
+          ],
+          "duration_src": "yudina"
+        },
+        {
+          "category": "Перманент бровей",
+          "template": "Пудровые брови",
+          "price": 12000,
+          "duration_minutes": 120,
+          "price_src": "pigment_lab",
+          "by": [
+            "fs-pm"
+          ],
+          "duration_src": "yudina"
+        },
+        {
+          "category": "Перманент бровей",
+          "template": "Теневая растушевка бровей",
+          "price": 12000,
+          "duration_minutes": 120,
+          "price_src": "pigment_lab",
+          "by": [
+            "fs-pm"
+          ],
+          "duration_src": "yudina"
+        },
+        {
+          "category": "Перманент бровей",
+          "template": "Микроблейдинг бровей",
+          "price": 5000,
+          "duration_minutes": 90,
+          "price_src": "yudina",
+          "by": [
+            "fs-pm"
+          ]
+        },
+        {
+          "category": "Перманент бровей",
+          "template": "Коррекция перманента бровей",
+          "price": 6000,
+          "duration_minutes": 90,
+          "price_src": "julia_permanent",
+          "by": [
+            "fs-pm"
+          ],
+          "duration_src": "yudina"
+        },
+        {
+          "category": "Перманент бровей",
+          "template": "Удаление перманента бровей лазером",
+          "price": 4000,
+          "duration_minutes": 30,
+          "price_src": "julia_permanent",
+          "by": [
+            "fs-pm"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Перманент бровей",
+          "template": "Удаление перманента бровей ремувером",
+          "price": 4000,
+          "duration_minutes": 30,
+          "price_src": "julia_permanent",
+          "by": [
+            "fs-pm"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Перманент губ",
+          "template": "Перманентный макияж губ",
+          "price": 13000,
+          "duration_minutes": 150,
+          "price_src": "julia_permanent",
+          "by": [
+            "fs-pm"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Перманент губ",
+          "template": "Коррекция перманента губ",
+          "price": 6000,
+          "duration_minutes": 90,
+          "price_src": "julia_permanent",
+          "by": [
+            "fs-pm"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Перманент век",
+          "template": "Межресничка",
+          "price": 9000,
+          "duration_minutes": 90,
+          "price_src": "julia_permanent",
+          "by": [
+            "fs-pm"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Перманент век",
+          "template": "Стрелка с растушевкой",
+          "price": 14000,
+          "duration_minutes": 120,
+          "price_src": "julia_permanent",
+          "by": [
+            "fs-pm"
+          ],
+          "duration_src": "derived"
+        },
+        {
+          "category": "Перманент век",
+          "template": "Коррекция перманента век",
+          "price": 4500,
+          "duration_minutes": 60,
+          "price_src": "julia_permanent",
+          "by": [
+            "fs-pm"
+          ],
+          "duration_src": "derived"
+        }
+      ]
+    }
+  ]
+}
