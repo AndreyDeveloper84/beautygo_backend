@@ -320,6 +320,27 @@ def _base_pool() -> QuerySet:
             is_booking_enabled=True,
             status=SpecialistProfile.ProfileStatus.ACTIVE,
         )
+        # DRF-1430. «in an active tenant» из докстринга выше до сих пор
+        # было обещанием, которого код не исполнял: фильтра по салону
+        # здесь не было вовсе, а ``select_related("tenant")`` служит
+        # только выводу ``tenant_slug``/``tenant_name``. Отключённый
+        # салон попадал в «ваши места» наравне с живыми.
+        #
+        # Здесь INNER JOIN — сознательно, и это ОТЛИЧИЕ от
+        # ``RecommendationEngine._fetch_candidates``, где стоит
+        # ``Q(tenant__isnull=True) | Q(...)``. Причина в том, что эта
+        # поверхность физически не умеет отдать мастера без салона:
+        # ``_build_card`` разыменовывает ``specialist.tenant.slug`` и
+        # ``.name`` без проверки, так что профиль с ``tenant=NULL``
+        # ронял ВЕСЬ эндпоинт в 500 (AttributeError: 'NoneType' object
+        # has no attribute 'slug'), а не просто не показывался.
+        #
+        # То есть фильтр не прячет то, что раньше было видно: он
+        # превращает жёсткое падение в корректное отсутствие. Движок
+        # подбора тенант не разыменовывает вовсе, поэтому там мастера
+        # без салона остаются в выдаче — разная форма условия отражает
+        # разные возможности поверхностей, а не разнобой.
+        .filter(tenant__is_active=True)
         .select_related("tenant")
         .prefetch_related(*catalog_services_prefetch())
     )
