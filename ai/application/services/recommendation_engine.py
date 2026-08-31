@@ -41,7 +41,7 @@ from uuid import UUID
 
 from django.conf import settings
 from django.core.cache import cache as default_cache
-from django.db.models import Q
+from django.db.models import Q, QuerySet
 
 from services.catalog_reads import (
     catalog_services_for,
@@ -379,7 +379,7 @@ class RecommendationEngine:
 
     @staticmethod
     def _split_by_review_evidence(
-        qs,
+        qs: QuerySet[SpecialistProfile],
         min_rating: float,
         limit: int,
     ) -> list[SpecialistProfile]:
