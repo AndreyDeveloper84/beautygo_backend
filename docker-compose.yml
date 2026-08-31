@@ -3,6 +3,13 @@ services:
     build:
       context: .
       args:
+        # DRF-1431. Which registry the base layer comes from. Default is
+        # the upstream Docker Hub ref, so a fresh clone / laptop / CI is
+        # unchanged. The dev deploy exports PYTHON_BASE_IMAGE=<GHCR ref>
+        # before `docker compose build` (ci.yml step 2/4) because the
+        # pilot VPS reaches Hub badly — see the comment block at the top
+        # of the Dockerfile for the measurements.
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
         # Forwards GH_DEPLOY_TOKEN from the host env into the build so
         # `pip install -r requirements.txt` can clone the private
         # ayla-ai-core repo (DRF-242 post-merge ops fix, 2026-05-07).
@@ -47,7 +54,20 @@ services:
       retries: 5
 
   celery_worker:
-    build: .
+    build:
+      context: .
+      # DRF-1431: same base-image indirection as `web`. Without it two of
+      # the three services named in ci.yml's `docker compose build` would
+      # still resolve python:3.12-slim from Docker Hub, and the deploy
+      # would keep failing exactly where it failed on 2026-08-31.
+      #
+      # GH_DEPLOY_TOKEN is deliberately NOT added here: this service has
+      # always built without it and does so successfully today (verified
+      # on the pilot 2026-08-31 — dev-celery_worker:latest builds clean).
+      # Adding it would change what pip is authenticated as, which is a
+      # separate question from this ticket.
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     restart: unless-stopped
     env_file:
       - .env
@@ -64,7 +84,11 @@ services:
         condition: service_healthy
 
   celery_beat:
-    build: .
+    build:
+      context: .
+      # DRF-1431 — see celery_worker above.
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     restart: unless-stopped
     env_file:
       - .env
