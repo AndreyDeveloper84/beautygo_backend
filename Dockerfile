@@ -1,4 +1,28 @@
-FROM python:3.12-slim
+# Base image, indirected through a build ARG (DRF-1431).
+#
+# Why this is not just `FROM python:3.12-slim`. The dev deploy builds ON
+# THE VPS (ci.yml step "2/4 Build application images" runs
+# `docker compose build` over SSH), and that box reaches Docker Hub badly:
+# two consecutive deploys on 2026-08-31 died before a single line of our
+# code was compiled, at
+#     failed to authorize: failed to fetch anonymous token:
+#     Get "https://auth.docker.io/token?scope=repository%3Alibrary..."
+# Measured from the pilot on 2026-08-31: registry-1.docker.io/v2/ answers
+# in 5.4s and auth.docker.io is intermittent, while ghcr.io/v2/ answers in
+# 0.26-0.31s on every attempt. GitHub is already a hard dependency of the
+# deploy (step 1/4 fetches from it), so pulling the base layer from GHCR
+# adds no new point of failure — it removes one.
+#
+# The DEFAULT stays the upstream Docker Hub ref on purpose: a fresh clone,
+# a laptop, and CI all keep working with no registry setup. Only the dev
+# deploy overrides it, via docker-compose.yml's
+# `PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}`.
+#
+# The mirror is refreshed by .github/workflows/mirror-base-image.yml,
+# which runs on a GitHub runner (good Hub connectivity) and copies the
+# upstream manifest list byte-for-byte. Same digest, different registry.
+ARG PYTHON_BASE_IMAGE=python:3.12-slim
+FROM ${PYTHON_BASE_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
