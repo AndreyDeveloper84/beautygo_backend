@@ -654,3 +654,80 @@ class TestBackendPromptConsumer:
         assert "чувствительность / аллергии: ретинол" in hint
         assert "бюджет" in hint
         assert "диета" not in hint
+
+
+# ---------------------------------------------------------------------------
+# The pin itself — what the bot's renderer makes of what this backend serves
+# ---------------------------------------------------------------------------
+
+
+class TestBotPromptRendererPin:
+    """DRF-1441. This repo pins ``ayla-ai-core`` by SHA, and the pin sat two
+    commits behind the SHA bot-platform runs, so the same client could be
+    described differently on the two channels.
+
+    Nothing in this repo's production path calls ``build_memory_block`` — the
+    backend chat renders its own hint (``ai.personal_context_hint``). What
+    this repo owns is the renderer's *input*: the internal personal-context
+    endpoint is where the bot's memory block comes from. So the pin is
+    provable from here, and only from here — feed the renderer the exact
+    payload this backend serves, assert on what comes out.
+
+    Both tests below FAIL on the previous pin (f773e7d) and pass on the
+    current one (ee6425a). They are why this bump is not a no-op.
+    """
+
+    def test_a_full_profile_keeps_the_budget_the_backend_serves(self, user, ctx):
+        """ee6425a. ``price_range_min`` / ``price_range_max`` had no declared
+        priority in the renderer's field order — the row that *was* declared,
+        ``price_range``, is not a key of this payload at all. Both keys
+        therefore sorted to the tail and the budget line fell off the top-8
+        cut on a full profile, while ``min_rating_preference`` — a search
+        filter, not a memory about the person — made it in.
+
+        ``FILLED`` is exactly such a profile: eleven renderable keys, ten
+        lines, eight slots. On f773e7d this block has no budget in it.
+        """
+        from ayla_ai_core import build_memory_block
+
+        payload = _internal().get(_url(user.id)).data["data"]
+        block = build_memory_block(payload["context"])
+
+        assert "Бюджет" in block, block
+        # Not merely present — present at its declared rank, ahead of the
+        # districts. Presence alone would also pass if the cut merely grew.
+        assert block.index("Бюджет") < block.index("Ищет рядом с работой"), block
+
+    def test_an_inferred_fact_is_not_offered_as_the_clients_own_words(
+        self, user, ctx,
+    ):
+        """af620ba, and the half this repo already built: the internal GET
+        ships ``data_sources`` beside ``context`` precisely so the renderer
+        can tell a nightly inference from something the person typed. Until
+        this pin the renderer had nowhere to put it — ``sources=`` did not
+        exist, and the call below raised TypeError on f773e7d.
+
+        ``busy_days`` is the real case: ``personal_context_inference`` stamps
+        it from booking history, and it used to arrive looking user-stated.
+        """
+        from ayla_ai_core import (
+            INFERRED_MARK,
+            MEMORY_INFERRED_HEADER,
+            build_memory_block,
+        )
+
+        ctx.data_sources = {"busy_days": "inferred"}
+        ctx.save(update_fields=["data_sources"])
+
+        payload = _internal().get(_url(user.id)).data["data"]
+        assert payload["data_sources"]["busy_days"] == "inferred"
+
+        block = build_memory_block(
+            payload["context"], sources=payload["data_sources"],
+        )
+
+        assert MEMORY_INFERRED_HEADER in block, block
+        assert f"{INFERRED_MARK} Избегает: понедельник" in block, block
+        # The line moved into the derived section — it no longer sits in the
+        # plain list, where it would read as the client's own words.
+        assert "\n- Избегает: понедельник" not in block, block
