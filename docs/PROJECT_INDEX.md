@@ -39,7 +39,7 @@ frontAyla — 4-й репозиторий проекта (аккаунт `Shiro-
          │             events/ingest (HMAC-SHA256, beat 30с)     │
          │                                                       │
          └─────────── shared lib: ayla-ai-core ──────────────────┘
-                      (оба пинят по SHA e73a1b47, v0.8.1)
+                      (оба пинят по SHA ee6425ac, DRF-1441)
 
 Legacy/внешние:
 - formulatela58.ru → ai-bot-platform (синк каталога, MYSITE_CATALOG_*)
@@ -83,7 +83,7 @@ Legacy/внешние:
 - **Назначение:** shared AI-оркестрационное ядро (библиотека, не сервис) для beautygo_backend и ai-bot-platform. AIConcierge-оркестратор, tool-definitions с anti-hallucination, multi-tenant brand voices, observability. Версия 0.8.1 (pre-1.0, API может ломаться в minor-релизах).
 - **Стек:** Python ≥3.12, зависимости `openai`, `pydantic`, `asgiref`; extras `[django]`, `[tiktoken]`, `[dev]`; setuptools; ruff + mypy.
 - **Ключевые модули (`src/ayla_ai_core/`):** `orchestrator.py` (AIConcierge, 11-шаговый pipeline, DI: store/context/prompt/dispatcher), `tools.py` (function-calling схемы, 5 ActionType), `tool_handlers.py` (dispatch + anti-hallucination), `context.py` (SpecialistContext generic int|UUID), `prompts.py` (два голоса: FORMULA_TELA / AYLA_MARKETPLACE), `composer.py`, `memory.py` (**новое в ветке**: build_memory_block с confidence-порогами), `observability.py` (tenant-context, replay-determinism), `providers/` (OpenAI passthrough, Anthropic adapter).
-- **Потребители:** djangoproject (ORM ConversationStore, AYLA_MARKETPLACE_VOICE) и ai-bot-platform — оба пинят по SHA (сейчас `e73a1b47`, v0.8.1).
+- **Потребители:** djangoproject (ORM ConversationStore, AYLA_MARKETPLACE_VOICE) и ai-bot-platform — оба пинят по SHA (сейчас `ee6425ac`, выровнены DRF-1441).
 - **Тесты:** 12 файлов, ~227 тест-функций, включая snapshot публичного API (`test_public_api_surface.py`) как drift-гейт.
 - **Доки:** `README.md`, `CHANGELOG.md`, `RELEASING.md` (SHA-pin discipline), `LTS_POLICY.md`, ADR-0009 (в `main`).
 - **Состояние:** ветка `feat/memory-context-builder` добавляет `memory.py`, но **фича не завершена**: `build_memory_block` не экспортирован из `__init__.py` (до потребителей не доходит), `[Unreleased]` в CHANGELOG пуст. Отстаёт от `main` на 2 коммита (доки). Незакоммичено: удалён `uv.lock`. Осознанный техдолг: deprecated-алиасы (удаление в v0.9.0).
