@@ -51,6 +51,7 @@ from django_filters.rest_framework import filters
 from rest_framework import serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 
 from users.models import SpecialistProfile
 from users.permissions import IsInternalBearer
@@ -133,6 +134,22 @@ class InternalSpecialistViewSet(SpecialistViewSet):
     authentication_classes: list = []
     permission_classes = [IsInternalBearer]
     filterset_class = InternalSpecialistFilter
+    # DRF-1446. With `authentication_classes = []` every call here is
+    # anonymous to DRF, so `slots` was spending the per-IP `anon` bucket
+    # (30/min) — and every bot process reaches us from one source IP, so
+    # the whole fleet shared it. One schedule screen is a 14-day fan-out
+    # asked one date at a time, so a single screen spent 14 of those 30
+    # and a second one 429'd mid-draw. Own bucket, same reasoning as
+    # `payment_internal` / `food_scan_internal`.
+    throttle_scope = 'slots_internal'
+
+    def get_throttles(self):
+        # Only the fan-out gets the scope. list/retrieve/services stay on
+        # the default anon/user buckets: they are single calls per action,
+        # and moving them would change limits this ticket has not measured.
+        if getattr(self, 'action', None) == 'slots':
+            return [ScopedRateThrottle()]
+        return super().get_throttles()
 
     def get_serializer_class(self) -> type:
         if self.action == 'retrieve':
