@@ -69,7 +69,8 @@ def _contains_sequence(haystack: list[str], needle: list[str]) -> bool:
     if not needle or len(needle) > len(haystack):
         return False
     last = len(haystack) - len(needle)
-    return any(haystack[i : i + len(needle)] == needle for i in range(last + 1))
+    size = len(needle)
+    return any(haystack[i:i + size] == needle for i in range(last + 1))
 
 
 def _catalog_names() -> list[NamedService]:
