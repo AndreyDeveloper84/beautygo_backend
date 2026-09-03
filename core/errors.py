@@ -172,6 +172,12 @@ class ErrorCode(str, Enum):
     NOT_FOUND = "NOT_FOUND"
     CONFLICT = "CONFLICT"
 
+    # --- Goal anketa (DRF-1451; project — not in spec) ---
+    # Ответ на шаг анкеты разошёлся с тем шагом, который ждёт сервер:
+    # документ на экране протух. Клиенту сюда — перечитать документ,
+    # а не повторять тот же запрос.
+    ANKETA_STEP_MISMATCH = "ANKETA_STEP_MISMATCH"
+
     # --- Rate limiting ---
     THROTTLED = "THROTTLED"
     RATE_LIMITED = "RATE_LIMITED"

@@ -38,6 +38,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from django.core.cache import cache
+
 from services.models import SalonService, ServiceCategory
 
 # Всё, что не буква и не цифра, — разделитель. Дефисы и точки внутри
@@ -73,27 +75,66 @@ def _contains_sequence(haystack: list[str], needle: list[str]) -> bool:
     return any(haystack[i:i + size] == needle for i in range(last + 1))
 
 
+#: Ключ и срок кеша списка имён. Каталог меняется редко, а читается
+#: теперь на каждом открытии приложения — см. ниже.
+_CACHE_KEY = "goals.service_match.catalog_names.v1"
+_CACHE_TTL_SECONDS = 300
+
+#: Потолок числа имён. Не оптимизация, а предохранитель: без него
+#: зеркало YClients на тысяче салонов превращает каждую проверку в
+#: последовательное чтение всей таблицы услуг.
+MAX_CATALOG_NAMES = 5000
+
+
+def _load_catalog_names() -> list[tuple[str, str]]:
+    names = [
+        ("category", name)
+        for name in ServiceCategory.objects.filter(is_active=True)
+        .order_by("name")
+        .values_list("name", flat=True)[:MAX_CATALOG_NAMES]
+    ]
+    remaining = MAX_CATALOG_NAMES - len(names)
+    if remaining > 0:
+        names += [
+            ("service", name)
+            for name in SalonService.objects.filter(is_active=True)
+            .order_by("name")
+            .values_list("name", flat=True)[:remaining]
+        ]
+    return names
+
+
 def _catalog_names() -> list[NamedService]:
     """Активные имена каталога — категории и услуги салона.
 
-    Тенант не фильтруется — так же, как в ``_suggestions()`` и
-    ``resolve_goal_category_ids``: слой цели работает от клиента, а не от
-    салона, и вводить здесь тенантную границу в одиночку означало бы
-    разойтись с соседями по модулю.
+    # Кеш
+
+    Функция вызывается из ``build_decision_context``, то есть на каждом
+    открытии приложения и на каждом ответе сервера, для любого клиента
+    с текстовой целью. Два запроса без ``LIMIT`` на такой частоте —
+    ошибка: у ``SalonService`` индексы начинаются с ``tenant``, поэтому
+    голый фильтр по ``is_active`` читает таблицу последовательно.
+    Пятиминутный кеш и потолок ``MAX_CATALOG_NAMES`` держат стоимость
+    ограниченной; каталог меняется несравнимо реже.
+
+    # Тенант НЕ фильтруется, и это известное ограничение
+
+    Соседи по модулю (``_suggestions``, ``resolve_goal_category_ids``)
+    тоже не фильтруют — но они читают ``GoalOption``, действительно
+    глобальную курируемую таблицу. Каталог глобальным не является, и
+    прецедент сюда не переносится: клиент салона A может получить
+    «цель распознана» от имени, которое есть только у салона B.
+
+    Наружу утекает один булев признак, не данные. Но решение при этом
+    принимается по чужим строкам, и чинить это надо тенантом,
+    протянутым до слоя цели, — чего в ``ClientGoal`` сегодня нет.
+    Записано вопросом владельцу, а не замазано здесь.
     """
-    names = [
-        NamedService(kind="category", name=name)
-        for name in ServiceCategory.objects.filter(is_active=True).values_list(
-            "name", flat=True
-        )
-    ]
-    names += [
-        NamedService(kind="service", name=name)
-        for name in SalonService.objects.filter(is_active=True).values_list(
-            "name", flat=True
-        )
-    ]
-    return names
+    cached = cache.get(_CACHE_KEY)
+    if cached is None:
+        cached = _load_catalog_names()
+        cache.set(_CACHE_KEY, cached, _CACHE_TTL_SECONDS)
+    return [NamedService(kind=kind, name=name) for kind, name in cached]
 
 
 def match_named_service(text: str | None) -> NamedService | None:

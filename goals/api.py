@@ -25,8 +25,9 @@ from rest_framework.views import APIView
 
 from analytics import event_catalogue
 from analytics.models import AnalyticsEvent
+from core.errors import ErrorCode
 from users.permissions import IsBotServiceWithVerifiedClient
-from users.response import success_response
+from users.response import error_response, success_response
 
 from . import anketa
 from .decision_context import (
@@ -245,16 +246,21 @@ class GoalSelectView(APIView):
     def _start_anketa(client) -> dict:
         """Начать новый проход. Уже открытый переиспользуется.
 
-        Переиспользование, а не второй ряд: ``GoalAnketaRun`` держит
-        partial-UniqueConstraint «один открытый проход на клиента», и
-        двойное нажатие кнопки не должно превращаться в 500.
+        ``get_or_create``, а не проверка-и-создание: ``GoalAnketaRun``
+        держит partial-UniqueConstraint «один открытый проход на
+        клиента», и два одновременных запроса (бот и мини-апп — два
+        независимых вызывающих на одном клиенте) прошли бы проверку оба,
+        а INSERT второго упал бы в 500. ``get_or_create`` ловит
+        IntegrityError и перечитывает.
         """
-        run = open_anketa_run(client)
-        if run is None:
-            run = GoalAnketaRun.objects.create(client=client)
+        run, created = GoalAnketaRun.objects.get_or_create(
+            client=client, completed_at=None
+        )
+        if created:
             logger.info("goals.anketa_started user_id=%s run_id=%s", client.id, run.id)
         return build_decision_context(client)
 
+    @transaction.atomic
     def _answer_anketa(self, client, *, answer: dict, source_channel: str) -> Response:
         """Записать ответ на шаг; последний шаг формирует цель.
 
@@ -262,27 +268,42 @@ class GoalSelectView(APIView):
         только сверяется с ним. Поэтому пропустить вопрос, ответить не по
         порядку или переписать уже закрытый проход из клиента нельзя:
         последовательность остаётся серверной (условие C-1).
+
+        # Отклонённый ответ не создаёт прохода
+
+        Порядок здесь не косметический. Раньше строка прохода писалась
+        ПЕРВОЙ, до сверки эха, — и каждый 409 (протухший документ на
+        экране, повтор после таймаута) оставлял человеку открытый проход
+        навсегда. Дальше ``build_decision_context`` видел незакрытый
+        проход и на КАЖДОМ запросе возвращал вопрос анкеты: человек с
+        целью получал анкету при каждом открытии приложения. То есть
+        ровно то, что решение владельца запрещает.
+
+        Теперь проход создаётся последним из проверок, и ни один путь
+        отказа до него не доходит. ``@transaction.atomic`` закрывает
+        второй край того же: создание цели, запись ответа и закрытие
+        прохода либо происходят вместе, либо не происходят вовсе —
+        иначе цель существовала бы при открытом проходе, и человека
+        снова тянуло бы в вопросы.
         """
         run = open_anketa_run(client)
-        if run is None:
-            run = GoalAnketaRun.objects.create(client=client)
 
+        # Сверки — ДО любой записи.
         expected = next_anketa_step(run)
         if answer["step"] != expected.key:
-            return Response(
-                {
-                    "error": {
-                        "code": "anketa_step_mismatch",
-                        "message": "Answer does not match the expected step.",
-                        "details": {"expected_step": expected.key},
-                    }
-                },
-                status=409,
+            return error_response(
+                ErrorCode.ANKETA_STEP_MISMATCH,
+                "Answer does not match the expected step.",
+                details={"expected_step": expected.key},
+                status_code=409,
             )
 
         option_key = answer.get("option_key")
         text = (answer.get("text") or "").strip() or None
-        if option_key and expected.options:
+        if option_key:
+            # Без `and expected.options`: на салоне без активных
+            # GoalOption список финального шага пуст, и прежний вид
+            # проверки пропускал ЛЮБОЙ слаг прямо в ClientGoal.goal_key.
             allowed = {key for key, _ in expected.options}
             if option_key not in allowed:
                 raise serializers.ValidationError(
@@ -292,6 +313,10 @@ class GoalSelectView(APIView):
             raise serializers.ValidationError(
                 {"answer": {"text": "This step does not accept free text."}}
             )
+
+        # Проверки пройдены — только теперь можно писать.
+        if run is None:
+            run, _ = GoalAnketaRun.objects.get_or_create(client=client, completed_at=None)
 
         if expected.key != anketa.FINAL_STEP_KEY:
             GoalAnketaAnswer.objects.update_or_create(
