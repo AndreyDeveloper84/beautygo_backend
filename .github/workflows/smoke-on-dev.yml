@@ -3,19 +3,25 @@ name: Smoke tests on dev VPS
 # One-shot remote-runner: SSHes into the dev box and runs the Phase 3
 # smoke suite against the deployed `web` container.
 #
-# Why we don't `docker compose build` here:
-# - The Dockerfile runs `pip install -r requirements.txt`, which clones
-#   the private `ayla-ai-core` dependency from GitHub. The CI runner
-#   has GH_DEPLOY_TOKEN configured for this; the VPS docker build
-#   context does NOT have access to it, so a `--no-cache` rebuild
-#   on the box fails at the pip install step.
-# - Until docker-build-time git auth is wired up on the VPS, we sync
-#   what we need by `docker cp`-ing the test directory + missing
-#   migrations into the *already-running* container, then running
-#   migrate + pytest. This is surgical: no image rebuild needed.
+# Why we don't build (or install) anything here:
+# - A check must not change what it checks. Anything this workflow writes
+#   into the pilot makes the pilot's state a product of the smoke run,
+#   and hides the very drift the run exists to catch.
 #
-# When the auth gap is closed (BUILD_SECRET on VPS or vendored dep),
-# revert to a clean rebuild flow.
+# The private-dep auth gap this header used to describe is CLOSED. The
+# Dockerfile takes `ARG GH_DEPLOY_TOKEN` and rewrites the github.com git
+# URL with it; docker-compose.yml forwards it into `web.build.args`; and
+# ci.yml's "2/4 Build application images" step runs `docker compose build`
+# on the VPS with GH_DEPLOY_TOKEN present in that box's .env. The deployed
+# image therefore already carries `ayla-ai-core` at the requirements.txt
+# pin, and already carries git (Dockerfile installs it explicitly).
+#
+# STILL OUTSTANDING (DRF-1444 follow-up, deliberately not changed here):
+# the `git reset --hard origin/dev` + `docker cp` sync block and the
+# `migrate --noinput` / `seed_beverages` steps below are writes into the
+# pilot too. They rest on the same "the image lags the host repo"
+# assumption that no longer holds, but removing them changes what the
+# suite covers, so it needs its own decision.
 
 on:
   workflow_dispatch:
@@ -36,13 +42,6 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     environment: dev
-    env:
-      # GH_DEPLOY_TOKEN read access on the AndreyDeveloper84/ayla-ai-core
-      # private repo. Forwarded via `envs:` into the SSH action's shell so
-      # the inline `pip install` can clone the dep into the running web
-      # container. ci.yml uses the same secret for its own pip install at
-      # runner boot time.
-      GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
     steps:
       - name: Run smoke suite on dev VPS
         uses: appleboy/ssh-action@v1
@@ -53,7 +52,7 @@ jobs:
           port: ${{ secrets.VPS_PORT }}
           timeout: 300s
           command_timeout: 15m
-          envs: PYTEST_ARGS,GITHUB_RUN_ID,GH_DEPLOY_TOKEN
+          envs: PYTEST_ARGS,GITHUB_RUN_ID
           script: |
             set -o pipefail
             cd /home/taximeter/beautygo/dev
@@ -122,30 +121,39 @@ jobs:
             docker compose cp ./search/.        web:/app/search
             echo
 
-            echo "=== ensure ayla-ai-core is installed in running container ==="
-            # The image on this VPS pre-dates DRF-241 Slice A (PR #57), which
-            # added `ayla-ai-core` to requirements.txt. Rebuilding the image
-            # requires GH_DEPLOY_TOKEN inside the docker build context — not
-            # plumbed yet. Until that gap is closed, install the dep at run
-            # time into the already-running web container. Idempotent: if the
-            # pin matches, pip is a no-op. If it's missing or behind, pip
-            # upgrades it without touching the image. Pinned to v0.6.0 (the
-            # tool_dispatcher hook landed in PR #5 there).
-            if [ -z "$GH_DEPLOY_TOKEN" ]; then
-              echo "GH_DEPLOY_TOKEN missing — repo is private, pip install will fail"
-              echo "(check repo Settings → Environments → dev → secrets)"
+            echo "=== verify ayla-ai-core matches the requirements.txt pin ==="
+            # DRF-1444. This step used to run, inside the live `web`
+            # container:
+            #     pip install --upgrade "ayla-ai-core @ git+...@v0.6.0"
+            # That is a write into the pilot, not a check, and it was
+            # actively harmful: requirements.txt has pinned v0.9.0
+            # (f773e7d) since 2026-07-19, so every nightly run rolled the
+            # library back 11 commits / 6 releases. Observed on the pilot
+            # on 2026-09-03: `web` had 0.6.0 while celery_worker and
+            # celery_beat — same image, never touched by this workflow —
+            # had 0.9.0. The nightly was the sole cause of that split.
+            #
+            # The comment it hid behind ("image pre-dates DRF-241 Slice A",
+            # "build-time git auth not plumbed yet") is stale; see the
+            # workflow header. The `apt-get install git` that preceded it is
+            # gone for the same reason — the Dockerfile installs git.
+            #
+            # What replaces it is the check that would have caught the
+            # drift: compare the commit pip actually installed (PEP 610
+            # direct_url.json) against the SHA pinned in the host checkout,
+            # which the `git reset --hard origin/dev` above just refreshed.
+            PINNED_REF="$(grep -m1 '^ayla-ai-core @ git+' requirements.txt | sed 's/.*[.]git@//; s/[[:space:]#].*//')"
+            if [ -z "$PINNED_REF" ]; then
+              echo "::error::could not read the ayla-ai-core pin from requirements.txt"
               exit 1
             fi
-            # The python:3.12-slim base image strips git to keep the
-            # production image lean. pip install with a git+https URL
-            # needs `git version` to work, so install git first.
-            # Idempotent — apt-get is a no-op once installed.
-            docker compose exec -T web bash -c "command -v git >/dev/null || (apt-get update -qq && apt-get install -y --no-install-recommends git)"
-            docker compose exec -T -e GH_DEPLOY_TOKEN="$GH_DEPLOY_TOKEN" web \
-              pip install --quiet --upgrade \
-              "ayla-ai-core @ git+https://${GH_DEPLOY_TOKEN}@github.com/AndreyDeveloper84/ayla-ai-core.git@v0.6.0"
-            docker compose exec -T web python -c \
-              "import ayla_ai_core; print('ayla_ai_core', ayla_ai_core.__version__)"
+            echo "requirements.txt pins: $PINNED_REF"
+            if ! docker compose exec -T web python -c "import json,sys,importlib.metadata as md; d=md.distribution('ayla-ai-core'); i=json.loads(d.read_text('direct_url.json') or '{}').get('vcs_info',{}); g=i.get('commit_id',''); r=i.get('requested_revision',''); print('container has: %s  commit=%s  requested=%s' % (d.version, g or '?', r or '?')); sys.exit(0 if '$PINNED_REF' in (g, r) else 1)"; then
+              echo "::error::ayla-ai-core in the running web container does not match requirements.txt."
+              echo "The pilot image is stale, or something mutated the container after deploy."
+              echo "Fix by redeploying (ci.yml) -- do NOT pip install into the running container."
+              exit 1
+            fi
             echo
 
             echo "=== container view of smoke dir ==="
