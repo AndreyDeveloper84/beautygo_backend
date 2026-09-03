@@ -745,25 +745,12 @@ class TestBotPromptRendererPin:
         failure ``sources=`` was added to prevent.
 
         The rule is now closed on the quote side: only a value in
-        ``STATED_SOURCES`` counts as something the person said. So this test
-        does not depend on the library happening to know the word in the
-        fixture, and it is the test that would have caught the defect had it
-        been written first.
+        ``STATED_SOURCES`` counts as something the person said, so an origin
+        the library has never heard of is treated as derived rather than as
+        speech. This test imports nothing that ee6425a lacks — it fails there
+        on the rendering itself, which is the claim being made.
         """
-        from ayla_ai_core import (
-            DERIVED_SOURCES,
-            INFERRED_MARK,
-            STATED_SOURCES,
-            build_memory_block,
-        )
-
-        # Every value this backend can write, checked against the library's
-        # own vocabulary — a future divergence fails here rather than in a
-        # prompt. ``explicit`` is this repo's name for «the person said it».
-        assert "explicit" in STATED_SOURCES
-        for value in ("inferred", "behavioral", "conversational",
-                      "transactional", "erased"):
-            assert value in DERIVED_SOURCES, value
+        from ayla_ai_core import INFERRED_MARK, build_memory_block
 
         # ``preferred_time_slots`` guessed from booking times is the realistic
         # ``behavioral`` case, and it ranks high enough to survive the top-8 cut.
@@ -783,3 +770,37 @@ class TestBotPromptRendererPin:
         assert "\n- Обычно выбирает время" not in block, block
         # ``explicit`` is not collateral damage: it still reads as a quote.
         assert "\n- Ищет рядом с домом (Сокол)" in block, block
+
+    def test_the_two_repos_still_agree_on_the_provenance_vocabulary(self):
+        """The drift gate for next time. DRF-1443 happened because the word
+        list is maintained in two repos and nothing compared them: the library
+        knew ``inferred``, this backend was already writing four other
+        non-speech values, and the disagreement was only visible in a prompt.
+
+        So compare them here, from each side's own constants rather than from
+        a list copied into this test — a value added to ``_SOURCE_CHOICES``
+        without a matching entry in the library fails here instead.
+        """
+        from ayla_ai_core import DERIVED_SOURCES, STATED_SOURCES
+
+        from users.internal_personal_context_api import _SOURCE_CHOICES
+        from users.personal_context_erasure import ERASED
+
+        # Every origin this backend can put in `data_sources`: what the bot may
+        # PATCH, plus what the nightly inference and the erase verb write.
+        # ``"inferred"`` is a literal in users/personal_context_inference.py
+        # (`_stamp_inferred`), which is why it is named rather than imported.
+        backend_writes = set(_SOURCE_CHOICES) | {ERASED, "inferred"}
+
+        unclassified = backend_writes - STATED_SOURCES - DERIVED_SOURCES
+        assert not unclassified, (
+            f"the library has no verdict for {sorted(unclassified)} — "
+            "it would fall through to «derived», which is the safe side, "
+            "but the vocabularies have drifted again"
+        )
+
+        # And the halves must not disagree about which side a value is on.
+        # ``explicit`` is this repo's name for «the person said it»; the other
+        # five are not speech and must never render as a quote.
+        assert "explicit" in STATED_SOURCES
+        assert backend_writes - {"explicit"} <= DERIVED_SOURCES
