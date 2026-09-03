@@ -105,6 +105,24 @@ REST_FRAMEWORK = {
         # Scoped: service-to-service /nutrition/internal/* — looser than
         # client-app rate; bot fans out across many BotUsers.
         'food_scan_internal': '60/min',
+        # Scoped: GET /api/v1/internal/specialists/{id}/slots/ (DRF-1446).
+        # Derived, not rounded. The endpoint answers one date per call,
+        # and the bot draws a schedule screen over a 14-day horizon
+        # (AVAILABLE_DATES_WINDOW_DAYS=14), so ONE screen = 14 requests —
+        # measured on the pilot 03.09 07:56:16-07:56:18 and again at
+        # 08:28:10, dates 09-03…09-16. A user comparing a second service
+        # pays 14 more: 28 in 32s (07:56:16 → 07:56:48).
+        # Three things can fan out at once — the bot consumer (a single
+        # sequential loop) and two uvicorn workers serving the Mini App —
+        # and every one of them reaches us from the same source IP, so
+        # they share one throttle key. 3 sources x ~4 screens/min x 14 =
+        # ~168/min; 240/min is the next step up with headroom.
+        # This is a ceiling on a fan-out, not a security boundary: the
+        # endpoint is already behind the internal Bearer token.
+        # A range query (date_from/date_to, one request per screen) would
+        # cut the 14 to 1 and let this drop to the neighbours' 60/min —
+        # scoped out of DRF-1446, owner decides.
+        'slots_internal': '240/min',
         'water': '60/min',           # Scoped: water tracker tap-buttons; user can't tap faster than this
         # Scoped: POST /analytics/event/. Mobile may batch-emit on session
         # foreground/background; higher than `user` so analytics doesn't
