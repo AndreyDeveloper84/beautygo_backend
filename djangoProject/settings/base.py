@@ -119,8 +119,9 @@ REST_FRAMEWORK = {
         # ~168/min; 240/min is the next step up with headroom.
         # This is a ceiling on a fan-out, not a security boundary: the
         # endpoint is already behind the internal Bearer token.
-        # DRF-1447 (range query, one request per screen) would cut the
-        # 14 to 1 and let this drop to the neighbours' 60/min.
+        # A range query (date_from/date_to, one request per screen) would
+        # cut the 14 to 1 and let this drop to the neighbours' 60/min —
+        # scoped out of DRF-1446, owner decides.
         'slots_internal': '240/min',
         'water': '60/min',           # Scoped: water tracker tap-buttons; user can't tap faster than this
         # Scoped: POST /analytics/event/. Mobile may batch-emit on session
