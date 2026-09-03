@@ -138,7 +138,7 @@ def next_anketa_step(run: GoalAnketaRun | None) -> anketa.AnketaStep:
     return anketa.next_step(answered)
 
 
-def _goal_is_resolved(goal: ClientGoal) -> bool:
+def _goal_is_resolved(goal: ClientGoal, *, service_match: bool = True) -> bool:
     """Считается ли цель готовой — то есть уточнять больше нечего.
 
     Ключ курируемой подсказки готов всегда. Свободный текст готов, если
@@ -146,9 +146,15 @@ def _goal_is_resolved(goal: ClientGoal) -> bool:
     (прежняя семантика ``goals.resolution``) или имя услуги/категории из
     каталога (DRF-1451).
 
-    Ради этой функции всё и затевалось: без неё человек, написавший
-    «хочу маникюр», получал ``goal_clarification`` — то есть падал
-    обратно в вопросы ровно там, где владелец велел вести к подбору.
+    Ради второго всё и затевалось: без него человек, написавший «хочу
+    маникюр», получал ``goal_clarification`` — то есть падал обратно в
+    вопросы ровно там, где владелец велел вести к подбору.
+
+    ``service_match=False`` выключает именно эту, новую половину.
+    Приходит из ``GOAL_ANKETA_ENABLED``: рубильник отката обязан
+    откатывать ВСЁ, что приехало с DRF-1451, включая сканирование
+    каталога, — иначе выключить его из-за нагрузки или плохого
+    совпадения было бы нечем.
     """
     if goal.goal_key:
         return True
@@ -163,6 +169,8 @@ def _goal_is_resolved(goal: ClientGoal) -> bool:
     )
     if exact_label:
         return True
+    if not service_match:
+        return False
     return match_named_service(text) is not None
 
 
@@ -200,7 +208,7 @@ def build_decision_context(
         missing.append(anketa.as_missing_item(next_anketa_step(run)))
     elif active_goal is None:
         missing.append({"kind": MISSING_GOAL, "prompt": PROMPT_GOAL_MISSING})
-    elif not _goal_is_resolved(active_goal):
+    elif not _goal_is_resolved(active_goal, service_match=anketa_on):
         # Свободный текст, в котором ничего не названо: уверенность
         # низкая — уточняем, а не отображаем насильно в ближайший чип
         # (OD-1). Названная услуга сюда не попадает (DRF-1451).
@@ -219,22 +227,45 @@ def build_decision_context(
             {"id": INTENT_START_ANKETA, "label": INTENT_START_ANKETA_LABEL}
         )
 
-    # Спрашивать больше нечего и цель есть — сервер называет следующий
-    # шаг сам. Формулировка нарочно ничего не обещает про подбор под
-    # цель: GOAL_RESOLUTION_ENABLED на пилоте выключен, и обещание было
-    # бы ложью до его включения.
-    next_step_hint: dict[str, str] | None = None
-    if not missing and active_goal is not None:
-        next_step_hint = {
-            "id": NEXT_BROWSE_CATALOG,
-            "label": NEXT_BROWSE_CATALOG_LABEL,
-        }
+    # Куда человек может уйти отсюда. Называет сервер, а не экран.
+    #
+    # Присутствует ВСЕГДА, а не только когда спрашивать нечего, — и это
+    # исправление, а не украшение. С условием «не осталось вопросов»
+    # получалось следующее: поверхность цели монтируется на корне, где
+    # кнопки «назад» нет (её там и не должно быть) и нижней навигации у
+    # клиента нет тоже. Пока в `missing` был хоть один вопрос, `next`
+    # молчал — и уйти с экрана было нельзя иначе, чем создав цель.
+    # То есть анкета становилась воротами, что запрещено и решением
+    # владельца (условие C-2), и non-goal #1 BOT-001, который владелец
+    # НЕ отменял: «Ayla MUST NOT require a guided onboarding sequence
+    # before useful action».
+    #
+    # Хуже всего это било по тому, ради кого правка и делалась: человек
+    # писал «хочу маникюра» (родительный падеж — имя каталога дословно
+    # не совпадает), получал `goal_clarification`, и `next` замолкал.
+    # Он назвал услугу — и остался заперт на вопросе.
+    #
+    # Формулировка нарочно ничего не обещает про подбор ПОД ЦЕЛЬ:
+    # GOAL_RESOLUTION_ENABLED на пилоте выключен, и обещание было бы
+    # ложью до его включения. «Найти услугу» правдиво в обоих случаях.
+    next_step_hint: dict[str, str] = {
+        "id": NEXT_BROWSE_CATALOG,
+        "label": NEXT_BROWSE_CATALOG_LABEL,
+    }
+
+    # На финальном шаге сам шаг УЖЕ несёт курируемые цели своими
+    # options — из того же queryset, что и suggestions. Оставить обе
+    # секции значило бы нарисовать человеку два одинаковых ряда чипов
+    # с одинаковыми подписями, отправляющих разные тела с одинаковым
+    # исходом. Выход при этом не теряется: чипы шага создают цель ровно
+    # так же, и свободный ввод на финальном шаге открыт.
+    on_final_step = bool(missing) and missing[0].get("step") == anketa.FINAL_STEP_KEY
 
     return {
         "version": 2,
         "known": known,
         "missing": missing,
-        "suggestions": _suggestions(),
+        "suggestions": [] if on_final_step else _suggestions(),
         "intents": intents,
         "next": next_step_hint,
     }

@@ -197,23 +197,83 @@ class TestAnketaFormsAGoal:
             option_key=anketa.ANKETA_STEPS[1].options[0][0],
         )
         assert resp.status_code == 409
-        assert resp.json()["error"]["code"] == "anketa_step_mismatch"
+        assert resp.json()["error"]["code"] == "ANKETA_STEP_MISMATCH"
         assert resp.json()["error"]["details"]["expected_step"] == (
             anketa.ANKETA_STEPS[0].key
         )
         assert GoalAnketaAnswer.objects.count() == 0
+        # Отклонённый ответ не должен оставлять после себя проход.
+        # Раньше оставлял — и человек с целью получал анкету при каждом
+        # открытии приложения, навсегда.
+        assert GoalAnketaRun.objects.count() == 0
 
     def test_unknown_option_is_rejected(self, customer, token):
         api = _api()
         resp = _answer(api, anketa.ANKETA_STEPS[0].key, option_key="not-an-option")
         assert resp.status_code == 400
         assert GoalAnketaAnswer.objects.count() == 0
+        assert GoalAnketaRun.objects.count() == 0
 
     def test_free_text_is_refused_on_a_closed_step(self, customer, token):
         api = _api()
         resp = _answer(api, anketa.ANKETA_STEPS[0].key, text="что-нибудь своё")
         assert resp.status_code == 400
         assert GoalAnketaAnswer.objects.count() == 0
+        assert GoalAnketaRun.objects.count() == 0
+
+    def test_stale_answer_from_a_client_with_a_goal_leaves_no_open_run(
+        self, customer, token, goal_options,
+    ):
+        """Самый дорогой случай отказа, и он же самый обыденный.
+
+        Документ на экране протух (человек выбрал цель из бота, пока
+        мини-апп был открыт; или запрос повторён после таймаута). Ответ
+        приходит на шаг, которого сервер не ждёт.
+
+        Если такой отказ оставит открытый проход, ``build_decision_context``
+        будет возвращать вопрос анкеты на КАЖДОМ запросе — и человек с
+        целью станет получать анкету при каждом открытии приложения.
+        Ровно то, что решение владельца запрещает.
+        """
+        ClientGoal.objects.create(
+            client=customer, goal_key="relax", source_channel="bot",
+        )
+        api = _api()
+        resp = _answer(api, anketa.FINAL_STEP_KEY, option_key="relax")
+        assert resp.status_code == 409
+
+        assert GoalAnketaRun.objects.count() == 0
+        # И следующее открытие приложения вопросов не показывает.
+        assert build_decision_context(customer)["missing"] == []
+
+    def test_step_mismatch_uses_the_registered_error_code(self, customer, token):
+        api = _api()
+        resp = _answer(
+            api, anketa.ANKETA_STEPS[1].key,
+            option_key=anketa.ANKETA_STEPS[1].options[0][0],
+        )
+        assert resp.json()["error"]["code"] == "ANKETA_STEP_MISMATCH"
+
+    def test_option_key_is_checked_even_when_the_step_has_no_options(
+        self, customer, token,
+    ):
+        """Салон без активных GoalOption: список финального шага пуст.
+
+        Прежняя проверка (`if option_key and expected.options`) на пустом
+        списке замолкала, и ЛЮБОЙ слаг уезжал прямо в
+        ``ClientGoal.goal_key`` — оттуда в события воронки и в резолвер,
+        где молча не находил ничего.
+        """
+        api = _api()
+        for step in anketa.ANKETA_STEPS:
+            _answer(api, step.key, option_key=step.options[0][0])
+        assert not GoalOption.objects.filter(is_active=True).exists()
+
+        # Латиницей: SlugField кириллицу отвергает сам, и тест прошёл бы
+        # по чужой причине, ничего не проверив.
+        resp = _answer(api, anketa.FINAL_STEP_KEY, option_key="anything-at-all")
+        assert resp.status_code == 400
+        assert ClientGoal.objects.count() == 0
 
     def test_final_step_accepts_free_text_and_forms_the_goal(
         self, customer, token, goal_options, catalog,
@@ -334,7 +394,74 @@ class TestAnketaIsNotAGate:
             format="json",
         ).json()["data"]
         assert _kinds(doc) == [MISSING_GOAL_CLARIFICATION]
-        assert doc["next"] is None
+
+    def test_a_way_out_exists_on_every_single_state(self, customer, token, catalog):
+        """`next` есть ВСЕГДА — иначе анкета ворота, и не в теории.
+
+        Поверхность цели монтируется на корне. Кнопки «назад» там нет
+        (её там и не должно быть), нижней навигации у клиента нет тоже.
+        Пока `next` молчал при непустом `missing`, уйти с экрана было
+        нельзя иначе, чем создав цель. Это ворота — запрещено и
+        решением владельца (C-2), и non-goal #1 BOT-001, который
+        владелец НЕ отменял.
+
+        Жёстче всего это било по тому, ради кого правка и делалась:
+        «хочу маникюра» — родительный падеж, дословного совпадения с
+        именем каталога нет, приходит `goal_clarification`, и человек,
+        НАЗВАВШИЙ услугу, оказывался заперт на вопросе.
+        """
+        api = _api()
+
+        # 1. Первый вопрос анкеты, цели нет вообще.
+        doc = api.get(CTX_URL).json()["data"]
+        assert doc["missing"], "предусловие: вопрос на экране есть"
+        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
+
+        # 2. Середина анкеты.
+        first = anketa.ANKETA_STEPS[0]
+        doc = _answer(api, first.key, option_key=first.options[0][0]).json()["data"]
+        assert doc["missing"]
+        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
+
+        # 3. Назвал услугу, но в падеже — уточнение.
+        doc = api.post(
+            SELECT_URL,
+            {"goal_text": "хочу маникюра", "source_channel": "miniapp"},
+            format="json",
+        ).json()["data"]
+        assert _kinds(doc) == [MISSING_GOAL_CLARIFICATION]
+        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG, (
+            "человек назвал услугу и остался бы заперт на вопросе"
+        )
+
+        # 4. Состояние ведения.
+        doc = api.post(
+            SELECT_URL,
+            {"intent": "need_guidance", "source_channel": "miniapp"},
+            format="json",
+        ).json()["data"]
+        assert _kinds(doc) == ["goal_guidance"]
+        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
+
+    def test_final_step_does_not_duplicate_its_own_chips_as_suggestions(
+        self, customer, token, goal_options,
+    ):
+        """Финальный шаг сам несёт курируемые цели — второй ряд лишний.
+
+        `suggestions` строятся из того же queryset. Оставить обе секции
+        значило нарисовать два одинаковых ряда чипов с одинаковыми
+        подписями. Выход при этом не теряется: чипы шага создают цель
+        так же, и свободный ввод на финальном шаге открыт.
+        """
+        api = _api()
+        for step in anketa.ANKETA_STEPS:
+            _answer(api, step.key, option_key=step.options[0][0])
+        doc = api.get(CTX_URL).json()["data"]
+
+        assert doc["missing"][0]["step"] == anketa.FINAL_STEP_KEY
+        assert [o["key"] for o in doc["missing"][0]["options"]] == ["relax", "glow"]
+        assert doc["suggestions"] == []
+        assert doc["missing"][0]["allow_free_text"] is True
 
     def test_named_service_matches_a_salon_service_too(
         self, customer, token, catalog,
@@ -368,6 +495,7 @@ class TestOldPathsSurvive:
             ids = [i["id"] for i in doc["intents"]]
             assert {"choose_suggested", "formulate_own", "need_guidance"} <= set(ids)
             assert doc["suggestions"], "чипы обязаны стоять рядом с вопросами"
+            assert doc["next"]["id"] == NEXT_BROWSE_CATALOG, "выход обязан быть всегда"
             step = doc["missing"][0]["step"]
             expected = next(s for s in anketa.ANKETA_STEPS if s.key == step)
             doc = _answer(api, step, option_key=expected.options[0][0]).json()["data"]
