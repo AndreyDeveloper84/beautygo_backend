@@ -484,6 +484,23 @@ GOAL_RESOLUTION_ENABLED = (
     os.environ.get("GOAL_RESOLUTION_ENABLED", "false").lower() == "true"
 )
 
+# DRF-1451 — анкета цели как вход клиента в мини-приложение.
+#
+# Решение владельца 03.09.2026, поправка A-1 к BOT-001 (§24). Клиент без
+# цели получает последовательность вопросов; по её завершении цель
+# сформирована. Прежние три пути (чипы, свободный ввод, «нужна помощь»)
+# остаются в документе всегда — анкета не ворота (§24, C-2).
+#
+# Default OPEN, в отличие от GOAL_RESOLUTION_ENABLED: решение владельца
+# состоит именно в том, что человек встречает анкету, и флаг с
+# умолчанием OFF означал бы, что решение не выложено. Флаг существует
+# как рубильник отката, а не как гейт раскатки: OFF возвращает ровно
+# прежний документ DRF-1190 (одно `missing` kind=goal), и старый путь
+# от этого не ломается.
+GOAL_ANKETA_ENABLED = (
+    os.environ.get("GOAL_ANKETA_ENABLED", "true").lower() == "true"
+)
+
 # SMS.RU Configuration
 SMS_RU_API_ID = os.environ.get("SMS_RU_API_ID", "")
 SMS_ENABLED = os.environ.get("SMS_ENABLED", "false").lower() == "true"

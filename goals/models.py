@@ -90,3 +90,112 @@ class ClientGoal(models.Model):
     def __str__(self) -> str:
         shown = self.goal_key or (self.goal_text or "")[:40]
         return f"ClientGoal<{self.client_id}> {shown} (active={self.is_active})"
+
+
+class GoalAnketaRun(models.Model):
+    """Один проход анкеты цели (DRF-1451).
+
+    Почему проход — отдельная строка, а не поле у клиента: владелец
+    распорядился (DRF-1225, подтверждено условием C-4 поправки A-1), что
+    анкету можно проходить **сколько угодно раз**. Проход — это факт
+    («человек начал отвечать тогда-то и закончил вот такой целью»), и
+    таких фактов у клиента много. Незакрытый проход ровно один — его и
+    ищет ``build_decision_context``.
+
+    ``goal`` — цель, которой проход завершился. NULL у брошенного:
+    человек в середине анкеты назвал услугу свободным вводом и ушёл к
+    подбору. Это не ошибка, а разрешённый выход (C-2, «анкета не
+    ворота»), поэтому проход закрывается без цели, а не висит открытым и
+    не затягивает человека обратно в вопросы.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    client = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="goal_anketa_runs",
+    )
+    started_at = models.DateTimeField(default=timezone.now)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    goal = models.ForeignKey(
+        "goals.ClientGoal",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="anketa_runs",
+        help_text="Цель, которой завершился проход; NULL — проход брошен",
+    )
+
+    class Meta:
+        ordering = ["-started_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["client"],
+                condition=models.Q(completed_at__isnull=True),
+                name="goalanketarun_one_open_per_client",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["client", "completed_at"],
+                name="goalanketarun_client_open_idx",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        state = "open" if self.completed_at is None else "closed"
+        return f"GoalAnketaRun<{self.client_id}> {state}"
+
+
+class GoalAnketaAnswer(models.Model):
+    """Ответ на один шаг анкеты — durable-факт.
+
+    Хранится дословно и не нормализуется по той же причине, что и
+    ``ClientGoal.goal_text``: это будущий корпус формулировок (OD-2).
+    Проекция (какой вопрос задавать следующим) строится поверх этих
+    строк на каждый запрос и в БД не лежит.
+
+    Собирается **только цель** — условие C-3 поправки A-1: ни контактов,
+    ни телефона (DRF-1039), ни профильных полей здесь нет и быть не
+    может, потому что список шагов закрыт в ``goals/anketa.py``.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    run = models.ForeignKey(
+        GoalAnketaRun,
+        on_delete=models.CASCADE,
+        related_name="answers",
+    )
+    step_key = models.SlugField(max_length=32)
+    option_key = models.SlugField(
+        max_length=64,
+        null=True,
+        blank=True,
+        help_text="Ключ выбранного варианта; NULL при свободном вводе",
+    )
+    answer_text = models.TextField(
+        null=True,
+        blank=True,
+        help_text="Дословный свободный ввод; не нормализуется",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(option_key__isnull=False)
+                    | models.Q(answer_text__isnull=False)
+                ),
+                name="goalanketaanswer_option_or_text_present",
+            ),
+            models.UniqueConstraint(
+                fields=["run", "step_key"],
+                name="goalanketaanswer_one_per_step",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        shown = self.option_key or (self.answer_text or "")[:40]
+        return f"GoalAnketaAnswer<{self.run_id}> {self.step_key}={shown}"
