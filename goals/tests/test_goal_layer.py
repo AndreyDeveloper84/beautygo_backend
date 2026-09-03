@@ -143,7 +143,16 @@ class TestAuthBoundary:
 
 @pytest.mark.django_db
 class TestDecisionContext:
-    def test_no_goal_missing_goal(self, customer):
+    def test_no_goal_missing_goal(self, customer, settings):
+        """Прежнее поведение DRF-1190 — под выключенной анкетой.
+
+        DRF-1451 сделал анкету путём по умолчанию, и с флагом ON клиент
+        без цели получает первый её шаг (это проверяется в
+        ``test_goal_anketa.py``). Старый документ не удалён и не сломан:
+        ``GOAL_ANKETA_ENABLED=False`` возвращает ровно его — этот тест и
+        есть страховка отката.
+        """
+        settings.GOAL_ANKETA_ENABLED = False
         doc = build_decision_context(customer)
         assert doc["known"]["goal"] is None
         assert [m["kind"] for m in doc["missing"]] == [MISSING_GOAL]
@@ -179,11 +188,22 @@ class TestDecisionContext:
             {"key": "relax", "label": "Расслабиться и восстановиться"},
         ]
 
-    def test_document_shape_screen_computes_nothing(self, customer, goal_option):
+    def test_document_shape_screen_computes_nothing(self, customer, goal_option, settings):
         """Инвариант Ответа 3: документ содержит только отображаемое —
-        ни флагов, ни сырых полей, из которых выводится другое содержимое."""
+        ни флагов, ни сырых полей, из которых выводится другое содержимое.
+
+        DRF-1451 добавил в документ ключ ``next`` (куда вести, когда
+        спрашивать нечего) и поля шага анкеты. Инвариант от этого не
+        ослаб, а усилился: ``next`` — это как раз решение, УНЕСЁННОЕ с
+        экрана на сервер. Форма шага анкеты проверяется отдельно в
+        ``test_goal_anketa.py::TestDocumentShape``; здесь — прежняя
+        форма под выключенной анкетой, дословно как в DRF-1190.
+        """
+        settings.GOAL_ANKETA_ENABLED = False
         doc = build_decision_context(customer)
-        assert set(doc) == {"version", "known", "missing", "suggestions", "intents"}
+        assert set(doc) == {
+            "version", "known", "missing", "suggestions", "intents", "next",
+        }
         for suggestion in doc["suggestions"]:
             assert set(suggestion) == {"key", "label"}
         for item in doc["missing"]:
