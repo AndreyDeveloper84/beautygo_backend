@@ -108,8 +108,8 @@ yookassa==3.10.0
 # Local dev: `pip install -e ../../ayla-ai-core` keeps a faster iteration loop;
 # the editable install satisfies the same requirement.
 #
-# DRF-1441 — realigned f773e7d → ee6425a, the SHA bot-platform already
-# pins. Two library commits sit in that gap, both in memory.py:
+# DRF-1441 — realigned f773e7d → d72a5de (main tip). Three library
+# commits sit in that gap, all three in memory.py:
 #   af620ba — `sources=` kwarg: a fact the system inferred renders in its
 #     own section instead of passing for something the client said. This is
 #     the consumer side of the `data_sources` map this backend already
@@ -120,7 +120,17 @@ yookassa==3.10.0
 #     profile. The backend serves exactly such profiles to the bot; see
 #     users/tests/test_memory_erasure_matrix.py::
 #     TestBotPromptRendererPin for the guard that pins the fixed order.
-# Neither commit touches anything this repo imports in production
+#   d72a5de — DRF-1443. af620ba treated ONLY the exact string "inferred" as
+#     derived, but the provenance vocabulary is written by three repos and
+#     had already diverged: this backend stamps "explicit" for stated, its
+#     internal PATCH accepts behavioral / conversational / transactional,
+#     the nightly pass writes "inferred", and erasure writes "erased". So a
+#     field this backend marked "behavioral" reached the prompt looking like
+#     the client's own words. The rule is now closed on the quote side —
+#     STATED_SOURCES ("stated" | "explicit") is a quote, anything else
+#     including a value the library does not know is derived. The backend's
+#     data_sources map can be passed straight through, unnormalised.
+# None of the three commits touches anything this repo imports in production
 # (AIConcierge, render_system_prompt, SpecialistContext, the tool layer),
 # so no call site changed with this bump.
-ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@ee6425ac90f6f4e2e0d899c22ebe981ae3b623e1
+ayla-ai-core @ git+https://github.com/AndreyDeveloper84/ayla-ai-core.git@d72a5de451f985d118d9449d2b17ce51bf0a6e25

@@ -662,9 +662,9 @@ class TestBackendPromptConsumer:
 
 
 class TestBotPromptRendererPin:
-    """DRF-1441. This repo pins ``ayla-ai-core`` by SHA, and the pin sat two
-    commits behind the SHA bot-platform runs, so the same client could be
-    described differently on the two channels.
+    """DRF-1441. This repo pins ``ayla-ai-core`` by SHA, and the pin sat
+    behind the SHA bot-platform runs, so the same client could be described
+    differently on the two channels.
 
     Nothing in this repo's production path calls ``build_memory_block`` — the
     backend chat renders its own hint (``ai.personal_context_hint``). What
@@ -673,8 +673,8 @@ class TestBotPromptRendererPin:
     provable from here, and only from here — feed the renderer the exact
     payload this backend serves, assert on what comes out.
 
-    Both tests below FAIL on the previous pin (f773e7d) and pass on the
-    current one (ee6425a). They are why this bump is not a no-op.
+    Each test below fails on the pin it names and passes on the current
+    one (d72a5de). They are why this bump is not a no-op.
     """
 
     def test_a_full_profile_keeps_the_budget_the_backend_serves(self, user, ctx):
@@ -731,3 +731,55 @@ class TestBotPromptRendererPin:
         # The line moved into the derived section — it no longer sits in the
         # plain list, where it would read as the client's own words.
         assert "\n- Избегает: понедельник" not in block, block
+
+    def test_a_behavioral_fact_is_not_offered_as_the_clients_own_words(
+        self, user, ctx,
+    ):
+        """d72a5de (DRF-1443). The test above passes on ee6425a too — but only
+        because its fixture happens to say ``inferred``, the one word that pin
+        compared against. This repo can stamp six values and four of them are
+        not that word: the internal PATCH accepts ``behavioral`` /
+        ``conversational`` / ``transactional`` (``_SOURCE_CHOICES``), and
+        erasure writes ``erased``. On ee6425a every one of those rendered as a
+        plain fact — i.e. as the client's own words — which is the exact
+        failure ``sources=`` was added to prevent.
+
+        The rule is now closed on the quote side: only a value in
+        ``STATED_SOURCES`` counts as something the person said. So this test
+        does not depend on the library happening to know the word in the
+        fixture, and it is the test that would have caught the defect had it
+        been written first.
+        """
+        from ayla_ai_core import (
+            DERIVED_SOURCES,
+            INFERRED_MARK,
+            STATED_SOURCES,
+            build_memory_block,
+        )
+
+        # Every value this backend can write, checked against the library's
+        # own vocabulary — a future divergence fails here rather than in a
+        # prompt. ``explicit`` is this repo's name for «the person said it».
+        assert "explicit" in STATED_SOURCES
+        for value in ("inferred", "behavioral", "conversational",
+                      "transactional", "erased"):
+            assert value in DERIVED_SOURCES, value
+
+        # ``preferred_time_slots`` guessed from booking times is the realistic
+        # ``behavioral`` case, and it ranks high enough to survive the top-8 cut.
+        ctx.data_sources = {"preferred_time_slots": "behavioral"}
+        ctx.save(update_fields=["data_sources"])
+
+        payload = _internal().get(_url(user.id)).data["data"]
+        assert payload["data_sources"]["preferred_time_slots"] == "behavioral"
+        # The rest of the map comes back ``explicit`` and must stay quotes.
+        assert payload["data_sources"]["home_district"] == "explicit"
+
+        block = build_memory_block(
+            payload["context"], sources=payload["data_sources"],
+        )
+
+        assert f"{INFERRED_MARK} Обычно выбирает время" in block, block
+        assert "\n- Обычно выбирает время" not in block, block
+        # ``explicit`` is not collateral damage: it still reads as a quote.
+        assert "\n- Ищет рядом с домом (Сокол)" in block, block
