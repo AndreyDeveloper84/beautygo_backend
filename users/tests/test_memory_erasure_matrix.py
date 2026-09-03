@@ -654,3 +654,153 @@ class TestBackendPromptConsumer:
         assert "чувствительность / аллергии: ретинол" in hint
         assert "бюджет" in hint
         assert "диета" not in hint
+
+
+# ---------------------------------------------------------------------------
+# The pin itself — what the bot's renderer makes of what this backend serves
+# ---------------------------------------------------------------------------
+
+
+class TestBotPromptRendererPin:
+    """DRF-1441. This repo pins ``ayla-ai-core`` by SHA, and the pin sat
+    behind the SHA bot-platform runs, so the same client could be described
+    differently on the two channels.
+
+    Nothing in this repo's production path calls ``build_memory_block`` — the
+    backend chat renders its own hint (``ai.personal_context_hint``). What
+    this repo owns is the renderer's *input*: the internal personal-context
+    endpoint is where the bot's memory block comes from. So the pin is
+    provable from here, and only from here — feed the renderer the exact
+    payload this backend serves, assert on what comes out.
+
+    Each test below fails on the pin it names and passes on the current
+    one (d72a5de). They are why this bump is not a no-op.
+    """
+
+    def test_a_full_profile_keeps_the_budget_the_backend_serves(self, user, ctx):
+        """ee6425a. ``price_range_min`` / ``price_range_max`` had no declared
+        priority in the renderer's field order — the row that *was* declared,
+        ``price_range``, is not a key of this payload at all. Both keys
+        therefore sorted to the tail and the budget line fell off the top-8
+        cut on a full profile, while ``min_rating_preference`` — a search
+        filter, not a memory about the person — made it in.
+
+        ``FILLED`` is exactly such a profile: eleven renderable keys, ten
+        lines, eight slots. On f773e7d this block has no budget in it.
+        """
+        from ayla_ai_core import build_memory_block
+
+        payload = _internal().get(_url(user.id)).data["data"]
+        block = build_memory_block(payload["context"])
+
+        assert "Бюджет" in block, block
+        # Not merely present — present at its declared rank, ahead of the
+        # districts. Presence alone would also pass if the cut merely grew.
+        assert block.index("Бюджет") < block.index("Ищет рядом с работой"), block
+
+    def test_an_inferred_fact_is_not_offered_as_the_clients_own_words(
+        self, user, ctx,
+    ):
+        """af620ba, and the half this repo already built: the internal GET
+        ships ``data_sources`` beside ``context`` precisely so the renderer
+        can tell a nightly inference from something the person typed. Until
+        this pin the renderer had nowhere to put it — ``sources=`` did not
+        exist, and the call below raised TypeError on f773e7d.
+
+        ``busy_days`` is the real case: ``personal_context_inference`` stamps
+        it from booking history, and it used to arrive looking user-stated.
+        """
+        from ayla_ai_core import (
+            INFERRED_MARK,
+            MEMORY_INFERRED_HEADER,
+            build_memory_block,
+        )
+
+        ctx.data_sources = {"busy_days": "inferred"}
+        ctx.save(update_fields=["data_sources"])
+
+        payload = _internal().get(_url(user.id)).data["data"]
+        assert payload["data_sources"]["busy_days"] == "inferred"
+
+        block = build_memory_block(
+            payload["context"], sources=payload["data_sources"],
+        )
+
+        assert MEMORY_INFERRED_HEADER in block, block
+        assert f"{INFERRED_MARK} Избегает: понедельник" in block, block
+        # The line moved into the derived section — it no longer sits in the
+        # plain list, where it would read as the client's own words.
+        assert "\n- Избегает: понедельник" not in block, block
+
+    def test_a_behavioral_fact_is_not_offered_as_the_clients_own_words(
+        self, user, ctx,
+    ):
+        """d72a5de (DRF-1443). The test above passes on ee6425a too — but only
+        because its fixture happens to say ``inferred``, the one word that pin
+        compared against. This repo can stamp six values and four of them are
+        not that word: the internal PATCH accepts ``behavioral`` /
+        ``conversational`` / ``transactional`` (``_SOURCE_CHOICES``), and
+        erasure writes ``erased``. On ee6425a every one of those rendered as a
+        plain fact — i.e. as the client's own words — which is the exact
+        failure ``sources=`` was added to prevent.
+
+        The rule is now closed on the quote side: only a value in
+        ``STATED_SOURCES`` counts as something the person said, so an origin
+        the library has never heard of is treated as derived rather than as
+        speech. This test imports nothing that ee6425a lacks — it fails there
+        on the rendering itself, which is the claim being made.
+        """
+        from ayla_ai_core import INFERRED_MARK, build_memory_block
+
+        # ``preferred_time_slots`` guessed from booking times is the realistic
+        # ``behavioral`` case, and it ranks high enough to survive the top-8 cut.
+        ctx.data_sources = {"preferred_time_slots": "behavioral"}
+        ctx.save(update_fields=["data_sources"])
+
+        payload = _internal().get(_url(user.id)).data["data"]
+        assert payload["data_sources"]["preferred_time_slots"] == "behavioral"
+        # The rest of the map comes back ``explicit`` and must stay quotes.
+        assert payload["data_sources"]["home_district"] == "explicit"
+
+        block = build_memory_block(
+            payload["context"], sources=payload["data_sources"],
+        )
+
+        assert f"{INFERRED_MARK} Обычно выбирает время" in block, block
+        assert "\n- Обычно выбирает время" not in block, block
+        # ``explicit`` is not collateral damage: it still reads as a quote.
+        assert "\n- Ищет рядом с домом (Сокол)" in block, block
+
+    def test_the_two_repos_still_agree_on_the_provenance_vocabulary(self):
+        """The drift gate for next time. DRF-1443 happened because the word
+        list is maintained in two repos and nothing compared them: the library
+        knew ``inferred``, this backend was already writing four other
+        non-speech values, and the disagreement was only visible in a prompt.
+
+        So compare them here, from each side's own constants rather than from
+        a list copied into this test — a value added to ``_SOURCE_CHOICES``
+        without a matching entry in the library fails here instead.
+        """
+        from ayla_ai_core import DERIVED_SOURCES, STATED_SOURCES
+
+        from users.internal_personal_context_api import _SOURCE_CHOICES
+        from users.personal_context_erasure import ERASED
+
+        # Every origin this backend can put in `data_sources`: what the bot may
+        # PATCH, plus what the nightly inference and the erase verb write.
+        # ``"inferred"`` is a literal in users/personal_context_inference.py
+        # (`_stamp_inferred`), which is why it is named rather than imported.
+        backend_writes = set(_SOURCE_CHOICES) | {ERASED, "inferred"}
+
+        unclassified = backend_writes - STATED_SOURCES - DERIVED_SOURCES
+        assert not unclassified, (
+            f"the library has no verdict for {sorted(unclassified)} — "
+            "it would fall through to «derived», which is the safe side, "
+            "but the vocabularies have drifted again"
+        )
+
+        # And the halves must not disagree about which side a value is on.
+        # ``explicit`` is this repo's name for «the person said it»; the other
+        # five are not speech and must never render as a quote.
+        assert "explicit" in STATED_SOURCES
+        assert backend_writes - {"explicit"} <= DERIVED_SOURCES
