@@ -8,13 +8,16 @@ name: Smoke tests on dev VPS
 #   into the pilot makes the pilot's state a product of the smoke run,
 #   and hides the very drift the run exists to catch.
 #
-# The private-dep auth gap this header used to describe is CLOSED. The
+# The dep-auth gap this header used to describe is CLOSED, twice over.
+# ayla-ai-core is a PUBLIC repo (owner's decision 04.09.2026,
+# docs/OPEN_DECISIONS.md §22), so the pinned SHA clones with no credential
+# at all; and where a token does exist the machinery still uses it — the
 # Dockerfile takes `ARG GH_DEPLOY_TOKEN` and rewrites the github.com git
-# URL with it; docker-compose.yml forwards it into `web.build.args`; and
-# ci.yml's "2/4 Build application images" step runs `docker compose build`
-# on the VPS with GH_DEPLOY_TOKEN present in that box's .env. The deployed
-# image therefore already carries `ayla-ai-core` at the requirements.txt
-# pin, and already carries git (Dockerfile installs it explicitly).
+# URL when it is non-empty, docker-compose.yml forwards it into
+# `web.build.args`, and ci.yml step "2/4 Build application images" runs
+# `docker compose build` on the VPS. The deployed image therefore carries
+# `ayla-ai-core` at the requirements.txt pin either way, and already
+# carries git (Dockerfile installs it explicitly).
 #
 # STILL OUTSTANDING (DRF-1444 follow-up, deliberately not changed here):
 # the `git reset --hard origin/dev` + `docker cp` sync block and the

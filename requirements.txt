@@ -85,7 +85,7 @@ freezegun==1.5.5
 yookassa==3.10.0
 
 # AI orchestration shared package (DRF-236..239 + DRF-241 — tool_dispatcher hook).
-# Repo: https://github.com/AndreyDeveloper84/ayla-ai-core (private)
+# Repo: https://github.com/AndreyDeveloper84/ayla-ai-core (public)
 #
 # Pinned SHA aligned with bot-platform pyproject.toml. Both services
 # share the same SHA so prompt rendering, tool dispatch, history
@@ -102,9 +102,15 @@ yookassa==3.10.0
 #   3. Update BOTH this line AND bot-platform pyproject.toml in coordinated PRs.
 #   4. PR title: `chore(deps): bump ayla-ai-core <prev> → vX.Y.Z (SHA <short>)`.
 #
-# CI auth: this is a private repo. The runner needs read access via either
-#   (a) deploy key on the repo + GIT_SSH_COMMAND with the key, or
-#   (b) a personal access token: https://${GH_TOKEN}@github.com/...
+# CI auth: none needed. The repo is PUBLIC (owner's decision 04.09.2026,
+# docs/OPEN_DECISIONS.md §22) and the pinned SHA clones anonymously —
+# verified that day by an unauthenticated fetch, and by Dependabot PRs
+# #282-284, which installed this line with an empty GH_DEPLOY_TOKEN.
+# If the visibility is ever closed again, the runner needs read access via
+#   (a) a deploy key on the repo + GIT_SSH_COMMAND with the key, or
+#   (b) a token: https://${GH_DEPLOY_TOKEN}@github.com/... — already wired
+#       conditionally in .github/workflows/ci.yml, Dockerfile and
+#       docker-compose.yml, so setting the secret is the only step.
 # Local dev: `pip install -e ../../ayla-ai-core` keeps a faster iteration loop;
 # the editable install satisfies the same requirement.
 #
