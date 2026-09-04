@@ -484,34 +484,40 @@ class TestAnketaIsNotAGate:
     def test_named_service_matches_a_salon_service_too(
         self, customer, token, catalog,
     ):
-        """Услуга салона — тоже названная услуга, если салон известен.
+        """Услуга салона — тоже названная услуга. Салон при этом не нужен.
 
-        DRF-1455: ``SalonService`` — прайс конкретного салона, и читается
-        он только для салона клиента. Здесь салон назван заголовком
-        ``X-Tenant`` — тем же способом, каким его называет всё
-        остальное в этом бэкенде.
+        Прежде (DRF-1455) этот тест звал заголовок ``X-Tenant``, чтобы
+        прайс салона вообще прочитался. Заголовок убран: каталог
+        читается целиком (DRF-1472), и проверка стала утверждать то, что
+        собиралась утверждать с самого начала, — что ``SalonService``
+        участвует в распознавании наравне с ``ServiceCategory``.
         """
         tenant = Tenant.objects.create(slug="penza-anketa", name="Penza")
         SalonService.objects.create(
             tenant=tenant, category=catalog, name="Аппаратный маникюр",
         )
-        api = _api()
-        api.defaults["HTTP_X_TENANT"] = tenant.slug
-        doc = api.post(
+        doc = _api().post(
             SELECT_URL,
             {"goal_text": "хочу аппаратный маникюр", "source_channel": "miniapp"},
             format="json",
         ).json()["data"]
         assert doc["missing"] == []
 
-    def test_salon_service_of_another_salon_is_not_a_named_service(
+    def test_salon_service_of_another_salon_is_a_named_service_too(
         self, customer, token, catalog,
     ):
-        """Обратная половина той же проверки (DRF-1455).
+        """Переписано наизнанку: чужой прайс — тоже прайс (DRF-1472).
 
-        Та же услуга, тот же текст — но клиент действует в другом
-        салоне. Услуга есть только у соседа, и «цель распознана» здесь
-        было бы решением по чужим строкам.
+        Прежняя редакция требовала обратного: клиент, действующий в
+        салоне A, не должен был распознать услугу салона B. Владелец
+        04.09.2026 отменил это правило — цели спрашивает клиентский
+        бот-витрина, салона у него нет, и услуга, которая есть хоть у
+        одного салона, человеку доступна.
+
+        Заголовок ``X-Tenant`` оставлен нарочно, и указывает он на
+        салон, у которого услуги НЕТ: так проверка сторожит не только
+        расширение каталога, но и то, что заголовок на решение больше
+        не влияет.
         """
         other = Tenant.objects.create(slug="penza-anketa-b", name="Penza B")
         mine = Tenant.objects.create(slug="penza-anketa-a", name="Penza A")
@@ -523,6 +529,26 @@ class TestAnketaIsNotAGate:
         doc = api.post(
             SELECT_URL,
             {"goal_text": "хочу аппаратный маникюр", "source_channel": "miniapp"},
+            format="json",
+        ).json()["data"]
+        assert doc["missing"] == []
+
+    def test_name_absent_from_every_salon_is_not_a_named_service(
+        self, customer, token, catalog,
+    ):
+        """Оставшаяся граница на том же пути: имени нет ни у кого.
+
+        Отрицательная половина обязана существовать и здесь, иначе
+        предыдущая проверка неотличима от «распознаём всё подряд».
+        Человек получает уточнение и выход «Найти услугу».
+        """
+        other = Tenant.objects.create(slug="penza-anketa-c", name="Penza C")
+        SalonService.objects.create(
+            tenant=other, category=catalog, name="Аппаратный маникюр",
+        )
+        doc = _api().post(
+            SELECT_URL,
+            {"goal_text": "хочу наращивание ресниц", "source_channel": "miniapp"},
             format="json",
         ).json()["data"]
         assert _kinds(doc) == [MISSING_GOAL_CLARIFICATION]
