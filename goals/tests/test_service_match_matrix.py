@@ -1,4 +1,4 @@
-"""Матрица распознавания названной услуги — DRF-1461 и DRF-1455.
+"""Матрица распознавания названной услуги — DRF-1461 и DRF-1472.
 
 Почему матрица, а не набор отдельных проверок
 ----------------------------------------------
@@ -18,10 +18,17 @@
 Послабление, ломающее вторую половину, хуже, чем отсутствие
 послабления.
 
-Салонная половина (DRF-1455) устроена так же: клиент салона A называет
-услугу своего салона — распознаётся; называет услугу, которая есть
-только у салона B, — НЕ распознаётся и получает уточнение с выходом
-«Найти услугу».
+Вторая половина устроена так же, но граница у неё НЕ салонная
+(DRF-1472, владелец 04.09.2026). Услуга, которая есть хоть у одного
+салона, распознаётся; имя, которого нет ни у одного, — не
+распознаётся и получает уточнение с выходом «Найти услугу».
+
+Салонная граница DRF-1455 отменена, и проверки на неё ниже переписаны,
+а не удалены: они утверждали поведение («клиент салона A не должен
+распознать услугу салона B»), которое владелец отменил, — и их
+утверждение теперь ровно обратное. Удалить их значило бы оставить
+отмену без стражи с обеих сторон, а именно её отсутствие и пропустило
+оба прежних дефекта до слияния.
 
 Все проверки идут через ``build_decision_context`` — то есть через тот
 самый путь, по которому решение принимается в бою, а не через
@@ -214,94 +221,97 @@ class TestPhraseMatrix:
 
 
 # ---------------------------------------------------------------------------
-# DRF-1455 — обе половины салонной проверки
+# DRF-1472 — граница осталась одна, и она не салонная
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-class TestSalonBoundary:
-    """Решение принимается по каталогу СВОЕГО салона."""
+class TestGlobalCatalog:
+    """Решение принимается по каталогу ВСЕХ салонов.
 
-    def test_own_salon_service_is_recognized(
+    Прежняя редакция этого класса (``TestSalonBoundary``, DRF-1455)
+    требовала обратного: клиент салона A обязан был НЕ распознать
+    услугу салона B. Владелец 04.09.2026 отменил это правило,
+    разобравшись, как устроены боты: цели спрашивают только в
+    клиентском боте — он один, общий, и салон у него не задан нарочно,
+    это витрина. Салонный бот обслуживает владельцев салонов и целей не
+    спрашивает, поэтому случая «клиент пришёл через бота салона» не
+    существует.
+
+    Проверки переписаны утверждением наизнанку, а не выброшены: тогда
+    отмена остаётся проверяемой, и вернуть салонную границу молча
+    нельзя.
+    """
+
+    def test_service_of_any_salon_is_recognized(
         self, anketa_off, salon_a, salon_b, client_of_a,
     ):
-        """Положительная половина: услуга своего салона распознаётся."""
+        """Услуга есть ТОЛЬКО у салона B — клиент салона A её называет.
+
+        Это ровно тот случай, который DRF-1455 запрещал. Теперь он
+        обязателен: витрина показывает все салоны, и услуга, которая
+        где-то есть, человеку доступна. Довести его до салона, у
+        которого она есть, — уже дело подбора.
+        """
+        _salon_service(salon_b, "Наращивание ресниц")
+        assert _recognized(client_of_a, "хочу наращивание ресниц")
+
+    def test_category_of_any_salon_is_recognized(
+        self, anketa_off, salon_a, salon_b, client_of_a,
+    ):
+        """То же для категорий: чужой таксономии больше не бывает."""
+        ServiceCategory.objects.create(
+            name="Наращивание ресниц", slug="b-lashes", tenant=salon_b,
+        )
+        assert _recognized(client_of_a, "хочу наращивание ресниц")
+
+    def test_service_of_own_salon_is_recognized(
+        self, anketa_off, salon_a, salon_b, client_of_a,
+    ):
+        """Положительная половина не пострадала от расширения."""
         _salon_service(salon_a, "Маникюр")
         assert _recognized(client_of_a, "хочу маникюр")
-
-    def test_foreign_salon_service_is_not_recognized(
-        self, anketa_off, salon_a, salon_b, client_of_a,
-    ):
-        """Отрицательная половина — та, которой не было.
-
-        Услуга существует ТОЛЬКО у салона B. Клиент салона A называет
-        её и обязан получить уточнение, а не «цель распознана»: в его
-        салоне такой услуги нет, и вести его к подбору по ней значит
-        вести по признаку, которого у него не существует.
-        """
-        _salon_service(salon_b, "Маникюр")
-        assert not _recognized(client_of_a, "хочу маникюр")
-
-    def test_foreign_salon_category_is_not_recognized(
-        self, anketa_off, salon_a, salon_b, client_of_a,
-    ):
-        """То же для категорий: чужая таксономия тоже чужая."""
-        ServiceCategory.objects.create(
-            name="Маникюр", slug="b-manicure", tenant=salon_b,
-        )
-        assert not _recognized(client_of_a, "хочу маникюр")
 
     def test_tenantless_category_stays_shared(
         self, anketa_off, salon_a, salon_b, client_of_a,
     ):
-        """Категория без салона — общая таксономия, а не чужие строки.
+        """Категория без салона читается как читалась.
 
-        ``ServiceCategory.tenant`` допускает NULL (легаси и общая
-        таксономия). Такая строка не принадлежит никакому салону,
-        поэтому решение по ней не является решением «по чужим строкам»,
-        и отбирать её у клиента не за что: иначе пилот, где категории
-        не проставлены салоном, потерял бы распознавание целиком.
+        ``ServiceCategory.tenant`` допускает NULL (общая/легаси
+        таксономия). На пилоте именно такие строки — «Маникюр», «Уход»,
+        «Стрижки» — покрывают почти весь замер DRF-1461, и проверка
+        стоит здесь, чтобы расширение каталога не оказалось заодно и
+        подменой источника.
         """
         ServiceCategory.objects.create(name="Маникюр", slug="g-manicure", tenant=None)
         assert _recognized(client_of_a, "хочу маникюр")
 
-    def test_multi_provider_client_sees_only_shared_names(
+    def test_multi_provider_client_sees_the_whole_catalog(
         self, anketa_off, salon_a, salon_b, client_of_a,
     ):
-        """Клиент с двумя салонами: салон не определён — салонные строки молчат.
+        """Клиент с двумя салонами больше не теряет распознавание.
 
-        Мультипровайдерный клиент (#246) — штатный случай, и выбрать за
-        него салон нельзя. Пока бот не сказал, в каком салоне человек
-        сейчас, решение по салонным строкам не принимается: он получает
-        уточнение и «Найти услугу», а не услугу наугад из одного из двух
-        каталогов.
+        DRF-1455 на нём молчал: выбрать за мультипровайдерного клиента
+        (#246) один салон нельзя, и салонные строки для него не
+        читались вовсе. Теперь выбирать нечего — каталог один.
         """
         TenantUserRelationship.objects.create(
             user=client_of_a, tenant=salon_b, is_active=True,
             role=TenantUserRelationship.Role.CUSTOMER,
         )
-        _salon_service(salon_a, "Маникюр")
-        assert not _recognized(client_of_a, "хочу маникюр")
+        _salon_service(salon_a, "Наращивание ресниц")
+        assert _recognized(client_of_a, "хочу наращивание ресниц")
 
-    def test_unbound_client_keeps_global_taxonomy_loses_foreign_prices(
+    def test_unbound_client_sees_the_whole_catalog(
         self, anketa_off, salon_a, salon_b, db,
     ):
-        """Клиент без салона: общая таксономия жива, чужие прайсы молчат.
+        """Клиент без единой связи с салоном — и есть пилотный случай.
 
-        Это пилотный случай. Клиент-прокси, созданный ботом, до первой
-        записи не привязан ни к какому салону (#1014 выдаёт связь на
-        первой записи). Салон для него неизвестен — и это честно, а не
-        чинится подстановкой.
-
-        Что при этом НЕ ломается: каноническая таксономия
-        ``ServiceCategory`` заводится без салона
-        (``seed_canonical_catalog``), и «Маникюр» на пилоте — именно
-        такая строка. Она читается как читалась.
-
-        Что чинится: ``SalonService`` — прайс конкретного салона. Он у
-        неизвестного клиента больше не читается вовсе, и «услуга,
-        которой в салоне A нет, но которая есть в салоне B» перестаёт
-        давать «цель распознана».
+        Клиент-прокси, созданный ботом, до первой записи не привязан ни
+        к какому салону (#1014 выдаёт связь на первой записи). При
+        DRF-1455 такой человек — то есть КАЖДЫЙ до первой записи — не
+        видел ни одного прайса. Именно это владелец и отменил: витрина
+        обязана отвечать до того, как человек где-то записался.
         """
         user = User.objects.create_user(
             username="bot:matrix-unbound", password="x", role="client",
@@ -311,40 +321,43 @@ class TestSalonBoundary:
         _salon_service(salon_b, "Наращивание ресниц")
 
         assert _recognized(user, "хочу маникюр")
-        assert not _recognized(user, "хочу наращивание ресниц")
+        assert _recognized(user, "хочу наращивание ресниц")
 
-    def test_goal_carries_the_salon_it_was_named_in(
+    def test_name_no_salon_has_is_not_recognized(
         self, anketa_off, salon_a, salon_b, client_of_a,
     ):
-        """Салон записан на самой цели, и решение идёт по нему.
+        """Единственная оставшаяся граница — и она не салонная.
 
-        Цель — durable-факт, и салон, в котором она названа, его часть.
-        Проверяем не хранение ради хранения: строка цели, помеченная
-        салоном B, судится по каталогу B даже у клиента, привязанного к
-        A. Иначе поле было бы справкой, а не тем, по чему принимается
-        решение.
+        Услуги, которой нет НИ У ОДНОГО салона, не существует и для
+        распознавания. Человек получает уточнение и выход «Найти
+        услугу» — то есть доходит до подбора другим путём, а не
+        оказывается заперт.
+
+        Без этой проверки «ищем по всем салонам» неотличимо от «ищем
+        везде и всегда находим»: остальные проверки класса умеют только
+        подтверждать распознавание.
         """
-        _salon_service(salon_b, "Наращивание ресниц")
-
-        ClientGoal.objects.filter(client=client_of_a).delete()
-        goal = ClientGoal.objects.create(
-            client=client_of_a,
-            tenant=salon_b,
-            goal_text="хочу наращивание ресниц",
-            source_channel=ClientGoal.SourceChannel.BOT,
-        )
-        assert goal.tenant_id == salon_b.id
-        assert not build_decision_context(client_of_a)["missing"]
+        _salon_service(salon_a, "Маникюр")
+        _salon_service(salon_b, "Педикюр")
+        assert not _recognized(client_of_a, "хочу наращивание ресниц")
 
 
 # ---------------------------------------------------------------------------
-# DRF-1455 — салон попадает на цель в момент её создания
+# DRF-1472 — салон на цель не попадает вовсе
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
-class TestTenantStamping:
-    """Салон проставляется один раз — когда цель названа."""
+class TestGoalCarriesNoSalon:
+    """Цель не несёт салона — ни колонкой, ни решением.
+
+    Прежняя редакция (``TestTenantStamping``, DRF-1455) проверяла три
+    источника, из которых салон попадал на цель: заголовок ``X-Tenant``,
+    единственная активная связь клиента, легаси ``User.tenant``. Все три
+    сняты вместе с колонкой, и проверки переписаны в утверждение, что
+    салон на решение больше не влияет НИКАК. Иначе тихий возврат любого
+    из трёх источников никто бы не заметил.
+    """
 
     URL = "/api/v1/internal/me/goals/select/"
 
@@ -361,57 +374,64 @@ class TestTenantStamping:
 
     @pytest.fixture
     def token(self, settings):
-        settings.AYLA_INTERNAL_API_TOKEN = "test-token-tenant-stamping"
-        settings.GOAL_ANKETA_ENABLED = False
-        return "test-token-tenant-stamping"
+        """Анкета включена — под тем же флагом живёт и распознавание.
 
-    def test_relationship_is_used_when_header_absent(
-        self, token, salon_a, client_of_a,
-    ):
-        """Единственная активная связь клиента — источник по умолчанию."""
-        api = self._api(token, client_of_a.username)
-        resp = api.post(
-            self.URL,
-            {"goal_text": "хочу маникюр", "source_channel": "bot"},
-            format="json",
-        )
-        assert resp.status_code == 200, resp.content
-        goal = ClientGoal.objects.get(client=client_of_a, is_active=True)
-        assert goal.tenant_id == salon_a.id
-
-    def test_header_wins_over_relationship(self, token, salon_a, salon_b, client_of_a):
-        """``X-Tenant`` — явное «я действую в салоне X», и оно сильнее вывода.
-
-        Дерево ``/api/v1/internal/`` исключено из
-        ``TenantContextMiddleware`` (бот не носит заголовок на каждый
-        вызов), поэтому заголовок читается на месте. Как только бот
-        начнёт его слать на goal-вызовах, менять здесь будет нечего.
+        ``GOAL_SERVICE_MATCH_MORPHOLOGY`` тоже включаем явно: проверки
+        ниже читают документ состояния целиком, а не одну колонку, и
+        зависеть от умолчания настройки им незачем.
         """
+        settings.AYLA_INTERNAL_API_TOKEN = "test-token-no-tenant"
+        settings.GOAL_ANKETA_ENABLED = True
+        settings.GOAL_SERVICE_MATCH_MORPHOLOGY = True
+        return "test-token-no-tenant"
+
+    def test_clientgoal_has_no_tenant_column(self):
+        """Колонки нет в модели — не «есть, но не заполняется».
+
+        Поле, оставленное «на всякий случай», рано или поздно начинает
+        влиять: кто-нибудь прочитает его в фильтре и вернёт салонную
+        границу, не заметив, что возвращает.
+        """
+        names = {f.name for f in ClientGoal._meta.get_fields()}
+        assert "tenant" not in names
+
+    def test_header_does_not_change_the_decision(
+        self, token, salon_a, salon_b, client_of_a,
+    ):
+        """``X-Tenant`` чужого салона ничего не меняет.
+
+        Заголовок — единственный явный способ сказать «я в салоне X», и
+        именно он раньше решал. Клиент называет услугу салона A, придя
+        с заголовком салона B, и обязан быть распознан: салон в решении
+        не участвует.
+        """
+        _salon_service(salon_a, "Наращивание ресниц")
         api = self._api(token, client_of_a.username, tenant_slug=salon_b.slug)
         resp = api.post(
             self.URL,
-            {"goal_text": "хочу маникюр", "source_channel": "bot"},
+            {"goal_text": "хочу наращивание ресниц", "source_channel": "bot"},
             format="json",
         )
         assert resp.status_code == 200, resp.content
-        goal = ClientGoal.objects.get(client=client_of_a, is_active=True)
-        assert goal.tenant_id == salon_b.id
+        assert resp.json()["data"]["missing"] == []
 
-    def test_unknown_slug_does_not_substitute_a_salon(
+    def test_service_of_a_salon_the_client_never_visited_is_recognized(
         self, token, salon_a, salon_b, client_of_a,
     ):
-        """Неизвестный слаг — не повод подставить чужой салон.
+        """Сквозной путь целиком: витрина отвечает по чужому прайсу.
 
-        Опечатка в заголовке не должна тихо превращаться в «ну возьмём
-        какой-нибудь». Заголовок с неизвестным слагом просто не даёт
-        ответа, и решение принимает следующий источник — связь клиента.
+        Клиент связан только с салоном A, заголовка нет — то есть все
+        прежние источники салона указывали бы на A. Услуга есть только
+        у B. Владелец распорядился прямо: показываем все салоны,
+        включая те, где человек никогда не был.
         """
-        api = self._api(token, client_of_a.username, tenant_slug="no-such-salon")
+        _salon_service(salon_b, "Наращивание ресниц")
+        api = self._api(token, client_of_a.username)
         resp = api.post(
             self.URL,
-            {"goal_text": "хочу маникюр", "source_channel": "bot"},
+            {"goal_text": "хочу наращивание ресниц", "source_channel": "bot"},
             format="json",
         )
         assert resp.status_code == 200, resp.content
-        goal = ClientGoal.objects.get(client=client_of_a, is_active=True)
-        assert goal.tenant_id == salon_a.id
+        assert resp.json()["data"]["missing"] == []
+        assert ClientGoal.objects.filter(client=client_of_a, is_active=True).exists()
