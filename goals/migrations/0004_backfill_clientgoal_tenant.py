@@ -10,17 +10,14 @@
 
 1. единственная активная связь клиента с салоном
    (``TenantUserRelationship``);
-2. ``User.tenant`` — легаси-привязка одиночного салона;
-3. единственный активный салон развёртывания — если салон в системе
-   ровно один, клиент может быть только в нём. Это пилот; ради него
-   бэкфилл и нужен, иначе все накопленные цели остались бы с NULL и
-   распознавались бы только по бессалонной части каталога.
+2. ``User.tenant`` — легаси-привязка одиночного салона.
 
-Неоднозначные строки (мультипровайдерный клиент, несколько салонов в
-системе) остаются NULL. NULL здесь — честное «салон неизвестен», а не
-пропуск: угадать за такого клиента нельзя, и подставлять первый
-попавшийся салон значило бы воспроизвести ровно тот дефект, который
-DRF-1455 чинит.
+Всё остальное остаётся NULL, и это не пропуск, а честное «салон
+неизвестен». Подставить первый попавшийся салон значило бы
+воспроизвести ровно тот дефект, который DRF-1455 чинит. Цели с NULL не
+теряют распознавание: каноническая таксономия ``ServiceCategory``
+заводится без салона и читается всегда — молчат только чужие прайсы
+``SalonService``.
 
 Обратная операция сбрасывает ``tenant`` в NULL у всех строк. Это точный
 откат: до этой миграции колонка была NULL везде (её только что добавили
@@ -35,15 +32,6 @@ from django.db import migrations
 def backfill(apps, schema_editor):
     ClientGoal = apps.get_model("goals", "ClientGoal")
     TenantUserRelationship = apps.get_model("users", "TenantUserRelationship")
-    Tenant = apps.get_model("tenants", "Tenant")
-
-    # apps.get_model отдаёт историческую модель с ПЛОСКИМ менеджером —
-    # _ActiveTenantManager с его filter(is_active=True) здесь не
-    # действует, поэтому фильтруем активность руками.
-    active_tenant_ids = list(
-        Tenant.objects.filter(is_active=True).values_list("id", flat=True)[:2]
-    )
-    sole_tenant_id = active_tenant_ids[0] if len(active_tenant_ids) == 1 else None
 
     goals = list(
         ClientGoal.objects.filter(tenant__isnull=True).values_list(
@@ -80,7 +68,7 @@ def backfill(apps, schema_editor):
             # Несколько активных салонов — выбрать за клиента нельзя.
             continue
         else:
-            tenant_id = legacy_tenant.get(client_id) or sole_tenant_id
+            tenant_id = legacy_tenant.get(client_id)
         if tenant_id is None:
             continue
         updates.setdefault(tenant_id, []).append(goal_id)
@@ -99,7 +87,6 @@ class Migration(migrations.Migration):
     dependencies = [
         ("goals", "0003_clientgoal_tenant"),
         ("users", "0012_tenantuserrelationship"),
-        ("tenants", "0003_seed_default_tenants"),
     ]
 
     operations = [

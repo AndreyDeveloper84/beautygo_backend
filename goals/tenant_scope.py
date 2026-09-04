@@ -93,14 +93,6 @@ def _sole_active_relationship_tenant_id(client: User) -> uuid.UUID | None:
     return ids[0] if len(ids) == 1 else None
 
 
-def _sole_deployment_tenant_id() -> uuid.UUID | None:
-    """Единственный активный салон развёртывания, если он единственный."""
-    from tenants.models import Tenant
-
-    ids = list(Tenant.objects.values_list("id", flat=True)[:2])
-    return ids[0] if len(ids) == 1 else None
-
-
 def resolve_client_tenant_id(client: User, *, request: Any = None) -> uuid.UUID | None:
     """Салон, в котором клиент сейчас действует. None — неизвестен."""
     from_request = tenant_id_from_request(request)
@@ -111,11 +103,7 @@ def resolve_client_tenant_id(client: User, *, request: Any = None) -> uuid.UUID 
     if from_relationship is not None:
         return from_relationship
 
-    legacy = getattr(client, "tenant_id", None)
-    if legacy is not None:
-        return legacy
-
-    return _sole_deployment_tenant_id()
+    return getattr(client, "tenant_id", None)
 
 
 def goal_tenant_id(goal, *, client: User | None = None) -> uuid.UUID | None:
