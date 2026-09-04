@@ -45,7 +45,8 @@ RUN apt-get update && apt-get install -y \
 # OPTIONAL build-time credential for the ayla-ai-core dep.
 #
 # ayla-ai-core is PUBLIC (owner's decision 04.09.2026, recorded in
-# docs/OPEN_DECISIONS.md §22), so this build needs no token: with the ARG
+# OPEN_DECISIONS.md §22 in the workspace root, outside this repo), so this
+# build needs no token: with the ARG
 # empty the `if` below is skipped and pip clones the pinned SHA
 # anonymously. Verified 04.09.2026 by an unauthenticated fetch of the pin.
 #

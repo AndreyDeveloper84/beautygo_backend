@@ -103,7 +103,8 @@ jobs:
       - name: Configure git auth for the ayla-ai-core dep (token optional)
         # requirements.txt pulls ayla-ai-core from a sibling repo
         # (AndreyDeveloper84/ayla-ai-core) that is PUBLIC — owner's
-        # decision of 04.09.2026, docs/OPEN_DECISIONS.md §22, re-checked
+        # decision of 04.09.2026, recorded in OPEN_DECISIONS.md §22 (that
+        # register lives in the workspace root, outside this repo), re-checked
         # anonymously the same day (`"private": false`). The pinned SHA
         # therefore fetches with no credential at all; Dependabot PRs
         # #282-284 went green on this job with an EMPTY token.

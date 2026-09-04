@@ -1,7 +1,8 @@
 """Страж: ``GH_DEPLOY_TOKEN`` необязателен для установки ``ayla-ai-core``.
 
 ``AndreyDeveloper84/ayla-ai-core`` — публичный репозиторий (решение владельца
-от 04.09.2026, ``docs/OPEN_DECISIONS.md`` §22; проверено анонимным запросом,
+от 04.09.2026, ``OPEN_DECISIONS.md`` §22 — реестр решений владельца лежит в
+корне рабочей области, вне этого репозитория; проверено анонимным запросом,
 ``"private": false``). Закреплённый в ``requirements.txt`` SHA клонируется
 без учётных данных вовсе.
 
@@ -42,6 +43,9 @@ WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 # то, что detect-secrets обязан ловить, и приучать его к исключениям ради
 # теста нельзя.
 FAKE_VALUE = "gh" + "p_" + ("0" * 36)
+
+# Заранее кладётся в подставной ~/.gitconfig; зачем — см. `_run_step`.
+GITCONFIG_MARKER = "[user]\n\tname = drf1466-marker\n"
 
 
 @functools.lru_cache(maxsize=1)
@@ -120,7 +124,12 @@ def _run_step(token: str, tmp_path: Path) -> subprocess.CompletedProcess:
     bash = _usable_bash()
     assert bash is not None, "нет пригодного bash — тест должен был быть пропущен"
     gitconfig = tmp_path / "gitconfig"
-    gitconfig.write_text("", encoding="utf-8")
+    # Маркер кладётся ДО прогона намеренно. Без него «переписывания URL в
+    # конфиге нет» выглядит одинаково и когда шаг действительно ничего не
+    # записал, и когда читается не тот файл (GIT_CONFIG_GLOBAL не долетел) —
+    # а тогда `git config --global` ушёл бы в НАСТОЯЩИЙ ~/.gitconfig
+    # разработчика, и тест этого не заметил бы.
+    gitconfig.write_text(GITCONFIG_MARKER, encoding="utf-8")
     env = {
         **os.environ,
         "GH_DEPLOY_TOKEN": token,
@@ -168,6 +177,11 @@ def test_step_succeeds_without_a_token_and_writes_no_rewrite(tmp_path: Path) -> 
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
     written = (tmp_path / "gitconfig").read_text(encoding="utf-8")
+    assert GITCONFIG_MARKER.strip() in written.strip(), (
+        f"прочитан не тот ~/.gitconfig, что видел шаг — маркер не вернулся. "
+        f"Прочитано: {written!r}. Пока это не сойдётся, утверждение ниже "
+        "ничего не проверяет."
+    )
     assert "insteadOf" not in written, (
         f"переписывание URL записано при пустом токене — в конфиг ушло: {written!r}"
     )
