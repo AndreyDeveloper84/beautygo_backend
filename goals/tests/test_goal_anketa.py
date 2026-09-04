@@ -409,6 +409,14 @@ class TestAnketaIsNotAGate:
         «хочу маникюра» — родительный падеж, дословного совпадения с
         именем каталога нет, приходит `goal_clarification`, и человек,
         НАЗВАВШИЙ услугу, оказывался заперт на вопросе.
+
+        DRF-1461 убрал сам этот случай: падежи распознаются, и «хочу
+        маникюра» больше не роняет в уточнение. Проверять `next` на нём
+        стало нечем — состояние, ради которого он был взят, исчезло.
+        Поэтому шаг 3 теперь берёт фразу, которая уточнения заслуживает
+        по существу («хочу что-то для рук» — услуга не названа), а
+        прежний случай проверяется рядом отдельно: он обязан
+        распознаваться, и выход при этом обязан остаться.
         """
         api = _api()
 
@@ -423,16 +431,26 @@ class TestAnketaIsNotAGate:
         assert doc["missing"]
         assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
 
-        # 3. Назвал услугу, но в падеже — уточнение.
+        # 3. Услуга НЕ названа — уточнение, и выход рядом с ним.
+        doc = api.post(
+            SELECT_URL,
+            {"goal_text": "хочу что-то для рук", "source_channel": "miniapp"},
+            format="json",
+        ).json()["data"]
+        assert _kinds(doc) == [MISSING_GOAL_CLARIFICATION]
+        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG, (
+            "уточнение не должно быть тупиком"
+        )
+
+        # 3a. Тот самый падеж (DRF-1461): распознан, уточнения нет,
+        # выход всё равно на месте.
         doc = api.post(
             SELECT_URL,
             {"goal_text": "хочу маникюра", "source_channel": "miniapp"},
             format="json",
         ).json()["data"]
-        assert _kinds(doc) == [MISSING_GOAL_CLARIFICATION]
-        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG, (
-            "человек назвал услугу и остался бы заперт на вопросе"
-        )
+        assert doc["missing"] == [], "родительный падеж обязан распознаваться"
+        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
 
         # 4. Состояние ведения.
         doc = api.post(
@@ -466,17 +484,49 @@ class TestAnketaIsNotAGate:
     def test_named_service_matches_a_salon_service_too(
         self, customer, token, catalog,
     ):
+        """Услуга салона — тоже названная услуга, если салон известен.
+
+        DRF-1455: ``SalonService`` — прайс конкретного салона, и читается
+        он только для салона клиента. Здесь салон назван заголовком
+        ``X-Tenant`` — тем же способом, каким его называет всё
+        остальное в этом бэкенде.
+        """
         tenant = Tenant.objects.create(slug="penza-anketa", name="Penza")
         SalonService.objects.create(
             tenant=tenant, category=catalog, name="Аппаратный маникюр",
         )
         api = _api()
+        api.defaults["HTTP_X_TENANT"] = tenant.slug
         doc = api.post(
             SELECT_URL,
             {"goal_text": "хочу аппаратный маникюр", "source_channel": "miniapp"},
             format="json",
         ).json()["data"]
         assert doc["missing"] == []
+
+    def test_salon_service_of_another_salon_is_not_a_named_service(
+        self, customer, token, catalog,
+    ):
+        """Обратная половина той же проверки (DRF-1455).
+
+        Та же услуга, тот же текст — но клиент действует в другом
+        салоне. Услуга есть только у соседа, и «цель распознана» здесь
+        было бы решением по чужим строкам.
+        """
+        other = Tenant.objects.create(slug="penza-anketa-b", name="Penza B")
+        mine = Tenant.objects.create(slug="penza-anketa-a", name="Penza A")
+        SalonService.objects.create(
+            tenant=other, category=catalog, name="Аппаратный маникюр",
+        )
+        api = _api()
+        api.defaults["HTTP_X_TENANT"] = mine.slug
+        doc = api.post(
+            SELECT_URL,
+            {"goal_text": "хочу аппаратный маникюр", "source_channel": "miniapp"},
+            format="json",
+        ).json()["data"]
+        assert _kinds(doc) == [MISSING_GOAL_CLARIFICATION]
+        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
 
 
 # ---------------------------------------------------------------------------

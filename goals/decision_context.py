@@ -56,6 +56,7 @@ from services.models import GoalOption
 from . import anketa
 from .models import ClientGoal, GoalAnketaRun
 from .service_match import match_named_service
+from .tenant_scope import goal_tenant_id
 
 if TYPE_CHECKING:
     from users.models import User
@@ -138,7 +139,12 @@ def next_anketa_step(run: GoalAnketaRun | None) -> anketa.AnketaStep:
     return anketa.next_step(answered)
 
 
-def _goal_is_resolved(goal: ClientGoal, *, service_match: bool = True) -> bool:
+def _goal_is_resolved(
+    goal: ClientGoal,
+    *,
+    service_match: bool = True,
+    client: User | None = None,
+) -> bool:
     """Считается ли цель готовой — то есть уточнять больше нечего.
 
     Ключ курируемой подсказки готов всегда. Свободный текст готов, если
@@ -149,6 +155,15 @@ def _goal_is_resolved(goal: ClientGoal, *, service_match: bool = True) -> bool:
     Ради второго всё и затевалось: без него человек, написавший «хочу
     маникюр», получал ``goal_clarification`` — то есть падал обратно в
     вопросы ровно там, где владелец велел вести к подбору.
+
+    Каталог читается каталогом САЛОНА цели (DRF-1455): салон записан на
+    самой цели, поэтому решение не плавает вместе с тем, где клиент
+    оказался сегодня. ``client`` нужен только строкам, у которых салон
+    NULL, — там разрешаем по клиенту (``goals/tenant_scope.py``).
+
+    Точное совпадение с ``GoalOption.label`` салоном не ограничивается:
+    подсказки целей — глобальная курируемая таблица владельца, а не
+    каталог салона.
 
     ``service_match=False`` выключает именно эту, новую половину.
     Приходит из ``GOAL_ANKETA_ENABLED``: рубильник отката обязан
@@ -171,7 +186,8 @@ def _goal_is_resolved(goal: ClientGoal, *, service_match: bool = True) -> bool:
         return True
     if not service_match:
         return False
-    return match_named_service(text) is not None
+    tenant_id = goal_tenant_id(goal, client=client)
+    return match_named_service(text, tenant_id=tenant_id) is not None
 
 
 def build_decision_context(
@@ -208,7 +224,9 @@ def build_decision_context(
         missing.append(anketa.as_missing_item(next_anketa_step(run)))
     elif active_goal is None:
         missing.append({"kind": MISSING_GOAL, "prompt": PROMPT_GOAL_MISSING})
-    elif not _goal_is_resolved(active_goal, service_match=anketa_on):
+    elif not _goal_is_resolved(
+        active_goal, service_match=anketa_on, client=client,
+    ):
         # Свободный текст, в котором ничего не названо: уверенность
         # низкая — уточняем, а не отображаем насильно в ближайший чип
         # (OD-1). Названная услуга сюда не попадает (DRF-1451).
