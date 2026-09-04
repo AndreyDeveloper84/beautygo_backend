@@ -323,6 +323,43 @@ class TestGlobalCatalog:
         assert _recognized(user, "хочу маникюр")
         assert _recognized(user, "хочу наращивание ресниц")
 
+    def test_repeated_names_across_salons_do_not_eat_the_cap(
+        self, anketa_off, salon_a, salon_b, client_of_a, monkeypatch,
+    ):
+        """Одно имя у двух салонов — это одно имя, а не два.
+
+        ``MAX_CATALOG_NAMES`` — предохранитель от последовательного
+        чтения тысяч строк зеркала. Пока каталог читался по одному
+        салону, повторов почти не было; на общем каталоге без
+        ``distinct()`` потолок съедали бы копии одного и того же имени,
+        и услуги, до которых очередь не дошла, переставали бы
+        распознаваться — тихо и в зависимости от того, кто как назвал
+        свою услугу.
+
+        Расклад собран руками, а не помощником ``_salon_service``:
+        потолок здесь опущен до трёх, и служебные категории-держатели,
+        которые помощник заводит на каждый салон, съели бы его сами.
+
+        Одна общая категория (1 имя) оставляет под услуги 2 места. Без
+        ``distinct()`` туда попадают два «Маникюра» и «Педикюр»
+        теряется; с ним — «Маникюр» и «Педикюр», как и должно быть.
+        """
+        from goals import service_match
+
+        monkeypatch.setattr(service_match, "MAX_CATALOG_NAMES", 3)
+        shared = ServiceCategory.objects.create(
+            name="Общее", slug="cap-shared", tenant=None,
+        )
+        for tenant, name in (
+            (salon_a, "Маникюр"), (salon_b, "Маникюр"), (salon_b, "Педикюр"),
+        ):
+            SalonService.objects.create(
+                tenant=tenant, name=name, category=shared, template=None,
+                is_active=True,
+            )
+
+        assert _recognized(client_of_a, "хочу педикюр")
+
     def test_name_no_salon_has_is_not_recognized(
         self, anketa_off, salon_a, salon_b, client_of_a,
     ):

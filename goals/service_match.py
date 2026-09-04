@@ -204,12 +204,22 @@ def _load_catalog() -> list[tuple[str, str, tuple[str, ...]]]:
     ``MAX_CATALOG_NAMES`` срезал сначала прайсы: общая таксономия
     ``ServiceCategory`` — десятки строк владельца, ``SalonService`` —
     тысячи строк зеркала, и терять надо второе.
+
+    ``distinct()`` — не оптимизация, а условие, при котором потолок
+    вообще работает. Решается вопрос «есть ли такое имя», и имя
+    «Маникюр с покрытием» у пятидесяти салонов — это одно имя, а не
+    пятьдесят. Пока каталог читался по одному салону, повторов почти не
+    было; на общем каталоге без ``distinct()`` потолок съедался бы
+    копиями, и имена, до которых очередь не дошла, переставали бы
+    распознаваться — тихо и в зависимости от того, кто как назвал свою
+    услугу.
     """
     rows: list[tuple[str, str, tuple[str, ...]]] = [
         ("category", name, normalize_all(_words(name)))
         for name in ServiceCategory.objects.filter(is_active=True)
         .order_by("name")
-        .values_list("name", flat=True)[:MAX_CATALOG_NAMES]
+        .values_list("name", flat=True)
+        .distinct()[:MAX_CATALOG_NAMES]
     ]
     remaining = MAX_CATALOG_NAMES - len(rows)
     if remaining > 0:
@@ -217,7 +227,8 @@ def _load_catalog() -> list[tuple[str, str, tuple[str, ...]]]:
             ("service", name, normalize_all(_words(name)))
             for name in SalonService.objects.filter(is_active=True)
             .order_by("name")
-            .values_list("name", flat=True)[:remaining]
+            .values_list("name", flat=True)
+            .distinct()[:remaining]
         ]
     return rows
 
