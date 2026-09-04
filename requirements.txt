@@ -103,7 +103,8 @@ yookassa==3.10.0
 #   4. PR title: `chore(deps): bump ayla-ai-core <prev> → vX.Y.Z (SHA <short>)`.
 #
 # CI auth: none needed. The repo is PUBLIC (owner's decision 04.09.2026,
-# docs/OPEN_DECISIONS.md §22) and the pinned SHA clones anonymously —
+# OPEN_DECISIONS.md §22 in the workspace root, outside this repo) and the
+# pinned SHA clones anonymously —
 # verified that day by an unauthenticated fetch, and by Dependabot PRs
 # #282-284, which installed this line with an empty GH_DEPLOY_TOKEN.
 # If the visibility is ever closed again, the runner needs read access via

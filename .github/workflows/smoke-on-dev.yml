@@ -9,8 +9,9 @@ name: Smoke tests on dev VPS
 #   and hides the very drift the run exists to catch.
 #
 # The dep-auth gap this header used to describe is CLOSED, twice over.
-# ayla-ai-core is a PUBLIC repo (owner's decision 04.09.2026,
-# docs/OPEN_DECISIONS.md §22), so the pinned SHA clones with no credential
+# ayla-ai-core is a PUBLIC repo (owner's decision 04.09.2026, recorded in
+# OPEN_DECISIONS.md §22 in the workspace root, outside this repo), so the
+# pinned SHA clones with no credential
 # at all; and where a token does exist the machinery still uses it — the
 # Dockerfile takes `ARG GH_DEPLOY_TOKEN` and rewrites the github.com git
 # URL when it is non-empty, docker-compose.yml forwards it into
