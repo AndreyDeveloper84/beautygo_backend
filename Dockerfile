@@ -32,7 +32,7 @@ WORKDIR /app
 # System dependencies:
 # - libjpeg-dev / zlib1g-dev: Pillow image processing
 # - libpq-dev: psycopg2 (PostgreSQL adapter)
-# - git: pip needs it to clone private dependencies (e.g.
+# - git: pip needs it to clone git+ dependencies (e.g.
 #   ``ayla-ai-core @ git+https://github.com/...``). Without git in PATH
 #   pip prints "Cannot find command 'git'" and the build fails.
 RUN apt-get update && apt-get install -y \
@@ -42,13 +42,22 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Build-time secret for cloning private GitHub repos (ayla-ai-core).
-# Pass via `docker compose build --build-arg GH_DEPLOY_TOKEN=...` or
-# set in compose.yaml under web.build.args. URL-rewrite makes pip's
-# git clone authenticate transparently. Token is consumed at build
-# time only and is NOT baked into the final image (no COPY of secret
-# files; the .gitconfig that `git config --global` writes lives in
-# /root/.gitconfig but is not user-facing in runtime).
+# OPTIONAL build-time credential for the ayla-ai-core dep.
+#
+# ayla-ai-core is PUBLIC (owner's decision 04.09.2026, recorded in
+# OPEN_DECISIONS.md §22 in the workspace root, outside this repo), so this
+# build needs no token: with the ARG empty the `if` below is skipped and
+# pip clones the pinned SHA anonymously. Verified 04.09.2026 by an
+# unauthenticated fetch of the pin.
+#
+# The token path is kept for the day the visibility is closed again (the
+# decision says public "for now"): pass via
+# `docker compose build --build-arg GH_DEPLOY_TOKEN=...` or set it in
+# compose under web.build.args, and the URL-rewrite makes pip's git clone
+# authenticate transparently. Consumed at build time only and NOT baked
+# into the final image (no COPY of secret files; the .gitconfig that
+# `git config --global` writes lives in /root/.gitconfig but is not
+# user-facing at runtime).
 ARG GH_DEPLOY_TOKEN=""
 RUN if [ -n "$GH_DEPLOY_TOKEN" ]; then \
       git config --global url."https://${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"; \
