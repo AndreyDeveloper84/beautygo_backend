@@ -1,42 +1,42 @@
 # Core
 Django==5.2.5
-django-unfold==0.86.1
-djangorestframework==3.16.1
+django-unfold==0.104.1
+djangorestframework==3.18.0
 djangorestframework-simplejwt==5.5.1
 django-cors-headers==4.9.0
 django-filter==25.2
 
 # API documentation
-drf-spectacular==0.28.0
+drf-spectacular==0.30.0
 
 # Image handling (Profile.avatar)
 Pillow==11.3.0
 
 # S3-compatible storage (Minio / AWS S3)
 django-storages==1.14.4
-boto3==1.35.99
+boto3==1.43.85
 
 # Social Auth (OAuth providers)
-requests==2.32.3
-PyJWT==2.9.0
+requests==2.34.2
+PyJWT==2.13.0
 cryptography==44.0.0
 
 # Environment
-python-dotenv==1.1.1
+python-dotenv==1.2.3
 
 # Observability — error monitoring + structured logging.
 # Sentry SDK no-ops when SENTRY_DSN env is empty, so dev / CI stay quiet.
 # python-json-logger is the JSON formatter used by prod LOGGING config.
-sentry-sdk[django]==2.20.0
+sentry-sdk[django]==2.68.1
 python-json-logger==3.3.0
 
 # Async tasks — Celery + Redis broker/result backend, django-redis cache,
 # django-celery-beat for the periodic outbox dispatcher.
-celery[redis]==5.5.3
+celery[redis]==5.6.3
 django-redis==5.4.0
 # 2.7.0 caps Django<5.2; project is on 5.2.5, so bump to 2.8.1 which
 # adds Django 5.2 support.
-django-celery-beat==2.8.1
+django-celery-beat==2.9.0
 
 # Database
 psycopg2-binary==2.9.10
@@ -65,14 +65,14 @@ gunicorn==23.0.0
 # delivery. Empty FIREBASE_CREDENTIALS_* keeps PushService in stub mode
 # so this dep ships unconditionally without breaking environments that
 # haven't provisioned Firebase yet.
-firebase-admin==6.5.0
+firebase-admin==6.9.0
 
 # OpenAI client + httpx with proxy support.
 # api.openai.com is geo-blocked from RU; production tunnels through
 # OPENAI_PROXY (HTTP/SOCKS), wired via httpx.Client(proxy=...). httpx is
 # already a transitive dep of openai but we pin it so proxy behaviour is
 # reproducible across environments.
-openai==1.99.9
+openai==1.109.1
 httpx==0.28.1
 
 # Морфология русского языка — DRF-1461.
@@ -96,12 +96,12 @@ pymorphy3-dicts-ru==2.4.417150.4580142
 
 # Testing
 pytest==8.4.2
-pytest-django==4.11.1
-pytest-cov==6.1.1
+pytest-django==4.14.0
+pytest-cov==6.3.0
 factory-boy==3.3.3
-Faker==37.4.0
+Faker==37.12.0
 freezegun==1.5.5
-yookassa==3.10.0
+yookassa==3.12.1
 
 # AI orchestration shared package (DRF-236..239 + DRF-241 — tool_dispatcher hook).
 # Repo: https://github.com/AndreyDeveloper84/ayla-ai-core (public)
