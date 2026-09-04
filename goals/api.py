@@ -128,7 +128,7 @@ def _create_goal(
     goal_key: str | None,
     goal_text: str | None,
     source_channel: str,
-    request=None,
+    request: Request | None = None,
 ) -> ClientGoal:
     """Записать новую активную цель, закрыв прежнюю.
 
@@ -273,7 +273,12 @@ class GoalSelectView(APIView):
 
     @transaction.atomic
     def _answer_anketa(
-        self, client, *, answer: dict, source_channel: str, request=None,
+        self,
+        client,
+        *,
+        answer: dict,
+        source_channel: str,
+        request: Request | None = None,
     ) -> Response:
         """Записать ответ на шаг; последний шаг формирует цель.
 
