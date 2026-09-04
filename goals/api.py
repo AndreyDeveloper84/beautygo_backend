@@ -38,6 +38,7 @@ from .decision_context import (
     open_anketa_run,
 )
 from .models import ClientGoal, GoalAnketaAnswer, GoalAnketaRun
+from .tenant_scope import resolve_client_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -127,18 +128,26 @@ def _create_goal(
     goal_key: str | None,
     goal_text: str | None,
     source_channel: str,
+    request=None,
 ) -> ClientGoal:
     """Записать новую активную цель, закрыв прежнюю.
 
     Вынесено из ``GoalSelectView.post``, потому что теперь сюда ведут два
     пути: прямой выбор (чип / свободный ввод) и завершение анкеты.
+
+    Салон (DRF-1455) проставляется здесь и один раз — в момент, когда
+    цель названа. Дальше решение о ней принимается по каталогу именно
+    этого салона, а не по тому, куда клиент зашёл сегодня: цель —
+    durable-факт, и салон, в котором она названа, — его часть.
     """
+    tenant_id = resolve_client_tenant_id(client, request=request)
     with transaction.atomic():
         ClientGoal.objects.filter(client=client, is_active=True).update(
             is_active=False
         )
         return ClientGoal.objects.create(
             client=client,
+            tenant_id=tenant_id,
             goal_key=goal_key or None,
             goal_text=(goal_text or "").strip() or None,
             source_channel=source_channel,
@@ -221,6 +230,7 @@ class GoalSelectView(APIView):
                 request.user,
                 answer=data["answer"],
                 source_channel=data["source_channel"],
+                request=request,
             )
 
         goal = _create_goal(
@@ -228,6 +238,7 @@ class GoalSelectView(APIView):
             goal_key=data.get("goal_key"),
             goal_text=data.get("goal_text"),
             source_channel=data["source_channel"],
+            request=request,
         )
         # Прямой выбор закрывает открытый проход: см. _close_open_run.
         _close_open_run(request.user, goal=goal)
@@ -261,7 +272,9 @@ class GoalSelectView(APIView):
         return build_decision_context(client)
 
     @transaction.atomic
-    def _answer_anketa(self, client, *, answer: dict, source_channel: str) -> Response:
+    def _answer_anketa(
+        self, client, *, answer: dict, source_channel: str, request=None,
+    ) -> Response:
         """Записать ответ на шаг; последний шаг формирует цель.
 
         Шаг, который сервер ждёт, вычисляется здесь заново — эхо клиента
@@ -337,6 +350,7 @@ class GoalSelectView(APIView):
             goal_key=option_key,
             goal_text=text,
             source_channel=source_channel,
+            request=request,
         )
         GoalAnketaAnswer.objects.update_or_create(
             run=run,
