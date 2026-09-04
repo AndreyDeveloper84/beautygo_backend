@@ -18,7 +18,8 @@ DRF-1451 — зачем это существует
    слов — с точностью до словарной формы каждого слова (DRF-1461);
 2. всё, что в тексте осталось за пределами имени, — обрамление, то
    есть слово из закрытого списка ниже (DRF-1461);
-3. имя принадлежит каталогу **салона клиента** (DRF-1455).
+3. имя есть в каталоге — в прайсе **любого** салона или в общей
+   таксономии (DRF-1472).
 
 Ни расстояния Левенштейна, ни эмбеддингов, ни «ближайшего», ни числа,
 которое можно подкрутить. На одинаковом входе и одинаковом каталоге
@@ -56,29 +57,35 @@ DRF-1461 — падежи, и почему одной морфологии ма�
 другим путём; распознали неверно — человека ведут к услуге, которую он
 не называл. Цена ошибок разная, поэтому и осторожность односторонняя.
 
-DRF-1455 — каталог одного салона
----------------------------------
+DRF-1472 — каталог всех салонов, и почему салона здесь нет вовсе
+-----------------------------------------------------------------
 
-Раньше сканировался каталог целиком, по всем салонам. Теперь —
-``tenant_id`` салона клиента (см. ``goals/tenant_scope.py``) плюс строки
-без салона: ``ServiceCategory.tenant`` допускает NULL (общая/легаси
-таксономия), и такие строки не принадлежат никакому чужому салону, а
-значит и решением «по чужим строкам» не являются. У ``SalonService``
-салон обязателен, поэтому при неизвестном салоне услуги не читаются
-вовсе.
+DRF-1455 сузил поиск до каталога салона клиента. Владелец 04.09.2026
+это отменил, разобравшись, как устроены боты: цели спрашивают **только
+в клиентском боте**. Он один, общий, и салон у него не задан нарочно —
+это витрина. Салонный бот существует для владельцев салонов и целей не
+спрашивает; ``MAX_BOT_SALON_TENANT_SLUG`` — особенность пилота с одним
+салоном, а не «бот салона Формула тела».
 
-Побочно это ещё и быстрее: у ``SalonService`` индексы начинаются с
-``tenant`` (``salonsvc_tenant_active_idx``), и голый фильтр по
-``is_active`` читал таблицу последовательно.
+Значит случая «клиент пришёл через бота салона» не существует: клиент
+всегда на витрине, и показать ему все салоны, у которых нужная услуга
+есть, — не утечка, а смысл продукта. Поэтому салона в этом решении нет
+ни в каком виде: ни аргументом, ни колонкой на цели.
+
+Граница остаётся ровно одна, и она не салонная: услуги, которой нет
+**ни у одного** салона, не существует и для распознавания — человек
+получает уточнение и выход «Найти услугу».
+
+Чем платим: голый фильтр по ``is_active`` читает ``SalonService``
+последовательно, мимо индексов, начинающихся с ``tenant``. Держат это
+кеш на ``_CACHE_TTL_SECONDS`` и потолок ``MAX_CATALOG_NAMES``, ниже.
 """
 from __future__ import annotations
 
 import re
-import uuid
 from dataclasses import dataclass
 
 from django.core.cache import cache
-from django.db.models import Q
 
 from services.models import SalonService, ServiceCategory
 
@@ -174,9 +181,10 @@ def _only_frame_around(
 
 
 #: Ключ и срок кеша списка имён. Каталог меняется редко, а читается
-#: теперь на каждом открытии приложения. Версия ``v2`` — в кеше лежат
-#: уже лемматизированные имена, и старые записи несовместимы.
-_CACHE_KEY_PREFIX = "goals.service_match.catalog_names.v2"
+#: теперь на каждом открытии приложения. Версия ``v3`` — в кеше лежит
+#: каталог всех салонов одной записью (DRF-1472), и записи ``v2``,
+#: разложенные по салонам, ему не соответствуют.
+_CACHE_KEY = "goals.service_match.catalog_names.v3"
 _CACHE_TTL_SECONDS = 300
 
 #: Потолок числа имён. Не оптимизация, а предохранитель: без него
@@ -185,48 +193,37 @@ _CACHE_TTL_SECONDS = 300
 MAX_CATALOG_NAMES = 5000
 
 
-def _cache_key(tenant_id: uuid.UUID | None) -> str:
-    return f"{_CACHE_KEY_PREFIX}:{tenant_id or 'global'}"
+def _load_catalog() -> list[tuple[str, str, tuple[str, ...]]]:
+    """``(kind, name, лемматизированные слова имени)`` — весь каталог.
 
+    Категории и услуги читаются целиком, по всем салонам: клиентский
+    бот — витрина, салона у него нет, и услуга, которая есть хоть у
+    одного салона, человеку доступна (DRF-1472).
 
-def _load_catalog(
-    tenant_id: uuid.UUID | None,
-) -> list[tuple[str, str, tuple[str, ...]]]:
-    """``(kind, name, лемматизированные слова имени)`` для салона.
-
-    Категории: строки салона ПЛЮС строки без салона (``tenant`` у
-    ``ServiceCategory`` допускает NULL — общая таксономия; чужому салону
-    такая строка не принадлежит).
-
-    Услуги: только строки салона. ``SalonService.tenant`` обязателен,
-    поэтому при неизвестном салоне читать нечего — и мы не читаем.
+    Категории идут первыми не по важности, а чтобы потолок
+    ``MAX_CATALOG_NAMES`` срезал сначала прайсы: общая таксономия
+    ``ServiceCategory`` — десятки строк владельца, ``SalonService`` —
+    тысячи строк зеркала, и терять надо второе.
     """
-    category_scope = Q(tenant__isnull=True)
-    if tenant_id is not None:
-        category_scope |= Q(tenant_id=tenant_id)
-
     rows: list[tuple[str, str, tuple[str, ...]]] = [
         ("category", name, normalize_all(_words(name)))
         for name in ServiceCategory.objects.filter(is_active=True)
-        .filter(category_scope)
         .order_by("name")
         .values_list("name", flat=True)[:MAX_CATALOG_NAMES]
     ]
     remaining = MAX_CATALOG_NAMES - len(rows)
-    if remaining > 0 and tenant_id is not None:
+    if remaining > 0:
         rows += [
             ("service", name, normalize_all(_words(name)))
-            for name in SalonService.objects.filter(
-                is_active=True, tenant_id=tenant_id,
-            )
+            for name in SalonService.objects.filter(is_active=True)
             .order_by("name")
             .values_list("name", flat=True)[:remaining]
         ]
     return rows
 
 
-def _catalog(tenant_id: uuid.UUID | None) -> list[tuple[str, str, tuple[str, ...]]]:
-    """Активные имена каталога салона — категории и услуги.
+def _catalog() -> list[tuple[str, str, tuple[str, ...]]]:
+    """Активные имена каталога — категории и услуги всех салонов.
 
     # Кеш
 
@@ -234,37 +231,30 @@ def _catalog(tenant_id: uuid.UUID | None) -> list[tuple[str, str, tuple[str, ...
     открытии приложения и на каждом ответе сервера, для любого клиента
     с текстовой целью. Пятиминутный кеш и потолок ``MAX_CATALOG_NAMES``
     держат стоимость ограниченной; каталог меняется несравнимо реже.
-    Ключ кеша включает салон — каталоги двух салонов не смешиваются
-    даже в кеше.
+    Ключ один на всех: каталог теперь один на всех.
 
     В кеше лежат уже лемматизированные слова: разбор каталога стоит
     заметно дороже разбора одной короткой фразы, и платить за него на
     каждый запрос незачем.
     """
-    key = _cache_key(tenant_id)
-    cached = cache.get(key)
+    cached = cache.get(_CACHE_KEY)
     if cached is None:
-        cached = _load_catalog(tenant_id)
-        cache.set(key, cached, _CACHE_TTL_SECONDS)
+        cached = _load_catalog()
+        cache.set(_CACHE_KEY, cached, _CACHE_TTL_SECONDS)
     return [(kind, name, tuple(lemmas)) for kind, name, lemmas in cached]
 
 
-def match_named_service(
-    text: str | None,
-    *,
-    tenant_id: uuid.UUID | None,
-) -> NamedService | None:
-    """Названа ли в ``text`` услуга или категория каталога салона.
+def match_named_service(text: str | None) -> NamedService | None:
+    """Названа ли в ``text`` услуга или категория каталога.
 
-    ``tenant_id`` — салон, по каталогу которого судим; ``None`` означает
-    «салон неизвестен», и тогда читается только бессалонная часть
-    каталога (см. ``_load_catalog``). Аргумент обязателен и именованный
-    нарочно: вызвать эту функцию, не подумав про салон, — ровно тот
-    дефект, который чинит DRF-1455.
+    Каталог — весь, по всем салонам (DRF-1472). Салона у этой функции
+    нет и не должно быть: цели спрашивает клиентский бот-витрина, и
+    услуга, которая есть хоть у одного салона, человеку доступна.
 
-    ``None`` в ответе — не названа. Тогда цель остаётся неразрешённой и
-    документ, как и раньше, просит уточнить (``goal_clarification``),
-    сохраняя выход «Найти услугу».
+    ``None`` в ответе — не названа, то есть такого имени нет ни у
+    одного салона. Тогда цель остаётся неразрешённой и документ, как и
+    раньше, просит уточнить (``goal_clarification``), сохраняя выход
+    «Найти услугу».
     """
     if not text:
         return None
@@ -280,7 +270,7 @@ def match_named_service(
 
     best: NamedService | None = None
     best_len = 0
-    for kind, name, needle in _catalog(tenant_id):
+    for kind, name, needle in _catalog():
         size = len(needle)
         if not size or size < best_len:
             continue
