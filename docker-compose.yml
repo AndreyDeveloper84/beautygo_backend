@@ -10,12 +10,14 @@ services:
         # pilot VPS reaches Hub badly — see the comment block at the top
         # of the Dockerfile for the measurements.
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
-        # Forwards GH_DEPLOY_TOKEN from the host env into the build so
-        # `pip install -r requirements.txt` can clone the private
-        # ayla-ai-core repo (DRF-242 post-merge ops fix, 2026-05-07).
-        # Empty / unset on host = Dockerfile skips git config; build
-        # still succeeds for any future requirements.txt that has no
-        # git+https deps.
+        # Forwards GH_DEPLOY_TOKEN from the host env into the build for
+        # the ayla-ai-core clone (DRF-242 post-merge ops fix, 2026-05-07).
+        # It is OPTIONAL: that repo is public (owner's decision
+        # 04.09.2026, docs/OPEN_DECISIONS.md §22), so empty / unset on the
+        # host is the normal case — the Dockerfile skips the git config
+        # and pip clones the pinned SHA anonymously. Kept wired so the
+        # authenticated path revives untouched if the visibility is closed
+        # again (DRF-1466).
         GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
     restart: unless-stopped
     ports:
@@ -65,7 +67,8 @@ services:
       # always built without it and does so successfully today (verified
       # on the pilot 2026-08-31 — dev-celery_worker:latest builds clean).
       # Adding it would change what pip is authenticated as, which is a
-      # separate question from this ticket.
+      # separate question from this ticket. DRF-1466 explains why it is
+      # not needed at all: ayla-ai-core is public and clones anonymously.
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     restart: unless-stopped

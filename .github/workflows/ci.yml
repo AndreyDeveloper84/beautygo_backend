@@ -100,16 +100,35 @@ jobs:
           key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
           restore-keys: ${{ runner.os }}-pip-
 
-      - name: Configure git auth for private dependency
-        # requirements.txt pulls ayla-ai-core from a sibling private repo
-        # (AndreyDeveloper84/ayla-ai-core). The default GITHUB_TOKEN only
-        # has read access to the current repo, so cloning siblings needs
-        # the same deploy token used by the deploy step. URL-rewriting
-        # makes pip's git clone authenticate transparently.
+      - name: Configure git auth for the ayla-ai-core dep (token optional)
+        # requirements.txt pulls ayla-ai-core from a sibling repo
+        # (AndreyDeveloper84/ayla-ai-core) that is PUBLIC — owner's
+        # decision of 04.09.2026, docs/OPEN_DECISIONS.md §22, re-checked
+        # anonymously the same day (`"private": false`). The pinned SHA
+        # therefore fetches with no credential at all; Dependabot PRs
+        # #282-284 went green on this job with an EMPTY token.
+        #
+        # So the rewrite is now CONDITIONAL. It used to run
+        # unconditionally, which with an empty secret wrote
+        # `https://@github.com/` — an empty-userinfo URL — into the global
+        # git config. That happens to work against a public repo, but it
+        # is a rewrite built out of a value the step never looked at, and
+        # against a private repo it degrades into a credential prompt
+        # rather than an honest error. Check the value, then use it.
+        #
+        # The token path is kept for the day the visibility is closed
+        # again (the decision says public "for now"): non-empty secret ->
+        # pip's git clone authenticates transparently. A missing token is
+        # a notice, never a failure — see DRF-1466.
         env:
           GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
         run: |
-          git config --global url."https://${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if [ -n "$GH_DEPLOY_TOKEN" ]; then
+            git config --global url."https://${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"
+            echo "GH_DEPLOY_TOKEN present — ayla-ai-core will be fetched with auth."
+          else
+            echo "::notice::GH_DEPLOY_TOKEN not set — fetching ayla-ai-core anonymously (the repo is public, DRF-1466). Expected on Dependabot runs."
+          fi
 
       - name: Install dependencies
         run: |
