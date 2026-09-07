@@ -65,7 +65,20 @@ INSTALLED_APPS = [
     'analytics',
     'goals',
     'wellness',
+    # Recommendation Resolver — единственный авторитет RecommendationDecision
+    # (OD §53, RECOMMENDATION_RESOLVER_CONTRACT_v1.0). Приложение без моделей:
+    # решение резолвером не сохраняется, персистенция — авторитет домена (§6.1).
+    'recommendation',
 ]
+
+# Порт к доменной правде для резолвера рекомендаций. Путь к ФАБРИКЕ, а не
+# к готовому объекту: источник живёт ровно одно решение, иначе доменная
+# правда кешировалась бы дольше, чем она верна.
+#
+# Резолвер не импортирует домен — домен реализует порт. Ровно это свойство
+# позволит вынести модуль в `ayla-ai-core` после пилота, не переписывая
+# ни одной стадии.
+RECOMMENDATION_CANDIDATE_SOURCE = 'users.recommendation_source.build_candidate_source'
 
 AUTH_USER_MODEL = 'users.User'
 
