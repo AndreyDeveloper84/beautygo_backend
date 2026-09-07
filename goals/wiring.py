@@ -55,8 +55,10 @@ from uuid import UUID
 
 from django.conf import settings
 
+from services.models import GoalOption
+
 from .models import ClientGoal
-from .resolution import resolve_goal_category_ids
+from .resolution import _categories_for_option, resolve_goal_category_ids
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +90,35 @@ def goal_category_ids_for(client) -> tuple[UUID, ...] | None:
         "goal.resolved client_id=%s categories=%d", client.id, len(resolved),
     )
     return tuple(resolved)
+
+
+def goal_category_ids_for_key(goal_key: str | None) -> tuple[UUID, ...] | None:
+    """Категории цели по её ключу, без обращения к клиенту.
+
+    Зачем отдельно от :func:`goal_category_ids_for`: там вход — человек,
+    и функция сама ищет его активную цель. Резолверу рекомендаций нужен
+    другой разрез: цель уже названа в запросе (`NeedSpec.goal_key`), а
+    кто её назвал — сказанное сейчас или сохранённое когда-то — решено
+    выше по стеку. Кто именно спрашивает, доменной правде о связке
+    «цель → категории» безразлично.
+
+    Реализация одна на обе функции: раскрытие вниз до подкатегорий живёт
+    в ``goals.resolution``. Второй копии этого раскрытия быть не должно —
+    владелец курирует связи на КОРНЕВЫХ категориях, а услуги висят на
+    листьях, и разъехавшиеся копии дали бы двум поверхностям разные
+    ответы на один и тот же курируемый факт.
+
+    Флаг ``GOAL_RESOLUTION_ENABLED`` здесь НЕ читается: он про политику
+    «фильтровать ли выдачу по сохранённой цели человека», а не про то,
+    что владелец связал с целью. Курируемое знание остаётся правдой
+    независимо от того, включён ли фильтр.
+    """
+    if not goal_key:
+        return None
+    option = GoalOption.objects.filter(key=goal_key).first()
+    if option is None:
+        return None
+    return tuple(_categories_for_option(option)) or None
 
 
 def _log_unresolved(client) -> None:
