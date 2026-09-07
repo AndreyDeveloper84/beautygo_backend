@@ -80,6 +80,13 @@ INSTALLED_APPS = [
 # ни одной стадии.
 RECOMMENDATION_CANDIDATE_SOURCE = 'users.recommendation_source.build_candidate_source'
 
+# Исключение §10.4 (а): «на пилоте считать каталог VERIFIED». Решение
+# ВЛАДЕЛЬЦА, не реализации, поэтому умолчание — выключено. Включённым
+# оно оставляет след в свидетельстве каждого затронутого кандидата
+# (strength=UNSUBSTANTIATED, source_ref="pilot_override"): разрешённое
+# исключение обязано быть видно, а не растворяться в умолчании.
+RECOMMENDATION_PILOT_MAPPING_OVERRIDE = False
+
 AUTH_USER_MODEL = 'users.User'
 
 REST_FRAMEWORK = {

@@ -83,6 +83,15 @@ def _clear_cache():
 @pytest.fixture(autouse=True)
 def _token(settings):
     settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+    # T6: полки 1 и 2 — проекции решения резолвера, а он не рекомендует
+    # кандидата без VERIFIED-маппинга (§10.1). Шкалы доверия в схеме нет,
+    # поэтому здесь ЯВНО включается исключение §10.4 (а).
+    #
+    # Предмет этого набора — чтение ОБОИХ слоёв каталога, а не политика
+    # допустимости. Без флага он проверял бы не то, ради чего написан:
+    # пустую выдачу вместо совпадения по услуге. Флаг включён здесь и
+    # выключен по умолчанию в base.py — решение остаётся за владельцем.
+    settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
 
 @pytest.fixture
@@ -218,6 +227,11 @@ def _assert_pilot_shape():
 
 
 def _catalog(api, **body) -> dict:
+    # T6: полки 1 и 2 — проекции решения резолвера. Два поля, которых
+    # раньше не требовалось, и оба про честность, а не про формальность:
+    # состояние безопасности приходит от того, кто его знает (§14), а
+    # исключение маппинга — решение владельца (§10.4), включаемое явно.
+    body.setdefault("safety_state", "NORMAL")
     response = api.post(CATALOG_URL, body, format="json")
     assert response.status_code == 200, response.data
     return response.data["data"]
@@ -313,16 +327,23 @@ class TestExplicitGoalFilter:
 
         assert names == {"Ольга К."}, names
 
-    def test_goal_reasoning_text_names_the_match(
+    def test_goal_match_is_named_by_code_not_by_a_sentence(
         self, catalog_api, massage_master,
     ):
-        """`_goal_matches` тоже ходит в легаси — совпадение не называется."""
+        """Совпадение называется КОДОМ, а не строкой (T6, контракт §7).
+
+        Раньше здесь проверялась фраза «Совпадает с твоей целью»: её
+        собирал источник. Теперь источник отдаёт `reason_codes`, а фразу
+        собирает представление — потребитель WHY не придумывает, но и
+        источник за него не пишет.
+        """
         _assert_pilot_shape()
 
         rows = _catalog(catalog_api, goal="массаж")["layer_2_ayla_picks"]
 
         assert len(rows) == 1, rows
-        assert "Совпадает с твоей целью" in rows[0]["reasoning_text"]
+        assert "reasoning_text" not in rows[0]
+        assert any(code.startswith("MATCH_") for code in rows[0]["reason_codes"])
 
     def test_goal_falls_back_to_template_category(
         self, catalog_api, template_master, manicure_master,
