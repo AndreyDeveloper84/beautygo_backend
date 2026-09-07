@@ -70,6 +70,10 @@ def _body(**overrides) -> dict:
         "surface": "MINIAPP_HOME",
         "scope": {"mode": "MARKETPLACE"},
         "need": {"origin": "USER_EXPLICIT", "raw_text": "массаж"},
+        # Состояние безопасности называется явно и всегда: `UNKNOWN`
+        # по §14 fail-closed, то есть равносильно STOP. Умолчание здесь
+        # молча превращало бы забытое поле в пустую выдачу.
+        "safety_state": "NORMAL",
         "tie_break_seed": "conv-http",
         "k": 3,
     }
@@ -104,6 +108,34 @@ class TestSchemaOnBothEnds:
         """
         r = _api().post(URL, _body(surface="TELEPATHY"), format="json")
         assert r.status_code == 400
+
+    def test_missing_safety_state_is_refused_not_silently_emptied(self, customer, bound_source):
+        """Забытое состояние безопасности — 400, а не пустая выдача.
+
+        `UNKNOWN` по §14 fail-closed: множество пусто, стадии не
+        выполняются. Будь у поля умолчание, вызывающий, который его не
+        прислал, получил бы честный по форме и лживый по смыслу ответ
+        «подходящих нет» — притом что искать никто и не начинал.
+        Этот тест написан после того, как ровно так и вышло в CI.
+        """
+        body = _body()
+        del body["safety_state"]
+        r = _api().post(URL, body, format="json")
+        assert r.status_code == 400
+        assert "safety_state" in r.json().get("error", {}).get("details", r.json())
+
+    def test_safety_unknown_yields_an_empty_but_honest_answer(self, customer, bound_source):
+        """А вот ЯВНО названный `UNKNOWN` — законный запрос с пустым ответом.
+
+        Разница между этим тестом и предыдущим и есть вся суть: «мы не
+        знаем, безопасно ли» — это ответ, который кто-то дал; отсутствие
+        поля — вопрос, который никто не задавал.
+        """
+        r = _api().post(URL, _body(safety_state="UNKNOWN"), format="json")
+        assert r.status_code == 200
+        data = r.json()["data"]
+        assert data["ordered"] == []
+        assert all(e["reason_code"] == "ELIG_EXCLUDED_SAFETY" for e in data["excluded"])
 
     def test_response_carries_the_contract_version(self, customer, bound_source):
         r = _api().post(URL, _body(), format="json")

@@ -84,6 +84,7 @@ def test_request_schema_keeps_constraints_three_valued():
         "surface": "BOT_CHAT",
         "scope": {"mode": "MARKETPLACE"},
         "need": {"origin": "USER_EXPLICIT", "raw_text": "массаж"},
+        "safety_state": "NORMAL",
         "price_max": {"kind": "FLEXIBLE"},
     })
     assert serializer.is_valid(), serializer.errors
@@ -98,8 +99,28 @@ def test_request_schema_rejects_unknown_surface():
         "surface": "TELEPATHY",
         "scope": {"mode": "MARKETPLACE"},
         "need": {"origin": "USER_EXPLICIT"},
+        "safety_state": "NORMAL",
     })
     assert not serializer.is_valid()
+    assert "surface" in serializer.errors
+
+
+def test_safety_state_is_required_not_defaulted():
+    """Забытое поле — 400, а не пустая выдача.
+
+    `UNKNOWN` по §14 fail-closed: множество пусто, стадии не выполняются.
+    Умолчание превращало бы забывчивость вызывающего в ответ «подходящих
+    нет» — честный по форме, лживый по смыслу. Так и вышло в CI, пока
+    поле имело умолчание; поэтому теперь оно обязательное.
+    """
+    serializer = ResolveRequestSerializer(data={
+        "request_id": "req-1",
+        "surface": "BOT_CHAT",
+        "scope": {"mode": "MARKETPLACE"},
+        "need": {"origin": "USER_EXPLICIT", "raw_text": "массаж"},
+    })
+    assert not serializer.is_valid()
+    assert "safety_state" in serializer.errors
 
 
 def test_request_schema_has_no_subject_field():

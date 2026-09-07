@@ -92,9 +92,16 @@ class ResolveRequestSerializer(serializers.Serializer):
     price_max = _ConstraintSerializer(required=False)
     time_window = _ConstraintSerializer(required=False)
     provider_ref = _ConstraintSerializer(required=False)
-    safety_state = serializers.ChoiceField(
-        choices=[s.value for s in SafetyState], required=False, default=SafetyState.UNKNOWN.value,
-    )
+    # ОБЯЗАТЕЛЕН, и это не строгость ради строгости. Умолчание `UNKNOWN`
+    # по контракту §14 fail-closed, то есть равносильно `STOP`: множество
+    # пусто, стадии не выполняются. Забывший поле вызывающий получал бы
+    # не ошибку, а **пустую выдачу** — то есть ответ «подходящих нет» на
+    # вопрос, который никто не задавал. Ровно то смешение недоступности
+    # с пустотой, из-за которого DEFECT-C-02 прожил незамеченным.
+    #
+    # Требуя поле, мы превращаем молчаливый пустой экран в 400 с именем
+    # причины: состояние безопасности обязан назвать тот, кто его знает.
+    safety_state = serializers.ChoiceField(choices=[s.value for s in SafetyState])
     tie_break_seed = serializers.CharField(required=False, allow_null=True, default=None)
     k = serializers.IntegerField(required=False, min_value=1, max_value=50, default=3)
 
