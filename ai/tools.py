@@ -25,22 +25,37 @@ SHOW_SPECIALISTS = {
                 "specialist_ids": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "UUIDs of specialists to show, ordered by relevance",
+                    # ПОРЯДОК ЗДЕСЬ НЕ РЕШАЕТСЯ. Раньше стояло «ordered by
+                    # relevance» — то есть модель прямо приглашалась
+                    # упорядочить кандидатов. Порядок кандидатов —
+                    # `CONTROLLED_POLICY` и `LLM_FORBIDDEN` (контракт §2.1,
+                    # §15): его вычисляет тот, кто владеет политикой, и
+                    # обработчик восстанавливает его по контексту, что бы
+                    # модель ни прислала.
+                    "description": (
+                        "UUIDs of specialists to show. Pick WHICH ones are relevant; "
+                        "the display order is restored from the ranked context and is "
+                        "not yours to set."
+                    ),
                     "maxItems": 5,
                 },
-                "match_scores": {
-                    "type": "array",
-                    "items": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "description": "Match score 0-100 per specialist, same order as ids",
-                },
-                "match_reasons": {
-                    "type": "array",
-                    "items": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                    "description": "Per-specialist short reasons (1-3 each)",
-                },
+                # `match_scores` и `match_reasons` УДАЛЕНЫ из схемы.
+                #
+                # Здесь модель просили выдать балл 0-100 и «короткие
+                # причины» на каждого мастера — и то и другое уходило
+                # человеку на экран. Это происхождение свидетельства:
+                # утверждение о мире, порождённое моделью, выдавалось
+                # за основание выбора (`LLM_FORBIDDEN`, контракт §7.3,
+                # решение владельца §53 п.2 «потребитель WHY
+                # не придумывает»).
+                #
+                # Плюс число на экране человеку запрещено отдельно
+                # (канон §8, §35 п.13: никаких процентов и шкал).
+                #
+                # Модель вернётся к отрисовке WHY тогда, когда получит
+                # закрытый набор `reason_codes` от резолвера: перевести
+                # утверждённый код в фразу ей можно, придумать причину —
+                # нет.
                 "explanation": {
                     "type": "string",
                     "description": "Overall explanation why these specialists were picked",

@@ -84,10 +84,13 @@ class SpecialistContext:
                 if c.services_preview
                 else ""
             )
-            score_hint = f" | score={c.score:.2f}" if c.score > 0 else ""
+            # Балла в промпте нет — канон §8. Вторая копия той же
+            # строки, что и в движке: числа ранжирования не являются
+            # публичным семантическим API, а промпт есть вход для того,
+            # кто пишет текст человеку.
             lines.append(
                 f"- {c.id} | {c.display_name} | ★{c.rating} "
-                f"({c.reviews_count} отз.){distance}{services}{score_hint}"
+                f"({c.reviews_count} отз.){distance}{services}"
             )
         return "\n".join(lines)
 

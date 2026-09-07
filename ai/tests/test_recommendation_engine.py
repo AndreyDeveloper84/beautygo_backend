@@ -452,12 +452,19 @@ class TestUnratedSpecialistIsNotCutOff:
         )
         by_id = {s.id: s for s in result.candidates}
         assert by_id[newcomer.id].breakdown.rating == 0.0
-        assert "Высокий рейтинг" not in by_id[newcomer.id].match_reasons
+        # Проверка переехала с `match_reasons` на разбор: T9 закрыл
+        # `match_reasons` — готовые фразы, выведенные из весов формулы,
+        # больше не уезжают человеку как причина (канон §8, EVIDENCE
+        # ORIGIN). Предмет теста от этого не изменился: он про вклад
+        # рейтинга при нуле отзывов, а не про канал доставки.
+        assert "Высокий рейтинг" not in by_id[newcomer.id].breakdown.top_reasons()
         # Положительная сторона на тех же данных: у мастера с отзывами
-        # причина «Высокий рейтинг» есть — значит тест выше проверяет
-        # отсутствие, а не сломанный расчёт причин.
+        # вклад есть — значит тест выше проверяет отсутствие, а не
+        # сломанный расчёт.
         assert by_id[good.id].breakdown.rating > 0.0
-        assert "Высокий рейтинг" in by_id[good.id].match_reasons
+        assert "Высокий рейтинг" in by_id[good.id].breakdown.top_reasons()
+        # И наружу не уходит ни одна из этих фраз.
+        assert by_id[good.id].match_reasons == []
 
     def test_newcomer_survives_prefetch_slice_on_a_full_catalog(self, db):
         """Порог снят — но выборку до скоринга режет ``[: limit * 3]``

@@ -205,8 +205,9 @@ class TestToolCalls:
             "show_specialists",
             {
                 "specialist_ids": [str(specialist_a.id), str(specialist_b.id)],
-                "match_scores": [95, 80],
-                "match_reasons": [["Высокий рейтинг"], ["Близко"]],
+                # `match_scores` / `match_reasons` убраны из схемы
+                # инструмента (T9): балл и причины, порождённые моделью,
+                # человеку не показываются.
                 "explanation": "Топ под запрос",
             },
         )
