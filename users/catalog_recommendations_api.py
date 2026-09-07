@@ -1,74 +1,71 @@
-"""POST /api/v1/internal/me/catalog/recommendations/ — task #99.
+"""POST /api/v1/internal/me/catalog/recommendations/ — поверхность домашнего экрана.
 
-W1 booking flow Phase B unblock. Three-layer catalog recommendations
-per Tau's §10.1 (project_ayla_ranking_philosophy):
+**Эта поверхность больше НЕ ранжирует.** Порядок кандидатов даёт
+Recommendation Resolver — единственный владелец `RecommendationDecision`
+(решение владельца `docs/OPEN_DECISIONS.md` §53, контракт
+`RECOMMENDATION_RESOLVER_CONTRACT_v1.0.md`). Здесь остались только
+границы поиска, проекция решения в полки и форма карточки.
 
-  layer_1_your_places  — specialists in tenants the customer already
-                         has an active CUSTOMER-role TUR with (the
-                         "salons you know" rail in the Mini App).
-  layer_2_ayla_picks   — top-3 specialists NOT in customer's history,
-                         ranked by simple composite score with a
-                         template reasoning_text per item.
-  layer_3_explore      — category-aggregate counts across the
-                         eligible pool ("there are 12 manicure
-                         specialists, 8 massage" — feeds the
-                         "browse by category" UI).
+Что упразднено этой правкой (контракт §16)
+------------------------------------------
+* ``_compute_layer_2_score`` — `rating*10 + 100/(km+1) + 5·available`.
+  Расстояние не срабатывало никогда (фронт шлёт пустое тело), `+5`
+  получали все (`is_available` — предусловие пула), значит это была
+  **сортировка по рейтингу и ничем больше**. Рейтинг — вторичное
+  свидетельство после соответствия нужде (канон §9.1), а на пилоте
+  он вообще не участвует в сортировке (решение владельца §29.4).
+* ``_build_reasoning_text`` — строка для показа, которую собирал
+  источник. Теперь наружу идут `reason_codes` + `evidence`, а фразу
+  собирает представление (§7). Потребитель WHY не придумывает.
+* ``RATING_REASONING_FLOOR = 4.5`` — порог, защищавший от НИЗКОЙ оценки
+  и не защищавший от ОТСУТСТВУЮЩЕЙ. Отсюда «Рейтинг 4.9» при нуле
+  отзывов: литерал из сида, поставленный ради порога чужого движка,
+  вышел человеку как причина выбора мастера. Заменён силой свидетельства
+  (§8.3): при `review_count = 0` рейтинг — `UNSUBSTANTIATED` и в WHY
+  не попадает, но **передаётся** как справочное число.
+* ``order_by("-rating", "id")[:5]`` в полке 1 — лексикографика под
+  отсечением.
 
-Identity bridging: ``IsBotServiceWithVerifiedClient`` (Bearer +
-X-External-User-ID) per memory ``project_identity_bridging_pattern``.
-Mini App calls bot-platform proxy → bot-platform calls this endpoint
-with the resolved bot_user identity; Ayla resolves to a canonical
-``User`` and reads their TUR history backend-side.
+Что осталось и почему это не ранжирование
+-----------------------------------------
+* **Полка 1 «твои салоны»** — не порядок, а **scope**: отдельный вызов
+  резолвера с `tenant_refs` = салоны, где у человека активная связь.
+  Якорь полки — отношения, а не качество.
+* **Полка 2** — тот же вызов с `exclude_tenant_refs` = те же салоны.
+* **Полка 3** — счётчики категорий. Это **агрегат каталога, а не
+  рекомендация**: `catalog_visible ≠ recommendation_eligible` (§10.1).
+  Никаких кандидатов она не упорядочивает и не отсекает по качеству.
 
-Pilot scope discipline:
-- NO LLM-generated reasoning text. Template strings only (founder
-  pilot_scope_discipline).
-- NO availability/slot computation in reasoning (would multiply DB
-  load by the size of the candidate pool). The "available" claim is
-  reduced to the ``is_available + is_booking_enabled`` boolean pair.
-- Minimum eligibility filter only (active specialist + active tenant)
-  — no rating/reviews thresholds in MVP per founder cut "simple
-  eligibility".
-- Goal matching for the request-supplied ``goal`` string is ILIKE on
-  ``service.name`` OR ``category.slug``; semantic match is post-pilot.
+Почему сегодня полки 1 и 2 пусты — и это честно
+-----------------------------------------------
+`recommendation_eligible = (mapping_status == VERIFIED)`, а шкалы доверия
+к маппингу в схеме **нет** (замер 07.09: 206 из 265 услуг связаны
+с шаблоном, признака доверия не существует как поля). Значит S1 не
+пропускает никого, `ordered` пуст, а в `excluded` стоит
+`ELIG_EXCLUDED_NOT_RECOMMENDABLE` — сигнал §10.3
+`BLOCKED(CATALOG_NOT_RECOMMENDABLE)`.
 
-OD-1 (2026-08-29) — сохранённая цель клиента
---------------------------------------------
-Когда запрос НЕ несёт ``goal``, полки 2 и 3 фильтруются категориями
-активной цели клиента (``goals.resolution`` через ``goals.wiring``), за
-флагом ``GOAL_RESOLUTION_ENABLED``. Это знание, курируемое владельцем в
-``GoalOptionCategory``, а не ILIKE по словам.
+Это **состояние**, а не поломка, и снимается оно одним решением
+владельца (OD §40.4 п.1) через политику `mapping_override_enabled`
+(§10.4). Пустой честный ответ допустимее непустого недоказанного —
+и именно поэтому «Рейтинг 4.9» здесь больше не появится.
 
-Фильтр цели идёт по КАНОНИЧЕСКОМУ каталогу (``SpecialistService`` ->
-``SalonService``), потому что легаси ``Service`` на пилоте пуст целиком
-(замер 2026-08-29: 0 строк против 292 канонических связок).
-
-S3-EMPTY (2026-08-30) — остальная машинерия переведена на оба слоя
-------------------------------------------------------------------
-Замер пилота показал, что предупреждение выше было не теорией: полка 3
-(``_build_layer_3``, счёт через ``ServiceCategory.services``) была пуста
-у каждого клиента, а любой явный непустой ``goal`` (ILIKE по
-``services__``) отдавал пустую полку 2. Обе поверхности теперь читают
-ОБА слоя каталога через ``services.catalog_reads`` — легаси ``Service``
-не выключен, к нему добавлен канонический слой. Разрешение категории
-там же: своя категория салона побеждает, шаблон — запасной путь.
-
-Приоритет: сказанное сейчас старше выбранного когда-то. Явный ``goal``
-в запросе полностью вытесняет сохранённую цель — контракт параметра не
-меняется. Полка 1 остаётся goal-независимой по прежней причине: её
-якорь — отношения клиента с салоном, а не цель.
-
-Разрешить цель нельзя (нет цели / нет связей / свободный текст без
-точного совпадения) → фильтр не применяется, полки прежние. На пилоте
-``ClientGoal`` = 0, поэтому это и есть сегодняшнее поведение для всех.
+Состояние безопасности
+----------------------
+Резолвер требует `safety_state`. У этой поверхности своего источника
+безопасности нет: разговора здесь не ведётся, Safety Engine ничего про
+этот запрос не говорил. Поэтому состояние приходит **от вызывающего**,
+а его отсутствие — `UNKNOWN`, то есть fail-closed по §14. Это логируется
+отдельно (`catalog.recommendations.safety_state_missing`): «мы не знаем,
+безопасно ли» не должно молча выглядеть как «подходящих нет».
 """
 from __future__ import annotations
 
 import logging
-import math
-from decimal import Decimal
+import uuid
 from typing import Any
 
+from django.conf import settings
 from django.db.models import QuerySet
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers
@@ -77,30 +74,35 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from goals.wiring import goal_category_ids_for
-from services.catalog_reads import (
-    catalog_services_for,
-    catalog_services_prefetch,
-    category_service_counts,
-    specialist_service_text_q,
+from recommendation.api import (
+    NeedOrigin,
+    StagePolicy,
+    NeedSpec,
+    RecommendationDecision,
+    RecommendationRequest,
+    SafetyState,
+    Scope,
+    ScopeMode,
+    Surface,
+    resolve,
 )
+from services.catalog_reads import category_service_counts
 from services.models import ServiceCategory
 from users.models import SpecialistProfile, TenantUserRelationship
 from users.permissions import IsBotServiceWithVerifiedClient
+from users.recommendation_source import SpecialistCandidateSource
 from users.response import success_response
 
 
 logger = logging.getLogger(__name__)
 
 
-# Pool caps per layer. Tuned conservatively — Mini App card list
-# performance budget is ~10 items per rail before scroll feels slow.
+# Сколько ПОКАЗЫВАЕТСЯ на полке. Не сколько считать: резолвер отдаёт всё
+# допустимое множество, срез делает поверхность — и делает его ПОСЛЕ
+# ротации, иначе «Показать ещё» нечего показывать (§12.2).
 LAYER_1_LIMIT = 5
 LAYER_2_LIMIT = 3
 LAYER_3_CATEGORY_LIMIT = 10
-
-# Rating threshold for the "Рейтинг X.Y" reasoning fact. Below this we
-# omit it to avoid surfacing weak signals as endorsements.
-RATING_REASONING_FLOOR = Decimal("4.5")
 
 
 # ---------------------------------------------------------------------------
@@ -109,36 +111,35 @@ RATING_REASONING_FLOOR = Decimal("4.5")
 
 
 class RecommendationsRequestSerializer(serializers.Serializer):
-    lat = serializers.FloatField(
-        required=False,
-        help_text="Customer's latitude. When provided alongside lon, "
-                  "distance feeds the layer_2 ranking and reasoning_text.",
-    )
+    lat = serializers.FloatField(required=False)
     lon = serializers.FloatField(required=False)
     goal = serializers.CharField(
         required=False, max_length=64, allow_blank=True,
-        help_text="Free-text goal like 'маникюр' or 'massage'. "
-                  "ILIKE-matched against service.name and "
-                  "category.slug. Optional.",
+        help_text="Что человек ищет сейчас. Уходит в NeedSpec.raw_text.",
+    )
+    safety_state = serializers.ChoiceField(
+        choices=[s.value for s in SafetyState], required=False,
+        help_text=(
+            "Состояние безопасности от того, кто его знает. Отсутствие — "
+            "UNKNOWN, то есть fail-closed по §14: выдача пуста."
+        ),
     )
 
 
 class _SpecialistCardSerializer(serializers.Serializer):
+    """Карточка. Числа здесь — справочные, причиной является только код."""
+
     id = serializers.UUIDField()
     display_name = serializers.CharField()
     avatar_url = serializers.CharField(allow_null=True)
-    rating = serializers.DecimalField(
-        max_digits=2, decimal_places=1, allow_null=True,
-    )
+    rating = serializers.DecimalField(max_digits=2, decimal_places=1, allow_null=True)
     reviews_count = serializers.IntegerField()
-    distance_km = serializers.FloatField(allow_null=True)
     tenant_id = serializers.UUIDField()
     tenant_slug = serializers.CharField()
     tenant_name = serializers.CharField()
-
-
-class _Layer2ItemSerializer(_SpecialistCardSerializer):
-    reasoning_text = serializers.CharField()
+    tier = serializers.IntegerField()
+    reason_codes = serializers.ListField(child=serializers.CharField())
+    evidence = serializers.ListField(child=serializers.DictField())
 
 
 class _Layer3CategorySerializer(serializers.Serializer):
@@ -148,308 +149,129 @@ class _Layer3CategorySerializer(serializers.Serializer):
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Проекция решения в полку
 # ---------------------------------------------------------------------------
 
 
-def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance between two lat/lon points in km."""
-    earth_km = 6371.0088
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(p1) * math.cos(p2) * math.sin(dlon / 2) ** 2
-    )
-    return 2 * earth_km * math.asin(math.sqrt(a))
-
-
-def _specialist_distance_km(
-    specialist: SpecialistProfile,
-    *, lat: float | None, lon: float | None,
-) -> float | None:
-    if (
-        lat is None or lon is None
-        or specialist.location_lat is None
-        or specialist.location_lng is None
-    ):
-        return None
-    return _haversine(
-        float(lat), float(lon),
-        float(specialist.location_lat), float(specialist.location_lng),
-    )
-
-
-def _build_card(
-    specialist: SpecialistProfile,
-    *, lat: float | None, lon: float | None,
-) -> dict[str, Any]:
-    """Common card payload — keeps Layer 1 / 2 / Layer 1-without-reasoning
-    rails consistent."""
-    return {
-        "id": str(specialist.id),
-        "display_name": specialist.display_name,
-        "avatar_url": specialist.avatar.url if specialist.avatar else None,
-        "rating": specialist.rating,
-        "reviews_count": specialist.reviews_count,
-        "distance_km": _specialist_distance_km(
-            specialist, lat=lat, lon=lon,
+def _resolve_layer(
+    *,
+    request_id: str,
+    subject_ref: str,
+    scope: Scope,
+    need: NeedSpec,
+    safety_state: SafetyState,
+    seed: str | None,
+    k: int,
+) -> RecommendationDecision:
+    """Один вызов границы. Порядок — его, границы — наши."""
+    return resolve(
+        RecommendationRequest(
+            request_id=request_id,
+            subject_ref=subject_ref,
+            surface=Surface.MINIAPP_HOME,
+            scope=scope,
+            need=need,
+            safety_state=safety_state,
+            tie_break_seed=seed,
+            k=k,
         ),
-        "tenant_id": str(specialist.tenant_id),
-        "tenant_slug": specialist.tenant.slug,
-        "tenant_name": specialist.tenant.name,
+        source=SpecialistCandidateSource(),
+        policy=_stage_policy(),
+    )
+
+
+def _stage_policy() -> StagePolicy:
+    """Политика стадий из настроек. Единственная ручка — исключение §10.4.
+
+    ``RECOMMENDATION_PILOT_MAPPING_OVERRIDE`` реализует ответ владельца
+    (а) «на пилоте считать каталог VERIFIED». По умолчанию ВЫКЛЮЧЕНО:
+    ответа нет, а включить его самим значило бы ответить за владельца.
+
+    Когда включено, каждый затронутый кандидат получает свидетельство
+    ``strength=UNSUBSTANTIATED, source_ref="pilot_override"`` — разрешённое
+    исключение обязано быть видно в свидетельстве, а не растворяться
+    в умолчании. Иначе через месяц никто не отличит «проверено» от
+    «разрешено на время пилота».
+    """
+    return StagePolicy(
+        mapping_override_enabled=bool(
+            getattr(settings, "RECOMMENDATION_PILOT_MAPPING_OVERRIDE", False)
+        ),
+    )
+
+
+def _project(decision: RecommendationDecision, *, limit: int) -> list[dict[str, Any]]:
+    """Разложить решение в карточки. Срез — ПОСЛЕ ротации, не в SQL.
+
+    Порядок карточек — порядок решения. Поверхность его не меняет: ей
+    разрешено показать первые k, но не переставить (§2.1 C1).
+    """
+    shown = decision.ordered[:limit]
+    if not shown:
+        return []
+
+    profiles = {
+        profile.id: profile
+        for profile in (
+            SpecialistProfile.objects
+            .filter(id__in=[c.candidate_ref.id for c in shown])
+            .select_related("tenant")
+        )
+    }
+    cards = []
+    for candidate in shown:
+        profile = profiles.get(candidate.candidate_ref.id)
+        if profile is None:
+            # Кандидат исчез между решением и отрисовкой: домен изменился.
+            # Пропускаем молча — но НЕ подставляем другого: подмена
+            # запрещена (§14).
+            continue
+        cards.append({
+            "id": str(profile.id),
+            "display_name": profile.display_name,
+            "avatar_url": profile.avatar.url if profile.avatar else None,
+            "rating": profile.rating,
+            "reviews_count": profile.reviews_count,
+            "tenant_id": str(profile.tenant_id),
+            "tenant_slug": profile.tenant.slug,
+            "tenant_name": profile.tenant.name,
+            "tier": candidate.tier,
+            "reason_codes": [code.value for code in candidate.reason_codes],
+            "evidence": [_evidence_payload(item) for item in candidate.evidence],
+        })
+    return cards
+
+
+def _evidence_payload(item) -> dict[str, Any]:
+    """Свидетельство наружу: значение ВМЕСТЕ с силой.
+
+    Сила — то, чего не было в старой форме. Без неё потребитель получал
+    голое число и решал сам, причина это или украшение; решил неверно,
+    и человек прочитал «Рейтинг 4.9» при нуле отзывов.
+    """
+    value = item.value
+    if hasattr(value, "rating") and hasattr(value, "review_count"):
+        value = {"rating": str(value.rating), "review_count": value.review_count}
+    elif hasattr(value, "value"):
+        value = value.value
+    return {
+        "kind": item.kind.value,
+        "strength": item.strength.value,
+        "origin": item.origin.value,
+        "value": value,
+        "source_ref": item.source_ref,
     }
 
 
-def _compute_layer_2_score(
-    specialist: SpecialistProfile,
-    *, lat: float | None, lon: float | None,
-) -> float:
-    """Composite score for Layer 2 ranking. Higher = better.
+def _build_layer_3(specialist_ids: list) -> dict[str, Any]:
+    """Счётчики категорий по видимому каталогу. НЕ рекомендация.
 
-    Three additive components:
-    - Rating: 0..50 (raw rating 0-5 multiplied by 10)
-    - Proximity: 100 / (km + 1); when no lat/lon, 0
-    - Availability boost: +5 when is_available
-
-    Deliberately simple. Tau §10.3 says priority order is goal >
-    distance > availability > rating; we tilt the *score* toward
-    distance + rating because goal match is a boolean filter applied
-    upstream (in goal-mode the pool is already goal-matching), not a
-    score signal here.
+    `catalog_visible ≠ recommendation_eligible` (§10.1): полка отвечает
+    на вопрос «что вообще есть», а не «что тебе подходит». Поэтому она
+    считается по пулу каталога и живёт даже тогда, когда рекомендовать
+    нельзя никого.
     """
-    score = 0.0
-    if specialist.rating is not None:
-        score += float(specialist.rating) * 10.0
-    distance = _specialist_distance_km(specialist, lat=lat, lon=lon)
-    if distance is not None:
-        score += 100.0 / (distance + 1.0)
-    if specialist.is_available:
-        score += 5.0
-    return score
-
-
-def _goal_matches(specialist: SpecialistProfile, goal: str) -> bool:
-    """Cheap goal-match check used by reasoning_text generation.
-
-    The candidate pool is already filtered by goal upstream when
-    goal is non-empty; this helper exists so the reasoning_text
-    builder can call it without re-filtering, and to handle the
-    case where the upstream filter is OR-shape (service name OR
-    category slug) — we still want to know if the match was on the
-    name (more meaningful) vs slug (more abstract).
-
-    Ходит по ОБОИМ слоям каталога (``services.catalog_reads``). Читая
-    только легаси ``services``, эта проверка на пилоте всегда возвращала
-    False — и мастер, отобранный ИМЕННО по совпадению с целью, получал
-    reasoning_text «Принимает записи» вместо «Совпадает с твоей целью».
-    """
-    if not goal:
-        return False
-    needle = goal.lower()
-    for service in catalog_services_for(specialist):
-        if needle in service.name.lower():
-            return True
-        if needle in (service.category_slug or "").lower():
-            return True
-        if needle in (service.category_name or "").lower():
-            return True
-    return False
-
-
-def _build_reasoning_text(
-    specialist: SpecialistProfile,
-    *, lat: float | None, lon: float | None, goal: str,
-) -> str:
-    """Template-driven reasoning string for Layer 2 items.
-
-    Priority order per Tau §10.3 — emit at most ONE fact for each
-    tier in this order, joined by ", ". A combined output reads like:
-    "Совпадает с твоей целью, 1.2 км от вас, рейтинг 4.9".
-
-    The empty-fallback case ('Принимает записи') is the truthful
-    minimum claim — we never invent availability nor distance when
-    the inputs aren't there.
-    """
-    parts: list[str] = []
-    if goal and _goal_matches(specialist, goal):
-        parts.append("Совпадает с твоей целью")
-    distance = _specialist_distance_km(specialist, lat=lat, lon=lon)
-    if distance is not None:
-        parts.append(f"{distance:.1f} км от вас")
-    if (
-        specialist.rating is not None
-        and specialist.rating >= RATING_REASONING_FLOOR
-    ):
-        # Strip trailing zeros so a 4.5 doesn't render as "4.50" —
-        # DecimalField(max_digits=2, decimal_places=1) keeps one
-        # decimal place internally; normalize() trims the float-style
-        # zero for display.
-        rating_str = format(specialist.rating, "g")
-        parts.append(f"Рейтинг {rating_str}")
-    if not parts:
-        # Fallback when none of the higher-tier facts apply.
-        # is_available is already a pool prerequisite — the claim
-        # is truthful: this specialist is open for bookings.
-        return "Принимает записи"
-    return ", ".join(parts)
-
-
-# ---------------------------------------------------------------------------
-# Layer builders
-# ---------------------------------------------------------------------------
-
-
-def _base_pool() -> QuerySet:
-    """Goal-independent eligibility pool — Tau §10.2 'simple eligibility'.
-
-    Just "active specialist in an active tenant taking bookings".
-    No quality scoring, no geographic radius, no rating threshold.
-
-    Layer 1 ('your salons') uses THIS pool so that typing a goal
-    doesn't hide a customer's known salon when that salon doesn't
-    happen to offer the goal — identity/relationship anchors layer 1,
-    not goal. Layers 2 + 3 apply the goal filter via
-    ``_apply_goal_filter``.
-    """
-    return (
-        SpecialistProfile.objects
-        .filter(
-            is_available=True,
-            is_booking_enabled=True,
-            status=SpecialistProfile.ProfileStatus.ACTIVE,
-        )
-        # DRF-1430. «in an active tenant» из докстринга выше до сих пор
-        # было обещанием, которого код не исполнял: фильтра по салону
-        # здесь не было вовсе, а ``select_related("tenant")`` служит
-        # только выводу ``tenant_slug``/``tenant_name``. Отключённый
-        # салон попадал в «ваши места» наравне с живыми.
-        #
-        # Здесь INNER JOIN — сознательно, и это ОТЛИЧИЕ от
-        # ``RecommendationEngine._fetch_candidates``, где стоит
-        # ``Q(tenant__isnull=True) | Q(...)``. Причина в том, что эта
-        # поверхность физически не умеет отдать мастера без салона:
-        # ``_build_card`` разыменовывает ``specialist.tenant.slug`` и
-        # ``.name`` без проверки, так что профиль с ``tenant=NULL``
-        # ронял ВЕСЬ эндпоинт в 500 (AttributeError: 'NoneType' object
-        # has no attribute 'slug'), а не просто не показывался.
-        #
-        # То есть фильтр не прячет то, что раньше было видно: он
-        # превращает жёсткое падение в корректное отсутствие. Движок
-        # подбора тенант не разыменовывает вовсе, поэтому там мастера
-        # без салона остаются в выдаче — разная форма условия отражает
-        # разные возможности поверхностей, а не разнобой.
-        .filter(tenant__is_active=True)
-        .select_related("tenant")
-        .prefetch_related(*catalog_services_prefetch())
-    )
-
-
-def _apply_goal_filter(qs: QuerySet, goal: str) -> QuerySet:
-    """Apply the goal ILIKE filter to a base pool. No-op when goal=''.
-
-    ILIKE on service name OR category slug/name — по ОБОИМ слоям
-    каталога (``services.catalog_reads.specialist_service_text_q``).
-    Читая только легаси ``services``, этот фильтр на пилоте отдавал
-    пустую полку 2 на ЛЮБУЮ непустую строку goal. Post-pilot:
-    tag-based or semantic match.
-    """
-    if not goal:
-        return qs
-    return qs.filter(specialist_service_text_q(goal)).distinct()
-
-
-def _apply_goal_category_filter(qs: QuerySet, category_ids) -> QuerySet:
-    """Фильтр по разрешённым категориям цели (OD-1). No-op при ``None``.
-
-    Две вещи отличают его от ``_apply_goal_filter`` выше:
-
-    * ни одного ILIKE — категории пришли из курируемой владельцем
-      таблицы ``GoalOptionCategory`` через ``goals.resolution``, это
-      знание, а не догадка о словах;
-    * ходит по КАНОНИЧЕСКОМУ каталогу (``SpecialistService`` ->
-      ``SalonService``), а не по легаси ``Service``, который на пилоте
-      пуст целиком (замер 2026-08-29: 0 строк против 292 канонических
-      связок).
-
-    Предикат общий с движком рекомендаций
-    (``RecommendationEngine._goal_category_predicate``), чтобы две
-    поверхности не разъехались в трактовке фолбэка на шаблон.
-    """
-    if not category_ids:
-        return qs
-    from ai.application.services.recommendation_engine import RecommendationEngine
-
-    return qs.filter(
-        RecommendationEngine._goal_category_predicate(tuple(category_ids)),
-        specialist_services__is_active=True,
-        specialist_services__salon_service__is_active=True,
-    ).distinct()
-
-
-def _build_layer_1(
-    base_pool: QuerySet, *, history_tenant_ids: list,
-    lat: float | None, lon: float | None,
-) -> list[dict]:
-    """Layer 1 — customer's known salons, ordered by rating desc.
-
-    Takes the GOAL-INDEPENDENT base pool (see _base_pool docstring).
-    Order: rating desc, then id (stable across replicas — Postgres
-    otherwise returns LIMIT 5 in arbitrary insertion order).
-    """
-    if not history_tenant_ids:
-        return []
-    rows = list(
-        base_pool
-        .filter(tenant_id__in=history_tenant_ids)
-        .order_by("-rating", "id")[:LAYER_1_LIMIT]
-    )
-    return [_build_card(r, lat=lat, lon=lon) for r in rows]
-
-
-def _build_layer_2(
-    pool: QuerySet, *, history_tenant_ids: list,
-    lat: float | None, lon: float | None, goal: str,
-) -> list[dict]:
-    rows = list(pool.exclude(tenant_id__in=history_tenant_ids))
-    # Score + rank. Python-side because the score formula isn't a
-    # cheap SQL expression (1 / (distance + 1) for variable distance).
-    scored = [
-        (r, _compute_layer_2_score(r, lat=lat, lon=lon)) for r in rows
-    ]
-    # Sort by descending score; ties broken by specialist id for
-    # deterministic responses across replicas.
-    scored.sort(key=lambda pair: (-pair[1], str(pair[0].id)))
-    top_n = scored[:LAYER_2_LIMIT]
-    out = []
-    for specialist, _score in top_n:
-        item = _build_card(specialist, lat=lat, lon=lon)
-        item["reasoning_text"] = _build_reasoning_text(
-            specialist, lat=lat, lon=lon, goal=goal,
-        )
-        out.append(item)
-    return out
-
-
-def _build_layer_3(pool: QuerySet) -> dict[str, Any]:
-    """Category counts across the eligible pool — feeds the Mini App's
-    "browse by category" rail.
-
-    Counts active services within the pool's eligible specialists across
-    BOTH catalog layers (``services.catalog_reads``). Раньше считалось
-    через ``ServiceCategory.services`` — обратную связь легаси
-    ``Service``, — и на пилоте полка была пуста у каждого клиента.
-
-    Категория услуги разрешается с запасным путём через шаблон: своя
-    категория салона побеждает, шаблон читается только когда своей нет
-    (см. докстринг ``services.catalog_reads``).
-
-    Sorted by count descending, then slug for a stable order across
-    replicas. Top-N.
-    """
-    eligible_ids = list(pool.values_list("id", flat=True))
-    counts = category_service_counts(specialist_ids=eligible_ids)
+    counts = category_service_counts(specialist_ids=specialist_ids)
     if not counts:
         return {"categories": []}
 
@@ -466,6 +288,16 @@ def _build_layer_3(pool: QuerySet) -> dict[str, Any]:
     return {"categories": rows[:LAYER_3_CATEGORY_LIMIT]}
 
 
+def _catalog_pool() -> QuerySet:
+    """Видимый каталог — для полки 3. Допустимость домена, не политика."""
+    return SpecialistProfile.objects.filter(
+        is_available=True,
+        is_booking_enabled=True,
+        status=SpecialistProfile.ProfileStatus.ACTIVE,
+        tenant__is_active=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # View
 # ---------------------------------------------------------------------------
@@ -473,7 +305,7 @@ def _build_layer_3(pool: QuerySet) -> dict[str, Any]:
 
 class CatalogRecommendationsView(APIView):
     """POST /api/v1/internal/me/catalog/recommendations/"""
-    # Bot service auth — same pattern as #97 Records endpoints.
+
     authentication_classes: list = []
     permission_classes = [IsBotServiceWithVerifiedClient]
     serializer_class = RecommendationsRequestSerializer
@@ -489,7 +321,7 @@ class CatalogRecommendationsView(APIView):
                         name="CatalogRecommendationsData",
                         fields={
                             "layer_1_your_places": _SpecialistCardSerializer(many=True),
-                            "layer_2_ayla_picks": _Layer2ItemSerializer(many=True),
+                            "layer_2_ayla_picks": _SpecialistCardSerializer(many=True),
                             "layer_3_explore": inline_serializer(
                                 name="Layer3Explore",
                                 fields={
@@ -507,13 +339,20 @@ class CatalogRecommendationsView(APIView):
     def post(self, request: Request) -> Response:
         serializer = RecommendationsRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        lat = serializer.validated_data.get("lat")
-        lon = serializer.validated_data.get("lon")
         goal = (serializer.validated_data.get("goal") or "").strip()
 
-        # Customer's history tenants: TUR rows where the resolved User
-        # has an active CUSTOMER role. ADMIN/STAFF rows are
-        # operational, not "places you've been booked at".
+        raw_safety = serializer.validated_data.get("safety_state")
+        if raw_safety is None:
+            # Отсутствие состояния безопасности — не «всё в порядке».
+            # Громко, потому что молчание здесь неотличимо от пустой
+            # выдачи, а цена этих двух состояний противоположна.
+            logger.warning(
+                "catalog.recommendations.safety_state_missing user_id=%s — "
+                "fail-closed по §14: выдача будет пуста",
+                request.user.id,
+            )
+        safety_state = SafetyState(raw_safety) if raw_safety else SafetyState.UNKNOWN
+
         history_tenant_ids = list(
             TenantUserRelationship.objects
             .filter(
@@ -524,41 +363,53 @@ class CatalogRecommendationsView(APIView):
             .values_list("tenant_id", flat=True)
         )
 
-        # One base pool query, two derived views:
-        # - layer 1 uses the GOAL-INDEPENDENT base (your salons stay
-        #   visible regardless of what the customer is searching for);
-        # - layers 2 + 3 apply the goal filter (the picks + category
-        #   counts should react to the search).
-        # OD-1: сохранённая цель говорит только когда клиент молчит.
-        # Явный `goal` в запросе — это сказанное сейчас, и оно старше
-        # выбранной когда-то цели: набравший «маникюр» получает
-        # маникюр, даже если его цель — «расслабиться». Контракт
-        # параметра `goal` при этом не меняется вовсе.
-        goal_category_ids = (
-            goal_category_ids_for(request.user) if not goal else None
+        # Курируемая цель говорит, только когда человек молчит: сказанное
+        # сейчас старше выбранного когда-то (OD-1). Ключ цели уходит
+        # в нужду, а связку «цель → категории» разворачивает домен —
+        # там же, где она курируется.
+        goal_key = None if goal else _saved_goal_key(request.user)
+        need = NeedSpec(
+            origin=NeedOrigin.USER_EXPLICIT if goal else NeedOrigin.GOAL,
+            goal_key=goal_key,
+            raw_text=goal or None,
+        )
+        seed = f"miniapp-home:{request.user.id}"
+        request_id = str(uuid.uuid4())
+
+        layer_1_decision = _resolve_layer(
+            request_id=request_id,
+            subject_ref=str(request.user.id),
+            scope=Scope(ScopeMode.MARKETPLACE, tenant_refs=tuple(history_tenant_ids)),
+            need=need,
+            safety_state=safety_state,
+            seed=seed,
+            k=LAYER_1_LIMIT,
+        ) if history_tenant_ids else None
+
+        layer_2_decision = _resolve_layer(
+            request_id=request_id,
+            subject_ref=str(request.user.id),
+            scope=Scope(
+                ScopeMode.MARKETPLACE,
+                exclude_tenant_refs=tuple(history_tenant_ids),
+            ),
+            need=need,
+            safety_state=safety_state,
+            seed=seed,
+            k=LAYER_2_LIMIT,
         )
 
-        base_pool = _base_pool()
-        scoped_pool = _apply_goal_category_filter(
-            _apply_goal_filter(base_pool, goal), goal_category_ids,
-        )
-
-        layer_1 = _build_layer_1(
-            base_pool, history_tenant_ids=history_tenant_ids,
-            lat=lat, lon=lon,
-        )
-        layer_2 = _build_layer_2(
-            scoped_pool, history_tenant_ids=history_tenant_ids,
-            lat=lat, lon=lon, goal=goal,
-        )
-        layer_3 = _build_layer_3(scoped_pool)
+        layer_1 = _project(layer_1_decision, limit=LAYER_1_LIMIT) if layer_1_decision else []
+        layer_2 = _project(layer_2_decision, limit=LAYER_2_LIMIT)
+        layer_3 = _build_layer_3(list(_catalog_pool().values_list("id", flat=True)))
 
         logger.info(
-            "catalog.recommendations user_id=%s goal=%r lat=%s lon=%s "
-            "l1=%d l2=%d l3_cats=%d",
-            request.user.id, goal, lat, lon,
-            len(layer_1), len(layer_2),
-            len(layer_3.get("categories", [])),
+            "catalog.recommendations user_id=%s goal=%r goal_key=%r safety=%s "
+            "l1=%d l2=%d l3_cats=%d excluded=%d decision_codes=%s",
+            request.user.id, goal, goal_key, safety_state.value,
+            len(layer_1), len(layer_2), len(layer_3.get("categories", [])),
+            len(layer_2_decision.excluded),
+            [code.value for code in layer_2_decision.reason_codes],
         )
 
         return success_response({
@@ -566,3 +417,21 @@ class CatalogRecommendationsView(APIView):
             "layer_2_ayla_picks": layer_2,
             "layer_3_explore": layer_3,
         })
+
+
+def _saved_goal_key(client) -> str | None:
+    """Ключ сохранённой цели человека, если фильтр цели включён.
+
+    Через ``goals.wiring``: флаг ``GOAL_RESOLUTION_ENABLED`` читается
+    ровно в одном месте репозитория, и это место — не здесь.
+    """
+    from goals.models import ClientGoal
+
+    if goal_category_ids_for(client) is None:
+        return None
+    goal = (
+        ClientGoal.objects.filter(client=client, is_active=True)
+        .order_by("-selected_at")
+        .first()
+    )
+    return goal.goal_key if goal and goal.goal_key else None
