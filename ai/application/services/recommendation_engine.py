@@ -162,8 +162,13 @@ class ScoreBreakdown:
         )
 
     def top_reasons(self) -> list[str]:
-        """Human-readable top contributors. Caller can show 1-3 reasons
-        per specialist in UI."""
+        """Крупнейшие вкладчики в балл. **Диагностика, не WHY.**
+
+        Раньше эти строки уходили человеку как причина выбора. Причина,
+        выведенная из веса формулы, — это пересказ балла, а балл наружу
+        не идёт (канон §8). Метод оставлен для отладки и тестов веса;
+        в `match_reasons` он больше не попадает.
+        """
         items = [
             ("Высокий рейтинг", self.rating * WEIGHT_RATING),
             ("Близко", self.distance * WEIGHT_DISTANCE),
@@ -198,7 +203,20 @@ class RecommendationResult:
         return {c.id for c in self.candidates}
 
     def to_prompt_summary(self) -> str:
-        """Compact one-line-per-specialist summary for LLM system prompt."""
+        """Строка кандидатов для системного промпта. **Без балла.**
+
+        Отсюда убрано `score={c.score:.2f}`. Канон §8: внутренние числа
+        ранжирования не являются публичным семантическим API, а промпт —
+        это вход для того, кто пишет текст человеку. Балл в промпте
+        означал, что модель видит число и вольна его пересказать —
+        и она его пересказывала, вместе с «причинами», которые сама же
+        и сочиняла (C-06).
+
+        Рейтинг и число отзывов остались и стоят РЯДОМ — это
+        единственное место во всей системе, где они шли парой ещё
+        до границы. Пара честнее одинокой оценки: «★4.9 (0 отз.)»
+        нельзя прочитать как «проверенное качество».
+        """
         if not self.candidates:
             return "(нет доступных мастеров под фильтр)"
         lines = []
@@ -213,8 +231,7 @@ class RecommendationResult:
             )
             lines.append(
                 f"- {c.id} | {c.display_name} | ★{c.rating} "
-                f"({c.reviews_count} отз.){distance}{services} | "
-                f"score={c.score:.2f}"
+                f"({c.reviews_count} отз.){distance}{services}"
             )
         return "\n".join(lines)
 
@@ -659,7 +676,17 @@ class RecommendationEngine:
             services_preview=services,
             score=breakdown.composite,
             breakdown=breakdown,
-            match_reasons=breakdown.top_reasons(),
+            # `top_reasons()` больше НЕ уезжает наружу как причина.
+            #
+            # Это были готовые русские фразы «Высокий рейтинг», «Близко»,
+            # собранные из весов формулы: обоснование, выведенное из
+            # балла, который человеку показывать нельзя (канон §8), и
+            # выданное за причину выбора. Разбор остаётся во внутреннем
+            # `breakdown` для диагностики; человеку он не адресован.
+            #
+            # Настоящий WHY придёт кодами от резолвера. Пока их нет,
+            # честнее пусто, чем фраза, выведенная из веса.
+            match_reasons=[],
         )
 
 
