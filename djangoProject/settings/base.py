@@ -65,6 +65,10 @@ INSTALLED_APPS = [
     'analytics',
     'goals',
     'wellness',
+    # Recommendation Resolver — единственный авторитет RecommendationDecision
+    # (OD §53, RECOMMENDATION_RESOLVER_CONTRACT_v1.0). Приложение без моделей:
+    # решение резолвером не сохраняется, персистенция — авторитет домена (§6.1).
+    'recommendation',
 ]
 
 AUTH_USER_MODEL = 'users.User'
