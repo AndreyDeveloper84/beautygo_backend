@@ -262,8 +262,20 @@ class SpecialistCandidateSource:
 
     @staticmethod
     def _rating(specialist: SpecialistProfile) -> RatingValue | None:
-        """Оценка ВМЕСТЕ с числом отзывов — порознь они не ходят (§8.4 E2)."""
-        if specialist.rating is None:
+        """Оценка ВМЕСТЕ с числом отзывов — порознь они не ходят (§8.4 E2).
+
+        **Ноль — это отсутствие данных, а не низкая оценка** (контракт §3.5,
+        решение владельца §29.4). Поле в схеме `NOT NULL` с умолчанием
+        `0.0`, то есть «оценки нет» и «оценка ноль» физически неотличимы
+        на уровне столбца — и соседний репозиторий уже закрепил ту же
+        трактовку словами: «0.00 = нет данных» (DRF-1535).
+
+        Разница не косметическая. Пропусти мы её — мастер без единой
+        оценки получил бы свидетельство `UNSUBSTANTIATED` («оценка есть,
+        но не подтверждена») вместо `UNKNOWN` («оценки нет»), то есть мы
+        бы сообщили о нём то, чего никто не измерял.
+        """
+        if specialist.rating is None or Decimal(specialist.rating) == 0:
             return None
         return RatingValue(Decimal(specialist.rating), specialist.reviews_count or 0)
 

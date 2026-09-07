@@ -40,16 +40,29 @@ def category(db):
 
 
 def _specialist(tenant, *, suffix: str, name: str, rating=None, reviews=0) -> SpecialistProfile:
+    """Мастер с профилем.
+
+    Профиль НЕ создаётся здесь: его заводит сигнал `post_save` на
+    `User(role="specialist")`. Создать второй — нарушить уникальность
+    `user_id`; поэтому найденный обновляется.
+
+    `rating=None` означает «оценки нет», и в базе это **ноль**: столбец
+    `NOT NULL` с умолчанием `0.0`. Ноль и отсутствие в схеме неотличимы —
+    ровно поэтому адаптер трактует ноль как отсутствие данных (§29.4).
+    """
     user = User.objects.create_user(
         username=f"src-{suffix}", password="x", role="specialist", phone=f"+7999500{suffix}",
     )
-    return SpecialistProfile.objects.create(
-        user=user, tenant=tenant, display_name=name,
-        is_available=True, is_booking_enabled=True,
-        status=SpecialistProfile.ProfileStatus.ACTIVE,
-        rating=Decimal(rating) if rating is not None else None,
-        reviews_count=reviews,
-    )
+    profile = SpecialistProfile.objects.get(user=user)
+    profile.tenant = tenant
+    profile.display_name = name
+    profile.is_available = True
+    profile.is_booking_enabled = True
+    profile.status = SpecialistProfile.ProfileStatus.ACTIVE
+    profile.rating = Decimal(rating) if rating is not None else Decimal("0.0")
+    profile.reviews_count = reviews
+    profile.save()
+    return profile
 
 
 def _offer(tenant, specialist, category, *, name: str, template=None) -> SalonService:
@@ -175,7 +188,15 @@ class TestRatingFacts:
         assert rating.rating == Decimal("4.9")
         assert rating.review_count == 0
 
-    def test_absent_rating_is_none_not_zero(self, tenant, category):
+    def test_zero_rating_is_absence_of_data_not_a_low_score(self, tenant, category):
+        """Ноль — «оценки нет», а не «оценка ноль» (§29.4, DRF-1535).
+
+        Столбец `NOT NULL` с умолчанием `0.0`: на уровне схемы отсутствие
+        и ноль неотличимы. Пропусти адаптер эту разницу — мастер без
+        единой оценки получил бы свидетельство UNSUBSTANTIATED («оценка
+        есть, но не подтверждена») вместо UNKNOWN («оценки нет»), то есть
+        мы сообщили бы о нём то, чего никто не измерял.
+        """
         master = _specialist(tenant, suffix="0021", name="Без рейтинга")
         _offer(tenant, master, category, name="Массаж")
 
