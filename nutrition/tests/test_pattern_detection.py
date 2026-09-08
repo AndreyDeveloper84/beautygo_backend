@@ -481,3 +481,79 @@ class TestEndpoint:
         body = resp.json()["data"]
         # Cached snapshot still says no active day from before the new row.
         assert body["active_days"] == 0
+
+
+# ===========================================================================
+# Без анкеты нормы нет — и паттерна, который её знаменателем считает, тоже
+# ===========================================================================
+
+
+class TestNoAnketaNoPattern:
+    """Три детектора сравнивают день с НОРМОЙ. Нет анкеты — не с чем.
+
+    ``_profile_goal_{protein,water,kcal}`` подставляли на этом месте
+    ``NUTRITION_DEFAULT_*`` — плоские числа на всех, к человеку
+    отношения не имеющие. Паттерн, собранный по чужому знаменателю,
+    уезжает дальше экрана: движок отдаёт его боту с
+    ``advice_template_args`` (``target``, ``target_ml``,
+    ``target_kcal``, ``deficit_pct``), и «недобор белка 40 %»
+    приходит модели как ФАКТ ОБ ЭТОМ ЧЕЛОВЕКЕ.
+
+    Автоюз-фикстура выше нарочно ставит настройкам ненулевые значения:
+    вернётся подстановка — эти три теста покраснеют.
+    """
+
+    def test_low_protein_is_silent_without_a_profile(self, user):
+        today = _today()
+        # 30 г при выдуманной норме 100 — это 30 %, глубоко под порогом.
+        for i in range(5):
+            ts = datetime.combine(
+                today - timedelta(days=i),
+                datetime.min.time().replace(hour=12),
+                tzinfo=dt_tz.utc,
+            )
+            _add_food(user, kcal=400, protein=30, when=ts)
+        result = detect_patterns(user_id=user.id, force=True)
+        assert "low_protein" not in {p.slug for p in result.patterns}
+
+    def test_low_water_is_silent_without_a_profile(self, user):
+        today = _today()
+        for i in range(4):
+            ts = datetime.combine(
+                today - timedelta(days=i),
+                datetime.min.time().replace(hour=10),
+                tzinfo=dt_tz.utc,
+            )
+            _add_water(user, ml=500, when=ts)  # 500 < 70 % от 2000
+        result = detect_patterns(user_id=user.id, force=True)
+        assert "low_water" not in {p.slug for p in result.patterns}
+
+    def test_meal_skips_is_silent_without_a_profile(self, user):
+        today = _today()
+        for i in range(3):
+            ts = datetime.combine(
+                today - timedelta(days=i),
+                datetime.min.time().replace(hour=12),
+                tzinfo=dt_tz.utc,
+            )
+            _add_food(user, kcal=200, protein=5, when=ts)  # < 30 % от 2000
+        result = detect_patterns(user_id=user.id, force=True)
+        assert "meal_skips" not in {p.slug for p in result.patterns}
+
+    def test_half_filled_anketa_counts_as_no_norm(self, user):
+        """Профиль есть, нормы в нём нули — тот же ответ, что без профиля.
+
+        ``daily_*`` объявлены ``default=0``, поэтому недосчитанный
+        профиль читается как «нормы нет», а не как «норма ноль».
+        """
+        NutritionProfile.objects.create(user=user)
+        today = _today()
+        for i in range(4):
+            ts = datetime.combine(
+                today - timedelta(days=i),
+                datetime.min.time().replace(hour=10),
+                tzinfo=dt_tz.utc,
+            )
+            _add_water(user, ml=500, when=ts)
+        result = detect_patterns(user_id=user.id, force=True)
+        assert "low_water" not in {p.slug for p in result.patterns}

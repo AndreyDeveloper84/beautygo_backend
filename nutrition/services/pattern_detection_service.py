@@ -794,22 +794,51 @@ def _force_severity(pattern: DetectedPattern, severity: str) -> DetectedPattern:
 # ---------------------------------------------------------------------------
 
 
+# Норма ЭТОГО человека, или 0.0 — «нормы нет».
+#
+# Во всех трёх функциях второй строкой стояло
+# ``getattr(settings, "NUTRITION_DEFAULT_*", ...)`` — плоское число на
+# всех, — и форма была «норма человека, а если её нет, то общая». Общей
+# нормы не бывает: подставленный знаменатель превращал чужое число в
+# утверждение об этом человеке.
+#
+# Цена здесь выше экранной. Детекторы ниже кладут знаменатель в
+# ``advice_template_args`` (``target``, ``target_ml``, ``target_kcal``,
+# ``deficit_pct``), а движок паттернов отдаёт их боту — и «недобор белка
+# 40 % от нормы» приходит модели как ФАКТ ОБ ЭТОМ ЧЕЛОВЕКЕ, которому
+# §48 разрешил делать из фактов выводы о самочувствии.
+#
+# Подставить вместо настройки «настоящую» норму, посчитанную по BMR или
+# по 1,4–1,6 г × вес, нельзя тем более: это решение владельца (OD-NUT-1),
+# и такая цифра назвала бы вес там, где сегодня его нет. «Нормы нет»
+# доезжает ОТСУТСТВИЕМ: ноль, и каждый из трёх детекторов на ``goal <= 0``
+# молча возвращает ``None`` — паттерна нет, а не паттерн по выдумке.
+#
+# Ноль читается как отсутствие безопасно: столбцы ``daily_*`` объявлены
+# ``default=0``, норма ноль граммов/миллилитров/килокалорий физически
+# невозможна, и недозаполненный профиль значит ровно «анкеты нет».
+#
+# Витаминные ``NUTRITION_DEFAULT_*`` в ``_rda`` выше остаются намеренно:
+# RDA — популяционная норма по определению, она не выводится из веса и
+# не притворяется персональной.
+
+
 def _profile_goal_protein(profile: NutritionProfile | None) -> float:
     if profile and profile.daily_protein_g:
         return float(profile.daily_protein_g)
-    return float(getattr(settings, "NUTRITION_DEFAULT_PROTEIN_GOAL_G", 0) or 0)
+    return 0.0
 
 
 def _profile_goal_water(profile: NutritionProfile | None) -> float:
     if profile and profile.daily_water_ml:
         return float(profile.daily_water_ml)
-    return float(getattr(settings, "NUTRITION_DEFAULT_WATER_GOAL_ML", 2000))
+    return 0.0
 
 
 def _profile_goal_kcal(profile: NutritionProfile | None) -> float:
     if profile and profile.daily_kcal:
         return float(profile.daily_kcal)
-    return float(getattr(settings, "NUTRITION_DEFAULT_CALORIES_GOAL", 2000))
+    return 0.0
 
 
 def _build_pattern(

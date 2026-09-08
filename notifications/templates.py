@@ -220,15 +220,23 @@ TEMPLATES: dict[str, NotificationTemplate] = {
         deep_link="appointment/{appointment_id}",
     ),
     # Retention reminders (M5 retention; beat tasks defined in
-    # notifications/tasks.py). Context: water_ml, water_goal_ml.
+    # notifications/tasks.py). Context: water_ml.
+    #
+    # Знаменателя в тексте больше нет. Стояло «выпито {water_ml} мл из
+    # {water_goal_ml}», и вторым числом приезжала
+    # ``NUTRITION_DEFAULT_WATER_GOAL_ML`` — 2000 мл на всех, ровно восемь
+    # стаканов по 250, — поданная человеку как ЕГО норма. Своё число
+    # сюда тоже не подставляется: норма воды считается как 30 мл × вес,
+    # то есть называет вес (§35 п.10), а пуш видно с заблокированного
+    # экрана. Кому напоминание уходит вообще — решает своя норма в
+    # ``dispatch_water_reminders``; в тексте остаётся только то, что
+    # человек сделал сам.
     "water_reminder": NotificationTemplate(
         id="water_reminder",
         app_type="client",
         channel=Notification.Channel.PUSH,
         push_title="Время выпить воды",
-        push_body=(
-            "Сегодня выпито {water_ml} мл из {water_goal_ml}. Не забывай!"
-        ),
+        push_body="Сегодня выпито {water_ml} мл. Не забывай!",
         deep_link="day",
     ),
     # Context: insight_text (LLM-generated short summary).
