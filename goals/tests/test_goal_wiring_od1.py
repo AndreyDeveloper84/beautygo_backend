@@ -85,6 +85,11 @@ def _clear_cache():
 @pytest.fixture(autouse=True)
 def _token(settings):
     settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+    # T6: полки 1 и 2 — проекции решения резолвера, а он не рекомендует
+    # кандидата без VERIFIED-маппинга (§10.1). Шкалы доверия в схеме нет,
+    # поэтому здесь ЯВНО включается исключение §10.4 (а). Предмет набора —
+    # связка «цель → категории»; без флага он проверял бы пустую выдачу.
+    settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
 
 @pytest.fixture
