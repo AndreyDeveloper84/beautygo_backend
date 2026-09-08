@@ -324,6 +324,32 @@ class SalonService(models.Model):
         YCLIENTS = "yclients", "YClients"
         SEED = "seed", "Seed"
 
+    class MappingStatus(models.TextChoices):
+        """Статус связи услуги с каноническим шаблоном. Решение владельца §76.
+
+        Три состояния, и путать их запрещено::
+
+            UNMAPPED            REVIEW_REQUIRED         VERIFIED
+            валидной связи      связь есть, но          подтверждена человеком
+            нет                 происхождения           ЛИБО детерминированным
+                                недостаточно            правилом с provenance
+                |                     |                        |
+            в подборе не участвует ---+                  участвует в подборе
+
+        **Ноль `VERIFIED` не разрешает откат на `REVIEW_REQUIRED`**
+        (формулировка владельца): иначе статус декоративен, а система
+        продолжает выдавать непроверенные связи. Пустая выдача при нуле
+        подтверждённых — штатное состояние с именем, а не поломка.
+
+        Умолчание — `UNMAPPED`, а не `REVIEW_REQUIRED`. Разница смысловая:
+        строка, про которую ещё ничего не сказано, не должна выглядеть как
+        строка, про которую сказано «связь есть».
+        """
+
+        UNMAPPED = "unmapped", "Unmapped"
+        REVIEW_REQUIRED = "review_required", "Review required"
+        VERIFIED = "verified", "Verified"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(
         "tenants.Tenant",
@@ -364,6 +390,39 @@ class SalonService(models.Model):
     source = models.CharField(
         max_length=10, choices=Source.choices, default=Source.MANUAL,
     )
+
+    # -- Статус связи с шаблоном и его происхождение (§76) -------------------
+    #
+    # `source` выше говорит, откуда взялась СТРОКА (ручной ввод, YClients,
+    # сид). Поля ниже говорят, чем доказана СВЯЗЬ с каноническим шаблоном.
+    # Это разные вопросы: строка из YClients может нести связь, которую
+    # никто не проверял, а строка, заведённая руками, — связь, выбранную
+    # человеком осознанно.
+    mapping_status = models.CharField(
+        max_length=16,
+        choices=MappingStatus.choices,
+        default=MappingStatus.UNMAPPED,
+    )
+    #: Кто подтвердил. Взаимоисключающе с `mapping_confirmed_rule`:
+    #: владелец назвал «кто ИЛИ какое правило», и оба сразу означали бы,
+    #: что происхождение неизвестно точно.
+    mapping_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    #: Имя детерминированного правила, если подтверждал не человек.
+    mapping_confirmed_rule = models.CharField(max_length=100, blank=True, default="")
+    #: Версия правила. Без неё «подтверждено правилом» неотличимо от
+    #: «подтверждено какой-то из его версий», а правило меняется.
+    mapping_rule_version = models.CharField(max_length=32, blank=True, default="")
+    mapping_confirmed_at = models.DateTimeField(null=True, blank=True)
+    #: Ссылка на исходное основание — драфт, выгрузка, решение, тикет.
+    #: Свободная строка намеренно: оснований разных видов, и требовать
+    #: одного типа значило бы запретить те, которых мы ещё не видели.
+    mapping_source_ref = models.CharField(max_length=200, blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -372,6 +431,37 @@ class SalonService(models.Model):
             models.UniqueConstraint(
                 fields=["tenant", "template", "name"],
                 name="salonservice_tenant_template_name_uniq",
+            ),
+            # `VERIFIED` без provenance невозможен НА УРОВНЕ СХЕМЫ, а не по
+            # договорённости. §76 требует хранить, кто или какое правило
+            # подтвердило, когда и по какому основанию; статус без этого —
+            # то же самое, что объяснение без evidence (§73), а именно так
+            # литерал рейтинга однажды и стал «проверенным фактом».
+            #
+            # Проверка стоит здесь, а не в `clean()`, потому что `clean()`
+            # обходится любым `update()` и любой миграцией данных.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(mapping_status="verified")
+                    | (
+                        models.Q(mapping_confirmed_at__isnull=False)
+                        & ~models.Q(mapping_source_ref="")
+                        & (
+                            models.Q(mapping_confirmed_by__isnull=False)
+                            | ~models.Q(mapping_confirmed_rule="")
+                        )
+                    )
+                ),
+                name="salonservice_verified_requires_provenance",
+            ),
+            # Правило без версии — «подтверждено какой-то из версий».
+            # Человеку версия не нужна: он и есть провенанс.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(mapping_confirmed_rule="")
+                    | ~models.Q(mapping_rule_version="")
+                ),
+                name="salonservice_rule_confirmation_carries_version",
             ),
         ]
         indexes = [
@@ -382,6 +472,12 @@ class SalonService(models.Model):
             models.Index(
                 fields=["tenant", "category", "is_active"],
                 name="salonsvc_tenant_cat_active_idx",
+            ),
+            # Допустимость подбора спрашивает статус на каждом запросе,
+            # а очередь проверки выбирает по нему же.
+            models.Index(
+                fields=["tenant", "mapping_status"],
+                name="salonsvc_tenant_mapstatus_idx",
             ),
         ]
 
