@@ -218,6 +218,10 @@ class SpecialistCandidateSource:
             is_capable=has_offer,
             mapping_status=mapping.status(has_offer=has_offer),
             safety_blocked=False,
+            # Признак медицинской проверки доезжает до резолвера: он
+            # отменяет заявление NOT_APPLICABLE (§4.1). Витрина, в которой
+            # есть услуга с противопоказаниями, витриной уже не является.
+            requires_health_check=mapping.requires_health_check,
             price=None,
             match_level=match_level,
             matched_service_ref=matched_service_id,
