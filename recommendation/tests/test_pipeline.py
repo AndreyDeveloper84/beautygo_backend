@@ -9,6 +9,8 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
+from django.test import override_settings
+
 from recommendation.api import (
     Constraint,
     MappingStatus,
@@ -219,6 +221,46 @@ def test_pilot_override_leaves_a_visible_trace():
     mapping = [e for e in _by_id(decision, facts.ref.id).evidence if e.kind.value == "CAPABILITY_MAPPING"]
     assert mapping and mapping[0].strength.value == "UNSUBSTANTIATED"
     assert mapping[0].source_ref == "pilot_override"
+
+
+@override_settings(RECOMMENDATION_PILOT_MAPPING_OVERRIDE=True)
+def test_default_policy_reads_settings_so_both_projections_answer_alike():
+    """Одна политика — одно значение, у кого бы ни спросили.
+
+    До этой правки настройку читала **поверхность** домашнего экрана,
+    а HTTP-проекция звала `resolve()` без политики и получала жёсткое
+    умолчание. Одна политика имела два значения в одном процессе —
+    тот же разрыв, ради устранения которого заведён эпик, только
+    в политике, а не в ранжировании.
+
+    Сегодня оба значения совпадают (`False`), поэтому расхождение
+    невидимо. Оно проявилось бы **в момент ответа владельца по §40.4
+    п.1**: флаг включают, домашний экран оживает, бот остаётся тёмным —
+    и выглядит это так, будто включение сработало.
+    """
+    decision = resolve(
+        make_request(),
+        source=StaticSource([make_facts(mapping_status=MappingStatus.UNMAPPED)]),
+    )
+
+    assert not decision.is_empty
+
+
+@override_settings(RECOMMENDATION_PILOT_MAPPING_OVERRIDE=True)
+def test_explicit_policy_still_beats_the_setting():
+    """Иначе тест не смог бы назвать политику, не правя настройки.
+
+    Половина без этой проверки означала бы, что чтение настроек забрало
+    у вызывающего право быть точным, — а оно ему нужно: политика
+    `CONTROLLED_POLICY`, и тест обязан уметь проверить ОБА её значения.
+    """
+    decision = resolve(
+        make_request(),
+        source=StaticSource([make_facts(mapping_status=MappingStatus.UNMAPPED)]),
+        policy=StagePolicy(mapping_override_enabled=False),
+    )
+
+    assert decision.is_empty
 
 
 def test_safety_unknown_is_fail_closed_like_stop():

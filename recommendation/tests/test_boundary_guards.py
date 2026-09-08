@@ -243,6 +243,39 @@ def test_unparseable_file_is_not_silently_allowed():
     assert _ranking_sites(broken)
 
 
+def test_nobody_outside_the_resolver_assembles_the_policy():
+    """Политику собирает резолвер, а не поверхность — как и порядок.
+
+    Стена W2 запрещает поверхности решать, КТО выше. Эта проверка
+    запрещает ей решать, ПО КАКИМ ПРАВИЛАМ, и заведена не из симметрии:
+    домашний экран уже собирал `StagePolicy` у себя, читая
+    `RECOMMENDATION_PILOT_MAPPING_OVERRIDE`, а HTTP-проекция звала
+    `resolve()` без политики и получала жёсткое умолчание. Одна политика
+    имела два значения в одном процессе.
+
+    Расхождение было невидимо ровно потому, что оба значения совпадали.
+    Проявилось бы оно в момент включения флага — то есть тогда, когда
+    на него уже перестали смотреть.
+    """
+    offenders = []
+    for rel, path in _python_files():
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and _called_name(node) == "StagePolicy":
+                offenders.append(f"{rel}:{node.lineno}")
+
+    assert not offenders, (
+        "политика собирается вне резолвера — у неё снова два значения:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nЗовите resolve() без policy: умолчание читает настройки само "
+        "(StagePolicy.from_settings). Явная политика допустима только в тестах."
+    )
+
+
 def test_private_modules_are_not_imported_from_outside():
     """Публичная поверхность — один модуль. Второй вход = второй авторитет."""
     pattern = re.compile(r"(from|import)\s+recommendation\._")

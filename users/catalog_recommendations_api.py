@@ -84,7 +84,6 @@ import logging
 import uuid
 from typing import Any
 
-from django.conf import settings
 from django.db.models import QuerySet
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers
@@ -95,7 +94,6 @@ from rest_framework.views import APIView
 from goals.wiring import goal_category_ids_for
 from recommendation.api import (
     NeedOrigin,
-    StagePolicy,
     NeedSpec,
     RecommendationDecision,
     RecommendationRequest,
@@ -192,27 +190,12 @@ def _resolve_layer(
             k=k,
         ),
         source=SpecialistCandidateSource(),
-        policy=_stage_policy(),
-    )
-
-
-def _stage_policy() -> StagePolicy:
-    """Политика стадий из настроек. Единственная ручка — исключение §10.4.
-
-    ``RECOMMENDATION_PILOT_MAPPING_OVERRIDE`` реализует ответ владельца
-    (а) «на пилоте считать каталог VERIFIED». По умолчанию ВЫКЛЮЧЕНО:
-    ответа нет, а включить его самим значило бы ответить за владельца.
-
-    Когда включено, каждый затронутый кандидат получает свидетельство
-    ``strength=UNSUBSTANTIATED, source_ref="pilot_override"`` — разрешённое
-    исключение обязано быть видно в свидетельстве, а не растворяться
-    в умолчании. Иначе через месяц никто не отличит «проверено» от
-    «разрешено на время пилота».
-    """
-    return StagePolicy(
-        mapping_override_enabled=bool(
-            getattr(settings, "RECOMMENDATION_PILOT_MAPPING_OVERRIDE", False)
-        ),
+        # Политику НЕ собираем: её читает резолвер сам
+        # (`StagePolicy.from_settings`). Здесь стояла своя сборка из
+        # настроек — и она давала одной политике два значения в одном
+        # процессе, потому что HTTP-проекция звала `resolve()` без неё
+        # и получала жёсткое умолчание. Поверхность не владеет политикой
+        # ровно по той же причине, по которой не владеет порядком.
     )
 
 
