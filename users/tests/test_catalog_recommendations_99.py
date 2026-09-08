@@ -747,10 +747,14 @@ class TestSalonStateGatesThePool:
     """Пул обязан исполнять то, что обещает его докстринг.
 
     Докстринг говорил «active specialist in an active tenant taking
-    bookings», а фильтра по салону в коде не было вовсе:
-    ``select_related("tenant")`` служит только выводу
-    ``tenant_slug``/``tenant_name``. Отключённый салон попадал в «ваши
-    места» наравне с живыми.
+    bookings», а фильтра по салону в коде не было вовсе: `select_related`
+    по салону служил только выводу имени салона в карточке. Отключённый
+    салон попадал в «ваши места» наравне с живыми.
+
+    Карточки с тех пор не стало (T18 — полка несёт ссылку на кандидата,
+    показ берётся из зеркала), но проверка осталась и осталась нужной:
+    фильтр по состоянию салона — про допуск, а не про отрисовку, и от
+    смены формы ответа он не зависит.
 
     Правило контура: рядом с каждым отрицательным утверждением стоит
     положительная стража НА ТЕХ ЖЕ ДАННЫХ — иначе «мастера не видно»
@@ -765,13 +769,13 @@ class TestSalonStateGatesThePool:
     def _layer_1_ids() -> set[str]:
         r = _api().post(URL, _body(), format="json")
         assert r.status_code == 200, r.content
-        return {i["id"] for i in r.json()["data"]["layer_1_your_places"]}
+        return {i["candidate"]["id"] for i in r.json()["data"]["layer_1_your_places"]}
 
     @staticmethod
     def _layer_2_ids() -> set[str]:
         r = _api().post(URL, _body(), format="json")
         assert r.status_code == 200, r.content
-        return {i["id"] for i in r.json()["data"]["layer_2_ayla_picks"]}
+        return {i["candidate"]["id"] for i in r.json()["data"]["layer_2_ayla_picks"]}
 
     def test_deactivated_salon_drops_out_of_your_places(
         self, customer, customer_known_tur, tenant_known, manicure_category,
@@ -839,6 +843,6 @@ class TestSalonStateGatesThePool:
         r = _api().post(URL, _body(), format="json")
         assert r.status_code == 200, r.content
 
-        picks = {i["id"] for i in r.json()["data"]["layer_2_ayla_picks"]}
+        picks = {i["candidate"]["id"] for i in r.json()["data"]["layer_2_ayla_picks"]}
         assert str(healthy.id) in picks
         assert str(orphan.id) not in picks

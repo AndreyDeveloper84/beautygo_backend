@@ -389,7 +389,9 @@ class TestSpecialistServicesPreview:
         response = app_api.get(SPECIALISTS_URL)
         assert response.status_code == 200, response.data
         rows = response.data["results"]
-        row = next(r for r in rows if r["candidate"]["id"] == str(massage_master.id))
+        # `/specialists/` — НЕ полка рекомендаций: карточка каталога,
+        # и ключ у неё прежний. T18 сменил форму только у полок.
+        row = next(r for r in rows if r["id"] == str(massage_master.id))
 
         assert row["services_count"] == 1, row
         assert len(row["services_preview"]) == 1, row["services_preview"]
@@ -440,7 +442,8 @@ class TestSpecialistServicesPreview:
         assert response.status_code == 200, response.data
         rows = response.data["data"]["nearby_specialists"]
 
-        row = next(r for r in rows if r["candidate"]["id"] == str(massage_master.id))
+        # `nearby_specialists` на главной — тоже не полка рекомендаций.
+        row = next(r for r in rows if r["id"] == str(massage_master.id))
         assert row["services_preview"] == [MASSAGE], row
 
 
