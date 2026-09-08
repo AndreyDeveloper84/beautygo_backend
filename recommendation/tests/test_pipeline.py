@@ -9,6 +9,8 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
+import pytest
+
 from django.test import override_settings
 
 from recommendation.api import (
@@ -205,62 +207,54 @@ def test_unmapped_catalog_is_not_recommendable():
     assert ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE in decision.reason_codes
 
 
-def test_pilot_override_leaves_a_visible_trace():
-    """§10.4: разрешённое владельцем исключение обязано быть видно в свидетельстве.
-
-    Иначе через месяц никто не отличит «проверено» от «разрешено на время
-    пилота» — ровно та ошибка, которая уже произошла с числом `rating`.
-    """
-    facts = make_facts(mapping_status=MappingStatus.UNMAPPED)
-    decision = resolve(
-        make_request(),
-        source=StaticSource([facts]),
-        policy=StagePolicy(mapping_override_enabled=True),
-    )
-
-    mapping = [e for e in _by_id(decision, facts.ref.id).evidence if e.kind.value == "CAPABILITY_MAPPING"]
-    assert mapping and mapping[0].strength.value == "UNSUBSTANTIATED"
-    assert mapping[0].source_ref == "pilot_override"
-
-
+@pytest.mark.parametrize(
+    "status",
+    [MappingStatus.UNMAPPED, MappingStatus.REVIEW_REQUIRED, MappingStatus.UNKNOWN],
+)
 @override_settings(RECOMMENDATION_PILOT_MAPPING_OVERRIDE=True)
-def test_default_policy_reads_settings_so_both_projections_answer_alike():
-    """Одна политика — одно значение, у кого бы ни спросили.
+def test_nothing_but_verified_is_admitted_whatever_the_settings_say(status):
+    """§76: ноль `VERIFIED` не разрешает fallback — и обойти это нечем.
 
-    До этой правки настройку читала **поверхность** домашнего экрана,
-    а HTTP-проекция звала `resolve()` без политики и получала жёсткое
-    умолчание. Одна политика имела два значения в одном процессе —
-    тот же разрыв, ради устранения которого заведён эпик, только
-    в политике, а не в ранжировании.
+    Здесь стоял тест про пилотное исключение: политика с
+    `mapping_override_enabled=True` пропускала кандидата с любым статусом,
+    помечая его `UNSUBSTANTIATED`. Это было честно ровно до тех пор, пока
+    вопрос владельца оставался открытым. Он ответил: «иначе статус будет
+    декоративным, а система продолжит выдавать непроверенные связи».
 
-    Сегодня оба значения совпадают (`False`), поэтому расхождение
-    невидимо. Оно проявилось бы **в момент ответа владельца по §40.4
-    п.1**: флаг включают, домашний экран оживает, бот остаётся тёмным —
-    и выглядит это так, будто включение сработало.
+    Настройка выставлена **нарочно** и обязана ничего не изменить: она
+    больше не существует, и тест это утверждает, а не подразумевает.
+    Без неё проверка доказывала бы только то, что при выключенном флаге
+    всё как раньше, — то есть ничего.
+
+    `REVIEW_REQUIRED` здесь важнее остальных: именно его получат все 206
+    связей пилота после миграции, и именно его владелец запретил считать
+    достаточным.
     """
     decision = resolve(
         make_request(),
-        source=StaticSource([make_facts(mapping_status=MappingStatus.UNMAPPED)]),
-    )
-
-    assert not decision.is_empty
-
-
-@override_settings(RECOMMENDATION_PILOT_MAPPING_OVERRIDE=True)
-def test_explicit_policy_still_beats_the_setting():
-    """Иначе тест не смог бы назвать политику, не правя настройки.
-
-    Половина без этой проверки означала бы, что чтение настроек забрало
-    у вызывающего право быть точным, — а оно ему нужно: политика
-    `CONTROLLED_POLICY`, и тест обязан уметь проверить ОБА её значения.
-    """
-    decision = resolve(
-        make_request(),
-        source=StaticSource([make_facts(mapping_status=MappingStatus.UNMAPPED)]),
-        policy=StagePolicy(mapping_override_enabled=False),
+        source=StaticSource([make_facts(mapping_status=status)]),
     )
 
     assert decision.is_empty
+    assert decision.excluded[0].reason_code is ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE
+
+
+def test_verified_is_still_admitted():
+    """Положительная стража: правило не выродилось в «не пускать никого».
+
+    Без неё три случая выше зеленели бы и на коде, который отвергает
+    всех подряд, — а тогда шкала владельца была бы бессмысленной, и
+    подтверждать связи не имело бы смысла.
+    """
+    facts = make_facts(mapping_status=MappingStatus.VERIFIED)
+    decision = resolve(make_request(), source=StaticSource([facts]))
+
+    assert _ranked_ids(decision) == [facts.ref.id]
+    mapping = [
+        e for e in _by_id(decision, facts.ref.id).evidence
+        if e.kind.value == "CAPABILITY_MAPPING"
+    ]
+    assert mapping and mapping[0].strength.value == "CONFIRMED"
 
 
 def test_safety_unknown_is_fail_closed_like_stop():

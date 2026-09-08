@@ -22,7 +22,9 @@ from decimal import Decimal
 import pytest
 from rest_framework.test import APIClient
 
-from services.models import Service, ServiceCategory
+from django.utils import timezone
+
+from services.models import SalonService, ServiceCategory, SpecialistService
 from tenants.models import Tenant
 from users.catalog_recommendations_api import RecommendationsRequestSerializer
 from users.models import SpecialistProfile, TenantUserRelationship, User
@@ -116,16 +118,67 @@ def massage_category(db):
     )
 
 
-def _make_service(specialist, category, *, name="Service", price="1500.00"):
-    return Service.objects.create(
-        specialist=specialist,
+def _make_service(
+    specialist, category, *, name="Service", price="1500.00",
+    mapping_status=SalonService.MappingStatus.VERIFIED, tenant=None,
+):
+    """Услуга КАНОНИЧЕСКИМ слоем, со статусом связи (§76).
+
+    Здесь создавалась легаси-строка `Service`, а непустую полку тесты
+    получали настройкой `RECOMMENDATION_PILOT_MAPPING_OVERRIDE=True`.
+    Настройки больше нет: владелец запретил пропускать неподтверждённые
+    связи, и путь убран, а не выключен (T16).
+
+    Значит фикстура обязана давать полке то, что полка теперь требует, —
+    **подтверждённую связь**. Легаси-строка её иметь не может по
+    устройству слоя, поэтому и слой здесь канонический: `SalonService`
+    со статусом плюс бронируемый `SpecialistService`.
+
+    Это заодно приближает фикстуру к пилоту, где легаси пуст целиком
+    (0 строк, замер 30.08). Тесты, зеленевшие на слое, которого в бою
+    нет, доказывали меньше, чем казалось.
+
+    `mapping_status` — аргумент, а не константа: тест про отказ обязан
+    уметь назвать `REVIEW_REQUIRED`, не трогая настройки, которых нет.
+
+    `tenant` — тоже аргумент, и по неочевидной причине. У салонной услуги
+    тенант обязателен по схеме, а у `SpecialistProfile` он **nullable**:
+    мастер без салона существует, и ровно он однажды ронял весь эндпоинт
+    в 500. Такому мастеру услугу всё равно надо чем-то дать — иначе тест
+    про него не собрать, — поэтому салон услуги называется отдельно
+    от салона мастера. Умолчание берёт салон мастера, как и раньше.
+    """
+    salon = SalonService.objects.create(
+        tenant=tenant or specialist.tenant,
         category=category,
         name=name,
+        duration_minutes=60,
+        mapping_status=mapping_status,
+        **_provenance_for(mapping_status),
+    )
+    return SpecialistService.objects.create(
+        salon_service=salon,
+        specialist=specialist,
         price=Decimal(price),
         duration_minutes=60,
-        is_active=True,
-        buffer_after_minutes=0,
     )
+
+
+def _provenance_for(mapping_status) -> dict:
+    """`VERIFIED` без provenance не сохранится — это запрещает схема.
+
+    Фикстура называет себя правилом честно: `test_fixture` с версией.
+    Подставлять сюда человека было бы хуже — тест утверждал бы, что
+    связь подтвердил кто-то, кого не существует.
+    """
+    if mapping_status != SalonService.MappingStatus.VERIFIED:
+        return {}
+    return {
+        "mapping_confirmed_rule": "test_fixture",
+        "mapping_rule_version": "1.0.0",
+        "mapping_confirmed_at": timezone.now(),
+        "mapping_source_ref": "fixture:test_catalog_recommendations_99",
+    }
 
 
 def _api(
@@ -182,7 +235,6 @@ class TestLayer1YourPlaces:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
-        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     def test_history_tenant_specialists_in_layer_1(
         self, customer, customer_known_tur, tenant_known,
@@ -278,7 +330,6 @@ class TestLayer2AylaPicks:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
-        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     def test_layer_2_capped_at_3(self, customer, tenant_new, manicure_category):
         """Срез — представление, а не политика.
@@ -381,22 +432,36 @@ class TestFailClosedStates:
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
 
-    def test_without_mapping_override_nobody_is_recommendable(
-        self, customer, tenant_new, manicure_category, settings,
+    @pytest.mark.parametrize(
+        "status",
+        [
+            SalonService.MappingStatus.REVIEW_REQUIRED,
+            SalonService.MappingStatus.UNMAPPED,
+        ],
+    )
+    def test_only_verified_reaches_the_shelf(
+        self, customer, tenant_new, manicure_category, status,
     ):
-        """§10.1: `catalog_visible ≠ recommendation_eligible`.
+        """§10.1 + §76: `catalog_visible ≠ recommendation_eligible`.
 
-        Шкалы доверия к маппингу в схеме нет, значит `VERIFIED` нет ни
-        у кого, значит рекомендовать нельзя никого. Это состояние, а не
-        поломка, и снимается решением владельца (§40.4 п.1).
+        `REVIEW_REQUIRED` здесь — не абстракция: именно его получат все
+        206 связей пилота после миграции, и именно его владелец запретил
+        считать достаточным («иначе статус будет декоративным»).
+
+        Раньше этот тест выключал настройку. Настройки больше нет —
+        и проверять теперь надо не её, а сам статус: **тест, который
+        проходит по причине, которой больше не существует, — ложный
+        сторож.**
+
+        Полка 3 при этом жива, и это половина смысла: каталог видно,
+        рекомендовать нельзя — разные вещи, и человек не остаётся перед
+        пустым экраном.
         """
-        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = False
         sp = _make_specialist(tenant_new, suffix="0150", name="Invisible")
-        _make_service(sp, manicure_category)
+        _make_service(sp, manicure_category, mapping_status=status)
 
         data = _api().post(URL, _body(), format="json").json()["data"]
         assert data["layer_2_ayla_picks"] == []
-        # Полка 3 жива: каталог видно, рекомендовать нельзя — разные вещи.
         assert data["layer_3_explore"]["categories"]
 
     def test_safety_is_declared_by_the_surface_and_not_steerable_by_the_caller(
@@ -426,7 +491,6 @@ class TestFailClosedStates:
         где она и живёт: `recommendation/tests/test_safety_not_applicable.py`.
         Дублировать её здесь значило бы проверять чужую стадию через ручку.
         """
-        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
         sp = _make_specialist(tenant_new, suffix="0160", name="Visible")
         _make_service(sp, manicure_category)
 
@@ -457,7 +521,6 @@ class TestEligibilityFilter:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
-        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     def test_unavailable_specialist_excluded(
         self, customer, tenant_new, manicure_category,
@@ -521,7 +584,6 @@ class TestGoalFilter:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
-        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     def test_goal_filters_by_service_name(
         self, customer, tenant_new, manicure_category, massage_category,
@@ -586,7 +648,6 @@ class TestGeographyIsNotOnThisSurface:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
-        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     def test_card_has_no_distance_field(self, customer, tenant_new, manicure_category):
         sp = _make_specialist(tenant_new, suffix="0200", name="Near")
@@ -601,7 +662,6 @@ class TestLayer3Explore:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
-        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     def test_layer_3_returns_category_counts(
         self, customer, tenant_new, manicure_category, massage_category,
@@ -652,8 +712,6 @@ class TestSalonStateGatesThePool:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
-        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
-        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     @staticmethod
     def _layer_1_ids() -> set[str]:
@@ -713,7 +771,10 @@ class TestSalonStateGatesThePool:
         orphan = _make_specialist(
             None, suffix="0602", name="Мастер без салона",
         )
-        _make_service(orphan, manicure_category, name="Маникюр")
+        # Салон услуги называем явно: у мастера его нет, а у услуги он
+        # обязателен по схеме. Предмет теста — мастер без салона,
+        # и он таким и остаётся.
+        _make_service(orphan, manicure_category, name="Маникюр", tenant=tenant_new)
 
         # Стража на предусловие: профиль действительно без салона.
         orphan.refresh_from_db()

@@ -38,6 +38,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from ai.tests.factories import make_specialist, make_user
@@ -85,11 +86,10 @@ def _clear_cache():
 @pytest.fixture(autouse=True)
 def _token(settings):
     settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
-    # T6: полки 1 и 2 — проекции решения резолвера, а он не рекомендует
-    # кандидата без VERIFIED-маппинга (§10.1). Шкалы доверия в схеме нет,
-    # поэтому здесь ЯВНО включается исключение §10.4 (а). Предмет набора —
-    # связка «цель → категории»; без флага он проверял бы пустую выдачу.
-    settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
+    # Полки 1 и 2 — проекции решения резолвера, а он пускает только
+    # подтверждённую связь (§76). Настройки, включавшей исключение,
+    # больше нет: путь убран, а не выключен (T16). Полку набор
+    # получает честно — фикстура создаёт услугу со статусом VERIFIED.
 
 
 @pytest.fixture
@@ -129,6 +129,14 @@ def _canonical(profile, tenant, *, name, category=None, template=None):
     """Каноническая связка: SalonService + бронируемый SpecialistService."""
     salon = SalonService.objects.create(
         tenant=tenant, category=category, template=template, name=name,
+        mapping_status=SalonService.MappingStatus.VERIFIED,
+        # `VERIFIED` без provenance схема не сохранит (§76). Фикстура
+        # называет себя правилом честно: подставлять сюда человека
+        # значило бы утверждать, что связь подтвердил кто-то, кого нет.
+        mapping_confirmed_rule="test_fixture",
+        mapping_rule_version="1.0.0",
+        mapping_confirmed_at=timezone.now(),
+        mapping_source_ref="fixture:test_goal_wiring_od1",
     )
     SpecialistService.objects.create(
         salon_service=salon, specialist=profile,
