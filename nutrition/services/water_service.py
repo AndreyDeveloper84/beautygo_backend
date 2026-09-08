@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from uuid import UUID
 
-from django.conf import settings
 from django.db.models import Sum
 
 from nutrition.models import WaterLog
@@ -43,6 +42,31 @@ class WaterTodayResponse:
     aggregate: WaterAggregate
 
 
+def _water_goal_ml(user_id: int) -> int:
+    """Дневная норма воды ЭТОГО человека, или 0 — «нормы нет».
+
+    Здесь стояла ``settings.NUTRITION_DEFAULT_WATER_GOAL_ML`` — 2000 мл на
+    всех, ровно восемь стаканов по 250: та самая выдуманная восьмёрка,
+    которую из клиента уже выбрасывали. Норма воды считается только из
+    анкеты питания (``NutritionProfile.daily_water_ml``), и тому, кто её
+    не проходил, подставлять нечего.
+
+    Ноль означает отсутствие: норма ноль миллилитров физически
+    невозможна, а ``_pct`` ниже делит только при положительной норме.
+    Тот же контракт, что у ``water_entry_service._load_nutrition_context``
+    — два пути к воде обязаны отвечать про норму одинаково.
+    """
+    from nutrition.models import NutritionProfile
+
+    row = (
+        NutritionProfile.objects
+        .filter(user_id=user_id)
+        .values_list("daily_water_ml", flat=True)
+        .first()
+    )
+    return int(row or 0)
+
+
 class WaterService:
     """Aggregates and queries WaterLog rows for one user."""
 
@@ -60,7 +84,7 @@ class WaterService:
             .filter(user_id=user_id, logged_at__gte=start, logged_at__lte=end)
             .order_by("logged_at")
         )
-        agg = self._aggregate_from_logs(logs)
+        agg = self._aggregate_from_logs(logs, user_id=user_id)
         return WaterTodayResponse(logs=logs, aggregate=agg)
 
     # ------------------------------------------------------------------
@@ -74,16 +98,21 @@ class WaterService:
             .filter(user_id=user_id, logged_at__gte=start, logged_at__lte=end)
             .aggregate(s=Sum("amount_ml"))["s"]
         ) or 0
-        goal = settings.NUTRITION_DEFAULT_WATER_GOAL_ML
+        goal = _water_goal_ml(user_id)
         return WaterAggregate(
             water_ml=int(total),
             water_goal_ml=int(goal),
             water_pct=_pct(int(total), int(goal)),
         )
 
-    def _aggregate_from_logs(self, logs: list[WaterLog]) -> WaterAggregate:
+    def _aggregate_from_logs(
+        self, logs: list[WaterLog], *, user_id: int
+    ) -> WaterAggregate:
+        # ``user_id`` пришёл в подпись вместе с нормой: раньше она была
+        # общей на всех и человека не спрашивала. Норма принадлежит
+        # человеку, поэтому и считающая её функция обязана знать, о ком речь.
         total = sum(log.amount_ml for log in logs)
-        goal = settings.NUTRITION_DEFAULT_WATER_GOAL_ML
+        goal = _water_goal_ml(user_id)
         return WaterAggregate(
             water_ml=int(total),
             water_goal_ml=int(goal),

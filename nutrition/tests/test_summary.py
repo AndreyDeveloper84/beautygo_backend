@@ -115,7 +115,20 @@ class TestQueryValidation:
 
 
 class TestEmptyDay:
-    def test_no_entries_returns_zero_totals_and_default_goals(self, auth_client):
+    def test_no_entries_returns_zero_totals_and_no_invented_goals(self, auth_client):
+        """Пустой день — нули, и НИ ОДНОЙ придуманной цели.
+
+        Тест назывался «...and default goals» и проверял ровно то, что
+        оказалось дефектом: `calories_goal == 2000` (плоская константа
+        ``NUTRITION_DEFAULT_CALORIES_GOAL``, одна на всех) и
+        `water_goal_ml == 2000` (та же константа, ровно восемь стаканов
+        по 250). Человеку это показывалось как ЕГО дневная цель, со
+        шкалой и процентом выполнения.
+
+        Ноль здесь означает «цели нет» и доезжает до клиента отсутствием
+        ключа. Что человек увидит вместо цели — вопрос владельца
+        (OD-NUT-1), и до ответа он не видит ничего сверх съеденного.
+        """
         resp = auth_client.get(URL, {"date": "2026-04-29"})
         assert resp.status_code == status.HTTP_200_OK
         body = resp.json()["data"]
@@ -137,10 +150,11 @@ class TestEmptyDay:
         assert body["entries"] == []
         # Slice 3c stubs
         assert body["water_ml"] == 0
-        assert body["water_goal_ml"] == 2000
         assert body["vitamin_deficits"] == {}
-        # Settings default
-        assert body["calories_goal"] == 2000
+        # Цели нет ни одной: анкету этот человек не проходил, и считать
+        # норму не из чего. Ноль — это отсутствие, а не «норма ноль».
+        assert body["water_goal_ml"] == 0
+        assert body["calories_goal"] == 0
 
     def test_default_date_is_today(self, auth_client):
         resp = auth_client.get(URL)

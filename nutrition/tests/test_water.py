@@ -32,6 +32,7 @@ TODAY_URL = "/api/v1/nutrition/water/today/"
 
 @pytest.fixture
 def client_user(db):
+    from nutrition.models import NutritionProfile
     from users.models import Profile, User
 
     u = User.objects.create_user(
@@ -39,6 +40,15 @@ def client_user(db):
         phone="+79995550000",
     )
     Profile.objects.filter(user=u).update(full_name="Wat", city="Penza")
+    # Анкета питания — часть предусловия каждого теста про НОРМУ.
+    #
+    # Раньше норма приезжала из ``settings.NUTRITION_DEFAULT_WATER_GOAL_ML``
+    # (2000 мл = ровно восемь стаканов по 250) и потому была у всех, в том
+    # числе у людей без анкеты: чужое число показывалось человеку как его
+    # дневная цель. Числа тестов ниже сохранены, изменился ИСТОЧНИК —
+    # норма принадлежит человеку. Обратную половину держит
+    # ``TestNoAnketaNoGoal`` в конце файла.
+    NutritionProfile.objects.create(user=u, daily_water_ml=2000)
     return u
 
 
@@ -305,3 +315,32 @@ class TestSummaryIntegration:
         body = resp.json()["data"]
         assert body["water_ml"] == 600
         assert body["water_goal_ml"] == 2000
+
+
+class TestNoAnketaNoGoal:
+    """Без анкеты питания нормы нет — и подставлять её нечем.
+
+    Пара к фикстуре ``client_user`` выше: там анкета есть и норма живёт,
+    здесь анкеты нет и норма равна нулю. Ноль означает отсутствие —
+    норма ноль миллилитров физически невозможна, — и клиент по этому
+    нулю не рисует ни цели, ни шкалы, ни процента.
+    """
+
+    def test_water_goal_is_zero_without_a_profile(self, other_client_user):
+        from nutrition.services.water_service import WaterService
+
+        WaterLog.objects.create(
+            user=other_client_user,
+            amount_ml=250,
+            logged_at=datetime.now(dt_tz.utc),
+        )
+
+        agg = WaterService().aggregate_for_day(
+            other_client_user.id, datetime.now(dt_tz.utc).date()
+        )
+
+        # POSITIVE: выпитое посчитано — правду вместе с выдумкой не теряем.
+        assert agg.water_ml == 250
+        # NEGATIVE: ни 2000, ни любого другого придуманного числа.
+        assert agg.water_goal_ml == 0
+        assert agg.water_pct == 0
