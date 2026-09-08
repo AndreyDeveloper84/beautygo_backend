@@ -458,7 +458,7 @@ class TestScopeIsAFilter:
         _offer(other, there, category, name="Массаж")
 
         facts = _fetch(scope=Scope(ScopeMode.MARKETPLACE, tenant_refs=(tenant.id,)))
-        assert [f.ref.id for f in facts] == [here.id]
+        assert [f.ref.id for f in facts] == [here.user_id]
 
     def test_exclude_tenant_scope_narrows_the_other_way(self, tenant, category):
         other = Tenant.objects.create(slug="src-other-2", name="Другой", is_active=True)
@@ -468,7 +468,7 @@ class TestScopeIsAFilter:
         _offer(other, there, category, name="Массаж")
 
         facts = _fetch(scope=Scope(ScopeMode.MARKETPLACE, exclude_tenant_refs=(tenant.id,)))
-        assert [f.ref.id for f in facts] == [there.id]
+        assert [f.ref.id for f in facts] == [there.user_id]
 
     def test_inactive_tenant_is_out_of_the_pool(self, category):
         dead = Tenant.objects.create(slug="src-dead", name="Отключён", is_active=False)
