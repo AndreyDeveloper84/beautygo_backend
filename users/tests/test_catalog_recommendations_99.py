@@ -6,16 +6,17 @@ recommendations per Tau's §10.1.
 Coverage:
 - Auth boundary (Bearer + X-External-User-ID; smoke — deep tests in PR #158)
 - Layer 1: customer's history tenants surfaced; non-history hidden
-- Layer 2: top-3 cap; ranked by composite score; reasoning_text built
-- Layer 3: category aggregate counts
+- Layer 2: порядок и причины приходят от резолвера, поверхность их не строит
+- Layer 3: category aggregate counts — агрегат каталога, не рекомендация
 - Eligibility filter: inactive/disabled specialists excluded
-- Goal filter: ILIKE on service name / category slug
-- Distance: haversine when lat/lon provided; null otherwise
-- Reasoning text: priority order (goal > distance > rating); fallback
+- Fail-closed: маппинг без `VERIFIED` (§10.1); безопасность — `NOT_APPLICABLE`
+  типом поверхности и не управляема вызывающим (§72)
+
+Строк про composite score, `reasoning_text` и приоритет «goal > distance >
+rating» здесь больше нет: этих механизмов не существует (T6, контракт §16).
 """
 from __future__ import annotations
 
-import logging
 from decimal import Decimal
 
 import pytest
@@ -23,6 +24,7 @@ from rest_framework.test import APIClient
 
 from services.models import Service, ServiceCategory
 from tenants.models import Tenant
+from users.catalog_recommendations_api import RecommendationsRequestSerializer
 from users.models import SpecialistProfile, TenantUserRelationship, User
 
 
@@ -142,14 +144,12 @@ def _api(
 def _body(**overrides) -> dict:
     """Тело запроса после T6.
 
-    `safety_state` называется ЯВНО: его отсутствие по §14 fail-closed,
-    то есть равносильно STOP. Умолчание в тесте скрывало бы разницу
-    между «мы не знаем, безопасно ли» и «подходящих нет» — ровно то
-    смешение, из-за которого DEFECT-C-02 прожил незамеченным.
+    Состояния безопасности здесь НЕТ и прислать его нельзя: поверхность
+    объявляет `NOT_APPLICABLE` своим типом (решение владельца §72), а поле
+    в запросе завело бы запрещённую конструкцию «поля нет → неприменимо».
+    Тест не подставляет того, чего ручка не принимает.
     """
-    body = {"safety_state": "NORMAL"}
-    body.update(overrides)
-    return body
+    return dict(overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +370,12 @@ class TestLayer2AylaPicks:
 
 @pytest.mark.django_db
 class TestFailClosedStates:
-    """Два состояния, которые обязаны отличаться от «подходящих нет»."""
+    """Состояния, которые обязаны отличаться от «подходящих нет».
+
+    Их было два. Владелец ответил на один (§72): безопасность на этой
+    поверхности не «неизвестна», а неприменима, и полку больше не гасит.
+    Остался маппинг — он ждёт §40.4 п.1.
+    """
 
     @pytest.fixture(autouse=True)
     def _token(self, settings):
@@ -394,33 +399,57 @@ class TestFailClosedStates:
         # Полка 3 жива: каталог видно, рекомендовать нельзя — разные вещи.
         assert data["layer_3_explore"]["categories"]
 
-    def test_missing_safety_state_empties_the_shelf_loudly(
-        self, customer, tenant_new, manicure_category, settings, caplog,
+    def test_safety_is_declared_by_the_surface_and_not_steerable_by_the_caller(
+        self, customer, tenant_new, manicure_category, settings,
     ):
-        """Отсутствие состояния безопасности — fail-closed И громко.
+        """§72: состояние безопасности здесь — свойство ручки, не поле запроса.
 
-        Молчаливая пустая полка неотличима от «никого не нашли», а цена
-        этих двух состояний противоположна.
+        Один тест закрывает оба ограничения владельца сразу.
+
+        **Гейт не применяется.** Раньше отсутствие поля означало `UNKNOWN`
+        и гасило полку. Пустая полка ничего не предотвращала: те же мастера
+        видны и бронируемы в обычном каталоге одним тапом — закрытым
+        оказывалось объяснение, а не действие. Теперь полка живая, и это
+        обязано быть видно тестом: иначе правка неотличима от кода, который
+        просто гасит `NOT_APPLICABLE` всегда, то есть от возврата к
+        fail-closed.
+
+        **Прислать состояние нельзя.** `STOP` в теле не меняет ничего —
+        не потому, что его аккуратно отбрасывают, а потому, что пути
+        от данных запроса к гейту не существует: поля нет в схеме,
+        значение — константа поверхности. Ровно этим отличается «тип
+        поверхности до решения» от запрещённого «данных нет → неприменимо»:
+        второе управляемо тем, кто зовёт, первое — нет.
+
+        Отмену заявления содержанием решения (кандидат с
+        `requires_health_check`, активная S4) стережёт резолвер, там же,
+        где она и живёт: `recommendation/tests/test_safety_not_applicable.py`.
+        Дублировать её здесь значило бы проверять чужую стадию через ручку.
         """
         settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
-        sp = _make_specialist(tenant_new, suffix="0160", name="Hidden")
+        sp = _make_specialist(tenant_new, suffix="0160", name="Visible")
         _make_service(sp, manicure_category)
 
-        # Логгер `users` объявлен с ``propagate: False`` (settings/base.py),
-        # а обработчик pytest висит на корне — значит записи до caplog
-        # не доходят, сколько ни выставляй уровень. Вешаем обработчик
-        # прямо на нужный логгер: тест про громкость обязан слышать
-        # именно то, что услышит дежурный.
-        surface_logger = logging.getLogger("users.catalog_recommendations_api")
-        surface_logger.addHandler(caplog.handler)
-        try:
-            with caplog.at_level(logging.WARNING, logger="users.catalog_recommendations_api"):
-                data = _api().post(URL, {}, format="json").json()["data"]
-        finally:
-            surface_logger.removeHandler(caplog.handler)
+        without = _api().post(URL, _body(), format="json").json()["data"]
+        steered = _api().post(
+            URL, _body(safety_state="STOP"), format="json",
+        ).json()["data"]
 
-        assert data["layer_2_ayla_picks"] == []
-        assert any("safety_state_missing" in record.getMessage() for record in caplog.records)
+        assert [row["id"] for row in without["layer_2_ayla_picks"]] == [str(sp.id)]
+        assert steered["layer_2_ayla_picks"] == without["layer_2_ayla_picks"]
+
+    def test_request_schema_carries_no_safety_field(self):
+        """Сторож на схему: поля нет — значит и умолчания у него нет.
+
+        Сторож по исходникам (`test_safety_not_applicable.py`) ловит
+        `x or NOT_APPLICABLE` и `default=NOT_APPLICABLE`. Он НЕ ловит
+        поле, объявленное `required=False` без умолчания: такое поле
+        само по себе невинно, а дыру открывает вместе со строкой
+        в обработчике. Здесь стережётся вторая половина — само наличие
+        входа для состояния безопасности на этой поверхности.
+        """
+        fields = RecommendationsRequestSerializer().get_fields()
+        assert not [name for name in fields if "safety" in name]
 
 
 @pytest.mark.django_db
