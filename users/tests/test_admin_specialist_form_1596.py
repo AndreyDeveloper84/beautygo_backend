@@ -78,7 +78,8 @@ def _admin_form_fields() -> set[str]:
     model_admin = django_admin.site._registry[SpecialistProfile]
     request = RequestFactory().get("/admin/users/specialistprofile/add/")
     request.user = User.objects.create_superuser(
-        username="drf1596-form-probe", password="pw", email="p@b.c",
+        username="drf1596-form-probe", password="pw",  # pragma: allowlist secret
+        email="p@b.c",
         role="admin",
     )
     return set(model_admin.get_form(request).base_fields)
@@ -155,7 +156,8 @@ def test_master_created_through_the_form_reaches_the_client_feed(client):
     администратора: иначе тест доказывал бы модель, а не форму.
     """
     staff = User.objects.create_superuser(
-        username="drf1596-admin", password="pw", email="a@b.c", role="admin",
+        username="drf1596-admin", password="pw",  # pragma: allowlist secret
+        email="a@b.c", role="admin",
     )
     client.force_login(staff)
 
@@ -185,8 +187,8 @@ def test_master_created_through_the_form_reaches_the_client_feed(client):
         reverse("admin:users_user_add"),
         {
             "username": "drf1596-master",
-            "password1": "Sup3rSecret!42",
-            "password2": "Sup3rSecret!42",
+            "password1": "Sup3rSecret!42",  # pragma: allowlist secret
+            "password2": "Sup3rSecret!42",  # pragma: allowlist secret
             "role": "specialist",
             "phone": "+79001596001",
             # management-формы блока «Профиль клиента» на форме

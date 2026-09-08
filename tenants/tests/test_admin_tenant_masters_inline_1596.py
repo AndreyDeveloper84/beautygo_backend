@@ -66,7 +66,8 @@ def test_masters_inline_exposes_the_fields_that_decide_visibility():
 def test_salon_and_master_are_created_in_one_pass(client):
     """Салон и мастер заводятся одним сохранением формы салона."""
     staff = User.objects.create_superuser(
-        username="drf1596-inline-admin", password="pw", email="i@b.c",
+        username="drf1596-inline-admin", password="pw",  # pragma: allowlist secret
+        email="i@b.c",
         role="admin",
     )
     client.force_login(staff)
@@ -79,7 +80,7 @@ def test_salon_and_master_are_created_in_one_pass(client):
     # Пользователь-мастер уже заведён формой пользователя — и сигнал
     # заодно завёл ему профиль без салона.
     master_user = User.objects.create_user(
-        username="drf1596-inline-master", password="x",
+        username="drf1596-inline-master", password="x",  # pragma: allowlist secret
         role="specialist", phone="+79001596002",
     )
     existing = SpecialistProfile.objects.get(user=master_user)
@@ -130,14 +131,15 @@ def test_inline_refuses_to_steal_a_master_from_another_salon(client):
     себе, и первый салон потерял бы её без единого следа.
     """
     staff = User.objects.create_superuser(
-        username="drf1596-steal-admin", password="pw", email="s@b.c",
+        username="drf1596-steal-admin", password="pw",  # pragma: allowlist secret
+        email="s@b.c",
         role="admin",
     )
     client.force_login(staff)
 
     other = Tenant.objects.create(slug="drf1596-other", name="Чужой салон")
     master_user = User.objects.create_user(
-        username="drf1596-owned-master", password="x",
+        username="drf1596-owned-master", password="x",  # pragma: allowlist secret
         role="specialist", phone="+79001596003",
     )
     owned = SpecialistProfile.objects.get(user=master_user)
