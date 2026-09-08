@@ -59,11 +59,29 @@ class ScopeMode(StrEnum):
 
 
 class SafetyState(StrEnum):
+    """Состояние безопасности запроса. Решение владельца 08.09.2026 (OD §72).
+
+    `UNKNOWN` и `NOT_APPLICABLE` — РАЗНЫЕ состояния, и путать их запрещено::
+
+        UNKNOWN                          NOT_APPLICABLE
+        оценка ПРИМЕНИМА,                поверхность НЕ выполняет
+        но данных для неё нет            safety-sensitive решение
+              |                                  |
+         fail-closed                     гейт не применяется
+
+    `NOT_APPLICABLE` определяется **типом поверхности до выполнения
+    решения**, а не отсутствием данных. Отсутствующее состояние
+    не превращается в него никогда: `payload.get("safety") or
+    NOT_APPLICABLE` — fail-open дыра, названная владельцем поимённо
+    и запрещённая тестом-сторожем.
+    """
+
     NORMAL = "NORMAL"
     CLARIFY = "CLARIFY"
     CAUTION = "CAUTION"
     STOP = "STOP"
     UNKNOWN = "UNKNOWN"
+    NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
 class NeedOrigin(StrEnum):
@@ -341,6 +359,10 @@ class CandidateFacts:
     is_capable: bool | None = None
     mapping_status: MappingStatus = MappingStatus.UNKNOWN
     safety_blocked: bool = False
+    #: Услуга кандидата требует проверки здоровья (`resolved_requires_health_check`).
+    #: Не запрет сам по себе — но признак того, что выдача КАСАЕТСЯ здоровья,
+    #: а значит заявление `NOT_APPLICABLE` для неё неправомерно (§4.1).
+    requires_health_check: bool = False
     price: Decimal | None = None
 
     # -- S2: соответствие нужде ---------------------------------------------

@@ -48,6 +48,7 @@ def make_facts(
     matched_service_ref=_DEFAULT,
     rating: tuple[str, int] | None = None,
     prior_completed_visit: bool = False,
+    requires_health_check: bool = False,
     is_bookable: bool | None = None,
     mapping_status: MappingStatus = MappingStatus.VERIFIED,
     price: Decimal | None = None,
@@ -71,6 +72,7 @@ def make_facts(
         matched_service_ref=uuid.uuid4() if matched_service_ref is _DEFAULT else matched_service_ref,
         is_bookable=is_bookable,
         prior_completed_visit=prior_completed_visit,
+        requires_health_check=requires_health_check,
         rating=RatingValue(Decimal(rating[0]), rating[1]) if rating else None,
         **overrides,
     )
