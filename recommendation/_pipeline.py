@@ -90,7 +90,10 @@ def resolve(
     в объявленном scope, и **не отвечает**, в каком они порядке. Порядок
     целиком здесь; это и есть граница между «правдой домена» и «политикой».
     """
-    policy = policy or StagePolicy()
+    # Умолчание читает настройки, а не жёсткую константу: иначе одна
+    # политика имеет два значения в одном процессе — у поверхности,
+    # которая её собрала, и здесь. См. `StagePolicy.from_settings`.
+    policy = policy or StagePolicy.from_settings()
     facts = _canonical_order(source.fetch(scope=request.scope, need=request.need))
 
     scoped = apply_scope(facts, request.scope)
