@@ -85,6 +85,11 @@ def _clear_cache():
 @pytest.fixture(autouse=True)
 def _token(settings):
     settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+    # T6: полки 1 и 2 — проекции решения резолвера, а он не рекомендует
+    # кандидата без VERIFIED-маппинга (§10.1). Шкалы доверия в схеме нет,
+    # поэтому здесь ЯВНО включается исключение §10.4 (а). Предмет набора —
+    # связка «цель → категории»; без флага он проверял бы пустую выдачу.
+    settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
 
 @pytest.fixture
@@ -263,6 +268,12 @@ def _home_names(api) -> set[str]:
 
 
 def _catalog_payload(api, **body) -> dict:
+    # T6: полки 1 и 2 — проекции решения резолвера. Исключение маппинга —
+    # решение владельца (§10.4), включается явно; без него набор проверял бы
+    # пустую выдачу, а его предмет — связка «цель → категории».
+    #
+    # Состояние безопасности не подставляется: поверхность объявляет
+    # `NOT_APPLICABLE` своим типом (§72), поля в запросе нет.
     response = api.post(CATALOG_URL, body, format="json")
     assert response.status_code == 200, response.data
     return response.data["data"]

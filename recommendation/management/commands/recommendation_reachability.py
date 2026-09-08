@@ -126,8 +126,22 @@ class Command(BaseCommand):
     # -- два порядка над одним множеством ----------------------------------
 
     def _fixed_order(self, rows) -> list[tuple[str, float]]:
-        """Сегодняшний порядок домашнего экрана, дословно."""
-        from users.catalog_recommendations_api import _compute_layer_2_score
+        """Сегодняшний порядок домашнего экрана, дословно.
+
+        После T6 формулы больше нет — она упразднена вместе с авторитетом
+        поверхности. Тогда эта половина замера не «даёт ноль», а
+        становится **неизмеримой**, и команда обязана сказать именно это:
+        baseline «до» снимают ДО миграции, и если его не сняли, задним
+        числом он не берётся.
+        """
+        try:
+            from users.catalog_recommendations_api import _compute_layer_2_score
+        except ImportError as exc:
+            raise CommandError(
+                "формула домашнего экрана удалена (T6/DRF-1567) — половина замера «до» "
+                "больше не вычислима. Это не ноль недостижимых, это отсутствие замера. "
+                "Записанный baseline ищите в DRF-1566"
+            ) from exc
 
         scored = [(row, _compute_layer_2_score(row, lat=None, lon=None)) for row in rows]
         scored.sort(key=lambda pair: (-pair[1], str(pair[0].id)))

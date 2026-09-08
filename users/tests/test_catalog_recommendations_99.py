@@ -6,12 +6,14 @@ recommendations per Tau's §10.1.
 Coverage:
 - Auth boundary (Bearer + X-External-User-ID; smoke — deep tests in PR #158)
 - Layer 1: customer's history tenants surfaced; non-history hidden
-- Layer 2: top-3 cap; ranked by composite score; reasoning_text built
-- Layer 3: category aggregate counts
+- Layer 2: порядок и причины приходят от резолвера, поверхность их не строит
+- Layer 3: category aggregate counts — агрегат каталога, не рекомендация
 - Eligibility filter: inactive/disabled specialists excluded
-- Goal filter: ILIKE on service name / category slug
-- Distance: haversine when lat/lon provided; null otherwise
-- Reasoning text: priority order (goal > distance > rating); fallback
+- Fail-closed: маппинг без `VERIFIED` (§10.1); безопасность — `NOT_APPLICABLE`
+  типом поверхности и не управляема вызывающим (§72)
+
+Строк про composite score, `reasoning_text` и приоритет «goal > distance >
+rating» здесь больше нет: этих механизмов не существует (T6, контракт §16).
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ from rest_framework.test import APIClient
 
 from services.models import Service, ServiceCategory
 from tenants.models import Tenant
+from users.catalog_recommendations_api import RecommendationsRequestSerializer
 from users.models import SpecialistProfile, TenantUserRelationship, User
 
 
@@ -138,6 +141,17 @@ def _api(
     return c
 
 
+def _body(**overrides) -> dict:
+    """Тело запроса после T6.
+
+    Состояния безопасности здесь НЕТ и прислать его нельзя: поверхность
+    объявляет `NOT_APPLICABLE` своим типом (решение владельца §72), а поле
+    в запросе завело бы запрещённую конструкцию «поля нет → неприменимо».
+    Тест не подставляет того, чего ручка не принимает.
+    """
+    return dict(overrides)
+
+
 # ---------------------------------------------------------------------------
 # Auth boundary (smoke only — deep coverage in PR #158)
 # ---------------------------------------------------------------------------
@@ -150,11 +164,11 @@ class TestAuthBoundary:
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
 
     def test_missing_bearer_denied(self, customer):
-        r = _api(bearer=None).post(URL, {}, format="json")
+        r = _api(bearer=None).post(URL, _body(), format="json")
         assert r.status_code == 403
 
     def test_wrong_bearer_denied(self, customer):
-        r = _api(bearer="wrong").post(URL, {}, format="json")
+        r = _api(bearer="wrong").post(URL, _body(), format="json")
         assert r.status_code == 403
 
 
@@ -168,6 +182,7 @@ class TestLayer1YourPlaces:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     def test_history_tenant_specialists_in_layer_1(
         self, customer, customer_known_tur, tenant_known,
@@ -178,7 +193,7 @@ class TestLayer1YourPlaces:
         )
         _make_service(spec, manicure_category, name="Маникюр")
 
-        r = _api().post(URL, {}, format="json")
+        r = _api().post(URL, _body(), format="json")
         assert r.status_code == 200
         body = r.json()["data"]
         l1_ids = {item["id"] for item in body["layer_1_your_places"]}
@@ -193,7 +208,7 @@ class TestLayer1YourPlaces:
         )
         _make_service(spec, manicure_category, name="Маникюр")
 
-        r = _api().post(URL, {}, format="json")
+        r = _api().post(URL, _body(), format="json")
         body = r.json()["data"]
         l1_ids = {item["id"] for item in body["layer_1_your_places"]}
         assert str(spec.id) not in l1_ids
@@ -204,7 +219,7 @@ class TestLayer1YourPlaces:
         """Customer has zero CUSTOMER-role TURs → layer_1 is []."""
         _make_specialist(tenant_new, suffix="0003", name="X")
 
-        r = _api().post(URL, {}, format="json")
+        r = _api().post(URL, _body(), format="json")
         body = r.json()["data"]
         assert body["layer_1_your_places"] == []
 
@@ -221,7 +236,7 @@ class TestLayer1YourPlaces:
         )
         _make_service(masseur, massage_category, name="Массаж")
 
-        r = _api().post(URL, {"goal": "маникюр"}, format="json")
+        r = _api().post(URL, _body(goal="маникюр"), format="json")
         body = r.json()["data"]
         l1_ids = {item["id"] for item in body["layer_1_your_places"]}
         # Salon offers no manicure, but it's still in 'your places'.
@@ -231,111 +246,210 @@ class TestLayer1YourPlaces:
         l2_ids = {item["id"] for item in body["layer_2_ayla_picks"]}
         assert str(masseur.id) not in l2_ids
 
-    def test_layer_1_ordered_by_rating_desc(
-        self, customer, customer_known_tur, tenant_known,
-        manicure_category,
+    def test_layer_1_is_not_ordered_by_rating(
+        self, customer, customer_known_tur, tenant_known, manicure_category,
     ):
-        low = _make_specialist(
-            tenant_known, suffix="0005", name="Low",
-            rating=Decimal("3.5"),
-        )
-        high = _make_specialist(
-            tenant_known, suffix="0006", name="High",
-            rating=Decimal("4.9"),
-        )
-        _make_service(low, manicure_category, name="Маникюр")
-        _make_service(high, manicure_category, name="Маникюр")
+        """Полка «твои салоны» больше не сортируется по рейтингу.
 
-        r = _api().post(URL, {}, format="json")
-        items = r.json()["data"]["layer_1_your_places"]
-        # Higher-rated specialist first — stable ordering.
-        assert items[0]["id"] == str(high.id)
-        assert items[1]["id"] == str(low.id)
+        Было `order_by("-rating", "id")[:5]` — качество как порядок плюс
+        лексикографика под отсечением, то есть мастер с «неудачным» id
+        при равенстве не показывался никому. Теперь порядок даёт резолвер,
+        а рейтинг в сортировку не входит вовсе (решение владельца §29.4):
+        оба кандидата неразличимы и делят ярус.
+        """
+        for suffix, name, rating in (
+            ("0300", "Top", "5.0"), ("0301", "Mid", "4.0"), ("0302", "Low", "3.0"),
+        ):
+            sp = _make_specialist(
+                tenant_known, suffix=suffix, name=name, rating=Decimal(rating),
+            )
+            _make_service(sp, manicure_category)
 
+        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_1_your_places"]
 
-# ---------------------------------------------------------------------------
-# Layer 2 — top-3 ayla picks (excluding history)
-# ---------------------------------------------------------------------------
+        assert {row["display_name"] for row in rows} == {"Top", "Mid", "Low"}
+        assert {row["tier"] for row in rows} == {1}
 
 
 @pytest.mark.django_db
 class TestLayer2AylaPicks:
+    """Полка 2 после T6: проекция решения резолвера, а не своя формула."""
+
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
+
+    def test_layer_2_capped_at_3(self, customer, tenant_new, manicure_category):
+        """Срез — представление, а не политика.
+
+        Резолвер отдаёт всё допустимое множество; поверхность показывает
+        первые k и делает это ПОСЛЕ ротации. Иначе «Показать ещё»
+        показывать нечего (§12.2).
+        """
+        for i in range(5):
+            sp = _make_specialist(
+                tenant_new, suffix=f"010{i}", name=f"Pick {i}", rating=Decimal("4.0"),
+            )
+            _make_service(sp, manicure_category)
+
+        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]
+        assert len(rows) == 3
+
+    def test_layer_2_excludes_history_tenants(
+        self, customer, customer_known_tur, tenant_known, tenant_new, manicure_category,
+    ):
+        known = _make_specialist(tenant_known, suffix="0110", name="Known")
+        fresh = _make_specialist(tenant_new, suffix="0111", name="Fresh")
+        _make_service(known, manicure_category)
+        _make_service(fresh, manicure_category)
+
+        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]
+        assert {row["display_name"] for row in rows} == {"Fresh"}
+
+    def test_rating_does_not_order_the_shelf(
+        self, customer, tenant_new, manicure_category,
+    ):
+        """Решение владельца §29.4: рейтинг в сортировку НЕ входит.
+
+        Раньше этот класс проверял обратное — «выше рейтинг, выше место».
+        Формула была `rating*10 + ...`, то есть сортировкой по рейтингу
+        и ничем больше. Теперь оба кандидата неразличимы и делят ярус:
+        стадия качества молчит, пока свидетельство не подтверждено.
+        """
+        high = _make_specialist(
+            tenant_new, suffix="0120", name="High", rating=Decimal("5.0"),
+        )
+        low = _make_specialist(
+            tenant_new, suffix="0121", name="Low", rating=Decimal("3.0"),
+        )
+        _make_service(high, manicure_category)
+        _make_service(low, manicure_category)
+
+        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]
+        assert {row["tier"] for row in rows} == {1}
+
+    def test_each_item_carries_codes_instead_of_a_sentence(
+        self, customer, tenant_new, manicure_category,
+    ):
+        """WHY — коды и свидетельства, а не строка от источника (§7).
+
+        Строку собирает представление. Источник, собравший её сам,
+        однажды напечатал человеку «Рейтинг 4.9» при нуле отзывов.
+        """
+        sp = _make_specialist(tenant_new, suffix="0130", name="Pick", rating=Decimal("4.9"))
+        _make_service(sp, manicure_category)
+
+        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]
+        assert rows
+        for row in rows:
+            assert "reasoning_text" not in row
+            assert row["reason_codes"]
+
+    def test_unsubstantiated_rating_is_delivered_but_not_a_reason(
+        self, customer, tenant_new, manicure_category,
+    ):
+        """Число доезжает как справочное, силой объявлено недоказанным.
+
+        Разделение «показать» и «обосновать» проводится в источнике,
+        а не на поверхности — иначе каждая поверхность проведёт его
+        по-своему, что уже однажды и случилось.
+        """
+        sp = _make_specialist(
+            tenant_new, suffix="0140", name="Loud", rating=Decimal("4.9"), reviews=0,
+        )
+        _make_service(sp, manicure_category)
+
+        row = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"][0]
+        ratings = [item for item in row["evidence"] if item["kind"] == "RATING"]
+        assert ratings and ratings[0]["strength"] == "UNSUBSTANTIATED"
+        assert not any(
+            code == "QUALITY_RATING_SUBSTANTIATED" for code in row["reason_codes"]
+        )
+
+
+@pytest.mark.django_db
+class TestFailClosedStates:
+    """Состояния, которые обязаны отличаться от «подходящих нет».
+
+    Их было два. Владелец ответил на один (§72): безопасность на этой
+    поверхности не «неизвестна», а неприменима, и полку больше не гасит.
+    Остался маппинг — он ждёт §40.4 п.1.
+    """
+
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
 
-    def test_layer_2_capped_at_3(
-        self, customer, tenant_new, manicure_category,
+    def test_without_mapping_override_nobody_is_recommendable(
+        self, customer, tenant_new, manicure_category, settings,
     ):
-        for i in range(5):
-            sp = _make_specialist(
-                tenant_new, suffix=f"010{i}", name=f"S{i}",
-                rating=Decimal("4.5"),
-            )
-            _make_service(sp, manicure_category, name="Маникюр")
+        """§10.1: `catalog_visible ≠ recommendation_eligible`.
 
-        r = _api().post(URL, {}, format="json")
-        body = r.json()["data"]
-        assert len(body["layer_2_ayla_picks"]) == 3
+        Шкалы доверия к маппингу в схеме нет, значит `VERIFIED` нет ни
+        у кого, значит рекомендовать нельзя никого. Это состояние, а не
+        поломка, и снимается решением владельца (§40.4 п.1).
+        """
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = False
+        sp = _make_specialist(tenant_new, suffix="0150", name="Invisible")
+        _make_service(sp, manicure_category)
 
-    def test_layer_2_excludes_history_tenants(
-        self, customer, customer_known_tur, tenant_known, tenant_new,
-        manicure_category,
+        data = _api().post(URL, _body(), format="json").json()["data"]
+        assert data["layer_2_ayla_picks"] == []
+        # Полка 3 жива: каталог видно, рекомендовать нельзя — разные вещи.
+        assert data["layer_3_explore"]["categories"]
+
+    def test_safety_is_declared_by_the_surface_and_not_steerable_by_the_caller(
+        self, customer, tenant_new, manicure_category, settings,
     ):
-        history_spec = _make_specialist(
-            tenant_known, suffix="0110", name="History",
-        )
-        new_spec = _make_specialist(
-            tenant_new, suffix="0111", name="New",
-        )
-        _make_service(history_spec, manicure_category, name="Маникюр")
-        _make_service(new_spec, manicure_category, name="Маникюр")
+        """§72: состояние безопасности здесь — свойство ручки, не поле запроса.
 
-        r = _api().post(URL, {}, format="json")
-        body = r.json()["data"]
-        l2_ids = {item["id"] for item in body["layer_2_ayla_picks"]}
-        assert str(history_spec.id) not in l2_ids
-        assert str(new_spec.id) in l2_ids
+        Один тест закрывает оба ограничения владельца сразу.
 
-    def test_layer_2_ranking_higher_rating_first(
-        self, customer, tenant_new, manicure_category,
-    ):
-        low = _make_specialist(
-            tenant_new, suffix="0120", name="Low",
-            rating=Decimal("3.5"),
-        )
-        high = _make_specialist(
-            tenant_new, suffix="0121", name="High",
-            rating=Decimal("4.9"),
-        )
-        _make_service(low, manicure_category, name="Маникюр")
-        _make_service(high, manicure_category, name="Маникюр")
+        **Гейт не применяется.** Раньше отсутствие поля означало `UNKNOWN`
+        и гасило полку. Пустая полка ничего не предотвращала: те же мастера
+        видны и бронируемы в обычном каталоге одним тапом — закрытым
+        оказывалось объяснение, а не действие. Теперь полка живая, и это
+        обязано быть видно тестом: иначе правка неотличима от кода, который
+        просто гасит `NOT_APPLICABLE` всегда, то есть от возврата к
+        fail-closed.
 
-        r = _api().post(URL, {}, format="json")
-        items = r.json()["data"]["layer_2_ayla_picks"]
-        # Higher-rated specialist surfaces first.
-        assert items[0]["id"] == str(high.id)
+        **Прислать состояние нельзя.** `STOP` в теле не меняет ничего —
+        не потому, что его аккуратно отбрасывают, а потому, что пути
+        от данных запроса к гейту не существует: поля нет в схеме,
+        значение — константа поверхности. Ровно этим отличается «тип
+        поверхности до решения» от запрещённого «данных нет → неприменимо»:
+        второе управляемо тем, кто зовёт, первое — нет.
 
-    def test_each_layer_2_item_has_reasoning_text(
-        self, customer, tenant_new, manicure_category,
-    ):
-        sp = _make_specialist(
-            tenant_new, suffix="0130", name="WithReason",
-        )
-        _make_service(sp, manicure_category, name="Маникюр")
+        Отмену заявления содержанием решения (кандидат с
+        `requires_health_check`, активная S4) стережёт резолвер, там же,
+        где она и живёт: `recommendation/tests/test_safety_not_applicable.py`.
+        Дублировать её здесь значило бы проверять чужую стадию через ручку.
+        """
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
+        sp = _make_specialist(tenant_new, suffix="0160", name="Visible")
+        _make_service(sp, manicure_category)
 
-        r = _api().post(URL, {}, format="json")
-        items = r.json()["data"]["layer_2_ayla_picks"]
-        assert items
-        for it in items:
-            assert "reasoning_text" in it
-            assert isinstance(it["reasoning_text"], str)
-            assert it["reasoning_text"] != ""
+        without = _api().post(URL, _body(), format="json").json()["data"]
+        steered = _api().post(
+            URL, _body(safety_state="STOP"), format="json",
+        ).json()["data"]
 
+        assert [row["id"] for row in without["layer_2_ayla_picks"]] == [str(sp.id)]
+        assert steered["layer_2_ayla_picks"] == without["layer_2_ayla_picks"]
 
-# ---------------------------------------------------------------------------
-# Eligibility filter
-# ---------------------------------------------------------------------------
+    def test_request_schema_carries_no_safety_field(self):
+        """Сторож на схему: поля нет — значит и умолчания у него нет.
+
+        Сторож по исходникам (`test_safety_not_applicable.py`) ловит
+        `x or NOT_APPLICABLE` и `default=NOT_APPLICABLE`. Он НЕ ловит
+        поле, объявленное `required=False` без умолчания: такое поле
+        само по себе невинно, а дыру открывает вместе со строкой
+        в обработчике. Здесь стережётся вторая половина — само наличие
+        входа для состояния безопасности на этой поверхности.
+        """
+        fields = RecommendationsRequestSerializer().get_fields()
+        assert not [name for name in fields if "safety" in name]
 
 
 @pytest.mark.django_db
@@ -343,6 +457,7 @@ class TestEligibilityFilter:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     def test_unavailable_specialist_excluded(
         self, customer, tenant_new, manicure_category,
@@ -353,7 +468,7 @@ class TestEligibilityFilter:
         )
         _make_service(sp, manicure_category, name="Маникюр")
 
-        r = _api().post(URL, {}, format="json")
+        r = _api().post(URL, _body(), format="json")
         body = r.json()["data"]
         all_ids = (
             {it["id"] for it in body["layer_1_your_places"]}
@@ -370,7 +485,7 @@ class TestEligibilityFilter:
         )
         _make_service(sp, manicure_category, name="Маникюр")
 
-        r = _api().post(URL, {}, format="json")
+        r = _api().post(URL, _body(), format="json")
         body = r.json()["data"]
         all_ids = (
             {it["id"] for it in body["layer_1_your_places"]}
@@ -387,7 +502,7 @@ class TestEligibilityFilter:
         )
         _make_service(sp, manicure_category, name="Маникюр")
 
-        r = _api().post(URL, {}, format="json")
+        r = _api().post(URL, _body(), format="json")
         body = r.json()["data"]
         all_ids = (
             {it["id"] for it in body["layer_1_your_places"]}
@@ -406,6 +521,7 @@ class TestGoalFilter:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     def test_goal_filters_by_service_name(
         self, customer, tenant_new, manicure_category, massage_category,
@@ -419,7 +535,7 @@ class TestGoalFilter:
         _make_service(manicurist, manicure_category, name="Маникюр")
         _make_service(masseur, massage_category, name="Массаж")
 
-        r = _api().post(URL, {"goal": "маникюр"}, format="json")
+        r = _api().post(URL, _body(goal="маникюр"), format="json")
         body = r.json()["data"]
         l2_ids = {it["id"] for it in body["layer_2_ayla_picks"]}
         assert str(manicurist.id) in l2_ids
@@ -439,7 +555,7 @@ class TestGoalFilter:
         )
         _make_service(masseur, massage_category, name="Шиацу")
 
-        r = _api().post(URL, {"goal": "manicure"}, format="json")
+        r = _api().post(URL, _body(goal="manicure"), format="json")
         body = r.json()["data"]
         l2_ids = {it["id"] for it in body["layer_2_ayla_picks"]}
         assert str(manicurist.id) in l2_ids
@@ -452,97 +568,32 @@ class TestGoalFilter:
 
 
 @pytest.mark.django_db
-class TestDistanceAndReasoning:
+class TestGeographyIsNotOnThisSurface:
+    """География ушла со шкалы карточки — и это не потеря.
+
+    Прежние тесты этого класса проверяли `distance_km` в карточке и
+    фразу «1.2 км от вас» в обосновании. Оба поля мертвы по факту:
+    фронт шлёт пустое тело, `lat`/`lon` не приходили НИКОГДА, значит
+    расстояние всегда было `None`, а слагаемое `100/(km+1)` не
+    срабатывало ни разу.
+
+    По контракту §3.3 расстояние допускается только как жёсткий предел
+    радиуса в S0/S1 и никогда как слагаемое. Радиус — поле запроса
+    резолвера; он появится здесь вместе с настоящей географией, а не
+    вместе с полем, которое всегда пусто.
+    """
+
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
-    def test_distance_computed_when_lat_lon_given(
-        self, customer, tenant_new, manicure_category,
-    ):
-        # 55.75, 37.62 — center of Moscow. Specialist at 55.76, 37.63
-        # is ~1.3 km away.
-        sp = _make_specialist(
-            tenant_new, suffix="0400", name="NearMoscow",
-            lat=55.76, lon=37.63,
-        )
-        _make_service(sp, manicure_category, name="Маникюр")
+    def test_card_has_no_distance_field(self, customer, tenant_new, manicure_category):
+        sp = _make_specialist(tenant_new, suffix="0200", name="Near")
+        _make_service(sp, manicure_category)
 
-        r = _api().post(
-            URL, {"lat": 55.75, "lon": 37.62}, format="json",
-        )
-        items = r.json()["data"]["layer_2_ayla_picks"]
-        item = next(it for it in items if it["id"] == str(sp.id))
-        assert item["distance_km"] is not None
-        assert 0.5 < item["distance_km"] < 3.0
-
-    def test_distance_null_when_no_lat_lon(
-        self, customer, tenant_new, manicure_category,
-    ):
-        sp = _make_specialist(
-            tenant_new, suffix="0410", name="NoCoords",
-        )
-        _make_service(sp, manicure_category, name="Маникюр")
-
-        r = _api().post(URL, {}, format="json")
-        items = r.json()["data"]["layer_2_ayla_picks"]
-        item = next(it for it in items if it["id"] == str(sp.id))
-        assert item["distance_km"] is None
-
-    def test_reasoning_mentions_distance_and_rating(
-        self, customer, tenant_new, manicure_category,
-    ):
-        sp = _make_specialist(
-            tenant_new, suffix="0420", name="WithSignals",
-            lat=55.76, lon=37.63, rating=Decimal("4.9"),
-        )
-        _make_service(sp, manicure_category, name="Маникюр")
-
-        r = _api().post(
-            URL, {"lat": 55.75, "lon": 37.62}, format="json",
-        )
-        items = r.json()["data"]["layer_2_ayla_picks"]
-        item = next(it for it in items if it["id"] == str(sp.id))
-        assert "км" in item["reasoning_text"]
-        assert "4.9" in item["reasoning_text"]
-
-    def test_reasoning_mentions_goal_match_first(
-        self, customer, tenant_new, manicure_category,
-    ):
-        sp = _make_specialist(
-            tenant_new, suffix="0430", name="GoalMatch",
-            rating=Decimal("4.9"),
-        )
-        _make_service(sp, manicure_category, name="Маникюр")
-
-        r = _api().post(URL, {"goal": "маникюр"}, format="json")
-        items = r.json()["data"]["layer_2_ayla_picks"]
-        item = next(it for it in items if it["id"] == str(sp.id))
-        text = item["reasoning_text"]
-        assert "Совпадает с твоей целью" in text
-        # Goal match should be the FIRST fact (priority order).
-        assert text.startswith("Совпадает с твоей целью")
-
-    def test_reasoning_fallback_when_no_signals(
-        self, customer, tenant_new, manicure_category,
-    ):
-        # Low rating (no rating fact), no coords (no distance), no
-        # goal — falls back to 'Принимает записи'.
-        sp = _make_specialist(
-            tenant_new, suffix="0440", name="Minimal",
-            rating=Decimal("3.5"),
-        )
-        _make_service(sp, manicure_category, name="Маникюр")
-
-        r = _api().post(URL, {}, format="json")
-        items = r.json()["data"]["layer_2_ayla_picks"]
-        item = next(it for it in items if it["id"] == str(sp.id))
-        assert item["reasoning_text"] == "Принимает записи"
-
-
-# ---------------------------------------------------------------------------
-# Layer 3 — category aggregate
-# ---------------------------------------------------------------------------
+        row = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"][0]
+        assert "distance_km" not in row
 
 
 @pytest.mark.django_db
@@ -550,6 +601,7 @@ class TestLayer3Explore:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     def test_layer_3_returns_category_counts(
         self, customer, tenant_new, manicure_category, massage_category,
@@ -567,7 +619,7 @@ class TestLayer3Explore:
         _make_service(m2, manicure_category)
         _make_service(ms1, massage_category)
 
-        r = _api().post(URL, {}, format="json")
+        r = _api().post(URL, _body(), format="json")
         cats = r.json()["data"]["layer_3_explore"]["categories"]
         by_slug = {c["slug"]: c for c in cats}
         assert "manicure" in by_slug
@@ -584,7 +636,7 @@ class TestLayer3Explore:
 
 @pytest.mark.django_db
 class TestSalonStateGatesThePool:
-    """``_base_pool`` обязан исполнять то, что обещает его докстринг.
+    """Пул обязан исполнять то, что обещает его докстринг.
 
     Докстринг говорил «active specialist in an active tenant taking
     bookings», а фильтра по салону в коде не было вовсе:
@@ -600,16 +652,18 @@ class TestSalonStateGatesThePool:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     @staticmethod
     def _layer_1_ids() -> set[str]:
-        r = _api().post(URL, {}, format="json")
+        r = _api().post(URL, _body(), format="json")
         assert r.status_code == 200, r.content
         return {i["id"] for i in r.json()["data"]["layer_1_your_places"]}
 
     @staticmethod
     def _layer_2_ids() -> set[str]:
-        r = _api().post(URL, {}, format="json")
+        r = _api().post(URL, _body(), format="json")
         assert r.status_code == 200, r.content
         return {i["id"] for i in r.json()["data"]["layer_2_ayla_picks"]}
 
@@ -673,7 +727,7 @@ class TestSalonStateGatesThePool:
         )
         _make_service(healthy, manicure_category, name="Маникюр")
 
-        r = _api().post(URL, {}, format="json")
+        r = _api().post(URL, _body(), format="json")
         assert r.status_code == 200, r.content
 
         picks = {i["id"] for i in r.json()["data"]["layer_2_ayla_picks"]}
