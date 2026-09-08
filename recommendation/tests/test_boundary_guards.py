@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -27,6 +28,10 @@ RESOLVER_DIR = REPO_ROOT / "recommendation"
 #: в его аргументах. Иначе гард ловил бы сортировку каталога по имени и был
 #: бы отключён в первую же неделю — а отключённый сторож хуже отсутствующего.
 _ORDERING_CALLS = re.compile(r"(order_by\(|\.sort\(|sorted\()")
+
+#: Те же вызовы для разбора по дереву. Имя вызываемого, а не подстрока:
+#: `sort_order(...)` мимо, `qs.order_by(...)` и `sorted(...)` — сюда.
+_ORDERING_NAMES = {"order_by", "sort", "sorted"}
 
 #: Признак, по которому упорядочивать нельзя. `sort_order` и `sorted` мимо:
 #: граница — на слове целиком.
@@ -48,8 +53,12 @@ _SKIPPED_PARTS = ("migrations", "tests", ".venv", "venv", "__pycache__", "node_m
 #: граница. Список намеренно точечный (файл, а не каталог): каталог прикрыл
 #: бы и то, что появится в нём завтра.
 _ALLOWED = {
-    # Домашний экран Mini App. Ранжирование упраздняется целиком — T6.
-    "users/catalog_recommendations_api.py": "DRF-1567 (T6): полки становятся проекциями resolve()",
+    # Домашний экран Mini App (DRF-1567, T6) отсюда УШЁЛ — ранжирования
+    # в файле больше нет, и это первая строка реестра авторитетов,
+    # сменившая «авторитет» на «удалено» не на словах, а тем, что гард
+    # перестал нуждаться в исключении. Пока сторож был текстовым,
+    # снять исключение было нельзя: файл продолжал «нарушать» цитатой
+    # в собственном докстринге, где перечислено удалённое.
     # Движок LLM-контекста. Единая сумма 30/25/20/15/10 упраздняется — T9.
     "ai/application/services/recommendation_engine.py": "DRF-1570 (T9): компоненты переезжают по стадиям",
     # Поиск специалистов: рейтинг с отсечением + расстояние сортировкой.
@@ -78,7 +87,60 @@ def _ranking_sites(text: str) -> list[tuple[int, str]]:
     Возвращает пары (строка, фрагмент). Пусто — значит файл сортирует
     по чему-то другому: по имени, по дате, по порядку в каталоге. Это
     разрешено и всегда было разрешено; запрещено ставить выше «лучшего».
+
+    **Разбор идёт по дереву, а не по тексту.** Текстовый сторож не
+    различал код и рассказ о коде: файл, у которого ранжирование
+    УДАЛЕНО, но в докстринге названо удалённым, продолжал считаться
+    нарушителем. Последствие тоньше ложного срабатывания: пока такой
+    файл «нарушает», его исключение в :data:`_ALLOWED` выглядит живым
+    и :func:`test_allowances_are_not_stale` молчит — то есть механизм,
+    которым список исключений остаётся списком долгов, отключается
+    ровно в тот момент, когда долг возвращён.
+
+    Тот же приём уже применён сторожем §72 (`test_safety_not_applicable`)
+    по той же причине: докстринг, ЦИТИРУЮЩИЙ запрещённую конструкцию, —
+    это документация правила, а не его нарушение.
+
+    Чего разбор по дереву по-прежнему не видит: порядок, собранный из
+    переменной (``qs.order_by(*fields)``) или в другом файле. Это не
+    анализ потока, и выдавать его за полный нельзя.
     """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        # Неразбираемый файл не должен становиться молча разрешённым:
+        # падаем на прежнюю текстовую проверку. Она груба, но её грубость
+        # в сторону «покраснеть», а не «промолчать».
+        return _ranking_sites_textual(text)
+
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _called_name(node)
+        if name not in _ORDERING_NAMES:
+            continue
+        args_src = ", ".join(
+            [ast.unparse(arg) for arg in node.args]
+            + [ast.unparse(kw) for kw in node.keywords]
+        )
+        signal = _QUALITY_SIGNAL.search(args_src)
+        if signal:
+            found.append((node.lineno, f"{name}(… {signal.group(0)}"))
+    return found
+
+
+def _called_name(node: ast.Call) -> str | None:
+    """Имя вызываемого — `qs.order_by(...)` и `sorted(...)` одинаково."""
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    return None
+
+
+def _ranking_sites_textual(text: str) -> list[tuple[int, str]]:
+    """Прежняя проверка — только как запасной путь для неразбираемого файла."""
     found = []
     for call in _ORDERING_CALLS.finditer(text):
         args = text[call.start(): call.start() + _ARGS_WINDOW]
@@ -145,6 +207,40 @@ def test_allowances_are_not_stale():
     assert not stale, (
         "исключения больше ничего не прикрывают — удалите их из _ALLOWED: " + ", ".join(stale)
     )
+
+
+def test_the_guard_reads_code_and_not_prose_about_code():
+    """Сторож обязан различать ранжирование и рассказ о нём.
+
+    Проверка нужна ровно потому, что её отсутствие уже стоило одного
+    отключённого механизма: пока разбор шёл по тексту, файл с удалённым
+    ранжированием продолжал «нарушать» цитатой в собственном докстринге,
+    его исключение выглядело живым, и `test_allowances_are_not_stale`
+    молчал именно тогда, когда должен был заговорить.
+
+    Обе половины обязательны. Без первой сторож ловит документацию;
+    без второй — не ловит ничего, и зелень доказывает лишь то, что
+    проверку ослабили.
+    """
+    prose = '"""Здесь стояло qs.order_by(\'-rating\', \'id\') — удалено (T6)."""\n'
+    comment = '# было: sorted(items, key=lambda c: -c.rating)\nx = 1\n'
+    assert _ranking_sites(prose) == []
+    assert _ranking_sites(comment) == []
+
+    assert _ranking_sites('qs.order_by("-rating", "id")\n')
+    assert _ranking_sites('sorted(items, key=lambda c: -c.rating)\n')
+    # Порядок по чему-то другому разрешён и всегда был разрешён.
+    assert _ranking_sites('qs.order_by("-created_at")\n') == []
+
+
+def test_unparseable_file_is_not_silently_allowed():
+    """Запасной путь краснеет, а не молчит.
+
+    Разбор по дереву мог бы стать способом обойти сторожа: файл,
+    который не парсится, при `return []` оказался бы разрешён молча.
+    """
+    broken = 'def f(:\n    qs.order_by("-rating")\n'
+    assert _ranking_sites(broken)
 
 
 def test_private_modules_are_not_imported_from_outside():
