@@ -203,6 +203,7 @@ def apply_eligibility(
 
     safety_blocks_all = request.safety_state in (SafetyState.STOP, SafetyState.UNKNOWN)
     budget = request.constraints.price_max
+    need_is_stated = request.need.is_stated
 
     for facts in candidates:
         cid = facts.ref.id
@@ -219,6 +220,32 @@ def apply_eligibility(
         granted.add(ReasonCode.ELIG_ACTIVE_OFFER)
 
         if facts.is_capable is not True:
+            excluded.append(ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_NOT_CAPABLE))
+            continue
+
+        # НАЗВАННАЯ НУЖДА — УСЛОВИЕ ДОПУСТИМОСТИ, а не только порядок.
+        #
+        # Уточнение, вынужденное реализацией. По §4.4 стадии S2–S6 не
+        # исключают, и это верно про СТЕПЕНЬ соответствия: кто подходит
+        # точнее, а кто грубее. Но кандидат, про которого соответствие
+        # ВООБЩЕ не определилось, при явно названной нужде — это не
+        # «подходит хуже», это «не отвечает тому, о чём спросили».
+        #
+        # Показать его значило бы молча подставить другую услугу
+        # (канон §14.4 запрещает прямо), а «непустой недоказанный ответ»
+        # хуже пустого честного (§14). Человек, набравший «массаж»,
+        # не должен получать маникюр ниже по списку — он должен получать
+        # массаж или честное «никого».
+        #
+        # Способность — она же и есть: мастер, не отвечающий названной
+        # нужде, для ЭТОГО запроса не способен, отсюда тот же код.
+        #
+        # Уровень берётся ТЕМ ЖЕ помощником, что и в S2 (`_effective_match_level`),
+        # а не полем фактов напрямую. Иначе провайдер без разрешённой услуги
+        # проходил бы S1 как «совпал», а в S2 читался бы как UNDETERMINED
+        # по K2 — две стадии, два ответа на один вопрос. Ровно тот разрыв,
+        # который мы и убираем этим эпиком.
+        if need_is_stated and _effective_match_level(facts) is MatchLevel.UNDETERMINED:
             excluded.append(ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_NOT_CAPABLE))
             continue
 

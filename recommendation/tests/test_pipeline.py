@@ -334,19 +334,48 @@ def test_stage_without_data_is_inactive_not_zero():
     assert ReasonCode.QUALITY_NO_EVIDENCE in decision.reason_codes
 
 
-def test_provider_without_resolved_service_cannot_claim_semantic_fit():
-    """K2: провайдера нельзя ранжировать «по соответствию», если услуга не разрешена.
+def test_provider_without_resolved_service_is_not_admitted_to_a_stated_need():
+    """K2 плюс уточнение S1: не отвечающий названной нужде не показывается.
 
     Сегодняшний дефект поверхности B дословно: провайдеры упорядочены как
-    будто по соответствию нужде, а соответствие не вычислялось.
+    будто по соответствию нужде, а соответствие не вычислялось. Раньше
+    такой кандидат оставался в выдаче ниже по списку; теперь при ЯВНО
+    названной нужде он выбывает на S1.
+
+    Причина не в строгости. Показать его значило бы молча подставить
+    другую услугу (канон §14.4), а «непустой недоказанный ответ» хуже
+    пустого честного (§14): человек, набравший «массаж», должен получить
+    массаж или честное «никого», но не маникюр ниже по списку.
+
+    Положительная стража на тех же данных обязательна: без неё тест
+    зеленел бы и на коде, который не пускает вообще никого.
     """
     resolved = make_facts(match_level=MatchLevel.SERVICE_EXACT)
     unresolved = make_facts(match_level=MatchLevel.SERVICE_EXACT, matched_service_ref=None)
 
     decision = resolve(make_request(), source=StaticSource([unresolved, resolved]))
 
-    assert _ranked_ids(decision)[0] == resolved.ref.id
-    assert ReasonCode.MATCH_UNDETERMINED in _by_id(decision, unresolved.ref.id).reason_codes
+    assert _ranked_ids(decision) == [resolved.ref.id]
+    assert [e.reason_code for e in decision.excluded] == [ReasonCode.ELIG_EXCLUDED_NOT_CAPABLE]
+
+
+def test_unresolved_provider_stays_when_the_need_was_never_stated():
+    """Нужда не названа — исключать не за что.
+
+    Отрицательная половина предыдущего теста: правило срабатывает ТОЛЬКО
+    когда человек сказал, что ищет. Молчание не является требованием,
+    и отсутствие соответствия при молчании — не «не подходит», а
+    «не вычислялось» (R4).
+    """
+    unresolved = make_facts(match_level=MatchLevel.SERVICE_EXACT, matched_service_ref=None)
+
+    decision = resolve(
+        make_request(need=NeedSpec(origin=NeedOrigin.USER_EXPLICIT)),
+        source=StaticSource([unresolved]),
+    )
+
+    assert _ranked_ids(decision) == [unresolved.ref.id]
+    assert decision.excluded == ()
 
 
 def test_unconfirmed_schedule_is_barred_from_the_first_tier():

@@ -356,7 +356,7 @@ class TestLayer2AylaPicks:
         по-своему, что уже однажды и случилось.
         """
         sp = _make_specialist(
-            tenant_new, suffix="0140", name="Loud", rating=Decimal("4.9"),
+            tenant_new, suffix="0140", name="Loud", rating=Decimal("4.9"), reviews=0,
         )
         _make_service(sp, manicure_category)
 
@@ -406,7 +406,7 @@ class TestFailClosedStates:
         sp = _make_specialist(tenant_new, suffix="0160", name="Hidden")
         _make_service(sp, manicure_category)
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger="users.catalog_recommendations_api"):
             data = _api().post(URL, {}, format="json").json()["data"]
 
         assert data["layer_2_ayla_picks"] == []
@@ -597,7 +597,7 @@ class TestLayer3Explore:
 
 @pytest.mark.django_db
 class TestSalonStateGatesThePool:
-    """``_base_pool`` обязан исполнять то, что обещает его докстринг.
+    """Пул обязан исполнять то, что обещает его докстринг.
 
     Докстринг говорил «active specialist in an active tenant taking
     bookings», а фильтра по салону в коде не было вовсе:
@@ -613,6 +613,8 @@ class TestSalonStateGatesThePool:
     @pytest.fixture(autouse=True)
     def _token(self, settings):
         settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
+        settings.RECOMMENDATION_PILOT_MAPPING_OVERRIDE = True
 
     @staticmethod
     def _layer_1_ids() -> set[str]:

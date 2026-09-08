@@ -376,11 +376,18 @@ class CatalogRecommendationsView(APIView):
         seed = f"miniapp-home:{request.user.id}"
         request_id = str(uuid.uuid4())
 
+        # Полка 1 — БЕЗ нужды, и это прежнее поведение, а не упрощение.
+        #
+        # Её якорь — отношения человека с салоном, а не то, что он ищет
+        # сейчас: набравший «массаж» не должен терять свой маникюрный
+        # салон из «твоих мест». Названная нужда — условие допустимости
+        # (S1), поэтому передать её сюда значило бы отфильтровать полку 1
+        # по цели, чего она никогда не делала.
         layer_1_decision = _resolve_layer(
             request_id=request_id,
             subject_ref=str(request.user.id),
             scope=Scope(ScopeMode.MARKETPLACE, tenant_refs=tuple(history_tenant_ids)),
-            need=need,
+            need=NeedSpec(origin=NeedOrigin.MEMORY),
             safety_state=safety_state,
             seed=seed,
             k=LAYER_1_LIMIT,
