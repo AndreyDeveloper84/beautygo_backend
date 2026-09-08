@@ -4,7 +4,26 @@
 Recommendation Resolver — единственный владелец `RecommendationDecision`
 (решение владельца `docs/OPEN_DECISIONS.md` §53, контракт
 `RECOMMENDATION_RESOLVER_CONTRACT_v1.0.md`). Здесь остались только
-границы поиска, проекция решения в полки и форма карточки.
+границы поиска и проекция решения в полки.
+
+Что полка отдаёт — и чего не отдаёт
+-----------------------------------
+Строка полки несёт **ссылку на кандидата** (`candidate: {kind, id}`),
+его место (`rank`, `tier`) и причину (`reason_codes`, `evidence`).
+Имени, фото и рейтинга в ней нет: показ берётся из зеркала бота, где
+лежат и собственные ключи потребителя, и данные соседних блоков экрана.
+
+Разделение простое: **личность, порядок и причина — наши; показ —
+зеркала**. Перевод нашего ключа в ключ зеркала делает транзит
+(`CatalogMaster.ayla_user_id`); у клиента такого поля нет вовсе.
+
+Вид кандидата объявляется явно, а не подразумевается (контракт §5, K1).
+Резолвер производит `PROVIDER` — мастеров, не услуги, — и всё, чем он
+различает, висит на специалисте: рейтинг и отзывы (S5), прошлые визиты
+(S4), расписание (S3). Пока вид подразумевался, существовал ответ,
+который одна половина границы считала валидным, а другая молча
+отбрасывала целиком — и заметно это стало бы не сразу, а в день, когда
+кто-то разметит связи и станет ждать, что полка загорится.
 
 Что упразднено этой правкой (контракт §16)
 ------------------------------------------
@@ -145,17 +164,29 @@ class RecommendationsRequestSerializer(serializers.Serializer):
     # «данных нет → NOT_APPLICABLE», а второе — fail-open дыра.
 
 
-class _SpecialistCardSerializer(serializers.Serializer):
-    """Карточка. Числа здесь — справочные, причиной является только код."""
+class _CandidateRefSerializer(serializers.Serializer):
+    """Ссылка на кандидата: ВИД и ключ, всегда вместе (контракт §5, K1).
 
+    Вид объявляется явно, а не подразумевается. Пока он подразумевался,
+    существовал ответ, который одна половина границы считала валидным,
+    а другая молча отбрасывала целиком.
+    """
+
+    kind = serializers.CharField()
     id = serializers.UUIDField()
-    display_name = serializers.CharField()
-    avatar_url = serializers.CharField(allow_null=True)
-    rating = serializers.DecimalField(max_digits=2, decimal_places=1, allow_null=True)
-    reviews_count = serializers.IntegerField()
-    tenant_id = serializers.UUIDField()
-    tenant_slug = serializers.CharField()
-    tenant_name = serializers.CharField()
+
+
+class _ShelfRowSerializer(serializers.Serializer):
+    """Строка полки — проекция решения, а не карточка.
+
+    Имени, фото и рейтинга здесь нет намеренно: показ берётся из
+    зеркала, где лежат и ключи потребителя. Наше — личность, порядок
+    и причина; прислав ещё и показ, мы завели бы второй источник тех же
+    полей.
+    """
+
+    candidate = _CandidateRefSerializer()
+    rank = serializers.IntegerField()
     tier = serializers.IntegerField()
     reason_codes = serializers.ListField(child=serializers.CharField())
     evidence = serializers.ListField(child=serializers.DictField())
@@ -205,45 +236,62 @@ def _resolve_layer(
 
 
 def _project(decision: RecommendationDecision, *, limit: int) -> list[dict[str, Any]]:
-    """Разложить решение в карточки. Срез — ПОСЛЕ ротации, не в SQL.
+    """Разложить решение в строки полки. Срез — ПОСЛЕ ротации, не в SQL.
 
-    Порядок карточек — порядок решения. Поверхность его не меняет: ей
+    Порядок строк — порядок решения. Поверхность его не меняет: ей
     разрешено показать первые k, но не переставить (§2.1 C1).
-    """
-    shown = decision.ordered[:limit]
-    if not shown:
-        return []
 
-    profiles = {
-        profile.id: profile
-        for profile in (
-            SpecialistProfile.objects
-            .filter(id__in=[c.candidate_ref.id for c in shown])
-            .select_related("tenant")
-        )
-    }
-    cards = []
-    for candidate in shown:
-        profile = profiles.get(candidate.candidate_ref.id)
-        if profile is None:
-            # Кандидат исчез между решением и отрисовкой: домен изменился.
-            # Пропускаем молча — но НЕ подставляем другого: подмена
-            # запрещена (§14).
-            continue
-        cards.append({
-            "id": str(profile.id),
-            "display_name": profile.display_name,
-            "avatar_url": profile.avatar.url if profile.avatar else None,
-            "rating": profile.rating,
-            "reviews_count": profile.reviews_count,
-            "tenant_id": str(profile.tenant_id),
-            "tenant_slug": profile.tenant.slug,
-            "tenant_name": profile.tenant.name,
+    Строка несёт ССЫЛКУ на кандидата, а не карточку
+    ----------------------------------------------
+    Здесь собиралась карточка: имя, аватар, рейтинг, салон. Больше нет,
+    и причины две, обе про один и тот же класс дефекта.
+
+    **Первая — вид кандидата был неявным.** Строка отдавала поле `id`
+    и молчала о том, чей это ключ. Резолвер производит `PROVIDER`
+    (контракт §5, K1 требует объявлять вид явно), а потребитель на другой
+    стороне границы отбирал кандидатов вида `SERVICE` и склеивал их со
+    своим списком услуг. Совпасть это не могло **никогда**, но заметно
+    стало бы не сразу: пока подтверждённых связей ноль, выдача и так
+    пуста. Проявилось бы это в день, когда кто-то разметит связи и станет
+    ждать, что полка загорится, — с готовым ложным объяснением
+    «наверное, опять разметка».
+
+    Теперь вид едет в ответе: `candidate: {kind, id}`. Несовпадение
+    предметов становится видно на первом же ответе, а не через месяц.
+
+    **Вторая — данные для показа у нас и у потребителя разные.** Экран
+    рисует мастеров из зеркала бота, там же лежат его собственные ключи
+    и там же он берёт имя и фото для соседних блоков. Прислав своё имя
+    и свой рейтинг, мы завели бы второй источник тех же полей — ровно
+    то расхождение, которое эпик и убирает, только в отображении.
+
+    Отсюда разделение: **личность, порядок и причина — наши; показ —
+    зеркала**. Перевод нашего ключа в ключ зеркала делает транзит,
+    у которого есть `CatalogMaster.ayla_user_id`; у клиента такого поля
+    нет вовсе.
+
+    Ушла и молчаливая ветка «профиль не найден — пропускаем». Она
+    выбрасывала кандидата из выдачи без следа, то есть решала за
+    человека, кого он увидит, — отбор, то есть политика, то есть
+    четвёртый авторитет, живущий в проекции. Кандидат, которого нельзя
+    отрисовать, обязан становиться названным состоянием на стороне,
+    которая про отрисовку знает, а не исчезать здесь.
+
+    Побочно исчез и запрос к базе: проекции больше нечего дочитывать.
+    """
+    return [
+        {
+            "candidate": {
+                "kind": candidate.candidate_ref.kind.value,
+                "id": str(candidate.candidate_ref.id),
+            },
+            "rank": candidate.rank,
             "tier": candidate.tier,
             "reason_codes": [code.value for code in candidate.reason_codes],
             "evidence": [_evidence_payload(item) for item in candidate.evidence],
-        })
-    return cards
+        }
+        for candidate in decision.ordered[:limit]
+    ]
 
 
 def _evidence_payload(item) -> dict[str, Any]:
@@ -344,8 +392,8 @@ class CatalogRecommendationsView(APIView):
                     "data": inline_serializer(
                         name="CatalogRecommendationsData",
                         fields={
-                            "layer_1_your_places": _SpecialistCardSerializer(many=True),
-                            "layer_2_ayla_picks": _SpecialistCardSerializer(many=True),
+                            "layer_1_your_places": _ShelfRowSerializer(many=True),
+                            "layer_2_ayla_picks": _ShelfRowSerializer(many=True),
                             "layer_3_explore": inline_serializer(
                                 name="Layer3Explore",
                                 fields={

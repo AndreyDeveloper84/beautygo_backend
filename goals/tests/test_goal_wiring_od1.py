@@ -53,7 +53,7 @@ from services.models import (
     SpecialistService,
 )
 from tenants.models import Tenant
-from users.models import User
+from users.models import SpecialistProfile, User
 
 pytestmark = pytest.mark.django_db
 
@@ -288,10 +288,14 @@ def _catalog_payload(api, **body) -> dict:
 
 
 def _layer_2_names(api, **body) -> set[str]:
-    return {
-        row["display_name"]
-        for row in _catalog_payload(api, **body)["layer_2_ayla_picks"]
-    }
+    """Имена по ссылкам на кандидатов — строка полки имени не несёт (T18)."""
+    rows = _catalog_payload(api, **body)["layer_2_ayla_picks"]
+    ids = [row["candidate"]["id"] for row in rows]
+    return set(
+        SpecialistProfile.objects
+        .filter(id__in=ids)
+        .values_list("display_name", flat=True)
+    )
 
 
 # ---------------------------------------------------------------------------
