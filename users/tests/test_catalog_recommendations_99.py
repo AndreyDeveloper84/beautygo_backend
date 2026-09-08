@@ -236,7 +236,7 @@ class TestLayer1YourPlaces:
         )
         _make_service(masseur, massage_category, name="Массаж")
 
-        r = _api().post(URL, {"goal": "маникюр"}, format="json")
+        r = _api().post(URL, _body(goal="маникюр"), format="json")
         body = r.json()["data"]
         l1_ids = {item["id"] for item in body["layer_1_your_places"]}
         # Salon offers no manicure, but it's still in 'your places'.
@@ -406,8 +406,18 @@ class TestFailClosedStates:
         sp = _make_specialist(tenant_new, suffix="0160", name="Hidden")
         _make_service(sp, manicure_category)
 
-        with caplog.at_level(logging.WARNING, logger="users.catalog_recommendations_api"):
-            data = _api().post(URL, {}, format="json").json()["data"]
+        # Логгер `users` объявлен с ``propagate: False`` (settings/base.py),
+        # а обработчик pytest висит на корне — значит записи до caplog
+        # не доходят, сколько ни выставляй уровень. Вешаем обработчик
+        # прямо на нужный логгер: тест про громкость обязан слышать
+        # именно то, что услышит дежурный.
+        surface_logger = logging.getLogger("users.catalog_recommendations_api")
+        surface_logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.WARNING, logger="users.catalog_recommendations_api"):
+                data = _api().post(URL, {}, format="json").json()["data"]
+        finally:
+            surface_logger.removeHandler(caplog.handler)
 
         assert data["layer_2_ayla_picks"] == []
         assert any("safety_state_missing" in record.getMessage() for record in caplog.records)
@@ -496,7 +506,7 @@ class TestGoalFilter:
         _make_service(manicurist, manicure_category, name="Маникюр")
         _make_service(masseur, massage_category, name="Массаж")
 
-        r = _api().post(URL, {"goal": "маникюр"}, format="json")
+        r = _api().post(URL, _body(goal="маникюр"), format="json")
         body = r.json()["data"]
         l2_ids = {it["id"] for it in body["layer_2_ayla_picks"]}
         assert str(manicurist.id) in l2_ids
@@ -516,7 +526,7 @@ class TestGoalFilter:
         )
         _make_service(masseur, massage_category, name="Шиацу")
 
-        r = _api().post(URL, {"goal": "manicure"}, format="json")
+        r = _api().post(URL, _body(goal="manicure"), format="json")
         body = r.json()["data"]
         l2_ids = {it["id"] for it in body["layer_2_ayla_picks"]}
         assert str(manicurist.id) in l2_ids

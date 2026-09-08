@@ -263,6 +263,12 @@ def _home_names(api) -> set[str]:
 
 
 def _catalog_payload(api, **body) -> dict:
+    # T6: полки 1 и 2 — проекции решения резолвера. Два поля, которых
+    # раньше не требовалось: состояние безопасности приходит от того, кто
+    # его знает (§14, его отсутствие fail-closed), а исключение маппинга —
+    # решение владельца (§10.4), включаемое явно. Предмет набора — связка
+    # «цель → категории», и без этих двух он проверял бы пустую выдачу.
+    body.setdefault("safety_state", "NORMAL")
     response = api.post(CATALOG_URL, body, format="json")
     assert response.status_code == 200, response.data
     return response.data["data"]

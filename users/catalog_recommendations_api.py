@@ -86,7 +86,7 @@ from recommendation.api import (
     Surface,
     resolve,
 )
-from services.catalog_reads import category_service_counts
+from services.catalog_reads import category_service_counts, specialist_service_text_q
 from services.models import ServiceCategory
 from users.models import SpecialistProfile, TenantUserRelationship
 from users.permissions import IsBotServiceWithVerifiedClient
@@ -288,14 +288,34 @@ def _build_layer_3(specialist_ids: list) -> dict[str, Any]:
     return {"categories": rows[:LAYER_3_CATEGORY_LIMIT]}
 
 
-def _catalog_pool() -> QuerySet:
-    """Видимый каталог — для полки 3. Допустимость домена, не политика."""
-    return SpecialistProfile.objects.filter(
+def _catalog_pool(*, goal: str, goal_category_ids) -> QuerySet:
+    """Видимый каталог для полки 3, суженный тем, что человек ищет.
+
+    Сужение целью здесь — **чтение каталога, а не политика рекомендации**:
+    полка отвечает «что вообще есть по этому запросу», и реагировать на
+    запрос она обязана. Я её однажды уже расширил до всего каталога молча,
+    и прогон это поймал: счётчики категорий перестали отзываться на поиск,
+    хотя ровно за этим их и показывают.
+
+    Ранжирования здесь нет и быть не может: это счётчики, а не кандидаты.
+    """
+    pool = SpecialistProfile.objects.filter(
         is_available=True,
         is_booking_enabled=True,
         status=SpecialistProfile.ProfileStatus.ACTIVE,
         tenant__is_active=True,
     )
+    if goal:
+        pool = pool.filter(specialist_service_text_q(goal)).distinct()
+    elif goal_category_ids:
+        from ai.application.services.recommendation_engine import RecommendationEngine
+
+        pool = pool.filter(
+            RecommendationEngine._goal_category_predicate(tuple(goal_category_ids)),
+            specialist_services__is_active=True,
+            specialist_services__salon_service__is_active=True,
+        ).distinct()
+    return pool
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +388,7 @@ class CatalogRecommendationsView(APIView):
         # в нужду, а связку «цель → категории» разворачивает домен —
         # там же, где она курируется.
         goal_key = None if goal else _saved_goal_key(request.user)
+        goal_category_ids = None if goal else goal_category_ids_for(request.user)
         need = NeedSpec(
             origin=NeedOrigin.USER_EXPLICIT if goal else NeedOrigin.GOAL,
             goal_key=goal_key,
@@ -408,7 +429,10 @@ class CatalogRecommendationsView(APIView):
 
         layer_1 = _project(layer_1_decision, limit=LAYER_1_LIMIT) if layer_1_decision else []
         layer_2 = _project(layer_2_decision, limit=LAYER_2_LIMIT)
-        layer_3 = _build_layer_3(list(_catalog_pool().values_list("id", flat=True)))
+        layer_3 = _build_layer_3(list(
+            _catalog_pool(goal=goal, goal_category_ids=goal_category_ids)
+            .values_list("id", flat=True)
+        ))
 
         logger.info(
             "catalog.recommendations user_id=%s goal=%r goal_key=%r safety=%s "
