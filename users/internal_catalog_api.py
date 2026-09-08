@@ -113,6 +113,7 @@ class _InternalTenantFieldMixin:
     tenant = serializers.UUIDField(
         source='tenant_id', read_only=True, allow_null=True,
     )
+
     # DRF-1587 — адрес и город салона. Аддитивно: ни одно существующее
     # поле не меняет имя, тип и смысл, и публичный каталог Client App
     # ничего из этого не видит (как и с ``tenant`` выше).
