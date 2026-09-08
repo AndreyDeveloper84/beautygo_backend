@@ -254,19 +254,37 @@ def dispatch_water_reminders() -> dict:
 
     Active = at least one WaterLog in the last
     ``WATER_REMINDER_ACTIVE_WINDOW_DAYS`` days. Behind = today's
-    water_ml < goal × ``WATER_REMINDER_BEHIND_PCT``. Idempotent
+    water_ml < HIS OWN norm × ``WATER_REMINDER_BEHIND_PCT``. Idempotent
     per-user-per-window via Notification existence check on
     (user, template_id='water_reminder', date(created_at)=today).
 
     Beat fires twice daily (14:00 and 18:00 UTC); the per-window
     de-dup key resets at midnight UTC, so two reminders/day max.
+
+    Норма — только своя, из анкеты питания. Здесь стояла
+    ``NUTRITION_DEFAULT_WATER_GOAL_ML`` (2000 мл = ровно те самые восемь
+    стаканов по 250, которые из клиента уже выбрасывали), и она решала
+    ДВЕ вещи: кого считать отстающим и какое число написать в тексте.
+    Это самое острое из трёх мест той же болезни: экран человек
+    открывает сам, а пуш приезжает к нему САМ, дважды в день, и называет
+    выдуманное число его нормой.
+
+    Нет анкеты — нет нормы, а значит и отставать не от чего:
+    напоминание не уходит вовсе. «Нормы нет» доезжает отсутствием
+    сообщения, а не сообщением с другим числом.
+
+    Само число в текст не идёт и тогда, когда норма есть. Норма воды
+    считается как 30 мл × вес (плюс надбавки за беременность и
+    кормление), то есть называет вес и состояние — §35 п.10, — а пуш
+    читается с заблокированного экрана кем угодно рядом. В сообщении
+    остаётся правда о самом человеке: сколько он сегодня выпил.
     """
     from datetime import datetime, timezone as dt_tz
 
     from django.conf import settings as dj_settings
     from django.db.models import Sum
 
-    from nutrition.models import WaterLog
+    from nutrition.models import NutritionProfile, WaterLog
     from .services.dispatcher import NotificationService
 
     today = datetime.now(dt_tz.utc).date()
@@ -275,10 +293,7 @@ def dispatch_water_reminders() -> dict:
     active_since = today_start - timedelta(
         days=dj_settings.WATER_REMINDER_ACTIVE_WINDOW_DAYS,
     )
-    behind_threshold = (
-        dj_settings.NUTRITION_DEFAULT_WATER_GOAL_ML
-        * dj_settings.WATER_REMINDER_BEHIND_PCT
-    )
+    behind_pct = dj_settings.WATER_REMINDER_BEHIND_PCT
 
     # Active users: distinct user_ids with any WaterLog in the lookback
     # window. Bounded by the active-user count, not the total user table.
@@ -322,27 +337,43 @@ def dispatch_water_reminders() -> dict:
         .values_list("user_id", flat=True).distinct()
     )
 
+    # Личные нормы — одним запросом, той же формы, что и totals выше.
+    # Профиля нет вовсе или он недозаполнен (``daily_water_ml`` объявлен
+    # ``default=0``) — нормы нет, и это одно и то же «анкеты нет».
+    own_norms = dict(
+        NutritionProfile.objects
+        .filter(user_id__in=active_user_ids)
+        .values_list("user_id", "daily_water_ml")
+    )
+
     queued = 0
     skipped = 0
     service = NotificationService()
     # Lazy User load: select_related not needed (template only uses
-    # water_ml / goal). Plain user fetch by id.
+    # water_ml). Plain user fetch by id.
     from users.models import User
 
     for user in User.objects.filter(id__in=active_user_ids):
         if user.id in already_reminded:
             skipped += 1
             continue
+        # Своя норма или ничего. Раньше здесь стояло общее число, и
+        # «отстаёт» решалось за человека по чужой мерке.
+        norm_ml = int(own_norms.get(user.id) or 0)
+        if norm_ml <= 0:
+            skipped += 1
+            continue
         water_ml = int(todays_totals.get(user.id) or 0)
-        if water_ml >= behind_threshold:
+        if water_ml >= norm_ml * behind_pct:
             skipped += 1
             continue
         service.send(
             user=user, template_id="water_reminder",
-            context={
-                "water_ml": water_ml,
-                "water_goal_ml": dj_settings.NUTRITION_DEFAULT_WATER_GOAL_ML,
-            },
+            # Норма в контекст не кладётся: она не нужна тексту, а
+            # ``context`` целиком уезжает в ``Notification.data`` и в
+            # ленту. Считать по ней — можно, называть её человеку —
+            # значит назвать ему его вес.
+            context={"water_ml": water_ml},
         )
         queued += 1
 

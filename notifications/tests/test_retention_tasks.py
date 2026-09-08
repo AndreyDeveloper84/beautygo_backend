@@ -61,6 +61,19 @@ def _today_start() -> datetime:
     )
 
 
+def _own_norm(user, ml: int = 2000):
+    """Дать человеку СВОЮ дневную норму воды — из его анкеты питания.
+
+    Раньше эту роль играла ``NUTRITION_DEFAULT_WATER_GOAL_ML``, и норма
+    в тестах бралась ниоткуда ровно так же, как в бою. Тесты ниже про
+    механику рассылки — про дедуп, про окно активности, про то, что
+    чужая вода не считается за свою, — и норма им нужна лишь как
+    предусловие: без неё напоминания не бывает вовсе (см.
+    ``TestWaterReminderDoesNotInventANorm``).
+    """
+    return NutritionProfile.objects.create(user=user, daily_water_ml=ml)
+
+
 # ---------------------------------------------------------------------------
 # Water reminders
 # ---------------------------------------------------------------------------
@@ -71,6 +84,7 @@ class TestDispatchWaterReminders:
         assert dispatch_water_reminders() == {"queued": 0, "skipped": 0}
 
     def test_user_behind_goal_gets_reminder(self, client_user):
+        _own_norm(client_user)
         # Active recently + below half-goal today.
         WaterLog.objects.create(
             user=client_user, amount_ml=250, logged_at=_now_utc(),
@@ -82,7 +96,8 @@ class TestDispatchWaterReminders:
         ).count() == 1
 
     def test_user_at_goal_skipped(self, client_user):
-        # Already past 50% threshold (default 1000ml at goal=2000).
+        _own_norm(client_user)
+        # Already past 50% threshold (1000 ml at his own norm 2000).
         WaterLog.objects.create(
             user=client_user, amount_ml=500, logged_at=_now_utc(),
         )
@@ -97,6 +112,7 @@ class TestDispatchWaterReminders:
         assert result["skipped"] == 1
 
     def test_idempotent_within_today(self, client_user):
+        _own_norm(client_user)
         WaterLog.objects.create(
             user=client_user, amount_ml=250, logged_at=_now_utc(),
         )
@@ -119,6 +135,8 @@ class TestDispatchWaterReminders:
     def test_other_users_water_only_counts_for_themselves(
         self, client_user, other_active_client,
     ):
+        _own_norm(client_user)
+        _own_norm(other_active_client)
         # client_user is at 250 (behind), other user is past goal.
         WaterLog.objects.create(
             user=client_user, amount_ml=250, logged_at=_now_utc(),
