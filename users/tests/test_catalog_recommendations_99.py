@@ -164,6 +164,22 @@ def _make_service(
     )
 
 
+def _names_of(rows) -> set[str]:
+    """Имена по ссылкам на кандидатов.
+
+    Строка полки несёт `candidate: {kind, id}` и **не несёт имени**:
+    показ берётся из зеркала, а не отсюда (T18). Тесты продолжают
+    читаться именами — так видно, про кого они, — но имя добывается
+    по ключу, как это делает и настоящий потребитель.
+    """
+    ids = [row["candidate"]["id"] for row in rows]
+    return set(
+        SpecialistProfile.objects
+        .filter(id__in=ids)
+        .values_list("display_name", flat=True)
+    )
+
+
 def _provenance_for(mapping_status) -> dict:
     """`VERIFIED` без provenance не сохранится — это запрещает схема.
 
@@ -179,22 +195,6 @@ def _provenance_for(mapping_status) -> dict:
         "mapping_confirmed_at": timezone.now(),
         "mapping_source_ref": "fixture:test_catalog_recommendations_99",
     }
-
-
-def _names_of(rows) -> set[str]:
-    """Имена по ссылкам на кандидатов.
-
-    Строка полки несёт `candidate: {kind, id}` и **не несёт имени**:
-    показ берётся из зеркала, а не отсюда (T18). Тесты продолжают
-    читаться именами — так видно, про кого они, — но имя добывается
-    по ключу, как это делает и настоящий потребитель.
-    """
-    ids = [row["candidate"]["id"] for row in rows]
-    return set(
-        SpecialistProfile.objects
-        .filter(id__in=ids)
-        .values_list("display_name", flat=True)
-    )
 
 
 def _api(

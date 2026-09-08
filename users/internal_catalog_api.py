@@ -66,6 +66,21 @@ from users.specialists_api import (
 logger = logging.getLogger(__name__)
 
 
+def _blank_to_none(value: str | None) -> str | None:
+    """«Не указано» обязано доезжать отсутствием, а не пустой строкой.
+
+    Поля-адреса объявлены как ``CharField(blank=True, default="")`` —
+    в базе «не указано» это пустая строка. На проводе пустая строка
+    неотличима от заполненного пустого значения, поэтому наружу она
+    уезжает как ``null``. Мастер без тенанта даёт ``None`` по той же
+    причине: подставлять сюда нечего.
+    """
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 class InternalSpecialistFilter(SpecialistFilter):
     """Public specialist filters + the ``?tenant=`` scope (DRF-1313).
 
@@ -99,14 +114,48 @@ class _InternalTenantFieldMixin:
         source='tenant_id', read_only=True, allow_null=True,
     )
 
+    # DRF-1587 — адрес и город салона. Аддитивно: ни одно существующее
+    # поле не меняет имя, тип и смысл, и публичный каталог Client App
+    # ничего из этого не видит (как и с ``tenant`` выше).
+    #
+    # Почему это едет здесь, а не отдельной ручкой тенанта: это ровно тот
+    # контракт, которым сегодня уезжает профиль мастера
+    # (``address`` в ``SpecialistListSerializer``), и зеркало бота кладёт
+    # всю строку целиком в ``CatalogMasterDTO.raw`` — новые ключи доезжают
+    # до него без единой правки на его стороне.
+    #
+    # Пустое поле уезжает как ``null``, НИКОГДА как пустая строка: на той
+    # стороне пустая строка неотличима от «адрес указан, и он пуст».
+    # ``SpecialistProfile.address`` при этом не трогается и смысла не
+    # меняет — старшинство салона над мастером решается в DRF-1589.
+    # Сами объявления полей стоят на КАЖДОМ конкретном сериализаторе ниже,
+    # а не здесь: ``SerializerMetaclass`` собирает объявленные поля только
+    # с баз, у которых есть ``_declared_fields`` — у этого миксина, не
+    # наследника ``Serializer``, его нет. (``tenant`` выше «работает» лишь
+    # потому, что это настоящая связь модели и ``ModelSerializer`` строит
+    # его сам по имени в ``Meta.fields``; для ``tenant_address`` такой
+    # подпорки нет — было бы ``ImproperlyConfigured`` на первом запросе.)
+    # Экземпляры полей DRF привязываются к своему сериализатору, поэтому
+    # один общий экземпляр на два класса и не годится.
+    def get_tenant_address(self, obj) -> str | None:
+        return _blank_to_none(getattr(obj.tenant, 'address', None))
+
+    def get_tenant_city(self, obj) -> str | None:
+        return _blank_to_none(getattr(obj.tenant, 'city', None))
+
 
 class InternalSpecialistListSerializer(
     _InternalTenantFieldMixin, SpecialistListSerializer,
 ):
     """List card + ``tenant``. Additive — no public field changes shape."""
 
+    tenant_address = serializers.SerializerMethodField()
+    tenant_city = serializers.SerializerMethodField()
+
     class Meta(SpecialistListSerializer.Meta):
-        fields = SpecialistListSerializer.Meta.fields + ['tenant']
+        fields = SpecialistListSerializer.Meta.fields + [
+            'tenant', 'tenant_address', 'tenant_city',
+        ]
 
 
 class InternalSpecialistDetailSerializer(
@@ -114,8 +163,13 @@ class InternalSpecialistDetailSerializer(
 ):
     """Detail profile + ``tenant``. Additive, same as the list serializer."""
 
+    tenant_address = serializers.SerializerMethodField()
+    tenant_city = serializers.SerializerMethodField()
+
     class Meta(SpecialistDetailSerializer.Meta):
-        fields = SpecialistDetailSerializer.Meta.fields + ['tenant']
+        fields = SpecialistDetailSerializer.Meta.fields + [
+            'tenant', 'tenant_address', 'tenant_city',
+        ]
 
 
 class InternalSpecialistViewSet(SpecialistViewSet):
@@ -150,6 +204,13 @@ class InternalSpecialistViewSet(SpecialistViewSet):
         if getattr(self, 'action', None) == 'slots':
             return [ScopedRateThrottle()]
         return super().get_throttles()
+
+    def get_queryset(self):
+        # DRF-1587 — ``tenant_address``/``tenant_city`` читают сам объект
+        # тенанта, а не только ``tenant_id``. Без этого список из N
+        # мастеров стоил бы N дополнительных запросов. Только внутренний
+        # вьюсет: публичный каталог этих полей не отдаёт.
+        return super().get_queryset().select_related('tenant')
 
     def get_serializer_class(self) -> type:
         if self.action == 'retrieve':
