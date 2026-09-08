@@ -238,3 +238,40 @@ class TestEndpoint:
         resp = c.get(URL, **headers)
         body = resp.json()["data"]
         assert body["detected"] is False
+
+
+# ===========================================================================
+# Без анкеты цели нет — и «вернулся к цели» сказать не о чем
+# ===========================================================================
+
+
+class TestNoAnketaNoSignal:
+    """``_resolve_goal`` подставлял ``NUTRITION_DEFAULT_CALORIES_GOAL``.
+
+    Инсайт целиком построен на проценте от дневной цели: провал — это
+    <60 %, возвращение — 80–110 %. Чужая цель делала «вернулся к своей
+    норме» утверждением о человеке, который норму не называл, — и бот
+    хвалит его за попадание в 2000 ккал, взявшиеся ниоткуда.
+
+    Автоюз-фикстура выше ставит настройке 2000: вернётся подстановка —
+    оба теста покраснеют.
+    """
+
+    def test_no_profile_means_not_detected(self, user):
+        # 3 дня провала (600 < 60 % от 2000) и 2 дня возвращения
+        # (1900 — в коридоре 80–110 %) — по выдуманной цели это ровно
+        # тот самый сигнал.
+        for i in (2, 3, 4):
+            _seed_day(user, days_ago=i, kcal=600)
+        for i in (0, 1):
+            _seed_day(user, days_ago=i, kcal=1900)
+        assert detect_returning_success(user_id=user.id, force=True).detected is False
+
+    def test_half_filled_anketa_counts_as_no_goal(self, user):
+        """Профиль есть, ``daily_kcal`` ноль — цели нет, а не «цель ноль»."""
+        NutritionProfile.objects.create(user=user, daily_kcal=0)
+        for i in (2, 3, 4):
+            _seed_day(user, days_ago=i, kcal=600)
+        for i in (0, 1):
+            _seed_day(user, days_ago=i, kcal=1900)
+        assert detect_returning_success(user_id=user.id, force=True).detected is False
