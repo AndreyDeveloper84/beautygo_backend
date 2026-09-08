@@ -24,25 +24,32 @@
 
 Про статус маппинга — важное
 ----------------------------
-Шкалы `VERIFIED / REVIEW_REQUIRED / UNMAPPED` в схеме **нет** (замер
-главного окна 07.09: 206 из 265 услуг связаны с шаблоном, признака
-доверия к связи не существует как поля). Поэтому:
+Статус **читается полем** `SalonService.mapping_status` (§76). Раньше он
+здесь синтезировался из наличия строк — «есть шаблон, значит
+`REVIEW_REQUIRED`». Синтез и запись — два ответа на один вопрос, и они
+разошлись бы в первый же день, когда кто-нибудь подтвердит связь: поле
+сказало бы `VERIFIED`, а источник продолжал бы выводить
+`REVIEW_REQUIRED` из шаблона.
 
-* нет шаблона → `UNMAPPED`;
-* шаблон есть → `REVIEW_REQUIRED`, **даже когда связь подтверждена
-  человеком** через `DraftSalonService(status=confirmed)`.
+**Статус берётся у той услуги, которая совпала с нуждой**, а не лучший
+по мастеру. Разница не формальная: допустить мастера по проверенной
+связи услуги Б, когда человек спросил про услугу А, — это подстановка
+другого предмета (канон §14.4), тот же класс, что «полка услуг молча
+приняла мастера». Если нужда не названа, спрашивается лучший статус
+среди активных предложений: тогда предмет — сам мастер, и достаточно
+одной проверенной способности.
 
-Второе — сознательный отказ решать за владельца. Машина подтверждения
-человеком действительно похожа на `REVIEW_REQUIRED → VERIFIED`, но
-объявить её таковой значило бы ответить реализацией на открытый вопрос
-владельца (OD §40.4 п.1) — тем же способом, каким литерал рейтинга
-в сиде однажды стал «свидетельством» на экране. Факт подтверждения
-доезжает до резолвера как `source_ref`, то есть виден в свидетельстве
-и готов к тому, чтобы владелец его повысил.
+Легаси-услуга канонической связи не имеет **по устройству слоя** —
+значит `UNMAPPED`. Это факт о связи, а не приговор мастеру.
 
-Следствие сегодня: `recommendation_eligible` нет ни у кого, выдача
-пуста, и это **честное** состояние по §10.3, а не поломка. Включается
-одним решением владельца — политикой `mapping_override_enabled` (§10.4).
+Отсутствие предложений вообще — `UNKNOWN`, а не `UNMAPPED`: «мы не
+знаем» и «мы знаем, что связи нет» — разные утверждения, и оба
+fail-closed, но по разным причинам.
+
+Следствие на пилоте: `VERIFIED` после миграции нет ни у кого, выдача
+пуста, и это **штатное состояние с именем** (§76), а не поломка.
+Снимается оно подтверждением связей, а не настройкой: пути, которым
+непроверенная связь попадала бы в подбор, больше нет (T16).
 """
 from __future__ import annotations
 
@@ -169,6 +176,11 @@ class SpecialistCandidateSource:
             salon = link.salon_service
             facts = out.setdefault(link.specialist_id, _MappingFacts())
             facts.has_service = True
+            # Ключ — `salon.id`, потому что именно его кладёт в `id`
+            # канонический слой `catalog_services_for`. Совпадение по
+            # нужде вернёт этот же ключ, и статус найдётся по нему —
+            # без второго чтения и без догадки, какая услуга совпала.
+            facts.status_by_service[salon.id] = salon.mapping_status
             if salon.template_id is not None:
                 facts.has_template = True
                 if salon.id in confirmed_salon_ids:
@@ -216,7 +228,9 @@ class SpecialistCandidateSource:
             distance_km=None,
             is_active_offer=has_offer,
             is_capable=has_offer,
-            mapping_status=mapping.status(has_offer=has_offer),
+            mapping_status=mapping.status(
+                has_offer=has_offer, matched_service_ref=matched_service_id,
+            ),
             safety_blocked=False,
             # Признак медицинской проверки доезжает до резолвера: он
             # отменяет заявление NOT_APPLICABLE (§4.1). Витрина, в которой
@@ -303,27 +317,82 @@ class SpecialistCandidateSource:
 class _MappingFacts:
     """Что домен знает про каноническую связь услуг мастера."""
 
+    #: Порядок «лучшести» статуса. Нужен только там, где нужда не названа
+    #: и предмет — сам мастер: тогда достаточно одной проверенной связи.
+    _RANK = {
+        MappingStatus.VERIFIED: 3,
+        MappingStatus.REVIEW_REQUIRED: 2,
+        MappingStatus.UNMAPPED: 1,
+        MappingStatus.UNKNOWN: 0,
+    }
+
     def __init__(self) -> None:
         self.has_service = False
         self.has_template = False
         self.requires_health_check = False
         self.human_confirmed_ref: str | None = None
+        #: `SalonService.id` → статус связи, как он записан в домене.
+        self.status_by_service: dict[UUID, str] = {}
 
-    def status(self, *, has_offer: bool | None = None) -> MappingStatus:
-        """Шкалы доверия в схеме нет — значит `VERIFIED` не выдаётся никому.
+    def status(
+        self,
+        *,
+        has_offer: bool | None = None,
+        matched_service_ref: UUID | None = None,
+    ) -> MappingStatus:
+        """Статус связи — прочитанный, а не выведенный (§76).
 
-        Не «пока не выдаётся из осторожности»: выдать его сейчас значило бы
-        назвать проверенным то, чего никто не проверял именно в этом
-        смысле. Признак подтверждения человеком уезжает в `source_ref`
-        и ждёт решения владельца (§40.4 п.1).
+        Когда нужда названа и услуга совпала, спрашивается статус
+        **именно этой** услуги. Взять лучший по мастеру значило бы
+        допустить его по проверенной связи услуги Б в ответ на вопрос
+        про услугу А — подстановка другого предмета (§14.4).
+
+        Когда нужда не названа, предмет — сам мастер, и берётся лучший
+        статус среди его предложений: одной проверенной способности
+        достаточно, чтобы мастера было чем рекомендовать.
+
+        Третий случай — нужда названа, но не совпало ничего — сюда тоже
+        приходит с лучшим статусом, и это безвредно: такой кандидат
+        выбывает раньше, на проверке способности (S1 исключает его как
+        `NOT_CAPABLE`), и до вопроса о связи дело не доходит. Считать
+        здесь что-то более точное значило бы отвечать на вопрос, который
+        никто не задаёт.
         """
         offered = self.has_service if has_offer is None else has_offer
         if not offered:
+            # «Мы не знаем» — не то же, что «мы знаем, что связи нет».
+            # Оба fail-closed, но причины разные, и в свидетельстве это
+            # видно.
             return MappingStatus.UNKNOWN
-        # Легаси-услуга шаблона не имеет по устройству слоя — значит
-        # UNMAPPED. Это факт о связи, а не приговор мастеру: рекомендовать
-        # его нельзя ровно потому, что связь не проверял никто.
-        return MappingStatus.REVIEW_REQUIRED if self.has_template else MappingStatus.UNMAPPED
+
+        if matched_service_ref is not None:
+            # Легаси-строки в карте нет по устройству слоя: канонической
+            # связи у неё не бывает, значит UNMAPPED — факт о связи,
+            # а не приговор мастеру.
+            return self._as_status(self.status_by_service.get(matched_service_ref))
+
+        if not self.status_by_service:
+            return MappingStatus.UNMAPPED
+        return max(
+            (self._as_status(value) for value in self.status_by_service.values()),
+            key=lambda status: self._RANK[status],
+        )
+
+    @classmethod
+    def _as_status(cls, raw: str | None) -> MappingStatus:
+        """Значение домена в значение контракта. Незнакомое — не «наверное да».
+
+        Домен и резолвер живут в одном процессе, но словари у них свои,
+        и совпадение имён — не доказательство совпадения смысла. Статус,
+        которого нет в контракте, читается как `UNMAPPED`: неизвестное
+        не толкуется в пользу допуска.
+        """
+        if raw is None:
+            return MappingStatus.UNMAPPED
+        try:
+            return MappingStatus(raw.upper())
+        except ValueError:
+            return MappingStatus.UNMAPPED
 
 
 __all__ = ["SpecialistCandidateSource", "build_candidate_source"]
