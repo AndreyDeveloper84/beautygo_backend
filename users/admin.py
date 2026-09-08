@@ -1,12 +1,81 @@
 """Django Admin configuration for users app."""
 from __future__ import annotations
 
+from django import forms
 from django.contrib import admin, messages
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+from django.core.exceptions import ValidationError
 from django.utils.html import format_html
 
 from .models import (
     DeviceToken, OTPCode, Profile, SocialAccount, SpecialistProfile, User,
+)
+
+
+# ─── Тексты подсказок (DRF-1596) ─────────────────────────────────────────────
+#
+# Владелец 08.09.2026 открыл `/admin/tenants/tenant/add/`, чтобы завести
+# настоящий салон с мастерами, и не нашёл, где добавить мастера. Формой это
+# и правда было невозможно: на форме салона мастеров не было вовсе, а на
+# форме мастера не было салона. Из десяти полей `SpecialistProfile` с
+# `blank=False` в форму не попадали пять — `timezone`, `is_booking_enabled`,
+# `booking_source`, `rating`, `reviews_count`, — и каждое подставлялось
+# умолчанием модели молча.
+#
+# Образец подсказки — раздел «Адрес» в `TenantAdmin` (DRF-1587): он не
+# описывает поле, он называет последствие незаполнения. Здесь то же самое.
+# Один и тот же текст стоит и на отдельной форме мастера, и во вложенном
+# блоке на форме салона — оператор не должен угадывать, что правила разные.
+
+TENANT_HELP = (
+    "Салон, которому принадлежит мастер. Пусто = мастер ничей: зеркало "
+    "бота тянет каталог по одному салону за раз (?tenant=<uuid>, "
+    "DRF-1313), и строка без салона не попадает ни в одну выборку — "
+    "клиент такого мастера не увидит нигде. Адрес и город клиенту "
+    "показываются салонные (DRF-1587)."
+)
+
+VISIBILITY_HELP = (
+    "Эти поля решают, попадёт ли мастер в каталог. Клиенту отдаются "
+    "ТОЛЬКО строки со «Статусом = Активен» И «Доступен = да» И активным "
+    "пользователем. Умолчание статуса — «Черновик»: только что заведённый "
+    "мастер клиенту НЕ виден, пока статус не переключат руками. "
+    "«Принимает записи» каталог не фильтрует — оно ставит запись на паузу, "
+    "оставляя карточку видимой. И даже после этого мастер доедет до "
+    "клиента не мгновенно: в зеркале бота строка появляется со статусом "
+    "приглашения «pending» и до подтверждения оператором в админке бота "
+    "не продаётся (DRF-1496) — это отдельный шаг, отсюда его сделать "
+    "нельзя."
+)
+
+BOOKING_HELP = (
+    "Часовой пояс — тот, в котором считаются расписание и свободные окна "
+    "мастера; ошибка здесь смещает все слоты. Источник записи — где живёт "
+    "расписание: «Ayla local DB SoR» значит, что слоты и брони ведутся "
+    "здесь (так у всех мастеров пилота); «YClients SoR» — что их ведёт "
+    "YClients, и тогда обязательны оба идентификатора YClients ниже, "
+    "иначе запись не оформится."
+)
+
+LOCATION_HELP = (
+    "Координаты необязательны и сегодня пусты у всех мастеров пилота — "
+    "заполнять их наугад нельзя. Адрес остаётся полем мастера, но клиенту "
+    "показывается адрес салона (DRF-1587): для мастера в салоне это поле "
+    "дублирует салонное и вводит в заблуждение. Правило старшинства — "
+    "DRF-1589."
+)
+
+STATS_HELP = (
+    "Считает платформа по отзывам, руками не вводится. 0.0 при нуле "
+    "отзывов означает «оценки ещё нет», а не «оценили на ноль»."
+)
+
+USER_ROLE_HELP = (
+    "Пользователь мастера. Заводить его удобнее сразу с ролью «specialist»: "
+    "тогда профиль мастера создаётся вместе с пользователем, и здесь "
+    "достаточно выбрать его — существующая строка будет дополнена, а не "
+    "продублирована. С другой ролью каталог мастера всё равно покажет, но "
+    "в кабинет мастера человек не войдёт."
 )
 
 
@@ -59,6 +128,109 @@ class ProfileInline(admin.StackedInline):
     verbose_name_plural = 'Профиль клиента'
     fk_name = 'user'
     fields = ('full_name', 'city', 'avatar', 'bio')
+
+
+class TenantMasterInlineForm(forms.ModelForm):
+    """Строка блока мастеров подхватывает профиль, а не дублирует его.
+
+    Ловушка, из-за которой наивный inline не работал бы ни разу.
+    ``users.signals.create_user_profile`` на создание
+    ``User(role='specialist')`` заводит ``SpecialistProfile`` сам — то
+    есть к моменту, когда оператор возвращается на форму салона и
+    выбирает этого человека в строке блока, профиль на него уже есть.
+    Связь ``SpecialistProfile.user`` — ``OneToOneField``, поэтому обычный
+    inline упирался бы в «Specialist profile с таким User уже
+    существует» и салон с мастерами не сохранялся бы никогда.
+
+    Отсюда две обязанности:
+
+    * **подхват** — строка формы приземляется на уже существующий
+      профиль этого человека, а не пытается создать второй;
+    * **отказ подхватывать чужого** — подхватывать разрешено только
+      профиль без салона или профиль ЭТОГО же салона. Иначе форма
+      чужого салона молча увела бы мастера к себе, и первый салон
+      потерял бы его без единого следа.
+
+    Обе стоят в ``_post_clean``, а не в ``clean()``, и это не вкусовщина:
+    проверку уникальности запускает именно ``_post_clean`` (через
+    ``instance.validate_unique()``), и она отрабатывает ПОСЛЕ ``clean()``.
+    Подхват, сделанный в ``clean()``, до неё бы не доехал — форма падала
+    бы на дубликате раньше.
+
+    ``BaseInlineFormSet._construct_form`` заранее проставляет
+    ``instance.tenant_id`` родительским салоном, поэтому сравнение ниже
+    осмысленно и на форме создания: ``Tenant.id`` —
+    ``UUIDField(default=uuid.uuid4)``, у несохранённого салона ``pk`` уже
+    заполнен, и любой профиль с чужим непустым салоном отличается от
+    него.
+    """
+
+    class Meta:
+        model = SpecialistProfile
+        fields = '__all__'
+
+    def _post_clean(self):
+        # ``_state.adding``, а НЕ ``instance.pk``: первичный ключ здесь
+        # ``UUIDField(default=uuid.uuid4)``, поэтому у новой, ещё не
+        # сохранённой строки он уже заполнен свежим uuid4, и проверка по
+        # ``pk`` пропускала бы подхват всегда.
+        user = self.cleaned_data.get('user')
+        if user is not None and self.instance._state.adding:
+            existing = (
+                SpecialistProfile.objects.select_related('tenant')
+                .filter(user=user)
+                .first()
+            )
+            if existing is not None:
+                owner = existing.tenant_id
+                if owner is not None and owner != self.instance.tenant_id:
+                    self.add_error('user', ValidationError(
+                        'У пользователя «%(user)s» уже есть профиль мастера '
+                        'в салоне «%(salon)s». Перевести мастера в другой '
+                        'салон можно только на его собственной форме — '
+                        'отсюда это молча увело бы его у первого салона.',
+                        code='master_belongs_to_another_tenant',
+                        params={'user': user, 'salon': existing.tenant},
+                    ))
+                    return
+                # Подхват. Формой подменяется ВЕСЬ объект, а не только его
+                # первичный ключ, и это принципиально: у пустой строки,
+                # собранной формсетом, ``created_at`` равен ``None``, а в
+                # блоке этого поля нет — Django собрал бы UPDATE, который
+                # затирает дату заведения мастера в NULL и падает на
+                # ``NOT NULL``. Взяв строку из базы, форма накладывает
+                # введённые значения поверх настоящих, а всё, чего в блоке
+                # нет (дата заведения, аватар, био, координаты, рейтинг),
+                # остаётся как было.
+                #
+                # Салон переносится на подхваченную строку: его проставил
+                # формсет, и именно он здесь и заводится.
+                existing.tenant_id = self.instance.tenant_id
+                self.instance = existing
+        super()._post_clean()
+
+
+class TenantMastersInline(admin.StackedInline):
+    """Мастера салона прямо на форме салона (DRF-1596).
+
+    Живёт здесь, рядом с ``SpecialistProfileAdmin``, а монтируется в
+    ``tenants.admin.TenantAdmin``: подсказки и набор полей у одного и
+    того же объекта обязаны быть одни и те же, где бы его ни заводили.
+    """
+
+    model = SpecialistProfile
+    fk_name = 'tenant'
+    form = TenantMasterInlineForm
+    extra = 1
+    verbose_name = 'Мастер'
+    verbose_name_plural = 'Мастера салона'
+    autocomplete_fields = ('user',)
+    show_change_link = True
+    fields = (
+        'user', 'display_name', 'experience_years',
+        'status', 'is_available', 'is_booking_enabled',
+        'timezone', 'booking_source',
+    )
 
 
 # ─── UserAdmin ───────────────────────────────────────────────────────────────
@@ -123,25 +295,53 @@ class SpecialistProfileAdmin(admin.ModelAdmin):
     actions = [approve_specialists, reject_specialists]
 
     list_display = (
-        'display_name', 'get_phone', 'status_badge',
+        'display_name', 'tenant', 'get_phone', 'status_badge',
         'rating', 'reviews_count', 'is_available', 'created_at',
     )
-    list_filter = ('status', 'is_available')
-    search_fields = ('display_name', 'user__phone', 'user__username', 'address')
+    list_filter = ('tenant', 'status', 'is_available', 'is_booking_enabled')
+    list_select_related = ('user', 'tenant')
+    search_fields = (
+        'display_name', 'user__phone', 'user__username', 'address',
+        'tenant__name', 'tenant__slug',
+    )
     readonly_fields = ('rating', 'reviews_count', 'created_at', 'updated_at')
     ordering = ('-created_at',)
     raw_id_fields = ('user',)
 
+    # DRF-1596. Порядок разделов повторяет порядок решений оператора:
+    # чей мастер → кто он → увидит ли его клиент → как он принимает
+    # записи → всё остальное. Раньше первых двух вопросов форма не
+    # задавала вовсе: `tenant` в ней отсутствовал, а `timezone`,
+    # `is_booking_enabled` и `booking_source` подставлялись умолчаниями
+    # модели молча.
     fieldsets = (
+        ('Салон', {
+            'fields': ('tenant',),
+            'description': TENANT_HELP,
+        }),
         ('Основное', {
-            'fields': ('user', 'display_name', 'avatar', 'bio', 'status', 'is_available'),
+            'fields': ('user', 'display_name', 'avatar', 'bio'),
+            'description': USER_ROLE_HELP,
+        }),
+        ('Кого видит клиент', {
+            'fields': ('status', 'is_available', 'is_booking_enabled'),
+            'description': VISIBILITY_HELP,
+        }),
+        ('Приём записей', {
+            'fields': (
+                'timezone', 'booking_source',
+                'yclients_company_id', 'yclients_staff_id',
+            ),
+            'description': BOOKING_HELP,
         }),
         ('Опыт и локация', {
             'fields': ('experience_years', 'address', 'location_lat', 'location_lng'),
+            'description': LOCATION_HELP,
         }),
         ('Статистика', {
             'fields': ('rating', 'reviews_count'),
             'classes': ('collapse',),
+            'description': STATS_HELP,
         }),
         ('Служебное', {
             'fields': ('created_at', 'updated_at'),

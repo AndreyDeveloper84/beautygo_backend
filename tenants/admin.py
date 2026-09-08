@@ -9,10 +9,19 @@ from __future__ import annotations
 from django.contrib import admin
 
 from tenants.models import Tenant
+from users.admin import TenantMastersInline
 
 
 @admin.register(Tenant)
 class TenantAdmin(admin.ModelAdmin):
+    # DRF-1596 — до этого тикета кортеж был пуст, и владелец, открыв
+    # `/admin/tenants/tenant/add/`, чтобы завести настоящий салон с
+    # мастерами, добавить мастера не мог: форма салона про мастеров не
+    # знала вовсе. Блок определён в `users.admin` (рядом с моделью и с
+    # `SpecialistProfileAdmin`), чтобы подсказки и набор полей у мастера
+    # были одни и те же, где бы его ни заводили.
+    inlines = (TenantMastersInline,)
+
     list_display = ("name", "slug", "city", "is_active", "created_at")
     list_filter = ("is_active", "city")
     search_fields = ("name", "slug", "city", "address")
