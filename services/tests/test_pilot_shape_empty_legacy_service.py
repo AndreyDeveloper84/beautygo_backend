@@ -47,7 +47,7 @@ from services.models import (
     SpecialistService,
 )
 from tenants.models import Tenant
-from users.models import User
+from users.models import SpecialistProfile, User
 
 pytestmark = pytest.mark.django_db
 
@@ -230,6 +230,16 @@ def _assert_pilot_shape():
     )
 
 
+def _picked_names(payload) -> set[str]:
+    """Имена по ссылкам на кандидатов — строка полки имени не несёт (T18)."""
+    ids = [row["candidate"]["id"] for row in payload["layer_2_ayla_picks"]]
+    return set(
+        SpecialistProfile.objects
+        .filter(id__in=ids)
+        .values_list("display_name", flat=True)
+    )
+
+
 def _catalog(api, **body) -> dict:
     # T6: полки 1 и 2 — проекции решения резолвера. Исключение маппинга —
     # решение владельца (§10.4), включается явно в самих тестах.
@@ -314,10 +324,7 @@ class TestExplicitGoalFilter:
         """
         _assert_pilot_shape()
 
-        names = {
-            row["display_name"]
-            for row in _catalog(catalog_api, goal="массаж")["layer_2_ayla_picks"]
-        }
+        names = _picked_names(_catalog(catalog_api, goal="массаж"))
 
         assert names == {"Ирина П."}, names
 
@@ -326,10 +333,7 @@ class TestExplicitGoalFilter:
     ):
         _assert_pilot_shape()
 
-        names = {
-            row["display_name"]
-            for row in _catalog(catalog_api, goal="Маникюр")["layer_2_ayla_picks"]
-        }
+        names = _picked_names(_catalog(catalog_api, goal="Маникюр"))
 
         assert names == {"Ольга К."}, names
 
@@ -356,10 +360,7 @@ class TestExplicitGoalFilter:
     ):
         _assert_pilot_shape()
 
-        names = {
-            row["display_name"]
-            for row in _catalog(catalog_api, goal="Массаж тела")["layer_2_ayla_picks"]
-        }
+        names = _picked_names(_catalog(catalog_api, goal="Массаж тела"))
 
         assert names == {"Дарья Ш."}, names
 
@@ -370,10 +371,7 @@ class TestExplicitGoalFilter:
         кто действительно в этой категории."""
         _assert_pilot_shape()
 
-        names = {
-            row["display_name"]
-            for row in _catalog(catalog_api, goal="Массаж тела")["layer_2_ayla_picks"]
-        }
+        names = _picked_names(_catalog(catalog_api, goal="Массаж тела"))
 
         assert names == {"Ирина П."}, names
 
@@ -391,6 +389,8 @@ class TestSpecialistServicesPreview:
         response = app_api.get(SPECIALISTS_URL)
         assert response.status_code == 200, response.data
         rows = response.data["results"]
+        # `/specialists/` — НЕ полка рекомендаций: карточка каталога,
+        # и ключ у неё прежний. T18 сменил форму только у полок.
         row = next(r for r in rows if r["id"] == str(massage_master.id))
 
         assert row["services_count"] == 1, row
@@ -442,6 +442,7 @@ class TestSpecialistServicesPreview:
         assert response.status_code == 200, response.data
         rows = response.data["data"]["nearby_specialists"]
 
+        # `nearby_specialists` на главной — тоже не полка рекомендаций.
         row = next(r for r in rows if r["id"] == str(massage_master.id))
         assert row["services_preview"] == [MASSAGE], row
 
