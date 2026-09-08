@@ -111,6 +111,55 @@ def _fetch(scope=None, need=None):
 
 
 @pytest.mark.django_db
+class TestCandidateKey:
+    """Каким ключом источник называет кандидата. Проверка стоит дороже вида.
+
+    За границей кандидата ищут в зеркале бота по `CatalogMaster.
+    ayla_user_id` — это ключ ПОЛЬЗОВАТЕЛЯ. Источник же держит в руках
+    профиль, и его первичный ключ — другой UUID того же человека.
+
+    Ошибка здесь не ломает ни один прогон: обе стороны сравниваются
+    только на живом контуре, а в фикстурах обе половины кладёт один
+    автор — и они, конечно, сходятся. Поэтому замер ниже стоит прямо
+    в теле теста: он единственное, что отличает эту проверку
+    от проверки согласованности фикстуры.
+    """
+
+    def test_candidate_is_named_by_the_user_key_not_the_profile_key(
+        self, tenant, category,
+    ):
+        """Замер пилота 08.09, воспроизведённый на двух строках.
+
+        На боевом контуре множества были по 31 элементу с обеих сторон,
+        а пересечение по профильному ключу — **пустое**: перевод не дал
+        бы ни одного совпадения ни на каких данных, и полка сказала бы
+        человеку «зеркало отстало».
+
+        Здесь то же самое в миниатюре. `mirror` — то, что хранит зеркало
+        (пользовательские ключи). Проверяется не «взяли user_id», а что
+        **пересечение по профильному ключу пусто, а по пользовательскому
+        полно** — то есть ровно та величина, которая была нулём.
+        """
+        first = _specialist(tenant, suffix="0100", name="Первый")
+        second = _specialist(tenant, suffix="0101", name="Второй")
+        _offer(tenant, first, category, name="Массаж")
+        _offer(tenant, second, category, name="Массаж")
+
+        # Предусловие: ключи РАЗНЫЕ. Без него тест зеленел бы и на схеме,
+        # где профиль и пользователь — одно и то же значение.
+        assert first.id != first.user_id
+        assert second.id != second.user_id
+
+        mirror = {str(first.user_id), str(second.user_id)}
+        emitted = {str(f.ref.id) for f in _fetch()}
+        by_profile = {str(first.id), str(second.id)}
+
+        assert len(emitted & mirror) == 2, "по пользовательскому ключу — все"
+        assert len(by_profile & mirror) == 0, "по профильному — пересечение пусто"
+        assert emitted == mirror
+
+
+@pytest.mark.django_db
 class TestMappingStatus:
     def test_status_is_read_from_the_field_not_inferred_from_a_template(
         self, tenant, category,
