@@ -276,6 +276,56 @@ def test_nobody_outside_the_resolver_assembles_the_policy():
     )
 
 
+def test_no_setting_can_admit_an_unverified_mapping():
+    """§76: пути, которым непроверенная связь попадает в подбор, не существует.
+
+    Владелец: «ноль `VERIFIED` не разрешает fallback на
+    `REVIEW_REQUIRED`, иначе статус будет декоративным, а система
+    продолжит выдавать непроверенные связи».
+
+    Запрет можно было исполнить, оставив флаг выключенным. Так делать
+    нельзя: запрет, обходимый одной строкой в `settings`, — не запрет,
+    и §74 называет порядок предпочтения прямо. Поэтому проверяется
+    **отсутствие имени во всём репозитории**, а не его значение.
+
+    Единственное разрешённое вхождение — комментарий, объясняющий, что
+    настройка удалена намеренно; он оставлен, чтобы вернувшийся не решил,
+    что её потеряли при рефакторинге, и не завёл заново. Разбор идёт по
+    дереву: рассказ о запрещённом — не запрещённое (§74).
+    """
+    offenders = []
+    for rel, path in _python_files():
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Attribute):
+                names.append(node.attr)
+            elif isinstance(node, ast.Name):
+                names.append(node.id)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                names.append(node.value)
+            if any(n in _FORBIDDEN_ADMISSION_LEVERS for n in names):
+                offenders.append(f"{rel}:{node.lineno}")
+
+    assert not offenders, (
+        "рычаг допуска в обход VERIFIED снова существует (§76):\n  "
+        + "\n  ".join(offenders)
+        + "\n\nСтатус связи подтверждается провенансом, а не настройкой."
+    )
+
+
+#: Имена, существование которых означает, что запрет владельца снова
+#: обходится конфигурацией. Список короткий и должен таким остаться.
+_FORBIDDEN_ADMISSION_LEVERS = frozenset({
+    "RECOMMENDATION_PILOT_MAPPING_OVERRIDE",
+    "mapping_override_enabled",
+})
+
+
 def test_private_modules_are_not_imported_from_outside():
     """Публичная поверхность — один модуль. Второй вход = второй авторитет."""
     pattern = re.compile(r"(from|import)\s+recommendation\._")

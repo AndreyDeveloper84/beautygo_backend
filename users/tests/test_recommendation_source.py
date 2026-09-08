@@ -4,17 +4,22 @@
 Порядок он не задаёт, и тестов на порядок здесь нет по построению — они
 живут в `recommendation/tests`, потому что порядок живёт в резолвере.
 
-Главное, что здесь стережётся: адаптер **не выдаёт `VERIFIED` никому**.
-Шкалы доверия в схеме нет; выдать статус, которого никто не присваивал,
-значило бы ответить реализацией на открытый вопрос владельца (§40.4 п.1) —
-тем же способом, каким литерал рейтинга из сида стал «свидетельством»
-на экране.
+Главное, что здесь стережётся после §76: адаптер **читает статус связи
+полем, а не выводит его из наличия строк**. Синтез и запись — два ответа
+на один вопрос, и разошлись бы они в первый же день, когда кто-нибудь
+подтвердит связь: поле сказало бы `VERIFIED`, а адаптер продолжал бы
+выводить `REVIEW_REQUIRED` из наличия шаблона.
+
+Второе: статус берётся **у совпавшей услуги**, а не лучший по мастеру.
+Допустить мастера по проверенной связи услуги Б в ответ на вопрос про
+услугу А — подстановка другого предмета (§14.4).
 """
 from __future__ import annotations
 
 from decimal import Decimal
 
 import pytest
+from django.utils import timezone
 
 from recommendation.api import CandidateKind, MappingStatus, MatchLevel, NeedOrigin, NeedSpec, Scope, ScopeMode
 from services.models import (
@@ -66,10 +71,26 @@ def _specialist(tenant, *, suffix: str, name: str, rating=None, reviews=0) -> Sp
     return profile
 
 
-def _offer(tenant, specialist, category, *, name: str, template=None) -> SalonService:
+def _offer(
+    tenant, specialist, category, *, name: str, template=None,
+    mapping_status=SalonService.MappingStatus.UNMAPPED,
+) -> SalonService:
+    """Предложение мастера со статусом связи (§76).
+
+    Умолчание — `UNMAPPED`, а не `VERIFIED`: фикстура не должна раздавать
+    допуск молча. Тест, которому нужен допущенный кандидат, называет
+    статус вслух, и в его теле видно, за счёт чего он зелёный.
+    """
+    provenance = {} if mapping_status != SalonService.MappingStatus.VERIFIED else {
+        "mapping_confirmed_rule": "test_fixture",
+        "mapping_rule_version": "1.0.0",
+        "mapping_confirmed_at": timezone.now(),
+        "mapping_source_ref": "fixture:test_recommendation_source",
+    }
     salon_service = SalonService.objects.create(
         tenant=tenant, name=name, category=category, template=template,
         duration_minutes=60, is_active=True,
+        mapping_status=mapping_status, **provenance,
     )
     SpecialistService.objects.create(
         specialist=specialist, salon_service=salon_service,
@@ -91,56 +112,172 @@ def _fetch(scope=None, need=None):
 
 @pytest.mark.django_db
 class TestMappingStatus:
-    def test_no_template_is_unmapped(self, tenant, category):
-        master = _specialist(tenant, suffix="0001", name="Без шаблона")
-        _offer(tenant, master, category, name="Массаж спины")
+    def test_status_is_read_from_the_field_not_inferred_from_a_template(
+        self, tenant, category,
+    ):
+        """Наличие шаблона больше ничего не решает — решает записанный статус.
 
-        facts = _fetch()
-        assert [f.mapping_status for f in facts] == [MappingStatus.UNMAPPED]
+        Раньше адаптер выводил: есть шаблон → `REVIEW_REQUIRED`, нет →
+        `UNMAPPED`. После §76 статус записан полем, и вывод обязан уйти:
+        два источника одного ответа рано или поздно расходятся.
 
-    def test_template_alone_is_review_required_not_verified(self, tenant, category):
-        """Связь есть, доверия к ней нет. Это разные вещи, и поле — одно.
-
-        Замер 07.09: 206 из 265 услуг связаны с шаблоном. Связь — не
-        признак проверки; шкалы проверки в схеме не существует.
+        Здесь шаблон ЕСТЬ, а статус — `UNMAPPED`. Прежний код сказал бы
+        `REVIEW_REQUIRED`, то есть соврал бы про домен в сторону, которая
+        выглядит безобиднее, чем есть.
         """
         template = ServiceTemplate.objects.create(name="Массаж классический", category=category)
-        master = _specialist(tenant, suffix="0002", name="С шаблоном")
-        _offer(tenant, master, category, name="Массаж", template=template)
+        master = _specialist(tenant, suffix="0002", name="Шаблон есть, статуса нет")
+        _offer(
+            tenant, master, category, name="Массаж", template=template,
+            mapping_status=SalonService.MappingStatus.UNMAPPED,
+        )
+
+        assert [f.mapping_status for f in _fetch()] == [MappingStatus.UNMAPPED]
+
+    def test_verified_is_read_through(self, tenant, category):
+        """Положительная стража: `VERIFIED` доезжает, когда он записан.
+
+        Без неё все проверки ниже зеленели бы и на адаптере, который
+        просто не умеет отдавать `VERIFIED`, — а именно так он и работал
+        до §76, и отличить одно от другого можно только этим тестом.
+        """
+        master = _specialist(tenant, suffix="0006", name="Подтверждена")
+        _offer(
+            tenant, master, category, name="Массаж",
+            mapping_status=SalonService.MappingStatus.VERIFIED,
+        )
+
+        assert [f.mapping_status for f in _fetch()] == [MappingStatus.VERIFIED]
+
+    def test_status_belongs_to_the_matched_service_not_to_the_best_one(
+        self, tenant, category,
+    ):
+        """§14.4: подтверждённая услуга Б не отвечает за вопрос об услуге А.
+
+        Мастер предлагает две услуги: «Массаж» с непроверенной связью и
+        «Педикюр» с подтверждённой. Человек спросил массаж. Взять лучший
+        статус по мастеру значило бы допустить его к рекомендации за счёт
+        услуги, о которой не спрашивали, — то есть подставить другой
+        предмет, ровно как «полка услуг молча приняла мастера».
+        """
+        master = _specialist(tenant, suffix="0007", name="Смешанная")
+        _offer(
+            tenant, master, category, name="Массаж",
+            mapping_status=SalonService.MappingStatus.REVIEW_REQUIRED,
+        )
+        _offer(
+            tenant, master, category, name="Педикюр",
+            mapping_status=SalonService.MappingStatus.VERIFIED,
+        )
+
+        asked_massage = _fetch(need=_need(raw_text="массаж"))
+        asked_pedicure = _fetch(need=_need(raw_text="педикюр"))
+
+        assert [f.mapping_status for f in asked_massage] == [MappingStatus.REVIEW_REQUIRED]
+        assert [f.mapping_status for f in asked_pedicure] == [MappingStatus.VERIFIED]
+
+    def test_a_legacy_mirror_does_not_shadow_the_verified_canonical_row(
+        self, tenant, category,
+    ):
+        """Лишняя строка в старом слое не должна решать допуск.
+
+        Регрессия, которую поймал CI, а не рассуждение. Услуга бывает
+        продублирована в обоих слоях: каноническая строка с подтверждённой
+        связью и легаси-зеркало с тем же названием. Легаси связи не имеет
+        по устройству и в списке идёт **первой** — и правило «статус
+        у совпавшей услуги», взятое буквально, выбрасывало мастера из
+        подбора.
+
+        Причина отказа была бы неправдой: не «связь не проверена»,
+        а «у него есть лишняя строка в старом слое». Порядок в списке
+        решал бы допуск.
+
+        Поэтому из ОДИНАКОВО совпавших выбирается лучшая по статусу.
+        Подменой предмета это не является: выбор идёт только среди тех
+        услуг, которые отвечают нужде.
+        """
+        master = _specialist(tenant, suffix="0009", name="Зеркало в двух слоях")
+        _offer(
+            tenant, master, category, name="Массаж",
+            mapping_status=SalonService.MappingStatus.VERIFIED,
+        )
+        Service.objects.create(
+            specialist=master, category=category, name="Массаж",
+            price=Decimal("1500"), duration_minutes=60, is_active=True,
+        )
+
+        assert [f.mapping_status for f in _fetch()] == [MappingStatus.VERIFIED]
+
+    def test_a_legacy_mirror_does_not_launder_an_unverified_canonical_row(
+        self, tenant, category,
+    ):
+        """Обратная стража: выбор лучшего не превращается в допуск.
+
+        Без неё правка выше зеленела бы и на коде, который просто
+        отдаёт `VERIFIED`, найдя его где угодно у мастера. Здесь
+        подтверждённой строки нет ни одной — и лучший из совпавших
+        честно остаётся `REVIEW_REQUIRED`.
+        """
+        master = _specialist(tenant, suffix="0010", name="Зеркало без подтверждения")
+        _offer(
+            tenant, master, category, name="Массаж",
+            mapping_status=SalonService.MappingStatus.REVIEW_REQUIRED,
+        )
+        Service.objects.create(
+            specialist=master, category=category, name="Массаж",
+            price=Decimal("1500"), duration_minutes=60, is_active=True,
+        )
 
         assert [f.mapping_status for f in _fetch()] == [MappingStatus.REVIEW_REQUIRED]
 
-    def test_human_confirmation_does_not_become_verified_by_itself(self, tenant, category):
-        """Подтверждённый черновик — свидетельство, а НЕ статус доверия.
+    def test_without_a_stated_need_the_best_offer_answers_for_the_master(
+        self, tenant, category,
+    ):
+        """Нужда не названа — предмет сам мастер, и одной проверенной хватает.
 
-        Машина `DraftSalonService(confirmed)` похожа на
-        `REVIEW_REQUIRED → VERIFIED`, но человек подтверждал строку
-        онбординга, а не пригодность к рекомендации. Превратить один клик
-        в признак доверия — тот самый механизм, которым число из сида
-        стало причиной на экране. Факт доезжает как `source_ref`.
+        Полка «твои салоны» нужду не передаёт: её якорь — отношения,
+        а не то, что человек ищет сейчас. Требовать там совпадения
+        значило бы отфильтровать полку по цели, чего она никогда
+        не делала.
+        """
+        master = _specialist(tenant, suffix="0008", name="Смешанная без нужды")
+        _offer(
+            tenant, master, category, name="Массаж",
+            mapping_status=SalonService.MappingStatus.REVIEW_REQUIRED,
+        )
+        _offer(
+            tenant, master, category, name="Педикюр",
+            mapping_status=SalonService.MappingStatus.VERIFIED,
+        )
+
+        facts = _fetch(need=NeedSpec(origin=NeedOrigin.MEMORY))
+        assert [f.mapping_status for f in facts] == [MappingStatus.VERIFIED]
+
+    def test_human_confirmed_draft_still_does_not_grant_the_status(
+        self, tenant, category,
+    ):
+        """Подтверждённый черновик — свидетельство, а не статус.
+
+        Он доезжает как `source_ref` и остаётся видимым, но статус даёт
+        только поле. На пилоте это и подтвердилось данными: `confirmed_at`
+        заполнен у всех 58 драфтов, `confirmed_by` — ни у одного, то есть
+        подтверждение состоялось, а подтвердившего нет (замер 08.09).
         """
         template = ServiceTemplate.objects.create(name="Массаж лимфодренажный", category=category)
         master = _specialist(tenant, suffix="0003", name="Подтверждён человеком")
-        salon_service = _offer(tenant, master, category, name="Лимфодренаж", template=template)
+        salon_service = _offer(
+            tenant, master, category, name="Лимфодренаж", template=template,
+            mapping_status=SalonService.MappingStatus.REVIEW_REQUIRED,
+        )
         DraftSalonService.objects.create(
             tenant=tenant, status=DraftSalonService.Status.CONFIRMED,
             external_name="Лимфодренаж", suggested_template=template,
             confirmed_salon_service=salon_service,
         )
 
-        facts = _fetch()
+        facts = _fetch(need=_need(raw_text="лимфодренаж"))
         assert facts[0].mapping_status is MappingStatus.REVIEW_REQUIRED
         assert facts[0].source_ref == f"draft_confirmed:{salon_service.id}"
-
-    def test_verified_is_issued_to_nobody(self, tenant, category):
-        """Сквозная проверка: `VERIFIED` не выдаётся ни в одной комбинации."""
-        template = ServiceTemplate.objects.create(name="Шаблон", category=category)
-        plain = _specialist(tenant, suffix="0004", name="Без шаблона")
-        mapped = _specialist(tenant, suffix="0005", name="С шаблоном")
-        _offer(tenant, plain, category, name="Услуга А")
-        _offer(tenant, mapped, category, name="Услуга Б", template=template)
-
-        assert all(f.mapping_status is not MappingStatus.VERIFIED for f in _fetch())
 
 
 @pytest.mark.django_db
