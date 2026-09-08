@@ -15,7 +15,7 @@ from notifications.tasks import (
     dispatch_beauty_insights,
     dispatch_water_reminders,
 )
-from nutrition.models import FoodLog, WaterLog
+from nutrition.models import FoodLog, NutritionProfile, WaterLog
 from users.models import User
 
 
@@ -220,3 +220,65 @@ class TestDispatchBeautyInsights:
 
         assert result["queued"] == 1
         assert result["failed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Напоминание про воду не придумывает норму
+# ---------------------------------------------------------------------------
+
+
+class TestWaterReminderDoesNotInventANorm:
+    """Самое острое из трёх мест: сообщение уходит человеку САМО.
+
+    Экран человек открывает сам, а это — исходящий пуш: выдуманная
+    норма приезжала на телефон без всякого запроса, дважды в день, и
+    называла себя «твоей». Знаменатель брался из
+    ``NUTRITION_DEFAULT_WATER_GOAL_ML`` (2000 мл = ровно те самые восемь
+    стаканов по 250) и решал ДВЕ вещи: кого признать отстающим и какое
+    число написать в тексте.
+
+    После правки норма — только своя, из анкеты питания; нет её — нет и
+    напоминания. Само число в текст не идёт: пуш видно с заблокированного
+    экрана, а норма воды считается как 30 мл × вес, то есть называет вес
+    (§35 п.10). Человеку остаётся правда о нём самом — сколько он выпил.
+    """
+
+    def test_no_anketa_means_no_reminder(self, client_user):
+        WaterLog.objects.create(
+            user=client_user, amount_ml=250, logged_at=_now_utc(),
+        )
+        result = dispatch_water_reminders()
+        assert result["queued"] == 0
+        assert not Notification.objects.filter(
+            user=client_user, template_id="water_reminder",
+        ).exists()
+
+    def test_behind_is_measured_against_his_own_norm(self, client_user):
+        """600 мл — это 60 % от 1000 (не отстаёт) и 30 % от 2000 (отстаёт).
+
+        Единственная строка, различающая две нормы: покрасневший тест
+        здесь означает, что решение «отстаёт» снова принимает чужое
+        число.
+        """
+        NutritionProfile.objects.create(user=client_user, daily_water_ml=1000)
+        WaterLog.objects.create(
+            user=client_user, amount_ml=600, logged_at=_now_utc(),
+        )
+        result = dispatch_water_reminders()
+        assert result["queued"] == 0
+        assert result["skipped"] == 1
+
+    def test_the_text_names_no_norm(self, client_user):
+        NutritionProfile.objects.create(user=client_user, daily_water_ml=1500)
+        WaterLog.objects.create(
+            user=client_user, amount_ml=250, logged_at=_now_utc(),
+        )
+        assert dispatch_water_reminders()["queued"] == 1
+        note = Notification.objects.get(
+            user=client_user, template_id="water_reminder",
+        )
+        assert note.body == "Сегодня выпито 250 мл. Не забывай!"
+        # Ни выдуманной нормы, ни своей — числа, из которого выводится вес.
+        assert "2000" not in note.body
+        assert "1500" not in note.body
+        assert "water_goal_ml" not in note.data
