@@ -8,9 +8,9 @@ and milestone detection. The two flows will reconcile in a Phase 3 cleanup
 pass once mobile picks up the same model.
 
 Profile-aware fields (timezone, daily_water_ml, pregnant, eating_disorder)
-come from ``_load_nutrition_context``. Until DRF-300 ships ``NutritionProfile``,
-the loader returns a defaults shim using ``settings.NUTRITION_DEFAULT_WATER_GOAL_ML``,
-UTC, and pregnant=eating_disorder=False so behaviour stays predictable.
+come from ``_load_nutrition_context``. Без профиля берутся безопасные
+значения — UTC, pregnant=eating_disorder=False — и **нулевая норма**:
+норму подставлять некому и не из чего, см. докстринг загрузчика.
 """
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone as dt_tz
 from uuid import UUID
 
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Sum
 
@@ -52,29 +51,48 @@ class NutritionContext:
     contract between the loader and the service.
     """
     timezone: dt_tz = dt_tz.utc
-    daily_water_ml: int = 2000
+    #: 0 — «нормы нет», а не «норма ноль». Норма воды считается ТОЛЬКО из
+    #: анкеты питания (``NutritionProfile``); тому, кто её не проходил,
+    #: считать не из чего, и подставить сюда число значит выдать чужое за
+    #: его собственное. Потребители читают ноль как отсутствие —
+    #: ``_milestones`` и расчёт процента ниже это уже делают.
+    daily_water_ml: int = 0
     pregnant: bool = False
     eating_disorder: bool = False
 
 
 def _load_nutrition_context(user_id: int) -> NutritionContext:
-    """Read NutritionProfile (DRF-300) when present, fall back to defaults.
+    """Read NutritionProfile (DRF-300) when present; NO norm when absent.
 
-    The profile is optional — pre-onboarding users still log water and we
-    want sensible behaviour (no eating-disorder strip, UTC, settings
-    default norm). Once DRF-300 lands the profile, all four fields here
-    pick up the real values and the rest of the service Just Works.
+    Профиль необязателен — воду логируют и до анкеты, и всё остальное
+    поведение (полоса РПП, часовой пояс) обязано оставаться разумным.
+    Чего мы больше НЕ делаем — не выдаём таким людям норму.
+
+    Здесь стояло ``NUTRITION_DEFAULT_WATER_GOAL_ML`` (2000 мл). Цена
+    подстановки, замеренная 07.09.2026: 2000 мл при стакане 250 мл —
+    ровно **восемь стаканов**, та самая константа «8», которую из
+    клиента выкинули со словами «норму воды не придумываем, восемь —
+    число ниоткуда» (``apps/miniapp_api/views.py`` в ai-bot-platform).
+    Клиент её больше не подставлял; подставляли мы, и человек снова
+    видел чужое число как свою дневную цель, со шкалой и процентом.
+
+    Вторая половина цены — обратный счёт. Непустая норма вычисляется как
+    ``WATER_ML_PER_KG (=30) × вес`` (плюс 300 при беременности, плюс 700
+    при кормлении), поэтому норма на экране называет вес человека, а не
+    делящаяся на 30 нацело — его состояние. §35 п.10 это запрещает.
+
+    «Нормы нет» выражается нулём и доезжает до экрана отсутствием цели.
+    Ноль безопасен ровно потому, что норма ноль физически невозможна, а
+    все потребители внутри модуля уже проверяют ``norm <= 0``.
     """
     from nutrition.models import NutritionProfile  # local import to avoid cycle
-
-    default_norm = int(getattr(settings, "NUTRITION_DEFAULT_WATER_GOAL_ML", 2000))
 
     try:
         profile = NutritionProfile.objects.only(
             "timezone", "daily_water_ml", "health_flags",
         ).get(user_id=user_id)
     except NutritionProfile.DoesNotExist:
-        return NutritionContext(daily_water_ml=default_norm)
+        return NutritionContext()
 
     tz = dt_tz.utc
     if profile.timezone and profile.timezone != "UTC":
@@ -87,7 +105,10 @@ def _load_nutrition_context(user_id: int) -> NutritionContext:
     flags = profile.health_flags or {}
     return NutritionContext(
         timezone=tz,
-        daily_water_ml=int(profile.daily_water_ml or default_norm),
+        # ``or 0`` не подставляет умолчание, а нормализует: столбец
+        # объявлен ``default=0``, и незаполненный профиль обязан читаться
+        # как «нормы нет», а не «норма ноль миллилитров».
+        daily_water_ml=int(profile.daily_water_ml or 0),
         pregnant=bool(flags.get("pregnant")),
         eating_disorder=bool(flags.get("eating_disorder")),
     )

@@ -35,14 +35,25 @@ TODAY_URL = "/api/v1/nutrition/internal/water/today/"
 @pytest.fixture(autouse=True)
 def _set_service_token(settings):
     settings.NUTRITION_SERVICE_TOKEN = SERVICE_TOKEN
-    settings.NUTRITION_DEFAULT_WATER_GOAL_ML = 2000
 
 
 @pytest.fixture
 def proxy_user(db):
-    return User.objects.create(
+    """Человек С анкетой питания: 2000 мл — ЕГО норма, а не общая.
+
+    Здесь стояло ``settings.NUTRITION_DEFAULT_WATER_GOAL_ML = 2000``, и
+    норма была у всех, включая тех, кто анкету не проходил: 2000 мл при
+    стакане 250 — ровно та выдуманная «восьмёрка», которую из клиента уже
+    выбрасывали. Числа тестов ниже не изменились, изменился источник.
+    Обратную половину держит ``TestNoAnketaNoNorm`` в конце файла.
+    """
+    from nutrition.models import NutritionProfile
+
+    user = User.objects.create(
         username="bot:302", role="client", is_proxy=True,
     )
+    NutritionProfile.objects.create(user=user, daily_water_ml=2000)
+    return user
 
 
 @pytest.fixture
@@ -431,3 +442,35 @@ class TestPurgeOlderThan90Days:
         assert purged == 1
         assert not WaterEntry.objects.filter(id=old.id).exists()
         assert WaterEntry.objects.filter(id=recent.id).exists()
+
+
+class TestNoAnketaNoNorm:
+    """Без анкеты нормы нет — ни в ответе, ни в вехах.
+
+    Вехи («половина нормы», «норма выполнена») считаются ОТ нормы, и
+    поздравлять человека с выполнением числа, которое мы ему придумали,
+    хуже, чем молчать. Пара к ``proxy_user`` выше, где анкета есть.
+    """
+
+    @pytest.fixture
+    def bare_user(self, db):
+        return User.objects.create(
+            username="bot:303", role="client", is_proxy=True,
+        )
+
+    def test_norm_is_zero_and_no_milestone_fires(self, bare_user, seed):
+        c = APIClient()
+        headers = {
+            "HTTP_X_SERVICE_TOKEN": SERVICE_TOKEN,
+            "HTTP_X_EXTERNAL_USER_ID": "bot:303",
+        }
+
+        resp = _post_water(c, {"ml": 1000}, headers)
+
+        assert resp.status_code == status.HTTP_201_CREATED, resp.json()
+        body = resp.json()["data"]
+        # POSITIVE: выпитое записано и посчитано — правда не теряется.
+        assert body["today_total_water_ml"] == 1000
+        # NEGATIVE: ни 2000, ни поздравления с половиной несуществующей нормы.
+        assert body["today_norm_water_ml"] == 0
+        assert not (body.get("milestone_text") or "")

@@ -138,7 +138,18 @@ class NutritionSummaryService:
         # Slice 4: water aggregate now lives — drops the stub.
         water = self._water_service.aggregate_for_day(user_id, day)
         entries = list(qs)
-        calories_goal = settings.NUTRITION_DEFAULT_CALORIES_GOAL
+        # 0 — «цели нет». Здесь стояла ``NUTRITION_DEFAULT_CALORIES_GOAL``
+        # — плоская константа 2000 ккал, ОДНА НА ВСЕХ: ни BMR, ни веса, ни
+        # профиля в этой ветке нет вовсе. Человеку она показывалась как ЕГО
+        # дневная цель, со шкалой и процентом выполнения, — та же болезнь,
+        # что у восьми стаканов воды, и лечится так же.
+        #
+        # Профиль умеет считать калории сам (``daily_kcal`` от BMR), но
+        # подставить ЕГО тоже нельзя: это решение владельца, а не наше
+        # (OD-NUT-1). BMR считается от веса, и цель на экране назвала бы
+        # вес — ровно то, что §35 п.10 запрещает. До ответа владельца цели
+        # нет ни у кого, и экран показывает съеденное без шкалы.
+        calories_goal = 0
 
         ai_comment: str | None = None
         if with_comment:
@@ -177,6 +188,24 @@ class NutritionSummaryService:
             ai_comment=ai_comment,
         )
 
+    @staticmethod
+    def _protein_goal_g(user_id) -> float:
+        """Дневная норма белка ЭТОГО человека, или 0.0 — «нормы нет».
+
+        Ноль означает отсутствие: столбец объявлен ``default=0``, и
+        незаполненный профиль читается как «анкеты нет», а не как «норма
+        ноль граммов». Профиля нет вовсе — тот же ответ.
+        """
+        from nutrition.models import NutritionProfile
+
+        row = (
+            NutritionProfile.objects
+            .filter(user_id=user_id)
+            .values_list("daily_protein_g", flat=True)
+            .first()
+        )
+        return float(row or 0.0)
+
     def weekly_deficits(self, *, user_id, days: int = 7) -> WeeklyDeficits:
         """Compute trailing-N-day deficit signals for cross-domain bridge (DRF-248).
 
@@ -205,7 +234,26 @@ class NutritionSummaryService:
                 protein_low_streak_days=0,
             )
 
-        goal = float(settings.NUTRITION_DEFAULT_PROTEIN_GOAL_G or 0.0)
+        # Знаменатель обязан быть НОРМОЙ ЭТОГО ЧЕЛОВЕКА.
+        #
+        # Здесь стояла ``NUTRITION_DEFAULT_PROTEIN_GOAL_G`` — плоская
+        # константа на всех, — и получавшийся процент уходил в промпт
+        # модели строкой «Белок: в среднем 62% от нормы», то есть как факт
+        # об этом человеке. Это тяжелее экранного дефекта: экран
+        # показывает выдуманную цель одному человеку, а промпт скармливает
+        # выдуманный факт механизму, которому §48 разрешил делать из
+        # фактов выводы о его самочувствии.
+        #
+        # Берётся ``NutritionProfile.daily_protein_g`` — норма, которую
+        # посчитали по ЕГО анкете. Нет анкеты — нет и знаменателя, и
+        # сигнал не отдаётся вовсе: подставить сюда общее число значит
+        # вернуть тот же дефект под другим именем.
+        #
+        # Процент, в отличие от миллилитров воды, веса не называет: в
+        # выдачу идут только доля и число дней, абсолютных граммов рядом
+        # нет, поэтому обратный счёт не собирается. Именно поэтому
+        # персональная норма здесь допустима, а на экране воды — нет.
+        goal = float(self._protein_goal_g(user_id) or 0.0)
         threshold_pct = float(settings.FOOD_DEFICIT_PROTEIN_THRESHOLD_PCT or 0.0)
         if goal <= 0:
             return WeeklyDeficits(

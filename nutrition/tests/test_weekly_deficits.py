@@ -7,7 +7,7 @@ import pytest
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from nutrition.models import FoodLog
+from nutrition.models import FoodLog, NutritionProfile
 from nutrition.services.deficit_hints import build_deficit_hint
 from nutrition.services.nutrition_summary_service import (
     NutritionSummaryService,
@@ -26,9 +26,21 @@ DEFICITS_URL = "/api/v1/nutrition/internal/deficits/"
 @pytest.fixture(autouse=True)
 def _set_service_token(settings):
     settings.NUTRITION_SERVICE_TOKEN = SERVICE_TOKEN
-    settings.NUTRITION_DEFAULT_PROTEIN_GOAL_G = 80
     settings.FOOD_DEFICIT_PROTEIN_THRESHOLD_PCT = 0.6
     settings.FOOD_DEFICIT_MIN_STREAK_DAYS = 3
+
+
+def _profile(user, *, protein_g: int = 80) -> NutritionProfile:
+    """Анкета питания с ПЕРСОНАЛЬНОЙ нормой белка.
+
+    Раньше на её месте стояла ``settings.NUTRITION_DEFAULT_PROTEIN_GOAL_G
+    = 80`` — плоская константа на всех. Числа в тестах ниже сохранены
+    (норма 80 г, порог 0.6), меняется только ИСТОЧНИК: норма теперь
+    принадлежит человеку, а не окружению. Тест
+    ``test_without_an_anketa_there_is_no_percentage`` держит вторую
+    половину: без анкеты знаменателя нет и сигнал не выдаётся.
+    """
+    return NutritionProfile.objects.create(user=user, daily_protein_g=protein_g)
 
 
 @pytest.fixture
@@ -67,6 +79,7 @@ class TestWeeklyDeficitsService:
         assert d.protein_low_streak_days == 0
 
     def test_streak_counts_consecutive_low_days_to_today(self, proxy_user):
+        _profile(proxy_user)
         # Goal=80, threshold 0.6 → low if <48g.
         # Days -3, -2, -1, 0 all at 30g → streak = 4
         for offset in (3, 2, 1, 0):
@@ -78,6 +91,7 @@ class TestWeeklyDeficitsService:
         assert 0.36 < d.protein_avg_pct_goal < 0.39
 
     def test_streak_breaks_on_high_day(self, proxy_user):
+        _profile(proxy_user)
         _log_meal(proxy_user, day_offset=3, protein_g=30)
         _log_meal(proxy_user, day_offset=2, protein_g=80)  # at goal — breaks streak
         _log_meal(proxy_user, day_offset=1, protein_g=30)
@@ -88,12 +102,38 @@ class TestWeeklyDeficitsService:
         assert d.protein_low_streak_days == 2
 
     def test_streak_breaks_on_missing_day(self, proxy_user):
+        _profile(proxy_user)
         # Day -1 has no log → streak ends at today only.
         _log_meal(proxy_user, day_offset=2, protein_g=30)
         _log_meal(proxy_user, day_offset=0, protein_g=30)
         d = NutritionSummaryService().weekly_deficits(user_id=proxy_user.id)
         assert d.days_observed == 2
         assert d.protein_low_streak_days == 1
+
+    def test_without_an_anketa_there_is_no_percentage(self, proxy_user):
+        """Нет анкеты — нет знаменателя, и выдумывать его нечем.
+
+        Этот сигнал уходит НЕ на экран, а в промпт модели строкой «Белок:
+        в среднем N% от нормы» (``apps/orchestrator/nutrition_context.py``
+        в ai-bot-platform), и §48 разрешил модели делать из картины
+        питания выводы о самочувствии. Плоская константа в знаменателе
+        превращала общее число в факт об этом человеке — дефект тяжелее
+        экранного, потому что адресат умеет рассуждать.
+
+        Съеденное при этом не теряется: дни с записями считаются как
+        считались, и «данных нет» от «нормы нет» по-прежнему отличимо.
+        """
+        for offset in (2, 1, 0):
+            _log_meal(proxy_user, day_offset=offset, protein_g=30)
+
+        d = NutritionSummaryService().weekly_deficits(user_id=proxy_user.id)
+
+        # POSITIVE: записи прочитаны, выдача не пуста.
+        assert d.days_observed == 3
+        # NEGATIVE: процента нет, и серии «не хватает подряд» тоже —
+        # она считается от того же знаменателя.
+        assert d.protein_avg_pct_goal is None
+        assert d.protein_low_streak_days == 0
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +199,9 @@ class TestInternalDeficitsView:
         assert body["fired_keys"] == []
 
     def test_returns_hint_when_streak_triggers(self, proxy_user):
+        # Анкета — часть предусловия: подсказка про белок считается от
+        # НОРМЫ ЭТОГО человека, и без анкеты знаменателя нет.
+        _profile(proxy_user)
         for offset in (3, 2, 1, 0):
             _log_meal(proxy_user, day_offset=offset, protein_g=30)
         c = APIClient()
