@@ -176,6 +176,60 @@ class TestMappingStatus:
         assert [f.mapping_status for f in asked_massage] == [MappingStatus.REVIEW_REQUIRED]
         assert [f.mapping_status for f in asked_pedicure] == [MappingStatus.VERIFIED]
 
+    def test_a_legacy_mirror_does_not_shadow_the_verified_canonical_row(
+        self, tenant, category,
+    ):
+        """Лишняя строка в старом слое не должна решать допуск.
+
+        Регрессия, которую поймал CI, а не рассуждение. Услуга бывает
+        продублирована в обоих слоях: каноническая строка с подтверждённой
+        связью и легаси-зеркало с тем же названием. Легаси связи не имеет
+        по устройству и в списке идёт **первой** — и правило «статус
+        у совпавшей услуги», взятое буквально, выбрасывало мастера из
+        подбора.
+
+        Причина отказа была бы неправдой: не «связь не проверена»,
+        а «у него есть лишняя строка в старом слое». Порядок в списке
+        решал бы допуск.
+
+        Поэтому из ОДИНАКОВО совпавших выбирается лучшая по статусу.
+        Подменой предмета это не является: выбор идёт только среди тех
+        услуг, которые отвечают нужде.
+        """
+        master = _specialist(tenant, suffix="0009", name="Зеркало в двух слоях")
+        _offer(
+            tenant, master, category, name="Массаж",
+            mapping_status=SalonService.MappingStatus.VERIFIED,
+        )
+        Service.objects.create(
+            specialist=master, category=category, name="Массаж",
+            price=Decimal("1500"), duration_minutes=60, is_active=True,
+        )
+
+        assert [f.mapping_status for f in _fetch()] == [MappingStatus.VERIFIED]
+
+    def test_a_legacy_mirror_does_not_launder_an_unverified_canonical_row(
+        self, tenant, category,
+    ):
+        """Обратная стража: выбор лучшего не превращается в допуск.
+
+        Без неё правка выше зеленела бы и на коде, который просто
+        отдаёт `VERIFIED`, найдя его где угодно у мастера. Здесь
+        подтверждённой строки нет ни одной — и лучший из совпавших
+        честно остаётся `REVIEW_REQUIRED`.
+        """
+        master = _specialist(tenant, suffix="0010", name="Зеркало без подтверждения")
+        _offer(
+            tenant, master, category, name="Массаж",
+            mapping_status=SalonService.MappingStatus.REVIEW_REQUIRED,
+        )
+        Service.objects.create(
+            specialist=master, category=category, name="Массаж",
+            price=Decimal("1500"), duration_minutes=60, is_active=True,
+        )
+
+        assert [f.mapping_status for f in _fetch()] == [MappingStatus.REVIEW_REQUIRED]
+
     def test_without_a_stated_need_the_best_offer_answers_for_the_master(
         self, tenant, category,
     ):

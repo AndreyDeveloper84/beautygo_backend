@@ -120,7 +120,7 @@ def massage_category(db):
 
 def _make_service(
     specialist, category, *, name="Service", price="1500.00",
-    mapping_status=SalonService.MappingStatus.VERIFIED,
+    mapping_status=SalonService.MappingStatus.VERIFIED, tenant=None,
 ):
     """Услуга КАНОНИЧЕСКИМ слоем, со статусом связи (§76).
 
@@ -140,9 +140,16 @@ def _make_service(
 
     `mapping_status` — аргумент, а не константа: тест про отказ обязан
     уметь назвать `REVIEW_REQUIRED`, не трогая настройки, которых нет.
+
+    `tenant` — тоже аргумент, и по неочевидной причине. У салонной услуги
+    тенант обязателен по схеме, а у `SpecialistProfile` он **nullable**:
+    мастер без салона существует, и ровно он однажды ронял весь эндпоинт
+    в 500. Такому мастеру услугу всё равно надо чем-то дать — иначе тест
+    про него не собрать, — поэтому салон услуги называется отдельно
+    от салона мастера. Умолчание берёт салон мастера, как и раньше.
     """
     salon = SalonService.objects.create(
-        tenant=specialist.tenant,
+        tenant=tenant or specialist.tenant,
         category=category,
         name=name,
         duration_minutes=60,
@@ -764,7 +771,10 @@ class TestSalonStateGatesThePool:
         orphan = _make_specialist(
             None, suffix="0602", name="Мастер без салона",
         )
-        _make_service(orphan, manicure_category, name="Маникюр")
+        # Салон услуги называем явно: у мастера его нет, а у услуги он
+        # обязателен по схеме. Предмет теста — мастер без салона,
+        # и он таким и остаётся.
+        _make_service(orphan, manicure_category, name="Маникюр", tenant=tenant_new)
 
         # Стража на предусловие: профиль действительно без салона.
         orphan.refresh_from_db()

@@ -215,7 +215,7 @@ class SpecialistCandidateSource:
         has_offer = bool(services)
 
         match_level, matched_service_id, matched_category_id = self._match(
-            services, needle=needle, goal_categories=goal_categories,
+            services, needle=needle, goal_categories=goal_categories, mapping=mapping,
         )
         return CandidateFacts(
             ref=CandidateRef(CandidateKind.PROVIDER, specialist.id),
@@ -257,6 +257,7 @@ class SpecialistCandidateSource:
         *,
         needle: str,
         goal_categories: tuple[UUID, ...] | None,
+        mapping: "_MappingFacts",
     ) -> tuple[MatchLevel, UUID | None, UUID | None]:
         """Соответствие нужде на сегодняшних данных. Честно слабое.
 
@@ -273,24 +274,42 @@ class SpecialistCandidateSource:
 
         Услуги приходят аргументом, а не читаются заново: два чтения — два
         ответа на один вопрос, и рано или поздно они разойдутся.
+
+        **Из одинаково совпавших выбирается лучшая по статусу связи.**
+        Это не «лучший статус по мастеру» — выбор идёт только среди тех
+        услуг, которые действительно отвечают нужде, поэтому предмет
+        не подменяется.
+
+        Правило вынужденное, и случай, который его потребовал, стоит
+        назвать: услуга, продублированная в обоих слоях каталога.
+        Легаси-строка канонической связи не имеет по устройству, а в
+        списке идёт первой, — и без этого правила она **перекрывала бы
+        подтверждённую каноническую услугу с тем же названием**. Мастер
+        выбывал бы из подбора не потому, что связь не проверена, а
+        потому, что у него есть лишняя строка в старом слое: порядок
+        в списке решал бы допуск.
         """
         if needle:
-            for service in services:
-                if service.name.strip().casefold() == needle:
-                    return MatchLevel.SERVICE_EXACT, service.id, None
-            for service in services:
-                if needle in service.name.casefold():
-                    return MatchLevel.SERVICE_PARTIAL, service.id, None
-                if needle in (service.category_name or "").casefold():
-                    return MatchLevel.SERVICE_PARTIAL, service.id, None
-                if needle in (service.category_slug or "").casefold():
-                    return MatchLevel.SERVICE_PARTIAL, service.id, None
+            exact = [s for s in services if s.name.strip().casefold() == needle]
+            if exact:
+                return MatchLevel.SERVICE_EXACT, mapping.best_of(exact), None
+
+            partial = [
+                s for s in services
+                if needle in s.name.casefold()
+                or needle in (s.category_name or "").casefold()
+                or needle in (s.category_slug or "").casefold()
+            ]
+            if partial:
+                return MatchLevel.SERVICE_PARTIAL, mapping.best_of(partial), None
 
         if goal_categories:
             allowed = set(goal_categories)
-            for service in services:
-                if service.category_id in allowed:
-                    return MatchLevel.GOAL_CATEGORY, service.id, service.category_id
+            in_goal = [s for s in services if s.category_id in allowed]
+            if in_goal:
+                chosen_id = mapping.best_of(in_goal)
+                chosen = next(s for s in in_goal if s.id == chosen_id)
+                return MatchLevel.GOAL_CATEGORY, chosen.id, chosen.category_id
 
         return MatchLevel.UNDETERMINED, None, None
 
@@ -377,6 +396,24 @@ class _MappingFacts:
             (self._as_status(value) for value in self.status_by_service.values()),
             key=lambda status: self._RANK[status],
         )
+
+    def best_of(self, services) -> UUID | None:
+        """Из одинаково совпавших услуг — та, чья связь доказана лучше.
+
+        Выбор идёт **только среди совпавших**, поэтому подменой предмета
+        не является: человек спросил про эту услугу, и мы отвечаем той
+        её строкой, у которой связь подтверждена.
+
+        При равенстве статусов побеждает первая — порядок
+        `catalog_services_for` стабилен между репликами, значит и выбор
+        воспроизводим.
+        """
+        if not services:
+            return None
+        return max(
+            services,
+            key=lambda s: self._RANK[self._as_status(self.status_by_service.get(s.id))],
+        ).id
 
     @classmethod
     def _as_status(cls, raw: str | None) -> MappingStatus:
