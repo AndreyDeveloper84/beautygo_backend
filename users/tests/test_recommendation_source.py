@@ -19,6 +19,7 @@ import pytest
 from recommendation.api import CandidateKind, MappingStatus, MatchLevel, NeedOrigin, NeedSpec, Scope, ScopeMode
 from services.models import (
     DraftSalonService,
+    Service,
     SalonService,
     ServiceCategory,
     ServiceTemplate,
@@ -140,6 +141,64 @@ class TestMappingStatus:
         _offer(tenant, mapped, category, name="Услуга Б", template=template)
 
         assert all(f.mapping_status is not MappingStatus.VERIFIED for f in _fetch())
+
+
+@pytest.mark.django_db
+class TestBothCatalogLayers:
+    """Допустимость читается по ОБОИМ слоям каталога.
+
+    Репозиторий уже дважды лечил этот дефект (S3-EMPTY, 30.08: «обе
+    поверхности теперь читают ОБА слоя»), и адаптер завёл его заново:
+    он спрашивал про услуги канонический слой, а про соответствие нужде —
+    оба. Мастер с услугами только в легаси выглядел как мастер БЕЗ услуг
+    и выбывал на S1 с кодом «неактивен» — притом что каталог его
+    показывает и записаться к нему можно.
+    """
+
+    def test_legacy_only_master_is_admitted(self, tenant, category):
+        master = _specialist(tenant, suffix="0050", name="Только легаси")
+        Service.objects.create(
+            specialist=master, category=category, name="Массаж",
+            price=Decimal("1500"), duration_minutes=60, is_active=True,
+        )
+
+        facts = _fetch()
+        assert len(facts) == 1
+        assert facts[0].is_active_offer is True
+        assert facts[0].is_capable is True
+
+    def test_legacy_only_master_is_unmapped_not_unknown(self, tenant, category):
+        """Услуга есть, шаблона у неё нет по устройству слоя.
+
+        `UNMAPPED` — факт о связи, а не приговор мастеру: рекомендовать
+        его нельзя ровно потому, что связь не проверял никто.
+        `UNKNOWN` означал бы «услуг нет вовсе», и это было бы неправдой.
+        """
+        master = _specialist(tenant, suffix="0051", name="Легаси без шаблона")
+        Service.objects.create(
+            specialist=master, category=category, name="Массаж",
+            price=Decimal("1500"), duration_minutes=60, is_active=True,
+        )
+
+        assert _fetch()[0].mapping_status is MappingStatus.UNMAPPED
+
+    def test_master_without_any_service_is_unknown(self, tenant, category):
+        """Ни одной услуги ни в одном слое — вот это `UNKNOWN`."""
+        _specialist(tenant, suffix="0052", name="Совсем без услуг")
+
+        facts = _fetch()
+        assert facts[0].is_active_offer is False
+        assert facts[0].mapping_status is MappingStatus.UNKNOWN
+
+    def test_legacy_service_name_matches_the_need(self, tenant, category):
+        """Соответствие нужде тоже видит легаси — иначе слои разъедутся."""
+        master = _specialist(tenant, suffix="0053", name="Легаси")
+        Service.objects.create(
+            specialist=master, category=category, name="Массаж",
+            price=Decimal("1500"), duration_minutes=60, is_active=True,
+        )
+
+        assert _fetch(need=_need(raw_text="массаж"))[0].match_level is MatchLevel.SERVICE_EXACT
 
 
 @pytest.mark.django_db
