@@ -22,8 +22,41 @@ RDA — популяционная норма по определению, он�
 настройку» — утверждение об отсутствии обращения, и поведением оно
 неотличимо от «читает, но сегодня значение совпало».
 
+Правка 08.09.2026 — список остатка сократился до пустого, и страж
+поменял форму
+-----------------------------------------------------------------
+
+Страж заводился с признанием: три места он назвал, но починить не мог,
+и держал их в ``KNOWN_REMAINING``, чтобы список сократили, а не забыли.
+Все три починены (``pattern_detection_service``,
+``returning_success_service``, ``notifications/tasks.py``), поэтому:
+
+1. ``KNOWN_REMAINING`` пуст — исключений больше нет ни одного, и первый
+   тест теперь требует ровно то, чем назван: НИ ОДНОГО чтения.
+2. Область разбора выросла. Раньше сканировался только
+   ``nutrition/services/*.py``, и третье место — напоминание про воду в
+   ``notifications/tasks.py`` — было названо словами в комментарии,
+   потому что живёт вне каталога. Слова не краснеют; теперь этот файл
+   разбирается наравне с сервисами, и подстановка, вернувшаяся в самое
+   острое из трёх мест (исходящий пуш), роняет страж, а не остаётся
+   упоминанием.
+3. Контроль присутствия сменил предмет. Он существует затем, чтобы
+   страж не прошёл победно в мире, где сканер ослеп, — и раньше опирался
+   на живого нарушителя: «в списке ровно ``pattern_detection_service``».
+   Нарушителей не осталось, такая проверка стала бы ``set() == set()`` и
+   прошла бы при любой поломке разбора. Вместо неё сканер запускается по
+   заведомо виноватому исходнику, собранному прямо в тесте, — обе формы
+   обращения, ``settings.NAME`` и ``getattr``.
+
+Чего не ловит ни один из двух тестов: переименование самих настроек.
+Переименуют ``NUTRITION_DEFAULT_WATER_GOAL_ML`` вместе с местом чтения —
+``FORBIDDEN`` протухнет молча. Лечится только тем, что новое имя добавят
+сюда руками.
+
 Замер 07.09.2026: вернуть подстановку в ``water_service`` →
 ``2 failed``; снять → зелено.
+Замер 08.09.2026: вернуть подстановку в ``notifications/tasks.py`` →
+``1 failed``; снять → ``2 passed``.
 """
 from __future__ import annotations
 
@@ -37,29 +70,29 @@ FORBIDDEN = frozenset({
     "NUTRITION_DEFAULT_PROTEIN_GOAL_G",
 })
 
-#: Места, где подстановка ещё осталась — названы, а не забыты.
+#: Места, где подстановка ещё осталась. ПУСТО — и должно остаться пустым.
 #:
-#: Оба чинятся отдельной работой: они вне пакета этой правки, и трогать
-#: их здесь значило бы расширить диф настолько, что ревью перестанет быть
-#: возможным. Форма у обоих одна и та же — «норма человека, а если её нет,
-#: то общая»:
+#: Здесь стояли ``pattern_detection_service.py`` и
+#: ``returning_success_service.py``: страж заводился вместе с починкой
+#: сводки и экрана, назвал оставшееся поимённо и ждал, что список
+#: сократят. Оба места починены — ``_profile_goal_{protein,water,kcal}``
+#: и ``_resolve_goal`` возвращают ноль вместо общего числа, — вместе с
+#: третьим, ``notifications/tasks.py``, которое теперь тоже разбирается
+#: (см. ``_SCANNED`` ниже).
 #:
-#: * ``pattern_detection_service._profile_goal_{protein,water,kcal}`` —
-#:   движок паттернов;
-#: * ``returning_success_service._resolve_goal`` — калории для сводки
-#:   вернувшегося.
-#:
-#: Третье место живёт вне этого каталога и потому сюда не попадает:
-#: ``notifications/tasks.py`` (напоминание про воду, строки 279 и 344).
-#:
-#: Список ждёт, что его сократят: когда место починят, второй тест ниже
-#: упадёт и заставит убрать строку, а не оставить её навсегда.
-KNOWN_REMAINING = frozenset({
-    "pattern_detection_service.py",
-    "returning_success_service.py",
-})
+#: Добавлять сюда новую строку — значит согласиться, что чужое число
+#: снова выдают человеку за его норму. Правильный ход — починить место.
+KNOWN_REMAINING: frozenset[str] = frozenset()
 
-_SERVICES = Path(__file__).resolve().parents[1] / "services"
+_ROOT = Path(__file__).resolve().parents[2]
+
+#: Что разбирается. Сервисы питания — и напоминание про воду, живущее
+#: вне пакета: пуш уезжает человеку сам, без запроса, поэтому оставлять
+#: его под честное слово комментария нельзя.
+_SCANNED: tuple[Path, ...] = (
+    *sorted((_ROOT / "nutrition" / "services").glob("*.py")),
+    _ROOT / "notifications" / "tasks.py",
+)
 
 
 def _reads_forbidden_settings(source: str) -> set[str]:
@@ -88,16 +121,36 @@ def _reads_forbidden_settings(source: str) -> set[str]:
 
 def _offenders() -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
-    for path in sorted(_SERVICES.glob("*.py")):
+    for path in _SCANNED:
         names = _reads_forbidden_settings(path.read_text(encoding="utf-8"))
         if names:
             out[path.name] = names
     return out
 
 
+#: Заведомо виноватый исходник для контроля присутствия ниже. Обе формы
+#: обращения — та, что стояла в ``water_service`` (``settings.NAME``), и
+#: та, что стояла в ``pattern_detection_service`` (``getattr``).
+_A_SUBSTITUTION_LOOKS_LIKE_THIS = """
+from django.conf import settings
+
+def goal(profile):
+    if profile and profile.daily_water_ml:
+        return profile.daily_water_ml
+    return settings.NUTRITION_DEFAULT_WATER_GOAL_ML
+
+def kcal(profile):
+    return getattr(settings, "NUTRITION_DEFAULT_CALORIES_GOAL", 2000)
+"""
+
+
 class TestNormsAreNotSubstituted:
-    def test_no_service_invents_a_norm(self) -> None:
-        """Ни один сервис питания не подставляет чужое число вместо нормы."""
+    def test_nobody_invents_a_norm(self) -> None:
+        """Ни одно из разбираемых мест не подставляет чужое число.
+
+        Исключений не осталось: ``KNOWN_REMAINING`` пуст, и любое чтение
+        трёх настроек — возврат дефекта, а не признанный остаток.
+        """
         offenders = _offenders()
 
         assert set(offenders) <= KNOWN_REMAINING, (
@@ -105,13 +158,27 @@ class TestNormsAreNotSubstituted:
             + "; ".join(f"{f} читает {sorted(n)}" for f, n in sorted(offenders.items()))
         )
 
-    def test_the_remaining_site_is_still_there(self) -> None:
-        """Контроль присутствия: список остатка не протух.
+    def test_the_scanner_still_sees_a_substitution(self) -> None:
+        """Контроль присутствия: сканер не ослеп.
 
-        Без него страж выше прошёл бы победно и в мире, где сканер
-        перестал находить что угодно — например, если переименуют
-        настройки или сломается разбор. Здесь же чинится и обратное: когда
-        ``pattern_detection_service`` вылечат, этот тест упадёт и заставит
-        убрать строку из ``KNOWN_REMAINING``, а не оставить её навсегда.
+        Тест выше — утверждение об ОТСУТСТВИИ, и оно проходит победно в
+        мире, где разбор сломался и не находит уже ничего. Раньше от
+        этого страховал живой нарушитель из ``KNOWN_REMAINING``;
+        нарушителей не осталось, и такая страховка выродилась бы в
+        ``set() == set()``. Поэтому сканер запускается по исходнику,
+        который виноват заведомо.
         """
-        assert set(_offenders()) == KNOWN_REMAINING
+        assert _reads_forbidden_settings(_A_SUBSTITUTION_LOOKS_LIKE_THIS) == {
+            "NUTRITION_DEFAULT_WATER_GOAL_ML",
+            "NUTRITION_DEFAULT_CALORIES_GOAL",
+        }
+
+    def test_the_water_reminder_is_scanned(self) -> None:
+        """Напоминание про воду разбирается, а не только упоминается.
+
+        Третье место жило вне ``nutrition/services`` и потому попадало в
+        стража только словами комментария. Слова не краснеют — а это
+        единственное из трёх мест, где выдуманная норма уезжала человеку
+        сама, без запроса.
+        """
+        assert (_ROOT / "notifications" / "tasks.py") in _SCANNED

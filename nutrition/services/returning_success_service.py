@@ -23,7 +23,6 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone as dt_tz
 
-from django.conf import settings
 from django.core.cache import cache
 from django.db.models import Sum
 from django.db.models.functions import TruncDate
@@ -111,9 +110,29 @@ def detect_returning_success(*, user_id: int, force: bool = False) -> ReturningS
 
 
 def _resolve_goal(profile: NutritionProfile | None) -> int:
+    """Дневная цель по калориям ЭТОГО человека, или 0 — «цели нет».
+
+    Второй строкой здесь стояло
+    ``getattr(settings, "NUTRITION_DEFAULT_CALORIES_GOAL", 2000)`` —
+    плоские 2000 ккал на всех. Весь инсайт построен на проценте от цели:
+    провал — это <60 %, возвращение — 80–110 %. С подставленным
+    знаменателем «сорвался, а потом вернулся к своей норме» становилось
+    утверждением о человеке, который никакой нормы не называл, и бот
+    хвалил его за попадание в чужое число.
+
+    Подставить вместо настройки ``profile.daily_kcal``, посчитанный от
+    BMR, — не починка, а тот же дефект под другим именем: это решение
+    владельца (OD-NUT-1), а BMR считается от веса. Своя цель есть
+    только у того, кто прошёл анкету; у остальных её нет, и «нет»
+    выражается нулём — ``detect_returning_success`` на ``goal <= 0``
+    отдаёт ``detected=False``, то есть молчит.
+
+    Ноль безопасно читать как отсутствие: столбец объявлен
+    ``default=0``, а дневная цель ноль килокалорий физически невозможна.
+    """
     if profile and profile.daily_kcal:
         return profile.daily_kcal
-    return int(getattr(settings, "NUTRITION_DEFAULT_CALORIES_GOAL", 2000))
+    return 0
 
 
 def _per_day_kcal(user_id: int, start: date, end: date) -> dict[date, float]:
