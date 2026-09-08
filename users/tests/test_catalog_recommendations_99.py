@@ -410,7 +410,7 @@ class TestFailClosedStates:
             data = _api().post(URL, {}, format="json").json()["data"]
 
         assert data["layer_2_ayla_picks"] == []
-        assert any("safety_state_missing" in record.message for record in caplog.records)
+        assert any("safety_state_missing" in record.getMessage() for record in caplog.records)
 
 
 @pytest.mark.django_db
