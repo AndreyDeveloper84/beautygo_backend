@@ -54,6 +54,7 @@ from ._types import (
     CandidateKind,
     ConstraintKind,
     ExcludedCandidate,
+    MappingCensus,
     MappingStatus,
     MatchLevel,
     NeedSpec,
@@ -147,6 +148,7 @@ class AdmissionResult:
     excluded: tuple[ExcludedCandidate, ...]
     codes: Mapping[UUID, frozenset[ReasonCode]] = field(default_factory=dict)
     evidence: Mapping[UUID, tuple[EvidenceItem, ...]] = field(default_factory=dict)
+    census: MappingCensus = field(default_factory=MappingCensus)
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +231,12 @@ def apply_eligibility(
     codes: dict[UUID, frozenset[ReasonCode]] = {}
     evidence: dict[UUID, tuple[EvidenceItem, ...]] = {}
 
+    # Перепись собирается ЗДЕСЬ, в том же проходе, что и отказы (§76).
+    # Отдельный запрос «сколько у нас непроверенных» отвечал бы на тот же
+    # вопрос своими условиями — и разошёлся бы с гейтом в первый же день,
+    # когда условие изменят в одном месте из двух.
+    tally: dict[MappingStatus, int] = {status: 0 for status in MappingStatus}
+
     safety_blocks_all = request.safety_state in (SafetyState.STOP, SafetyState.UNKNOWN)
     if request.safety_state is SafetyState.NOT_APPLICABLE and _is_safety_sensitive(candidates):
         # Заявление «эта поверхность не выполняет safety-sensitive решение»
@@ -250,6 +258,12 @@ def apply_eligibility(
         cid = facts.ref.id
         granted: set[ReasonCode] = set()
         items: list[EvidenceItem] = []
+
+        # До любых веток: перепись считает УВИДЕННЫХ, а не выживших.
+        # Кандидат, выбывший по безопасности или способности, свой статус
+        # связи всё равно имеет, и в наблюдаемости он обязан быть виден —
+        # иначе числа схлопнутся ровно на тех, из-за кого их и завели.
+        tally[facts.mapping_status] = tally.get(facts.mapping_status, 0) + 1
 
         if safety_blocks_all or facts.safety_blocked:
             excluded.append(ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_SAFETY))
@@ -321,7 +335,14 @@ def apply_eligibility(
         if items:
             evidence[cid] = tuple(items)
 
-    return AdmissionResult(tuple(admitted), tuple(excluded), codes, evidence)
+    census = MappingCensus(
+        visible=len(candidates),
+        recommendation_eligible=len(admitted),
+        review_required=tally.get(MappingStatus.REVIEW_REQUIRED, 0),
+        unmapped=tally.get(MappingStatus.UNMAPPED, 0),
+        unknown=tally.get(MappingStatus.UNKNOWN, 0),
+    )
+    return AdmissionResult(tuple(admitted), tuple(excluded), codes, evidence, census)
 
 
 def _is_safety_sensitive(candidates: Sequence[CandidateFacts]) -> bool:
