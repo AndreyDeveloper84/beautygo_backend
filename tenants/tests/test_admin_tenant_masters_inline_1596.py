@@ -54,12 +54,24 @@ def test_masters_inline_exposes_the_fields_that_decide_visibility():
     ``status=active`` И ``is_available=True``. Если блок этих полей не
     показывает, мастер, заведённый на форме салона, не доедет до
     клиента — ровно тот молчаливый отказ, против которого заведён тикет.
+
+    Подсказка требуется здесь не меньше, чем на отдельной форме мастера:
+    салон заводят именно на этом экране.
     """
     inline = _master_inline()
     assert inline is not None
-    fields = set(inline.fields or ())
-    for name in ("user", "display_name", "status", "is_available"):
+    fields: set[str] = set()
+    explained: set[str] = set()
+    for _title, opts in inline.fieldsets:
+        fields.update(opts["fields"])
+        if (opts.get("description") or "").strip():
+            explained.update(opts["fields"])
+    for name in ("user", "display_name", "status", "is_available",
+                 "is_booking_enabled", "timezone", "booking_source"):
         assert name in fields, f"{name} нет в блоке мастеров: {sorted(fields)}"
+    for name in ("status", "is_available", "is_booking_enabled",
+                 "timezone", "booking_source"):
+        assert name in explained, f"{name} в блоке без подсказки"
 
 
 @pytest.mark.no_auto_tenant

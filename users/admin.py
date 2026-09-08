@@ -53,8 +53,9 @@ BOOKING_HELP = (
     "мастера; ошибка здесь смещает все слоты. Источник записи — где живёт "
     "расписание: «Ayla local DB SoR» значит, что слоты и брони ведутся "
     "здесь (так у всех мастеров пилота); «YClients SoR» — что их ведёт "
-    "YClients, и тогда обязательны оба идентификатора YClients ниже, "
-    "иначе запись не оформится."
+    "YClients, и тогда обязательны идентификаторы компании и сотрудника "
+    "YClients (они на отдельной форме мастера), иначе запись не "
+    "оформится."
 )
 
 LOCATION_HELP = (
@@ -226,10 +227,23 @@ class TenantMastersInline(admin.StackedInline):
     verbose_name_plural = 'Мастера салона'
     autocomplete_fields = ('user',)
     show_change_link = True
-    fields = (
-        'user', 'display_name', 'experience_years',
-        'status', 'is_available', 'is_booking_enabled',
-        'timezone', 'booking_source',
+    # Разделы, а не плоский список полей: подсказки нужны здесь даже
+    # больше, чем на отдельной форме мастера. Владелец заводит салон
+    # именно тут, и именно тут умолчание «Черновик» тише всего
+    # превращает нового мастера в невидимого.
+    fieldsets = (
+        (None, {
+            'fields': ('user', 'display_name', 'experience_years'),
+            'description': USER_ROLE_HELP,
+        }),
+        ('Кого видит клиент', {
+            'fields': ('status', 'is_available', 'is_booking_enabled'),
+            'description': VISIBILITY_HELP,
+        }),
+        ('Приём записей', {
+            'fields': ('timezone', 'booking_source'),
+            'description': BOOKING_HELP,
+        }),
     )
 
 
