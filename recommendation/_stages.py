@@ -32,6 +32,8 @@
 """
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 from uuid import UUID
@@ -61,6 +63,9 @@ from ._types import (
     Scope,
     StageId,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -202,6 +207,19 @@ def apply_eligibility(
     evidence: dict[UUID, tuple[EvidenceItem, ...]] = {}
 
     safety_blocks_all = request.safety_state in (SafetyState.STOP, SafetyState.UNKNOWN)
+    if request.safety_state is SafetyState.NOT_APPLICABLE and _is_safety_sensitive(candidates):
+        # Заявление «эта поверхность не выполняет safety-sensitive решение»
+        # опровергнуто СОДЕРЖАНИЕМ решения, а не мнением о вызывающем.
+        # Владелец (OD §72): `NOT_APPLICABLE` не допускается как запасной
+        # путь после неудавшейся оценки, и как только выдача касается
+        # здоровья или становится персональной интерпретацией — она
+        # обязана получить настоящий SafetyResult.
+        logger.warning(
+            "recommendation.safety.not_applicable_refused — заявлено NOT_APPLICABLE, "
+            "но выдача касается здоровья либо персонализирована; fail-closed как при UNKNOWN "
+            "(OD §72, контракт §4.1)"
+        )
+        safety_blocks_all = True
     budget = request.constraints.price_max
     need_is_stated = request.need.is_stated
 
@@ -268,6 +286,10 @@ def apply_eligibility(
         # CLARIFY: резолвер отрабатывает, но «можно ли рекомендовать»
         # решает трек A, поэтому код «безопасность пройдена» здесь НЕ
         # выдаётся — иначе мы ответим за чужой контракт (§14).
+        #
+        # NOT_APPLICABLE тоже не даёт этого кода, и это не придирка:
+        # «безопасность пройдена» — утверждение о проверке, а проверки
+        # не было. Очищать было нечего.
         if request.safety_state is SafetyState.NORMAL:
             granted.add(ReasonCode.ELIG_SAFETY_CLEARED)
 
@@ -277,6 +299,28 @@ def apply_eligibility(
             evidence[cid] = tuple(items)
 
     return AdmissionResult(tuple(admitted), tuple(excluded), codes, evidence)
+
+
+def _is_safety_sensitive(candidates: Sequence[CandidateFacts]) -> bool:
+    """Касается ли эта выдача безопасности — по её СОДЕРЖАНИЮ.
+
+    Два признака, оба из решения владельца (OD §72):
+
+    * среди кандидатов есть требующий проверки здоровья — выдача трогает
+      противопоказания, даже если поверхность считает себя витриной;
+    * выдача персонализирована прошлым опытом человека — тогда она уже
+      не «что есть в каталоге», а «тебе сейчас лучше вот эти», то есть
+      интерпретация.
+
+    Проверка стоит здесь, а не в доверии к вызывающему, намеренно:
+    заявление о неприменимости должно опровергаться фактами, иначе оно
+    становится способом обойти гейт, назвав себя витриной.
+    """
+    return any(
+        facts.requires_health_check or facts.prior_completed_visit
+        or facts.prior_completed_same_category
+        for facts in candidates
+    )
 
 
 def _mapping_admission(facts: CandidateFacts, policy: StagePolicy) -> tuple[bool, EvidenceItem | None]:
