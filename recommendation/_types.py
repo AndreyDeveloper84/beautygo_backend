@@ -451,6 +451,54 @@ class PolicyVersions:
 
 
 @dataclass(frozen=True)
+class MappingCensus:
+    """Сколько кандидатов увидели и почему они не прошли — по статусу связи.
+
+    Зачем это в решении, а не в логе поверхности
+    --------------------------------------------
+    Считать обязан **тот же гейт, который исключает**. Иначе счётчик
+    и отказ отвечают на один вопрос порознь: гейт скажет «не прошёл»
+    построчно, а счётчик соберут отдельным запросом с другими условиями,
+    и в день расхождения выяснится, что «клиент не увидит никого»
+    и «никого не нашлось» — разные множества, посчитанные разными
+    правилами.
+
+    Зачем это вообще
+    ----------------
+    Решение владельца §76: при нуле `VERIFIED` событие пишется
+    в наблюдаемость **с количеством `REVIEW_REQUIRED` и `UNMAPPED`**.
+    На пилоте это не редкий исход, а постоянное состояние — замер 08.09
+    после миграции: `review_required 206 · unmapped 59 · verified 0`.
+    Значит перепись — не диагностика края, а **единственное, по чему
+    видно движение**: подтвердили связь — число переехало из одной
+    колонки в другую.
+
+    Что НЕ уходит клиенту
+    ---------------------
+    Перепись остаётся на сервере. `REVIEW_REQUIRED` показывается только
+    во внутренней очереди проверки (§76), и хотя счётчик — не показ
+    кандидата, разница между «сколько их» и «кто они» слишком легко
+    стирается на следующей правке. Наружу идёт имя состояния, внутрь —
+    числа.
+    """
+
+    visible: int = 0
+    #: Прошли гейт связи. При нуле выдача пуста по §10.3.
+    recommendation_eligible: int = 0
+    review_required: int = 0
+    unmapped: int = 0
+    #: Признака нет вовсе — «мы не знаем», а не «связи нет» (§4.1).
+    unknown: int = 0
+
+    def as_log_fields(self) -> str:
+        return (
+            f"visible={self.visible} eligible={self.recommendation_eligible} "
+            f"review_required={self.review_required} unmapped={self.unmapped} "
+            f"unknown={self.unknown}"
+        )
+
+
+@dataclass(frozen=True)
 class RecommendationDecision:
     """Результат работы резолвера — контракт §4.2. Резолвером НЕ сохраняется.
 
@@ -467,6 +515,7 @@ class RecommendationDecision:
     reason_codes: tuple[ReasonCode, ...]
     policy_versions: PolicyVersions
     computed_at: datetime
+    census: "MappingCensus" = field(default_factory=lambda: MappingCensus())
 
     @property
     def is_empty(self) -> bool:

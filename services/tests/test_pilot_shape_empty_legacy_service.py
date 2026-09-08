@@ -232,7 +232,7 @@ def _assert_pilot_shape():
 
 def _picked_names(payload) -> set[str]:
     """Имена по ссылкам на кандидатов — строка полки имени не несёт (T18)."""
-    ids = [row["candidate"]["id"] for row in payload["layer_2_ayla_picks"]]
+    ids = [row["candidate"]["id"] for row in payload["layer_2_ayla_picks"]["items"]]
     return set(
         SpecialistProfile.objects
         .filter(id__in=ids)
@@ -274,7 +274,7 @@ class TestLayer3Explore:
 
         # Положительная стража: пул не пуст — падать обязан именно
         # подсчёт категорий, а не сама выборка мастеров.
-        assert len(data["layer_2_ayla_picks"]) == 2, data["layer_2_ayla_picks"]
+        assert len(data["layer_2_ayla_picks"]["items"]) == 2, data["layer_2_ayla_picks"]["items"]
 
         categories = data["layer_3_explore"]["categories"]
         by_slug = {row["slug"]: row for row in categories}
@@ -349,7 +349,7 @@ class TestExplicitGoalFilter:
         """
         _assert_pilot_shape()
 
-        rows = _catalog(catalog_api, goal="массаж")["layer_2_ayla_picks"]
+        rows = _catalog(catalog_api, goal="массаж")["layer_2_ayla_picks"]["items"]
 
         assert len(rows) == 1, rows
         assert "reasoning_text" not in rows[0]
