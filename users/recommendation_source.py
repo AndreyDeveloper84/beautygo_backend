@@ -187,8 +187,23 @@ class SpecialistCandidateSource:
         needle: str,
         goal_categories: tuple[UUID, ...] | None,
     ) -> CandidateFacts:
+        # ОБА слоя каталога, а не только канонический.
+        #
+        # Здесь стояло `mapping.has_service`, то есть наличие строки
+        # `SpecialistService`. Мастер, у которого услуги только в легаси
+        # `Service`, выглядел как мастер БЕЗ услуг и выбывал на S1 с кодом
+        # «неактивен» — притом что каталог его показывает и записаться
+        # к нему можно.
+        #
+        # Это ровно тот дефект, который репозиторий уже дважды лечил
+        # (S3-EMPTY, 30.08: «обе поверхности теперь читают ОБА слоя»),
+        # и я завёл его заново, читая один слой для допустимости и оба —
+        # для соответствия нужде. Один источник на оба вопроса.
+        services = catalog_services_for(specialist)
+        has_offer = bool(services)
+
         match_level, matched_service_id, matched_category_id = self._match(
-            specialist, needle=needle, goal_categories=goal_categories,
+            services, needle=needle, goal_categories=goal_categories,
         )
         return CandidateFacts(
             ref=CandidateRef(CandidateKind.PROVIDER, specialist.id),
@@ -199,9 +214,9 @@ class SpecialistCandidateSource:
             # оно не станет ни на одной стадии, и считать его без явного
             # радиуса незачем.
             distance_km=None,
-            is_active_offer=mapping.has_service,
-            is_capable=mapping.has_service,
-            mapping_status=mapping.status(),
+            is_active_offer=has_offer,
+            is_capable=has_offer,
+            mapping_status=mapping.status(has_offer=has_offer),
             safety_blocked=False,
             price=None,
             match_level=match_level,
@@ -220,7 +235,7 @@ class SpecialistCandidateSource:
 
     def _match(
         self,
-        specialist: SpecialistProfile,
+        services: list,
         *,
         needle: str,
         goal_categories: tuple[UUID, ...] | None,
@@ -237,9 +252,10 @@ class SpecialistCandidateSource:
         происхождению — это знание владельца, а не догадка о словах, —
         но слабее прямого совпадения услуги: человек, назвавший услугу,
         сказал о себе больше, чем выбравший цель когда-то.
-        """
-        services = catalog_services_for(specialist)
 
+        Услуги приходят аргументом, а не читаются заново: два чтения — два
+        ответа на один вопрос, и рано или поздно они разойдутся.
+        """
         if needle:
             for service in services:
                 if service.name.strip().casefold() == needle:
@@ -289,7 +305,7 @@ class _MappingFacts:
         self.requires_health_check = False
         self.human_confirmed_ref: str | None = None
 
-    def status(self) -> MappingStatus:
+    def status(self, *, has_offer: bool | None = None) -> MappingStatus:
         """Шкалы доверия в схеме нет — значит `VERIFIED` не выдаётся никому.
 
         Не «пока не выдаётся из осторожности»: выдать его сейчас значило бы
@@ -297,8 +313,12 @@ class _MappingFacts:
         смысле. Признак подтверждения человеком уезжает в `source_ref`
         и ждёт решения владельца (§40.4 п.1).
         """
-        if not self.has_service:
+        offered = self.has_service if has_offer is None else has_offer
+        if not offered:
             return MappingStatus.UNKNOWN
+        # Легаси-услуга шаблона не имеет по устройству слоя — значит
+        # UNMAPPED. Это факт о связи, а не приговор мастеру: рекомендовать
+        # его нельзя ровно потому, что связь не проверял никто.
         return MappingStatus.REVIEW_REQUIRED if self.has_template else MappingStatus.UNMAPPED
 
 
