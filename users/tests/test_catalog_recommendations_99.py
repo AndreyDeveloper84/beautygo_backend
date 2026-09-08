@@ -264,7 +264,7 @@ class TestLayer1YourPlaces:
         r = _api().post(URL, _body(), format="json")
         assert r.status_code == 200
         body = r.json()["data"]
-        l1_ids = {item["candidate"]["id"] for item in body["layer_1_your_places"]}
+        l1_ids = {item["candidate"]["id"] for item in body["layer_1_your_places"]["items"]}
         assert str(spec.id) in l1_ids
 
     def test_non_history_tenant_not_in_layer_1(
@@ -278,7 +278,7 @@ class TestLayer1YourPlaces:
 
         r = _api().post(URL, _body(), format="json")
         body = r.json()["data"]
-        l1_ids = {item["candidate"]["id"] for item in body["layer_1_your_places"]}
+        l1_ids = {item["candidate"]["id"] for item in body["layer_1_your_places"]["items"]}
         assert str(spec.id) not in l1_ids
 
     def test_no_history_returns_empty_layer_1(
@@ -289,7 +289,10 @@ class TestLayer1YourPlaces:
 
         r = _api().post(URL, _body(), format="json")
         body = r.json()["data"]
-        assert body["layer_1_your_places"] == []
+        # Полки не было, а не «искали и не нашли»: истории нет, значит
+        # решения по ней не принимали. Пустые коды это и говорят —
+        # приписать сюда причину значило бы выдумать её.
+        assert body["layer_1_your_places"] == {"items": [], "reason_codes": []}
 
     def test_layer_1_not_filtered_by_goal(
         self, customer, customer_known_tur, tenant_known,
@@ -306,12 +309,12 @@ class TestLayer1YourPlaces:
 
         r = _api().post(URL, _body(goal="маникюр"), format="json")
         body = r.json()["data"]
-        l1_ids = {item["candidate"]["id"] for item in body["layer_1_your_places"]}
+        l1_ids = {item["candidate"]["id"] for item in body["layer_1_your_places"]["items"]}
         # Salon offers no manicure, but it's still in 'your places'.
         assert str(masseur.id) in l1_ids
         # Layer 2 should NOT surface this masseur — they don't match
         # the goal and aren't in history.
-        l2_ids = {item["candidate"]["id"] for item in body["layer_2_ayla_picks"]}
+        l2_ids = {item["candidate"]["id"] for item in body["layer_2_ayla_picks"]["items"]}
         assert str(masseur.id) not in l2_ids
 
     def test_layer_1_is_not_ordered_by_rating(
@@ -333,7 +336,7 @@ class TestLayer1YourPlaces:
             )
             _make_service(sp, manicure_category)
 
-        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_1_your_places"]
+        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_1_your_places"]["items"]
 
         assert _names_of(rows) == {"Top", "Mid", "Low"}
         assert {row["tier"] for row in rows} == {1}
@@ -360,7 +363,7 @@ class TestLayer2AylaPicks:
             )
             _make_service(sp, manicure_category)
 
-        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]
+        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]["items"]
         assert len(rows) == 3
 
     def test_layer_2_excludes_history_tenants(
@@ -371,7 +374,7 @@ class TestLayer2AylaPicks:
         _make_service(known, manicure_category)
         _make_service(fresh, manicure_category)
 
-        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]
+        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]["items"]
         assert _names_of(rows) == {"Fresh"}
 
     def test_rating_does_not_order_the_shelf(
@@ -393,7 +396,7 @@ class TestLayer2AylaPicks:
         _make_service(high, manicure_category)
         _make_service(low, manicure_category)
 
-        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]
+        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]["items"]
         assert {row["tier"] for row in rows} == {1}
 
     def test_each_item_carries_codes_instead_of_a_sentence(
@@ -407,7 +410,7 @@ class TestLayer2AylaPicks:
         sp = _make_specialist(tenant_new, suffix="0130", name="Pick", rating=Decimal("4.9"))
         _make_service(sp, manicure_category)
 
-        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]
+        rows = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]["items"]
         assert rows
         for row in rows:
             assert "reasoning_text" not in row
@@ -440,7 +443,7 @@ class TestLayer2AylaPicks:
         sp = _make_specialist(tenant_new, suffix="0170", name="Ссылка")
         _make_service(sp, manicure_category)
 
-        row = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"][0]
+        row = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]["items"][0]
 
         assert row["candidate"] == {"kind": "PROVIDER", "id": str(sp.id)}
         assert set(row) == {"candidate", "rank", "tier", "reason_codes", "evidence"}
@@ -459,7 +462,7 @@ class TestLayer2AylaPicks:
         )
         _make_service(sp, manicure_category)
 
-        row = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"][0]
+        row = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]["items"][0]
         ratings = [item for item in row["evidence"] if item["kind"] == "RATING"]
         assert ratings and ratings[0]["strength"] == "UNSUBSTANTIATED"
         assert not any(
@@ -509,7 +512,11 @@ class TestFailClosedStates:
         _make_service(sp, manicure_category, mapping_status=status)
 
         data = _api().post(URL, _body(), format="json").json()["data"]
-        assert data["layer_2_ayla_picks"] == []
+        shelf = data["layer_2_ayla_picks"]
+        assert shelf["items"] == []
+        # Пустота НАЗВАНА: по этому коду потребитель говорит
+        # «нет подтверждённых», а не «никто не подошёл» (§76, §10.3).
+        assert "ELIG_EXCLUDED_NOT_RECOMMENDABLE" in shelf["reason_codes"]
         assert data["layer_3_explore"]["categories"]
 
     def test_safety_is_declared_by_the_surface_and_not_steerable_by_the_caller(
@@ -547,7 +554,13 @@ class TestFailClosedStates:
             URL, _body(safety_state="STOP"), format="json",
         ).json()["data"]
 
-        assert [row["candidate"]["id"] for row in without["layer_2_ayla_picks"]] == [str(sp.id)]
+        picked = [
+            row["candidate"]["id"]
+            for row in without["layer_2_ayla_picks"]["items"]
+        ]
+        assert picked == [str(sp.id)]
+        # Полка целиком, а не только строки: коды тоже обязаны совпасть,
+        # иначе присланный STOP мог бы менять объяснение, не меняя выдачи.
         assert steered["layer_2_ayla_picks"] == without["layer_2_ayla_picks"]
 
     def test_request_schema_carries_no_safety_field(self):
@@ -582,8 +595,8 @@ class TestEligibilityFilter:
         r = _api().post(URL, _body(), format="json")
         body = r.json()["data"]
         all_ids = (
-            {it["candidate"]["id"] for it in body["layer_1_your_places"]}
-            | {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]}
+            {it["candidate"]["id"] for it in body["layer_1_your_places"]["items"]}
+            | {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]["items"]}
         )
         assert str(sp.id) not in all_ids
 
@@ -599,8 +612,8 @@ class TestEligibilityFilter:
         r = _api().post(URL, _body(), format="json")
         body = r.json()["data"]
         all_ids = (
-            {it["candidate"]["id"] for it in body["layer_1_your_places"]}
-            | {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]}
+            {it["candidate"]["id"] for it in body["layer_1_your_places"]["items"]}
+            | {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]["items"]}
         )
         assert str(sp.id) not in all_ids
 
@@ -616,8 +629,8 @@ class TestEligibilityFilter:
         r = _api().post(URL, _body(), format="json")
         body = r.json()["data"]
         all_ids = (
-            {it["candidate"]["id"] for it in body["layer_1_your_places"]}
-            | {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]}
+            {it["candidate"]["id"] for it in body["layer_1_your_places"]["items"]}
+            | {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]["items"]}
         )
         assert str(sp.id) not in all_ids
 
@@ -647,7 +660,7 @@ class TestGoalFilter:
 
         r = _api().post(URL, _body(goal="маникюр"), format="json")
         body = r.json()["data"]
-        l2_ids = {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]}
+        l2_ids = {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]["items"]}
         assert str(manicurist.id) in l2_ids
         assert str(masseur.id) not in l2_ids
 
@@ -667,7 +680,7 @@ class TestGoalFilter:
 
         r = _api().post(URL, _body(goal="manicure"), format="json")
         body = r.json()["data"]
-        l2_ids = {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]}
+        l2_ids = {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]["items"]}
         assert str(manicurist.id) in l2_ids
         assert str(masseur.id) not in l2_ids
 
@@ -701,7 +714,7 @@ class TestGeographyIsNotOnThisSurface:
         sp = _make_specialist(tenant_new, suffix="0200", name="Near")
         _make_service(sp, manicure_category)
 
-        row = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"][0]
+        row = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]["items"][0]
         assert "distance_km" not in row
 
 
@@ -769,13 +782,13 @@ class TestSalonStateGatesThePool:
     def _layer_1_ids() -> set[str]:
         r = _api().post(URL, _body(), format="json")
         assert r.status_code == 200, r.content
-        return {i["candidate"]["id"] for i in r.json()["data"]["layer_1_your_places"]}
+        return {i["candidate"]["id"] for i in r.json()["data"]["layer_1_your_places"]["items"]}
 
     @staticmethod
     def _layer_2_ids() -> set[str]:
         r = _api().post(URL, _body(), format="json")
         assert r.status_code == 200, r.content
-        return {i["candidate"]["id"] for i in r.json()["data"]["layer_2_ayla_picks"]}
+        return {i["candidate"]["id"] for i in r.json()["data"]["layer_2_ayla_picks"]["items"]}
 
     def test_deactivated_salon_drops_out_of_your_places(
         self, customer, customer_known_tur, tenant_known, manicure_category,
@@ -843,6 +856,6 @@ class TestSalonStateGatesThePool:
         r = _api().post(URL, _body(), format="json")
         assert r.status_code == 200, r.content
 
-        picks = {i["candidate"]["id"] for i in r.json()["data"]["layer_2_ayla_picks"]}
+        picks = {i["candidate"]["id"] for i in r.json()["data"]["layer_2_ayla_picks"]["items"]}
         assert str(healthy.id) in picks
         assert str(orphan.id) not in picks

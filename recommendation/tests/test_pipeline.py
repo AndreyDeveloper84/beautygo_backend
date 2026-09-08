@@ -448,6 +448,51 @@ def test_availability_stays_inactive_until_the_data_condition_is_met():
     assert ReasonCode.EXEC_SCHEDULE_UNCONFIRMED not in codes
 
 
+def test_census_counts_everyone_seen_not_only_survivors():
+    """§76: числа `REVIEW_REQUIRED` и `UNMAPPED` — то, по чему видно движение.
+
+    На пилоте это не диагностика края, а постоянное состояние: после
+    миграции `review_required 206 · unmapped 59 · verified 0`. Пока
+    подтверждённых нет, единственный признак прогресса — переезд числа
+    из одной колонки в другую.
+
+    Считается **увиденное**, а не выжившее. Кандидат, выбывший раньше
+    гейта связи, свой статус всё равно имеет, и схлопнуть его значило бы
+    потерять из счёта ровно тех, из-за кого счёт и завели.
+    """
+    decision = resolve(
+        make_request(),
+        source=StaticSource([
+            make_facts(mapping_status=MappingStatus.REVIEW_REQUIRED),
+            make_facts(mapping_status=MappingStatus.REVIEW_REQUIRED),
+            make_facts(mapping_status=MappingStatus.UNMAPPED),
+            make_facts(mapping_status=MappingStatus.VERIFIED),
+        ]),
+    )
+
+    census = decision.census
+    assert (census.visible, census.recommendation_eligible) == (4, 1)
+    assert (census.review_required, census.unmapped) == (2, 1)
+
+
+def test_census_counts_a_candidate_dropped_before_the_mapping_gate():
+    """Выбывший по безопасности из переписи НЕ исчезает.
+
+    Иначе при `STOP` числа обнулялись бы целиком, и дежурный прочитал бы
+    «непроверенных связей нет» там, где их полный каталог. Пустота
+    получила бы второе объяснение, и оба выглядели бы одинаково.
+    """
+    decision = resolve(
+        make_request(safety_state=SafetyState.STOP),
+        source=StaticSource([make_facts(mapping_status=MappingStatus.REVIEW_REQUIRED)]),
+    )
+
+    assert decision.is_empty
+    assert decision.census.visible == 1
+    assert decision.census.review_required == 1
+    assert decision.census.recommendation_eligible == 0
+
+
 def test_decision_carries_policy_versions():
     """§6.3: без версий решение невоспроизводимо задним числом."""
     decision = resolve(make_request(), source=StaticSource([make_facts()]))

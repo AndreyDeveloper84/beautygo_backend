@@ -289,7 +289,7 @@ def _catalog_payload(api, **body) -> dict:
 
 def _layer_2_names(api, **body) -> set[str]:
     """Имена по ссылкам на кандидатов — строка полки имени не несёт (T18)."""
-    rows = _catalog_payload(api, **body)["layer_2_ayla_picks"]
+    rows = _catalog_payload(api, **body)["layer_2_ayla_picks"]["items"]
     ids = [row["candidate"]["id"] for row in rows]
     return set(
         SpecialistProfile.objects

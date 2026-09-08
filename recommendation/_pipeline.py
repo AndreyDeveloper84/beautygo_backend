@@ -131,6 +131,7 @@ def resolve(
             tie_break_policy_version=TIE_BREAK_POLICY_VERSION,
         ),
         computed_at=datetime.now(timezone.utc),
+        census=admitted.census,
     )
 
 

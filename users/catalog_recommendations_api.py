@@ -192,6 +192,18 @@ class _ShelfRowSerializer(serializers.Serializer):
     evidence = serializers.ListField(child=serializers.DictField())
 
 
+class _ShelfSerializer(serializers.Serializer):
+    """Полка: строки плюс коды решения, объясняющие пустоту.
+
+    Коды едут рядом со строками, потому что различать пустоты обязан
+    потребитель — и различает он их по кодам, а не по факту пустоты.
+    Без них любая пустая полка получила бы одно имя на все причины.
+    """
+
+    items = _ShelfRowSerializer(many=True)
+    reason_codes = serializers.ListField(child=serializers.CharField())
+
+
 class _Layer3CategorySerializer(serializers.Serializer):
     slug = serializers.CharField()
     name = serializers.CharField()
@@ -233,6 +245,50 @@ def _resolve_layer(
         # и получала жёсткое умолчание. Поверхность не владеет политикой
         # ровно по той же причине, по которой не владеет порядком.
     )
+
+
+def _shelf(decision: RecommendationDecision | None, *, limit: int) -> dict[str, Any]:
+    """Полка = строки решения ПЛЮС коды, объясняющие пустоту.
+
+    Почему коды обязаны ехать рядом со строками
+    -------------------------------------------
+    Потребитель уже умеет различать пустоты — и различает он их **по
+    кодам решения**, а не по факту пустоты: безопасность отдельно,
+    неподтверждённая связь отдельно, «никто не подошёл» отдельно.
+    Классификатор у него написан правильно и второго заводить нельзя:
+    два классификатора — два ответа на один вопрос.
+
+    Но предыдущая правка (T18) оставила ему только строки. Коды решения
+    остались на сервере, и различать стало нечем: любая пустота
+    выглядела бы одинаково, а значит получила бы **одно имя на все
+    причины** — ровно тот дефект, который эпик и убирает.
+
+    Поэтому полка несёт `reason_codes` решения. Не «на всякий случай»:
+    это единственное, из чего потребитель может честно сказать, ПОЧЕМУ
+    полка пуста, а не выдумать причину.
+
+    Чего здесь нет
+    --------------
+    Переписи (`census`) в ответе нет — она уходит в лог. `REVIEW_REQUIRED`
+    показывается только во внутренней очереди проверки (§76); счётчик —
+    не показ кандидата, но разница между «сколько их» и «кто они»
+    слишком легко стирается следующей правкой. Наружу имя состояния,
+    внутрь числа.
+
+    Полка, которой не было
+    ----------------------
+    `None` означает «вызова не было»: полку «твои салоны» не строят,
+    когда истории нет вовсе. Это не пустая выдача, и путать их нельзя —
+    пустой список с кодами сказал бы «искали и не нашли», чего никто
+    не делал. Отсюда пустые `reason_codes`: сказать нечего, потому что
+    решения не принимали.
+    """
+    if decision is None:
+        return {"items": [], "reason_codes": []}
+    return {
+        "items": _project(decision, limit=limit),
+        "reason_codes": [code.value for code in decision.reason_codes],
+    }
 
 
 def _project(decision: RecommendationDecision, *, limit: int) -> list[dict[str, Any]]:
@@ -392,8 +448,8 @@ class CatalogRecommendationsView(APIView):
                     "data": inline_serializer(
                         name="CatalogRecommendationsData",
                         fields={
-                            "layer_1_your_places": _ShelfRowSerializer(many=True),
-                            "layer_2_ayla_picks": _ShelfRowSerializer(many=True),
+                            "layer_1_your_places": _ShelfSerializer(),
+                            "layer_2_ayla_picks": _ShelfSerializer(),
                             "layer_3_explore": inline_serializer(
                                 name="Layer3Explore",
                                 fields={
@@ -473,20 +529,25 @@ class CatalogRecommendationsView(APIView):
             k=LAYER_2_LIMIT,
         )
 
-        layer_1 = _project(layer_1_decision, limit=LAYER_1_LIMIT) if layer_1_decision else []
-        layer_2 = _project(layer_2_decision, limit=LAYER_2_LIMIT)
+        layer_1 = _shelf(layer_1_decision, limit=LAYER_1_LIMIT)
+        layer_2 = _shelf(layer_2_decision, limit=LAYER_2_LIMIT)
         layer_3 = _build_layer_3(list(
             _catalog_pool(goal=goal, goal_category_ids=goal_category_ids)
             .values_list("id", flat=True)
         ))
 
+        # Перепись — В ЛОГ, не клиенту (§76). При нуле подтверждённых связей
+        # это не диагностика края, а единственное, по чему видно движение:
+        # подтвердили связь — число переехало из одной колонки в другую.
+        # Замер пилота 08.09 после миграции: 206 / 59 / 0.
         logger.info(
             "catalog.recommendations user_id=%s goal=%r goal_key=%r safety=%s "
-            "l1=%d l2=%d l3_cats=%d excluded=%d decision_codes=%s",
+            "l1=%d l2=%d l3_cats=%d l2_codes=%s l2_census[%s]",
             request.user.id, goal, goal_key, safety_state.value,
-            len(layer_1), len(layer_2), len(layer_3.get("categories", [])),
-            len(layer_2_decision.excluded),
-            [code.value for code in layer_2_decision.reason_codes],
+            len(layer_1["items"]), len(layer_2["items"]),
+            len(layer_3.get("categories", [])),
+            layer_2["reason_codes"],
+            layer_2_decision.census.as_log_fields(),
         )
 
         return success_response({
