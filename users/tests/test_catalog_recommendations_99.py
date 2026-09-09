@@ -164,6 +164,20 @@ def _make_service(
     )
 
 
+def _key(profile) -> str:
+    """Ключ, которым кандидат назван за границей — ПОЛЬЗОВАТЕЛЬСКИЙ.
+
+    Не `profile.id`. Разница не косметическая: за границей мастера ищут
+    в зеркале бота по `ayla_user_id`, и это ключ пользователя (контракт
+    §5 K1.1). У одного человека это два разных UUID, и сравнение
+    с профильным давало на пилоте ПУСТОЕ пересечение.
+
+    Помощник назван, а не подставлен в каждую строку, чтобы в тесте было
+    видно **какой** ключ проверяется, а не просто «какой-то id».
+    """
+    return str(profile.user_id)
+
+
 def _names_of(rows) -> set[str]:
     """Имена по ссылкам на кандидатов.
 
@@ -175,7 +189,7 @@ def _names_of(rows) -> set[str]:
     ids = [row["candidate"]["id"] for row in rows]
     return set(
         SpecialistProfile.objects
-        .filter(id__in=ids)
+        .filter(user_id__in=ids)
         .values_list("display_name", flat=True)
     )
 
@@ -265,7 +279,7 @@ class TestLayer1YourPlaces:
         assert r.status_code == 200
         body = r.json()["data"]
         l1_ids = {item["candidate"]["id"] for item in body["layer_1_your_places"]["items"]}
-        assert str(spec.id) in l1_ids
+        assert _key(spec) in l1_ids
 
     def test_non_history_tenant_not_in_layer_1(
         self, customer, customer_known_tur, tenant_new,
@@ -279,7 +293,7 @@ class TestLayer1YourPlaces:
         r = _api().post(URL, _body(), format="json")
         body = r.json()["data"]
         l1_ids = {item["candidate"]["id"] for item in body["layer_1_your_places"]["items"]}
-        assert str(spec.id) not in l1_ids
+        assert _key(spec) not in l1_ids
 
     def test_no_history_returns_empty_layer_1(
         self, customer, tenant_new, manicure_category,
@@ -311,11 +325,11 @@ class TestLayer1YourPlaces:
         body = r.json()["data"]
         l1_ids = {item["candidate"]["id"] for item in body["layer_1_your_places"]["items"]}
         # Salon offers no manicure, but it's still in 'your places'.
-        assert str(masseur.id) in l1_ids
+        assert _key(masseur) in l1_ids
         # Layer 2 should NOT surface this masseur — they don't match
         # the goal and aren't in history.
         l2_ids = {item["candidate"]["id"] for item in body["layer_2_ayla_picks"]["items"]}
-        assert str(masseur.id) not in l2_ids
+        assert _key(masseur) not in l2_ids
 
     def test_layer_1_is_not_ordered_by_rating(
         self, customer, customer_known_tur, tenant_known, manicure_category,
@@ -445,7 +459,7 @@ class TestLayer2AylaPicks:
 
         row = _api().post(URL, _body(), format="json").json()["data"]["layer_2_ayla_picks"]["items"][0]
 
-        assert row["candidate"] == {"kind": "PROVIDER", "id": str(sp.id)}
+        assert row["candidate"] == {"kind": "PROVIDER", "id": _key(sp)}
         assert set(row) == {"candidate", "rank", "tier", "reason_codes", "evidence"}
 
     def test_unsubstantiated_rating_is_delivered_but_not_a_reason(
@@ -558,7 +572,7 @@ class TestFailClosedStates:
             row["candidate"]["id"]
             for row in without["layer_2_ayla_picks"]["items"]
         ]
-        assert picked == [str(sp.id)]
+        assert picked == [_key(sp)]
         # Полка целиком, а не только строки: коды тоже обязаны совпасть,
         # иначе присланный STOP мог бы менять объяснение, не меняя выдачи.
         assert steered["layer_2_ayla_picks"] == without["layer_2_ayla_picks"]
@@ -598,7 +612,7 @@ class TestEligibilityFilter:
             {it["candidate"]["id"] for it in body["layer_1_your_places"]["items"]}
             | {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]["items"]}
         )
-        assert str(sp.id) not in all_ids
+        assert _key(sp) not in all_ids
 
     def test_booking_disabled_specialist_excluded(
         self, customer, tenant_new, manicure_category,
@@ -615,7 +629,7 @@ class TestEligibilityFilter:
             {it["candidate"]["id"] for it in body["layer_1_your_places"]["items"]}
             | {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]["items"]}
         )
-        assert str(sp.id) not in all_ids
+        assert _key(sp) not in all_ids
 
     def test_non_active_status_excluded(
         self, customer, tenant_new, manicure_category,
@@ -632,7 +646,7 @@ class TestEligibilityFilter:
             {it["candidate"]["id"] for it in body["layer_1_your_places"]["items"]}
             | {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]["items"]}
         )
-        assert str(sp.id) not in all_ids
+        assert _key(sp) not in all_ids
 
 
 # ---------------------------------------------------------------------------
@@ -661,8 +675,8 @@ class TestGoalFilter:
         r = _api().post(URL, _body(goal="маникюр"), format="json")
         body = r.json()["data"]
         l2_ids = {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]["items"]}
-        assert str(manicurist.id) in l2_ids
-        assert str(masseur.id) not in l2_ids
+        assert _key(manicurist) in l2_ids
+        assert _key(masseur) not in l2_ids
 
     def test_goal_filters_by_category_slug(
         self, customer, tenant_new, manicure_category, massage_category,
@@ -681,8 +695,8 @@ class TestGoalFilter:
         r = _api().post(URL, _body(goal="manicure"), format="json")
         body = r.json()["data"]
         l2_ids = {it["candidate"]["id"] for it in body["layer_2_ayla_picks"]["items"]}
-        assert str(manicurist.id) in l2_ids
-        assert str(masseur.id) not in l2_ids
+        assert _key(manicurist) in l2_ids
+        assert _key(masseur) not in l2_ids
 
 
 # ---------------------------------------------------------------------------
@@ -800,17 +814,17 @@ class TestSalonStateGatesThePool:
 
         # Положительная стража: салон включён — мастер на месте.
         # Без неё отрицание ниже прошло бы и на пустом ответе.
-        assert str(spec.id) in self._layer_1_ids()
+        assert _key(spec) in self._layer_1_ids()
 
         # Меняем РОВНО одно поле — состояние салона.
         tenant_known.is_active = False
         tenant_known.save(update_fields=["is_active"])
-        assert str(spec.id) not in self._layer_1_ids()
+        assert _key(spec) not in self._layer_1_ids()
 
         # И обратно, чтобы исключить любую другую причину.
         tenant_known.is_active = True
         tenant_known.save(update_fields=["is_active"])
-        assert str(spec.id) in self._layer_1_ids()
+        assert _key(spec) in self._layer_1_ids()
 
     @pytest.mark.no_auto_tenant
     def test_master_without_a_salon_does_not_500_the_endpoint(
@@ -857,5 +871,5 @@ class TestSalonStateGatesThePool:
         assert r.status_code == 200, r.content
 
         picks = {i["candidate"]["id"] for i in r.json()["data"]["layer_2_ayla_picks"]["items"]}
-        assert str(healthy.id) in picks
-        assert str(orphan.id) not in picks
+        assert _key(healthy) in picks
+        assert _key(orphan) not in picks
