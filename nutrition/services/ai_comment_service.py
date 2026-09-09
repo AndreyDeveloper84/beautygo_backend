@@ -53,12 +53,12 @@ class SummaryFacts:
     boring. Not a Pydantic model on purpose; this is internal.
     """
     calories_total: float
-    calories_goal: int
+    calories_goal: int | None
     protein_g: float
     fat_g: float
     carbs_g: float
     water_ml: int
-    water_goal_ml: int
+    water_goal_ml: int | None
     entries_count: int
 
 
@@ -255,7 +255,10 @@ def _validate(text: str) -> str | None:
 def _neutral_fallback(facts: SummaryFacts) -> str:
     if facts.entries_count == 0:
         return "Сегодня записей пока нет — попробуем завтра. Я рядом."
-    if facts.water_ml < facts.water_goal_ml * 0.7:
+    # Сравнение с ориентиром — только когда ориентир ЕСТЬ. Без него
+    # ``None * 0.7`` уронило бы фолбэк, а ``0 * 0.7`` сделало бы совет
+    # про воду недостижимым: любой человек «не отстаёт» от нуля.
+    if facts.water_goal_ml and facts.water_ml < facts.water_goal_ml * 0.7:
         return "Хороший день. Завтра попробуй чуть больше воды — это поддержит самочувствие."
     return "Хороший день — почти в норме. Завтра попробуй немного больше белка с утра."
 
