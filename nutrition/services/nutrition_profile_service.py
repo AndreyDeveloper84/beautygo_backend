@@ -30,11 +30,44 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 
-# Defaults for skipped anthropometry fields — Penza pilot audience median.
-DEFAULT_GENDER = "female"
-DEFAULT_AGE = 40
-DEFAULT_HEIGHT_CM = 165
-DEFAULT_WEIGHT_KG = 70.0
+# Медианы пензенской аудитории УДАЛЕНЫ (§82, §85; §35 п.10).
+#
+# Стояло::
+#
+#     DEFAULT_GENDER = "female"
+#     DEFAULT_AGE = 40
+#     DEFAULT_HEIGHT_CM = 165
+#     DEFAULT_WEIGHT_KG = 70.0   # «Penza pilot audience median»
+#
+# и подставлялось за ЛЮБОЕ пропущенное поле. Человек, не назвавший вес,
+# получал ориентир, посчитанный ОТ ЧУЖОГО ТЕЛА, и на экране это было
+# неотличимо от своего.
+#
+# Это тяжелее плоской константы, а не легче. Плоскую 2000 видно — она
+# одинаковая у всех, и рано или поздно кто-то замечает. Медиана даёт
+# правдоподобное и РАЗНОЕ число: оно меняется от ответов человека и
+# потому выглядит персональным. Сверить его не с чем, оспорить нечем.
+#
+# DRF-1339 завёл маркер ``{"reason": "assumed_input", "field":
+# "weight_kg"}`` — но маркер это признание, а не отказ: число всё равно
+# считалось, уезжало в профиль и показывалось. Теперь пропуск любого из
+# четырёх обязательных входов отменяет расчёт целиком, и у отказа есть
+# имя: ``insufficient_inputs`` с перечнем недостающих полей.
+#
+# Раздел 3.2 решения перечисляет входы как ОБЯЗАТЕЛЬНЫЕ: возраст, рост,
+# вес, физиологический пол. Раздел 11: «для каждого результата
+# воспроизводимы входы, формула и версия» — подставленный вход
+# воспроизводимость ломает молча.
+
+#: Входы, без которых расчёта нет. Пол, возраст, рост и вес — ровно те
+#: четыре, что стоят в формуле Миффлина — Сан Жеора.
+REQUIRED_INPUTS: tuple[str, ...] = ("gender", "age", "height_cm", "weight_kg")
+
+# ``DEFAULT_ACTIVITY`` оставлен и НЕ снят здесь намеренно. Он того же
+# класса — умолчание, равное осмысленному значению, — но живёт ещё и в
+# схеме: ``NutritionProfile.activity_coefficient = FloatField(default=1.4)``.
+# Снять его значит тронуть колонку, то есть миграцию существующих
+# клиентов, а это отдельный срез. Названо главному окну строкой.
 DEFAULT_ACTIVITY = 1.4
 
 # BMR floor margin — daily_kcal must stay at least this far above BMR
@@ -99,7 +132,7 @@ class ProfileInputs:
     NutritionProfile directly here so the function stays pure and easy
     to fuzz-test.
     """
-    gender: str = DEFAULT_GENDER
+    gender: str = ""
     age: int | None = None
     height_cm: int | None = None
     weight_kg: float | None = None
@@ -139,16 +172,59 @@ class ComputedNorms:
 # ---------------------------------------------------------------------------
 
 
-def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
-    """Pure deterministic computation.
+def _missing_inputs(inputs: ProfileInputs) -> list[str]:
+    """Обязательные входы, которых человек не назвал.
 
-    Fills defaults for skipped fields, computes BMR, applies the
-    override ladder in priority order, then derives daily targets.
+    Пустая строка считается пропуском наравне с ``None``: пол хранится
+    строкой, и незаполненный он приходит как ``""``.
     """
-    gender = inputs.gender or DEFAULT_GENDER
-    age = inputs.age if inputs.age is not None else DEFAULT_AGE
-    height_cm = inputs.height_cm if inputs.height_cm is not None else DEFAULT_HEIGHT_CM
-    weight_kg = inputs.weight_kg if inputs.weight_kg is not None else DEFAULT_WEIGHT_KG
+    missing = []
+    for name in REQUIRED_INPUTS:
+        value = getattr(inputs, name, None)
+        if value is None or value == "":
+            missing.append(name)
+    return missing
+
+
+def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
+    """Pure deterministic computation — или ОТКАЗ, если входов не хватает.
+
+    Раньше функция заполняла пропуски медианой пензенской аудитории и
+    считала всегда. Теперь пропуск любого из ``REQUIRED_INPUTS`` отменяет
+    расчёт целиком: возвращаются нули и запись в аудите с именем отказа.
+
+    Нули, а не ``None``: столбцы профиля объявлены ``PositiveIntegerField
+    (default=0)``, и переводить их в nullable — миграция существующих
+    клиентов, отдельный срез. Ноль здесь безопасен ровно потому, что
+    дневная норма ноль калорий физически невозможна, и все потребители
+    уже проверяют её на положительность. Наружу отказ уезжает не нулём:
+    ключ ориентира сериализатор выкидывает (``OmitAbsentTargetsMixin``).
+    """
+    missing = _missing_inputs(inputs)
+    if missing:
+        return ComputedNorms(
+            bmr=0,
+            daily_kcal=0,
+            daily_protein_g=0,
+            daily_fat_g=0,
+            daily_carbs_g=0,
+            goal=inputs.goal or "maintain",
+            pace=inputs.pace or "moderate",
+            goal_overridden_by="",
+            # У пропуска есть ИМЯ и перечень. Молчаливая пустота — отказ
+            # без имени: потребитель видит нули и не может отличить «не
+            # спросили» от «посчитали и вышло ноль».
+            overrides_applied=[{
+                "reason": "insufficient_inputs",
+                "fields": missing,
+            }],
+        )
+
+    gender = inputs.gender
+    age = inputs.age
+    height_cm = inputs.height_cm
+    weight_kg = inputs.weight_kg
+    assert age is not None and height_cm is not None and weight_kg is not None
 
     bmr = _mifflin_st_jeor(gender, age, height_cm, weight_kg)
     activity = inputs.activity_coefficient or DEFAULT_ACTIVITY
