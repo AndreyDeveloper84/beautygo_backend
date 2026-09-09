@@ -37,10 +37,13 @@
 НАСТРОЕК (``NUTRITION_DEFAULT_*``), этот — подстановку значения в код.
 Два разных способа вернуть одно и то же.
 
-Замер 09.09.2026: подставить ``calories_goal = 2000`` в
-``nutrition_summary_service`` → ``1 failed``; снять → ``4 passed``.
-Чем снято: ``python -m pytest nutrition/tests/test_targets_stay_absent.py
---junitxml``.
+Замер 09.09.2026, снят ``python -m pytest
+nutrition/tests/test_targets_stay_absent.py``: подставить
+``calories_goal = 2000`` вместо ``calories_goal: int | None = None`` в
+``nutrition_summary_service`` → ``1 failed, 3 passed``; вернуть как было
+→ ``4 passed``. Подмена проверена на применение (ровно одно совпадение в
+файле) — ``str.replace`` «успешен» и при нуле совпадений и доказал бы
+свойство несуществующего кода.
 """
 from __future__ import annotations
 
