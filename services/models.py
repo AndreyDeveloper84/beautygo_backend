@@ -571,16 +571,47 @@ class SpecialistService(models.Model):
             return template.duration_default
         return None
 
-    def resolved_requires_health_check(self) -> bool:
-        """Escalate-only OR across template floor, salon, specialist (D1)."""
+    def resolved_requires_health_check(self) -> bool | None:
+        """Escalate-only OR across template floor, salon, specialist (D1).
+
+        Tri-state. ``None`` means **unknown**, not ``False``.
+
+        Precedence, and it is deliberate:
+
+        1. An explicit raise anywhere wins. ``salon.requires_health_check``
+           or ``self.requires_health_check`` being ``True`` returns ``True``
+           even with no template — escalate-only is preserved exactly.
+        2. With a template, its flag is the canonical floor and the answer
+           is a real ``bool``.
+        3. **Without a template, and with nobody having raised the flag,
+           the answer is ``None``.** There is no canonical floor to read,
+           so the honest answer is "not known".
+
+        Why case 3 is not ``False``. The previous version wrote
+        ``template.requires_health_check if template is not None else False``,
+        which turned *the absence of a canonical link* into *a positive
+        claim about safety*. Measured on the pilot 09.09.2026: of 387 active
+        bookable edges, 96 resolved ``False`` solely because no template was
+        attached — 95 of them the pilot salon's, i.e. every edge a real
+        person can book there. The salon had not answered the question; the
+        cascade answered it for the salon.
+
+        Consumers must decide what to do with ``None`` explicitly. The bot
+        mirror already models it — ``MasterService.resolved_requires_health_check``
+        is ``null=True`` and its booking gate treats ``NULL`` as "screening
+        required" — and never saw a ``NULL`` only because this method never
+        produced one.
+        """
         salon = self.salon_service
+        # An explicit raise needs no canonical anchor: a salon or a
+        # specialist may always escalate, and that answer IS known.
+        if salon.requires_health_check or self.requires_health_check:
+            return True
         template = salon.template
-        template_floor = (
-            template.requires_health_check if template is not None else False
-        )
-        return bool(
-            template_floor or salon.requires_health_check or self.requires_health_check
-        )
+        if template is None:
+            # No floor to read. Absence of evidence is not evidence of safety.
+            return None
+        return bool(template.requires_health_check)
 
     def clean(self) -> None:
         if self.is_active and self.resolved_duration() is None:

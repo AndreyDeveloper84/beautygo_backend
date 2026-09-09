@@ -258,7 +258,16 @@ class SpecialistServiceInternalSerializer(serializers.ModelSerializer):
     def get_resolved_duration(self, obj: SpecialistService) -> int | None:
         return obj.resolved_duration()
 
-    def get_resolved_requires_health_check(self, obj: SpecialistService) -> bool:
+    def get_resolved_requires_health_check(self, obj: SpecialistService) -> bool | None:
+        """Tri-state on the wire: ``true`` / ``false`` / ``null`` = unknown.
+
+        ``null`` is a deliberate value, not a missing key. The consumer
+        (bot mirror) distinguishes the two: an absent key means "this
+        payload does not speak about the field", a present ``null`` means
+        "the catalog says it does not know". Collapsing unknown to ``false``
+        here is what made 96 of 387 pilot edges read as screened-safe
+        without anyone having said so.
+        """
         return obj.resolved_requires_health_check()
 
     def get_template(self, obj: SpecialistService) -> str | None:
