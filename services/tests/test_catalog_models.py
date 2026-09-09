@@ -171,6 +171,65 @@ class TestSpecialistService:
         )
         assert sp.resolved_requires_health_check() is True
 
+    def test_health_check_is_unknown_without_a_template(
+        self, tenant, category, specialist_user,
+    ):
+        """Нет канонической опоры и никто не поднимал флаг → «не знаю».
+
+        Ровно этот случай на пилоте 09.09.2026 давал ``False`` у 96 из 387
+        активных записываемых рёбер (95 из них — рёбра пилотного салона).
+        Отсутствие связи с шаблоном не является утверждением о том, что
+        скрининг не нужен: салон на этот вопрос не отвечал.
+        """
+        salon = SalonService.objects.create(
+            tenant=tenant, template=None, category=category,
+            name="Услуга без шаблона", duration_minutes=60,
+            requires_health_check=False,
+        )
+        sp = SpecialistService.objects.create(
+            salon_service=salon, specialist=specialist_user.specialist_profile,
+            duration_minutes=60, price=Decimal("2000"),
+            requires_health_check=False,
+        )
+        assert sp.resolved_requires_health_check() is None
+
+    def test_health_check_explicit_raise_survives_a_missing_template(
+        self, tenant, category, specialist_user,
+    ):
+        """Эскалация не требует канонической опоры — этот ответ ИЗВЕСТЕН.
+
+        Сторож против противоположной ошибки: сделать «не знаю» слишком
+        жадным и проглотить поднятый салоном флаг.
+        """
+        salon = SalonService.objects.create(
+            tenant=tenant, template=None, category=category,
+            name="Услуга без шаблона, но с гейтом", duration_minutes=60,
+            requires_health_check=True,
+        )
+        sp = SpecialistService.objects.create(
+            salon_service=salon, specialist=specialist_user.specialist_profile,
+            duration_minutes=60, price=Decimal("2000"),
+            requires_health_check=False,
+        )
+        assert sp.resolved_requires_health_check() is True
+
+    def test_health_check_known_false_stays_false(
+        self, salon_service, specialist_user,
+    ):
+        """Шаблон есть и флага не несёт → это ЗНАНИЕ, а не незнание.
+
+        Вторая половина того же сторожа: ``None`` не должен подменять
+        честный ``False``, иначе гейт закроется на всём подряд и его
+        отключат целиком.
+        """
+        sp = SpecialistService.objects.create(
+            salon_service=salon_service,
+            specialist=specialist_user.specialist_profile,
+            duration_minutes=60, price=Decimal("2000"),
+            requires_health_check=False,
+        )
+        assert sp.resolved_requires_health_check() is False
+
     def test_health_check_escalates_from_specialist(self, salon_service, specialist_user):
         # template floor False, specialist escalates to True
         sp = SpecialistService.objects.create(
