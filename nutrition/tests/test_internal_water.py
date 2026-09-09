@@ -245,7 +245,7 @@ class TestAlcoholHint:
 class TestCaffeineWarning:
     @patch(
         "nutrition.services.water_entry_service._load_nutrition_context",
-        return_value=NutritionContext(pregnant=True, daily_water_ml=2000),
+        return_value=NutritionContext(pregnant=True),
     )
     def test_pregnant_over_threshold_warns(self, _ctx, proxy_user, seed, headers):
         c = APIClient()
@@ -255,7 +255,7 @@ class TestCaffeineWarning:
 
     @patch(
         "nutrition.services.water_entry_service._load_nutrition_context",
-        return_value=NutritionContext(pregnant=True, daily_water_ml=2000),
+        return_value=NutritionContext(pregnant=True),
     )
     def test_pregnant_under_threshold_no_warning(
         self, _ctx, proxy_user, seed, headers,
@@ -279,7 +279,7 @@ class TestCaffeineWarning:
 class TestEatingDisorderMode:
     @patch(
         "nutrition.services.water_entry_service._load_nutrition_context",
-        return_value=NutritionContext(eating_disorder=True, daily_water_ml=2000),
+        return_value=NutritionContext(eating_disorder=True),
     )
     def test_strips_kcal_milestone_alcohol_hint(
         self, _ctx, proxy_user, seed, headers,
@@ -296,7 +296,7 @@ class TestEatingDisorderMode:
 
     @patch(
         "nutrition.services.water_entry_service._load_nutrition_context",
-        return_value=NutritionContext(eating_disorder=True, daily_water_ml=2000),
+        return_value=NutritionContext(eating_disorder=True),
     )
     def test_persistence_still_records_macros_internally(
         self, _ctx, proxy_user, seed, headers,
