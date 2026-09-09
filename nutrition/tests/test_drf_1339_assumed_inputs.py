@@ -1,20 +1,31 @@
-"""DRF-1339: marker of assumed (default-substituted) inputs in norm computation.
+"""DRF-1339 → §82/§85: подстановки больше нет, а не «она видна».
 
-When the user skipped weight, ``compute_norms`` silently substitutes
-``DEFAULT_WEIGHT_KG`` (nutrition_profile_service.py) and every downstream
-number — BMR, kcal, macros, water, the BMR-floor ladder verdict — is
-computed from a value the user never stated. This change only makes that
-fact visible: a machine-readable ``assumed_inputs`` field in the profile
-response plus an ``assumed_input`` entry in the persisted override audit.
-No computed number changes.
+Файл заводился под маркер: когда человек не называл вес,
+``compute_norms`` молча подставлял ``DEFAULT_WEIGHT_KG`` — 70.0,
+медиану пензенской аудитории, — и КАЖДОЕ число ниже по цепочке (BMR,
+калории, макросы, вердикт лестницы BMR-floor) считалось от значения,
+которого человек не говорил. DRF-1339 сделал этот факт ВИДИМЫМ:
+машиночитаемое поле ``assumed_inputs`` и запись ``assumed_input`` в
+аудите. Ни одно число при этом не менялось.
 
-Layers:
-- HTTP: marker present + ``weight_kg`` stays NULL (response and DB) when
-  weight is skipped; marker empty when weight is given; a ``bmr_floor``
-  verdict on an assumed weight is distinguishable from the same verdict
-  on a real weight by the single ``assumed_inputs`` field.
-- Snapshot: every computed number frozen from the pre-change code and
-  re-asserted here — the invariance proof required by DRF-1339.
+Маркер был честной полумерой и своё отработал: он назвал предмет и
+позволил его измерить. Но признание — не отказ. Число всё равно
+считалось, уезжало в профиль и показывалось человеку как ЕГО ориентир, а
+``assumed_inputs`` жил в ответе API, куда экран не смотрит.
+
+Владелец 09.09.2026 снял подстановку целиком (§82, §85; раздел 3.2
+решения перечисляет возраст, рост, вес и пол как ОБЯЗАТЕЛЬНЫЕ входы).
+Файл сохранён и перевёрнут — он теперь доказывает две вещи:
+
+* неназванный вес отменяет расчёт, и у отказа есть имя
+  (``insufficient_inputs`` с перечнем полей), а ``assumed_inputs``
+  всегда пуст, потому что подставлять стало нечего;
+* расчёт по НАЗВАННЫМ входам не сдвинулся ни на калорию — снимок
+  ``all_known_*`` / ``real_weight_*`` заморожен ещё до DRF-1339 и
+  пережил обе правки.
+
+Второе — контроль присутствия: без него первая половина прошла бы
+победно в мире, где ``compute_norms`` всегда возвращает нули.
 """
 from __future__ import annotations
 
@@ -63,7 +74,9 @@ def headers():
 
 
 class TestAssumedInputsMarker:
-    def test_no_weight_marks_assumed_and_keeps_weight_null(
+    """Маркер пуст всегда: подставлять больше нечего."""
+
+    def test_no_weight_cancels_the_norms_and_keeps_weight_null(
         self, proxy_user, headers,
     ):
         c = APIClient()
@@ -73,22 +86,29 @@ class TestAssumedInputsMarker:
         }, format="json", **headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
         body = resp.json()["data"]
-        # The marker names the substituted input...
-        assert body["assumed_inputs"] == ["weight_kg"]
-        # ...the response does not leak the default into weight_kg...
+        # Маркер пуст: подстановки не было, потому что её больше нет.
+        assert body["assumed_inputs"] == []
+        # Вес как был NULL, так и остался — и в ответе, и в базе.
         assert body["weight_kg"] is None
-        # ...and the DB column stays NULL — the default is never written.
         profile = NutritionProfile.objects.get(user=proxy_user)
         assert profile.weight_kg is None
-        # The persisted audit carries the machine-readable marker.
+        # Норм НЕТ — вместо чисел от чужого тела ноль, и у отказа имя.
+        assert profile.daily_kcal == 0
+        assert profile.bmr == 0
         assert {
-            "reason": "assumed_input", "field": "weight_kg",
+            "reason": "insufficient_inputs", "fields": ["weight_kg"],
         } in profile.last_overrides_applied
+        # Старого признания в аудите тоже нет: оно означало «посчитали
+        # от подставленного», а считать перестали.
+        assert not [
+            e for e in profile.last_overrides_applied
+            if e.get("reason") == "assumed_input"
+        ]
 
-        # GET renders the same marker.
+        # GET отвечает тем же.
         get_resp = c.get(URL, **headers)
         get_body = get_resp.json()["data"]
-        assert get_body["assumed_inputs"] == ["weight_kg"]
+        assert get_body["assumed_inputs"] == []
         assert get_body["weight_kg"] is None
 
     def test_with_weight_marker_empty(self, proxy_user, headers):
@@ -108,9 +128,15 @@ class TestAssumedInputsMarker:
             if e.get("reason") == "assumed_input"
         ]
 
-    def test_bmr_floor_on_assumed_vs_real_weight_distinguishable(self, db):
-        # Both profiles land on goal_overridden_by == "bmr_floor"; only
-        # assumed_inputs tells the substituted-weight one apart.
+    def test_bmr_floor_verdict_needs_a_real_weight(self, db):
+        """Вердикт лестницы BMR-floor выносится только по НАЗВАННОМУ весу.
+
+        Тест назывался ``..._on_assumed_vs_real_weight_distinguishable`` и
+        проверял, что два одинаковых вердикта различимы одним полем.
+        Теперь их не два: на неназванном весе вердикта нет вовсе —
+        выносить приговор «цель снижения тебе не подходит» по чужому телу
+        было хуже, чем не выносить.
+        """
         c = APIClient()
         payload = {
             "gender": "female", "age": 70, "height_cm": 150,
@@ -123,8 +149,10 @@ class TestAssumedInputsMarker:
             "HTTP_X_EXTERNAL_USER_ID": "bot:1339-a",
         })
         body_assumed = resp_assumed.json()["data"]
-        assert body_assumed["goal_overridden_by"] == "bmr_floor"
-        assert body_assumed["goal"] == "maintain"
+        # NEGATIVE: веса нет — вердикта нет, и цель человека не тронута.
+        assert body_assumed["goal_overridden_by"] is None
+        assert body_assumed["goal"] == "lose"
+        assert body_assumed["norms"]["daily_kcal"] == 0
 
         User.objects.create(username="bot:1339-b", role="client", is_proxy=True)
         resp_real = c.post(URL, {**payload, "weight_kg": 45.0}, format="json", **{
@@ -132,18 +160,25 @@ class TestAssumedInputsMarker:
             "HTTP_X_EXTERNAL_USER_ID": "bot:1339-b",
         })
         body_real = resp_real.json()["data"]
+        # POSITIVE: вес назван — лестница работает как работала. Без
+        # этой половины отрицание выше прошло бы и в мире, где вердикт
+        # не выносится никому.
         assert body_real["goal_overridden_by"] == "bmr_floor"
         assert body_real["goal"] == "maintain"
+        assert body_real["norms"]["daily_kcal"] > 0
 
-        # Same verdict — distinguished by one field, no text parsing.
-        assert body_assumed["assumed_inputs"] == ["weight_kg"]
+        # Маркер подстановки пуст в обоих случаях: подставлять нечего.
+        assert body_assumed["assumed_inputs"] == []
         assert body_real["assumed_inputs"] == []
 
 
 # ===========================================================================
-# Invariance snapshot — every computed number frozen from the pre-change
-# code (captured on origin/dev before DRF-1339). If any number diverges,
-# the change is wrong: the marker must show, never recompute.
+# Снимок. Числа заморожены с кода ДО DRF-1339 (снято с origin/dev) и
+# пережили две правки подряд. Половина с известными входами — по-прежнему
+# доказательство неизменности: расхождение значит, что правка тронула
+# расчёт, чего она делать не должна. Половина с неназванным весом
+# (`_REFUSED_CASES`) читается наоборот: её числа теперь описание дефекта,
+# а не эталон.
 # ===========================================================================
 
 
@@ -155,7 +190,7 @@ _SNAPSHOT = {
         ),
         "expected": {
             "bmr": 1370, "daily_kcal": 1918, "daily_protein_g": 98,
-            "daily_fat_g": 64, "daily_carbs_g": 238, "daily_water_ml": 2100,
+            "daily_fat_g": 64, "daily_carbs_g": 238,
             "goal": "maintain", "pace": "moderate", "goal_overridden_by": "",
             "daily_vitamin_d_iu": 600, "daily_vitamin_b12_mcg": 2.4,
             "daily_vitamin_c_mg": 75, "daily_iron_mg": 18,
@@ -171,7 +206,7 @@ _SNAPSHOT = {
         ),
         "expected": {
             "bmr": 1370, "daily_kcal": 1918, "daily_protein_g": 98,
-            "daily_fat_g": 64, "daily_carbs_g": 238, "daily_water_ml": 2100,
+            "daily_fat_g": 64, "daily_carbs_g": 238,
             "goal": "maintain", "pace": "moderate", "goal_overridden_by": "",
             "daily_vitamin_d_iu": 600, "daily_vitamin_b12_mcg": 2.4,
             "daily_vitamin_c_mg": 75, "daily_iron_mg": 18,
@@ -187,7 +222,7 @@ _SNAPSHOT = {
         ),
         "expected": {
             "bmr": 1126, "daily_kcal": 1126, "daily_protein_g": 98,
-            "daily_fat_g": 38, "daily_carbs_g": 99, "daily_water_ml": 2100,
+            "daily_fat_g": 38, "daily_carbs_g": 99,
             "goal": "maintain", "pace": "gentle",
             "goal_overridden_by": "bmr_floor",
             "daily_vitamin_d_iu": 800, "daily_vitamin_b12_mcg": 2.4,
@@ -209,7 +244,7 @@ _SNAPSHOT = {
         ),
         "expected": {
             "bmr": 876, "daily_kcal": 876, "daily_protein_g": 63,
-            "daily_fat_g": 29, "daily_carbs_g": 90, "daily_water_ml": 1350,
+            "daily_fat_g": 29, "daily_carbs_g": 90,
             "goal": "maintain", "pace": "gentle",
             "goal_overridden_by": "bmr_floor",
             "daily_vitamin_d_iu": 800, "daily_vitamin_b12_mcg": 2.4,
@@ -231,7 +266,7 @@ _SNAPSHOT = {
         ),
         "expected": {
             "bmr": 1680, "daily_kcal": 2150, "daily_protein_g": 112,
-            "daily_fat_g": 72, "daily_carbs_g": 264, "daily_water_ml": 2100,
+            "daily_fat_g": 72, "daily_carbs_g": 264,
             "goal": "lose", "pace": "moderate", "goal_overridden_by": "",
             "daily_vitamin_d_iu": 600, "daily_vitamin_b12_mcg": 2.4,
             "daily_vitamin_c_mg": 90, "daily_iron_mg": 8,
@@ -244,7 +279,7 @@ _SNAPSHOT = {
         "inputs": ProfileInputs(),
         "expected": {
             "bmr": 1370, "daily_kcal": 1918, "daily_protein_g": 98,
-            "daily_fat_g": 64, "daily_carbs_g": 238, "daily_water_ml": 2100,
+            "daily_fat_g": 64, "daily_carbs_g": 238,
             "goal": "maintain", "pace": "moderate", "goal_overridden_by": "",
             "daily_vitamin_d_iu": 600, "daily_vitamin_b12_mcg": 2.4,
             "daily_vitamin_c_mg": 75, "daily_iron_mg": 18,
@@ -261,7 +296,7 @@ _SNAPSHOT = {
         ),
         "expected": {
             "bmr": 1420, "daily_kcal": 2188, "daily_protein_g": 123,
-            "daily_fat_g": 73, "daily_carbs_g": 285, "daily_water_ml": 2400,
+            "daily_fat_g": 73, "daily_carbs_g": 285,
             "goal": "maintain", "pace": "moderate",
             "goal_overridden_by": "pregnancy",
             "daily_vitamin_d_iu": 600, "daily_vitamin_b12_mcg": 2.4,
@@ -282,7 +317,7 @@ _SNAPSHOT = {
         ),
         "expected": {
             "bmr": 1420, "daily_kcal": 1988, "daily_protein_g": 98,
-            "daily_fat_g": 66, "daily_carbs_g": 250, "daily_water_ml": 2100,
+            "daily_fat_g": 66, "daily_carbs_g": 250,
             "goal": "maintain", "pace": "moderate",
             "goal_overridden_by": "eating_disorder",
             "daily_vitamin_d_iu": 600, "daily_vitamin_b12_mcg": 2.4,
@@ -302,7 +337,7 @@ _SNAPSHOT = {
         ),
         "expected": {
             "bmr": 1774, "daily_kcal": 2416, "daily_protein_g": 128,
-            "daily_fat_g": 81, "daily_carbs_g": 295, "daily_water_ml": 2400,
+            "daily_fat_g": 81, "daily_carbs_g": 295,
             "goal": "tone", "pace": "gentle", "goal_overridden_by": "",
             "daily_vitamin_d_iu": 600, "daily_vitamin_b12_mcg": 2.4,
             "daily_vitamin_c_mg": 90, "daily_iron_mg": 8,
@@ -318,7 +353,7 @@ _SNAPSHOT = {
         ),
         "expected": {
             "bmr": 1426, "daily_kcal": 2040, "daily_protein_g": 98,
-            "daily_fat_g": 68, "daily_carbs_g": 259, "daily_water_ml": 2100,
+            "daily_fat_g": 68, "daily_carbs_g": 259,
             "goal": "gain", "pace": "moderate", "goal_overridden_by": "",
             "daily_vitamin_d_iu": 600, "daily_vitamin_b12_mcg": 2.4,
             "daily_vitamin_c_mg": 75, "daily_iron_mg": 18,
@@ -330,12 +365,67 @@ _SNAPSHOT = {
 }
 
 
+#: Случаи из снимка, где ВЕС НЕ НАЗВАН. Раньше они считались от
+#: ``DEFAULT_WEIGHT_KG`` и давали числа, неотличимые от настоящих; теперь
+#: расчёта нет вовсе (§82, §85). Ключи перечислены явно, а не по префиксу
+#: имени: имя — не доказательство содержимого, а список должен ломаться
+#: при добавлении случая, а не молча его пропускать.
+_REFUSED_CASES = (
+    "unknown_weight_maintain",
+    "unknown_weight_lose_bmr_floor",
+    "unknown_weight_lose_ok",
+    "unknown_weight_all_defaults",
+    "unknown_weight_pregnant",
+    "unknown_weight_ed",
+    "unknown_weight_gain",
+)
+
+
 class TestComputedNormsSnapshot:
-    @pytest.mark.parametrize("case", sorted(_SNAPSHOT))
-    def test_norms_unchanged_by_drf1339(self, case):
+    """Снимок разделён надвое: известные входы и неназванный вес.
+
+    Файл заводился как доказательство НЕИЗМЕННОСТИ: DRF-1339 добавлял
+    маркер подстановки и обязан был не тронуть ни одного числа. Половина
+    снимка при этом фиксировала числа, посчитанные ОТ ЧУЖОГО ТЕЛА
+    (``DEFAULT_WEIGHT_KG = 70.0``, медиана пензенской аудитории) — и
+    фиксировала их как эталон.
+
+    Владелец снял подстановку 09.09.2026. Половина с известными входами
+    осталась ровно тем, чем была: расчёт по названным человеком числам
+    не сдвинулся ни на калорию, и это здесь доказывается. Половина с
+    неназванным весом перевёрнута: расчёта больше нет, а у отказа есть
+    имя.
+
+    Ориентир по жидкости выброшен из всех снимков вместе с формулой
+    ``30 мл × вес``, которая его считала.
+    """
+
+    @pytest.mark.parametrize(
+        "case", sorted(set(_SNAPSHOT) - set(_REFUSED_CASES)),
+    )
+    def test_known_inputs_still_compute_the_same_numbers(self, case):
+        """Правка НЕ сдвинула расчёт там, где входы названы."""
         norms = compute_norms(_SNAPSHOT[case]["inputs"])
         for field_name, expected in _SNAPSHOT[case]["expected"].items():
             actual = getattr(norms, field_name)
             assert actual == expected, (
                 f"{case}.{field_name}: {actual!r} != snapshot {expected!r}"
             )
+
+    @pytest.mark.parametrize("case", _REFUSED_CASES)
+    def test_an_unnamed_weight_cancels_the_calculation(self, case):
+        """Вес не назван — расчёта нет, и отказ назван по имени.
+
+        Числа из старого снимка тут больше не эталон, а описание
+        дефекта: ``unknown_weight_maintain`` давал те же 1370 ккал BMR,
+        что и ``all_known_maintain``, потому что вес брался один и тот
+        же — чужой.
+        """
+        norms = compute_norms(_SNAPSHOT[case]["inputs"])
+        assert norms.bmr == 0
+        assert norms.daily_kcal == 0
+        assert norms.daily_protein_g == 0
+        assert [o.get("reason") for o in norms.overrides_applied] == [
+            "insufficient_inputs",
+        ]
+        assert norms.overrides_applied[0]["fields"] == ["weight_kg"]
