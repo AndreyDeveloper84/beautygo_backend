@@ -61,9 +61,29 @@ PREGNANCY_KCAL_BONUS = 200
 BREASTFEEDING_KCAL_BONUS = 400
 PREGNANCY_PROTEIN_BONUS_G = 25
 
-# Per-kg water target. Spec: 30 ml/kg + adjustments. Lightweight model
-# for now — adjustments come in Phase 3.2 (heat/exercise/breastfeeding).
-WATER_ML_PER_KG = 30
+# Ориентира по жидкости здесь БОЛЬШЕ НЕТ, и это решение владельца от
+# 09.09.2026 (§82, §85; `docs/decisions/AYLA_NUTRITION_TARGETS_
+# ARCHITECTURE_DECISION.md` раздел 4), а не упрощение.
+#
+# Стояло: ``WATER_ML_PER_KG = 30`` и ``_water_target(weight_kg, flags)``
+# = 30 × вес, плюс 300 при беременности и плюс 700 при кормлении.
+# Дословно из решения: «Формула воды ``30 мл × вес`` и прибавки за
+# беременность или кормление НЕ ИСПОЛЬЗУЮТСЯ без отдельно утверждённой
+# методики».
+#
+# Прибавки сняты ДВАЖДЫ. Первый раз — как неутверждённая методика.
+# Второй — по разделу 7: беременным и кормящим Ayla не рассчитывает
+# ориентиры вовсе, так что прибавлять было не к чему.
+#
+# Была и третья причина, видная только из кода: непустая норма
+# вычислялась ИЗ ВЕСА, поэтому число на экране называло вес человека, а
+# не делящееся на 30 нацело — его состояние. §35 п.10 это запрещает.
+#
+# Что придёт на замену — справочный ориентир по напиткам 2200 мл
+# женщинам и 3000 мл мужчинам, версия ``adult_beverages_reference_v1``
+# (раздел 4 решения). Это ОТДЕЛЬНЫЙ срез: у него свои стоп-сценарии
+# (раздел 7) и своё согласие на пол. Подставить 2200 здесь и сейчас
+# значило бы повторить ту же ошибку с другим числом.
 
 
 # ---------------------------------------------------------------------------
@@ -96,7 +116,6 @@ class ComputedNorms:
     daily_protein_g: int
     daily_fat_g: int
     daily_carbs_g: int
-    daily_water_ml: int
     goal: str
     pace: str
     goal_overridden_by: str
@@ -196,7 +215,6 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
 
     protein_g, fat_g, carbs_g = _macros_split(daily_kcal, weight_kg, goal)
     protein_g += bonus_protein_g
-    daily_water_ml = _water_target(weight_kg, flags)
 
     rda = compute_rda(
         gender=gender,
@@ -210,7 +228,6 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
         daily_protein_g=int(round(protein_g)),
         daily_fat_g=int(round(fat_g)),
         daily_carbs_g=int(round(carbs_g)),
-        daily_water_ml=int(round(daily_water_ml)),
         goal=goal,
         pace=pace,
         goal_overridden_by=overridden_by,
@@ -258,16 +275,6 @@ def _macros_split(daily_kcal: float, weight_kg: float, goal: str) -> tuple[float
     used_kcal = protein_g * 4 + fat_g * 9
     carbs_g = max(0.0, (daily_kcal - used_kcal) / 4.0)
     return protein_g, fat_g, carbs_g
-
-
-def _water_target(weight_kg: float, flags: dict) -> float:
-    base = WATER_ML_PER_KG * weight_kg
-    # Pregnancy / breastfeeding nudge — small, conservative additions.
-    if flags.get("pregnant"):
-        base += 300
-    if flags.get("breastfeeding"):
-        base += 700
-    return base
 
 
 # ---------------------------------------------------------------------------

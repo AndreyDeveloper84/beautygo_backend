@@ -161,7 +161,12 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
     profile.daily_protein_g = norms.daily_protein_g
     profile.daily_fat_g = norms.daily_fat_g
     profile.daily_carbs_g = norms.daily_carbs_g
-    profile.daily_water_ml = norms.daily_water_ml
+    # ``profile.daily_water_ml`` здесь БОЛЬШЕ НЕ ПИШЕТСЯ: формула
+    # 30 мл × вес снята (§82, §85). Столбец остаётся в схеме со своим
+    # ``default=0`` — миграция данных существующих клиентов это
+    # отдельный срез, и подставлять в неё нынешние числа как «выбор
+    # клиента» нельзя. Новых фиктивных значений с этой правки не
+    # появляется ни у кого.
     # DRF-265: micronutrient RDA — recomputed on every upsert.
     profile.daily_vitamin_d_iu = norms.daily_vitamin_d_iu
     profile.daily_vitamin_b12_mcg = norms.daily_vitamin_b12_mcg
@@ -209,7 +214,10 @@ def _serialize(
             "daily_protein_g": profile.daily_protein_g,
             "daily_fat_g": profile.daily_fat_g,
             "daily_carbs_g": profile.daily_carbs_g,
-            "daily_water_ml": profile.daily_water_ml,
+            # ``daily_water_ml`` из ответа снят вместе с формулой,
+            # которая его считала. Ключа нет — не ноль и не null: у
+            # существующих строк в столбце ещё лежит старое 30 × вес, и
+            # отдать его значило бы выдать снятую методику за живую.
             # DRF-265: micronutrient RDA targets.
             "daily_vitamin_d_iu": profile.daily_vitamin_d_iu,
             "daily_vitamin_b12_mcg": profile.daily_vitamin_b12_mcg,
