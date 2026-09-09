@@ -580,7 +580,7 @@ class WaterEntryCreateSerializer(serializers.Serializer):
     ts = serializers.DateTimeField(required=False)
 
 
-class WaterEntryResponseSerializer(serializers.Serializer):
+class WaterEntryResponseSerializer(OmitAbsentTargetsMixin, serializers.Serializer):
     """POST /internal/water/ response shape (spec §2.1)."""
 
     entry_id = serializers.UUIDField()
