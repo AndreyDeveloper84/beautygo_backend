@@ -251,3 +251,126 @@ class TestTheKeyIsAbsentAtTheBoundary:
         assert resp.status_code == 200
         body = resp.json()["data"]
         assert "water_goal_ml" not in body, body.get("water_goal_ml")
+
+
+# ---------------------------------------------------------------------------
+# 3. Чужое тело: медиана пензенской аудитории за пропущенное поле
+# ---------------------------------------------------------------------------
+
+
+class TestNobodyGetsSomeoneElsesBody:
+    """Пропущенный рост, вес, возраст или пол не заменяются медианой.
+
+    В модуле стояло::
+
+        DEFAULT_GENDER = "female"
+        DEFAULT_AGE = 40
+        DEFAULT_HEIGHT_CM = 165
+        DEFAULT_WEIGHT_KG = 70.0   # «Penza pilot audience median»
+
+    и подставлялось за ЛЮБОЕ незаполненное поле. Человек, не назвавший
+    вес, получал ориентир, посчитанный **от чужого тела**, — а на экране
+    это неотличимо от своего.
+
+    Это тяжелее плоской константы, а не легче. Плоскую 2000 видно: она
+    одинаковая у всех, и рано или поздно кто-то замечает. Медиана даёт
+    ПРАВДОПОДОБНОЕ и РАЗНОЕ число — оно меняется от ответов человека и
+    потому выглядит персональным. Оспорить его нельзя: не с чем сверить.
+
+    DRF-1339 завёл маркер ``{"reason": "assumed_input", "field":
+    "weight_kg"}``, но маркер — это признание, а не отказ: число всё
+    равно считалось, уезжало в профиль и показывалось. У отсутствия
+    должно быть имя, а не сноска под подставленным значением.
+    """
+
+    REQUIRED = ("gender", "age", "height_cm", "weight_kg")
+
+    def test_the_median_body_constants_are_gone(self) -> None:
+        from nutrition.services import nutrition_profile_service as mod
+
+        alive = [
+            n for n in
+            ("DEFAULT_GENDER", "DEFAULT_AGE", "DEFAULT_HEIGHT_CM", "DEFAULT_WEIGHT_KG")
+            if hasattr(mod, n)
+        ]
+        assert alive == [], f"медиана вернулась в модуль: {alive}"
+
+    def test_each_missing_field_alone_refuses_the_whole_calculation(self) -> None:
+        """Любого ОДНОГО пропуска достаточно, чтобы расчёта не было.
+
+        Проверяются все четыре по одному, а не «пустой ввод»: пустой
+        ввод прошёл бы и в мире, где подстановка осталась для трёх полей
+        из четырёх.
+        """
+        from nutrition.services.nutrition_profile_service import (
+            ProfileInputs, compute_norms,
+        )
+
+        complete = {
+            "gender": "female", "age": 30,
+            "height_cm": 170, "weight_kg": 70.0,
+        }
+        for field_name in self.REQUIRED:
+            kwargs = dict(complete)
+            kwargs[field_name] = None if field_name != "gender" else ""
+            norms = compute_norms(ProfileInputs(**kwargs))
+            assert norms.bmr == 0, f"{field_name}: bmr={norms.bmr}"
+            assert norms.daily_kcal == 0, f"{field_name}: kcal={norms.daily_kcal}"
+            assert norms.daily_protein_g == 0, field_name
+            reasons = [o.get("reason") for o in norms.overrides_applied]
+            assert "insufficient_inputs" in reasons, (
+                f"{field_name}: у пропуска нет имени — {norms.overrides_applied}"
+            )
+            named = [
+                o for o in norms.overrides_applied
+                if o.get("reason") == "insufficient_inputs"
+            ][0]
+            assert field_name in named.get("fields", []), named
+
+    def test_a_complete_anketa_still_gets_a_number(self) -> None:
+        """Контроль присутствия: отказ адресный, а не поголовный.
+
+        Три утверждения выше — про ОТСУТСТВИЕ, и все три прошли бы
+        победно в мире, где ``compute_norms`` сломан и всегда возвращает
+        нули. Полная анкета обязана считаться.
+
+        Число здесь НЕ сверяется с эталоном: методика калорий (§85 —
+        Миффлин — Сан Жеор, поправка не более ±10%) это следующий срез,
+        и нынешние ``GOAL_FACTORS`` ей не соответствуют. Проверяется
+        ровно то, что расчёт состоялся.
+        """
+        from nutrition.services.nutrition_profile_service import (
+            ProfileInputs, compute_norms,
+        )
+
+        norms = compute_norms(ProfileInputs(
+            gender="female", age=30, height_cm=170, weight_kg=70.0,
+        ))
+        assert norms.bmr > 0
+        assert norms.daily_kcal > 0
+        assert "insufficient_inputs" not in [
+            o.get("reason") for o in norms.overrides_applied
+        ]
+
+    def test_the_profile_row_of_a_person_who_skipped_weight_stays_empty(
+        self, anketa_user,
+    ) -> None:
+        """Штатный upsert без веса не записывает ориентиры в профиль."""
+        from nutrition.models import NutritionProfile
+        from nutrition.services.profile_upsert_service import upsert_profile
+
+        upsert_profile(
+            user=anketa_user,
+            external_user_id=str(anketa_user.id),
+            payload={
+                "gender": "female", "age": 30, "height_cm": 170,
+                # веса нет — человек его не назвал
+                "goal": "maintain", "complete": True,
+            },
+            idempotency_key=None,
+        )
+        row = NutritionProfile.objects.get(user_id=anketa_user.id)
+        assert row.daily_kcal == 0, (
+            f"человеку без веса записали {row.daily_kcal} ккал от чужого тела"
+        )
+        assert row.bmr == 0
