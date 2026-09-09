@@ -428,4 +428,7 @@ class TestComputedNormsSnapshot:
         assert [o.get("reason") for o in norms.overrides_applied] == [
             "insufficient_inputs",
         ]
-        assert norms.overrides_applied[0]["fields"] == ["weight_kg"]
+        # Вес обязан быть в перечне; в случае ``unknown_weight_all_defaults``
+        # рядом с ним ещё три поля — там не назван вообще никто, и отказ
+        # честно перечисляет всё недостающее.
+        assert "weight_kg" in norms.overrides_applied[0]["fields"]
