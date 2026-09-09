@@ -293,7 +293,9 @@ def _layer_2_names(api, **body) -> set[str]:
     ids = [row["candidate"]["id"] for row in rows]
     return set(
         SpecialistProfile.objects
-        .filter(id__in=ids)
+        # Ключ кандидата — ПОЛЬЗОВАТЕЛЬСКИЙ (контракт §5 K1.1), а не
+        # первичный ключ профиля: за границей мастера ищут по нему.
+        .filter(user_id__in=ids)
         .values_list("display_name", flat=True)
     )
 
