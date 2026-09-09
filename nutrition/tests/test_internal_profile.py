@@ -19,9 +19,6 @@ from rest_framework.test import APIClient
 
 from nutrition.models import NutritionProfile, ProfileIdempotencyKey
 from nutrition.services.nutrition_profile_service import (
-    DEFAULT_AGE,
-    DEFAULT_HEIGHT_CM,
-    DEFAULT_WEIGHT_KG,
     ProfileInputs,
     compute_norms,
 )
@@ -78,19 +75,41 @@ class TestMifflinStJeor:
         assert norms.bmr == 1780
 
 
-class TestDefaultsForSkippedFields:
-    def test_all_fields_missing_uses_penza_defaults(self):
+class TestSkippedFieldsCancelTheCalculation:
+    """Тест назывался ``TestDefaultsForSkippedFields`` и проверял ДЕФЕКТ.
+
+    Он утверждал: человек, не заполнивший ничего, получает те же нормы,
+    что и «female / 40 / 165 / 70» — медиана пензенской аудитории. То
+    есть закреплял, что ориентир считается ОТ ЧУЖОГО ТЕЛА, а на экране
+    это неотличимо от своего.
+
+    Владелец снял подстановку 09.09.2026 (§82, §85; раздел 3.2 решения
+    перечисляет возраст, рост, вес и пол как обязательные входы).
+    Утверждение перевёрнуто: расчёта нет, и у отказа есть имя.
+
+    Поимённая проверка каждого из четырёх полей по одному —
+    ``nutrition/tests/test_targets_absent.py::TestNobodyGetsSomeoneElsesBody``.
+    """
+
+    def test_all_fields_missing_yields_no_norms_at_all(self):
         norms = compute_norms(ProfileInputs(goal="maintain", pace="moderate"))
-        baseline = compute_norms(ProfileInputs(
-            gender="female",
-            age=DEFAULT_AGE,
-            height_cm=DEFAULT_HEIGHT_CM,
-            weight_kg=DEFAULT_WEIGHT_KG,
-            goal="maintain",
-            pace="moderate",
+        assert norms.bmr == 0
+        assert norms.daily_kcal == 0
+        assert [o.get("reason") for o in norms.overrides_applied] == [
+            "insufficient_inputs",
+        ]
+        assert set(norms.overrides_applied[0]["fields"]) == {
+            "gender", "age", "height_cm", "weight_kg",
+        }
+
+    def test_a_complete_anketa_is_untouched(self):
+        """Контроль присутствия: отказ адресный, а не поголовный."""
+        norms = compute_norms(ProfileInputs(
+            gender="female", age=40, height_cm=165, weight_kg=70.0,
+            goal="maintain", pace="moderate",
         ))
-        assert norms.bmr == baseline.bmr
-        assert norms.daily_kcal == baseline.daily_kcal
+        assert norms.bmr > 0
+        assert norms.daily_kcal > 0
 
 
 # ===========================================================================
