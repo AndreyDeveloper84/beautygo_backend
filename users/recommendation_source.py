@@ -395,11 +395,18 @@ class _MappingFacts:
 
     #: Порядок «лучшести» статуса. Нужен только там, где нужда не названа
     #: и предмет — сам мастер: тогда достаточно одной проверенной связи.
+    #: `NOT_RECOMMENDABLE` стоит НИЖЕ `UNKNOWN`, и это не придирка.
+    #: Порядок спрашивается там, где нужда не названа и предмет — сам
+    #: мастер: берётся лучший статус среди его предложений. Услуга, про
+    #: которую решено «канонической связи не будет», поднять мастера не
+    #: может никогда, а услуга с неизвестным статусом — может завтра,
+    #: когда её разберут. Закрытая дверь хуже неоткрытой.
     _RANK = {
-        MappingStatus.VERIFIED: 3,
-        MappingStatus.REVIEW_REQUIRED: 2,
-        MappingStatus.UNMAPPED: 1,
-        MappingStatus.UNKNOWN: 0,
+        MappingStatus.VERIFIED: 4,
+        MappingStatus.REVIEW_REQUIRED: 3,
+        MappingStatus.UNMAPPED: 2,
+        MappingStatus.UNKNOWN: 1,
+        MappingStatus.NOT_RECOMMENDABLE: 0,
     }
 
     def __init__(self) -> None:

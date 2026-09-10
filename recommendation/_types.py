@@ -104,11 +104,25 @@ class MappingStatus(StrEnum):
 
     `UNKNOWN` — не «наверное можно»: отсутствие признака тоже не даёт
     права рекомендовать (fail-closed).
+
+    `NOT_RECOMMENDABLE` — решение владельца §93, третий исход разбора.
+    В подбор он не пускает так же, как `UNMAPPED`, и именно поэтому его
+    легко счесть лишним. Он не лишний, и разница не косметическая::
+
+        UNMAPPED           связи ЕЩЁ нет — про строку никто ничего не сказал
+        NOT_RECOMMENDABLE  связи НЕ БУДЕТ — человек это решил, и у решения
+                           есть автор, дата и основание
+
+    Отсутствие и отказ ведут себя одинаково ровно один раз — на гейте.
+    Дальше они расходятся: `UNMAPPED` — очередь работы, `NOT_RECOMMENDABLE`
+    — работа сделанная. Слитые в одно, они превращают убывающую очередь
+    в вечную: разобранные строки возвращаются в неё каждым отчётом.
     """
 
     VERIFIED = "VERIFIED"
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
     UNMAPPED = "UNMAPPED"
+    NOT_RECOMMENDABLE = "NOT_RECOMMENDABLE"
     UNKNOWN = "UNKNOWN"
 
 
@@ -487,6 +501,10 @@ class MappingCensus:
     recommendation_eligible: int = 0
     review_required: int = 0
     unmapped: int = 0
+    #: Решено, что канонической связи не будет (§93). Своя колонка, а не
+    #: слагаемое в `unmapped`: иначе разобранные строки не отличить от
+    #: неразобранных, и по переписи не видно, что работа идёт.
+    not_recommendable: int = 0
     #: Признака нет вовсе — «мы не знаем», а не «связи нет» (§4.1).
     unknown: int = 0
 
@@ -494,6 +512,7 @@ class MappingCensus:
         return (
             f"visible={self.visible} eligible={self.recommendation_eligible} "
             f"review_required={self.review_required} unmapped={self.unmapped} "
+            f"not_recommendable={self.not_recommendable} "
             f"unknown={self.unknown}"
         )
 
