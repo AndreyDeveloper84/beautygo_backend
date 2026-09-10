@@ -113,3 +113,104 @@ class BillingEligibilityError(BookingDomainError):
     def __init__(self, reason: str = "SUBSCRIPTION_PAST_DUE"):
         self.reason = reason
         super().__init__(reason)
+
+
+class HealthScreeningRequiredError(BookingDomainError):
+    """The booking cannot be created without a human health screening.
+
+    Carries a machine ``reason``, and the two values are NOT the same
+    situation — that is the whole point of splitting them::
+
+        HEALTH_CHECK_REQUIRED   the catalog says this service needs a
+                                screening. The person must pass one.
+        HEALTH_CHECK_UNKNOWN    nobody has said anything about this
+                                service. The person is waiting on the
+                                salon, not on a screening.
+
+    Collapsing the two would cost us the only number that says how much of
+    the refusal is our own missing data: on the pilot, 09.09.2026, 95 of 95
+    bookable edges of the live salon resolve to UNKNOWN because no template
+    is attached, and none of them to REQUIRED. A single counter would have
+    read as "the gate fires a lot" and hidden that it fires on ignorance.
+
+    Outward, both may render as one blunt sentence — the customer does not
+    need our taxonomy. Inward they must stay apart: the operator handling
+    the handoff needs to know whether to run a screening or to go ask the
+    salon a question, and those are different jobs.
+    """
+
+    REQUIRED = "HEALTH_CHECK_REQUIRED"
+    UNKNOWN = "HEALTH_CHECK_UNKNOWN"
+    #: Устаревший путь маркетплейса: отвечать НЕГДЕ, а не «не ответили».
+    #:
+    #: У модели ``services.Service`` нет колонки под медицинский признак —
+    #: выразить его там невозможно. Решение владельца §100 от 10.09.2026:
+    #: путь fail-closed до осознанной замены через DRF-1622, колонку в
+    #: легаси-модель не добавляем, слой не размечаем, ``False`` запрещён.
+    #:
+    #: Отдельное имя, а не ``UNKNOWN``, потому что у них разная РАБОТА:
+    #: за ``UNKNOWN`` стоит очередь разметки («спросить салон»), за
+    #: ``NOT_APPLICABLE`` не стоит ничего. Слитые, они дали бы очередь, в
+    #: которую валится слой, который никто размечать не собирается.
+    NOT_APPLICABLE = "HEALTH_CHECK_NOT_APPLICABLE"
+
+    #: Запасной текст для человека — выбран по ПРИЧИНЕ, не по АДРЕСАТУ.
+    #:
+    #: Граница «наружу» — это не место, а адресат, и здесь один текст
+    #: обслуживает двух разных. Клиенту `REQUIRED` и `UNKNOWN` говорят
+    #: одно и то же: «вами займётся человек». Администратору салона —
+    #: разное: за `UNKNOWN` стоит РАБОТА, и работа его собственная,
+    #: разметить услугу. Поверхность, чей адресат — администратор,
+    #: обязана выбрать своё слово ПО КОДУ; строку отсюда она берёт лишь
+    #: как запасную. Читать текст, чтобы восстановить причину, запрещено
+    #: (§102): причина приезжает кодом и полем `details.reason`.
+    #:
+    #: Решение владельца (c) от 10.09.2026: этот исход НЕ изображается
+    #: технической ошибкой и НЕ обещает, что запись создана. Оба —
+    #: проверяемые утверждения, а не тон: «не ошибка» значит, что
+    #: поверхность не рендерит исход в своей ветке ошибок; «не обещает»
+    #: значит, что в ответе нет идентификатора записи и нет
+    #: подтверждающего текста. Строка живёт здесь, а не в трёх
+    #: поверхностях, чтобы правка вёрстки не разъехалась с контрактом.
+    HANDOFF_TEXT = (
+        "Перед записью нужно уточнить несколько вопросов. "
+        "Передадим запрос специалисту."
+    )
+
+    #: Текст устаревшего пути — БЕЗ обещания консультации.
+    #:
+    #: Оговорка владельца §100, и она не косметическая: консультацию по
+    #: этому исходу никто не назначит, потому что назначать её некому.
+    #: Обещать её значило бы отправить человека искать дверь, которой
+    #: нет, — то же семейство, что экран согласий, которого не существует.
+    #: Отказ он поймёт; несуществующую дверь будет искать.
+    NOT_APPLICABLE_TEXT = "Запись этим способом сейчас недоступна."
+
+    #: Ведёт ли исход к живому человеку. Машинный признак для поверхностей:
+    #: по нему они отличают «позвать оператора» от «просто отказать», и
+    #: проверяется в контрактных тестах именно он, а не строка текста.
+    _HANDOFF_BY_REASON = {
+        REQUIRED: True,
+        UNKNOWN: True,
+        NOT_APPLICABLE: False,
+    }
+
+    _TEXT_BY_REASON = {
+        REQUIRED: HANDOFF_TEXT,
+        UNKNOWN: HANDOFF_TEXT,
+        NOT_APPLICABLE: NOT_APPLICABLE_TEXT,
+    }
+
+    def __init__(self, reason: str = REQUIRED):
+        self.reason = reason
+        super().__init__(reason)
+
+    @property
+    def leads_to_a_human(self) -> bool:
+        """Позовём ли мы человека — или это просто закрытая дверь."""
+        return self._HANDOFF_BY_REASON.get(self.reason, True)
+
+    @property
+    def text(self) -> str:
+        """Текст для человека, выбранный по причине, а не по поверхности."""
+        return self._TEXT_BY_REASON.get(self.reason, self.HANDOFF_TEXT)
