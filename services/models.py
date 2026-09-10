@@ -9,6 +9,8 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.text import slugify
 
+from services.normalization import normalize_service_name
+
 
 class ServiceCategory(models.Model):
     """Hierarchical category for beauty services."""
@@ -211,6 +213,163 @@ class RegionalPricing(models.Model):
             f"{self.template.name} — {self.region_name} "
             f"({self.price_min:.0f}–{self.price_max:.0f} ₽)"
         )
+
+
+class ServiceTemplateSynonym(models.Model):
+    """Подтверждённое название канонической услуги словами салона (§93).
+
+    Зачем
+    -----
+
+    Решение владельца §93: когда услугу связывают с каноном, **исходное
+    название салона сохраняется как подтверждённый синоним.** Замер
+    10.09 показал, зачем это на самом деле нужно, и это не мелочь.
+
+    Из 56 услуг пилотного салона точным совпадением имени с каноном
+    находились 8, и вывод был «сорока восьми не с чем сопоставлять».
+    Вывод оказался свойством метода. Салон держит вид процедуры **в
+    категории**, а канон — в имени::
+
+        салон:  категория «Лазерная эпиляция» + услуга «Подмышки»
+        канон:  «Лазерная эпиляция подмышек»               (7.1.6)
+
+    Сравнение имени с именем такую пару найти не может по устройству. В
+    каталоге 32 канона лазерной эпиляции, и ручная сверка зона к зоне
+    дала **15 из 17**. То есть преобладающая нужда пилота — не создавать
+    недостающие каноны, а **записывать синонимы к существующим**.
+
+    Что синоним делает и чего НЕ делает
+    -----------------------------------
+
+    Синоним **находит** канон, и на этом его полномочия кончаются.
+
+    Он не создаёт связь, не меняет `SalonService.mapping_status` и никого
+    не пускает в подбор. Гейт §76 остаётся единственной дверью:
+    `recommendation_eligible = (mapping_status == VERIFIED)`, а `VERIFIED`
+    ставит человек, отвечая за это своим именем.
+
+    Разделение намеренное и оно здесь главное. Синоним — **находка**,
+    связь — **решение**. Позволить синониму проставлять связь значило бы
+    вернуть ровно ту выдумку, против которой §93 и написан: совпадение
+    строк снова стало бы доказательством происхождения (§73). Поэтому
+    таблица не имеет ни статуса, ни флага «применить»: она отвечает на
+    вопрос «как ещё называют вот этот канон», а не «чем является вот эта
+    услуга салона».
+
+    Почему провенанс обязателен у каждой строки
+    -------------------------------------------
+
+    §93 говорит «**подтверждённый** синоним», и здесь нет второго
+    состояния: неподтверждённых синонимов эта таблица не хранит вовсе.
+    Значит жизненный цикл не нужен, а провенанс нужен всегда — кто или
+    какое правило, когда, на каком основании. Форма та же, что у
+    `SalonService`, и по той же причине: запись без автора через месяц
+    читается как умолчание.
+
+    Один синоним может вести к нескольким канонам
+    ---------------------------------------------
+
+    Ограничение уникальности стоит на паре «шаблон + нормализованный
+    текст», а не на тексте одном. То есть «Массаж спины» вправе быть
+    синонимом и `1.1.5`, и `1.3.6`.
+
+    **Это не ответ на открытый вопрос владельцу** (ведёт ли синоним к
+    одному канону или к нескольким), а отказ отвечать за него кодом.
+    Разрешать безопасно: синоним ничего не решает, и оператор, увидев
+    двух кандидатов, выбирает сам. Запрещать было бы опаснее — второй
+    салон не смог бы записать своё настоящее название, не удалив чужое.
+    Если владелец скажет «один канон» — это одна миграция с
+    `UniqueConstraint` на `normalized`.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    template = models.ForeignKey(
+        ServiceTemplate,
+        on_delete=models.CASCADE,
+        related_name="synonyms",
+    )
+    #: Как это называется у салона — дословно, включая регистр и знаки.
+    #: Хранится нетронутым: оператор должен видеть исходную строку, а не
+    #: её обработанный след.
+    text = models.CharField(max_length=200)
+    #: Ключ поиска. Заполняется в `save()` из `text`, руками не вводится.
+    normalized = models.CharField(max_length=200, editable=False, db_index=True)
+    #: Чьё это название. Не обязателен: синоним может прийти из
+    #: справочника или из разбора, а не от конкретного салона.
+    source_tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    #: Провенанс. Та же форма, что у `SalonService`: кто ИЛИ правило.
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    confirmed_rule = models.CharField(max_length=100, blank=True, default="")
+    rule_version = models.CharField(max_length=32, blank=True, default="")
+    confirmed_at = models.DateTimeField()
+    source_ref = models.CharField(max_length=200)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["template", "text"]
+        constraints = [
+            # Один и тот же синоним дважды у одного шаблона — дубль.
+            # Уникальность по НОРМАЛИЗОВАННОМУ тексту, иначе «Подмышки»
+            # и «подмышки » считались бы разными записями и обе висели
+            # бы в выдаче.
+            models.UniqueConstraint(
+                fields=["template", "normalized"],
+                name="templatesynonym_template_normalized_uniq",
+            ),
+            # Провенанс обязателен у КАЖДОЙ строки: неподтверждённых
+            # синонимов эта таблица не хранит (§93). `confirmed_at`
+            # закрыт `NOT NULL` самим полем, здесь — остальные два.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(source_ref="")
+                    & (
+                        models.Q(confirmed_by__isnull=False)
+                        | ~models.Q(confirmed_rule="")
+                    )
+                ),
+                name="templatesynonym_requires_provenance",
+            ),
+            # Кто ИЛИ правило, но не оба — как у связи. Оба заполненных
+            # означают, что происхождение известно неточно.
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(confirmed_by__isnull=False)
+                    & ~models.Q(confirmed_rule="")
+                ),
+                name="templatesynonym_provenance_is_who_xor_rule",
+            ),
+            # Правило без версии — «подтверждено какой-то из версий».
+            models.CheckConstraint(
+                condition=(
+                    models.Q(confirmed_rule="")
+                    | ~models.Q(rule_version="")
+                ),
+                name="templatesynonym_rule_carries_version",
+            ),
+        ]
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        # Нормализованный ключ считается ЗДЕСЬ, а не в форме и не в
+        # вызывающем коде: строка может приехать миграцией, командой или
+        # админкой, и ключ обязан получиться один и тот же во всех трёх
+        # случаях. Поле `editable=False` именно поэтому — вводить его
+        # руками некому.
+        self.normalized = normalize_service_name(self.text)
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.text} → {self.template.name}"
 
 
 class Service(models.Model):
