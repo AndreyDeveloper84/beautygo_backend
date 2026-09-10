@@ -308,3 +308,118 @@ class TestRecentActivity:
         resp = auth_client.get(HOME_URL)
         # Other user's completed appointment not in result
         assert resp.json()["data"]["recent_activity"] == []
+
+
+# ---------------------------------------------------------------------------
+# §125: «Рядом с тобой» — честный каталог, а не рекомендация
+# ---------------------------------------------------------------------------
+
+
+class TestNearbyIsCatalogNotRecommendation:
+    """Решение владельца §125 от 10.09.2026.
+
+    Секция использует каталог и географию и **не выдаёт себя за semantic
+    Recommendation**. Персональная рекомендация остаётся отдельной
+    поверхностью канонического резолвера.
+
+    Замер, из-за которого решение и принято: близость давала 25% порядка,
+    а `client history` — 10%, и наружу уезжали `match_reasons`, то есть
+    объяснения персональной пригодности. Секция с нейтральным именем
+    несла персональную семантику.
+
+    Исчезновение этого с экрана — **видимое изменение продукта,
+    санкционированное владельцем** (§125), а не побочный эффект правки.
+    Тесты ниже существуют, чтобы через месяц его не «вернули как было»
+    как случайную пропажу.
+    """
+
+    #: Ровно то, что секция вправе отдавать. Список закрытый: проверка
+    #: на «нет match_reasons» пропустила бы `score`, `top_reasons` и любое
+    #: следующее объяснение под новым именем. Закрытый набор ловит их все,
+    #: включая те, которых ещё не придумали.
+    ALLOWED_KEYS = {
+        "id", "display_name", "rating", "reviews_count",
+        "address", "distance_km", "services_preview",
+    }
+
+    #: Имена, под которыми объяснение персональной пригодности возвращалось
+    #: или могло бы вернуться. Проверяются отдельно от закрытого набора,
+    #: чтобы сообщение об ошибке называло предмет, а не «лишний ключ».
+    RECOMMENDATION_ARTEFACTS = {
+        "match_reasons", "score", "top_reasons", "why", "reasons",
+        "recommendation_reasons", "explanation",
+    }
+
+    def test_section_carries_no_personal_fit_explanation(self, auth_client):
+        """Объяснений «чем подходит именно тебе» в ответе нет."""
+        make_specialist(display_name="Anna", rating=4.9, reviews_count=80)
+        nearby = auth_client.get(HOME_URL).json()["data"]["nearby_specialists"]
+        assert nearby, "секция пуста — проверка ничего не проверяет"
+
+        for item in nearby:
+            leaked = set(item) & self.RECOMMENDATION_ARTEFACTS
+            assert not leaked, (
+                "в каталожную секцию вернулось объяснение пригодности: "
+                + ", ".join(sorted(leaked))
+                + ". §125: секция не выдаёт себя за Recommendation."
+            )
+
+    def test_section_returns_a_closed_set_of_fields(self, auth_client):
+        """Набор полей закрыт, а не «без match_reasons».
+
+        Запрет по списку запрещённого пропустил бы следующее объяснение
+        под новым именем. Здесь запрещено всё, что не разрешено.
+        """
+        make_specialist(display_name="Boris", rating=4.7, reviews_count=30)
+        nearby = auth_client.get(HOME_URL).json()["data"]["nearby_specialists"]
+        assert nearby, "секция пуста — проверка ничего не проверяет"
+
+        for item in nearby:
+            extra = set(item) - self.ALLOWED_KEYS
+            assert not extra, (
+                "в каталожной секции появились поля вне закрытого набора: "
+                + ", ".join(sorted(extra))
+            )
+
+    def test_the_section_does_not_consult_the_client_goal(self):
+        """Цель клиента секцией не спрашивается.
+
+        Проверка **структурная**, и это осознанный выбор, а не лень.
+        Поведенческий вариант — «завести цель и убедиться, что выдача не
+        изменилась» — зависел бы от флага разрешения целей: при
+        выключенном флаге `goal_category_ids_for` возвращает `None`
+        всегда, выдача не меняется по любой причине, и тест зеленел бы,
+        **не проверив ничего**. Ложная зелень здесь дороже грубости.
+
+        Смотрим на исходник модуля, а не на импорты: `from ... import`
+        внутри функции греп по импортам не увидит, а он там и стоял.
+        """
+        import inspect
+
+        from users import home_api
+
+        source = inspect.getsource(home_api)
+        for marker in ("goal_category_ids_for", "goal_category_ids="):
+            assert marker not in source, (
+                f"секция снова спрашивает цель клиента ({marker}) — §125 запрещает: "
+                "выдача, собранная по намерению человека, персональна, "
+                "как её ни назови."
+            )
+
+    def test_the_section_does_not_personalise_by_history(self):
+        """История визитов в секцию не передаётся.
+
+        `client_id` в запросе к движку включает `WEIGHT_HISTORY` —
+        подъём для вернувшегося клиента. §125 историю не называет; это
+        чтение «не выдаёт себя за Recommendation», и оно записано в
+        коде рядом с правкой, чтобы возражение было адресным.
+        """
+        import inspect
+
+        from users import home_api
+
+        source = inspect.getsource(home_api.HomeView._nearby_specialists)
+        assert "client_id=None" in source, (
+            "секция снова передаёт клиента движку — вернулась персонализация "
+            "прошлым опытом (§125, §72)"
+        )

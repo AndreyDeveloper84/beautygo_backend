@@ -234,7 +234,6 @@ class HomeView(APIView):
             RecommendationEngine,
             RecommendationQuery,
         )
-        from goals.wiring import goal_category_ids_for
 
         # If client didn't share geo, fall back to top-rated (RecommendationEngine
         # treats None lat/lon as neutral 0.5 distance score, so rating dominates).
@@ -243,19 +242,39 @@ class HomeView(APIView):
         if profile is not None:
             city = getattr(profile, "city", "") or None
 
-        # OD-1: цель влияет на пассивную выдачу. Здесь клиент ничего не
-        # запрашивал — экран открылся сам, — поэтому говорить о его
-        # намерении может только сохранённая цель. ``None`` (флаг
-        # выключен либо цель не разрешается) оставляет прежнюю выдачу.
+        # «Рядом с тобой» — ЧЕСТНЫЙ КАТАЛОГ, не рекомендация (§125,
+        # 10.09.2026). Секция использует каталог, географию и не выдаёт
+        # себя за semantic Recommendation; персональная рекомендация
+        # остаётся отдельной поверхностью канонического резолвера.
+        #
+        # Ушло отсюда и НЕ ВЕРНЁТСЯ без нового решения владельца:
+        #
+        #   goal_category_ids   участие цели (прежнее OD-1). Цель — это
+        #                       намерение человека, и выдача, собранная
+        #                       по ней, персональна, как её ни назови.
+        #   client_id           история визитов (`WEIGHT_HISTORY`).
+        #                       §125 её не называет — это моё чтение
+        #                       «не выдаёт себя за Recommendation»:
+        #                       персонализация прошлым опытом ровно тот
+        #                       признак, по которому §72 отказывает
+        #                       поверхности в праве зваться витриной.
+        #                       Если владелец читает иначе — вернуть
+        #                       одной строкой, но осознанно.
+        #   match_reasons       объяснения «чем подходит именно тебе»,
+        #                       см. ниже по коду.
+        #
+        # `client_id=None` не «анонимизирует клиента», а выключает
+        # персонализацию: пустая история даёт нулевой вклад ВСЕМ
+        # кандидатам, то есть слагаемое становится константой и порядок
+        # не искажает.
         engine = RecommendationEngine()
         result = engine.recommend(
             RecommendationQuery(
-                client_id=user.id,
+                client_id=None,
                 client_lat=lat,
                 client_lon=lon,
                 city=city,
                 limit=LIMIT_NEARBY,
-                goal_category_ids=goal_category_ids_for(user),
             ),
         )
         return [
@@ -267,7 +286,12 @@ class HomeView(APIView):
                 "address": s.address,
                 "distance_km": s.distance_km,
                 "services_preview": s.services_preview,
-                "match_reasons": s.match_reasons,
+                # `match_reasons` УБРАНО (§125, 10.09.2026). Это были
+                # объяснения «чем этот мастер подходит именно тебе» —
+                # артефакт рекомендации, а секция рекомендацией не
+                # является. Исчезновение их с экрана — видимое
+                # изменение продукта, САНКЦИОНИРОВАННОЕ ВЛАДЕЛЬЦЕМ, а
+                # не побочный эффект инженерной правки.
             }
             for s in result.candidates
         ]
