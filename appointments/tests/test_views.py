@@ -17,7 +17,7 @@ class TestAppointmentCreate:
         c.force_authenticate(user=user)
         return c
 
-    def test_create_success(self, client_user, specialist, service):
+    def test_create_success(self, client_user, specialist, bookable_service):
         start = (timezone.now() + timezone.timedelta(hours=3)).replace(
             second=0, microsecond=0,
         )
@@ -25,7 +25,7 @@ class TestAppointmentCreate:
             '/api/v1/appointments/',
             data={
                 'specialist_id': str(specialist.id),
-                'service_id': str(service.id),
+                'service_id': str(bookable_service.id),
                 'start_datetime': start.isoformat(),
             },
             format='json',
@@ -35,11 +35,11 @@ class TestAppointmentCreate:
         appt = Appointment.objects.first()
         assert appt.status == Appointment.Status.AWAITING_PAYMENT
         assert appt.client == client_user
-        assert appt.snapshot_service_name == service.name
-        assert float(appt.snapshot_price) == float(service.price)
+        assert appt.snapshot_service_name == bookable_service.name
+        assert float(appt.snapshot_price) == float(bookable_service.base_price)
 
     def test_create_without_prepayment_confirms(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         """D6 — online payment is optional: payment_required=False lands
         the booking directly in CONFIRMED with no Payment row and emits
@@ -51,7 +51,7 @@ class TestAppointmentCreate:
             '/api/v1/appointments/',
             data={
                 'specialist_id': str(specialist.id),
-                'service_id': str(service.id),
+                'service_id': str(bookable_service.id),
                 'start_datetime': start.isoformat(),
                 'payment_required': False,
             },
@@ -66,7 +66,7 @@ class TestAppointmentCreate:
         assert OutboxEvent.Topic.BOOKING_CONFIRMED in topics
 
     def test_create_default_keeps_online_payment_path(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         """Backward compatible: omitting payment_required keeps the
         online-payment contract (AWAITING_PAYMENT + pending Payment)."""
@@ -77,7 +77,7 @@ class TestAppointmentCreate:
             '/api/v1/appointments/',
             data={
                 'specialist_id': str(specialist.id),
-                'service_id': str(service.id),
+                'service_id': str(bookable_service.id),
                 'start_datetime': start.isoformat(),
             },
             format='json',
@@ -87,7 +87,7 @@ class TestAppointmentCreate:
         assert appt.status == Appointment.Status.AWAITING_PAYMENT
         assert appt.payments.filter(status='pending').count() == 1
 
-    def test_create_unauthenticated(self, specialist, service):
+    def test_create_unauthenticated(self, specialist, bookable_service):
         c = APIClient()
         c.defaults['HTTP_X_APP_TYPE'] = 'client'
         start = (timezone.now() + timezone.timedelta(hours=3)).isoformat()
@@ -95,35 +95,35 @@ class TestAppointmentCreate:
             '/api/v1/appointments/',
             data={
                 'specialist_id': str(specialist.id),
-                'service_id': str(service.id),
+                'service_id': str(bookable_service.id),
                 'start_datetime': start,
             },
             format='json',
         )
         assert response.status_code == status.HTTP_401_UNAUTHORIZED
 
-    def test_create_too_soon(self, client_user, specialist, service):
+    def test_create_too_soon(self, client_user, specialist, bookable_service):
         """Cannot book less than 1 hour in advance."""
         start = (timezone.now() + timezone.timedelta(minutes=30)).isoformat()
         response = self._client(client_user).post(
             '/api/v1/appointments/',
             data={
                 'specialist_id': str(specialist.id),
-                'service_id': str(service.id),
+                'service_id': str(bookable_service.id),
                 'start_datetime': start,
             },
             format='json',
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
-    def test_create_slot_taken(self, client_user, specialist, service, appointment):
+    def test_create_slot_taken(self, client_user, specialist, bookable_service, appointment):
         """Cannot double-book the same time slot."""
         overlap_start = appointment.start_datetime + timezone.timedelta(minutes=30)
         response = self._client(client_user).post(
             '/api/v1/appointments/',
             data={
                 'specialist_id': str(specialist.id),
-                'service_id': str(service.id),
+                'service_id': str(bookable_service.id),
                 'start_datetime': overlap_start.isoformat(),
             },
             format='json',
@@ -131,14 +131,14 @@ class TestAppointmentCreate:
         # Slot conflict returns 409 from booking engine
         assert response.status_code == status.HTTP_409_CONFLICT
 
-    def test_create_specialist_not_found(self, client_user, service):
+    def test_create_specialist_not_found(self, client_user, bookable_service):
         import uuid
         start = (timezone.now() + timezone.timedelta(hours=3)).isoformat()
         response = self._client(client_user).post(
             '/api/v1/appointments/',
             data={
                 'specialist_id': str(uuid.uuid4()),
-                'service_id': str(service.id),
+                'service_id': str(bookable_service.id),
                 'start_datetime': start,
             },
             format='json',
@@ -149,7 +149,7 @@ class TestAppointmentCreate:
         assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
         assert response.data['error']['code'] == 'SPECIALIST_NOT_ACTIVE'
 
-    def test_specialist_cannot_create(self, specialist_user, specialist, service):
+    def test_specialist_cannot_create(self, specialist_user, specialist, bookable_service):
         """Specialists cannot create appointments through the client endpoint."""
         c = APIClient()
         c.defaults['HTTP_X_APP_TYPE'] = 'pro'
@@ -159,7 +159,7 @@ class TestAppointmentCreate:
             '/api/v1/appointments/',
             data={
                 'specialist_id': str(specialist.id),
-                'service_id': str(service.id),
+                'service_id': str(bookable_service.id),
                 'start_datetime': start,
             },
             format='json',

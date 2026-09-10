@@ -38,8 +38,9 @@ from payments.services import (
     get_platform_fee,
 )
 from payments.tasks import capture_payment_task
-from services.models import Service, ServiceCategory
+from services.models import SalonService, ServiceCategory, SpecialistService
 from users.models import User
+from users.models import SpecialistProfile
 
 CREATE_URL = '/api/v1/payments/create/'
 WEBHOOK_URL = '/api/v1/payments/webhook/'
@@ -72,13 +73,39 @@ def specialist_user(db):
 
 @pytest.fixture
 def service(db, specialist_user, category):
-    return Service.objects.create(
-        specialist=specialist_user.specialist_profile,
+    # Тенант читаем ИЗ БАЗЫ, а не из объекта: профиль здесь
+    # правился отдельным экземпляром, и закешированный `.tenant`
+    # показывает подставной тенант autouse-фикстуры вместо
+    # настоящего. Резолвер фильтрует по тенанту, и расхождение
+    # читалось бы как «услуги не существует».
+    _tenant_id = SpecialistProfile.objects.values_list(
+        "tenant_id", flat=True
+    ).get(pk=specialist_user.specialist_profile.pk)
+    salon_service = SalonService.objects.create(
+        tenant_id=_tenant_id,
         category=category,
         name='Маникюр B',
-        price=Decimal('2000.00'),
         duration_minutes=60,
+        base_price=Decimal('2000.00'),
+        is_active=True,
+        # §100: путь маркетплейса закрыт fail-closed — он не несёт
+        # медицинского признака и отвечает NOT_APPLICABLE. Предмет
+        # этого файла — захват платежа и комиссия, а не слой каталога,
+        # поэтому фикстура переехала на слой, которым идёт боевая
+        # запись. Салон отвечает на вопрос о здоровье явным «нет»:
+        # это ответ, а не умолчание колонки — после 0018 они
+        # различимы.
+        requires_health_check=False,
     )
+    SpecialistService.objects.create(
+        salon_service=salon_service,
+        specialist=specialist_user.specialist_profile,
+        duration_minutes=60,
+        price=Decimal('2000.00'),
+        buffer_after_minutes=0,
+        is_active=True,
+    )
+    return salon_service
 
 
 @pytest.fixture
@@ -94,11 +121,11 @@ def _make_appointment(client_user, specialist_user, service, appt_status):
     return Appointment.objects.create(
         client=client_user,
         specialist=specialist_user.specialist_profile,
-        service=service,
+        salon_service=service,
         start_datetime=now + timedelta(hours=2),
         end_datetime=now + timedelta(hours=3),
         status=appt_status,
-        price=service.price,
+        price=service.base_price,
     )
 
 

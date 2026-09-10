@@ -157,6 +157,7 @@ def _handle_booking_domain(exc: Exception) -> Optional[Response]:
             BookingDomainError,
             BookingWindowError,
             CancellationNotAllowedError,
+            HealthScreeningRequiredError,
             InvalidStateTransitionError,
             RescheduleNotAllowedError,
             ServiceNotActiveError,
@@ -199,6 +200,35 @@ def _handle_booking_domain(exc: Exception) -> Optional[Response]:
     if isinstance(exc, ServiceNotActiveError):
         return _envelope(
             ErrorCode.SERVICE_NOT_ACTIVE.value, str(exc), status_code=422,
+        )
+    if isinstance(exc, HealthScreeningRequiredError):
+        # Решение владельца (c) от 10.09.2026. Три вещи здесь намеренны.
+        #
+        # СВОЙ КОД, А НЕ ``BOOKING_ERROR``. Общий код заставил бы каждую
+        # поверхность угадывать исход по тексту сообщения, а очередь
+        # разметки услуг — строиться на грепе логов. Кодов два, потому
+        # что REQUIRED и UNKNOWN — разные положения человека и разная
+        # работа оператора: первому нужен скрининг, второму — ответ
+        # салона.
+        #
+        # ``handoff: true`` В ``details``. Это не украшение конверта, а
+        # единственный машинный признак, по которому поверхность отличает
+        # «показать ошибку» от «позвать человека». Тест поверхности
+        # проверяет именно его, а не строку текста.
+        #
+        # 4xx, А НЕ 2xx, И ЭТО ГЛАВНОЕ. Соблазн отдать 200 с телом «не
+        # ошибка» велик, но он ломается на неподнятом потребителе:
+        # клиент, который считает 2xx успехом, покажет «вы записаны» на
+        # ответе без записи — ровно то, что владелец запретил («не
+        # обещать, что запись создана»). При 4xx необновлённая
+        # поверхность деградирует в «ошибку»: тон неверный, обещания
+        # ложного нет. Из двух видов деградации выбран безопасный.
+        # Создание отвечает 201; этот исход не отвечает 2xx никогда.
+        return _envelope(
+            exc.reason,
+            exc.text,
+            details={"handoff": exc.leads_to_a_human, "reason": exc.reason},
+            status_code=422,
         )
     if isinstance(exc, BookingDomainError):
         return _envelope(

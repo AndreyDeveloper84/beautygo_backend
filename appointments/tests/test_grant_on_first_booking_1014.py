@@ -34,7 +34,7 @@ from appointments.application.services.create_booking_service import (
 )
 from appointments.models import Appointment
 from rest_framework.exceptions import NotFound
-from services.models import Service, ServiceCategory
+from services.models import SalonService, ServiceCategory, SpecialistService
 from tenants.models import Tenant
 from users.models import SpecialistProfile, TenantUserRelationship, User
 
@@ -61,15 +61,43 @@ def _make_specialist(tenant, *, suffix: str) -> SpecialistProfile:
     return p
 
 
-def _make_service(specialist) -> Service:
+def _make_service(specialist) -> SalonService:
     cat, _ = ServiceCategory.objects.get_or_create(
         slug="g1014-cat", defaults={"name": "G1014 Cat"},
     )
-    return Service.objects.create(
-        specialist=specialist, category=cat, name="G1014 Service",
-        price=Decimal("1500.00"), duration_minutes=60, is_active=True,
-        buffer_after_minutes=0,
+    # Тенант читаем ИЗ БАЗЫ, а не из объекта: профиль здесь
+    # правился отдельным экземпляром, и закешированный `.tenant`
+    # показывает подставной тенант autouse-фикстуры вместо
+    # настоящего. Резолвер фильтрует по тенанту, и расхождение
+    # читалось бы как «услуги не существует».
+    _tenant_id = SpecialistProfile.objects.values_list(
+        "tenant_id", flat=True
+    ).get(pk=specialist.pk)
+    salon_service = SalonService.objects.create(
+        tenant_id=_tenant_id,
+        category=cat,
+        name="G1014 Service",
+        duration_minutes=60,
+        base_price=Decimal("1500.00"),
+        is_active=True,
+        # §100: путь маркетплейса закрыт fail-closed — он не несёт
+        # медицинского признака и отвечает NOT_APPLICABLE. Предмет
+        # этого файла — грант при первой брони, а не слой каталога,
+        # поэтому фикстура переехала на слой, которым идёт боевая
+        # запись. Салон отвечает на вопрос о здоровье явным «нет»:
+        # это ответ, а не умолчание колонки — после 0018 они
+        # различимы.
+        requires_health_check=False,
     )
+    SpecialistService.objects.create(
+        salon_service=salon_service,
+        specialist=specialist,
+        duration_minutes=60,
+        price=Decimal("1500.00"),
+        buffer_after_minutes=0,
+        is_active=True,
+    )
+    return salon_service
 
 
 def _dto(client, specialist, service, *, hours: int = 3) -> CreateBookingDTO:

@@ -27,7 +27,7 @@ from appointments.models import Appointment
 from billing.models import BookingFee, SpecialistSubscription, TariffPlan
 from billing.services import accrue_booking_fee
 from payments.models import Payment
-from services.models import Service, ServiceCategory
+from services.models import SalonService, ServiceCategory, SpecialistService
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
 
@@ -69,11 +69,40 @@ def category(db):
     return ServiceCategory.objects.create(name="JW2 Cat", slug="jw2-cat")
 
 
-def _make_service(specialist, category, name="JW2 Service") -> Service:
-    return Service.objects.create(
-        specialist=specialist, category=category, name=name,
-        price=Decimal("1500.00"), duration_minutes=60, is_active=True,
+def _make_service(specialist, category, name="JW2 Service") -> SalonService:
+    # Тенант читаем ИЗ БАЗЫ, а не из объекта: профиль здесь
+    # правился отдельным экземпляром, и закешированный `.tenant`
+    # показывает подставной тенант autouse-фикстуры вместо
+    # настоящего. Резолвер фильтрует по тенанту, и расхождение
+    # читалось бы как «услуги не существует».
+    _tenant_id = SpecialistProfile.objects.values_list(
+        "tenant_id", flat=True
+    ).get(pk=specialist.pk)
+    salon_service = SalonService.objects.create(
+        tenant_id=_tenant_id,
+        category=category,
+        name=name,
+        duration_minutes=60,
+        base_price=Decimal("1500.00"),
+        is_active=True,
+        # §100: путь маркетплейса закрыт fail-closed — он не несёт
+        # медицинского признака и отвечает NOT_APPLICABLE. Предмет
+        # этого файла — совместный биллинг W1×W2, а не слой каталога,
+        # поэтому фикстура переехала на слой, которым идёт боевая
+        # запись. Салон отвечает на вопрос о здоровье явным «нет»:
+        # это ответ, а не умолчание колонки — после 0018 они
+        # различимы.
+        requires_health_check=False,
     )
+    SpecialistService.objects.create(
+        salon_service=salon_service,
+        specialist=specialist,
+        duration_minutes=60,
+        price=Decimal("1500.00"),
+        buffer_after_minutes=0,
+        is_active=True,
+    )
+    return salon_service
 
 
 def _subscription(user, *, status, tenant=None, tariff_code="solo"):
@@ -123,11 +152,15 @@ class TestJointC1:
         self, customer, category,
     ):
         spec = _make_specialist("jw2_pastdue", "+79992002002")
-        _make_service(spec, category)
+        # Услугу берём у самой фабрики: перечитать её через
+        # `Service.objects.get(specialist=...)` больше нельзя — фикстура
+        # живёт в салонном слое, а у `SalonService` мастера в полях нет,
+        # он висит на ребре `SpecialistService`. Соседний тест в этом же
+        # классе так и делал всегда.
+        service = _make_service(spec, category)
         _subscription(
             spec.user, status=SpecialistSubscription.Status.PAST_DUE,
         )
-        service = Service.objects.get(specialist=spec)
         r = _internal_api().post(
             INTERNAL_CREATE_URL, _body(customer, spec, service),
             format="json",
@@ -236,12 +269,13 @@ class TestJointC1:
 def _completed_appointment(customer, specialist, service) -> Appointment:
     now = datetime.now(tz=timezone.utc)
     return Appointment.objects.create(
-        client=customer, specialist=specialist, service=service,
+        client=customer, specialist=specialist,
+        salon_service=service,
         start_datetime=now - timedelta(hours=3),
         end_datetime=now - timedelta(hours=2),
         status=Appointment.Status.COMPLETED,
         completed_at=now - timedelta(hours=2),
-        price=service.price,
+        price=service.base_price,
     )
 
 

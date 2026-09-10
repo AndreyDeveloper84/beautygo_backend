@@ -37,7 +37,7 @@ from appointments.models import (
     SpecialistWorkingHours,
 )
 from payments.models import Payment
-from services.models import Service, ServiceCategory
+from services.models import SalonService, Service, ServiceCategory, SpecialistService
 from users.models import SpecialistProfile, User
 
 
@@ -71,7 +71,17 @@ def category(db):
 
 
 @pytest.fixture
-def service(specialist, category):
+def marketplace_service(specialist, category):
+    """Услуга легаси-слоя — ровно для тестов слотов, и только для них.
+
+    ``AvailabilityQueryService`` без ``duration_override`` ходит прямо в
+    ``Service.objects.get`` и салонной услуги не видит: слои читаются
+    двумя путями, и путь слотов знает только этот. Перевести и эти тесты
+    значило бы чинить гейт, ломая расписание.
+
+    Гейт здоровья сюда не достаёт: он стоит на СОЗДАНИИ записи, а расчёт
+    слотов ничего не создаёт.
+    """
     return Service.objects.create(
         specialist=specialist,
         category=category,
@@ -79,8 +89,44 @@ def service(specialist, category):
         price='2000.00',
         duration_minutes=60,
         is_active=True,
-        buffer_after_minutes=0,
     )
+
+
+@pytest.fixture
+def service(specialist, category):
+    # Тенант читаем ИЗ БАЗЫ, а не из объекта: профиль здесь
+    # правился отдельным экземпляром, и закешированный `.tenant`
+    # показывает подставной тенант autouse-фикстуры вместо
+    # настоящего. Резолвер фильтрует по тенанту, и расхождение
+    # читалось бы как «услуги не существует».
+    _tenant_id = SpecialistProfile.objects.values_list(
+        "tenant_id", flat=True
+    ).get(pk=specialist.pk)
+    salon_service = SalonService.objects.create(
+        tenant_id=_tenant_id,
+        category=category,
+        name='Test Haircut',
+        duration_minutes=60,
+        base_price='2000.00',
+        is_active=True,
+        # §100: путь маркетплейса закрыт fail-closed — он не несёт
+        # медицинского признака и отвечает NOT_APPLICABLE. Предмет
+        # этого файла — слой сервисов брони, а не слой каталога,
+        # поэтому фикстура переехала на слой, которым идёт боевая
+        # запись. Салон отвечает на вопрос о здоровье явным «нет»:
+        # это ответ, а не умолчание колонки — после 0018 они
+        # различимы.
+        requires_health_check=False,
+    )
+    SpecialistService.objects.create(
+        salon_service=salon_service,
+        specialist=specialist,
+        duration_minutes=60,
+        price='2000.00',
+        buffer_after_minutes=0,
+        is_active=True,
+    )
+    return salon_service
 
 
 @pytest.fixture
@@ -233,10 +279,10 @@ class TestCancelBookingService:
         appt = Appointment.objects.create(
             client=client_user,
             specialist=specialist,
-            service=service,
+            salon_service=service,
             start_datetime=start,
             end_datetime=start + timedelta(minutes=60),
-            price=service.price,
+            price=service.base_price,
             status=Appointment.Status.CONFIRMED,
         )
         return appt
@@ -281,10 +327,10 @@ class TestRescheduleBookingService:
         return Appointment.objects.create(
             client=client_user,
             specialist=specialist,
-            service=service,
+            salon_service=service,
             start_datetime=start,
             end_datetime=start + timedelta(minutes=60),
-            price=service.price,
+            price=service.base_price,
             status=Appointment.Status.CONFIRMED,
         )
 
@@ -337,10 +383,10 @@ class TestRescheduleBookingService:
         appt = Appointment.objects.create(
             client=client_user,
             specialist=specialist,
-            service=service,
+            salon_service=service,
             start_datetime=start,
             end_datetime=start + timedelta(minutes=60),
-            price=service.price,
+            price=service.base_price,
             status=Appointment.Status.PENDING,
         )
         dto = RescheduleBookingDTO(
@@ -360,10 +406,10 @@ class TestRescheduleBookingService:
         Appointment.objects.create(
             client=client_user,
             specialist=specialist,
-            service=service,
+            salon_service=service,
             start_datetime=other_start,
             end_datetime=other_start + timedelta(minutes=60),
-            price=service.price,
+            price=service.base_price,
             status=Appointment.Status.CONFIRMED,
         )
 
@@ -382,19 +428,19 @@ class TestRescheduleBookingService:
 
 @pytest.mark.django_db
 class TestAvailabilityQueryService:
-    def test_no_working_hours_returns_not_working(self, specialist, service):
+    def test_no_working_hours_returns_not_working(self, specialist, marketplace_service):
         """If no SpecialistWorkingHours set, day is not a working day."""
         tomorrow = (dj_tz.localdate() + timedelta(days=1))
         dto = GetAvailabilityDTO(
             specialist_id=specialist.id,
             target_date=tomorrow,
-            service_id=service.id,
+            service_id=marketplace_service.id,
         )
         result = AvailabilityQueryService().get_day_availability(dto)
         assert result.is_working_day is False
         assert result.slots == []
 
-    def test_with_working_hours_returns_slots(self, specialist, service):
+    def test_with_working_hours_returns_slots(self, specialist, marketplace_service):
         tomorrow = dj_tz.localdate() + timedelta(days=1)
         day_of_week = tomorrow.weekday()
 
@@ -409,7 +455,7 @@ class TestAvailabilityQueryService:
         dto = GetAvailabilityDTO(
             specialist_id=specialist.id,
             target_date=tomorrow,
-            service_id=service.id,
+            service_id=marketplace_service.id,
         )
         result = AvailabilityQueryService().get_day_availability(dto)
         assert result.is_working_day is True
@@ -417,7 +463,7 @@ class TestAvailabilityQueryService:
         # 60-min service in 9h window (09:00-18:00) = up to 18 slots (every 30 min)
         assert len(result.slots) <= 18
 
-    def test_booked_slot_excluded(self, client_user, specialist, service):
+    def test_booked_slot_excluded(self, client_user, specialist, marketplace_service):
         tomorrow = dj_tz.localdate() + timedelta(days=1)
         day_of_week = tomorrow.weekday()
 
@@ -433,7 +479,7 @@ class TestAvailabilityQueryService:
         dto = GetAvailabilityDTO(
             specialist_id=specialist.id,
             target_date=tomorrow,
-            service_id=service.id,
+            service_id=marketplace_service.id,
         )
         before = AvailabilityQueryService().get_day_availability(dto)
 
@@ -449,10 +495,10 @@ class TestAvailabilityQueryService:
         Appointment.objects.create(
             client=client_user,
             specialist=specialist,
-            service=service,
+            service=marketplace_service,
             start_datetime=slot_start,
             end_datetime=slot_end,
-            price=service.price,
+            price=marketplace_service.price,
             status=Appointment.Status.CONFIRMED,
         )
 
