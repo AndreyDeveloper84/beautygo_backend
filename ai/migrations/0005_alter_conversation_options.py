@@ -8,6 +8,15 @@ pilot table is not something an ordering fix should carry. This
 migration therefore contains the ``AlterModelOptions`` alone.
 
 ``AlterModelOptions`` is state-only — it emits no SQL.
+
+DRF-1624: расхождение закрыто в
+``0006_drf1624_constraint_condition_order``. Причина оказалась не в
+базе, а в порядке операндов ``Q``: модель писала условие kwargs'ами,
+которые ``Q.__init__`` сортирует, а ``0004`` — позиционными
+кортежами, которые не сортируются. Отказ ЭТОЙ миграции тащить
+перестройку индекса был верным: ordering-фикс действительно не
+должен был её нести. Перестройка выпущена отдельно, в 0006, после
+замера таблицы на пилоте — 2 строки на 10.09.2026.
 """
 from django.db import migrations
 
