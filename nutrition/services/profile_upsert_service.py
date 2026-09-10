@@ -191,6 +191,29 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
     # нет», а не «расчёт есть, но входы чужие».
     profile.last_overrides_applied = list(norms.overrides_applied)
 
+    # ── Происхождение (DRF-1623 N-d) ────────────────────────────────────
+    #
+    # Пишется на КАЖДОМ пересчёте, вместе со значением, а не отдельным
+    # вызовом: разъехаться они не должны. Ориентир, у которого значение
+    # новое, а происхождение старое, хуже, чем ориентир без происхождения
+    # — он выглядит объяснённым.
+    #
+    # Отказ (нехватка входов) не выдаётся за расчёт: снимок пуст, версий
+    # нет, источник — «ориентира нет». Прежнее происхождение при этом
+    # СТИРАЕТСЯ намеренно: значения обнулены строкой выше, и оставить
+    # рядом с нулями объяснение прошлого расчёта значило бы объяснить
+    # число, которого больше нет.
+    if norms.computed:
+        profile.targets_source = NutritionProfile.TargetsSource.AYLA_CALCULATED
+        profile.targets_method_versions = dict(norms.method_versions)
+        profile.targets_input_snapshot = dict(norms.input_snapshot)
+        profile.targets_computed_at = datetime.now(dt_tz.utc)
+    else:
+        profile.targets_source = NutritionProfile.TargetsSource.NONE
+        profile.targets_method_versions = {}
+        profile.targets_input_snapshot = {}
+        profile.targets_computed_at = None
+
 
 def _flip_lifecycle_markers(profile: NutritionProfile, payload: dict) -> None:
     if payload.get("complete") and profile.onboarded_at is None:
@@ -248,6 +271,21 @@ def _serialize(
         # посчитанных ДО этой правки, неправда. Пустой список честнее:
         # с этой правки подстановок действительно нет ни одной.
         "assumed_inputs": [],
+        # Происхождение ориентира (DRF-1623 N-d). Уезжает наружу, потому
+        # что §92 п.5 адресован ПОКАЗУ: «уже рассчитанный ориентир нельзя
+        # продолжать показывать как актуальный без его происхождения».
+        # Значит показывающая сторона обязана его получить — иначе
+        # правило неисполнимо в принципе, а не просто не исполнено.
+        #
+        # Снимок входов наружу НЕ уходит: он нужен для воспроизводимости
+        # расчёта на нашей стороне, а не экрану. Отдать его значило бы
+        # разослать параметры тела туда, где они не нужны, — ровно то,
+        # чего §92 избегает раздельными согласиями.
+        "targets_provenance": {
+            "source": profile.targets_source,
+            "method_versions": profile.targets_method_versions or {},
+            "computed_at": _strip_microseconds(profile.targets_computed_at),
+        },
         "disclaimer_acked": profile.disclaimer_acked,
         "onboarded_at": _strip_microseconds(profile.onboarded_at),
         "first_food_logged_at": _strip_microseconds(profile.first_food_logged_at),
