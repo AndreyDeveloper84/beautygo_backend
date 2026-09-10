@@ -58,6 +58,54 @@ class AuditUnavailable(RuntimeError):
     """
 
 
+def build_payload(
+    *,
+    caller_purpose: str,
+    actor,
+    object_id,
+    operation: str,
+    object_category: str,
+    result: str,
+    actor_named: bool,
+    denial_reason: str = "",
+    basis: str = "",
+    request_id: str = "",
+) -> dict:
+    """The record, as plain data — one shape for the table and for the queue.
+
+    Built once so a queued record and a directly-written one cannot drift
+    apart. A queue that stores a different shape than the table replays into
+    a journal that disagrees with itself, and nobody notices until somebody
+    reads a year-old row.
+
+    ``actor_role`` is derived here rather than passed, so "a service with no
+    human behind it" is spelled the same way at every call site: ``service``.
+    An empty role and a service call are different facts, and one blank would
+    merge them.
+
+    The caller-supplied external identity is deliberately NOT included. It is
+    unbounded caller-controlled text, and a record that echoed it would let
+    whoever is probing write strings into the very file investigators read.
+    """
+    return {
+        "caller_purpose": caller_purpose,
+        "actor_id": getattr(actor, "pk", None),
+        "actor_role": (
+            (getattr(actor, "role", "") or "") if actor is not None else "service"
+        ),
+        # Global client subject — see the model's tenant field comment.
+        "tenant_id": None,
+        "operation": operation,
+        "object_category": object_category,
+        "object_id": object_id,
+        "result": result,
+        "denial_reason": denial_reason,
+        "actor_named": actor_named,
+        "basis": basis or "",
+        "request_id": request_id or "",
+    }
+
+
 def record_access(
     *,
     caller_purpose: str,
@@ -84,32 +132,64 @@ def record_access(
     that record will later read. The resolved ``actor`` FK answers the same
     question with a value the system chose.
     """
-    if actor is not None:
-        actor_role = getattr(actor, "role", "") or ""
-    else:
-        actor_role = "service"
-
+    payload = build_payload(
+        caller_purpose=caller_purpose, actor=actor, object_id=object_id,
+        operation=operation, object_category=object_category, result=result,
+        actor_named=actor_named, denial_reason=denial_reason, basis=basis,
+        request_id=request_id,
+    )
+    actor_id = payload.pop("actor_id")
     try:
-        return PersonalDataAccessLog.objects.create(
-            caller_purpose=caller_purpose,
-            actor=actor,
-            actor_role=actor_role,
-            tenant=None,  # global client subject — see the model's field comment
-            operation=operation,
-            object_category=object_category,
-            object_id=object_id,
-            result=result,
-            denial_reason=denial_reason,
-            actor_named=actor_named,
-            basis=basis or "",
-            request_id=request_id or "",
-        )
+        return PersonalDataAccessLog.objects.create(actor_id=actor_id, **payload)
     except Exception as exc:  # noqa: BLE001 — re-raised as AuditUnavailable
         logger.error(
             "privacy_audit.write_failed operation=%s result=%s subject=%s err=%s",
             operation, result, object_id, exc,
         )
         raise AuditUnavailable(str(exc)) from exc
+
+
+def record_or_queue(**kwargs) -> str:
+    """Record the access, and decide what an unrecordable one means.
+
+    Returns how the record was stored: ``"written"`` (the row exists),
+    ``"queued"`` (it is in the guaranteed queue and will), or raises
+    :class:`AuditUnavailable` when the operation must not proceed at all.
+
+    The fork is the owner's boundary, and it lives in
+    :mod:`privacy_audit.policy` rather than here so that "which operations
+    stop" is one readable set instead of a condition buried in a handler:
+
+    * a **disclosing or destroying** operation that cannot be journalled does
+      not happen — the exception propagates and the caller refuses it;
+    * anything else is queued, because our outage must not stop a person
+      acting on their own data.
+
+    A **denial** is queued too, whatever the operation. That is not in the
+    ruling and it follows from it: an attempt to reach somebody else's subject
+    has to arrive in the journal even if the journal was down when it
+    happened, and the queue is exactly the mechanism that makes "eventually"
+    honest. Refusing harder is not available — the request was already
+    refused.
+    """
+    from privacy_audit import policy, spool
+
+    try:
+        record_access(**kwargs)
+        return "written"
+    except AuditUnavailable:
+        allowed = kwargs.get("result") == PersonalDataAccessLog.Result.ALLOWED
+        if allowed and policy.stops_when_unauditable(kwargs.get("operation", "")):
+            raise
+        try:
+            spool.enqueue(build_payload(**kwargs))
+        except spool.SpoolUnavailable:
+            # Both the table and the queue are gone. The record is lost; the
+            # spool has already logged it at CRITICAL. For a queued operation
+            # the owner's ruling says the product does not stop, so we do not
+            # convert our outage into the person's failure.
+            return "lost"
+        return "queued"
 
 
 def basis_from(request) -> str:
