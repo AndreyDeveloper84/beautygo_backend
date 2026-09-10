@@ -179,6 +179,45 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: python manage.py check
 
+      # DRF-1624 — fail the PR when a model no longer matches its migrations.
+      #
+      # Nothing else in this job compares the two. `pytest` builds the test
+      # schema from the migration files, so a model change carrying no
+      # migration tests green; `manage.py check` above validates the models
+      # against themselves and never opens `*/migrations/` — with the drift
+      # this step was written for already in the tree, it exits 0. Until
+      # someone runs `makemigrations` by hand, drift is invisible here.
+      #
+      # What earns it a step of its own rather than trust in the deploy: of
+      # the three apps drifting when this was first switched on, two
+      # (`appointments`, `payments`) emit no SQL at all — `sqlmigrate` prints
+      # `-- (no-op)` for every operation. A clean `migrate` against the pilot
+      # is therefore not evidence that the models match. Drift loud enough to
+      # break a deploy is caught by the deploy; this kind never announces
+      # itself, and from the outside the two look the same.
+      #
+      # `--check` supplies the non-zero exit code. `--dry-run` is redundant
+      # on Django 5.2.5 — `--check` already sets `dry_run` itself
+      # (makemigrations.py:118) — and is passed anyway, because that internal
+      # coupling carries two properties a guard should not inherit silently.
+      # It is what keeps generated migrations out of the runner's tree, and
+      # it is what makes the questioner non-prompting: without a dry run,
+      # drift of the "non-nullable field without a default" kind asks on
+      # stdin (questioner.py:174), and a runner has no one to answer. Naming
+      # the flag keeps both properties ours rather than the version's.
+      - name: Migration drift guard (makemigrations --check)
+        env:
+          DJANGO_SETTINGS_MODULE: djangoProject.settings.test
+          DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: '5432'
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: beautygo
+          SENTRY_DSN: ''
+          REDIS_URL: redis://localhost:6379
+        run: python manage.py makemigrations --check --dry-run
+
   # ---------------------------------------------------------------------------
   # deploy — DRF-1363. Rebuilt so that an abort can never take the pilot's
   # database with it.
