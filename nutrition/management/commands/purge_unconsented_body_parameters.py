@@ -52,12 +52,22 @@
 старше введения провенанса), поэтому чистить сегодня нечего. Команда всё
 равно его чистит: пусто сегодня не значит пусто в день запуска.
 
+**И проверяет полноту по данным, а не по собственной работе.** Стереть
+столбцы — не то же самое, что стереть имя: копия могла быть заполнена
+заново между срезами, записана из места, о котором никто не помнит, или
+вложена в объект, где ``pop`` верхнего уровня её не достанет. Проверка
+перечитывает строку из базы внутри транзакции и откатывает всё, если имя
+осталось. Без неё команда отчитывалась бы успехом за удаление, полноту
+которого обеспечила чужая очерёдность.
+
 Usage:
     python manage.py purge_unconsented_body_parameters
     python manage.py purge_unconsented_body_parameters --apply
 """
 
 from __future__ import annotations
+
+import json
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
@@ -78,6 +88,41 @@ DERIVED_FIELDS = ("bmr", "daily_kcal", "daily_protein_g", "daily_fat_g",
 
 class OrderViolation(CommandError):
     """N-b ещё не отработал: ориентиры на месте, входы стирать рано."""
+
+
+class IncompleteErasure(CommandError):
+    """Стёрли столбцы, а имя осталось где-то ещё — удаление не состоялось."""
+
+
+def _strip_purged(value):
+    """Убрать закрытые имена из структуры ЛЮБОЙ глубины.
+
+    ``snap.pop(k)`` снимает только верхний уровень. Снимок сегодня плоский,
+    но плоский он по обычаю, а не по контракту: `JSONField` не мешает
+    следующему писателю вложить входы в объект.
+    """
+    if isinstance(value, dict):
+        return {
+            k: _strip_purged(v)
+            for k, v in value.items()
+            if k not in PURGED_FIELDS
+        }
+    if isinstance(value, list):
+        return [_strip_purged(v) for v in value]
+    return value
+
+
+def _names_left_in(snapshot) -> list[str]:
+    """Какие закрытые имена ещё встречаются — ПО ДАННЫМ, а не по коду.
+
+    Ищет по сериализованной структуре, а не по ключам верхнего уровня:
+    вопрос стоит «осталось ли имя где-нибудь», и отвечать на него надо
+    так же широко, как он задан.
+    """
+    if not snapshot:
+        return []
+    blob = json.dumps(snapshot, ensure_ascii=False)
+    return [f for f in PURGED_FIELDS if f'"{f}"' in blob]
 
 
 class Command(BaseCommand):
@@ -196,15 +241,41 @@ class Command(BaseCommand):
             for p in affected:
                 for f in PURGED_FIELDS:
                     setattr(p, f, None)
-                snap = dict(p.targets_input_snapshot or {})
-                for k in PURGED_SNAPSHOT_KEYS:
-                    snap.pop(k, None)
-                p.targets_input_snapshot = snap
+                p.targets_input_snapshot = _strip_purged(
+                    p.targets_input_snapshot
+                )
                 p.save(
                     update_fields=[
                         *PURGED_FIELDS, "targets_input_snapshot", "updated_at",
                     ]
                 )
+
+            # ПРОВЕРКА ПОЛНОТЫ — по данным, перечитанным из базы, и
+            # ВНУТРИ транзакции, чтобы неполное удаление не доехало до
+            # коммита.
+            #
+            # Довод — не паранойя. Сегодня снимок пуст у всех шести, и
+            # эта проверка зелена; полноту удаления обеспечивает не она,
+            # а то, что N-b прошёл раньше и убрал дубликат. Это
+            # ОЧЕРЁДНОСТЬ, а не сторож, и она разойдётся тремя обычными
+            # способами: порядок переставят; между срезами любой upsert
+            # с полными входами заполнит снимок заново; писать снимок
+            # начнут из четвёртого места. Во всех трёх удаление было бы
+            # ОБЪЯВЛЕНО И НЕ СДЕЛАНО, а команда отчиталась бы успехом,
+            # потому что стирает столбцы, а не ищет копии.
+            #
+            # Ищет по PURGED_FIELDS, а не по перечислению имён: расширят
+            # объём — расширится и проверка, без правки её текста.
+            for p in affected:
+                p.refresh_from_db(fields=["targets_input_snapshot"])
+                left = _names_left_in(p.targets_input_snapshot)
+                if left:
+                    raise IncompleteErasure(
+                        "Удаление не состоялось: у user=%s имена %s остались "
+                        "в targets_input_snapshot. Столбцы стёрты, копия — "
+                        "нет; транзакция откачена целиком."
+                        % (p.user_id, left)
+                    )
 
         self.stdout.write("")
         self.stdout.write(

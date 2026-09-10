@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 from io import StringIO
 
 import pytest
@@ -257,3 +258,97 @@ class TestTheOrderOfExecutionIsAConditionNotAWish:
 
         profile.refresh_from_db()
         assert profile.weight_kg is None
+
+
+class TestCompletenessIsCheckedByDataNotByOwnWork:
+    """Стереть столбцы — не то же самое, что стереть ИМЯ.
+
+    Сегодня снимок пуст у всех шести профилей пилота, и проверка полноты
+    зелена. Но полноту обеспечивает не она, а то, что N-b прошёл раньше
+    и убрал дубликат: это ОЧЕРЁДНОСТЬ, а не сторож. Разойдётся она тремя
+    обычными способами — порядок переставят; между срезами любой upsert
+    с полными входами заполнит снимок заново; писать снимок начнут из
+    четвёртого места.
+
+    Во всех трёх удаление было бы объявлено и не сделано, а команда
+    отчиталась бы успехом.
+    """
+
+    def test_a_filled_snapshot_makes_the_check_do_work(self):
+        """Проверка на непустом снимке — то есть не вхолостую.
+
+        Зелёная проверка на пустых данных не доказывает ничего; здесь у
+        неё есть что искать, и она находит, что имён не осталось.
+        """
+        profile = _profile(
+            "purge-filled-snapshot",
+            targets_source=NutritionProfile.TargetsSource.NONE,
+            targets_input_snapshot={
+                "weight_kg": 70.0, "height_cm": 165, "age": 40,
+                "gender": "female", "goal": "maintain", "pace": "moderate",
+            },
+        )
+
+        _run("--apply")
+
+        profile.refresh_from_db()
+        blob = json.dumps(profile.targets_input_snapshot, ensure_ascii=False)
+        for name in ("weight_kg", "height_cm", "age"):
+            assert f'"{name}"' not in blob
+        assert profile.targets_input_snapshot["goal"] == "maintain"
+
+    def test_a_nested_copy_is_reached_too(self):
+        """`pop` верхнего уровня вложенную копию не достаёт.
+
+        Снимок сегодня плоский по обычаю, а не по контракту: `JSONField`
+        не мешает следующему писателю вложить входы в объект. Тест
+        закрепляет, что глубина роли не играет.
+        """
+        profile = _profile(
+            "purge-nested-snapshot",
+            targets_source=NutritionProfile.TargetsSource.NONE,
+            targets_input_snapshot={
+                "v2": {"inputs": {"weight_kg": 70.0, "age": 40}},
+                "goal": "maintain",
+            },
+        )
+
+        _run("--apply")
+
+        profile.refresh_from_db()
+        blob = json.dumps(profile.targets_input_snapshot, ensure_ascii=False)
+        assert '"weight_kg"' not in blob
+        assert '"age"' not in blob
+        assert profile.targets_input_snapshot["goal"] == "maintain"
+
+    def test_the_check_goes_red_and_rolls_everything_back(self, monkeypatch):
+        """КРАСНАЯ строка сторожа — иначе он ни разу не проверен.
+
+        Подменяем чистильщик на пустышку: столбцы стираются, копия
+        остаётся. Проверка обязана это увидеть, отказать и откатить
+        транзакцию — то есть НЕ оставить состояния «столбцы стёрты, имя
+        живёт», ради предотвращения которого она и заведена.
+        """
+        from django.core.management.base import CommandError
+
+        from nutrition.management.commands import (
+            purge_unconsented_body_parameters as cmd,
+        )
+
+        profile = _profile(
+            "purge-sabotaged",
+            targets_source=NutritionProfile.TargetsSource.NONE,
+            targets_input_snapshot={"weight_kg": 70.0, "goal": "maintain"},
+        )
+        monkeypatch.setattr(cmd, "_strip_purged", lambda value: value)
+
+        with pytest.raises(CommandError) as exc:
+            _run("--apply")
+
+        assert "Удаление не состоялось" in str(exc.value)
+        assert "weight_kg" in str(exc.value)
+
+        # Откат целиком: столбцы тоже на месте, а не «наполовину стёрто».
+        profile.refresh_from_db()
+        assert profile.weight_kg == 70.0
+        assert profile.targets_input_snapshot["weight_kg"] == 70.0
