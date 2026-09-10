@@ -501,3 +501,75 @@ def test_decision_carries_policy_versions():
     assert versions.stage_policy_version
     assert versions.reason_code_registry_version
     assert versions.tie_break_policy_version
+
+
+# ---------------------------------------------------------------------------
+# Третий исход §93 на гейте и в переписи
+# ---------------------------------------------------------------------------
+
+
+def test_refused_candidate_is_not_admitted():
+    """`NOT_RECOMMENDABLE` в подбор не проходит — как и всё, кроме `VERIFIED`.
+
+    Поведение на гейте у отказа и у отсутствия одинаковое, и это
+    правильно: гейт спрашивает «подтверждена ли связь», а не «почему
+    нет». Различаются они дальше — в переписи, см. тест ниже.
+    """
+    decision = resolve(
+        make_request(),
+        source=StaticSource([make_facts(mapping_status=MappingStatus.NOT_RECOMMENDABLE)]),
+    )
+
+    assert decision.is_empty
+    assert decision.excluded[0].reason_code is ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE
+
+
+def test_refusal_is_counted_apart_from_absence():
+    """Отказ считается СВОЕЙ колонкой, а не приплюсовывается к `unmapped`.
+
+    Это и есть весь смысл четвёртого состояния. Гейт ведёт себя с ними
+    одинаково, поэтому единственное место, где разница наблюдаема, —
+    перепись. Схлопнутся здесь — состояние станет декоративным: очередь
+    разбора перестанет убывать, потому что разобранные строки будут
+    возвращаться в неё каждым отчётом.
+    """
+    decision = resolve(
+        make_request(),
+        source=StaticSource([
+            make_facts(mapping_status=MappingStatus.UNMAPPED),
+            make_facts(mapping_status=MappingStatus.NOT_RECOMMENDABLE),
+            make_facts(mapping_status=MappingStatus.NOT_RECOMMENDABLE),
+        ]),
+    )
+
+    census = decision.census
+    assert census.visible == 3
+    assert census.unmapped == 1, "отказ посчитан как отсутствие"
+    assert census.not_recommendable == 2
+
+
+def test_the_exclusion_code_is_not_the_status():
+    """`ELIG_EXCLUDED_NOT_RECOMMENDABLE` — не имя состояния, а имя отказа гейта.
+
+    Совпадение слов опасное и появилось раньше состояния: код был
+    заведён как «не прошёл гейт связи» и достаётся ЛЮБОМУ статусу,
+    кроме `VERIFIED`. Читатель, встретивший его в логе, не вправе
+    заключить, что строка помечена `NOT_RECOMMENDABLE`.
+
+    Тест закрепляет именно это: один и тот же код у трёх разных причин.
+    Если код когда-нибудь переименуют в статус-специфичный, здесь
+    станет красно, и переименование не пройдёт молча.
+    """
+    for status in (
+        MappingStatus.UNMAPPED,
+        MappingStatus.REVIEW_REQUIRED,
+        MappingStatus.NOT_RECOMMENDABLE,
+    ):
+        decision = resolve(
+            make_request(),
+            source=StaticSource([make_facts(mapping_status=status)]),
+        )
+        assert (
+            decision.excluded[0].reason_code
+            is ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE
+        ), f"{status} получил другой код отказа"
