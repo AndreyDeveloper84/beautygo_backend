@@ -5,6 +5,9 @@
 # 0002's explicit rename, #492) and ``AlterField(amount)`` (validator
 # state). Both are SQL no-ops and intentionally NOT included here;
 # reported to the orchestrator for the owning stream.
+#
+# DRF-1624: закрыто в 0005_drf1624_amount_validator_and_table_state.
+# `makemigrations` этого расхождения больше не показывает.
 
 from django.db import migrations, models
 

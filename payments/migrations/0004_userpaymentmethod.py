@@ -3,6 +3,9 @@
 # NOTE: ``makemigrations`` keeps detecting the PRE-EXISTING drift
 # reported with 0003 (AlterModelTable/AlterField amount — SQL no-ops
 # from #492); intentionally NOT included here either.
+#
+# DRF-1624: закрыто в 0005_drf1624_amount_validator_and_table_state.
+# `makemigrations` этого расхождения больше не показывает.
 
 import django.core.validators
 import django.db.models.deletion
