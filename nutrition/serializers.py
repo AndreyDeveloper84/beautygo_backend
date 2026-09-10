@@ -556,6 +556,14 @@ class NutritionProfileResponseSerializer(serializers.Serializer):
     # DRF-1339: inputs substituted with defaults for the norm computation.
     assumed_inputs = serializers.ListField(child=serializers.CharField())
 
+    # DRF-1623 N-d — происхождение ориентира: {source, method_versions,
+    # computed_at}. Объявлено ОБЯЗАТЕЛЬНЫМ полем ответа, а не
+    # ``required=False``: §92 п.5 запрещает показывать ориентир без
+    # происхождения, и необязательный ключ означал бы, что показывающая
+    # сторона может его не получить и всё равно показать. Снимка входов
+    # здесь нет намеренно — он для воспроизводимости, а не для экрана.
+    targets_provenance = serializers.DictField()
+
     disclaimer_acked = serializers.JSONField(allow_null=True)
     onboarded_at = serializers.DateTimeField(allow_null=True)
     first_food_logged_at = serializers.DateTimeField(allow_null=True)
