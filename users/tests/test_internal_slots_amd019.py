@@ -185,6 +185,12 @@ class TestSharedResolverPin:
             return ResolvedService(
                 kind="marketplace", service_id=service_id,
                 name="Spy", duration_minutes=60, price=Decimal("100.00"),
+                # Заглушка обязана давать ПОЛНОЕ разрешение: предмет теста —
+                # что оба пути зовут один резолвер, а не медицинский гейт.
+                # Без явного «скрининг не нужен» заглушка означала бы «не
+                # знаю», и гейт пути записи закрыл бы бронь раньше, чем тест
+                # успел проверить своё.
+                requires_health_check=False,
             )
 
         salon = salon_link.salon_service

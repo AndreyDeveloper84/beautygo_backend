@@ -168,6 +168,23 @@ class CreateBookingService:
             # a raw TypeError instead of this sentence.
             raise ValueError("start_at must be timezone-aware (UTC)")
 
+        # Медицинский гейт стоит ЗДЕСЬ — до развилки `time_override` и вне
+        # неё, намеренно. Override снимает временной набор правил (окно,
+        # сетка, рамка расписания, закрытие салона, отгул); здоровье
+        # временным правилом не является и им не снимается ни при каком
+        # значении. DRF-1545 уже убрал единственный механизм, которым этот
+        # гейт открывался по площадке; вернуть его побочным эффектом
+        # временного override значило бы получить ту же дыру под другим
+        # именем и без строки в реестре решений.
+        #
+        # Также вне ветки `_is_client_actor`: гейт расписания — правило
+        # клиентского самообслуживания, а противопоказание относится к
+        # процедуре и не зависит от того, кто нажал кнопку.
+        from appointments.application.services._booking_guards import (
+            check_health_screening,
+        )
+        check_health_screening(resolved)
+
         if dto.time_override:
             self._validate_time_override(dto)
         elif _is_client_actor(dto.actor_role):

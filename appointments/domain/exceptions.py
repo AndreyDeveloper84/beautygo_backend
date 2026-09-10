@@ -113,3 +113,35 @@ class BillingEligibilityError(BookingDomainError):
     def __init__(self, reason: str = "SUBSCRIPTION_PAST_DUE"):
         self.reason = reason
         super().__init__(reason)
+
+
+class HealthScreeningRequiredError(BookingDomainError):
+    """The booking cannot be created without a human health screening.
+
+    Carries a machine ``reason``, and the two values are NOT the same
+    situation — that is the whole point of splitting them::
+
+        HEALTH_CHECK_REQUIRED   the catalog says this service needs a
+                                screening. The person must pass one.
+        HEALTH_CHECK_UNKNOWN    nobody has said anything about this
+                                service. The person is waiting on the
+                                salon, not on a screening.
+
+    Collapsing the two would cost us the only number that says how much of
+    the refusal is our own missing data: on the pilot, 09.09.2026, 95 of 95
+    bookable edges of the live salon resolve to UNKNOWN because no template
+    is attached, and none of them to REQUIRED. A single counter would have
+    read as "the gate fires a lot" and hidden that it fires on ignorance.
+
+    Outward, both may render as one blunt sentence — the customer does not
+    need our taxonomy. Inward they must stay apart: the operator handling
+    the handoff needs to know whether to run a screening or to go ask the
+    salon a question, and those are different jobs.
+    """
+
+    REQUIRED = "HEALTH_CHECK_REQUIRED"
+    UNKNOWN = "HEALTH_CHECK_UNKNOWN"
+
+    def __init__(self, reason: str = REQUIRED):
+        self.reason = reason
+        super().__init__(reason)
