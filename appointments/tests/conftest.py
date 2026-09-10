@@ -45,6 +45,51 @@ def service(db, specialist, category):
 
 
 @pytest.fixture
+def bookable_service(db, specialist, category):
+    """Услуга ЖИВОГО слоя — салонного, — пригодная для создания записи.
+
+    Соседняя фикстура ``service`` осталась маркетплейсной намеренно, и
+    это не недоделка. Два пути в этом репозитории читают каталог
+    по-разному:
+
+    * создание записи идёт через ``resolve_bookable_service`` (AMD-019) и
+      понимает оба слоя;
+    * ``AvailabilityQueryService`` без ``duration_override`` ходит прямо в
+      ``Service.objects.get`` и салонную услугу не находит вовсе.
+
+    Поэтому тесты слотов остаются на ``service``, а тесты создания
+    переезжают сюда: §100 закрыл легаси-путь fail-closed, и создание
+    через него отвечает ``HEALTH_CHECK_NOT_APPLICABLE``.
+
+    Салон отвечает на вопрос о здоровье явным «нет» — это ответ, а не
+    умолчание колонки: после миграции 0018 они различимы.
+    """
+    from services.models import SalonService, SpecialistService
+
+    tenant_id = SpecialistProfile.objects.values_list(
+        "tenant_id", flat=True
+    ).get(pk=specialist.pk)
+    salon_service = SalonService.objects.create(
+        tenant_id=tenant_id,
+        category=category,
+        name='Test Service',
+        duration_minutes=60,
+        base_price='1500.00',
+        is_active=True,
+        requires_health_check=False,
+    )
+    SpecialistService.objects.create(
+        salon_service=salon_service,
+        specialist=specialist,
+        duration_minutes=60,
+        price='1500.00',
+        buffer_after_minutes=0,
+        is_active=True,
+    )
+    return salon_service
+
+
+@pytest.fixture
 def client_user(db):
     return User.objects.create_user(
         username='client_appt', password='pass', role='client',
