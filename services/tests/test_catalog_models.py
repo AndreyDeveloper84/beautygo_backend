@@ -184,7 +184,7 @@ class TestSpecialistService:
         salon = SalonService.objects.create(
             tenant=tenant, template=None, category=category,
             name="Услуга без шаблона", duration_minutes=60,
-            requires_health_check=False,
+            requires_health_check=None,
         )
         sp = SpecialistService.objects.create(
             salon_service=salon, specialist=specialist_user.specialist_profile,
@@ -192,6 +192,77 @@ class TestSpecialistService:
             requires_health_check=False,
         )
         assert sp.resolved_requires_health_check() is None
+
+    def test_salon_can_say_no_without_a_template(
+        self, tenant, category, specialist_user,
+    ):
+        """Салон вправе ответить «нет» — и этот ответ отличим от молчания.
+
+        Предмет правки целиком. Решение владельца §90 — размечать каталог
+        явными ответами салона — было неисполнимо наполовину: сказать «да»
+        салон мог, сказать «нет» ему было нечем. Поставленный человеком
+        `False` был неотличим от `False`, которого никто не касался, и при
+        отсутствующем шаблоне оба давали «не знаю».
+
+        Теперь `False` у салона — ответ, и услуга бронируется без передачи
+        оператору. `None` осталось молчанием.
+        """
+        salon = SalonService.objects.create(
+            tenant=tenant, template=None, category=category,
+            name="Салон ответил: не нужно", duration_minutes=60,
+            requires_health_check=False,
+        )
+        sp = SpecialistService.objects.create(
+            salon_service=salon, specialist=specialist_user.specialist_profile,
+            duration_minutes=60, price=Decimal("2000"),
+            requires_health_check=False,
+        )
+        assert sp.resolved_requires_health_check() is False
+
+    def test_salon_silence_is_still_unknown(
+        self, tenant, category, specialist_user,
+    ):
+        """Положительная стража: «нет» не подменяет молчание.
+
+        Без неё тест выше зеленел бы и на коде, который просто вернул
+        `False` вместо `None` для всех — то есть на возврате прежнего
+        дефекта под новым именем.
+        """
+        salon = SalonService.objects.create(
+            tenant=tenant, template=None, category=category,
+            name="Салон молчит", duration_minutes=60,
+            requires_health_check=None,
+        )
+        sp = SpecialistService.objects.create(
+            salon_service=salon, specialist=specialist_user.specialist_profile,
+            duration_minutes=60, price=Decimal("2000"),
+            requires_health_check=False,
+        )
+        assert sp.resolved_requires_health_check() is None
+
+    def test_salon_cannot_relax_a_gated_template(
+        self, tenant, category, specialist_user,
+    ):
+        """D1 escalate-only: «нет» салона не снимает поднятый пол шаблона.
+
+        Право отвечать в обе стороны у салона есть только там, где канон
+        промолчал. Ослабить канон он не может — иначе трёхзначность стала
+        бы способом обойти гейт, а не способом ответить на вопрос.
+        """
+        gated = ServiceTemplate.objects.create(
+            category=category, name="Гейтед канон", name_short="Гейт",
+            duration_default=60, requires_health_check=True,
+        )
+        salon = SalonService.objects.create(
+            tenant=tenant, template=gated, category=category,
+            name="Салон спорит с каноном", requires_health_check=False,
+        )
+        sp = SpecialistService.objects.create(
+            salon_service=salon, specialist=specialist_user.specialist_profile,
+            duration_minutes=60, price=Decimal("2000"),
+            requires_health_check=False,
+        )
+        assert sp.resolved_requires_health_check() is True
 
     def test_health_check_explicit_raise_survives_a_missing_template(
         self, tenant, category, specialist_user,
