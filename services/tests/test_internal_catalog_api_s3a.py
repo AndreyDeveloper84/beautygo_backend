@@ -113,7 +113,11 @@ class TestSalonServiceRead:
         data = r.json().get("data", r.json())
         assert str(data["id"]) == str(salon_service.id)
         assert str(data["template"]) == str(gated_template.id)
-        assert data["requires_health_check"] is False
+        # Собственный признак САЛОНА трёхзначен с 0018: фикстура его не
+        # трогает, значит салон на вопрос не отвечал — это `null`, а не
+        # `false`. Прежнее `False` здесь было умолчанием колонки, и
+        # утверждение «салон сказал нет» оно не несло никогда.
+        assert data["requires_health_check"] is None
 
     def test_filter_by_tenant(self, salon_service):
         other = Tenant.objects.create(slug="s3a-other", name="Other")
