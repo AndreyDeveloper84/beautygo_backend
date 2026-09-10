@@ -1,6 +1,7 @@
 """Django Admin for appointments + booking engine models."""
 from __future__ import annotations
 
+from django import forms
 from django.contrib import admin
 from django.utils.html import format_html
 
@@ -90,8 +91,114 @@ class AppointmentAdmin(admin.ModelAdmin):
         )
 
 
+class WorkingHoursInlineForm(forms.ModelForm):
+    """Одна строка расписания — с проверкой ОБЕИХ сторон «выходного».
+
+    Правило простое: выходной — это отсутствие часов, а не часы, которые
+    никто не смотрит. Но держать его в этом репозитории было нечем:
+
+    * у модели нет ни ``constraints``, ни ``clean`` — проверено чтением
+      ``appointments/models.py``, а не памятью;
+    * ``WorkingHoursSerializer.validate`` (``users/schedule_api.py``)
+      заходит внутрь только при ``is_working_day=True``. Ветки «выходной,
+      а времена заданы» там нет вовсе, и «выходной с 10 до 19» проходит
+      через API сегодня.
+
+    Сторож был односторонним: он охранял рабочий день и молчал про
+    выходной. Здесь проверяются обе стороны, потому что вторая — это
+    строка, которая ЧИТАЕТСЯ потребителем как «не работает», а выглядит
+    в базе как заполненная смена, и разойтись они могут молча.
+
+    Проверки рабочего дня повторяют сериализатор дословно, а не «примерно
+    так же»: два разных набора правил на один объект — это способ
+    получить строку, которую одна дверь принимает, а другая нет.
+    """
+
+    class Meta:
+        model = SpecialistWorkingHours
+        fields = ('day_of_week', 'is_working_day', 'start_time', 'end_time',
+                  'break_start', 'break_end')
+
+    def clean(self):
+        cleaned = super().clean()
+        working = cleaned.get('is_working_day')
+        start = cleaned.get('start_time')
+        end = cleaned.get('end_time')
+        break_start = cleaned.get('break_start')
+        break_end = cleaned.get('break_end')
+
+        if not working:
+            # Сторона, которой не было нигде. Молча обнулить времена за
+            # человека нельзя: он мог ошибиться галочкой, а не полями, и
+            # тихая очистка стёрла бы смену, которую он вводил.
+            filled = {
+                name: value
+                for name, value in (
+                    ('start_time', start), ('end_time', end),
+                    ('break_start', break_start), ('break_end', break_end),
+                )
+                if value is not None
+            }
+            if filled:
+                for name in filled:
+                    self.add_error(
+                        name,
+                        'Выходной день не может иметь времён. Уберите время '
+                        'или снимите отметку «выходной».',
+                    )
+            return cleaned
+
+        if not start or not end:
+            raise forms.ValidationError(
+                'У рабочего дня должны быть начало и конец смены.'
+            )
+        if start >= end:
+            raise forms.ValidationError('Начало смены должно быть раньше конца.')
+
+        if break_start or break_end:
+            if not (break_start and break_end):
+                raise forms.ValidationError(
+                    'Перерыв задаётся двумя границами: начало и конец.'
+                )
+            if break_start >= break_end:
+                raise forms.ValidationError(
+                    'Начало перерыва должно быть раньше его конца.'
+                )
+            if break_start < start or break_end > end:
+                raise forms.ValidationError('Перерыв должен быть внутри смены.')
+
+        return cleaned
+
+
+class SpecialistWorkingHoursInline(admin.TabularInline):
+    """Семь строк расписания рядом с мастером, а не отдельным экраном.
+
+    Живёт здесь, рядом с ``SpecialistWorkingHoursAdmin``, а монтируется в
+    ``users.admin.SpecialistProfileAdmin`` — тем же приёмом, которым
+    ``TenantMastersInline`` живёт рядом с админкой мастера и монтируется
+    в салон: правила у одного объекта обязаны быть одни и те же, где бы
+    его ни заводили.
+
+    Заводя салон из пяти мастеров, человек делал тридцать пять отправок
+    формы, которая про мастера даже не упоминает. Здесь он делает пять.
+
+    ``extra = 0`` намеренно. Пустые строки — это приглашение заполнить
+    семь дней руками, а руками их заполнять и не нужно: для этого есть
+    действие-пресет. Пустая форма, которую предлагают заполнить, —
+    ровно тот путь, которым в базу попадают выдуманные часы.
+    """
+
+    model = SpecialistWorkingHours
+    form = WorkingHoursInlineForm
+    extra = 0
+    ordering = ('day_of_week',)
+    verbose_name = 'День недели'
+    verbose_name_plural = 'Рабочие часы'
+
+
 @admin.register(SpecialistWorkingHours)
 class SpecialistWorkingHoursAdmin(admin.ModelAdmin):
+    form = WorkingHoursInlineForm
     list_display = ('specialist', 'day_of_week', 'is_working_day', 'start_time', 'end_time')
     list_filter = ('is_working_day', 'day_of_week')
     search_fields = ('specialist__display_name',)

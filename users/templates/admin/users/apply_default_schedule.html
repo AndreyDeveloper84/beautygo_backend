@@ -1,0 +1,50 @@
+{% extends "admin/base_site.html" %}
+{% comment %}
+Страница подтверждения пресета расписания.
+
+Она существует ровно затем, чтобы часы были ВИДИМЫМ РЕШЕНИЕМ, а не
+значением, которое появилось само. Четверо пилотных мастеров числятся
+работающими семь дней с 10:00 до 19:00 без обеда — этого никто не вводил,
+это изготовленное умолчание прежнего кода, и по нему сегодня продают
+клиенту. Экран показывает, ЧТО будет записано и КОМУ, до записи.
+
+Мастера, у которых расписание уже есть, показаны отдельным списком и по
+умолчанию не трогаются: «выделить всё» в админке ставится одним движением,
+и молчаливое затирание настоящего графика было бы тем же умолчанием, только
+поверх данных.
+{% endcomment %}
+{% block content %}
+<form method="post">{% csrf_token %}
+
+  <h2>Что будет записано</h2>
+  <table>
+    <tr><th>Пн – Пт</th><td>{{ preset_start|time:"H:i" }} – {{ preset_end|time:"H:i" }}, без перерыва</td></tr>
+    <tr><th>Сб, Вс</th><td>выходной</td></tr>
+  </table>
+  <p>Выходные записываются строками, а не отсутствием строк: пустота не
+     отличает «выходной» от «расписание не заводили».</p>
+
+  {% if fresh %}
+    <h2>Мастера без расписания — им запишется ({{ fresh|length }})</h2>
+    <ul>{% for s in fresh %}<li>{{ s }}</li>{% endfor %}</ul>
+  {% endif %}
+
+  {% if untouched %}
+    <h2>У этих расписание уже есть ({{ untouched|length }})</h2>
+    <ul>{% for s in untouched %}<li>{{ s }}</li>{% endfor %}</ul>
+    <p><label>
+      <input type="checkbox" name="overwrite" value="yes">
+      Перезаписать существующее расписание у этих мастеров
+    </label></p>
+    <p>Без этой отметки они будут пропущены, и вы увидите их поимённо.</p>
+  {% endif %}
+
+  {% for obj in queryset %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ obj.pk }}">
+  {% endfor %}
+  <input type="hidden" name="action" value="apply_default_schedule">
+  <input type="hidden" name="confirm" value="yes">
+  <input type="submit" value="Записать расписание">
+  <a href="#" onclick="window.history.back(); return false;">Отмена</a>
+</form>
+{% endblock %}
