@@ -31,6 +31,13 @@ pytestmark = pytest.mark.django_db
 SERVICE_TOKEN = "test-token-DRF-300"
 URL = "/api/v1/nutrition/internal/profile/"
 
+#: §92 / срез N-a2: параметры тела принимаются только с утверждением о
+#: согласии. Предмет этих тестов — расчёт, идемпотентность и
+#: PATCH-семантика; утверждение здесь часть ВАЛИДНОГО запроса, а не
+#: предмет проверки. Сам сторож проверяется в
+#: ``test_personal_calculation_consent.py``.
+CONSENT = {"type": "personal_calculation", "document_version": "v1"}
+
 
 @pytest.fixture(autouse=True)
 def _set_service_token(settings):
@@ -221,6 +228,7 @@ class TestGetProfile:
         # Seed via POST first
         c = APIClient()
         c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "goal": "maintain", "pace": "moderate",
         }, format="json", **headers)
@@ -234,22 +242,22 @@ class TestGetProfile:
 class TestPostProfileValidation:
     def test_age_below_min_rejected(self, proxy_user, headers):
         c = APIClient()
-        resp = c.post(URL, {"age": 14}, format="json", **headers)
+        resp = c.post(URL, {"consent": CONSENT, "age": 14}, format="json", **headers)
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
 
     def test_age_above_max_rejected(self, proxy_user, headers):
         c = APIClient()
-        resp = c.post(URL, {"age": 105}, format="json", **headers)
+        resp = c.post(URL, {"consent": CONSENT, "age": 105}, format="json", **headers)
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
 
     def test_weight_out_of_range_rejected(self, proxy_user, headers):
         c = APIClient()
-        resp = c.post(URL, {"weight_kg": 25}, format="json", **headers)
+        resp = c.post(URL, {"consent": CONSENT, "weight_kg": 25}, format="json", **headers)
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
 
     def test_height_out_of_range_rejected(self, proxy_user, headers):
         c = APIClient()
-        resp = c.post(URL, {"height_cm": 100}, format="json", **headers)
+        resp = c.post(URL, {"consent": CONSENT, "height_cm": 100}, format="json", **headers)
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
 
     def test_unknown_health_flag_rejected(self, proxy_user, headers):
@@ -267,6 +275,7 @@ class TestPostProfileUpsert:
     def test_first_post_creates_profile_with_norms(self, proxy_user, headers):
         c = APIClient()
         resp = c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "activity_coefficient": 1.4,
             "goal": "lose", "pace": "moderate",
@@ -280,11 +289,12 @@ class TestPostProfileUpsert:
     def test_patch_semantics_only_provided_fields_change(self, proxy_user, headers):
         c = APIClient()
         c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "goal": "maintain", "pace": "moderate",
         }, format="json", **headers)
         # Send only weight_kg — age/height/gender/goal must persist.
-        resp = c.post(URL, {"weight_kg": 72.0}, format="json", **headers)
+        resp = c.post(URL, {"consent": CONSENT, "weight_kg": 72.0}, format="json", **headers)
         body = resp.json()["data"]
         assert body["weight_kg"] == 72.0
         assert body["age"] == 40
@@ -293,6 +303,7 @@ class TestPostProfileUpsert:
     def test_skipped_fields_set_skipped_flags(self, proxy_user, headers):
         c = APIClient()
         resp = c.post(URL, {
+            "consent": CONSENT,
             "gender": "female",
             "_skipped_fields": ["weight", "age"],
         }, format="json", **headers)
@@ -303,6 +314,7 @@ class TestPostProfileUpsert:
     def test_complete_true_sets_onboarded_at(self, proxy_user, headers):
         c = APIClient()
         r = c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "goal": "maintain", "pace": "moderate", "complete": True,
         }, format="json", **headers)
@@ -313,6 +325,7 @@ class TestPostProfileUpsert:
     ):
         c = APIClient()
         r1 = c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "complete": True,
         }, format="json", **headers)
@@ -323,6 +336,7 @@ class TestPostProfileUpsert:
     def test_pregnant_returns_overrides_applied(self, proxy_user, headers):
         c = APIClient()
         resp = c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 30, "height_cm": 165, "weight_kg": 65.0,
             "goal": "lose", "pace": "moderate",
             "health_flags": {"pregnant": True},
@@ -338,6 +352,7 @@ class TestIdempotencyKey:
     def test_replay_returns_cached_response(self, proxy_user, headers):
         c = APIClient()
         body = {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "goal": "lose", "pace": "moderate",
         }
@@ -352,12 +367,14 @@ class TestIdempotencyKey:
         h = {**headers, "HTTP_IDEMPOTENCY_KEY": "abc-300-2"}
         # 1st call sets weight 70 with the idem key
         c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
         }, format="json", **h)
         # Mutate without idem key to weight 80
-        c.post(URL, {"weight_kg": 80.0}, format="json", **headers)
+        c.post(URL, {"consent": CONSENT, "weight_kg": 80.0}, format="json", **headers)
         # Replay 1st call — must NOT revert to 70 in DB; cached response is returned.
         r3 = c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
         }, format="json", **h)
         assert r3.json()["data"]["weight_kg"] == 70.0  # cached response
@@ -381,6 +398,7 @@ class TestProfileWiresIntoWaterContext:
         # Create profile with eating_disorder=True
         c = APIClient()
         c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 30, "height_cm": 165, "weight_kg": 60.0,
             "goal": "lose", "pace": "moderate",
             "health_flags": {"eating_disorder": True},

@@ -47,6 +47,13 @@ pytestmark = pytest.mark.django_db
 SERVICE_TOKEN = "test-token-DRF-1339"
 URL = "/api/v1/nutrition/internal/profile/"
 
+#: §92 / срез N-a2: параметры тела принимаются только с утверждением о
+#: согласии. Предмет этих тестов — расчёт, идемпотентность и
+#: PATCH-семантика; утверждение здесь часть ВАЛИДНОГО запроса, а не
+#: предмет проверки. Сам сторож проверяется в
+#: ``test_personal_calculation_consent.py``.
+CONSENT = {"type": "personal_calculation", "document_version": "v1"}
+
 
 @pytest.fixture(autouse=True)
 def _set_service_token(settings):
@@ -81,6 +88,7 @@ class TestAssumedInputsMarker:
     ):
         c = APIClient()
         resp = c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165,
             "goal": "maintain", "pace": "moderate",
         }, format="json", **headers)
@@ -114,6 +122,7 @@ class TestAssumedInputsMarker:
     def test_with_weight_marker_empty(self, proxy_user, headers):
         c = APIClient()
         resp = c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165,
             "weight_kg": 70.0, "goal": "maintain", "pace": "moderate",
         }, format="json", **headers)
@@ -139,6 +148,7 @@ class TestAssumedInputsMarker:
         """
         c = APIClient()
         payload = {
+            "consent": CONSENT,
             "gender": "female", "age": 70, "height_cm": 150,
             "activity_coefficient": 1.0, "goal": "lose", "pace": "moderate",
         }
