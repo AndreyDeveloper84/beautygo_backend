@@ -54,6 +54,14 @@ class ResolvedService:
     duration_minutes: int | None
     price: Decimal
     buffer_after_minutes: int = 0
+    #: Трёхзначный вердикт медицинского скрининга — тот же, что отдаёт
+    #: ``SpecialistService.resolved_requires_health_check()``: True / False
+    #: / None («не знаем»). Считается ЗДЕСЬ, потому что здесь в руках уже
+    #: есть ребро ``SpecialistService``: сторож на пути записи получает
+    #: готовый ответ и не ходит в ORM второй раз за прочитанным.
+    #:
+    #: Про легаси-слой маркетплейса — см. комментарий в самой ветке.
+    requires_health_check: bool | None = None
 
 
 def resolve_bookable_service(
@@ -90,6 +98,29 @@ def resolve_bookable_service(
             duration_minutes=service.duration_minutes,
             price=service.price,
             buffer_after_minutes=service.buffer_after_minutes,
+            # У легаси-`Service` поля здоровья НЕТ вообще — ни на нём, ни
+            # над ним: каскад «шаблон → салон → мастер» живёт только в
+            # каноническом слое, а легаси канонической связи иметь не может
+            # по устройству. Спрашивать негде.
+            #
+            # `None` — «не знаем», и сторож пути записи такую бронь закроет.
+            # Выбор между `False` и `None` здесь сегодня ничего не решает:
+            # слой ПУСТ (0 строк, перемерено 09.09.2026, сторож ниже), и
+            # ветка недостижима. Решает он то, каким будет отказ, ЕСЛИ слой
+            # когда-нибудь наполнится:
+            #
+            #     False  медицинский гейт молча открыт        тихо
+            #     None   каждая легаси-бронь уедет человеку   громко
+            #
+            # Для медицинского гейта громкий отказ лучше тихого пропуска, и
+            # о наполнении слоя мы хотим узнать — а `False` устроен так, что
+            # не узнаем.
+            #
+            # Прецедент легаси-пути бота («better UX than dead-end every
+            # flow») сюда не переносится: там довод опирался на живой поток,
+            # здесь потока нет вовсе. Одинаковый выбор при разных
+            # обстоятельствах — копирование, а не последовательность.
+            requires_health_check=None,
         )
 
     # 2) Salon catalog — only with an ACTIVE SpecialistService link in
@@ -132,4 +163,8 @@ def resolve_bookable_service(
         duration_minutes=duration,
         price=link.price,
         buffer_after_minutes=link.buffer_after_minutes,
+        # Канонический слой отвечает трёхзначно: True / False / None.
+        # `None` — «шаблона нет и никто флаг не поднимал», и сторож пути
+        # записи закрывает такую бронь отдельным именем причины.
+        requires_health_check=link.resolved_requires_health_check(),
     )
