@@ -19,7 +19,7 @@ from rest_framework.test import APIClient
 
 from appointments.models import Appointment, OutboxEvent
 from payments.models import Payment
-from services.models import SalonService, Service, ServiceCategory, SpecialistService
+from services.models import SalonService, ServiceCategory, SpecialistService
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
 

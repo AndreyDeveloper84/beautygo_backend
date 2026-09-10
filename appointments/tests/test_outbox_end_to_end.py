@@ -31,7 +31,7 @@ from appointments.application.services.create_booking_service import (
 )
 from appointments.models import OutboxEvent
 from appointments.tasks import dispatch_outbox_events
-from services.models import SalonService, Service, ServiceCategory, SpecialistService
+from services.models import SalonService, ServiceCategory, SpecialistService
 from users.models import SpecialistProfile, User
 
 

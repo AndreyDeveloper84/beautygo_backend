@@ -27,7 +27,7 @@ from appointments.models import Appointment
 from billing.models import BookingFee, SpecialistSubscription, TariffPlan
 from billing.services import accrue_booking_fee
 from payments.models import Payment
-from services.models import SalonService, Service, ServiceCategory, SpecialistService
+from services.models import SalonService, ServiceCategory, SpecialistService
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
 
@@ -69,7 +69,7 @@ def category(db):
     return ServiceCategory.objects.create(name="JW2 Cat", slug="jw2-cat")
 
 
-def _make_service(specialist, category, name="JW2 Service") -> Service:
+def _make_service(specialist, category, name="JW2 Service") -> SalonService:
     # Тенант читаем ИЗ БАЗЫ, а не из объекта: профиль здесь
     # правился отдельным экземпляром, и закешированный `.tenant`
     # показывает подставной тенант autouse-фикстуры вместо
