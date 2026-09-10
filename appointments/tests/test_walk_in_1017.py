@@ -19,7 +19,7 @@ from rest_framework.test import APIClient
 
 from appointments.models import Appointment, OutboxEvent
 from payments.models import Payment
-from services.models import Service, ServiceCategory
+from services.models import SalonService, Service, ServiceCategory, SpecialistService
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
 
@@ -67,11 +67,39 @@ def category(db):
 
 @pytest.fixture
 def service(specialist, category):
-    return Service.objects.create(
-        specialist=specialist, category=category, name="Walk-in Service",
-        price=Decimal("1500.00"), duration_minutes=60, is_active=True,
-        buffer_after_minutes=0,
+    # Тенант читаем ИЗ БАЗЫ, а не из объекта: профиль здесь
+    # правился отдельным экземпляром, и закешированный `.tenant`
+    # показывает подставной тенант autouse-фикстуры вместо
+    # настоящего. Резолвер фильтрует по тенанту, и расхождение
+    # читалось бы как «услуги не существует».
+    _tenant_id = SpecialistProfile.objects.values_list(
+        "tenant_id", flat=True
+    ).get(pk=specialist.pk)
+    salon_service = SalonService.objects.create(
+        tenant_id=_tenant_id,
+        category=category,
+        name="Walk-in Service",
+        duration_minutes=60,
+        base_price=Decimal("1500.00"),
+        is_active=True,
+        # §100: путь маркетплейса закрыт fail-closed — он не несёт
+        # медицинского признака и отвечает NOT_APPLICABLE. Предмет
+        # этого файла — walk-in, а не слой каталога,
+        # поэтому фикстура переехала на слой, которым идёт боевая
+        # запись. Салон отвечает на вопрос о здоровье явным «нет»:
+        # это ответ, а не умолчание колонки — после 0018 они
+        # различимы.
+        requires_health_check=False,
     )
+    SpecialistService.objects.create(
+        salon_service=salon_service,
+        specialist=specialist,
+        duration_minutes=60,
+        price=Decimal("1500.00"),
+        buffer_after_minutes=0,
+        is_active=True,
+    )
+    return salon_service
 
 
 @pytest.fixture
