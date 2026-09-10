@@ -83,35 +83,47 @@ class TestDispatchWaterReminders:
     def test_no_active_users_returns_zero(self, db):
         assert dispatch_water_reminders() == {"queued": 0, "skipped": 0}
 
-    def test_user_behind_goal_gets_reminder(self, client_user):
+    def test_nobody_is_reminded_while_there_is_no_fluid_target(
+        self, client_user,
+    ):
+        """Отстаёт человек или нет — решать НЕ ПО ЧЕМУ, и пуш не уходит.
+
+        Тест назывался ``test_user_behind_goal_gets_reminder`` и был
+        главным подтверждением, что механика работает. «Отстаёт»
+        определялось сравнением с ``NutritionProfile.daily_water_ml`` —
+        выходом формулы ``30 мл × вес`` (+300/+700), которую владелец
+        снял 09.09.2026 (§82). Пока в столбце результат снятой формулы,
+        прочитать его значит эту формулу применить.
+
+        Следствие названо прямо, а не спрятано: напоминание про воду не
+        уходит НИКОМУ до утверждения методики (§85, раздел 4). Это самое
+        острое из мест, где выдумка уезжала человеку САМА, дважды в
+        день, и читается она с заблокированного экрана. Выдуманный повод
+        написать человеку хуже молчания.
+
+        Молчание при этом СЧИТАЕТСЯ: ``skipped`` растёт, и в логе видно,
+        скольким сегодня не написали. Молчаливая пустота была бы отказом
+        без имени.
+        """
         _own_norm(client_user)
-        # Active recently + below half-goal today.
         WaterLog.objects.create(
             user=client_user, amount_ml=250, logged_at=_now_utc(),
         )
         result = dispatch_water_reminders()
-        assert result["queued"] == 1
-        assert Notification.objects.filter(
-            user=client_user, template_id="water_reminder",
-        ).count() == 1
-
-    def test_user_at_goal_skipped(self, client_user):
-        _own_norm(client_user)
-        # Already past 50% threshold (1000 ml at his own norm 2000).
-        WaterLog.objects.create(
-            user=client_user, amount_ml=500, logged_at=_now_utc(),
-        )
-        WaterLog.objects.create(
-            user=client_user, amount_ml=500, logged_at=_now_utc(),
-        )
-        WaterLog.objects.create(
-            user=client_user, amount_ml=200, logged_at=_now_utc(),
-        )
-        result = dispatch_water_reminders()
         assert result["queued"] == 0
         assert result["skipped"] == 1
+        assert not Notification.objects.filter(
+            user=client_user, template_id="water_reminder",
+        ).exists()
 
-    def test_idempotent_within_today(self, client_user):
+    def test_repeat_beats_stay_silent_too(self, client_user):
+        """Дедуп проверять стало не на чем — проверяется молчание обоих.
+
+        Тест назывался ``test_idempotent_within_today`` и сторожил, что
+        два удара планировщика дают одно сообщение. Сообщений теперь
+        ноль, и утверждение перевёрнуто: ни один удар не пишет человеку.
+        Дедуп вернётся вместе с ориентиром — код рассылки цел.
+        """
         _own_norm(client_user)
         WaterLog.objects.create(
             user=client_user, amount_ml=250, logged_at=_now_utc(),
@@ -119,11 +131,9 @@ class TestDispatchWaterReminders:
         dispatch_water_reminders()
         result = dispatch_water_reminders()
         assert result["queued"] == 0
-        assert result["skipped"] == 1
-        # Only one Notification persisted across the two beats.
         assert Notification.objects.filter(
             user=client_user, template_id="water_reminder",
-        ).count() == 1
+        ).count() == 0
 
     def test_dormant_users_excluded(self, db, client_user):
         # WaterLog 30 days ago — outside the 7-day active window.
@@ -145,8 +155,12 @@ class TestDispatchWaterReminders:
             user=other_active_client, amount_ml=2200, logged_at=_now_utc(),
         )
         result = dispatch_water_reminders()
-        assert result["queued"] == 1
-        assert result["skipped"] == 1
+        # Оба активны, обоим не пишут: ориентира нет ни у кого. Тест
+        # сторожил, что чужая вода не считается за свою; проверять это
+        # стало не на чем, но ОКНО АКТИВНОСТИ он держит по-прежнему —
+        # оба человека попали в счётчик, а не выпали из выборки.
+        assert result["queued"] == 0
+        assert result["skipped"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -250,15 +264,20 @@ class TestWaterReminderDoesNotInventANorm:
 
     Экран человек открывает сам, а это — исходящий пуш: выдуманная
     норма приезжала на телефон без всякого запроса, дважды в день, и
-    называла себя «твоей». Знаменатель брался из
-    ``NUTRITION_DEFAULT_WATER_GOAL_ML`` (2000 мл = ровно те самые восемь
-    стаканов по 250) и решал ДВЕ вещи: кого признать отстающим и какое
-    число написать в тексте.
+    называла себя «твоей». Дорога была двухступенчатой:
 
-    После правки норма — только своя, из анкеты питания; нет её — нет и
-    напоминания. Само число в текст не идёт: пуш видно с заблокированного
-    экрана, а норма воды считается как 30 мл × вес, то есть называет вес
-    (§35 п.10). Человеку остаётся правда о нём самом — сколько он выпил.
+    1. Знаменатель брался из ``NUTRITION_DEFAULT_WATER_GOAL_ML``
+       (2000 мл = ровно восемь стаканов по 250) и решал ДВЕ вещи: кого
+       признать отстающим и какое число написать в тексте. Число из
+       текста убрали, источник сменили на анкету.
+    2. В анкете лежал результат формулы ``30 мл × вес`` (+300/+700) —
+       то же чужое число с лишним шагом. Владелец снял и формулу (§82),
+       поэтому снят последний читатель: решать «отстаёт» не по чему.
+
+    Пуш не уходит никому до утверждения методики (§85, раздел 4). Не
+    уходит и тем, у кого столбец ещё заполнен старым значением —
+    миграцию данных не делали, а «новым не считаем, старым считаем»
+    было бы половинчатой правкой.
     """
 
     def test_no_anketa_means_no_reminder(self, client_user):
@@ -271,32 +290,22 @@ class TestWaterReminderDoesNotInventANorm:
             user=client_user, template_id="water_reminder",
         ).exists()
 
-    def test_behind_is_measured_against_his_own_norm(self, client_user):
-        """600 мл — это 60 % от 1000 (не отстаёт) и 30 % от 2000 (отстаёт).
+    def test_a_stale_column_value_does_not_bring_the_push_back(
+        self, client_user,
+    ):
+        """Заполненный столбец у существующего клиента ничего не решает.
 
-        Единственная строка, различающая две нормы: покрасневший тест
-        здесь означает, что решение «отстаёт» снова принимает чужое
-        число.
+        Самое невыгодное предусловие для правки: миграцию данных не
+        делали (отдельный срез), и у людей с пройденной анкетой в
+        ``daily_water_ml`` до сих пор лежит ``30 мл × вес``. Пуш не
+        должен уходить и им — иначе снятие формулы означало бы «новым
+        не считаем, старым считаем».
         """
-        NutritionProfile.objects.create(user=client_user, daily_water_ml=1000)
-        WaterLog.objects.create(
-            user=client_user, amount_ml=600, logged_at=_now_utc(),
-        )
-        result = dispatch_water_reminders()
-        assert result["queued"] == 0
-        assert result["skipped"] == 1
-
-    def test_the_text_names_no_norm(self, client_user):
         NutritionProfile.objects.create(user=client_user, daily_water_ml=1500)
         WaterLog.objects.create(
             user=client_user, amount_ml=250, logged_at=_now_utc(),
         )
-        assert dispatch_water_reminders()["queued"] == 1
-        note = Notification.objects.get(
+        assert dispatch_water_reminders()["queued"] == 0
+        assert not Notification.objects.filter(
             user=client_user, template_id="water_reminder",
-        )
-        assert note.body == "Сегодня выпито 250 мл. Не забывай!"
-        # Ни выдуманной нормы, ни своей — числа, из которого выводится вес.
-        assert "2000" not in note.body
-        assert "1500" not in note.body
-        assert "water_goal_ml" not in note.data
+        ).exists()
