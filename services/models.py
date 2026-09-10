@@ -385,7 +385,26 @@ class SalonService(models.Model):
     # Escalate-only floor vs template (D1): admin may set True on a salon
     # even when the template does not require it; cannot relax a gated
     # template downstream (SpecialistService.resolved_requires_health_check).
-    requires_health_check = models.BooleanField(default=False)
+    #
+    # ТРЁХЗНАЧНОЕ, и третье состояние несущее::
+    #
+    #     NULL   салон на вопрос НЕ ОТВЕЧАЛ
+    #     True   салон говорит: скрининг нужен
+    #     False  салон говорит: скрининг НЕ нужен
+    #
+    # Двузначным поле быть не может, и это выяснилось на живом решении.
+    # Владелец постановил (§90) размечать пилотный каталог явными ответами
+    # салона вместо умолчаний кода — и оказалось, что сказать «нет» салону
+    # нечем: поставленный человеком `False` был неотличим от `False`,
+    # которого никто не касался. Решение было бы исполнимо наполовину:
+    # «да» записывалось бы, «нет» пропадало молча, а услуга навсегда
+    # оставалась бы «неизвестной» и уезжала оператору.
+    #
+    # Это тот же инвариант, который на этой границе уже проведён дважды —
+    # у зеркала (`MasterService.resolved_requires_health_check`) и у самого
+    # вердикта: **отсутствие обязано быть отличимо от значения.** Здесь, у
+    # источника признака, он оставался непроведённым дольше всех.
+    requires_health_check = models.BooleanField(null=True, blank=True, default=None)
     is_active = models.BooleanField(default=True)
     source = models.CharField(
         max_length=10, choices=Source.choices, default=Source.MANUAL,
@@ -531,6 +550,21 @@ class SpecialistService(models.Model):
         max_digits=10, decimal_places=2,
         validators=[MinValueValidator(1)],
     )
+    # ДВУЗНАЧНОЕ — сознательно, и это решение, а не недосмотр рядом с
+    # трёхзначным полем салона.
+    #
+    # У мастера по D1 есть право только ПОДНЯТЬ признак и нет права его
+    # опустить: ослабить пол шаблона или ответ салона он не может. Значит
+    # высказывание «мастер говорит: не нужно» в модели не существует, и
+    # третьему состоянию нечего было бы означать. `False` здесь — полный
+    # ответ («не эскалирую»), а не молчание.
+    #
+    # У салона иначе: он — авторитет по собственным внетаксономическим
+    # услугам и вправе отвечать в обе стороны, поэтому его поле обязано
+    # различать «нет» и «не отвечал».
+    #
+    # Половинчатая трёхзначность была бы хуже последовательной
+    # двузначности: читатель не знал бы, чему верить.
     requires_health_check = models.BooleanField(default=False)
     buffer_after_minutes = models.PositiveSmallIntegerField(default=0)
     is_active = models.BooleanField(default=True)
@@ -571,16 +605,77 @@ class SpecialistService(models.Model):
             return template.duration_default
         return None
 
-    def resolved_requires_health_check(self) -> bool:
-        """Escalate-only OR across template floor, salon, specialist (D1)."""
+    def resolved_requires_health_check(self) -> bool | None:
+        """Escalate-only OR across template floor, salon, specialist (D1).
+
+        Tri-state. ``None`` means **unknown**, not ``False``.
+
+        Precedence, and it is deliberate:
+
+        1. An explicit raise anywhere wins. ``salon.requires_health_check``
+           or ``self.requires_health_check`` being ``True`` returns ``True``
+           even with no template — escalate-only is preserved exactly.
+        2. With a template, its flag is the canonical floor and the answer
+           is a real ``bool``.
+        3. **Without a template, and with nobody having raised the flag,
+           the answer is ``None``.** There is no canonical floor to read,
+           so the honest answer is "not known".
+
+        Why case 3 is not ``False``. The previous version wrote
+        ``template.requires_health_check if template is not None else False``,
+        which turned *the absence of a canonical link* into *a positive
+        claim about safety*. Measured on the pilot 09.09.2026: of 387 active
+        bookable edges, 96 resolved ``False`` solely because no template was
+        attached — 95 of them the pilot salon's, i.e. every edge a real
+        person can book there. The salon had not answered the question; the
+        cascade answered it for the salon.
+
+        Consumers must decide what to do with ``None`` explicitly. The bot
+        mirror already models it — ``MasterService.resolved_requires_health_check``
+        is ``null=True`` and its booking gate treats ``NULL`` as "screening
+        required" — and never saw a ``NULL`` only because this method never
+        produced one.
+        """
         salon = self.salon_service
         template = salon.template
         template_floor = (
-            template.requires_health_check if template is not None else False
+            template.requires_health_check if template is not None else None
         )
-        return bool(
-            template_floor or salon.requires_health_check or self.requires_health_check
-        )
+
+        # 1. Поднятый пол шаблона не снимает никто — это и есть D1
+        #    «escalate-only»: салон не вправе ослабить канон.
+        #
+        #    СРОК ГОДНОСТИ У ЭТОГО ШАГА. Он трактует поднятый пол
+        #    БЕЗУСЛОВНО — не потому, что так решено, а потому, что
+        #    различить нечем: у `ServiceTemplate.requires_health_check`
+        #    нет поля происхождения. Решение владельца §95 (10.09.2026):
+        #    гейт, выведенный правилом, — черновой, и скрининга по нему
+        #    не требуем; просмотренный человеком — требуем. Сегодня из
+        #    102 гейтованных шаблонов человеком не просмотрен ни один
+        #    (85 выведены членством в подкатегории, 17 — словом в
+        #    названии), и сид про себя говорит «draft flags for later
+        #    owner review», а поля под этот review не существует.
+        #
+        #    Как только провенанс шаблона появится, ЭТОТ ШАГ ОБЯЗАН
+        #    измениться: черновой пол перестаёт быть безусловным. Пока
+        #    поля нет, безусловность — граница знания, а не решение, и
+        #    принимать её за решение нельзя.
+        if template_floor is True:
+            return True
+        # 2. Эскалация мастера. Он вправе поднять и не вправе опустить,
+        #    поэтому поле остаётся двузначным — см. его докстринг.
+        if self.requires_health_check:
+            return True
+        # 3. Ответ салона, если салон отвечал. Трёхзначное поле: `False`
+        #    здесь — это сказанное «нет», а не молчание.
+        if salon.requires_health_check is not None:
+            return bool(salon.requires_health_check)
+        # 4. Шаблон есть и флага не несёт — ответил канон.
+        if template_floor is False:
+            return False
+        # 5. Опоры нет и никто не отвечал. Отсутствие свидетельства не
+        #    является свидетельством безопасности.
+        return None
 
     def clean(self) -> None:
         if self.is_active and self.resolved_duration() is None:
