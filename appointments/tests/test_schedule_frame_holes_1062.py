@@ -366,7 +366,7 @@ class TestGuardAppliesToClientsNotStaff:
     at the sick master.
     """
 
-    def _dto(self, client_user, specialist, service, start_at, actor_role):
+    def _dto(self, client_user, specialist, bookable_service, start_at, actor_role):
         from uuid import uuid4
 
         from appointments.application.dto import CreateBookingDTO
@@ -374,7 +374,7 @@ class TestGuardAppliesToClientsNotStaff:
         return CreateBookingDTO(
             client_id=client_user.id,
             specialist_id=specialist.id,
-            service_id=service.id,
+            service_id=bookable_service.id,
             start_at=start_at,
             idempotency_key=str(uuid4()),
             payment_required=False,
@@ -383,14 +383,14 @@ class TestGuardAppliesToClientsNotStaff:
         )
 
     def test_client_cannot_book_a_closed_sunday_through_the_service(
-        self, client_user, scheduled_specialist, service,
+        self, client_user, scheduled_specialist, bookable_service,
     ):
         from appointments.application.services.create_booking_service import (
             CreateBookingService,
         )
 
         dto = self._dto(
-            client_user, scheduled_specialist, service,
+            client_user, scheduled_specialist, bookable_service,
             _utc(_next_weekday(6), 10), actor_role="user",
         )
 
@@ -398,14 +398,14 @@ class TestGuardAppliesToClientsNotStaff:
             CreateBookingService().execute(dto)
 
     def test_walk_in_on_the_same_closed_sunday_is_allowed(
-        self, client_user, scheduled_specialist, service,
+        self, client_user, scheduled_specialist, bookable_service,
     ):
         from appointments.application.services.create_booking_service import (
             CreateBookingService,
         )
 
         dto = self._dto(
-            client_user, scheduled_specialist, service,
+            client_user, scheduled_specialist, bookable_service,
             _utc(_next_weekday(6), 10), actor_role="specialist",
         )
 
@@ -505,7 +505,7 @@ class TestFrameAndHolesCompose:
             )
 
     def test_staff_override_does_not_reach_through_an_absence(
-        self, client_user, scheduled_specialist, service,
+        self, client_user, scheduled_specialist, bookable_service,
     ):
         """Staff may book outside working hours; they may not book over a
         master who is marked absent. The schedule says when the salon
@@ -524,7 +524,7 @@ class TestFrameAndHolesCompose:
         dto = CreateBookingDTO(
             client_id=client_user.id,
             specialist_id=scheduled_specialist.id,
-            service_id=service.id,
+            service_id=bookable_service.id,
             start_at=_utc(sunday, 16),
             idempotency_key=str(uuid4()),
             payment_required=False,
