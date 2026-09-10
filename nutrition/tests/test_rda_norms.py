@@ -263,7 +263,23 @@ class TestRDABackwardsCompat:
         # Protein floor: 1.4 g/kg for maintain.
         assert 95 <= norms.daily_protein_g <= 105
 
-    def test_water_unchanged(self, adult_female_inputs):
-        # 30 ml/kg × 70 = 2100.
+    def test_the_fluid_target_is_gone_entirely(self, adult_female_inputs):
+        """Ориентира по жидкости в расчёте больше НЕТ вовсе.
+
+        Тест назывался ``test_water_unchanged`` и сторожил, что RDA-слой
+        (DRF-265) не тронул воду: 30 мл × 70 = 2100. Формулу
+        владелец снял 09.09.2026 (§82), и поля больше нет — не
+        ноль в нём и не ``None``, а нет самого поля: пустое поле
+        пережило бы правку и через неделю снова получило бы число
+        «по умолчанию».
+
+        Витаминные RDA рядом ОСТАЮТСЯ и проверяются тем же
+        тестом: RDA — популяционная норма по определению, она не
+        выводится из веса и не притворяется персональной. Снять их
+        заодно значило бы решить за владельца.
+        """
         norms = compute_norms(adult_female_inputs)
-        assert norms.daily_water_ml == 2100
+        assert not hasattr(norms, "daily_water_ml")
+        # POSITIVE: витаминный слой цел — отрицание выше
+        # про воду, а не про сломанный ``compute_norms``.
+        assert norms.daily_vitamin_c_mg > 0

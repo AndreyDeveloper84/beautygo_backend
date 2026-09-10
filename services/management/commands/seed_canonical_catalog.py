@@ -25,6 +25,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
+from django.utils import timezone
 
 from services.models import ServiceCategory, ServiceTemplate
 
@@ -32,6 +33,10 @@ DEFAULT_FILE = (
     Path(__file__).resolve().parents[2] / "seeds" / "canonical_catalog_2026-07.json"
 )
 NAME_SHORT_MAX = 40
+
+#: Имя правила одобрения. Версией служит имя файла-источника: он
+#: датирован, и по нему видно, каким изданием справочника одобрено.
+APPROVAL_RULE = "seed_canonical_catalog"
 
 
 class Command(BaseCommand):
@@ -62,7 +67,7 @@ class Command(BaseCommand):
             return
 
         with transaction.atomic():
-            n_cat, n_tpl, n_hc = self._seed(rows)
+            n_cat, n_tpl, n_hc = self._seed(rows, source_name=path.name)
 
         self.stdout.write(self.style.SUCCESS(
             f"Canonical catalog seeded: +{n_cat} categories, +{n_tpl} templates "
@@ -77,7 +82,7 @@ class Command(BaseCommand):
         hc = sum(1 for r in rows if str(r.get("requires_health_check")).lower() == "true")
         return len(cats), len(subs), hc
 
-    def _seed(self, rows: list[dict]) -> tuple[int, int, int]:
+    def _seed(self, rows: list[dict], *, source_name: str) -> tuple[int, int, int]:
         created_categories = 0
 
         # 1. Root categories (tenant-null / global taxonomy).
@@ -123,6 +128,22 @@ class Command(BaseCommand):
                 category=category,
                 name=name,
                 defaults={
+                    # Одобрение детерминированным правилом с провенансом
+                    # (§76 разрешает такую форму наравне с человеком,
+                    # §93 требует её у канона). Правило проверяемое:
+                    # строка пришла из эталонного списка владельца, имя
+                    # файла — в основании. Без этого повторный прогон
+                    # сида оставлял бы весь справочник черновым.
+                    #
+                    # `seed_service_templates` (DRF-196) намеренно НЕ
+                    # трогаем: его сорок строк — не эталонный список
+                    # владельца, и черновое состояние для них верное.
+                    "lifecycle": ServiceTemplate.Lifecycle.APPROVED,
+                    "approved_by": None,
+                    "approved_rule": APPROVAL_RULE,
+                    "approval_rule_version": source_name,
+                    "approved_at": timezone.now(),
+                    "approval_source_ref": f"эталонный справочник владельца: {source_name}",
                     "name_short": name[:NAME_SHORT_MAX],
                     "duration_default": None,
                     "duration_min": None,

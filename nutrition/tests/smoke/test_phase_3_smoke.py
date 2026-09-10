@@ -327,7 +327,13 @@ class TestSection3Water:
     def test_3_1_pure_water_no_beverage(
         self, client_api, headers, profile_default, seed_beverages,
     ):
-        """3.1 — POST {ml:250} без beverage → water_ml=250, kcal=0, pct=12."""
+        """3.1 — POST {ml:250} без beverage → water_ml=250, kcal=0, без цели.
+
+        Процент из проверки снят вместе с ориентиром: формула
+        ``30 мл × вес`` снята до утверждения методики (§82, §85 раздел
+        4), а процент — её производная. Доли от несуществующей нормы не
+        бывает, и ключа в ответе нет вовсе.
+        """
         resp = client_api.post(
             URL_WATER, {"ml": 250}, format="json", **headers,
         )
@@ -335,7 +341,8 @@ class TestSection3Water:
         body = resp.json()["data"]
         assert body["water_ml"] == 250
         assert body["kcal"] == 0
-        assert body["today_progress_pct"] == 12
+        assert "today_progress_pct" not in body
+        assert "today_norm_water_ml" not in body
 
     def test_3_2_coffee_beverage_macros_and_caffeine(
         self, client_api, headers, profile_default, seed_beverages,
@@ -393,46 +400,45 @@ class TestSection3Water:
         assert r1.json()["data"]["entry_id"] == r2.json()["data"]["entry_id"]
         assert WaterEntry.objects.count() == 1
 
-    def test_3_7_milestone_50_fires_once_per_day(
+    def test_3_7_to_3_10_no_milestone_fires_without_a_target(
         self, client_api, headers, profile_default, seed_beverages,
     ):
-        """3.7 — 50% триггерится один раз; третья запись уже без milestone."""
+        """3.7–3.10 — ни один порог не срабатывает: считать не от чего.
+
+        Четыре сценария сведены в один, потому что различал их ПОРОГ —
+        50%, 100%, 150% от нормы, — а порог это производная ориентира
+        (``norm × threshold / 100``). Ориентира по жидкости больше нет
+        ни у кого: формула ``30 мл × вес`` снята до утверждения методики
+        (§82; §85 раздел 4).
+
+        «Дневная норма выполнена 💧» было самым громким местом, где
+        выдумка возвращалась человеку как его достижение. Поздравить с
+        выполнением числа, которое мы ему придумали, хуже, чем
+        промолчать.
+
+        Объёмы взяты те же, что раньше давали все три порога подряд.
+        """
+        volumes = [500, 500, 200, 1100, 950, 1000]
+        last = None
+        for ml in volumes:
+            last = client_api.post(
+                URL_WATER, {"ml": ml}, format="json", **headers,
+            )
+            assert not (last.json()["data"].get("milestone_text") or "")
+        # POSITIVE: записи не потерялись — снимается ориентир, не факт.
+        assert last is not None
+        assert last.json()["data"]["today_total_water_ml"] == sum(volumes)
+
+    def test_3_10_undo_still_works(
+        self, client_api, headers, profile_default, seed_beverages,
+    ):
+        """3.10 — путь назад цел: снят порог, а не отмена записи."""
         client_api.post(URL_WATER, {"ml": 500}, format="json", **headers)
         r2 = client_api.post(URL_WATER, {"ml": 500}, format="json", **headers)
-        assert "Половина" in (r2.json()["data"]["milestone_text"] or "")
-        r3 = client_api.post(URL_WATER, {"ml": 200}, format="json", **headers)
-        text = r3.json()["data"]["milestone_text"] or ""
-        assert "Половина" not in text
-
-    def test_3_8_milestone_100(
-        self, client_api, headers, profile_default, seed_beverages,
-    ):
-        """3.8 — норма выполнена."""
-        client_api.post(URL_WATER, {"ml": 1100}, format="json", **headers)
-        r = client_api.post(URL_WATER, {"ml": 950}, format="json", **headers)
-        assert "норма выполнена" in (r.json()["data"]["milestone_text"] or "").lower()
-
-    def test_3_9_milestone_150(
-        self, client_api, headers, profile_default, seed_beverages,
-    ):
-        """3.9 — 150% — «запасом»."""
-        client_api.post(URL_WATER, {"ml": 1100}, format="json", **headers)
-        client_api.post(URL_WATER, {"ml": 950}, format="json", **headers)
-        r = client_api.post(URL_WATER, {"ml": 1000}, format="json", **headers)
-        assert "запасом" in (r.json()["data"]["milestone_text"] or "")
-
-    def test_3_10_undo_does_not_unlock_milestone(
-        self, client_api, headers, profile_default, seed_beverages,
-    ):
-        """3.10 — после DELETE milestone-записи 50% повторно не сработает."""
-        client_api.post(URL_WATER, {"ml": 500}, format="json", **headers)
-        r2 = client_api.post(URL_WATER, {"ml": 500}, format="json", **headers)
-        assert "Половина" in (r2.json()["data"]["milestone_text"] or "")
-        client_api.delete(
+        resp = client_api.delete(
             f"{URL_WATER}{r2.json()['data']['entry_id']}/", **headers,
         )
-        r3 = client_api.post(URL_WATER, {"ml": 500}, format="json", **headers)
-        assert r3.json()["data"]["milestone_text"] is None
+        assert resp.status_code == status.HTTP_200_OK
 
     def test_3_11_alcohol_recovery_hint(
         self, client_api, headers, profile_default, seed_beverages,
@@ -828,15 +834,25 @@ class TestSection5Patterns:
         slugs = {p["slug"] for p in resp.json()["data"]["patterns"]}
         assert "low_protein" in slugs
 
-    def test_5_4_low_water_fires_with_4_dry_days_of_7(
+    def test_5_4_low_water_does_not_fire_without_a_target(
         self, client_api, headers, proxy_user, profile_default, add_water_at,
     ):
-        """5.4 — 4 дня <70% воды → low_water."""
+        """5.4 — «мало воды» не поднимается: сравнивать не с чем.
+
+        «Сухой день» определялся как ``< 70% от нормы``, а норма читалась
+        из ``NutritionProfile.daily_water_ml`` — выхода снятой формулы
+        ``30 мл × вес`` (§82). Паттерн это вывод О ЧЕЛОВЕКЕ, он уезжает
+        в промпт модели как факт; делать его от чужой мерки хуже, чем не
+        делать. Вернётся вместе с методикой (§85, раздел 4).
+
+        Контроль присутствия — соседние 5.3 и 5.5: они от ориентира по
+        жидкости не зависят и в этом же прогоне поднимаются.
+        """
         for i in range(4):
             add_water_at(proxy_user, days_ago=i, ml=500)
         resp = client_api.get(URL_PATTERNS, **headers)
         slugs = {p["slug"] for p in resp.json()["data"]["patterns"]}
-        assert "low_water" in slugs
+        assert "low_water" not in slugs
 
     def test_5_5_late_dinner_fires(
         self, client_api, headers, proxy_user, profile_default, add_food_at,
@@ -1271,43 +1287,54 @@ class TestSection8CrossFeature:
     def test_8_2_profile_change_updates_water_norm(
         self, client_api, headers, proxy_user, seed_beverages,
     ):
-        """8.2 — после смены профиля POST /water/ использует новую норму.
+        """8.2 — смена веса больше НЕ меняет ориентир по жидкости.
 
-        Verifies the WaterContext loader actually re-reads the profile
-        rather than caching a stale daily_water_ml. We change weight_kg
-        (not just goal) because daily_water_ml is computed as
-        ``WATER_ML_PER_KG × weight_kg + flag adjustments`` — independent
-        of goal. Without a weight delta, before == after and the
-        endpoint assertion would hold even for a broken stale-cache
-        loader, masking the regression.
+        Тест назывался ``test_8_2_profile_change_updates_water_norm`` и
+        доказывал, что загрузчик перечитывает профиль, а не кеширует
+        норму. Разделительной чертой был вес: норма считалась как
+        ``WATER_ML_PER_KG × weight_kg + надбавки``, поэтому 70 → 80 кг
+        давало 2100 → 2400.
+
+        Ровно это владелец и снял (§82): норма, меняющаяся от веса,
+        НАЗЫВАЕТ вес — а §35 п.10 запрещает выводить его на экран.
+        Число, делящееся на 30 нацело, называло ещё и состояние: +300
+        при беременности, +700 при кормлении.
+
+        Утверждение перевёрнуто: ни до, ни после смены веса ориентира
+        нет. Пересчёт профиля при этом ЖИВ — контроль присутствия ниже
+        смотрит на калории, которые от веса зависеть не перестали.
         """
         client_api.post(URL_PROFILE, {
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "goal": "maintain",
         }, format="json", **headers)
-        before = NutritionProfile.objects.get(user=proxy_user).daily_water_ml
-        assert before > 0  # recompute happened on initial POST
+        row_before = NutritionProfile.objects.get(user=proxy_user)
+        before_water = row_before.daily_water_ml
+        before_kcal = row_before.daily_kcal
+        assert before_water == 0
+        # POSITIVE: пересчёт на POST состоялся — калории посчитаны.
+        assert before_kcal > 0
 
-        # Bump weight to force a *different* daily_water_ml (30 ml/kg ×
-        # 80 = 2400 vs 30 × 70 = 2100). Now the endpoint can't pass by
-        # accidentally returning a stale cached norm.
         client_api.post(
             URL_PROFILE, {"weight_kg": 80.0, "goal": "lose"},
             format="json", **headers,
         )
-        after = NutritionProfile.objects.get(user=proxy_user).daily_water_ml
-        assert after > 0
-        assert after != before, (
-            "weight change must change the computed water norm — "
-            "otherwise this test can't distinguish a correct loader "
-            "from a stale-cache loader"
-        )
+        row_after = NutritionProfile.objects.get(user=proxy_user)
+        # NEGATIVE: ориентира по жидкости нет ни до, ни после.
+        assert row_after.daily_water_ml == 0
+        # POSITIVE: загрузчик профиль ПЕРЕЧИТАЛ — калории сдвинулись
+        # вслед за весом. Без этой половины отрицание выше прошло бы и
+        # у сломанного пересчёта.
+        assert row_after.daily_kcal != before_kcal
 
-        # The endpoint must surface the *current* norm.
+        # Ручка воды тоже не показывает ориентира — ни ключа, ни нуля.
         water_resp = client_api.post(
             URL_WATER, {"ml": 250}, format="json", **headers,
         )
-        assert water_resp.json()["data"]["today_norm_water_ml"] == after
+        water_body = water_resp.json()["data"]
+        assert "today_norm_water_ml" not in water_body
+        # POSITIVE: стакан записан.
+        assert water_body["water_ml"] == 250
 
     def test_8_3_scan_caption_then_summary_with_comment_round_trip(
         self, client_api, headers, proxy_user, settings, patch_openai_client,
