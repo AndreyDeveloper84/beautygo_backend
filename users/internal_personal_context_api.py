@@ -47,6 +47,8 @@ from rest_framework.views import APIView
 
 from users import personalization_engine as engine
 from users.models import User, UserPersonalContext
+from privacy_audit.mixins import AuditedPersonalDataAccess
+from privacy_audit.models import PersonalDataAccessLog
 from users.permissions import IsInternalBearerForSubject
 from users.personal_context_erasure import erase_personal_context
 from users.personal_context_views import _GREEN_ZONE_FIELDS
@@ -119,12 +121,18 @@ class _UpdateItemSerializer(serializers.Serializer):
     )
 
 
-class InternalPersonalContextView(APIView):
+class InternalPersonalContextView(AuditedPersonalDataAccess, APIView):
     """GET / PATCH персонального контекста по ``ayla_user_id`` (Bearer)."""
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "ayla_user_id"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.PERSONAL_CONTEXT
+    audit_operations = {
+        "GET": PersonalDataAccessLog.Operation.READ_CONTEXT,
+        "PATCH": PersonalDataAccessLog.Operation.WRITE_CONTEXT,
+        "DELETE": PersonalDataAccessLog.Operation.ERASE_CONTEXT,
+    }
 
     def get(self, request: Request, ayla_user_id: str) -> Response:
         user = _resolve_user(ayla_user_id)
@@ -197,12 +205,14 @@ class InternalPersonalContextView(APIView):
         })
 
 
-class InternalAskEligibilityView(APIView):
+class InternalAskEligibilityView(AuditedPersonalDataAccess, APIView):
     """Обёртка над 8 правилами: какое ОДНО поле спросить (или нельзя)."""
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "ayla_user_id"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.PERSONAL_CONTEXT
+    audit_operations = {"GET": PersonalDataAccessLog.Operation.ASK_METADATA}
 
     def get(self, request: Request, ayla_user_id: str) -> Response:
         user = _resolve_user(ayla_user_id)
@@ -233,12 +243,14 @@ class _FieldBodySerializer(serializers.Serializer):
     field = serializers.ChoiceField(choices=[f for f, _ in _ASK_CANDIDATES])
 
 
-class InternalMarkAskedView(APIView):
+class InternalMarkAskedView(AuditedPersonalDataAccess, APIView):
     """POST — отметить, что вопрос по полю ЗАДАН (24ч cooldown)."""
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "ayla_user_id"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.PERSONAL_CONTEXT
+    audit_operations = {"POST": PersonalDataAccessLog.Operation.ASK_METADATA}
 
     def post(self, request: Request, ayla_user_id: str) -> Response:
         user = _resolve_user(ayla_user_id)
@@ -250,12 +262,14 @@ class InternalMarkAskedView(APIView):
         return success_response({"ok": True})
 
 
-class InternalSkipView(APIView):
+class InternalSkipView(AuditedPersonalDataAccess, APIView):
     """POST — пользователь пропустил вопрос (anti-spam, skip x2 → пауза)."""
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "ayla_user_id"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.PERSONAL_CONTEXT
+    audit_operations = {"POST": PersonalDataAccessLog.Operation.ASK_METADATA}
 
     def post(self, request: Request, ayla_user_id: str) -> Response:
         user = _resolve_user(ayla_user_id)

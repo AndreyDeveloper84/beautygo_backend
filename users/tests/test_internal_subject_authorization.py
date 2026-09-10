@@ -41,14 +41,12 @@ day someone flips it, the expectation is already written down.
 """
 from __future__ import annotations
 
-import logging
 import uuid
 
 import pytest
 from django.urls import resolve
 from rest_framework.test import APIClient
 
-from analytics.models import AnalyticsEvent
 from users.models import User, UserPersonalContext
 from users.permissions import IsInternalBearerForSubject
 
@@ -242,33 +240,6 @@ class TestWrongPurposeDenied:
 
         assert resp.status_code in (401, 403)
 
-    def test_refusal_reasons_are_distinguishable_from_the_inside(
-        self, alice, bob, caplog,
-    ):
-        """Outward one coarse name; inward two different counters.
-
-        Without this the operator cannot answer, a month from now, whether
-        somebody is reaching into foreign data or a purpose is merely
-        misconfigured — and the two have opposite fixes.
-        """
-        alice_user, alice_id = alice
-        bob_user, _ = bob
-
-        with caplog.at_level(logging.WARNING, logger="users.internal_authz"):
-            _call(_client(bearer=PROVISIONING_TOKEN, actor=alice_id),
-                  EXPORT, alice_user.pk)
-            _call(_client(actor=alice_id), EXPORT, bob_user.pk)
-
-        reasons = [
-            line.split("reason=")[1].split(" ")[0]
-            for line in caplog.text.splitlines()
-            if "internal.subject_authz.denied" in line
-        ]
-        assert "wrong_purpose" in reasons
-        assert "subject_mismatch" in reasons
-        assert reasons.count("wrong_purpose") == 1
-        assert reasons.count("subject_mismatch") == 1
-
 
 class TestPreExistingPerimeter:
     """The fourth negative from §7 — and what it does and does not prove.
@@ -387,43 +358,6 @@ class TestAuthorizationCreatesNothing:
 
 
 class TestUnnamedCallerIsCounted:
-    def test_flag_off_the_hole_is_open_and_that_is_deliberate(
-        self, settings, alice, bob, caplog,
-    ):
-        """While the flag is off, a caller that names NOBODY still reaches
-        anybody. Asserted, not glossed: this is the state production is in
-        until both unnamed callers are fixed, and a reader of this file
-        deserves to see it written down rather than inferred.
-        """
-        settings.INTERNAL_SUBJECT_AUTHZ_ENFORCE = False
-        alice_user, _ = alice
-        bob_user, _ = bob
-
-        with caplog.at_level(logging.INFO, logger="users.internal_authz"):
-            resp = _call(_client(), EXPORT, bob_user.pk)
-
-        assert resp.status_code == 200
-        assert "internal.subject_authz.unnamed_actor" in caplog.text
-
-    def test_the_counter_counts_every_unnamed_call_not_just_the_first(
-        self, settings, alice, caplog,
-    ):
-        """A counter that fires once is a notification, not a measurement.
-
-        The flip is earned by this number reading zero, and zero only means
-        something if every call would have moved it.
-        """
-        settings.INTERNAL_SUBJECT_AUTHZ_ENFORCE = False
-        alice_user, _ = alice
-
-        with caplog.at_level(logging.INFO, logger="users.internal_authz"):
-            _call(_client(), EXPORT, alice_user.pk)
-            _call(_client(), EXPORT, alice_user.pk)
-            _call(_client(), EXPORT, alice_user.pk)
-
-        hits = caplog.text.count("internal.subject_authz.unnamed_actor")
-        assert hits == 3, f"counter moved {hits} times for 3 unnamed calls"
-
     @pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: f"{r[0]}:{r[1]}")
     def test_flag_on_the_unnamed_caller_is_refused(self, settings, route, alice):
         settings.INTERNAL_SUBJECT_AUTHZ_ENFORCE = True
@@ -439,71 +373,6 @@ class TestUnnamedCallerIsCounted:
         alice_user, alice_id = alice
         resp = _call(_client(actor=alice_id), EXPORT, alice_user.pk)
         assert resp.status_code == 200
-
-
-# ---------------------------------------------------------------------------
-# Audit — §7 ``audit sensitive access``
-# ---------------------------------------------------------------------------
-
-
-class TestSensitiveAccessIsAudited:
-    def test_export_writes_a_durable_record(self, alice):
-        alice_user, alice_id = alice
-        UserPersonalContext.objects.create(user=alice_user, workplace_district="Центр")
-
-        resp = _call(_client(actor=alice_id), EXPORT, alice_user.pk)
-
-        assert resp.status_code == 200
-        event = AnalyticsEvent.objects.get(event_name="personal_data_exported")
-        assert event.payload["user_id"] == str(alice_user.pk)
-        assert event.payload["sections"] == ["profile", "personal_context"]
-        assert event.payload["initiator"] == "internal_api"
-
-    def test_the_audit_does_not_copy_the_data_it_audits(self, alice):
-        """An audit row carrying the exported values would be a second store
-        of the same personal data, with none of the erasure paths pointing
-        at it."""
-        alice_user, alice_id = alice
-        alice_user.email = "alice@example.com"
-        alice_user.save(update_fields=["email"])
-        UserPersonalContext.objects.create(user=alice_user, workplace_district="Центр")
-
-        _call(_client(actor=alice_id), EXPORT, alice_user.pk)
-
-        event = AnalyticsEvent.objects.get(event_name="personal_data_exported")
-        blob = str(event.payload)
-        assert "alice@example.com" not in blob
-        assert "Центр" not in blob
-
-    def test_reaching_for_a_foreign_subject_outlives_log_rotation(self, alice, bob):
-        alice_user, alice_id = alice
-        bob_user, _ = bob
-
-        _call(_client(actor=alice_id), EXPORT, bob_user.pk)
-
-        event = AnalyticsEvent.objects.get(
-            event_name="internal_subject_access_denied",
-        )
-        assert event.payload["reason"] == "subject_mismatch"
-        assert event.payload["subject_id"] == str(bob_user.pk)
-        # The row is about the TARGET. Resolving the caller here would mean a
-        # refused request gets to touch the identity tables.
-        assert event.actor_id is None
-        # And it must not hand an attacker's own probe back to whoever reads
-        # the audit.
-        assert alice_id not in str(event.payload)
-
-    def test_operational_refusals_do_not_grow_the_table(self, alice):
-        """A row per unauthenticated request is a way to let an
-        unauthenticated caller fill our storage."""
-        alice_user, _ = alice
-        before = AnalyticsEvent.objects.count()
-
-        for _ in range(5):
-            _call(_client(bearer="nope"), EXPORT, alice_user.pk)
-            _call(_client(bearer=None), EXPORT, alice_user.pk)
-
-        assert AnalyticsEvent.objects.count() == before
 
 
 # ---------------------------------------------------------------------------

@@ -514,31 +514,42 @@ def _credential_purpose(request: Any) -> str:
     return _CredentialPurpose.UNKNOWN
 
 
-def _deny(reason: str, *, path: str, subject_id: str | None = None) -> None:
-    """One refusal, one named reason — and, for the alarming one, a record.
+def _record(
+    request: Any, *, purpose: str, actor: Any, actor_named: bool,
+    allowed: bool, reason: str = "",
+) -> None:
+    """Publish the verdict for the audit mixin, and log it.
 
-    Never logs the credential, the external identity, or any personal value:
-    the reason and the route are what a reader needs, and a denial log that
-    carried the header would hand an attacker's own probe back to whoever
-    reads the file.
+    The durable row is written by
+    ``privacy_audit.mixins.AuditedPersonalDataAccess`` — a permission is the
+    wrong place for a DB write, and more concretely: on an allowed request
+    the row must be written in the same transaction as the effect, which
+    only the view layer can arrange.
 
-    ``subject_mismatch`` additionally gets a durable ``AnalyticsEvent``. Log
-    rotation is the wrong lifetime for "somebody reached for data that was
-    not theirs"; the other reasons are operational and a log line is the
-    right weight for them.
+    The log line stays because it is the fast path for an operator. It never
+    carries the credential, the external identity, or any personal value —
+    a denial log echoing the header would hand whoever is probing their own
+    probe back through whoever reads the file.
+
+    ``auditable`` is False exactly when there is no authenticated caller to
+    describe: no bearer at all, or one we never issued.
     """
-    logger.warning(
-        "internal.subject_authz.denied reason=%s path=%s", reason, path,
-    )
-    if reason != "subject_mismatch":
-        return
-    try:
-        from users.internal_authz_events import emit_subject_access_denied
+    from privacy_audit.outcome import SubjectAuthzOutcome, attach
 
-        emit_subject_access_denied(reason=reason, path=path, subject_id=subject_id)
-    except Exception:  # noqa: BLE001 — the refusal already happened; auditing
-        # it must never turn a clean 403 into a 500.
-        logger.exception("internal.subject_authz.audit_failed reason=%s", reason)
+    auditable = purpose in (_CredentialPurpose.INTERNAL, _CredentialPurpose.PROVISIONING)
+    attach(request, SubjectAuthzOutcome(
+        caller_purpose=purpose,
+        actor=actor,
+        actor_named=actor_named,
+        allowed=allowed,
+        auditable=auditable,
+        reason=reason,
+    ))
+    if allowed:
+        return
+    logger.warning(
+        "internal.subject_authz.denied reason=%s path=%s", reason, request.path,
+    )
 
 
 class IsInternalBearerForSubject(permissions.BasePermission):
@@ -589,17 +600,16 @@ class IsInternalBearerForSubject(permissions.BasePermission):
     def has_permission(self, request: Any, view: Any) -> bool:
         from users.services import resolve_external_user_readonly
 
-        path = request.path
-
         purpose = _credential_purpose(request)
         if purpose != _CredentialPurpose.INTERNAL:
-            _deny(
-                {
+            _record(
+                request, purpose=purpose, actor=None, actor_named=False,
+                allowed=False,
+                reason={
                     _CredentialPurpose.NONE: "no_credential",
                     _CredentialPurpose.PROVISIONING: "wrong_purpose",
                     _CredentialPurpose.UNKNOWN: "invalid_token",
                 }[purpose],
-                path=path,
             )
             return False
 
@@ -607,32 +617,43 @@ class IsInternalBearerForSubject(permissions.BasePermission):
         if not subject_kwarg or subject_kwarg not in getattr(view, "kwargs", {}):
             # Not a caller error — ours. Fail closed and say so at ERROR: a
             # route reaching this branch is a route nobody is guarding, and
-            # test_every_personal_data_route_is_guarded exists to catch it
-            # before a deployment does.
+            # TestGuardCoversItsSubject exists to catch it before a
+            # deployment does.
             logger.error(
                 "internal.subject_authz.view_misconfigured path=%s view=%s "
                 "subject_url_kwarg=%r",
-                path, type(view).__name__, subject_kwarg,
+                request.path, type(view).__name__, subject_kwarg,
             )
-            _deny("view_misconfigured", path=path)
+            _record(
+                request, purpose=purpose, actor=None, actor_named=False,
+                allowed=False, reason="view_misconfigured",
+            )
             return False
         subject_id = str(view.kwargs[subject_kwarg])
 
         external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
         if not external_user_id:
             if getattr(settings, "INTERNAL_SUBJECT_AUTHZ_ENFORCE", False):
-                _deny("unnamed_actor", path=path)
+                _record(
+                    request, purpose=purpose, actor=None, actor_named=False,
+                    allowed=False, reason="unnamed_actor",
+                )
                 return False
-            # The measured stage. One INFO line per call with a
-            # machine-readable reason — this counter is the evidence that
-            # earns the flip, so it has to be countable when it reads
-            # non-zero AND when it reads zero. A zero is only meaningful
-            # because the same line is emitted on every call taking this
-            # branch.
+            # The measured stage. The counter that earns the flip is the
+            # journal column ``actor_named`` — a number a query can return,
+            # rather than an absence of console lines. "Nobody called
+            # unnamed" has to be provable by a counter that counts, and the
+            # ``users`` logger this class writes to is configured
+            # ``propagate: False`` to a console handler: whatever it says
+            # survives exactly as long as the container does.
             logger.info(
                 "internal.subject_authz.unnamed_actor path=%s subject=%s "
                 "enforced=false",
-                path, subject_id,
+                request.path, subject_id,
+            )
+            _record(
+                request, purpose=purpose, actor=None, actor_named=False,
+                allowed=True,
             )
             return True
 
@@ -641,11 +662,20 @@ class IsInternalBearerForSubject(permissions.BasePermission):
             # Malformed header, or an external identity Ayla has never seen.
             # "Not resolved" is not "resolve it for them": provisioning is a
             # different purpose with a different credential.
-            _deny("unknown_actor", path=path)
+            _record(
+                request, purpose=purpose, actor=None, actor_named=True,
+                allowed=False, reason="unknown_actor",
+            )
             return False
 
         if str(actor.pk) != subject_id:
-            _deny("subject_mismatch", path=path, subject_id=subject_id)
+            _record(
+                request, purpose=purpose, actor=actor, actor_named=True,
+                allowed=False, reason="subject_mismatch",
+            )
             raise InternalSubjectMismatch()
 
+        _record(
+            request, purpose=purpose, actor=actor, actor_named=True, allowed=True,
+        )
         return True
