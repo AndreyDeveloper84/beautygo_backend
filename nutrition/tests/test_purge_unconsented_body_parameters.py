@@ -32,6 +32,10 @@ def _profile(username, **over):
         goal="maintain",
         bmr=1392,
         daily_kcal=1590,
+        # Состояние ПОСЛЕ N-b: ориентиры очищены, происхождения нет.
+        # Без этого сторож порядка (см. класс ниже) отказал бы каждому
+        # тесту удаления — и отказал бы правильно.
+        targets_source=NutritionProfile.TargetsSource.NONE,
     )
     fields.update(over)
     return NutritionProfile.objects.create(**fields)
@@ -190,3 +194,66 @@ class TestRowsWithoutBodyParametersAreNotTouched:
         out = _run()
 
         assert "Стирать нечего" in out
+
+
+class TestTheOrderOfExecutionIsAConditionNotAWish:
+    """§103 очищает ориентиры, §120 стирает входы — и только в таком порядке.
+
+    В обратном возникает окно, где входы стёрты, а ориентиры
+    показываются: ориентир как актуальный без происхождения, что §92
+    правило 5 запрещает прямо.
+
+    Окно не гипотетическое — два профиля пилота уже в нём. Условие,
+    записанное в тело PR, через месяц прочитает не тот, кто запускает,
+    поэтому оно стоит в коде и отказывает.
+    """
+
+    def test_apply_refuses_while_the_targets_still_have_provenance(self):
+        from django.core.management.base import CommandError
+
+        profile = _profile(
+            "purge-too-early",
+            targets_source=NutritionProfile.TargetsSource.UNKNOWN_LEGACY,
+        )
+
+        with pytest.raises(CommandError) as exc:
+            _run("--apply")
+
+        assert "Сначала N-b" in str(exc.value)
+        # И ГЛАВНОЕ: отказ означает, что не стёрто ничего.
+        profile.refresh_from_db()
+        assert profile.weight_kg == 70.0
+
+    def test_the_dry_run_says_it_is_too_early_instead_of_refusing(self):
+        """Сухой прогон не отказывает — он предупреждает.
+
+        Отказать ему значило бы отнять у человека возможность посмотреть,
+        что БУДЕТ стёрто, до того как порядок соблюдён. Отчёт безопасен
+        по построению; запрет нужен только необратимому действию.
+        """
+        _profile(
+            "purge-dry-too-early",
+            targets_source=NutritionProfile.TargetsSource.UNKNOWN_LEGACY,
+        )
+
+        out = _run()
+
+        assert "СЕЙЧАС ЗАПУСКАТЬ РАНО" in out
+        assert "70.0" in out  # значения всё равно показаны
+
+    def test_after_n_b_the_same_call_goes_through(self):
+        """Положительная стража: сторож порядка закрывает НЕ навсегда.
+
+        Без неё тесты выше зеленели бы и на команде, которая отказывает
+        всегда, — то есть на неисполнимом решении §120 вместо
+        отложенного.
+        """
+        profile = _profile(
+            "purge-after-nb",
+            targets_source=NutritionProfile.TargetsSource.NONE,
+        )
+
+        _run("--apply")
+
+        profile.refresh_from_db()
+        assert profile.weight_kg is None

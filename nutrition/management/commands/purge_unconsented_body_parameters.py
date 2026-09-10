@@ -59,7 +59,7 @@ Usage:
 
 from __future__ import annotations
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from nutrition.models import NutritionProfile
@@ -74,6 +74,10 @@ PURGED_SNAPSHOT_KEYS = ("weight_kg", "height_cm", "age")
 #: чтобы запускающий видел, что осталось.
 DERIVED_FIELDS = ("bmr", "daily_kcal", "daily_protein_g", "daily_fat_g",
                   "daily_carbs_g")
+
+
+class OrderViolation(CommandError):
+    """N-b ещё не отработал: ориентиры на месте, входы стирать рано."""
 
 
 class Command(BaseCommand):
@@ -136,8 +140,51 @@ class Command(BaseCommand):
             # «от тела ничего не осталось», а осталось.
             self.stdout.write(f"      ОСТАЁТСЯ (посчитано от них): {remaining}")
 
+        # ПОРЯДОК ИСПОЛНЕНИЯ — условие запуска, а не пожелание.
+        #
+        # §103 очищает ориентиры (`targets_source` → `none`), §120 стирает
+        # входы. В обратном порядке возникает окно, в котором входы уже
+        # стёрты, а ориентиры показываются, — прямое нарушение §92
+        # правило 5: ориентир как актуальный без происхождения.
+        #
+        # Окно это не гипотетическое: два профиля пилота уже в нём (вес
+        # пуст, `bmr` заполнен), и запуск этой команды до N-b добавил бы
+        # к двум ещё четыре.
+        #
+        # Записанное в тело PR условие через месяц прочитает не тот, кто
+        # запускает. Поэтому проверка стоит в коде и отказывает.
+        premature = [
+            p for p in affected
+            if p.targets_source != NutritionProfile.TargetsSource.NONE
+        ]
+        if premature and apply:
+            raise OrderViolation(
+                "Сначала N-b (§103): у %d из %d профилей ориентиры ещё не "
+                "очищены — targets_source=%s. Стереть входы сейчас значит "
+                "оставить ориентир без происхождения, что запрещено §92 "
+                "правилом 5. Запускать после того, как N-b обнулит "
+                "ориентиры и проставит source=none."
+                % (
+                    len(premature),
+                    len(affected),
+                    sorted({p.targets_source for p in premature}),
+                )
+            )
+
         if not apply:
             self.stdout.write("")
+            if premature:
+                self.stdout.write(
+                    self.style.WARNING(
+                        "СЕЙЧАС ЗАПУСКАТЬ РАНО: у %d из %d профилей ориентиры "
+                        "не очищены (targets_source=%s). Сначала N-b (§103)."
+                        % (
+                            len(premature),
+                            len(affected),
+                            sorted({p.targets_source for p in premature}),
+                        )
+                    )
+                )
             self.stdout.write(
                 self.style.WARNING(
                     "Ничего не изменено. Для удаления: --apply"
