@@ -223,6 +223,16 @@ def test_master_created_through_the_form_reaches_the_client_feed(client):
             "address": "",
             "location_lat": "",
             "location_lng": "",
+            # management-формы вложенного блока расписания. Блок появился
+            # вместе с ним же: часы мастера переехали на его форму, чтобы
+            # завести салон из пяти мастеров стоило пять отправок, а не
+            # тридцать пять. Без этих ключей Django отвергает весь POST —
+            # форма возвращается страницей с ошибкой, а не редиректом, и
+            # тест падает не на предмете, а на неполном запросе.
+            "working_hours-TOTAL_FORMS": "0",
+            "working_hours-INITIAL_FORMS": "0",
+            "working_hours-MIN_NUM_FORMS": "0",
+            "working_hours-MAX_NUM_FORMS": "1000",
         },
     )
     assert resp.status_code == 302, resp.content[:4000]
