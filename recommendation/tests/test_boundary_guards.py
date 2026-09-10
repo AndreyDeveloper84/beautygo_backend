@@ -19,6 +19,12 @@ import ast
 import re
 from pathlib import Path
 
+from recommendation._authority import (
+    NON_RANKING_CONSUMERS,
+    RANKED_OUTPUT_CONSUMERS,
+    RANKING_COMPONENTS,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESOLVER_DIR = REPO_ROOT / "recommendation"
 
@@ -404,3 +410,127 @@ def test_partially_conformant_response_is_invalid_as_a_whole():
     serializer = ResolveResponseSerializer(data=payload)
     assert not serializer.is_valid(), "битый элемент обязан делать невалидным весь ответ"
     assert "ordered" in serializer.errors
+
+
+# ---------------------------------------------------------------------------
+# Вторая ось границы: кто берёт чужой порядок и выдаёт за решение (DRF-1628)
+# ---------------------------------------------------------------------------
+#
+# Сторож выше ищет СИНТАКСИС упорядочивания. Он правдиво видит ноль в
+# `users/home_api.py` и в `specialist_context_builder.py` — они и правда не
+# сортируют. Они зовут того, кто сортирует, и отдают его порядок дальше как
+# ответ Ayla. Такого потребителя проверка на `order_by` не видит по
+# устройству, и ниже закрывается именно это.
+
+
+def _importers_of(module_names: set[str]) -> dict[str, list[tuple[int, str]]]:
+    """Кто импортирует названные модули — разбором дерева, не текстом.
+
+    Текстом нельзя по той же причине, по которой её пришлось выучить
+    выше: докстринг, называющий модуль, — рассказ о правиле, а не его
+    нарушение. `_authority.py` целиком состоит из таких упоминаний.
+    """
+    found: dict[str, list[tuple[int, str]]] = {}
+    for rel, path in _python_files():
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+        except SyntaxError:
+            # Неразбираемый файл не становится молча разрешённым: он
+            # уже роняет `test_unparseable_file_is_not_silently_allowed`.
+            continue
+        hits: list[tuple[int, str]] = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module in module_names:
+                hits.append((node.lineno, node.module))
+            elif isinstance(node, ast.Import):
+                hits.extend(
+                    (node.lineno, alias.name)
+                    for alias in node.names
+                    if alias.name in module_names
+                )
+        if hits:
+            found[rel] = hits
+    return found
+
+
+def test_every_consumer_of_a_ranking_component_is_declared():
+    """Кто зовёт ранжировщика — назван и разобран, что именно берёт.
+
+    Не «зовёт движок», а «берёт у движка порядок» либо «берёт предикат».
+    Разница решающая: первое подменяет авторитет, второе нет. Молчаливый
+    потребитель попадает сюда автоматически и остаётся красным, пока его
+    не разберут словами.
+    """
+    declared = set(RANKED_OUTPUT_CONSUMERS) | set(NON_RANKING_CONSUMERS)
+    undeclared = [
+        f"{rel}:{lines[0][0]}"
+        for rel, lines in _importers_of(set(RANKING_COMPONENTS)).items()
+        if rel not in declared
+    ]
+    assert not undeclared, (
+        "потребитель ранжирующего компонента не объявлен (DRF-1628):\n  "
+        + "\n  ".join(undeclared)
+        + "\n\nВнесите его в RANKED_OUTPUT_CONSUMERS, если он берёт ПОРЯДОК "
+        "(тогда назовите задачу, которая это снимет), или в "
+        "NON_RANKING_CONSUMERS, если берёт предикат либо счёт — "
+        "и напишите, что именно."
+    )
+
+
+def test_every_ranked_output_consumer_names_the_task_that_removes_it():
+    """Долг без задачи — это «временно», которое станет постоянным.
+
+    У второй оси границы, в отличие от первой, постоянных исключений
+    быть не может: взять чужой порядок и выдать за решение — всегда
+    нарушение, вопрос только в сроке.
+    """
+    for path, reason in RANKED_OUTPUT_CONSUMERS.items():
+        assert reason.startswith("DRF-"), (
+            f"{path}: потребитель чужого порядка обязан называть задачу, "
+            f"которая его снимет. Получено: {reason!r}"
+        )
+
+
+def test_declared_consumers_still_import_the_component():
+    """Объявление на потребителя, который больше не зовёт, — мусор.
+
+    Он прикрывает не долг, а пустоту, и вместе с ним перестаёт что-либо
+    значить правило «пустой словарь = граница закрыта».
+    """
+    importers = set(_importers_of(set(RANKING_COMPONENTS)))
+    stale = [
+        rel for rel in (set(RANKED_OUTPUT_CONSUMERS) | set(NON_RANKING_CONSUMERS))
+        if rel not in importers
+    ]
+    assert not stale, (
+        "объявленные потребители больше не импортируют компонент — уберите: "
+        + ", ".join(sorted(stale))
+    )
+
+
+def test_there_is_exactly_one_semantic_authority():
+    """Ролей четыре, авторитет один.
+
+    Если у второго компонента появится роль `SEMANTIC_RANKING`, вопрос
+    «что Ayla рекомендует» получит два ответа, и выбирать между ними
+    будет тот, кто первым попал в поверхность.
+    """
+    from recommendation._authority import ComponentRole, RANKING_COMPONENTS as _rc
+
+    semantic = [name for name, role in _rc.items() if role is ComponentRole.SEMANTIC_RANKING]
+    assert not semantic, (
+        "компонент вне пакета резолвера объявлен семантическим авторитетом: "
+        + ", ".join(semantic)
+    )
+
+
+def test_the_guard_does_not_fire_on_prose_about_the_component():
+    """Сторож различает импорт и рассказ об импорте.
+
+    `_authority.py` называет модуль движка трижды — в докстринге и в
+    реестре строкой. Ни одно из упоминаний импортом не является, и
+    файл обязан остаться чистым. Без этой проверки сторож поймал бы
+    собственную документацию, как уже случалось с текстовой версией
+    соседнего гарда.
+    """
+    assert "recommendation/_authority.py" not in _importers_of(set(RANKING_COMPONENTS))

@@ -127,6 +127,19 @@ class ErrorCode(str, Enum):
     CANCELLATION_NOT_ALLOWED = "CANCELLATION_NOT_ALLOWED"
     SPECIALIST_NOT_ACTIVE = "SPECIALIST_NOT_ACTIVE"
     SERVICE_NOT_ACTIVE = "SERVICE_NOT_ACTIVE"
+    # --- Медицинский скрининг (§89, решение владельца (c) 10.09.2026) ---
+    # Два кода, а не один, и не общий BOOKING_ERROR. Наружу поверхность
+    # вправе показать одну спокойную фразу — человеку наша таксономия не
+    # нужна. Внутрь они обязаны расходиться: очередь разметки услуг
+    # строится на счётчике UNKNOWN, и слитый с REQUIRED он перестаёт
+    # говорить, сколько отказов вызвано нашими же недостающими данными.
+    # На пилоте 10.09.2026 это 96 рёбер из 387 против одного REQUIRED.
+    HEALTH_CHECK_REQUIRED = "HEALTH_CHECK_REQUIRED"
+    HEALTH_CHECK_UNKNOWN = "HEALTH_CHECK_UNKNOWN"
+    # Третье состояние, а не разновидность UNKNOWN: у устаревшего пути
+    # маркетплейса нет колонки, куда мог бы лечь ответ. За UNKNOWN
+    # стоит работа (спросить салон), за этим — не стоит ничего.
+    HEALTH_CHECK_NOT_APPLICABLE = "HEALTH_CHECK_NOT_APPLICABLE"
     BOOKING_ERROR = "BOOKING_ERROR"
 
     # --- Reviews (spec §Отзывы) ---

@@ -1,5 +1,16 @@
 """RecommendationEngine — weighted multi-factor specialist ranking.
 
+**Роль в конвейере: RETRIEVAL / candidate generation** (DRF-1628, реестр
+``recommendation/_authority.py``). Считать этот модуль вправе — владелец
+отнял у него **не право считать, а право быть конечным ответом Ayla**.
+Его выход это `CandidateSet`, а не `Recommendation`, и
+``SearchResult ≠ CatalogResult ≠ CandidateSet ≠ Recommendation``.
+
+Отдать его порядок наружу как ответ может только тот, кто пропустил его
+через Canonical Recommendation Resolver. Потребители, берущие отсюда
+именно порядок, перечислены в ``RANKED_OUTPUT_CONSUMERS`` — каждый с
+задачей, которая его снимет.
+
 Per DRF-105 / M3. Scoring model:
 
   rating          30%
@@ -202,38 +213,10 @@ class RecommendationResult:
     def candidate_ids(self) -> set[UUID]:
         return {c.id for c in self.candidates}
 
-    def to_prompt_summary(self) -> str:
-        """Строка кандидатов для системного промпта. **Без балла.**
-
-        Отсюда убрано `score={c.score:.2f}`. Канон §8: внутренние числа
-        ранжирования не являются публичным семантическим API, а промпт —
-        это вход для того, кто пишет текст человеку. Балл в промпте
-        означал, что модель видит число и вольна его пересказать —
-        и она его пересказывала, вместе с «причинами», которые сама же
-        и сочиняла (C-06).
-
-        Рейтинг и число отзывов остались и стоят РЯДОМ — это
-        единственное место во всей системе, где они шли парой ещё
-        до границы. Пара честнее одинокой оценки: «★4.9 (0 отз.)»
-        нельзя прочитать как «проверенное качество».
-        """
-        if not self.candidates:
-            return "(нет доступных мастеров под фильтр)"
-        lines = []
-        for c in self.candidates:
-            distance = (
-                f", {c.distance_km:.1f} км" if c.distance_km is not None else ""
-            )
-            services = (
-                f" — {', '.join(c.services_preview[:3])}"
-                if c.services_preview
-                else ""
-            )
-            lines.append(
-                f"- {c.id} | {c.display_name} | ★{c.rating} "
-                f"({c.reviews_count} отз.){distance}{services}"
-            )
-        return "\n".join(lines)
+    # `to_prompt_summary()` снят (DRF-1630): он клал в промпт ★рейтинг и
+    # расстояние в порядке движка. Вызовов у него не было ни одного — и
+    # именно поэтому он опасен: готовый метод это приглашение подключить
+    # его снова. Владелец назвал находку классом дефекта, а не багом.
 
 
 # --- Engine ------------------------------------------------------------------
