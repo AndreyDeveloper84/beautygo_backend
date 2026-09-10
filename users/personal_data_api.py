@@ -31,7 +31,8 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from users.internal_authz_events import emit_personal_data_exported
+from privacy_audit.mixins import AuditedPersonalDataAccess
+from privacy_audit.models import PersonalDataAccessLog
 from users.models import Profile, User, UserPersonalContext
 from users.permissions import IsInternalBearerForSubject
 from users.personal_context_erasure import erase_personal_context
@@ -73,15 +74,23 @@ def _not_found(request: Request, user_id: UUID) -> Response:
     return error_response("NOT_FOUND", "User not found.", status_code=404)
 
 
-class InternalPersonalDataExportView(APIView):
-    """GET …/personal-data/export/ — C5.1 synchronous JSON export."""
+class InternalPersonalDataExportView(AuditedPersonalDataAccess, APIView):
+    """GET …/personal-data/export/ — C5.1 synchronous JSON export.
+
+    Owner §96 — the export counts as performed only once the access journal
+    has recorded it. The mixin writes the row after this handler builds the
+    body and before the response leaves the process, so an unavailable
+    journal turns into a 503 and nothing is disclosed.
+    """
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
-    # CP-2: names the URL kwarg the object-level check authorises against.
-    # Without it the permission fails closed and logs at ERROR — see
-    # ``IsInternalBearerForSubject``.
+    # CP-2: names the URL kwarg the object-level check authorises against —
+    # and the one the journal records as the object. Without it the
+    # permission fails closed and logs at ERROR.
     subject_url_kwarg = "user_id"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.PERSONAL_DATA
+    audit_operations = {"GET": PersonalDataAccessLog.Operation.EXPORT}
 
     @extend_schema(
         operation_id="internal_personal_data_export",
@@ -130,19 +139,6 @@ class InternalPersonalDataExportView(APIView):
             "internal.personal_data.exported user_id=%s request_id=%s",
             user_id, getattr(request, "request_id", "-"),
         )
-        # CP-2 — §7 ``audit sensitive access``. Deletion has been audited
-        # since AMD-010; this read was not audited at all, so the record of
-        # who obtained a person's data outlived nothing but log rotation.
-        # Section NAMES only — the values are in the response, and an audit
-        # that copied them would be a second store of the same personal data.
-        emit_personal_data_exported(
-            user,
-            sections=(
-                ["profile", "personal_context"] if context_data is not None
-                else ["profile"]
-            ),
-            initiator="internal_api",
-        )
         return success_response({
             "user_id": str(user.pk),
             "exported_at": timezone.now().isoformat(),
@@ -151,12 +147,20 @@ class InternalPersonalDataExportView(APIView):
         })
 
 
-class InternalPersonalDataDeleteView(APIView):
-    """DELETE …/personal-data/ — C5.2/AMD-006 idempotent wipe + audit."""
+class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
+    """DELETE …/personal-data/ — C5.2/AMD-006 idempotent wipe + audit.
+
+    The erasure and its journal row share one transaction (the mixin opens it
+    for every unsafe method). A journal that cannot be written rolls the
+    erasure back: there is no state in which somebody's data is gone and
+    nothing records that it went.
+    """
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "user_id"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.PERSONAL_DATA
+    audit_operations = {"DELETE": PersonalDataAccessLog.Operation.DELETE}
 
     @extend_schema(
         operation_id="internal_personal_data_delete",

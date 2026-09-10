@@ -63,6 +63,11 @@ INSTALLED_APPS = [
     'nutrition',
     'tenants',
     'analytics',
+    # Журнал доступа к персданным (152-ФЗ, решение владельца §96). Своё
+    # приложение, а не таблица в users и не строка в analytics: аналитика
+    # агрегируется и чистится, лог переживает ротацию, а сам журнал —
+    # чувствительные данные и должен иметь собственное право на чтение.
+    'privacy_audit',
     'goals',
     'wellness',
     # Recommendation Resolver — единственный авторитет RecommendationDecision
