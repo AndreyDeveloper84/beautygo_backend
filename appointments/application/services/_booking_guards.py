@@ -101,14 +101,21 @@ def check_health_screening(resolved_service) -> None:
     if verdict is False:
         return
 
-    reason = (
-        HealthScreeningRequiredError.REQUIRED
-        if verdict is True
-        else HealthScreeningRequiredError.UNKNOWN
-    )
-    # Раздельные счётчики: наружу пойдёт одно грубое имя, внутрь — два
-    # разных положения человека. Без этой строки «гейт сработал N раз»
-    # не отвечает на вопрос, сколько из N — незнание, а сколько запрет.
+    if not resolved_service.health_check_answerable:
+        # Слой, у которого нет места под ответ, не «промолчал» — его не
+        # спрашивали, потому что спросить негде. Отказ тот же (§100:
+        # fail-closed), имя другое, и разница нужна не эстетике: за
+        # UNKNOWN стоит очередь разметки, за этим не стоит ничего.
+        reason = HealthScreeningRequiredError.NOT_APPLICABLE
+    elif verdict is True:
+        reason = HealthScreeningRequiredError.REQUIRED
+    else:
+        reason = HealthScreeningRequiredError.UNKNOWN
+    # Раздельные счётчики: наружу пойдёт одно грубое имя, внутрь — три
+    # разных положения. Без этой строки «гейт сработал N раз» не
+    # отвечает ни на один полезный вопрос: сколько из N — запрет,
+    # сколько наше незнание (работа для очереди разметки), а сколько
+    # закрытый устаревший путь (работы нет вовсе).
     logger.info(
         "booking.health_gate.refused reason=%s layer=%s service=%s",
         reason,
