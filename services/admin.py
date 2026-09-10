@@ -70,10 +70,13 @@ class ServiceTemplateSynonymInline(admin.TabularInline):
 @admin.register(ServiceTemplate)
 class ServiceTemplateAdmin(admin.ModelAdmin):
     list_display = (
-        'name', 'category', 'duration_default',
+        'name', 'lifecycle', 'category', 'duration_default',
         'is_popular', 'sort_order',
     )
-    list_filter = ('category', 'is_popular')
+    # `lifecycle` первым фильтром: очередь одобрения канонов — рабочий
+    # список куратора справочника, ровно как очередь проверки связей у
+    # оператора салонов (§93).
+    list_filter = ('lifecycle', 'category', 'is_popular')
     # `synonyms__text` — то, ради чего синонимы и заведены (§93). Салон
     # называет услугу «Подмышки» в категории «Лазерная эпиляция», канон
     # называется «Лазерная эпиляция подмышек», и поиском по имени эта

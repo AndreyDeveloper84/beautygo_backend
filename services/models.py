@@ -78,12 +78,47 @@ class ServiceCategory(models.Model):
 
 
 class ServiceTemplate(models.Model):
-    """Предустановленный шаблон услуги, привязанный к категории.
+    """Каноническая услуга. В коде — шаблон, в разговорах — канон.
 
     Используется на онбординге мастера, чтобы предложить готовый список
     популярных услуг с рекомендованной длительностью вместо пустой формы.
     Реальные цены вычисляются через `RegionalPricing` отдельно (DRF-197).
+
+    С §93 справочник перестал быть замороженным закрытым списком и стал
+    **курируемым расширяемым реестром**: нет подходящего канона —
+    оператор заводит новый. Отсюда жизненный цикл, см. `Lifecycle`.
     """
+
+    class Lifecycle(models.TextChoices):
+        """Состояние самой канонической услуги. Решение владельца §93.
+
+        Не путать с `SalonService.MappingStatus`: тот про **связь**
+        услуги салона с каноном, этот — про **канон**. Оси разные, и
+        вопросы разные::
+
+            MappingStatus   «чем доказано, что вот эта услуга салона —
+                             вот этот канон»
+            Lifecycle       «проверял ли кто-нибудь, что вот этот канон
+                             вообще должен существовать»
+
+        `PROVISIONAL` — оператор завёл его на ходу, потому что
+        подходящего не нашлось (§93, шаг 1). Это рабочее состояние, а не
+        брак: без него разбор упирается в закрытый справочник, ровно как
+        упёрся на пилоте.
+
+        `APPROVED` — кто-то проверил и отвечает за это именем или
+        правилом. Провенанс обязателен и стоит `CheckConstraint`'ом:
+        одобрение без автора через месяц читается как умолчание.
+
+        **Умолчание — `PROVISIONAL`**, и это не придирка. Канон,
+        заведённый кодом, миграцией или чужой рукой, никем не проверен
+        по определению. Умолчание `APPROVED` означало бы, что каждая
+        новая строка сама себя одобрила.
+        """
+
+        PROVISIONAL = "provisional", "Черновой"
+        APPROVED = "approved", "Одобрен"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     category = models.ForeignKey(
         ServiceCategory,
@@ -126,6 +161,27 @@ class ServiceTemplate(models.Model):
         help_text="Показывать в верхней части списка категории",
     )
     sort_order = models.PositiveIntegerField(default=0)
+
+    # -- Жизненный цикл самого канона (§93) --------------------------------
+    lifecycle = models.CharField(
+        max_length=16,
+        choices=Lifecycle.choices,
+        default=Lifecycle.PROVISIONAL,
+    )
+    #: Кто одобрил. Взаимоисключающе с `approved_rule` — «кто ИЛИ какое
+    #: правило», та же форма, что у связи (§76).
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    approved_rule = models.CharField(max_length=100, blank=True, default="")
+    approval_rule_version = models.CharField(max_length=32, blank=True, default="")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    #: Основание одобрения — разбор, реестр владельца, тикет.
+    approval_source_ref = models.CharField(max_length=200, blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -134,6 +190,43 @@ class ServiceTemplate(models.Model):
         ordering = ['-is_popular', 'sort_order', 'name']
         indexes = [
             models.Index(fields=['category', 'is_popular', 'sort_order']),
+            # Очередь одобрения выбирается по этому полю, и она же —
+            # рабочий список куратора справочника.
+            models.Index(fields=['lifecycle'], name='svctpl_lifecycle_idx'),
+        ]
+        constraints = [
+            # Одобрение — решение, и провенанс ему нужен по той же
+            # причине, что и подтверждению связи: без автора оно через
+            # месяц неотличимо от умолчания. Форма условия намеренно
+            # повторяет `salonservice_verified_requires_provenance`.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(lifecycle="approved")
+                    | (
+                        models.Q(approved_at__isnull=False)
+                        & ~models.Q(approval_source_ref="")
+                        & (
+                            models.Q(approved_by__isnull=False)
+                            | ~models.Q(approved_rule="")
+                        )
+                    )
+                ),
+                name="servicetemplate_approved_requires_provenance",
+            ),
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(approved_by__isnull=False)
+                    & ~models.Q(approved_rule="")
+                ),
+                name="servicetemplate_approval_is_who_xor_rule",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(approved_rule="")
+                    | ~models.Q(approval_rule_version="")
+                ),
+                name="servicetemplate_approval_rule_carries_version",
+            ),
         ]
 
     def clean(self) -> None:
