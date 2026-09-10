@@ -35,7 +35,12 @@ from appointments.application.services.create_booking_service import (
 )
 from appointments.domain.value_objects import TimeInterval
 from appointments.models import Appointment
-from services.models import Service, ServiceCategory
+from services.models import (
+    SalonService,
+    Service,
+    ServiceCategory,
+    SpecialistService,
+)
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
 
@@ -77,6 +82,45 @@ def specialist(specialist_user, tenant_a):
 @pytest.fixture
 def category(db):
     return ServiceCategory.objects.create(name="510 Cat", slug="510-cat")
+
+
+@pytest.fixture
+def bookable_service(specialist, category):
+    """Услуга живого слоя — для теста, который бьётся в РУЧКУ создания.
+
+    Соседняя `service` осталась маркетплейсной: её берут тесты, которые
+    создают запись напрямую через ORM, и слой каталога им безразличен.
+
+    А путь создания через API после §100 закрыт для легаси-слоя: он
+    отвечает `HEALTH_CHECK_NOT_APPLICABLE` и до границы тенантов, которую
+    этот файл закрепляет, запрос просто не доходит. Оставить здесь
+    маркетплейсную услугу значило бы закрепить срабатывание медицинского
+    гейта под именем «граница тенантов» — тест бы зеленел, проверяя не
+    то, ради чего написан.
+    """
+    from users.models import SpecialistProfile
+
+    tenant_id = SpecialistProfile.objects.values_list(
+        "tenant_id", flat=True
+    ).get(pk=specialist.pk)
+    salon_service = SalonService.objects.create(
+        tenant_id=tenant_id,
+        category=category,
+        name="510 Service",
+        duration_minutes=60,
+        base_price=Decimal("1500.00"),
+        is_active=True,
+        requires_health_check=False,
+    )
+    SpecialistService.objects.create(
+        salon_service=salon_service,
+        specialist=specialist,
+        duration_minutes=60,
+        price=Decimal("1500.00"),
+        buffer_after_minutes=0,
+        is_active=True,
+    )
+    return salon_service
 
 
 @pytest.fixture
@@ -246,7 +290,7 @@ class TestUserLevelBoundaryPinned:
         assert r.status_code == 404
 
     def test_outsider_client_create_attempt_for_other_specialist(
-        self, outsider_client, specialist, service,
+        self, outsider_client, specialist, bookable_service,
     ):
         """Outsider client posting against specialist in tenant_a.
         Today the booking succeeds (no IsTenantMember + service
@@ -258,7 +302,7 @@ class TestUserLevelBoundaryPinned:
             "/api/v1/appointments/",
             {
                 "specialist_id": str(specialist.id),
-                "service_id": str(service.id),
+                "service_id": str(bookable_service.id),
                 "start_datetime": start,
             },
             format="json",
