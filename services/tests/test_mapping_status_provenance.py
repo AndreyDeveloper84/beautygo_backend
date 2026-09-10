@@ -236,3 +236,84 @@ def test_backfill_does_not_touch_a_status_already_decided(tenant, category, huma
 
     confirmed.refresh_from_db()
     assert confirmed.mapping_status == S.VERIFIED
+
+
+# ---------------------------------------------------------------------------
+# Третий исход §93: отказ — это решение, а не отсутствие
+# ---------------------------------------------------------------------------
+
+
+def test_refusal_is_not_the_default(tenant, category):
+    """Новая строка — `UNMAPPED`, а не отказ.
+
+    Если бы отказ был умолчанием, каждая заведённая услуга объявляла бы
+    сама о себе «рекомендовать не будем» — то есть решение принималось
+    бы кодом за человека, ровно как §90 запретил делать с признаком
+    здоровья.
+    """
+    assert _service(tenant, category).mapping_status != S.NOT_RECOMMENDABLE
+
+
+def test_refusal_without_provenance_is_refused_by_the_database(tenant, category):
+    """Отказ без автора и основания невозможен на уровне схемы.
+
+    Отказ — решение человека, и у решения обязан быть автор, дата и
+    основание. Иначе через месяц строка со статусом «не подлежит»
+    неотличима от строки, которую так проставил чей-то `update()`.
+
+    Проверка в базе, а не в `clean()`, по той же причине, что и у
+    `verified`: `clean()` обходится любым `update()`.
+    """
+    with pytest.raises(IntegrityError, match="not_recommendable_requires_provenance"):
+        with transaction.atomic():
+            _service(
+                tenant, category, name="Отказ без автора",
+                mapping_status=S.NOT_RECOMMENDABLE,
+            )
+
+
+def test_refusal_with_provenance_is_accepted(tenant, category, human):
+    """Положительная стража: правильно оформленный отказ записывается.
+
+    Без неё проверка выше зеленела бы и на схеме, которая запрещает
+    четвёртое состояние вовсе, — а тогда разбор 56 услуг снова было бы
+    некуда записывать.
+    """
+    before = SalonService.objects.filter(mapping_status=S.NOT_RECOMMENDABLE).count()
+    service = _service(
+        tenant, category, name="Продажа подарочного сертификата",
+        mapping_status=S.NOT_RECOMMENDABLE,
+        mapping_confirmed_by=human,
+        mapping_confirmed_at=timezone.now(),
+        mapping_source_ref="разбор 56 услуг, строка 41: это не процедура",
+    )
+    assert service.mapping_status == S.NOT_RECOMMENDABLE
+    assert (
+        SalonService.objects.filter(mapping_status=S.NOT_RECOMMENDABLE).count()
+        == before + 1
+    )
+
+
+def test_refusal_and_unmapped_are_distinct_rows_in_the_database(tenant, category, human):
+    """Отказ и отсутствие различимы выборкой, а не только на словах.
+
+    Это то, ради чего состояние заведено. Очередь разбора выбирается
+    как `mapping_status=UNMAPPED`; если бы отказ писался тем же
+    значением, разобранные строки возвращались бы в очередь каждым
+    отчётом, и она никогда бы не убывала.
+    """
+    _service(tenant, category, name="Ещё не смотрели")
+    _service(
+        tenant, category, name="Посмотрели и отказали",
+        mapping_status=S.NOT_RECOMMENDABLE,
+        mapping_confirmed_by=human,
+        mapping_confirmed_at=timezone.now(),
+        mapping_source_ref="разбор 56 услуг, строка 41",
+    )
+
+    queue = SalonService.objects.filter(mapping_status=S.UNMAPPED)
+    decided = SalonService.objects.filter(mapping_status=S.NOT_RECOMMENDABLE)
+
+    assert queue.count() == 1
+    assert decided.count() == 1
+    assert queue.get().name == "Ещё не смотрели"

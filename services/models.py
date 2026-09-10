@@ -325,16 +325,37 @@ class SalonService(models.Model):
         SEED = "seed", "Seed"
 
     class MappingStatus(models.TextChoices):
-        """Статус связи услуги с каноническим шаблоном. Решение владельца §76.
+        """Статус связи услуги с каноническим шаблоном. §76, расширен §93.
 
-        Три состояния, и путать их запрещено::
+        Четыре состояния, и путать их запрещено::
 
-            UNMAPPED            REVIEW_REQUIRED         VERIFIED
-            валидной связи      связь есть, но          подтверждена человеком
-            нет                 происхождения           ЛИБО детерминированным
-                                недостаточно            правилом с provenance
-                |                     |                        |
-            в подборе не участвует ---+                  участвует в подборе
+            UNMAPPED         REVIEW_REQUIRED  VERIFIED         NOT_RECOMMENDABLE
+            валидной связи   связь есть, но   подтверждена     решено, что связи
+            ещё нет          происхождения    человеком ЛИБО   НЕ БУДЕТ
+                             недостаточно     правилом
+                |                  |                |                  |
+            не участвует ----------+                |          не участвует
+            в подборе                               |          в подборе
+                                        участвует в подборе
+
+        **`UNMAPPED` и `NOT_RECOMMENDABLE` — не одно и то же**, хотя на
+        гейте ведут себя одинаково. Это третий исход разбора по §93, и
+        отличается он не поведением, а тем, что за ним стоит::
+
+            UNMAPPED           про строку ещё никто ничего не сказал
+            NOT_RECOMMENDABLE  человек посмотрел и решил; у решения есть
+                               автор, дата и основание
+
+        Отсутствие и отказ совпадают ровно один раз — когда гейт их не
+        пускает. Дальше они расходятся: `UNMAPPED` — очередь работы,
+        `NOT_RECOMMENDABLE` — работа сделанная. Слитые в одно, они
+        превращают убывающую очередь в вечную: пятьдесят шесть
+        разобранных услуг пилота возвращались бы в неё каждым отчётом, и
+        по переписи было бы не видно, что разбор вообще шёл.
+
+        Поэтому у отказа своё `CheckConstraint` на происхождение — такое
+        же, как у `VERIFIED`, и по той же причине: **решение без автора
+        через месяц читается как умолчание.**
 
         **Ноль `VERIFIED` не разрешает откат на `REVIEW_REQUIRED`**
         (формулировка владельца): иначе статус декоративен, а система
@@ -349,6 +370,7 @@ class SalonService(models.Model):
         UNMAPPED = "unmapped", "Unmapped"
         REVIEW_REQUIRED = "review_required", "Review required"
         VERIFIED = "verified", "Verified"
+        NOT_RECOMMENDABLE = "not_recommendable", "Не подлежит рекомендациям"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(
@@ -418,7 +440,7 @@ class SalonService(models.Model):
     # никто не проверял, а строка, заведённая руками, — связь, выбранную
     # человеком осознанно.
     mapping_status = models.CharField(
-        max_length=16,
+        max_length=24,
         choices=MappingStatus.choices,
         default=MappingStatus.UNMAPPED,
     )
@@ -473,6 +495,31 @@ class SalonService(models.Model):
                 ),
                 name="salonservice_verified_requires_provenance",
             ),
+            # Отказ — тоже решение, и провенанс ему нужен по той же
+            # причине, что и подтверждению (§93). Форма условия
+            # намеренно та же, что у `verified` выше: два терминальных
+            # состояния связи, и оба обязаны отвечать на «кто, когда, на
+            # каком основании».
+            #
+            # Отдельным ограничением, а не расширением верхнего через
+            # `IN (verified, not_recommendable)`: имя ограничения — это
+            # то, что читает человек в тексте ошибки, и «нарушено
+            # not_recommendable_requires_provenance» говорит ему, какое
+            # именно решение он пытается записать без автора.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(mapping_status="not_recommendable")
+                    | (
+                        models.Q(mapping_confirmed_at__isnull=False)
+                        & ~models.Q(mapping_source_ref="")
+                        & (
+                            models.Q(mapping_confirmed_by__isnull=False)
+                            | ~models.Q(mapping_confirmed_rule="")
+                        )
+                    )
+                ),
+                name="salonservice_not_recommendable_requires_provenance",
+            ),
             # Правило без версии — «подтверждено какой-то из версий».
             # Человеку версия не нужна: он и есть провенанс.
             models.CheckConstraint(
@@ -481,6 +528,26 @@ class SalonService(models.Model):
                     | ~models.Q(mapping_rule_version="")
                 ),
                 name="salonservice_rule_confirmation_carries_version",
+            ),
+            # Кто ИЛИ правило, но не оба. Второй инвариант этой
+            # миграции, и он чинит РАСХОЖДЕНИЕ, а не добавляет новое:
+            # докстринг `mapping_confirmed_by` называл поля
+            # взаимоисключающими со ссылкой на §76 с самого начала, а
+            # оба ограничения выше написаны через `OR` и обе заполненные
+            # строки пропускали. То есть решение владельца было записано
+            # и не исполнялось, а выглядело исполненным —
+            # «проверяемый инвариант не живёт в комментарии».
+            #
+            # Условие глобальное, а не только для терминальных
+            # состояний: происхождение, набранное на строке, которая ещё
+            # не решена, тоже обязано быть однозначным — иначе
+            # неоднозначность просто дожидается смены статуса.
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(mapping_confirmed_by__isnull=False)
+                    & ~models.Q(mapping_confirmed_rule="")
+                ),
+                name="salonservice_provenance_is_who_xor_rule",
             ),
         ]
         indexes = [
