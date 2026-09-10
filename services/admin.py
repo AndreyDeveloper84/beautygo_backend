@@ -15,6 +15,7 @@ from .models import (
     Service,
     ServiceCategory,
     ServiceTemplate,
+    ServiceTemplateSynonym,
     SpecialistService,
 )
 
@@ -54,6 +55,18 @@ class RegionalPricingInline(admin.TabularInline):
     ordering = ('region_key',)
 
 
+class ServiceTemplateSynonymInline(admin.TabularInline):
+    model = ServiceTemplateSynonym
+    extra = 0
+    fields = (
+        'text', 'source_tenant',
+        'confirmed_by', 'confirmed_rule', 'rule_version',
+        'confirmed_at', 'source_ref',
+    )
+    raw_id_fields = ('source_tenant', 'confirmed_by')
+    ordering = ('text',)
+
+
 @admin.register(ServiceTemplate)
 class ServiceTemplateAdmin(admin.ModelAdmin):
     list_display = (
@@ -61,10 +74,33 @@ class ServiceTemplateAdmin(admin.ModelAdmin):
         'is_popular', 'sort_order',
     )
     list_filter = ('category', 'is_popular')
-    search_fields = ('name', 'name_short', 'category__name')
+    # `synonyms__text` — то, ради чего синонимы и заведены (§93). Салон
+    # называет услугу «Подмышки» в категории «Лазерная эпиляция», канон
+    # называется «Лазерная эпиляция подмышек», и поиском по имени эта
+    # пара не находится по устройству. Один записанный синоним делает
+    # канон находимым словами салона — в том числе во всплывающем окне
+    # выбора шаблона на форме услуги салона, потому что оно ищет этим же
+    # набором полей.
+    search_fields = ('name', 'name_short', 'category__name', 'synonyms__text')
     list_editable = ('is_popular', 'sort_order')
     ordering = ('category', '-is_popular', 'sort_order', 'name')
-    inlines = [RegionalPricingInline]
+    inlines = [RegionalPricingInline, ServiceTemplateSynonymInline]
+
+
+@admin.register(ServiceTemplateSynonym)
+class ServiceTemplateSynonymAdmin(admin.ModelAdmin):
+    list_display = (
+        'text', 'template', 'source_tenant',
+        'confirmed_by', 'confirmed_rule', 'confirmed_at',
+    )
+    list_filter = ('source_tenant', 'template__category')
+    # `normalized` в поиске намеренно: оператор, ищущий «подмышки» и не
+    # находящий «Подмышки», должен иметь возможность посмотреть, каким
+    # ключом строка легла на самом деле.
+    search_fields = ('text', 'normalized', 'template__name')
+    raw_id_fields = ('template', 'source_tenant', 'confirmed_by')
+    readonly_fields = ('normalized', 'created_at', 'updated_at')
+    ordering = ('template', 'text')
 
 
 @admin.register(RegionalPricing)
