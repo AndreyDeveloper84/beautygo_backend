@@ -43,6 +43,12 @@ pytestmark = pytest.mark.django_db
 # Quick aliases
 URL_BEVERAGES = "/api/v1/nutrition/internal/beverages/"
 URL_PROFILE = "/api/v1/nutrition/internal/profile/"
+
+#: §92 / срез N-a2: параметры тела принимаются только с утверждением о
+#: согласии. Здесь оно часть ВАЛИДНОГО запроса, а не предмет проверки —
+#: сторож проверяется в ``test_personal_calculation_consent.py``.
+CONSENT = {"type": "personal_calculation", "document_version": "v1"}
+
 URL_WATER = "/api/v1/nutrition/internal/water/"
 URL_WATER_TODAY = "/api/v1/nutrition/internal/water/today/"
 URL_SCAN = "/api/v1/nutrition/internal/scan/"
@@ -163,6 +169,7 @@ class TestSection2Profile:
     ):
         """2.2 — POST минимального профиля рассчитывает BMR=1370 и нормы."""
         resp = client_api.post(URL_PROFILE, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165,
             "weight_kg": 70.0, "goal": "maintain",
         }, format="json", **headers)
@@ -176,11 +183,13 @@ class TestSection2Profile:
     ):
         """2.3 — посылаем только weight_kg → age/height сохраняются."""
         client_api.post(URL_PROFILE, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165,
             "weight_kg": 70.0, "goal": "maintain",
         }, format="json", **headers)
         resp = client_api.post(
-            URL_PROFILE, {"weight_kg": 72.0}, format="json", **headers,
+            URL_PROFILE, {"consent": CONSENT, "weight_kg": 72.0},
+            format="json", **headers,
         )
         body = resp.json()["data"]
         assert body["weight_kg"] == 72.0
@@ -212,6 +221,7 @@ class TestSection2Profile:
     ):
         """2.6 — pregnancy: goal lose→maintain, +200 ккал, +25г белка."""
         baseline_resp = client_api.post(URL_PROFILE, {
+            "consent": CONSENT,
             "gender": "female", "age": 30, "height_cm": 165, "weight_kg": 65.0,
             "goal": "maintain",
         }, format="json", **headers)
@@ -219,6 +229,7 @@ class TestSection2Profile:
         # Reset profile by deleting and re-creating with pregnancy
         NutritionProfile.objects.all().delete()
         resp = client_api.post(URL_PROFILE, {
+            "consent": CONSENT,
             "gender": "female", "age": 30, "height_cm": 165, "weight_kg": 65.0,
             "goal": "lose", "pace": "moderate",
             "health_flags": {"pregnant": True},
@@ -236,6 +247,7 @@ class TestSection2Profile:
     ):
         """2.7 — eating_disorder=true → goal=maintain unconditionally."""
         resp = client_api.post(URL_PROFILE, {
+            "consent": CONSENT,
             "gender": "female", "age": 30, "height_cm": 165, "weight_kg": 60.0,
             "goal": "lose", "pace": "moderate",
             "health_flags": {"eating_disorder": True},
@@ -249,6 +261,7 @@ class TestSection2Profile:
     ):
         """2.8 — экстремальный профиль → pace=gentle ИЛИ goal=maintain."""
         resp = client_api.post(URL_PROFILE, {
+            "consent": CONSENT,
             "gender": "female", "age": 50, "height_cm": 160, "weight_kg": 55.0,
             "activity_coefficient": 1.2,
             "goal": "lose", "pace": "moderate",
@@ -274,11 +287,15 @@ class TestSection2Profile:
         """2.9 — replay возвращает cached, между ними другой POST не отменяется."""
         h_idem = {**headers, "HTTP_IDEMPOTENCY_KEY": "smoke-2-9"}
         body_a = {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165,
             "weight_kg": 70.0, "goal": "maintain",
         }
         client_api.post(URL_PROFILE, body_a, format="json", **h_idem)
-        client_api.post(URL_PROFILE, {"weight_kg": 80.0}, format="json", **headers)
+        client_api.post(
+            URL_PROFILE, {"consent": CONSENT, "weight_kg": 80.0},
+            format="json", **headers,
+        )
         replay = client_api.post(URL_PROFILE, body_a, format="json", **h_idem)
         # Cached response has weight_kg=70, but DB row keeps the in-between 80.
         assert replay.json()["data"]["weight_kg"] == 70.0
@@ -289,6 +306,7 @@ class TestSection2Profile:
     ):
         """2.10 — complete=true ставит onboarded_at один раз."""
         r1 = client_api.post(URL_PROFILE, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "complete": True,
         }, format="json", **headers)
@@ -304,6 +322,7 @@ class TestSection2Profile:
     ):
         """2.11 — _skipped_fields → *_skipped boolean flags."""
         resp = client_api.post(URL_PROFILE, {
+            "consent": CONSENT,
             "gender": "female",
             "_skipped_fields": ["weight", "age"],
         }, format="json", **headers)
@@ -1138,6 +1157,7 @@ class TestSection7WebhookOutbox:
         """7.1 — URL пустой → enqueue не создаёт строку."""
         settings.NUTRITION_WEBHOOK_URL = ""
         client_api.post(URL_PROFILE, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "goal": "maintain",
         }, format="json", **headers)
@@ -1148,6 +1168,7 @@ class TestSection7WebhookOutbox:
     ):
         """7.2 — POST profile создаёт pending event."""
         client_api.post(URL_PROFILE, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "goal": "maintain",
         }, format="json", **headers)
@@ -1305,6 +1326,7 @@ class TestSection8CrossFeature:
         смотрит на калории, которые от веса зависеть не перестали.
         """
         client_api.post(URL_PROFILE, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
             "goal": "maintain",
         }, format="json", **headers)
@@ -1316,7 +1338,8 @@ class TestSection8CrossFeature:
         assert before_kcal > 0
 
         client_api.post(
-            URL_PROFILE, {"weight_kg": 80.0, "goal": "lose"},
+            URL_PROFILE,
+            {"consent": CONSENT, "weight_kg": 80.0, "goal": "lose"},
             format="json", **headers,
         )
         row_after = NutritionProfile.objects.get(user=proxy_user)

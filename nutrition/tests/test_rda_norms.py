@@ -32,6 +32,11 @@ from nutrition.services.nutrition_profile_service import (
     compute_norms,
 )
 
+#: §92 / срез N-a2: параметры тела принимаются только с утверждением о
+#: согласии. Здесь оно часть ВАЛИДНОГО запроса, а не предмет проверки —
+#: сторож проверяется в ``test_personal_calculation_consent.py``.
+CONSENT = {"type": "personal_calculation", "document_version": "v1"}
+
 
 # Adult women 19-50 RDA targets (USDA / NIH ODS) — the baseline the
 # pattern engine compares against. Fenced here so the calculation can
@@ -229,6 +234,7 @@ class TestProfileUpsertWritesRDA:
         settings.NUTRITION_SERVICE_TOKEN = "test-rda-token"
 
         resp = self._post_profile({
+            "consent": CONSENT,
             "gender": "female", "age": 40,
             "height_cm": 165, "weight_kg": 70.0,
             "goal": "maintain",
