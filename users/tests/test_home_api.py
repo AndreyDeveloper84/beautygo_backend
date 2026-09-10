@@ -1,6 +1,8 @@
 """Integration tests for GET /api/v1/home/ — DRF-110."""
 from __future__ import annotations
 
+import textwrap
+
 from datetime import datetime, timedelta, timezone as dt_tz
 from decimal import Decimal
 
@@ -414,12 +416,32 @@ class TestNearbyIsCatalogNotRecommendation:
         чтение «не выдаёт себя за Recommendation», и оно записано в
         коде рядом с правкой, чтобы возражение было адресным.
         """
+        import ast
         import inspect
 
         from users import home_api
 
-        source = inspect.getsource(home_api.HomeView._nearby_specialists)
-        assert "client_id=None" in source, (
-            "секция снова передаёт клиента движку — вернулась персонализация "
-            "прошлым опытом (§125, §72)"
+        # Разбор ДЕРЕВА, а не поиск подстроки. Первая версия этого теста
+        # искала `"client_id=None" in source` — и пропустила подмену,
+        # потому что та же строка стоит рядом в КОММЕНТАРИИ, объясняющем
+        # правку. Сторож зеленел на подменённом коде, читая рассказ о
+        # коде. Тот же урок, что записан у соседнего гарда в
+        # `recommendation/tests/test_boundary_guards.py`.
+        source = textwrap.dedent(
+            inspect.getsource(home_api.HomeView._nearby_specialists)
         )
+        tree = ast.parse(source)
+        passed = [
+            kw
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            for kw in node.keywords
+            if kw.arg == "client_id"
+        ]
+        assert passed, "вызов движка не найден — тест смотрит не туда"
+        for kw in passed:
+            assert isinstance(kw.value, ast.Constant) and kw.value.value is None, (
+                "секция снова передаёт клиента движку — вернулась "
+                "персонализация прошлым опытом (§125, §72): "
+                f"client_id={ast.unparse(kw.value)}"
+            )
