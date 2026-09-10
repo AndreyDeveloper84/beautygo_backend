@@ -26,6 +26,7 @@ side detect that the world moved and re-ask, the same way reschedule uses
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -220,3 +221,117 @@ def get_schedule_impact(
         bookings=bookings,
         impact_token=_fingerprint(specialist.id, start_at, end_at, rows),
     )
+
+
+class ScheduleShrinkConflict(Exception):
+    """A proposed frame change would leave live bookings outside the frame.
+
+    Carries the count only. The refusal is the same plain
+    ``HAS_ACTIVE_APPOINTMENTS`` 409 the rest of this surface returns —
+    no impact preview, no resolution path, nothing cancelled or moved.
+    """
+
+    def __init__(self, stranded: int) -> None:
+        super().__init__(f"{stranded} active appointment(s) would be stranded")
+        self.stranded = stranded
+
+
+def _fitting_booking_ids(specialist) -> set:
+    """Ids of this master's live FUTURE bookings that fit their day's frame.
+
+    The predicate is :func:`check_schedule_frame` — the SAME function the
+    booking write path uses — on purpose. A second implementation of
+    "inside working hours" is precisely the divergence DRF-1062 closed
+    when it stopped the frame being enforced on the read path only; this
+    guard must not reopen it from the other end.
+
+    **Everything future, not just the booking horizon.**
+    ``BOOKING_MAX_AHEAD_DAYS`` governs how far ahead a booking may be
+    MADE; it says nothing about which existing bookings deserve
+    protection. Bookings past it exist — the salon and walk-in paths do
+    not consult it — and a client booked for March is stranded by a
+    shrink exactly as much as one booked for next week. Bounding this
+    scan by that setting would have made the guard silently miss them,
+    which is how it was written first and what the two recorded baselines
+    caught: their booking sits 84 days out.
+
+    Cost is one frame resolution per future booking, twice per write.
+    Deliberate: grouping by date would mean re-implementing the fit test
+    instead of calling the authoritative one, and this is a rare
+    administrative write, not a hot path.
+    """
+    from appointments.application.services._booking_guards import check_schedule_frame
+    from appointments.domain.exceptions import SlotNotAvailableError
+    from appointments.models import Appointment
+    from appointments.domain.value_objects import TimeInterval
+
+    now = datetime.now(timezone.utc)
+
+    fitting = set()
+    bookings = (
+        Appointment.objects
+        .filter(
+            specialist=specialist,
+            status__in=[s.value for s in ACTIVE_BOOKING_STATUSES],
+            end_datetime__gt=now,
+        )
+        .only("id", "start_datetime", "end_datetime")
+    )
+    for booking in bookings:
+        try:
+            check_schedule_frame(
+                specialist.id,
+                TimeInterval(start_at=booking.start_datetime, end_at=booking.end_datetime),
+            )
+        except SlotNotAvailableError:
+            continue
+        fitting.add(booking.id)
+    return fitting
+
+
+@contextmanager
+def refuse_if_the_change_strands_bookings(specialist):
+    """Refuse a frame change that displaces a booking which used to fit.
+
+    DRF-1297 B-4, the half ``_refuse_if_bookings_are_stranded`` explicitly
+    could not answer: **shrinking** the weekly template or trimming the
+    hours of a working-day override.
+
+    # Why a before/after measurement and not a check
+
+    "Any booking outside the new frame is a conflict" is the obvious rule
+    and it is wrong. A booking may sit outside working hours perfectly
+    legally — walk-ins and salon-made bookings skip the frame check by
+    design (``create_booking_service``) — so being outside the NEW frame
+    proves nothing on its own. What makes a booking *displaced* is that it
+    was inside the OLD frame and is not inside the new one.
+
+    Answering that needs the old effective frame and the new one, and the
+    only honest way to get the new one is to apply the change and ask the
+    authoritative resolver again. So this is a context manager: measure,
+    let the caller write, measure again, and raise if anything moved from
+    fitting to not-fitting. Wrap it in ``transaction.atomic`` and the
+    raise rolls the write back.
+
+    The alternative — computing the proposed frame here — would mean a
+    second implementation of "what working hours mean" living next to the
+    resolver, which is the exact divergence DRF-1062 was created to end.
+
+    # Named limits, so the guard is not read as more than it is
+
+    **Not transactional by itself and takes no lock**, exactly like the
+    date-bounded guard it stands beside. A booking created between the
+    two measurements is invisible to it. It catches an administrator
+    shrinking a schedule over a client they forgot about; it is not a
+    serialisation guarantee and must not be described as one.
+
+    **Only this specialist.** A tenant-wide closure is a different
+    reduction with its own guard.
+    """
+    before = _fitting_booking_ids(specialist)
+    yield
+    after = _fitting_booking_ids(specialist)
+
+    stranded = before - after
+    if stranded:
+        raise ScheduleShrinkConflict(len(stranded))

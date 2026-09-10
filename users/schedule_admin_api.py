@@ -35,6 +35,12 @@ from rest_framework.response import Response
 from rest_framework.settings import api_settings
 from rest_framework.views import APIView
 
+from django.db import transaction
+
+from appointments.application.services.schedule_impact_service import (
+    ScheduleShrinkConflict,
+    refuse_if_the_change_strands_bookings,
+)
 from appointments.models import SpecialistScheduleException, TenantClosure
 
 from .authentication import AylaServiceBearerAuthentication
@@ -556,18 +562,33 @@ class AdminScheduleExceptionListView(_TenantScopedSpecialistMixin, APIView):
         if conflict is not None:
             return conflict
 
-        row, _ = SpecialistScheduleException.objects.update_or_create(
-            specialist=specialist,
-            date=data["date"],
-            defaults={
-                "is_working_day": data["is_working_day"],
-                "start_time": data.get("start_time"),
-                "end_time": data.get("end_time"),
-                "break_start": data.get("break_start"),
-                "break_end": data.get("break_end"),
-                "note": data.get("note", ""),
-            },
-        )
+        # DRF-1297 B-4, вторая половина пробела. Сосед выше отвечает на
+        # «день закрыт целиком» — там затронутый диапазон однозначен. А
+        # СОКРАЩЕНИЕ часов рабочего дня («работаю, но с 10 до 14») — та же
+        # задача сравнения рамок, что у недельного шаблона, и решается тем
+        # же способом: измерить пригодность записей до и после записи.
+        try:
+            with transaction.atomic():
+                with refuse_if_the_change_strands_bookings(specialist):
+                    row, _ = SpecialistScheduleException.objects.update_or_create(
+                        specialist=specialist,
+                        date=data["date"],
+                        defaults={
+                            "is_working_day": data["is_working_day"],
+                            "start_time": data.get("start_time"),
+                            "end_time": data.get("end_time"),
+                            "break_start": data.get("break_start"),
+                            "break_end": data.get("break_end"),
+                            "note": data.get("note", ""),
+                        },
+                    )
+        except ScheduleShrinkConflict as conflict:
+            return error_response(
+                "HAS_ACTIVE_APPOINTMENTS",
+                f"Cannot shrink this day: {conflict.stranded} active "
+                "appointment(s) would be left outside working hours.",
+                status_code=409,
+            )
         logger.info(
             "schedule.exception_set actor=%s tenant=%s specialist=%s date=%s working=%s",
             request.user.pk, request.tenant.pk, specialist.pk,
