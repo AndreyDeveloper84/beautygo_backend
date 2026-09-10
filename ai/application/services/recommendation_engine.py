@@ -1,5 +1,16 @@
 """RecommendationEngine — weighted multi-factor specialist ranking.
 
+**Роль в конвейере: RETRIEVAL / candidate generation** (DRF-1628, реестр
+``recommendation/_authority.py``). Считать этот модуль вправе — владелец
+отнял у него **не право считать, а право быть конечным ответом Ayla**.
+Его выход это `CandidateSet`, а не `Recommendation`, и
+``SearchResult ≠ CatalogResult ≠ CandidateSet ≠ Recommendation``.
+
+Отдать его порядок наружу как ответ может только тот, кто пропустил его
+через Canonical Recommendation Resolver. Потребители, берущие отсюда
+именно порядок, перечислены в ``RANKED_OUTPUT_CONSUMERS`` — каждый с
+задачей, которая его снимет.
+
 Per DRF-105 / M3. Scoring model:
 
   rating          30%
