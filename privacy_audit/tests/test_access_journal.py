@@ -17,7 +17,7 @@ import pytest
 from django.contrib.auth.models import Permission
 from rest_framework.test import APIClient
 
-from privacy_audit import mixins
+from privacy_audit import mixins, policy, services, spool
 from privacy_audit.models import PersonalDataAccessLog
 from privacy_audit.services import AuditUnavailable
 from users.models import User, UserPersonalContext
@@ -75,11 +75,27 @@ def bob() -> tuple[User, str]:
 
 @pytest.fixture
 def broken_journal(monkeypatch):
-    """Make every journal write fail, the way an unavailable table would."""
+    """Make every DIRECT journal write fail, as an unavailable table would.
+
+    Patched at ``services.record_access`` rather than at the mixin, so the
+    routing that owner §107 introduced — stop, or queue — is exercised for
+    real instead of being bypassed by the fixture.
+    """
     def _boom(**_kwargs):
         raise AuditUnavailable("simulated journal outage")
 
-    monkeypatch.setattr(mixins, "record_access", _boom)
+    monkeypatch.setattr(services, "record_access", _boom)
+
+
+@pytest.fixture(autouse=True)
+def isolated_spool(settings, tmp_path):
+    """Each test gets its own queue directory.
+
+    Not a convenience: a shared spool would let one test's queued record be
+    drained by another and counted as that one's evidence.
+    """
+    settings.PRIVACY_AUDIT_SPOOL_DIR = str(tmp_path / "spool")
+    return settings.PRIVACY_AUDIT_SPOOL_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -88,12 +104,18 @@ def broken_journal(monkeypatch):
 
 
 class TestAuditIsAPrecondition:
-    """«Аудит недоступен — экспорт не выполняем» (owner §96).
+    """«Аудит недоступен — экспорт не выполняем» (owner §96), narrowed by §107.
 
     Everywhere else in this repository an audit failure is swallowed, because
-    losing a metric is cheaper than failing a feature. Here the reasoning
-    inverts: inability to record that personal data was disclosed is
-    inability to disclose it.
+    losing a metric is cheaper than failing a feature. For a DISCLOSING or
+    DESTROYING operation the reasoning inverts: inability to record that
+    personal data was disclosed is inability to disclose it.
+
+    §107 drew the line: only those operations stop. The tests for the other
+    side of the line — the ones that must NOT stop — are in
+    :class:`TestQueuedOperationsDoNotStopTheProduct`, and they are the half
+    that would be easy to forget, because a suite that only proves things
+    stop is green on a system that stops everything.
     """
 
     def test_export_is_refused_when_the_journal_cannot_be_written(
@@ -135,21 +157,6 @@ class TestAuditIsAPrecondition:
         assert ctx.workplace_district == "Заводской"
         assert ctx.data_sources.get("workplace_district") == "explicit"
 
-    def test_context_write_is_rolled_back_when_the_journal_cannot_be_written(
-        self, alice, broken_journal,
-    ):
-        alice_user, alice_id = alice
-
-        resp = _client(actor=alice_id).patch(
-            CTX_URL.format(subject=alice_user.pk),
-            {"updates": [{"field": "workplace_district", "value": "Центр"}]},
-            format="json",
-        )
-
-        assert resp.status_code == 503
-        ctx = UserPersonalContext.objects.filter(user=alice_user).first()
-        assert ctx is None or ctx.workplace_district != "Центр"
-
     def test_a_refusal_stays_a_refusal_when_the_journal_is_broken(
         self, alice, bob, broken_journal,
     ):
@@ -166,6 +173,240 @@ class TestAuditIsAPrecondition:
 
         assert resp.status_code == 403
         assert resp.json()["error"]["code"] == "CLIENT_MISMATCH"
+        # And the attempt is not lost: it goes to the queue, because "no
+        # foreign access happened" must not be provable merely by our having
+        # failed to write it down.
+        assert spool.pending_count() == 1
+
+
+# ---------------------------------------------------------------------------
+# The other side of the owner's line (§107)
+# ---------------------------------------------------------------------------
+
+
+class TestQueuedOperationsDoNotStopTheProduct:
+    """«Останавливать его из-за недоступности журнала значит наказывать
+    человека за нашу поломку» — owner §107.
+
+    The first implementation stopped everything, and this window raised the
+    cost itself: a personal-context read happens on every turn of the
+    conversation, so a journal outage degraded the whole conversation rather
+    than one privileged operation. The owner drew the line along **what the
+    operation does to the data**, not along whose data it touches.
+
+    These tests are the ones that would be easy not to write. A suite proving
+    only that things stop stays green on a system that stops everything.
+    """
+
+    QUEUED = [
+        ("get", CTX_URL, None),
+        ("patch", CTX_URL,
+         {"updates": [{"field": "workplace_district", "value": "Центр"}]}),
+        ("get", CTX_URL + "ask-eligibility/", None),
+        ("post", CTX_URL + "mark-asked/", {"field": "preferred_time_slots"}),
+        ("post", CTX_URL + "skip/", {"field": "preferred_time_slots"}),
+    ]
+
+    @pytest.mark.parametrize("method,template,body", QUEUED,
+                             ids=lambda v: str(v)[:40])
+    def test_the_person_is_served_while_the_journal_is_down(
+        self, method, template, body, alice, broken_journal,
+    ):
+        alice_user, alice_id = alice
+        client = _client(actor=alice_id)
+        url = template.format(subject=alice_user.pk)
+
+        resp = (getattr(client, method)(url, body, format="json") if body
+                else getattr(client, method)(url))
+
+        assert resp.status_code == 200, resp.content
+        assert spool.pending_count() == 1
+
+    def test_a_context_write_actually_lands_while_the_journal_is_down(
+        self, alice, broken_journal,
+    ):
+        """Served means served — not "returned 200 and rolled back".
+
+        The transaction that wraps an unsafe method exists to keep the effect
+        and its record together. When the record is queued rather than
+        written, the effect must still commit, or we would be answering
+        "done" to something we undid.
+        """
+        alice_user, alice_id = alice
+
+        resp = _client(actor=alice_id).patch(
+            CTX_URL.format(subject=alice_user.pk),
+            {"updates": [{"field": "workplace_district", "value": "Центр"}]},
+            format="json",
+        )
+
+        assert resp.status_code == 200
+        assert (
+            UserPersonalContext.objects.get(user=alice_user).workplace_district
+            == "Центр"
+        )
+        assert spool.pending_count() == 1
+
+    def test_the_boundary_is_what_the_operation_does_not_whose_data_it_is(self):
+        """The classification, asserted directly.
+
+        Read as a sentence: exporting, deleting and erasing stop; reading,
+        writing and asking do not. If somebody widens the set by analogy, this
+        is where it shows.
+        """
+        _Op = PersonalDataAccessLog.Operation
+        assert policy.FAIL_CLOSED_OPERATIONS == {
+            _Op.EXPORT, _Op.DELETE, _Op.ERASE_CONTEXT,
+        }
+        for stopped in (_Op.EXPORT, _Op.DELETE, _Op.ERASE_CONTEXT):
+            assert policy.stops_when_unauditable(stopped)
+        for served in (_Op.READ_CONTEXT, _Op.WRITE_CONTEXT, _Op.ASK_METADATA):
+            assert not policy.stops_when_unauditable(served)
+
+
+class TestTheQueueIsAnObligation:
+    """«Очередь без доказанной доставки — то же самое, что отсутствие записи,
+    только выглядит спокойнее.»
+
+    So the queue is tested by what comes OUT of it, not by what goes in.
+    """
+
+    def test_queued_records_reach_the_journal_and_the_counter_returns_to_zero(
+        self, alice, broken_journal,
+    ):
+        """The positive guard on the counter.
+
+        Three queued accesses must give three — a counter that always said
+        zero would pass a test that only checked the end state, and "nothing
+        is waiting" would then be indistinguishable from "nothing is counted".
+        """
+        alice_user, alice_id = alice
+        for _ in range(3):
+            _client(actor=alice_id).get(CTX_URL.format(subject=alice_user.pk))
+
+        assert spool.pending_count() == 3
+        assert PersonalDataAccessLog.objects.count() == 0
+
+        written, failed = spool.drain()
+
+        assert (written, failed) == (3, 0)
+        assert spool.pending_count() == 0
+        assert PersonalDataAccessLog.objects.count() == 3
+
+    def test_a_replayed_record_is_the_same_record(self, alice, broken_journal):
+        """The queue must not store a different shape than the table.
+
+        A queue that replays into a journal disagreeing with itself is worse
+        than no queue: nobody notices until somebody reads a year-old row.
+        """
+        alice_user, alice_id = alice
+        _client(actor=alice_id, basis="REQ-9001").get(
+            CTX_URL.format(subject=alice_user.pk),
+        )
+        spool.drain()
+
+        row = PersonalDataAccessLog.objects.get()
+        assert row.operation == PersonalDataAccessLog.Operation.READ_CONTEXT
+        assert row.object_id == alice_user.pk
+        assert row.actor_id == alice_user.pk
+        assert row.actor_role == "client"
+        assert row.actor_named is True
+        assert row.result == PersonalDataAccessLog.Result.ALLOWED
+        assert row.basis == "REQ-9001"
+
+    def test_a_queued_denial_reaches_the_journal_with_its_reason(
+        self, alice, bob, broken_journal,
+    ):
+        alice_user, alice_id = alice
+        bob_user, _ = bob
+
+        _client(actor=alice_id).get(CTX_URL.format(subject=bob_user.pk))
+        spool.drain()
+
+        row = PersonalDataAccessLog.objects.get()
+        assert row.result == PersonalDataAccessLog.Result.DENIED
+        assert row.denial_reason == "subject_mismatch"
+        assert row.object_id == bob_user.pk
+
+    def test_the_queue_carries_no_personal_values(self, alice, broken_journal):
+        """A spool file is a file on a disk somebody can read."""
+        alice_user, alice_id = alice
+        alice_user.email = "alice@example.com"
+        alice_user.save(update_fields=["email"])
+        UserPersonalContext.objects.create(
+            user=alice_user, workplace_district="Центр",
+        )
+
+        _client(actor=alice_id).get(CTX_URL.format(subject=alice_user.pk))
+
+        blob = "".join(
+            path.read_text(encoding="utf-8")
+            for path in spool.spool_dir().glob("*.audit.json")
+        )
+        assert blob
+        assert "alice@example.com" not in blob
+        assert "Центр" not in blob
+        assert alice_id not in blob
+
+    def test_a_partial_write_never_becomes_a_record(self, alice, broken_journal):
+        """Records appear whole or not at all.
+
+        Written to a temporary name and renamed, so a process that dies
+        mid-write leaves nothing the drain would read as truth.
+        """
+        alice_user, alice_id = alice
+        _client(actor=alice_id).get(CTX_URL.format(subject=alice_user.pk))
+
+        leftovers = list(spool.spool_dir().glob("*.partial"))
+        assert leftovers == []
+
+    def test_drain_leaves_what_it_could_not_write(self, alice, broken_journal,
+                                                  monkeypatch):
+        """A record leaves the queue only once its row exists.
+
+        Otherwise a drain that half-succeeded would report success and take
+        the evidence with it.
+        """
+        alice_user, alice_id = alice
+        _client(actor=alice_id).get(CTX_URL.format(subject=alice_user.pk))
+        assert spool.pending_count() == 1
+
+        def _refuse(*_args, **_kwargs):
+            raise RuntimeError("journal still down")
+
+        monkeypatch.setattr(
+            PersonalDataAccessLog.objects, "create", _refuse, raising=False,
+        )
+        written, failed = spool.drain()
+
+        assert (written, failed) == (0, 1)
+        assert spool.pending_count() == 1
+
+    def test_the_only_loss_path_is_named_and_does_not_stop_the_person(
+        self, alice, broken_journal, monkeypatch,
+    ):
+        """Both the table and the queue gone.
+
+        The record is lost — that is the single path on which it happens, and
+        for a queued operation the owner's ruling says the product does not
+        stop. Asserted rather than left implicit, so the loss is a known limit
+        and not a discovery.
+        """
+        alice_user, alice_id = alice
+
+        def _boom(_record):
+            raise spool.SpoolUnavailable("disk gone")
+
+        # ``services`` imports the module lazily, so the name is looked up on
+        # the module object at call time — patching it here is what the code
+        # under test will actually see.
+        monkeypatch.setattr(spool, "enqueue", _boom)
+
+        resp = _client(actor=alice_id).get(CTX_URL.format(subject=alice_user.pk))
+
+        assert resp.status_code == 200
+        assert PersonalDataAccessLog.objects.count() == 0
+        assert spool.pending_count() == 0
 
 
 # ---------------------------------------------------------------------------

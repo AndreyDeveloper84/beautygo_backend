@@ -794,6 +794,19 @@ INTERNAL_SUBJECT_AUTHZ_ENFORCE = os.environ.get(
     "INTERNAL_SUBJECT_AUTHZ_ENFORCE", "false",
 ).strip().lower() in {"1", "true", "yes", "on"}
 
+# Где лежит гарантированная очередь журнала доступа (решение владельца §107,
+# ai-bot-platform docs/OPEN_DECISIONS.md, dev 883b7539).
+#
+# Файл, а НЕ таблица, и это не вкусовщина: очередь страхует запись в базу, и
+# будь она строкой в той же базе, легла бы тем же отказом. Свод §23 — сторож
+# внутри предмета не сторож.
+#
+# Цена выбора названа вслух: очередь ЛОКАЛЬНА для процесса. На нескольких
+# инстансах либо `drain_privacy_audit_spool` крутится на каждом, либо этот
+# путь указывает на общее хранилище. Пусто = каталог var/ в корне проекта, а
+# не системный temp: очередь, которую чистит перезагрузка, не гарантированная.
+PRIVACY_AUDIT_SPOOL_DIR = os.environ.get("PRIVACY_AUDIT_SPOOL_DIR", "")
+
 # S3C — YClients catalog intake (read-only pull of the pilot salon's
 # services + staff). Dual-token auth: partner (application) token +
 # optional user token, both in one Authorization header. Empty partner

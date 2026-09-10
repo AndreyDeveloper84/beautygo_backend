@@ -8,15 +8,23 @@ The mixin also owns the ORDERING that owner §96 requires, and the ordering
 differs by method for a reason that is not stylistic:
 
 * a **read** is recorded after the body is built and before it leaves the
-  process, so a failed journal write turns into a refusal and nothing is
+  process, so a failed journal write can turn into a refusal with nothing
   disclosed;
 * a **write or erasure** shares ONE transaction with the journal row, so a
   failed journal write rolls the effect back. There is no state where data
   was erased and the erasure went unrecorded.
 
+Whether a failed write actually refuses is the owner's boundary from §107 and
+lives in :mod:`privacy_audit.policy`: only disclosing and destroying
+operations stop. Everything else is queued —
+:mod:`privacy_audit.spool` — because our outage must not stop a person acting
+on their own data. The ordering above still matters for the queued ones: it is
+what keeps the queued record consistent with what actually happened.
+
 Refusals ride the same path: the decision the permission made is on the
 request, so a denial is journalled with its own reason instead of being
-reconstructed from a 403.
+reconstructed from a 403 — and a denial whose row cannot be written is queued
+rather than dropped.
 """
 from __future__ import annotations
 
@@ -26,7 +34,7 @@ from django.db import transaction
 
 from privacy_audit import outcome as authz_outcome
 from privacy_audit.models import PersonalDataAccessLog
-from privacy_audit.services import AuditUnavailable, basis_from, record_access
+from privacy_audit.services import AuditUnavailable, basis_from, record_or_queue
 from users.response import error_response
 
 logger = logging.getLogger("privacy_audit")
@@ -112,35 +120,32 @@ class AuditedPersonalDataAccess:
                 f"{request.method}"
             )
 
-        try:
-            record_access(
-                caller_purpose=decision.caller_purpose,
-                actor=decision.actor,
-                object_id=self.kwargs.get(self.subject_url_kwarg),
-                operation=operation,
-                object_category=self.audit_object_category,
-                result=(
-                    PersonalDataAccessLog.Result.ALLOWED if decision.allowed
-                    else PersonalDataAccessLog.Result.DENIED
-                ),
-                actor_named=decision.actor_named,
-                denial_reason=decision.reason,
-                basis=basis_from(request),
-                request_id=str(getattr(request, "request_id", "") or ""),
-            )
-        except AuditUnavailable:
-            if decision.allowed:
-                raise
-            # A refusal cannot fail closed any harder than it already is, and
-            # turning it into a 503 would tell the caller "try again later"
-            # about a request that was refused on the merits — a false answer
-            # to a true question. The refusal stands; the fact that it went
-            # unrecorded is an operational alarm, not the caller's problem.
-            logger.error(
-                "privacy_audit.denial_unrecorded path=%s reason=%s subject=%s "
-                "— the refusal held, the journal did not",
-                request.path, decision.reason,
-                self.kwargs.get(self.subject_url_kwarg),
+        # ``record_or_queue`` owns the owner's boundary (§107): a disclosing or
+        # destroying operation that cannot be journalled raises and is refused
+        # by the caller below; anything else is queued, and a denial is always
+        # queued rather than dropped — an attempt to reach somebody else's
+        # subject has to arrive in the journal even if the journal was down
+        # when it happened.
+        stored = record_or_queue(
+            caller_purpose=decision.caller_purpose,
+            actor=decision.actor,
+            object_id=self.kwargs.get(self.subject_url_kwarg),
+            operation=operation,
+            object_category=self.audit_object_category,
+            result=(
+                PersonalDataAccessLog.Result.ALLOWED if decision.allowed
+                else PersonalDataAccessLog.Result.DENIED
+            ),
+            actor_named=decision.actor_named,
+            denial_reason=decision.reason,
+            basis=basis_from(request),
+            request_id=str(getattr(request, "request_id", "") or ""),
+        )
+        if stored != "written":
+            logger.warning(
+                "privacy_audit.record_deferred how=%s path=%s operation=%s "
+                "result=%s", stored, request.path, operation,
+                "allowed" if decision.allowed else "denied",
             )
 
     def _refuse_unaudited(self):
