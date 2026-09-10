@@ -161,7 +161,12 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
     profile.daily_protein_g = norms.daily_protein_g
     profile.daily_fat_g = norms.daily_fat_g
     profile.daily_carbs_g = norms.daily_carbs_g
-    profile.daily_water_ml = norms.daily_water_ml
+    # ``profile.daily_water_ml`` здесь БОЛЬШЕ НЕ ПИШЕТСЯ: формула
+    # 30 мл × вес снята (§82, §85). Столбец остаётся в схеме со своим
+    # ``default=0`` — миграция данных существующих клиентов это
+    # отдельный срез, и подставлять в неё нынешние числа как «выбор
+    # клиента» нельзя. Новых фиктивных значений с этой правки не
+    # появляется ни у кого.
     # DRF-265: micronutrient RDA — recomputed on every upsert.
     profile.daily_vitamin_d_iu = norms.daily_vitamin_d_iu
     profile.daily_vitamin_b12_mcg = norms.daily_vitamin_b12_mcg
@@ -174,13 +179,17 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
     profile.goal = norms.goal
     profile.pace = norms.pace
     profile.goal_overridden_by = norms.goal_overridden_by
-    audit = list(norms.overrides_applied)
-    if profile.weight_kg is None:
-        # DRF-1339: the norms above were computed against DEFAULT_WEIGHT_KG,
-        # not a user-stated weight. Mark the assumed input in the same audit
-        # so consumers can tell substituted from real without parsing text.
-        audit.append({"reason": "assumed_input", "field": "weight_kg"})
-    profile.last_overrides_applied = audit
+    # DRF-1339 добавлял сюда ``{"reason": "assumed_input", "field":
+    # "weight_kg"}`` — маркер того, что нормы посчитаны от
+    # ``DEFAULT_WEIGHT_KG``, а не от названного человеком веса. Маркер
+    # снят вместе с подстановкой: он был ПРИЗНАНИЕМ, а не отказом, и
+    # число всё равно считалось, уезжало в профиль и показывалось.
+    #
+    # Теперь недостающий вход отменяет расчёт, и запись об этом делает
+    # сам ``compute_norms``: ``{"reason": "insufficient_inputs",
+    # "fields": [...]}``. Одно имя вместо двух, и оно означает «расчёта
+    # нет», а не «расчёт есть, но входы чужие».
+    profile.last_overrides_applied = list(norms.overrides_applied)
 
 
 def _flip_lifecycle_markers(profile: NutritionProfile, payload: dict) -> None:
@@ -209,7 +218,10 @@ def _serialize(
             "daily_protein_g": profile.daily_protein_g,
             "daily_fat_g": profile.daily_fat_g,
             "daily_carbs_g": profile.daily_carbs_g,
-            "daily_water_ml": profile.daily_water_ml,
+            # ``daily_water_ml`` из ответа снят вместе с формулой,
+            # которая его считала. Ключа нет — не ноль и не null: у
+            # существующих строк в столбце ещё лежит старое 30 × вес, и
+            # отдать его значило бы выдать снятую методику за живую.
             # DRF-265: micronutrient RDA targets.
             "daily_vitamin_d_iu": profile.daily_vitamin_d_iu,
             "daily_vitamin_b12_mcg": profile.daily_vitamin_b12_mcg,
@@ -226,12 +238,16 @@ def _serialize(
             profile.bmi_warning_overridden_at,
         ),
         "overrides_applied": profile.last_overrides_applied or [],
-        # DRF-1339: machine-readable list of inputs that were substituted
-        # with defaults for the norm computation (weight_kg is NULL → the
-        # norms came from DEFAULT_WEIGHT_KG). Derived from the profile
-        # itself so legacy rows persisted before the audit marker still
-        # report truthfully.
-        "assumed_inputs": ["weight_kg"] if profile.weight_kg is None else [],
+        # DRF-1339: список входов, которые ПОДСТАВЛЯЛИСЬ вместо ответов
+        # человека. Подстановки больше нет — недостающий вход отменяет
+        # расчёт, — поэтому список всегда пуст, а имя отказа приезжает в
+        # ``overrides_applied`` выше как ``insufficient_inputs``.
+        #
+        # Ключ оставлен: его читают потребители, а исчезновение
+        # означало бы для них «подстановок не было», что для строк,
+        # посчитанных ДО этой правки, неправда. Пустой список честнее:
+        # с этой правки подстановок действительно нет ни одной.
+        "assumed_inputs": [],
         "disclaimer_acked": profile.disclaimer_acked,
         "onboarded_at": _strip_microseconds(profile.onboarded_at),
         "first_food_logged_at": _strip_microseconds(profile.first_food_logged_at),
