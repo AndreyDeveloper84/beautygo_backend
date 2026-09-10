@@ -113,7 +113,11 @@ class TestSalonServiceRead:
         data = r.json().get("data", r.json())
         assert str(data["id"]) == str(salon_service.id)
         assert str(data["template"]) == str(gated_template.id)
-        assert data["requires_health_check"] is False
+        # Собственный признак САЛОНА трёхзначен с 0018: фикстура его не
+        # трогает, значит салон на вопрос не отвечал — это `null`, а не
+        # `false`. Прежнее `False` здесь было умолчанием колонки, и
+        # утверждение «салон сказал нет» оно не несло никогда.
+        assert data["requires_health_check"] is None
 
     def test_filter_by_tenant(self, salon_service):
         other = Tenant.objects.create(slug="s3a-other", name="Other")
@@ -139,6 +143,40 @@ class TestSpecialistServiceRead:
         # template floor requires health check -> resolved True even though
         # the specialist row has requires_health_check=False (D1 escalate-only)
         assert data["resolved_requires_health_check"] is True
+
+    def test_unknown_health_check_travels_as_null_not_false(
+        self, tenant, category, specialist,
+    ):
+        """Услуга без шаблона отдаёт по проводу `null`, а не `false`.
+
+        Это весь предмет правки. Зеркало бота уже умеет третье состояние
+        (`MasterService.resolved_requires_health_check`, `null=True`, гейт
+        читает `NULL` как «нужен скрининг») и не видело его ни разу только
+        потому, что каталог отвечал `false` за салон, который на вопрос не
+        отвечал: 96 из 387 активных рёбер на пилоте 09.09.2026.
+
+        `null` здесь — ЗНАЧЕНИЕ, а не отсутствие ключа. Ключ обязан
+        присутствовать в теле: приёмник различает «поле не прислали»
+        (сохранить прежнее) и «прислали null» (записать «не знаю»).
+        """
+        bare = SalonService.objects.create(
+            tenant=tenant, template=None, category=category,
+            name="Услуга без шаблона", duration_minutes=60,
+        )
+        link = SpecialistService.objects.create(
+            salon_service=bare, specialist=specialist,
+            duration_minutes=60, price=Decimal("2000"),
+        )
+
+        r = _api().get(f"{SPEC_URL}{link.id}/")
+        assert r.status_code == 200, r.data
+        data = r.json().get("data", r.json())
+
+        assert "resolved_requires_health_check" in data, (
+            "ключ обязан присутствовать: его отсутствие приёмник читает как "
+            "«эта выгрузка про поле не говорит» и сохраняет прежнее значение"
+        )
+        assert data["resolved_requires_health_check"] is None
         assert str(data["specialist"]) == str(specialist.id)
         assert data["yclients_staff_id"] == "9001"
 
