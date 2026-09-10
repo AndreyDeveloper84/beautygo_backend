@@ -20,7 +20,7 @@ from appointments.application.services.create_booking_service import (
 )
 from appointments.models import Appointment
 from payments.models import Payment
-from services.models import SalonService, Service, ServiceCategory, SpecialistService
+from services.models import SalonService, ServiceCategory, SpecialistService
 from users.models import SpecialistProfile, User
 
 

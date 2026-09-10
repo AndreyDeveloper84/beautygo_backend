@@ -38,7 +38,7 @@ from payments.services import (
     get_platform_fee,
 )
 from payments.tasks import capture_payment_task
-from services.models import SalonService, Service, ServiceCategory, SpecialistService
+from services.models import SalonService, ServiceCategory, SpecialistService
 from users.models import User
 from users.models import SpecialistProfile
 

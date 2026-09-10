@@ -34,7 +34,7 @@ from appointments.application.services.create_booking_service import (
 )
 from appointments.models import Appointment
 from rest_framework.exceptions import NotFound
-from services.models import SalonService, Service, ServiceCategory, SpecialistService
+from services.models import SalonService, ServiceCategory, SpecialistService
 from tenants.models import Tenant
 from users.models import SpecialistProfile, TenantUserRelationship, User
 
@@ -61,7 +61,7 @@ def _make_specialist(tenant, *, suffix: str) -> SpecialistProfile:
     return p
 
 
-def _make_service(specialist) -> Service:
+def _make_service(specialist) -> SalonService:
     cat, _ = ServiceCategory.objects.get_or_create(
         slug="g1014-cat", defaults={"name": "G1014 Cat"},
     )
