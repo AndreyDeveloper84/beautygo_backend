@@ -1,10 +1,15 @@
 """Custom permission classes for BeautyGO API."""
 
+import logging
 from hmac import compare_digest
 from typing import Any
 
 from django.conf import settings
 from rest_framework import permissions
+
+from core.errors import DomainException, ErrorCode
+
+logger = logging.getLogger("users.internal_authz")
 
 
 class IsClientApp(permissions.BasePermission):
@@ -429,3 +434,218 @@ class IsTenantAdminOrPlatformAdmin(permissions.BasePermission):
             role=TenantUserRelationship.Role.ADMIN,
             is_active=True,
         ).exists()
+
+
+# ---------------------------------------------------------------------------
+# CP-2 / DRF-1617 — purpose separation + object-level authorization for the
+# internal personal-data surface.
+#
+# The defect this closes, in one sentence: a holder of the shared internal
+# bearer could export, overwrite and erase the personal data of ANY subject
+# by putting that subject's UUID in the URL. The token proved the call came
+# from one of our own services, and the check ended there.
+#
+# Three things are separated here that used to be one undifferentiated 403,
+# because a month from now the difference is the whole question — is somebody
+# reaching into foreign data, or is a purpose merely misconfigured?
+#
+#   wrong_purpose      a credential we recognise, issued for something else
+#   subject_mismatch   a caller that named itself, and named somebody else
+#   unnamed_actor      a caller that named nobody (the measured stage)
+#
+# Outward every one of them is the same coarse refusal. Inward they are
+# separate counters, and they are what makes "no foreign access happened" an
+# observation rather than a hope.
+# ---------------------------------------------------------------------------
+
+
+class InternalSubjectMismatch(DomainException):
+    """The subject named in the URL is not the caller's own subject.
+
+    Deliberately the same wire code the C7.6 card surface has emitted since
+    ``payments.views._check_user_scope``: one boundary, one name.
+    """
+
+    code = ErrorCode.CLIENT_MISMATCH
+    status_code = 403
+    default_message = "path subject id does not match the resolved actor."
+
+
+class _CredentialPurpose:
+    """Which credential the caller presented, by the purpose it was issued for."""
+
+    NONE = "none"
+    INTERNAL = "internal"          # AYLA_INTERNAL_API_TOKEN — runtime bot credential
+    PROVISIONING = "provisioning"  # AYLA_IDENTITY_PROVISIONING_TOKEN — ops only
+    UNKNOWN = "unknown"            # a bearer that matches nothing we issued
+
+
+def _bearer(request: Any) -> str:
+    """Extract the bearer value, or "" when there is no bearer at all."""
+    auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+    prefix = "Bearer "
+    if not auth_header.startswith(prefix):
+        return ""
+    return auth_header[len(prefix):].strip()
+
+
+def _credential_purpose(request: Any) -> str:
+    """Classify the presented credential by PURPOSE, not by validity.
+
+    ``IsInternalBearer`` answers "is this the runtime token?" and folds every
+    other outcome into one ``False``. That is enough to keep the door shut and
+    not enough to say what knocked. Here the provisioning credential is
+    recognised **explicitly**, so presenting an ops-only secret to a runtime
+    surface is recorded as a misdirected purpose rather than as an invalid
+    token — the two have opposite fixes and look identical from outside.
+
+    Comparison stays constant-time, and an unset setting can never match: an
+    empty ``expected`` is skipped, never compared.
+    """
+    provided = _bearer(request)
+    if not provided:
+        return _CredentialPurpose.NONE
+    internal = getattr(settings, "AYLA_INTERNAL_API_TOKEN", "") or ""
+    if internal and compare_digest(provided, internal):
+        return _CredentialPurpose.INTERNAL
+    provisioning = getattr(settings, "AYLA_IDENTITY_PROVISIONING_TOKEN", "") or ""
+    if provisioning and compare_digest(provided, provisioning):
+        return _CredentialPurpose.PROVISIONING
+    return _CredentialPurpose.UNKNOWN
+
+
+def _deny(reason: str, *, path: str, subject_id: str | None = None) -> None:
+    """One refusal, one named reason — and, for the alarming one, a record.
+
+    Never logs the credential, the external identity, or any personal value:
+    the reason and the route are what a reader needs, and a denial log that
+    carried the header would hand an attacker's own probe back to whoever
+    reads the file.
+
+    ``subject_mismatch`` additionally gets a durable ``AnalyticsEvent``. Log
+    rotation is the wrong lifetime for "somebody reached for data that was
+    not theirs"; the other reasons are operational and a log line is the
+    right weight for them.
+    """
+    logger.warning(
+        "internal.subject_authz.denied reason=%s path=%s", reason, path,
+    )
+    if reason != "subject_mismatch":
+        return
+    try:
+        from users.internal_authz_events import emit_subject_access_denied
+
+        emit_subject_access_denied(reason=reason, path=path, subject_id=subject_id)
+    except Exception:  # noqa: BLE001 — the refusal already happened; auditing
+        # it must never turn a clean 403 into a 500.
+        logger.exception("internal.subject_authz.audit_failed reason=%s", reason)
+
+
+class IsInternalBearerForSubject(permissions.BasePermission):
+    """Runtime internal bearer, restricted to the caller's OWN subject.
+
+    Attach to any internal view whose URL names a person. The view must
+    declare which kwarg holds that person::
+
+        class InternalPersonalDataExportView(APIView):
+            permission_classes = [IsInternalBearerForSubject]
+            subject_url_kwarg = "user_id"
+
+    A view that forgets ``subject_url_kwarg`` is refused, loudly. Silence
+    would be the one failure mode this class exists to prevent: an unguarded
+    surface that looks guarded because the class name is in the list.
+
+    ### What is checked, in order
+
+    1. **Purpose.** Only the runtime credential passes. The provisioning
+       credential is recognised and refused *as such* — see
+       :func:`_credential_purpose`.
+    2. **Subject.** ``X-External-User-ID`` is resolved WITHOUT creating a row
+       (:func:`users.services.resolve_external_user_readonly`) and must equal
+       the UUID in the URL.
+
+    ### The unnamed caller, and why it is still allowed
+
+    Step 2 can only run on a caller that names itself. Two callers do not, as
+    of 10.09.2026 — ``personal_context_client`` in ai-bot-platform and
+    ``scripts/pilot_smoke`` here — so refusing the unnamed today takes down
+    the production erasure path.
+
+    So the unnamed branch is **counted, not refused**, until
+    ``settings.INTERNAL_SUBJECT_AUTHZ_ENFORCE`` is turned on. Read that
+    honestly: while the flag is off, this class does NOT close the hole — a
+    token holder who simply omits the header still reaches any subject. What
+    it does is make the omission visible and make the *named* attack
+    impossible, which costs nothing because no legitimate caller ever names a
+    foreign subject.
+
+    The flag's own docstring in ``settings/base.py`` carries the expiry
+    condition. Both halves are needed: the counter earns the flip, the flip
+    closes Gate 2.
+    """
+
+    message = "Internal service auth required"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        from users.services import resolve_external_user_readonly
+
+        path = request.path
+
+        purpose = _credential_purpose(request)
+        if purpose != _CredentialPurpose.INTERNAL:
+            _deny(
+                {
+                    _CredentialPurpose.NONE: "no_credential",
+                    _CredentialPurpose.PROVISIONING: "wrong_purpose",
+                    _CredentialPurpose.UNKNOWN: "invalid_token",
+                }[purpose],
+                path=path,
+            )
+            return False
+
+        subject_kwarg = getattr(view, "subject_url_kwarg", None)
+        if not subject_kwarg or subject_kwarg not in getattr(view, "kwargs", {}):
+            # Not a caller error — ours. Fail closed and say so at ERROR: a
+            # route reaching this branch is a route nobody is guarding, and
+            # test_every_personal_data_route_is_guarded exists to catch it
+            # before a deployment does.
+            logger.error(
+                "internal.subject_authz.view_misconfigured path=%s view=%s "
+                "subject_url_kwarg=%r",
+                path, type(view).__name__, subject_kwarg,
+            )
+            _deny("view_misconfigured", path=path)
+            return False
+        subject_id = str(view.kwargs[subject_kwarg])
+
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        if not external_user_id:
+            if getattr(settings, "INTERNAL_SUBJECT_AUTHZ_ENFORCE", False):
+                _deny("unnamed_actor", path=path)
+                return False
+            # The measured stage. One INFO line per call with a
+            # machine-readable reason — this counter is the evidence that
+            # earns the flip, so it has to be countable when it reads
+            # non-zero AND when it reads zero. A zero is only meaningful
+            # because the same line is emitted on every call taking this
+            # branch.
+            logger.info(
+                "internal.subject_authz.unnamed_actor path=%s subject=%s "
+                "enforced=false",
+                path, subject_id,
+            )
+            return True
+
+        actor = resolve_external_user_readonly(external_user_id)
+        if actor is None:
+            # Malformed header, or an external identity Ayla has never seen.
+            # "Not resolved" is not "resolve it for them": provisioning is a
+            # different purpose with a different credential.
+            _deny("unknown_actor", path=path)
+            return False
+
+        if str(actor.pk) != subject_id:
+            _deny("subject_mismatch", path=path, subject_id=subject_id)
+            raise InternalSubjectMismatch()
+
+        return True

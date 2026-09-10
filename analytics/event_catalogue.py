@@ -101,6 +101,20 @@ EXTERNAL_IDENTITY_BOUND = "external_identity_bound"
 GOAL_SELECTED = "goal_selected"
 RECOMMENDATION_SHOWN = "recommendation_shown"
 
+# ── Internal personal-data access audit (CP-2 / DRF-1617) ──
+# personal_data_exported: the read half of the 152-ФЗ audit. Deletion has
+# been audited since AMD-010; the export was not audited at all — it only
+# reached logger.info, so the record of who read a person's data lived
+# exactly as long as log rotation. Server-side emit only
+# (users/internal_authz_events); payload carries initiator + the NAMES of
+# the exported sections, never the exported values.
+# internal_subject_access_denied: a caller that named itself and named a
+# DIFFERENT subject. Deliberately durable while the other refusal reasons
+# stay log-only — "somebody reached for data that was not theirs" is the
+# one that has to outlive a log file.
+PERSONAL_DATA_EXPORTED = "personal_data_exported"
+INTERNAL_SUBJECT_ACCESS_DENIED = "internal_subject_access_denied"
+
 
 EVENT_NAMES: frozenset[str] = frozenset({
     BOOKING_VIEWED, BOOKING_CREATED, BOOKING_CANCELLED,
@@ -122,4 +136,5 @@ EVENT_NAMES: frozenset[str] = frozenset({
     PERSONAL_DATA_DELETED,
     EXTERNAL_IDENTITY_BOUND,
     GOAL_SELECTED, RECOMMENDATION_SHOWN,
+    PERSONAL_DATA_EXPORTED, INTERNAL_SUBJECT_ACCESS_DENIED,
 })

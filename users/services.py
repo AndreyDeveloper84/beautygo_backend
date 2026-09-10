@@ -137,14 +137,62 @@ def resolve_external_user(external_user_id: str) -> User:
             "identity.proxy_created user_id=%s external_user_id=%s",
             user.id, external_user_id,
         )
+    return _follow_binding(user)
+
+
+def _follow_binding(user: User) -> User:
+    """Return the bound REAL account for a proxy row, else the row itself.
+
+    Extracted so ``resolve_external_user`` (creating) and
+    ``resolve_external_user_readonly`` (not creating) cannot drift: the
+    rule "which subject does this external identity mean" must have ONE
+    implementation, or the authorising reader and the acting writer will
+    eventually disagree about the same header — and the reader is the one
+    that grants access.
+
+    Fail-closed: a binding to a deactivated / soft-deleted account is void
+    — fall back to the isolated proxy (a controlled empty result) rather
+    than resolving an anonymized identity.
+    """
     if user.is_proxy and user.linked_user_id is not None:
         linked = user.linked_user
-        # Fail-closed: a binding to a deactivated / soft-deleted account
-        # is void — fall back to the isolated proxy (controlled empty
-        # result) rather than resolving an anonymized identity.
         if linked.is_active and linked.deleted_at is None:
             return linked
     return user
+
+
+def resolve_external_user_readonly(external_user_id: str) -> User | None:
+    """Resolve ``<source>:<id>[…]`` to a ``User`` **without creating one**.
+
+    The authorising twin of :func:`resolve_external_user` (CP-2 / DRF-1617).
+    Both answer the same question — "which Ayla subject does this header
+    mean" — and both follow the same binding via :func:`_follow_binding`.
+    They differ in exactly one thing, and that difference is the point:
+
+    * ``resolve_external_user`` is used by endpoints that **act for** the
+      caller, so provisioning an unseen subject is part of the job;
+    * this one is used by endpoints that **authorise** a caller against a
+      subject named elsewhere (a UUID in the URL). An authorisation check
+      that provisions rows would let anyone holding the service token mint
+      accounts by guessing headers, and — worse on this surface — an
+      export that creates a row is an export that CREATES data about a
+      person (``personal_data_api`` already refuses to do that for the
+      personal-context row).
+
+    Returns ``None`` for a malformed id and for an id nobody has ever
+    used. ``None`` is a denial input, never a "fall back to something".
+    """
+    if not is_valid_external_user_id(external_user_id):
+        return None
+    user = (
+        User.objects
+        .select_related("linked_user")
+        .filter(username=external_user_id)
+        .first()
+    )
+    if user is None:
+        return None
+    return _follow_binding(user)
 
 
 class IdentityBindingError(ValueError):

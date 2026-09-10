@@ -764,6 +764,31 @@ AYLA_IDENTITY_PROVISIONING_TOKEN = os.environ.get(
     "AYLA_IDENTITY_PROVISIONING_TOKEN", "",
 )
 
+# CP-2 / DRF-1617 — object-level authorization on the personal-data
+# surface. When a caller NAMES its acting subject (X-External-User-ID),
+# the check is always on: a header that resolves to somebody other than
+# the UUID in the URL is refused whatever this flag says, because no
+# legitimate caller ever sends that pair.
+#
+# This flag governs only the caller that names NOBODY. Two such callers
+# exist as of 10.09.2026 — ai-bot-platform's personal_context_client
+# (the sole Ayla client of ten that omits the header) and
+# scripts/pilot_smoke — so flipping this to True before they are fixed
+# takes down the production erasure path. False therefore means
+# "count the unnamed, do not refuse them yet", and the counter is the
+# thing that earns the flip.
+#
+# EXPIRY, and it is a real one: this flag is a measuring instrument, not
+# a setting. It comes out — together with the whole unnamed branch — as
+# soon as `internal.subject_authz.unnamed_actor` has read ZERO for a
+# full pilot day with both callers deployed. Until it is True in
+# production, Gate 2 of the pilot GO gate is NOT met: a token holder who
+# simply omits the header still reaches any subject. Do not read a green
+# test suite on this file as "the hole is closed".
+INTERNAL_SUBJECT_AUTHZ_ENFORCE = os.environ.get(
+    "INTERNAL_SUBJECT_AUTHZ_ENFORCE", "false",
+).strip().lower() in {"1", "true", "yes", "on"}
+
 # S3C — YClients catalog intake (read-only pull of the pilot salon's
 # services + staff). Dual-token auth: partner (application) token +
 # optional user token, both in one Authorization header. Empty partner

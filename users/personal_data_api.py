@@ -31,8 +31,9 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from users.internal_authz_events import emit_personal_data_exported
 from users.models import Profile, User, UserPersonalContext
-from users.permissions import IsInternalBearer
+from users.permissions import IsInternalBearerForSubject
 from users.personal_context_erasure import erase_personal_context
 from users.personal_context_views import UserPersonalContextSerializer
 from users.response import error_response, success_response
@@ -76,7 +77,11 @@ class InternalPersonalDataExportView(APIView):
     """GET …/personal-data/export/ — C5.1 synchronous JSON export."""
 
     authentication_classes: list = []
-    permission_classes = [IsInternalBearer]
+    permission_classes = [IsInternalBearerForSubject]
+    # CP-2: names the URL kwarg the object-level check authorises against.
+    # Without it the permission fails closed and logs at ERROR — see
+    # ``IsInternalBearerForSubject``.
+    subject_url_kwarg = "user_id"
 
     @extend_schema(
         operation_id="internal_personal_data_export",
@@ -125,6 +130,19 @@ class InternalPersonalDataExportView(APIView):
             "internal.personal_data.exported user_id=%s request_id=%s",
             user_id, getattr(request, "request_id", "-"),
         )
+        # CP-2 — §7 ``audit sensitive access``. Deletion has been audited
+        # since AMD-010; this read was not audited at all, so the record of
+        # who obtained a person's data outlived nothing but log rotation.
+        # Section NAMES only — the values are in the response, and an audit
+        # that copied them would be a second store of the same personal data.
+        emit_personal_data_exported(
+            user,
+            sections=(
+                ["profile", "personal_context"] if context_data is not None
+                else ["profile"]
+            ),
+            initiator="internal_api",
+        )
         return success_response({
             "user_id": str(user.pk),
             "exported_at": timezone.now().isoformat(),
@@ -137,7 +155,8 @@ class InternalPersonalDataDeleteView(APIView):
     """DELETE …/personal-data/ — C5.2/AMD-006 idempotent wipe + audit."""
 
     authentication_classes: list = []
-    permission_classes = [IsInternalBearer]
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "user_id"
 
     @extend_schema(
         operation_id="internal_personal_data_delete",

@@ -59,6 +59,15 @@ class ErrorCode(str, Enum):
     NOT_OWNER = "NOT_OWNER"
     NOT_PARTICIPANT = "NOT_PARTICIPANT"
     NOT_REVIEW_OWNER = "NOT_REVIEW_OWNER"
+    # Service-to-service ownership boundary: the subject named in the URL
+    # (or body) is not the subject the caller's credentials resolve to.
+    # Emitted since C7.6 by payments/appointments internal views through
+    # error_response('CLIENT_MISMATCH', …) — but it was never registered
+    # here, so every one of those calls took the unknown-code branch:
+    # AssertionError under DEBUG, a drift warning otherwise. Registering
+    # it changes no wire contract (the string was always what shipped) and
+    # removes a trap that only fires where DEBUG is on.
+    CLIENT_MISMATCH = "CLIENT_MISMATCH"
 
     # --- OTP / phone auth (spec §SMS-коды + §Регистрация) ---
     PHONE_ALREADY_REGISTERED = "PHONE_ALREADY_REGISTERED"
