@@ -11,6 +11,45 @@ from rest_framework import serializers
 from nutrition.models import Beverage, FoodLog, FoodScan, NutritionProfile, WaterLog
 
 
+#: Поля-ОРИЕНТИРЫ. Их отсутствие обязано доезжать до потребителя
+#: отсутствием ключа, а не нулём и не ``null`` (§65, §82, §85 раздел 8).
+#:
+#: Ноль читался правильно только у нас: снаружи ключ со значением ``0``
+#: неотличим от ориентира «ноль», и потребитель вправе нарисовать
+#: «0 из 0 ккал · 0 %». ``null`` не лучше — это «цель есть, мы её не
+#: знаем», то есть прочерк, а прочерк тоже сообщение о цели.
+#:
+#: Факт (``calories_total``, ``water_ml``, ``today_total_water_ml``)
+#: сюда НЕ входит и входить не должен: ноль съеденного — настоящий
+#: ноль, и прятать его значило бы врать в другую сторону.
+TARGET_FIELDS = frozenset({
+    "calories_goal",
+    "water_goal_ml",
+    "water_pct",
+    "today_norm_water_ml",
+    "today_progress_pct",
+})
+
+
+class OmitAbsentTargetsMixin:
+    """Выбрасывает ориентир из ответа, когда его нет.
+
+    Один mixin на все четыре ручки нарочно: ответ про воду и ответ про
+    сводку обязаны говорить об отсутствии ОДИНАКОВО. Когда каждая ручка
+    решала это сама, у одной остался ноль, у другой ключ исчез, и
+    клиент выучил обе формы — а потом одну из них забыли.
+
+    Страж на обратный ход — ``nutrition/tests/test_targets_stay_absent.py``.
+    """
+
+    def to_representation(self, instance):  # type: ignore[no-untyped-def]
+        data = super().to_representation(instance)
+        for name in TARGET_FIELDS:
+            if name in data and data[name] is None:
+                del data[name]
+        return data
+
+
 # DRF-264: Track E micronutrient keys that appear in
 # FoodScan.nutrition JSON (DRF-260 added these). Exposed in the
 # response under ``nutrition.vitamins``. Sparse map: only non-null
@@ -311,7 +350,7 @@ class ProgressiveSummaryResponseSerializer(serializers.Serializer):
     goal_progress = serializers.DictField(allow_null=True)
 
 
-class NutritionSummaryResponseSerializer(serializers.Serializer):
+class NutritionSummaryResponseSerializer(OmitAbsentTargetsMixin, serializers.Serializer):
     """Response shape per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION
     NutritionSummaryResponse.
 
@@ -322,12 +361,12 @@ class NutritionSummaryResponseSerializer(serializers.Serializer):
 
     date = serializers.DateField(format="%Y-%m-%d")
     calories_total = serializers.FloatField(source="totals.calories")
-    calories_goal = serializers.IntegerField()
+    calories_goal = serializers.IntegerField(allow_null=True, required=False)
     protein_g = serializers.FloatField(source="totals.protein_g")
     fat_g = serializers.FloatField(source="totals.fat_g")
     carbs_g = serializers.FloatField(source="totals.carbs_g")
     water_ml = serializers.IntegerField()
-    water_goal_ml = serializers.IntegerField()
+    water_goal_ml = serializers.IntegerField(allow_null=True, required=False)
     entries = FoodLogEntrySerializer(many=True)
     vitamin_deficits = serializers.DictField(
         child=serializers.FloatField(),
@@ -358,7 +397,7 @@ class WaterLogCreateSerializer(serializers.Serializer):
         return value
 
 
-class WaterLogResponseSerializer(serializers.Serializer):
+class WaterLogResponseSerializer(OmitAbsentTargetsMixin, serializers.Serializer):
     """POST/DELETE response — aggregate + the affected log id.
 
     Per spec ``WaterLogResponse``: water_ml, water_goal_ml, water_pct,
@@ -367,8 +406,12 @@ class WaterLogResponseSerializer(serializers.Serializer):
     """
 
     water_ml = serializers.IntegerField(source="aggregate.water_ml")
-    water_goal_ml = serializers.IntegerField(source="aggregate.water_goal_ml")
-    water_pct = serializers.IntegerField(source="aggregate.water_pct")
+    water_goal_ml = serializers.IntegerField(
+        source="aggregate.water_goal_ml", allow_null=True, required=False,
+    )
+    water_pct = serializers.IntegerField(
+        source="aggregate.water_pct", allow_null=True, required=False,
+    )
     log_id = serializers.UUIDField()
 
 
@@ -381,12 +424,14 @@ class WaterTodayLogSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
-class WaterTodayResponseSerializer(serializers.Serializer):
+class WaterTodayResponseSerializer(OmitAbsentTargetsMixin, serializers.Serializer):
     """GET /water/today response shape per spec WaterTodayResponse."""
 
     logs = WaterTodayLogSerializer(many=True)
     water_ml = serializers.IntegerField(source="aggregate.water_ml")
-    water_goal_ml = serializers.IntegerField(source="aggregate.water_goal_ml")
+    water_goal_ml = serializers.IntegerField(
+        source="aggregate.water_goal_ml", allow_null=True, required=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -535,7 +580,7 @@ class WaterEntryCreateSerializer(serializers.Serializer):
     ts = serializers.DateTimeField(required=False)
 
 
-class WaterEntryResponseSerializer(serializers.Serializer):
+class WaterEntryResponseSerializer(OmitAbsentTargetsMixin, serializers.Serializer):
     """POST /internal/water/ response shape (spec §2.1)."""
 
     entry_id = serializers.UUIDField()
@@ -549,8 +594,8 @@ class WaterEntryResponseSerializer(serializers.Serializer):
     carbs_g = serializers.FloatField()
     caffeine_mg = serializers.FloatField()
     today_total_water_ml = serializers.IntegerField()
-    today_norm_water_ml = serializers.IntegerField()
-    today_progress_pct = serializers.IntegerField()
+    today_norm_water_ml = serializers.IntegerField(allow_null=True, required=False)
+    today_progress_pct = serializers.IntegerField(allow_null=True, required=False)
     milestone_text = serializers.CharField(allow_null=True)
     alcohol_recovery_hint = serializers.BooleanField()
     caffeine_warning = serializers.CharField(allow_null=True)
@@ -567,14 +612,14 @@ class WaterTodayEntrySerializer(serializers.Serializer):
     deleted = serializers.BooleanField()
 
 
-class WaterTodayResponseSerializerV3(serializers.Serializer):
+class WaterTodayResponseSerializerV3(OmitAbsentTargetsMixin, serializers.Serializer):
     """GET /internal/water/today/ (spec §2.4) — distinct from the Slice 4
     WaterTodayResponseSerializer above (mobile fixed-button glasses)."""
 
     date = serializers.DateField(format="%Y-%m-%d")
     entries = WaterTodayEntrySerializer(many=True)
     today_total_water_ml = serializers.IntegerField()
-    today_norm_water_ml = serializers.IntegerField()
+    today_norm_water_ml = serializers.IntegerField(allow_null=True, required=False)
     today_kcal_from_beverages = serializers.FloatField()
     today_caffeine_mg = serializers.FloatField()
     today_total_coffee_cups = serializers.IntegerField()

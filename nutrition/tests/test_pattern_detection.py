@@ -185,18 +185,53 @@ class TestLowProtein:
 
 
 class TestLowWater:
-    def test_fires_with_4_low_days_of_7(self, user, profile):
+    """Паттерн «мало воды» не срабатывает: сравнивать не с чем.
+
+    Тест назывался ``test_fires_with_4_low_days_of_7`` и проверял, что
+    четыре «сухих» дня из семи поднимают паттерн. «Сухой» определялся
+    как ``< 70% от нормы``, а норма читалась из
+    ``NutritionProfile.daily_water_ml`` — выхода формулы ``30 мл × вес``,
+    снятой владельцем 09.09.2026 (§82).
+
+    Паттерн — это вывод О ЧЕЛОВЕКЕ, и делать его от чужой мерки хуже,
+    чем не делать вовсе: он уезжает в промпт модели как факт, а модель
+    вправе на нём строить совет.
+
+    Паттерн вернётся вместе с методикой (§85, раздел 4). Пока —
+    отсутствие, и оно проверяется вместе с контролем присутствия:
+    остальные паттерны того же прогона живы.
+    """
+
+    def test_does_not_fire_without_a_fluid_target(self, user, profile):
         today = _today()
-        # 4 dry-ish days (below 70% of 2000 = 1400 ml)
+        # Те же четыре «сухих» дня, что раньше поднимали паттерн.
         for i in range(4):
             ts = datetime.combine(
                 today - timedelta(days=i),
                 datetime.min.time().replace(hour=10),
                 tzinfo=dt_tz.utc,
             )
-            _add_water(user, ml=500, when=ts)  # 500 < 1400
+            _add_water(user, ml=500, when=ts)
         result = detect_patterns(user_id=user.id, force=True)
-        assert "low_water" in {p.slug for p in result.patterns}
+        assert "low_water" not in {p.slug for p in result.patterns}
+
+    def test_another_pattern_of_the_same_run_still_fires(self, user, profile):
+        """Контроль присутствия: молчит ИМЕННО водный вывод.
+
+        Утверждение выше прошло бы победно в мире, где ``detect_patterns``
+        сломан и не возвращает ничего. Поздний ужин от ориентира не
+        зависит и обязан подняться в том же прогоне.
+        """
+        today = _today()
+        for i in range(3):
+            ts = datetime.combine(
+                today - timedelta(days=i),
+                datetime.min.time().replace(hour=LATE_DINNER_HOUR + 1),
+                tzinfo=dt_tz.utc,
+            )
+            _add_food(user, kcal=500, when=ts)
+        result = detect_patterns(user_id=user.id, force=True)
+        assert "late_dinner" in {p.slug for p in result.patterns}
 
 
 # ===========================================================================
@@ -447,15 +482,18 @@ class TestEndpoint:
         assert body["patterns"] == []
 
     def test_response_shape_per_spec(self, user, profile, headers):
-        # Trigger any single pattern (low_water).
+        # Поднимаем любой ОДИН паттерн — предмет теста форма ответа, а
+        # не сам паттерн. Был ``low_water``; он больше не срабатывает,
+        # потому что сравнивать не с чем (§82 снял формулу воды). Взят
+        # ``late_dinner``: от ориентира не зависит.
         today = _today()
-        for i in range(4):
+        for i in range(3):
             ts = datetime.combine(
                 today - timedelta(days=i),
-                datetime.min.time().replace(hour=10),
+                datetime.min.time().replace(hour=LATE_DINNER_HOUR + 1),
                 tzinfo=dt_tz.utc,
             )
-            _add_water(user, ml=400, when=ts)
+            _add_food(user, kcal=500, when=ts)
         c = APIClient()
         resp = c.get(URL, **headers)
         body = resp.json()["data"]

@@ -23,9 +23,19 @@ from nutrition.models import WaterLog
 
 @dataclass(frozen=True)
 class WaterAggregate:
+    """Факт и — пока не будет методики — ОТСУТСТВИЕ ориентира.
+
+    ``water_goal_ml`` и ``water_pct`` объявлены ``None`` и другими не
+    бывают: единственный источник ориентира, ``NutritionProfile.
+    daily_water_ml``, считался снятой формулой 30 мл × вес (§82, §85).
+    Поля оставлены на месте — они несут ФОРМУ контракта, и сериализатор
+    выкидывает их из ответа именно по ``None``. Значение сюда положить
+    неоткуда, и положить его — значит вернуть дефект.
+    """
+
     water_ml: int
-    water_goal_ml: int
-    water_pct: int                 # 0..100, capped
+    water_goal_ml: int | None = None
+    water_pct: int | None = None
 
 
 @dataclass(frozen=True)
@@ -40,31 +50,6 @@ class WaterTodayResponse:
     """GET /water/today response — full list + aggregate."""
     logs: list[WaterLog]
     aggregate: WaterAggregate
-
-
-def _water_goal_ml(user_id: int) -> int:
-    """Дневная норма воды ЭТОГО человека, или 0 — «нормы нет».
-
-    Здесь стояла ``settings.NUTRITION_DEFAULT_WATER_GOAL_ML`` — 2000 мл на
-    всех, ровно восемь стаканов по 250: та самая выдуманная восьмёрка,
-    которую из клиента уже выбрасывали. Норма воды считается только из
-    анкеты питания (``NutritionProfile.daily_water_ml``), и тому, кто её
-    не проходил, подставлять нечего.
-
-    Ноль означает отсутствие: норма ноль миллилитров физически
-    невозможна, а ``_pct`` ниже делит только при положительной норме.
-    Тот же контракт, что у ``water_entry_service._load_nutrition_context``
-    — два пути к воде обязаны отвечать про норму одинаково.
-    """
-    from nutrition.models import NutritionProfile
-
-    row = (
-        NutritionProfile.objects
-        .filter(user_id=user_id)
-        .values_list("daily_water_ml", flat=True)
-        .first()
-    )
-    return int(row or 0)
 
 
 class WaterService:
@@ -98,26 +83,18 @@ class WaterService:
             .filter(user_id=user_id, logged_at__gte=start, logged_at__lte=end)
             .aggregate(s=Sum("amount_ml"))["s"]
         ) or 0
-        goal = _water_goal_ml(user_id)
-        return WaterAggregate(
-            water_ml=int(total),
-            water_goal_ml=int(goal),
-            water_pct=_pct(int(total), int(goal)),
-        )
+        # Ориентира нет ни у кого — ни ``water_goal_ml``, ни ``water_pct``.
+        return WaterAggregate(water_ml=int(total))
 
     def _aggregate_from_logs(
         self, logs: list[WaterLog], *, user_id: int
     ) -> WaterAggregate:
         # ``user_id`` пришёл в подпись вместе с нормой: раньше она была
-        # общей на всех и человека не спрашивала. Норма принадлежит
-        # человеку, поэтому и считающая её функция обязана знать, о ком речь.
+        # общей на всех и человека не спрашивала. Подпись сохранена — она
+        # ждёт методику (§85, раздел 4), после которой ориентир снова
+        # станет ЧЬИМ-ТО, а не общим.
         total = sum(log.amount_ml for log in logs)
-        goal = _water_goal_ml(user_id)
-        return WaterAggregate(
-            water_ml=int(total),
-            water_goal_ml=int(goal),
-            water_pct=_pct(int(total), int(goal)),
-        )
+        return WaterAggregate(water_ml=int(total))
 
 
 # ---------------------------------------------------------------------------
@@ -135,9 +112,7 @@ def _utc_day_bounds(day: date) -> tuple[datetime, datetime]:
         datetime.combine(day, time.max, tzinfo=timezone.utc),
     )
 
-
-def _pct(value: int, goal: int) -> int:
-    if goal <= 0:
-        return 0
-    # Cap at 100 — UI progress ring shouldn't keep growing past goal.
-    return min(100, round(value * 100 / goal))
+# ``_pct`` снят вместе с ориентиром. Процент — ПРОИЗВОДНАЯ ориентира, и
+# без него он не «ноль процентов», а отсутствие ответа: доли от
+# несуществующей нормы не бывает (§85, раздел 8 — «активного ориентира
+# нет → шкалы нет, процента нет»).
