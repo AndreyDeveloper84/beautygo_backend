@@ -896,8 +896,28 @@ FOOD_DEFICIT_MIN_STREAK_DAYS = int(
 # GET /nutrition/summary. UserPersonalContext doesn't carry per-user goals
 # yet (DRF-174 reduced scope) so the daily summary uses these flat defaults.
 # Override at the env level if a particular pilot wants different anchors.
-NUTRITION_DEFAULT_CALORIES_GOAL = int(os.environ.get("NUTRITION_DEFAULT_CALORIES_GOAL", "2000"))
-NUTRITION_DEFAULT_WATER_GOAL_ML = int(os.environ.get("NUTRITION_DEFAULT_WATER_GOAL_ML", "2000"))
+# ``NUTRITION_DEFAULT_CALORIES_GOAL`` УДАЛЕНА. Была плоская константа
+# 2000 ккал — одна на всех: ни роста, ни веса, ни возраста в той ветке
+# не участвовало вовсе, и человеку она показывалась как ЕГО дневная
+# цель, со шкалой и процентом выполнения.
+#
+# Владелец снял её дословно 09.09.2026: «Текущая плоская норма калорий
+# для всех удаляется» (§82). Замена — версионированный расчёт Миффлина
+# — Сан Жеора (§85), и он ОТДЕЛЬНЫЙ срез.
+#
+# Настройки здесь больше нет намеренно: пока имя живо, вернуть
+# подстановку — одна строка ``getattr(settings, ..., 2000)``. Страж на
+# это имя стоит в ``nutrition/tests/test_no_invented_norms.py``.
+# ``NUTRITION_DEFAULT_WATER_GOAL_ML`` УДАЛЕНА по той же причине и тем
+# же решением. 2000 мл при стакане 250 — ровно ВОСЕМЬ СТАКАНОВ: то самое
+# число, которое из клиента уже выбрасывали со словами «норму воды не
+# придумываем, восемь — число ниоткуда», после чего оно вернулось по
+# проводу с нашей стороны. Читателей у неё не осталось ещё 08.09.2026;
+# снято само имя, чтобы вернуть подстановку нельзя было одной строкой.
+#
+# ``NUTRITION_DEFAULT_PROTEIN_GOAL_G`` выше оставлена намеренно: белок
+# в решении владельца не назван, и снимать его заодно значило бы решить
+# за владельца. Читателей у неё тоже нет, и страж держит их отсутствие.
 
 # Water reminder beat task — only nag users active in the last N days
 # so dormant accounts don't get spammed. Pilot starts strict (7 days);

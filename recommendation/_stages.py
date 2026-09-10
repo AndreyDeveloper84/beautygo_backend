@@ -340,6 +340,7 @@ def apply_eligibility(
         recommendation_eligible=len(admitted),
         review_required=tally.get(MappingStatus.REVIEW_REQUIRED, 0),
         unmapped=tally.get(MappingStatus.UNMAPPED, 0),
+        not_recommendable=tally.get(MappingStatus.NOT_RECOMMENDABLE, 0),
         unknown=tally.get(MappingStatus.UNKNOWN, 0),
     )
     return AdmissionResult(tuple(admitted), tuple(excluded), codes, evidence, census)
