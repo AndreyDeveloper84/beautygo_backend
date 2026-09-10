@@ -57,6 +57,64 @@ def _is_client_actor(actor_role: str) -> bool:
     return actor_role in _CLIENT_ACTOR_ROLES
 
 
+# ---------------------------------------------------------------------------
+# B-6.1 — payment_required is the server's decision, not the client's word
+# ---------------------------------------------------------------------------
+
+# ONE coarse name for the refusal, the way DRF-1072 gives the time
+# override one. It is what may travel outward (the booking.created audit
+# keys below); which rule refused and what the caller had asked for stays
+# inward, in the service log.
+PAYMENT_REQUIRED_REFUSED = "payment_required_refused"
+
+# Refusal reasons — separate values on purpose. A booking with no Payment
+# row because the CALLER asked for none and a booking with no Payment row
+# because the SERVER overruled the caller are the same row and must not be
+# the same fact: counted together, "the client asked for prepayment and
+# never got it" leaves no trace at all.
+REFUSAL_STAFF_RECORDED = "staff_recorded"
+
+
+def _resolve_payment_required(dto) -> tuple[bool, str | None]:
+    """Decide whether this booking carries an online prepayment.
+
+    ``dto.payment_required`` arrives verbatim from the request body on
+    both create paths (``AppointmentCreateSerializer`` and
+    ``InternalBookingCreateSerializer`` each declare it as an optional
+    boolean) and, until this function existed, went straight into the
+    write path: the caller's word alone decided whether a Payment row
+    was created and — through ``confirm_immediately``, which the views
+    derive from the same field — whether the booking waited for money.
+    Price and duration are taken from the resolver and never from the
+    caller; this one field was re-checked on no side at all.
+
+    The server's rule, and the only one today's server-side state
+    supports:
+
+    * A booking RECORDED BY STAFF (walk-in master, salon front desk,
+      automation) is settled off-platform by definition — that is the
+      entire premise of the walk-in path (#1017), which is why the view
+      hardcodes ``payment_required=False`` there. A caller asking for
+      prepayment on such a path asks the platform to hold the card of a
+      customer who never touched the request. Refused.
+    * A CLIENT booking keeps what was asked. Promoting ``False`` →
+      ``True`` would need a prepayment policy the data model does not
+      carry — there is no per-specialist or per-tenant "requires
+      prepayment" field — and inventing one here would quietly turn the
+      pilot's "запись без предоплаты" back into an awaited payment.
+
+    Returns ``(payment_required, refusal_reason)``. ``refusal_reason`` is
+    ``None`` whenever the server agreed with the caller, INCLUDING the
+    ordinary case where the caller asked for no payment and got none —
+    a refusal means the server overruled a request, not merely that the
+    booking is unpaid.
+    """
+    requested = bool(dto.payment_required)
+    if requested and not _is_client_actor(dto.actor_role):
+        return False, REFUSAL_STAFF_RECORDED
+    return requested, None
+
+
 class CreateBookingService:
     """Orchestrates the booking creation use case."""
 
@@ -494,14 +552,37 @@ class CreateBookingService:
                         dto.client_id, specialist.tenant_id,
                     )
 
+        # B-6.1 — the server decides whether this booking carries an
+        # online prepayment; ``dto.payment_required`` is a request, not
+        # the verdict. The status below and the Payment row further down
+        # both read the RESOLVED value, so the two can never end up
+        # stating different things about the same booking.
+        payment_required, payment_refusal = _resolve_payment_required(dto)
+        if payment_refusal is not None:
+            # Inward: which rule refused, for whom, what was asked and
+            # what was applied. Its own log event — deliberately not
+            # folded into the ordinary unpaid-booking path, so a refusal
+            # can be counted apart from a caller who wanted none.
+            logger.warning(
+                "booking.%s reason=%s actor_role=%s specialist=%s "
+                "requested=%s applied=%s",
+                PAYMENT_REQUIRED_REFUSED, payment_refusal, dto.actor_role,
+                dto.specialist_id, dto.payment_required, payment_required,
+            )
+
         # Provider walk-in (#1017): the cash/in-person transaction
         # happens off-platform, so the booking skips the online Payment
         # and lands directly in CONFIRMED. The default customer path
         # keeps the online-payment contract (AWAITING_PAYMENT + a pending
         # Payment row the YooKassa hold later confirms).
+        #
+        # A refused prepayment lands CONFIRMED too, whatever the caller
+        # paired with it: AWAITING_PAYMENT for a booking the server just
+        # decided carries no Payment row would be a booking waiting
+        # forever for money nobody will ever be asked for.
         initial_status = (
             BookingStatus.CONFIRMED.value
-            if dto.confirm_immediately
+            if dto.confirm_immediately or payment_refusal is not None
             else BookingStatus.AWAITING_PAYMENT.value
         )
 
@@ -534,7 +615,7 @@ class CreateBookingService:
         # Create payment record (online-payment path only). Walk-ins are
         # settled off-platform — no Payment row.
         payment = None
-        if dto.payment_required:
+        if payment_required:
             payment = Payment.objects.create(
                 appointment=appointment,
                 amount=snapshot.price,
@@ -571,6 +652,13 @@ class CreateBookingService:
                     str(dto.actor_id) if dto.actor_id else None
                 ),
             }
+        # B-6.1 — the refusal audit. One coarse key, present ONLY when the
+        # server overruled the caller, so an ordinary booking's payload is
+        # byte-identical to before. The consumer learns that the prepayment
+        # it asked for was not applied; WHY is the service log's business.
+        payment_audit = {}
+        if payment_refusal is not None:
+            payment_audit = {PAYMENT_REQUIRED_REFUSED: True}
         emit_outbox_event(
             topic=_OutboxEvent.Topic.BOOKING_CREATED,
             data={
@@ -602,6 +690,7 @@ class CreateBookingService:
                 "amount": str(snapshot.price),
                 "specialist_timezone": snapshot.specialist_timezone,
                 **override_audit,
+                **payment_audit,
             },
             user_id=dto.client_id,
             tenant_id=tenant_id,
