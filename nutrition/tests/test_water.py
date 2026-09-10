@@ -4,13 +4,13 @@ Per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION:
 
 POST /nutrition/water
     Request:  { amount_ml: 150 | 200 | 250 | 350 | 500 }
-    Response: { water_ml, water_goal_ml, water_pct, log_id }
+    Response: { water_ml, log_id } — ориентира и процента нет (§82)
 
 DELETE /nutrition/water/{id}
     Response: WaterLogResponse (with updated aggregate)
 
 GET /nutrition/water/today
-    Response: { logs: [{id, amount_ml, logged_at}], water_ml, water_goal_ml }
+    Response: { logs: [{id, amount_ml, logged_at}], water_ml }
 """
 from __future__ import annotations
 
@@ -143,13 +143,17 @@ class TestCreateHappyPath:
         )
         assert resp.status_code == status.HTTP_200_OK, resp.json()
         body = resp.json()["data"]
-        assert set(body.keys()) == {
-            "water_ml", "water_goal_ml", "water_pct", "log_id",
-        }
+        # Ключей ориентира в ответе НЕТ — ни `water_goal_ml`, ни
+        # `water_pct`. Формула 30 мл × вес снята до утверждения методики
+        # (§82, §85 раздел 4), и отсутствие доезжает отсутствием ключа,
+        # а не нулём: ключ со значением 0 потребитель вправе показать
+        # как «0 мл цели · 0 %».
+        #
+        # Процент ушёл вместе с ориентиром, потому что он его ПРОИЗВОДНАЯ:
+        # доли от несуществующей нормы не бывает.
+        assert set(body.keys()) == {"water_ml", "log_id"}
+        # POSITIVE: выпитое на месте — снимается ориентир, не факт.
         assert body["water_ml"] == 250
-        assert body["water_goal_ml"] == 2000
-        # 250 / 2000 = 12.5 → rounded 12 or 13 (banker's rounding territory).
-        assert body["water_pct"] in (12, 13)
 
         log = WaterLog.objects.get(id=body["log_id"])
         assert log.user_id == client_user.id
@@ -176,8 +180,12 @@ class TestCreateHappyPath:
             CREATE_URL, {"amount_ml": 250}, format="json",
         )
         body = resp.json()["data"]
+        # Выпитое считается по-прежнему...
         assert body["water_ml"] == 2250
-        assert body["water_pct"] == 100
+        # ...а «потолка в 100%» больше нет, потому что нет и процента.
+        # Тест назывался ``test_pct_caps_at_100`` и сторожил обрезку
+        # шкалы; сторожить стало нечего — шкалы нет, пока нет ориентира.
+        assert "water_pct" not in body
 
     def test_other_users_water_not_counted(
         self, auth_client, client_user, other_client_user,
@@ -253,10 +261,11 @@ class TestToday:
         resp = auth_client.get(TODAY_URL)
         assert resp.status_code == status.HTTP_200_OK
         body = resp.json()["data"]
-        assert set(body.keys()) == {"logs", "water_ml", "water_goal_ml"}
+        assert set(body.keys()) == {"logs", "water_ml"}
         assert body["logs"] == []
         assert body["water_ml"] == 0
-        assert body["water_goal_ml"] == 2000
+        # Ориентира нет — ключа нет. Ноль здесь был бы «норма ноль мл».
+        assert "water_goal_ml" not in body
 
     def test_lists_today_logs_in_order(self, auth_client, client_user):
         # Anchor inside today's UTC day so a CI run near midnight doesn't
@@ -314,19 +323,24 @@ class TestSummaryIntegration:
         )
         body = resp.json()["data"]
         assert body["water_ml"] == 600
-        assert body["water_goal_ml"] == 2000
+        assert "water_goal_ml" not in body
 
 
 class TestNoAnketaNoGoal:
-    """Без анкеты питания нормы нет — и подставлять её нечем.
+    """Ориентира нет ни с анкетой, ни без неё.
 
-    Пара к фикстуре ``client_user`` выше: там анкета есть и норма живёт,
-    здесь анкеты нет и норма равна нулю. Ноль означает отсутствие —
-    норма ноль миллилитров физически невозможна, — и клиент по этому
-    нулю не рисует ни цели, ни шкалы, ни процента.
+    Класс заводился как пара к фикстуре ``client_user``: там анкета есть
+    и норма живёт, здесь анкеты нет и норма ноль. Разницы больше нет —
+    формула ``30 мл × вес`` снята для всех до утверждения методики
+    (§82; §85 раздел 4 — справочные 2200/3000 мл по полу придут
+    отдельным срезом).
+
+    Изменилось и КАК выражается отсутствие: было нулём, стало ``None``.
+    Ноль внутри модуля читался правильно, но наружу уезжал значением —
+    ключ в JSON был, и потребитель вправе показать «0 мл · 0 %».
     """
 
-    def test_water_goal_is_zero_without_a_profile(self, other_client_user):
+    def test_water_goal_is_absent_without_a_profile(self, other_client_user):
         from nutrition.services.water_service import WaterService
 
         WaterLog.objects.create(
@@ -341,6 +355,8 @@ class TestNoAnketaNoGoal:
 
         # POSITIVE: выпитое посчитано — правду вместе с выдумкой не теряем.
         assert agg.water_ml == 250
-        # NEGATIVE: ни 2000, ни любого другого придуманного числа.
-        assert agg.water_goal_ml == 0
-        assert agg.water_pct == 0
+        # NEGATIVE: ни 2000, ни любого другого придуманного числа, и
+        # больше даже не ноль. Ноль был внутренним словом «нормы нет» и
+        # наружу уезжал значением; теперь и внутри стоит `None`.
+        assert agg.water_goal_ml is None
+        assert agg.water_pct is None
