@@ -31,6 +31,7 @@ from appointments.application.services.create_booking_service import (
 )
 from appointments.domain.exceptions import (
     BookingDomainError,
+    HealthScreeningRequiredError,
     SlotNotAvailableError,
 )
 
@@ -179,6 +180,31 @@ class ActionService:
                 next_action_data=None,
                 error_code="SLOT_NOT_AVAILABLE",
                 error_details={"reason": str(exc)},
+            )
+        except HealthScreeningRequiredError as exc:
+            # Владелец не называл чат среди трёх поверхностей, но он —
+            # четвёртый вызывающий того же сторожа, и без этой ветки исход
+            # уехал бы отсюда как ``BOOKING_FAILED``: технической ошибкой,
+            # то есть ровно тем, чем ему быть запрещено. Код отдаём тот
+            # же, что и REST, — раздельные счётчики нужны и здесь, иначе
+            # очередь разметки не увидит записи, пришедшие через чат.
+            logger.info(
+                "ai.action.confirm_booking health_gate conv=%s reason=%s",
+                conversation.id, exc.reason,
+            )
+            return ActionResultDTO(
+                success=False,
+                appointment_id=None,
+                appointment_payload=None,
+                next_message=None,
+                next_action_type="",
+                next_action_data=None,
+                error_code=exc.reason,
+                error_details={
+                    "handoff": True,
+                    "reason": exc.reason,
+                    "message": HealthScreeningRequiredError.HANDOFF_TEXT,
+                },
             )
         except BookingDomainError as exc:
             logger.warning(

@@ -92,6 +92,30 @@ class TestMarketplaceBranch:
         assert r.price == Decimal("1500.00")
         assert r.buffer_after_minutes == 10
 
+    def test_marketplace_health_verdict_is_unknown_not_false(
+        self, specialist, marketplace_service,
+    ):
+        """У легаси-слоя вердикта нет — и он приезжает как «не знаю».
+
+        Поля здоровья у `Service` не существует ни на нём, ни над ним:
+        каскад «шаблон → салон → мастер» живёт только в каноническом слое.
+        Отдать `False` значило бы сочинить ответ там, где спрашивать негде,
+        и молча открыть медицинский гейт.
+
+        Сегодня выбор ничего не решает: слой пуст (0 строк, перемерено на
+        боевом контуре 09.09.2026). Он решает, каким будет отказ, если слой
+        когда-нибудь наполнится — а для медицинского гейта громкий отказ
+        лучше тихого пропуска.
+
+        **Чего этот тест НЕ доказывает:** что слой пуст на бою. Тест видит
+        только свою базу. Пустота — живой замер, и у неё свой срок годности;
+        команда лежит в `docs/PILOT_MEASUREMENTS.md`.
+        """
+        r = resolve_bookable_service(
+            service_id=marketplace_service.id, specialist=specialist,
+        )
+        assert r.requires_health_check is None
+
     def test_inactive_marketplace_rejected(self, specialist, marketplace_service):
         marketplace_service.is_active = False
         marketplace_service.save()
@@ -130,6 +154,20 @@ class TestSalonBranch:
         # …price from the SpecialistService link
         assert r.price == Decimal("2200.00")
         assert r.buffer_after_minutes == 5
+
+    def test_salon_health_verdict_is_tri_state(self, specialist, salon_link):
+        """Канонический слой отвечает трёхзначно, и «не знаю» — тоже ответ.
+
+        У фикстуры шаблона нет и флага никто не поднимал — значит `None`.
+        Положительная стража на второе состояние стоит в
+        `services/tests/test_catalog_models.py`: шаблон без флага даёт
+        честный `False`, и он не подменяется незнанием.
+        """
+        r = resolve_bookable_service(
+            service_id=salon_link.salon_service_id, specialist=specialist,
+        )
+        assert r.kind == "salon"
+        assert r.requires_health_check is None
 
     def test_duration_falls_back_to_resolution_cascade(
         self, specialist, category, tenant,

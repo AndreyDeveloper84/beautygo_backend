@@ -336,3 +336,61 @@ def test_saved_row_reaches_the_database(tenant, category, human):
     before = SalonService.objects.filter(mapping_status=S.VERIFIED).count()
     form.save()
     assert SalonService.objects.filter(mapping_status=S.VERIFIED).count() == before + 1
+
+
+# ---------------------------------------------------------------------------
+# Третий исход §93 — отказ читается так же, как подтверждение
+# ---------------------------------------------------------------------------
+
+
+def test_refusal_without_source_ref_is_named_on_its_own_field(tenant, category, human):
+    """Отказ без основания объясняется полем, а не именем ограничения.
+
+    Когда §93 добавил четвёртое состояние, сравнение `!= VERIFIED` в
+    форме молча перестало покрывать половину случаев: подтверждение
+    получало человеческое сообщение, а отказ — `IntegrityError` от
+    `salonservice_not_recommendable_requires_provenance`, то есть ровно
+    то, что этот класс и чинил.
+
+    Отказ — такое же решение, и объясняться должен так же.
+    """
+    form = _bound_form(
+        tenant, category,
+        mapping_status=S.NOT_RECOMMENDABLE,
+        mapping_confirmed_by=str(human.pk),
+        mapping_source_ref="",
+        **_confirmed_at(),
+    )
+    errors = _field_errors(form)
+    assert "mapping_source_ref" in errors, f"ошибка не привязана к полю: {errors}"
+    assert "not_recommendable_requires_provenance" not in " ".join(
+        errors["mapping_source_ref"]
+    ), "оператору показано имя ограничения базы вместо объяснения"
+
+
+def test_refusal_without_who_and_rule_is_named(tenant, category):
+    """Отказ без автора и без правила — то же требование, что у связи."""
+    form = _bound_form(
+        tenant, category,
+        mapping_status=S.NOT_RECOMMENDABLE,
+        mapping_source_ref="разбор 56 услуг, строка 41",
+        **_confirmed_at(),
+    )
+    assert "mapping_confirmed_by" in _field_errors(form)
+
+
+def test_properly_recorded_refusal_passes(tenant, category, human):
+    """Положительная стража: оформленный отказ форма пропускает.
+
+    Без неё две проверки выше зеленели бы и на форме, которая отвергает
+    четвёртое состояние целиком, — а тогда разбор 56 услуг снова было
+    бы некуда записывать.
+    """
+    form = _bound_form(
+        tenant, category,
+        mapping_status=S.NOT_RECOMMENDABLE,
+        mapping_confirmed_by=str(human.pk),
+        mapping_source_ref="разбор 56 услуг, строка 41: это не процедура",
+        **_confirmed_at(),
+    )
+    assert form.is_valid(), form.errors.as_text()

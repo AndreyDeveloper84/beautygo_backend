@@ -75,11 +75,11 @@ def _grid_time_ahead() -> datetime:
     return nxt
 
 
-def _dto(client_user, specialist, service, start_at, actor_role, **kwargs):
+def _dto(client_user, specialist, bookable_service, start_at, actor_role, **kwargs):
     return CreateBookingDTO(
         client_id=client_user.id,
         specialist_id=specialist.id,
-        service_id=service.id,
+        service_id=bookable_service.id,
         start_at=start_at,
         idempotency_key=str(uuid4()),
         payment_required=False,
@@ -114,12 +114,12 @@ class TestClientGridAlignment:
         return specialist
 
     def test_client_off_grid_start_is_refused(
-        self, client_user, scheduled_specialist, service,
+        self, client_user, scheduled_specialist, bookable_service,
     ):
         """The read path only ever offers grid-aligned slots; a client
         POST that fabricates a 10:15 start must not land."""
         dto = _dto(
-            client_user, scheduled_specialist, service,
+            client_user, scheduled_specialist, bookable_service,
             _utc(_next_weekday(0), 10, 15), actor_role="user",
         )
 
@@ -127,22 +127,22 @@ class TestClientGridAlignment:
             CreateBookingService().execute(dto)
 
     def test_client_on_grid_start_is_accepted(
-        self, client_user, scheduled_specialist, service,
+        self, client_user, scheduled_specialist, bookable_service,
     ):
         dto = _dto(
-            client_user, scheduled_specialist, service,
+            client_user, scheduled_specialist, bookable_service,
             _utc(_next_weekday(0), 10, 30), actor_role="user",
         )
 
         assert CreateBookingService().execute(dto).booking_id
 
     def test_staff_off_grid_start_is_allowed(
-        self, client_user, scheduled_specialist, service,
+        self, client_user, scheduled_specialist, bookable_service,
     ):
         """The grid is part of the client contract, not of the diary a
         master keeps for people who are physically present."""
         dto = _dto(
-            client_user, scheduled_specialist, service,
+            client_user, scheduled_specialist, bookable_service,
             _utc(_next_weekday(0), 10, 15), actor_role="specialist",
         )
 
@@ -155,23 +155,23 @@ class TestClientGridAlignment:
 
 class TestStaffBookingWindow:
     def test_staff_booking_inside_min_ahead_is_allowed(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         """The 19:30 case: the client stands in front of the master NOW.
         "At least 60 minutes ahead" is a self-service rule for clients
         planning their week, not a reason to refuse a human on the spot."""
         dto = _dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             _grid_time_ahead(), actor_role="specialist",
         )
 
         assert CreateBookingService().execute(dto).booking_id
 
     def test_client_booking_inside_min_ahead_is_refused(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         dto = _dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             _grid_time_ahead(), actor_role="user",
         )
 
@@ -194,10 +194,10 @@ class TestStaffOuterBounds:
     """
 
     def test_staff_booking_in_the_past_is_refused(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         dto = _dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             datetime.now(timezone.utc) - timedelta(hours=2),
             actor_role="specialist",
         )
@@ -206,11 +206,11 @@ class TestStaffOuterBounds:
             CreateBookingService().execute(dto)
 
     def test_staff_booking_beyond_the_horizon_is_refused(
-        self, client_user, specialist, service, settings,
+        self, client_user, specialist, bookable_service, settings,
     ):
         horizon = timedelta(days=settings.BOOKING_MAX_AHEAD_DAYS)
         dto = _dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             datetime.now(timezone.utc) + horizon + timedelta(days=1),
             actor_role="specialist",
         )
@@ -219,12 +219,12 @@ class TestStaffOuterBounds:
             CreateBookingService().execute(dto)
 
     def test_staff_booking_inside_the_horizon_is_accepted(
-        self, client_user, specialist, service, settings,
+        self, client_user, specialist, bookable_service, settings,
     ):
         """The positive guard for both refusals above."""
         horizon = timedelta(days=settings.BOOKING_MAX_AHEAD_DAYS)
         dto = _dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             datetime.now(timezone.utc) + horizon - timedelta(days=1),
             actor_role="specialist",
         )
@@ -232,13 +232,13 @@ class TestStaffOuterBounds:
         assert CreateBookingService().execute(dto).booking_id
 
     def test_override_is_the_door_for_backdating(
-        self, client_user, specialist_user, specialist, service,
+        self, client_user, specialist_user, specialist, bookable_service,
     ):
         """Recording a visit that already happened is a real need — and
         the task's own answer for it: the explicit, reasoned, audited
         override, not a silent hole in the staff path."""
         dto = _dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             datetime.now(timezone.utc) - timedelta(hours=2),
             actor_role="specialist",
             time_override=True,
@@ -255,10 +255,10 @@ class TestStaffOuterBounds:
 
 class TestTimeOverride:
     def test_override_requires_a_reason(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         dto = _dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             _utc(_next_weekday(0), 10), actor_role="specialist",
             time_override=True,
         )
@@ -267,12 +267,12 @@ class TestTimeOverride:
             CreateBookingService().execute(dto)
 
     def test_override_is_not_available_to_the_client(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         """A flag only a trusted caller may raise — the client actor
         passing it is a contract violation, not a booking."""
         dto = _dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             _utc(_next_weekday(0), 10), actor_role="user",
             time_override=True, time_override_reason="сам себе админ",
         )
@@ -281,7 +281,7 @@ class TestTimeOverride:
             CreateBookingService().execute(dto)
 
     def test_override_lifts_an_absence_and_is_audited(
-        self, client_user, specialist_user, specialist, service, caplog,
+        self, client_user, specialist_user, specialist, bookable_service, caplog,
     ):
         """The deliberate decision DRF-1062 deferred: staff without the
         flag stays blocked by the absence; the flagged, reasoned override
@@ -296,7 +296,7 @@ class TestTimeOverride:
         )
 
         dto = _dto(
-            client_user, specialist, service, start,
+            client_user, specialist, bookable_service, start,
             actor_role="specialist",
             time_override=True,
             time_override_reason="мастер подтвердил лично, отсутствие снято устно",
@@ -331,20 +331,20 @@ class TestTimeOverride:
         assert event.data["time_override_actor_id"] == str(specialist_user.id)
 
     def test_override_does_not_skip_the_conflict_check(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         """Override lifts the *time context* rules (window, grid, frame,
         closure, absence) — not physical reality: two bodies still cannot
         occupy the slot at once."""
         monday = _next_weekday(0)
         first = _dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             _utc(monday, 10), actor_role="specialist",
         )
         CreateBookingService().execute(first)
 
         clashing = _dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             _utc(monday, 10, 30), actor_role="specialist",
             time_override=True,
             time_override_reason="двойная запись по звонку",
@@ -353,12 +353,12 @@ class TestTimeOverride:
             CreateBookingService().execute(clashing)
 
     def test_no_override_means_no_audit_fields(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         """The ordinary booking payload stays byte-identical: the audit
         keys appear only when an override actually happened."""
         dto = _dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             _utc(_next_weekday(0), 10), actor_role="specialist",
         )
         CreateBookingService().execute(dto)
