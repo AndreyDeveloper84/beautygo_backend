@@ -60,7 +60,7 @@ def resolve_goal_category_ids(client) -> list[UUID] | None:
     а не угадывать.
     """
     goal = (
-        ClientGoal.objects.filter(client=client, is_active=True)
+        ClientGoal.objects.filter(client=client, state=ClientGoal.State.ACTIVE)
         .order_by("-selected_at")
         .first()
     )

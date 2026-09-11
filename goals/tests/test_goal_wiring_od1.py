@@ -571,3 +571,87 @@ class TestRecommendationCacheKey:
             RecommendationQuery(client_id=None).cache_key()
             == RecommendationQuery(client_id=None, goal_category_ids=None).cache_key()
         )
+
+
+# ---------------------------------------------------------------------------
+# DRF-1660: цель на паузе не режет выдачу (§97 OD-GOAL-B «PAUSED — Ayla по
+# ней не ведёт»). Положительная стража ВПЕРЕДИ: сначала показать, что
+# ACTIVE цель действительно режет, — иначе «пауза не режет» зеленело бы и
+# на выключенном фильтре.
+# ---------------------------------------------------------------------------
+
+def _pause(goal: ClientGoal) -> None:
+    from goals.lifecycle import transition
+
+    transition(goal, ClientGoal.State.PAUSED)
+    from django.core.cache import cache
+
+    cache.clear()
+
+
+class TestPausedGoalDoesNotTrimTheFeed:
+    def test_home_feed_is_trimmed_by_active_and_restored_by_pause(
+        self, settings, home_api, client_user, relax_option, both_specialists,
+    ):
+        settings.GOAL_RESOLUTION_ENABLED = True
+        goal = _select_goal(client_user)
+        assert _home_names(home_api) == {"В цели"}, "положительная стража: ACTIVE режет"
+
+        _pause(goal)
+
+        assert _home_names(home_api) == {"В цели", "Вне цели"}, (
+            "цель на паузе не должна резать главную"
+        )
+
+    def test_layer_2_is_trimmed_by_active_and_restored_by_pause(
+        self, settings, catalog_api, bot_customer, relax_option, both_specialists,
+    ):
+        settings.GOAL_RESOLUTION_ENABLED = True
+        goal = _select_goal(bot_customer)
+        assert _layer_2_names(catalog_api) == {"В цели"}, "положительная стража: ACTIVE режет"
+
+        _pause(goal)
+
+        assert _layer_2_names(catalog_api) == {"В цели", "Вне цели"}, (
+            "цель на паузе не должна резать полку 2"
+        )
+
+    def test_resume_trims_again(
+        self, settings, home_api, client_user, relax_option, both_specialists,
+    ):
+        """Выход из паузы существует и действует: снял — ведение вернулось."""
+        from django.core.cache import cache
+
+        from goals.lifecycle import transition
+
+        settings.GOAL_RESOLUTION_ENABLED = True
+        goal = _select_goal(client_user)
+        _pause(goal)
+        assert _home_names(home_api) == {"В цели", "Вне цели"}
+
+        transition(goal, ClientGoal.State.ACTIVE)
+        cache.clear()
+
+        assert _home_names(home_api) == {"В цели"}
+
+    def test_every_non_active_state_leaves_the_feed_whole(
+        self, settings, home_api, client_user, relax_option, both_specialists,
+    ):
+        """Не только пауза: ни одно состояние, кроме ACTIVE, не ведёт.
+
+        Перечислено по ``State.choices``, а не руками: новое состояние
+        попадёт сюда само и обязано будет назвать, режет оно или нет.
+        """
+        settings.GOAL_RESOLUTION_ENABLED = True
+        from django.core.cache import cache
+
+        for state, _label in ClientGoal.State.choices:
+            if state == ClientGoal.State.ACTIVE:
+                continue
+            ClientGoal.objects.filter(client=client_user).delete()
+            ClientGoal.objects.create(
+                client=client_user, goal_key="relax",
+                source_channel=ClientGoal.SourceChannel.BOT, state=state,
+            )
+            cache.clear()
+            assert _home_names(home_api) == {"В цели", "Вне цели"}, state
