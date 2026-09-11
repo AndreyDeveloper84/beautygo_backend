@@ -2,8 +2,11 @@
 
 * ``POST /api/v1/internal/users/{ayla_user_id}/deletion-requests/`` —
   завести (201) или вернуть открытую (200). Тело: ``{"initiator": "bot"}``.
+* ``GET  /api/v1/internal/users/{ayla_user_id}/deletion-requests/`` —
+  текущая заявка (открытая, иначе последняя завершённая; 404 — не было)
+  для профиля, который номера не помнит.
 * ``GET  /api/v1/internal/users/{ayla_user_id}/deletion-requests/{request_id}/``
-  — состояние заявки для экрана «принято» и профиля.
+  — состояние одной заявки по номеру.
 
 Сторож — ``IsInternalBearer``: тот же, что у ``…/personal-data/`` (C5.2).
 Заявка заводится ботом от имени человека, которого бот уже проверил
@@ -38,6 +41,7 @@ from rest_framework.views import APIView
 
 from users.deletion_requests import (
     as_payload,
+    current_request_for,
     ensure_deletion_request,
     get_deletion_request,
 )
@@ -92,6 +96,26 @@ class InternalDeletionRequestCreateView(APIView):
             "is erased here: erasure is the executor's job (D3)."
         ),
     )
+    @extend_schema(
+        operation_id="internal_deletion_request_current",
+        tags=["internal"],
+        request=None,
+        responses={
+            200: _DeletionRequestResponseSerializer,
+            401: OpenApiResponse(description="Missing / invalid bearer token"),
+            404: OpenApiResponse(description="User does not exist or never asked for deletion"),
+        },
+        description="The person's current deletion request: the open one, else the latest completed one.",
+    )
+    def get(self, request: Request, user_id: UUID) -> Response:
+        user = _user_or_none(user_id)
+        if user is None:
+            return error_response("NOT_FOUND", "User not found.", status_code=404)
+        req = current_request_for(user)
+        if req is None:
+            return error_response("NOT_FOUND", "No deletion request.", status_code=404)
+        return success_response(as_payload(req))
+
     def post(self, request: Request, user_id: UUID) -> Response:
         user = _user_or_none(user_id)
         if user is None:

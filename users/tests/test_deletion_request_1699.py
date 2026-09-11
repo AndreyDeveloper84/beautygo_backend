@@ -178,6 +178,24 @@ class TestTheGuardAndTheShape:
         assert got.status_code == 200, got.content
         assert got.json()["data"] == posted
 
+    def test_current_is_404_then_open_then_latest_completed(self, api, user):
+        """Профиль номера не помнит — спрашивает «текущую»."""
+        assert api.get(_url(user.pk)).status_code == 404
+
+        posted = api.post(_url(user.pk), {"initiator": "bot"}, format="json").json()["data"]
+        current = api.get(_url(user.pk))
+        assert current.status_code == 200, current.content
+        assert current.json()["data"] == posted
+
+        row = DeletionRequest.objects.get(pk=posted["request_id"])
+        row.status = DeletionRequest.Status.COMPLETED
+        row.completed_at = timezone.now()
+        row.save(update_fields=["status", "completed_at"])
+        done = api.get(_url(user.pk))
+        assert done.status_code == 200, done.content
+        assert done.json()["data"]["request_id"] == posted["request_id"]
+        assert done.json()["data"]["is_open"] is False
+
     def test_get_of_someone_elses_request_is_404(self, api, user):
         other = User.objects.create_user(
             username="dr-other", password="pass", role="client", phone="+79992221698",
