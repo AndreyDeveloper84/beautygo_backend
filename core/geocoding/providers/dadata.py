@@ -48,6 +48,7 @@ from django.conf import settings
 from core.geocoding.contract import GeocodeResult, Outcome, Precision
 
 SUGGEST_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address"
+GEOLOCATE_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/geolocate/address"
 TIMEOUT_SEC = 5
 
 #: ``qc_geo`` DaData → общая точность. Словарь провайдера хранится рядом
@@ -97,17 +98,19 @@ class DaDataGeocoder:
             )
         return None
 
-    def geocode(self, address: str, *, city: str = "") -> GeocodeResult:
-        payload: dict = {"query": address, "count": 2}
-        if city:
-            payload["locations"] = [{"city": city}]
+    def _post(self, url: str, payload: dict) -> list | GeocodeResult:
+        """Список подсказок либо готовый отрицательный исход.
+
+        Один разбор HTTP на оба направления: отклонённый ключ — про нас
+        (``MISCONFIGURED``), лимит и сбой — про сервис (``UNAVAILABLE``).
+        """
         headers = {
             "Authorization": f"Token {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
         try:
-            resp = self._session.post(SUGGEST_URL, json=payload, headers=headers, timeout=TIMEOUT_SEC)
+            resp = self._session.post(url, json=payload, headers=headers, timeout=TIMEOUT_SEC)
         except requests.RequestException as exc:
             return GeocodeResult(outcome=Outcome.UNAVAILABLE, provider=self.name, reason=f"сеть: {exc}")
 
@@ -131,9 +134,33 @@ class DaDataGeocoder:
             suggestions = resp.json().get("suggestions") or []
         except ValueError:
             return GeocodeResult(outcome=Outcome.UNAVAILABLE, provider=self.name, reason="ответ не JSON")
-
         if not suggestions:
             return GeocodeResult(outcome=Outcome.NOT_FOUND, provider=self.name)
+        return suggestions
+
+    def reverse(self, lat: float, lon: float) -> GeocodeResult:
+        """``geolocate/address``: ближайший адрес к точке, нужен только город."""
+        got = self._post(GEOLOCATE_URL, {"lat": lat, "lon": lon, "count": 1})
+        if isinstance(got, GeocodeResult):
+            return got
+        data = got[0].get("data") or {}
+        locality = _locality(data)
+        if not locality:
+            return GeocodeResult(outcome=Outcome.NOT_FOUND, provider=self.name, reason="в ответе нет города")
+        return GeocodeResult(
+            outcome=Outcome.FOUND, provider=self.name,
+            normalized_address=got[0].get("unrestricted_value") or got[0].get("value") or "",
+            locality=locality,
+        )
+
+    def geocode(self, address: str, *, city: str = "") -> GeocodeResult:
+        payload: dict = {"query": address, "count": 2}
+        if city:
+            payload["locations"] = [{"city": city}]
+        got = self._post(SUGGEST_URL, payload)
+        if isinstance(got, GeocodeResult):
+            return got
+        suggestions = got
 
         first = suggestions[0]
         data = first.get("data") or {}

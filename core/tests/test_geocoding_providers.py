@@ -244,3 +244,42 @@ def test_nominatim_public_host_is_throttled_to_one_request_per_second_and_own_ho
 def test_registry_order_is_dadata_first_nominatim_second_yandex_stub():
     assert list(PROVIDERS) == ["dadata", "nominatim", "yandex"]
     assert {"core/geocoding/providers/dadata.py", "core/geocoding/providers/nominatim.py"} <= GEOCODING_MODULES
+
+
+# ---------------------------------------------------------------------------
+# Обратное геокодирование (DRF-1685) — тем же провайдером
+# ---------------------------------------------------------------------------
+
+
+def test_dadata_reverse_returns_the_locality_via_geolocate():
+    s = FakeSession(_Resp(200, {"suggestions": [_dd("ул Кирова, д 20", "53.19", "45.01", 0, "20")]}))
+    r = DaDataGeocoder(api_key="k", session=s).reverse(53.19, 45.01)
+    assert r.outcome is Outcome.FOUND and r.locality == "Пенза"
+    assert s.calls[0]["url"].endswith("/geolocate/address")
+    assert s.calls[0]["json"] == {"lat": 53.19, "lon": 45.01, "count": 1}
+
+
+def test_dadata_reverse_shares_the_http_outcomes_with_forward():
+    """Один разбор HTTP на оба направления: отклонённый ключ и здесь MISCONFIGURED."""
+    assert DaDataGeocoder(api_key="bad", session=FakeSession(_Resp(403))).reverse(1, 1).outcome is Outcome.MISCONFIGURED
+    assert DaDataGeocoder(api_key="k", session=FakeSession(_Resp(503))).reverse(1, 1).outcome is Outcome.UNAVAILABLE
+    empty = FakeSession(_Resp(200, {"suggestions": []}))
+    assert DaDataGeocoder(api_key="k", session=empty).reverse(1, 1).outcome is Outcome.NOT_FOUND
+
+
+def test_dadata_reverse_without_a_city_in_the_answer_is_not_found():
+    no_city = {"value": "Россия", "data": {"geo_lat": "1", "geo_lon": "1", "qc_geo": 5}}
+    r = DaDataGeocoder(api_key="k", session=FakeSession(_Resp(200, {"suggestions": [no_city]}))).reverse(1, 1)
+    assert r.outcome is Outcome.NOT_FOUND
+
+
+def test_nominatim_reverse_returns_the_locality_and_respects_the_public_policy():
+    slept: list[float] = []
+    s = FakeSession(_Resp(200, _nm("53.19", "45.01")), _Resp(200, {"error": "Unable to geocode"}))
+    p = NominatimGeocoder(base_url="https://nominatim.openstreetmap.org", session=s, sleep=slept.append)
+    r = p.reverse(53.19, 45.01)
+    assert r.outcome is Outcome.FOUND and r.locality == "Пенза"
+    assert s.calls[0]["url"].endswith("/reverse") and s.calls[0]["params"]["lat"] == 53.19
+    # объект с error — «ничего нет», и интервал между вызовами соблюдён
+    assert p.reverse(0, 0).outcome is Outcome.NOT_FOUND
+    assert len(slept) == 1

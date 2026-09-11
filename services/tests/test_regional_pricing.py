@@ -146,55 +146,137 @@ class TestGetRegionKey:
 
 
 # ---------------------------------------------------------------------------
-# Yandex geocoder — транспорт
+# Обратное геокодирование — через адаптер §139 (DRF-1685)
 # ---------------------------------------------------------------------------
+#
+# До DRF-1685 здесь стояли тесты транспорта Яндекса, которые сами подставляли
+# ``YANDEX_GEOCODER_API_KEY`` — и потому три месяца были зелёными над мёртвой
+# в бою функцией. Теперь провайдер подставной и **из реестра**, а состояние
+# «не настроен» проверяется отдельно — как состояние, а не как «вернул None».
+
+class _FakeReverse:
+    name = "fake-reverse"
+    refuse = None
+    answer = None
+    calls: list = []
+
+    def check(self):
+        from core.geocoding.contract import GeocodeResult, Outcome
+        if self.refuse:
+            return GeocodeResult(outcome=Outcome.MISCONFIGURED, provider=self.name, reason=self.refuse)
+        return None
+
+    def geocode(self, address, *, city=""):  # pragma: no cover — не для этого теста
+        raise AssertionError("прямое геокодирование здесь не зовётся")
+
+    def reverse(self, lat, lon):
+        _FakeReverse.calls.append((lat, lon))
+        return self.answer
+
+
+@pytest.fixture
+def fake_reverse(monkeypatch, settings):
+    from core.geocoding.providers import PROVIDERS
+    from services import geocoding
+    _FakeReverse.refuse = None
+    _FakeReverse.answer = None
+    _FakeReverse.calls = []
+    monkeypatch.setitem(PROVIDERS, "fake-reverse", _FakeReverse)
+    settings.GEOCODING_PROVIDER = "fake-reverse"
+    monkeypatch.setattr(geocoding, "_warned_once", False)
+    return _FakeReverse
+
 
 class TestReverseGeocodeCity:
-    def test_returns_none_without_api_key(self, settings):
-        settings.YANDEX_GEOCODER_API_KEY = ''
+    def test_found_returns_the_locality(self, fake_reverse):
+        from core.geocoding.contract import GeocodeResult, Outcome
         from services.geocoding import reverse_geocode_city
+        fake_reverse.answer = GeocodeResult(outcome=Outcome.FOUND, provider="fake-reverse", locality="Пенза")
+        assert reverse_geocode_city(53.2, 45.0) == "Пенза"
+        assert fake_reverse.calls == [(53.2, 45.0)]
+
+    def test_not_configured_returns_none_and_says_so_once(self, fake_reverse):
+        """Не тихий None: причина в логе, один раз на процесс.
+
+        Логгер подменяется напрямую, а не через caplog: конфигурация
+        логирования проекта не пропускает записи наверх, и caplog молчал бы
+        по чужой причине.
+        """
+        from services import geocoding
+        fake_reverse.refuse = "ключ пуст"
+        with patch.object(geocoding.logger, "warning") as warn:
+            assert geocoding.reverse_geocode_city(53.2, 45.0) is None
+            assert geocoding.reverse_geocode_city(53.2, 45.0) is None
+        assert fake_reverse.calls == []  # до провайдера не дошли
+        assert warn.call_count == 1
+        assert "ключ пуст" in warn.call_args.args[1]
+
+    def test_unavailable_and_not_found_return_none(self, fake_reverse):
+        from core.geocoding.contract import GeocodeResult, Outcome
+        from services.geocoding import reverse_geocode_city
+        fake_reverse.answer = GeocodeResult(outcome=Outcome.UNAVAILABLE, provider="fake-reverse", reason="timeout")
+        assert reverse_geocode_city(53.2, 45.0) is None
+        fake_reverse.answer = GeocodeResult(outcome=Outcome.NOT_FOUND, provider="fake-reverse")
         assert reverse_geocode_city(53.2, 45.0) is None
 
-    def test_parses_city_from_response(self, settings):
-        settings.YANDEX_GEOCODER_API_KEY = 'test-key'
-        from services import geocoding
+    def test_unknown_provider_name_is_a_named_readiness_failure(self, settings):
+        from services.geocoding import reverse_geocoding_readiness
+        settings.GEOCODING_PROVIDER = "google"
+        reason = reverse_geocoding_readiness()
+        assert reason is not None and "google" in reason and "dadata" in reason
 
-        fake_json = {
-            'response': {
-                'GeoObjectCollection': {
-                    'featureMember': [
-                        {'GeoObject': {'name': 'Пенза'}},
-                    ],
-                },
-            },
-        }
 
-        class _Response:
-            def raise_for_status(self): pass
-            def json(self): return fake_json
+class TestReverseGeocodingSystemCheck:
+    """Сторож из DRF-1685: краснеет, когда ключа нет, а функция объявлена живой."""
 
-        with patch.object(geocoding.requests, 'get', return_value=_Response()):
-            assert geocoding.reverse_geocode_city(53.2, 45.0) == 'Пенза'
+    def _run(self):
+        from core.geocoding.checks import reverse_geocoding_is_not_a_fiction
+        return reverse_geocoding_is_not_a_fiction(None)
 
-    def test_network_error_returns_none(self, settings):
-        settings.YANDEX_GEOCODER_API_KEY = 'test-key'
-        from services import geocoding
+    def test_configured_provider_is_silent(self, fake_reverse):
+        assert self._run() == []
 
-        with patch.object(
-            geocoding.requests, 'get',
-            side_effect=geocoding.requests.Timeout(),
-        ):
-            assert geocoding.reverse_geocode_city(53.2, 45.0) is None
+    def test_unconfigured_is_a_warning_by_default(self, fake_reverse, settings):
+        fake_reverse.refuse = "ключ пуст"
+        settings.GEOCODING_REQUIRE_LIVE_REVERSE = False
+        msgs = self._run()
+        assert [m.id for m in msgs] == ["geocoding.W001"]
+        assert "всегда default" in msgs[0].msg
 
-    def test_empty_features_returns_none(self, settings):
-        settings.YANDEX_GEOCODER_API_KEY = 'test-key'
-        from services import geocoding
+    def test_unconfigured_but_declared_live_is_an_error(self, fake_reverse, settings):
+        fake_reverse.refuse = "ключ пуст"
+        settings.GEOCODING_REQUIRE_LIVE_REVERSE = True
+        msgs = self._run()
+        assert [m.id for m in msgs] == ["geocoding.E001"]
 
-        class _Response:
-            def raise_for_status(self): pass
+    def test_the_check_is_wired_into_manage_py_check(self):
+        """Проверка зарегистрирована ЗАГРУЗКОЙ приложения, а не импортом из теста.
 
-            def json(self):
-                return {'response': {'GeoObjectCollection': {'featureMember': []}}}
+        Первая редакция этого теста импортировала ``core.geocoding.checks``
+        сама — и тем самым сама её регистрировала: подмена, выкинувшая
+        импорт из ``apps.py``, оставалась зелёной. Здесь ``manage.py check``
+        идёт в отдельном процессе с пустым ключом: единственный путь к
+        регистрации — ``ServicesConfig.ready()``.
+        """
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
 
-        with patch.object(geocoding.requests, 'get', return_value=_Response()):
-            assert geocoding.reverse_geocode_city(53.2, 45.0) is None
+        env = dict(os.environ, DADATA_API_KEY="", GEOCODING_PROVIDER="dadata",
+                   GEOCODING_REQUIRE_LIVE_REVERSE="false")
+        root = Path(__file__).resolve().parents[2]
+        out = subprocess.run(
+            [sys.executable, "manage.py", "check"], cwd=root, env=env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=180,
+        )
+        combined = out.stdout + out.stderr
+        assert "geocoding.W001" in combined, combined[-800:]
+
+    def test_real_settings_in_this_environment_name_the_state(self):
+        """Не подставной: с настоящими настройками этого окружения проверка
+        либо молчит (ключ есть), либо называет причину. Тихого третьего нет."""
+        from services.geocoding import reverse_geocoding_readiness
+        reason = reverse_geocoding_readiness()
+        msgs = self._run()
+        assert (reason is None and msgs == []) or (reason is not None and len(msgs) == 1)

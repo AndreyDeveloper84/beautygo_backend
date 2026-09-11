@@ -260,8 +260,8 @@ def test_unknown_provider_names_the_known_ones():
 def test_the_set_of_modules_that_talk_to_geocoders_is_closed():
     """Два геокодера без связи уже есть; третьего не распутает никто.
 
-    Положительный контроль: сканер обязан найти ``services/geocoding.py`` —
-    иначе зелень означала бы «сканер слеп», а не «третьего нет».
+    Положительный контроль: сканер обязан найти ``providers/dadata.py`` —
+    иначе зелень означала бы «сканер слеп», а не «лишних нет».
     """
     root = Path(__file__).resolve().parents[2]
     found = set()
@@ -274,7 +274,10 @@ def test_the_set_of_modules_that_talk_to_geocoders_is_closed():
         text = path.read_text(encoding="utf-8", errors="replace")
         if any(marker in text for marker in GEOCODER_HOST_MARKERS):
             found.add(rel)
-    assert "services/geocoding.py" in found, "положительный контроль: сканер не видит старый геокодер"
+    assert "core/geocoding/providers/dadata.py" in found, "положительный контроль: сканер слеп"
+    # DRF-1685: старый модуль больше не ходит к геокодеру сам — и сканер
+    # обязан это ПОДТВЕРДИТЬ, а не просто не жаловаться.
+    assert "services/geocoding.py" not in found, "services/geocoding.py снова зовёт геокодер напрямую"
     extra = found - GEOCODING_MODULES
     assert not extra, (
         "появился модуль, который ходит к геокодеру и не объявлен в GEOCODING_MODULES: "

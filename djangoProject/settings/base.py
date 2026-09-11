@@ -748,6 +748,18 @@ DADATA_API_KEY = os.environ.get("DADATA_API_KEY", "")
 # соблюдает интервал сам. (Имя хоста здесь не пишется намеренно: сторож
 # закрытого списка модулей-геокодеров ищет его по тексту.)
 NOMINATIM_BASE_URL = os.environ.get("NOMINATIM_BASE_URL", "")
+# Какой провайдер адаптера обслуживает ОБРАТНОЕ геокодирование
+# (координаты → город) для региональной цены (DRF-1685). Один модуль
+# геокодирования на каталог: services/geocoding.py ходит сюда же.
+GEOCODING_PROVIDER = os.environ.get("GEOCODING_PROVIDER", "dadata")
+# «Функция объявлена живой»: True требует, чтобы провайдер был настроен, и
+# системная проверка падает ОШИБКОЙ, если ключа нет. False (умолчание) —
+# та же проверка лишь предупреждает: региональная цена по координатам
+# всегда default, и это видно при каждом manage.py check/migrate, а не
+# прячется в getattr(..., "").
+GEOCODING_REQUIRE_LIVE_REVERSE = (
+    os.environ.get("GEOCODING_REQUIRE_LIVE_REVERSE", "false").lower() == "true"
+)
 
 # Router primary / fallback vendor selection. Slice 2 will read these.
 # Keep names lowercase short tokens so env diffs stay readable.
