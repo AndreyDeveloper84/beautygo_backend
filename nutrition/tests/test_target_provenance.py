@@ -73,12 +73,16 @@ class TestTheCalculationCarriesItsOwnProvenance:
         Иначе снимок обещал бы воспроизводимость и не давал её: повторив
         расчёт по записанной цели, получили бы другое число.
         """
-        norms = compute_norms(_full_inputs(goal="lose", health_flags={"eating_disorder": True}))
+        # §5.1: РПП теперь отказ, лестница здесь — только пол BMR: очень
+        # лёгкий человек с целью lose упирается в него, и цель переписывается.
+        norms = compute_norms(_full_inputs(
+            goal="lose", pace="moderate", weight_kg=40.0, height_cm=150, age=60,
+        ))
 
-        # РПП переводит цель в maintain — это уже проверяют соседние
-        # тесты; здесь важно, что снимок согласен с результатом.
-        assert norms.goal == "maintain"
+        assert norms.computed, norms.overrides_applied
+        assert any(o["reason"] == "bmr_floor" for o in norms.overrides_applied)
         assert norms.input_snapshot["goal"] == norms.goal
+        assert norms.input_snapshot["pace"] == norms.pace
 
     def test_recomputing_the_same_inputs_gives_the_same_snapshot(self) -> None:
         """§85 — воспроизводимость. Тот же вход, тот же снимок и версия."""

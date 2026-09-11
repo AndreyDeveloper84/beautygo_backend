@@ -1,7 +1,7 @@
 # Phase 3 nutrition — smoke tests
 
 Locally-runnable test suite that mirrors `docs/SMOKE_TESTS_PHASE_3.md` 1:1.
-Each test is named after the checklist ID (`test_2_6_pregnancy_override`,
+Each test is named after the checklist ID (`test_2_6_pregnancy_refuses_the_calculation_by_name`,
 `test_3_15_restore_within_window`, etc.) so you can cross-reference both
 files when triaging failures.
 
