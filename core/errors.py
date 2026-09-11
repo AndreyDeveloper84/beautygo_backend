@@ -191,6 +191,13 @@ class ErrorCode(str, Enum):
     # а не повторять тот же запрос.
     ANKETA_STEP_MISMATCH = "ANKETA_STEP_MISMATCH"
 
+    # --- Goal lifecycle (DRF-1660; §97 OD-GOAL-B) ---
+    # Два разных «нельзя» с разными адресами починки: первое — перехода
+    # нет в таблице (выбрать другое действие), второе — снять с паузы
+    # мешает другая ACTIVE цель (сначала поставить на паузу её).
+    GOAL_TRANSITION_NOT_ALLOWED = "GOAL_TRANSITION_NOT_ALLOWED"
+    GOAL_ANOTHER_ACTIVE = "GOAL_ANOTHER_ACTIVE"
+
     # --- Rate limiting ---
     THROTTLED = "THROTTLED"
     RATE_LIMITED = "RATE_LIMITED"
