@@ -1,4 +1,8 @@
-"""Путь записи: результат провайдера → восемь полей ``Tenant``.
+"""Путь записи: результат провайдера → восемь полей ``ServiceLocation``.
+
+§9 (DRF-1687, L4): цель записи адаптера — **место оказания услуги**, не салон.
+``Tenant.address`` остаётся входом (перенос — ``promote_tenant_location``),
+восемь полей провенанса на ``Tenant`` доживают до нуля читателей (L8).
 
 Три правила, каждое — про то, чего адаптер НЕ делает:
 
@@ -21,7 +25,7 @@ from datetime import datetime
 from django.utils import timezone
 
 from core.geocoding.contract import GeocodeResult, Outcome, status_for
-from tenants.models import GeocodeStatus, Tenant
+from tenants.models import GeocodeStatus, ServiceLocation
 
 #: Поля, которые пишет адаптер. Ровно восемь из ``#333`` — и ни одного
 #: сверх: ``address`` и ``city`` адаптер читает, но не трогает.
@@ -37,11 +41,17 @@ WRITTEN_FIELDS: tuple[str, ...] = (
 )
 
 
+def _key(location: ServiceLocation) -> str:
+    """Чем строка называется в отчёте: slug салона и метка/адрес места."""
+    head = location.label or location.address
+    return f"{location.tenant.slug}/{head}" if location.tenant_id else f"соло/{head}"
+
+
 @dataclass(frozen=True)
 class Applied:
     """Что произошло со строкой. ``status`` пуст, если запись пропущена."""
 
-    tenant_slug: str
+    key: str  #: slug салона / место — или «соло / место»
     status: GeocodeStatus | None
     skipped_because: str = ""
 
@@ -51,7 +61,7 @@ class Applied:
 
 
 def apply_result(
-    tenant: Tenant,
+    location: ServiceLocation,
     result: GeocodeResult,
     *,
     source_address: str,
@@ -74,32 +84,32 @@ def apply_result(
             "а команда — остановиться. " + result.reason
         )
 
-    current = tenant.geocode_status
+    current = location.geocode_status
     if current == GeocodeStatus.CONFIRMED:
-        return Applied(tenant.slug, None, "подтверждено человеком — адаптер не перезаписывает")
+        return Applied(_key(location), None, "подтверждено человеком — адаптер не перезаписывает")
     if current == GeocodeStatus.OK and not overwrite_ok:
-        return Applied(tenant.slug, None, "уже геокодировано — без --overwrite-ok не трогается")
-    if result.outcome is Outcome.UNAVAILABLE and tenant.is_geocoded:
-        return Applied(tenant.slug, None, "сервис недоступен — геокодированную строку не портим")
+        return Applied(_key(location), None, "уже геокодировано — без --overwrite-ok не трогается")
+    if result.outcome is Outcome.UNAVAILABLE and location.is_geocoded:
+        return Applied(_key(location), None, "сервис недоступен — геокодированную строку не портим")
 
-    status = status_for(result, expected_city=tenant.city)
+    status = status_for(result, expected_city=location.city)
     now = now or timezone.now()
 
-    tenant.geocode_source_address = source_address
-    tenant.geocode_normalized_address = result.normalized_address
-    tenant.latitude = result.latitude
-    tenant.longitude = result.longitude
-    tenant.geocode_provider = result.provider
-    tenant.geocode_precision = result.provider_precision
-    tenant.geocode_status = status
-    tenant.geocoded_at = now
+    location.geocode_source_address = source_address
+    location.geocode_normalized_address = result.normalized_address
+    location.latitude = result.latitude
+    location.longitude = result.longitude
+    location.geocode_provider = result.provider
+    location.geocode_precision = result.provider_precision
+    location.geocode_status = status
+    location.geocoded_at = now
 
     # Правила модели — единственный сторож фикции, и он обязан сработать
     # здесь, а не остаться в admin-форме. Ошибка поднимается наверх: строка
     # с (0,0) от провайдера — это дефект провайдера, и молча превращать её в
     # pending значило бы спрятать его.
-    tenant.full_clean(validate_unique=False)
+    location.full_clean(validate_unique=False)
 
     if not dry_run:
-        tenant.save(update_fields=WRITTEN_FIELDS)
-    return Applied(tenant.slug, status)
+        location.save(update_fields=WRITTEN_FIELDS)
+    return Applied(_key(location), status)
