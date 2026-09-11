@@ -237,17 +237,24 @@ def apply_eligibility(
     # когда условие изменят в одном месте из двух.
     tally: dict[MappingStatus, int] = {status: 0 for status in MappingStatus}
 
+    # Список закрывается ЦЕЛИКОМ только когда safety-контекст ЗАПРОСА требует
+    # оценки всего ответа: STOP / UNKNOWN (fail-closed по §10.2), либо
+    # NOT_APPLICABLE при ответе, персонализированном прошлым опытом человека —
+    # тогда ответ есть интерпретация ПРО ЧЕЛОВЕКА, и SafetyResult нужен ему
+    # весь (OD §72). Чувствительность отдельного кандидата (услуга требует
+    # проверки здоровья) — свойство КАНДИДАТА и закрывает ЕГО, ниже в цикле
+    # (DRF-1627, frozen Safety canon: capability/candidate-specific, не
+    # глобальный переключатель списка).
+    #
+    # До DRF-1627 здесь стояло `any(...)` по обоим признакам сразу, и один
+    # «Медицинский педикюр» среди 31 кандидата гасил безопасный массаж и
+    # маникюр рядом — причём ДО гейта маппинга, так что подтверждение связей
+    # полку не открывало.
     safety_blocks_all = request.safety_state in (SafetyState.STOP, SafetyState.UNKNOWN)
-    if request.safety_state is SafetyState.NOT_APPLICABLE and _is_safety_sensitive(candidates):
-        # Заявление «эта поверхность не выполняет safety-sensitive решение»
-        # опровергнуто СОДЕРЖАНИЕМ решения, а не мнением о вызывающем.
-        # Владелец (OD §72): `NOT_APPLICABLE` не допускается как запасной
-        # путь после неудавшейся оценки, и как только выдача касается
-        # здоровья или становится персональной интерпретацией — она
-        # обязана получить настоящий SafetyResult.
+    if request.safety_state is SafetyState.NOT_APPLICABLE and _is_personalised(candidates):
         logger.warning(
             "recommendation.safety.not_applicable_refused — заявлено NOT_APPLICABLE, "
-            "но выдача касается здоровья либо персонализирована; fail-closed как при UNKNOWN "
+            "но выдача персонализирована прошлым опытом человека; fail-closed как при UNKNOWN "
             "(OD §72, контракт §4.1)"
         )
         safety_blocks_all = True
@@ -266,6 +273,20 @@ def apply_eligibility(
         tally[facts.mapping_status] = tally.get(facts.mapping_status, 0) + 1
 
         if safety_blocks_all or facts.safety_blocked:
+            excluded.append(ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_SAFETY))
+            continue
+
+        if _needs_own_safety_result(facts, request.safety_state):
+            # Точечный fail-closed (DRF-1627): у ЭТОГО кандидата услуга требует
+            # проверки здоровья, а поверхность SafetyResult не запрашивала.
+            # Закрывается он — соседи продолжают конвейер. Снять глобальный
+            # отказ и не оставить точечного значило бы открыть то, что
+            # закрыто по делу.
+            logger.info(
+                "recommendation.safety.candidate_unassessed — кандидат %s требует проверки "
+                "здоровья, SafetyResult не запрошен (NOT_APPLICABLE); исключён он один (DRF-1627)",
+                cid,
+            )
             excluded.append(ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_SAFETY))
             continue
 
@@ -346,26 +367,34 @@ def apply_eligibility(
     return AdmissionResult(tuple(admitted), tuple(excluded), codes, evidence, census)
 
 
-def _is_safety_sensitive(candidates: Sequence[CandidateFacts]) -> bool:
-    """Касается ли эта выдача безопасности — по её СОДЕРЖАНИЮ.
+def _is_personalised(candidates: Sequence[CandidateFacts]) -> bool:
+    """Персонализирован ли ответ прошлым опытом человека — признак СПИСКА.
 
-    Два признака, оба из решения владельца (OD §72):
+    Если хоть один кандидат отобран по прошлым визитам, ответ уже не «что
+    есть в каталоге», а «тебе сейчас лучше вот эти» — интерпретация про
+    человека, и SafetyResult нужен всему ответу (OD §72). Это единственный
+    признак, который закрывает список целиком при NOT_APPLICABLE.
 
-    * среди кандидатов есть требующий проверки здоровья — выдача трогает
-      противопоказания, даже если поверхность считает себя витриной;
-    * выдача персонализирована прошлым опытом человека — тогда она уже
-      не «что есть в каталоге», а «тебе сейчас лучше вот эти», то есть
-      интерпретация.
-
-    Проверка стоит здесь, а не в доверии к вызывающему, намеренно:
-    заявление о неприменимости должно опровергаться фактами, иначе оно
-    становится способом обойти гейт, назвав себя витриной.
+    Проверка здоровья по услуге здесь НЕ учитывается намеренно: это признак
+    кандидата, и он обрабатывается точечно (`_needs_own_safety_result`,
+    DRF-1627). До DRF-1627 оба признака стояли в одном `any(...)`.
     """
     return any(
-        facts.requires_health_check or facts.prior_completed_visit
-        or facts.prior_completed_same_category
+        facts.prior_completed_visit or facts.prior_completed_same_category
         for facts in candidates
     )
+
+
+def _needs_own_safety_result(facts: CandidateFacts, safety_state: SafetyState) -> bool:
+    """Требует ли ЭТОТ кандидат SafetyResult, которого у запроса нет.
+
+    Услуга с проверкой здоровья без оценки безопасности — fail-closed для
+    этого кандидата (frozen Safety canon: capability/candidate-specific).
+    При STOP/UNKNOWN вопрос не стоит — список уже закрыт целиком выше; при
+    NORMAL/DEGRADED SafetyResult есть, и его вердикт лежит в
+    `facts.safety_blocked`.
+    """
+    return safety_state is SafetyState.NOT_APPLICABLE and bool(facts.requires_health_check)
 
 
 def _mapping_admission(facts: CandidateFacts, policy: StagePolicy) -> tuple[bool, EvidenceItem | None]:

@@ -95,12 +95,19 @@ def test_personalised_shelf_refuses_the_declaration():
     assert decision.is_empty
 
 
-def test_one_sensitive_candidate_closes_the_whole_answer():
-    """Один кандидат с противопоказанием закрывает ВЕСЬ ответ.
+def test_one_sensitive_candidate_is_excluded_and_its_neighbours_stay():
+    """Один кандидат с противопоказанием закрывает СЕБЯ, не ответ (DRF-1627).
 
-    Не «показать остальных, спрятать этого»: отбор годных потребителем —
-    та самая четвёртая власть, живущая в фильтре (§53.1). Здесь она была
-    бы ещё и опаснее, потому что фильтровала бы по здоровью.
+    Здесь стояло обратное — «один закрывает весь ответ» — с доводом из
+    §53.1: отбор годных потребителем есть четвёртая власть. Довод верный
+    про ПОТРЕБИТЕЛЯ и не про это место: исключает здесь не потребитель, а
+    сам авторитет на S1, и это его прямая работа. Владелец решил дословно
+    (DRF-1627, frozen Safety canon): safety — capability/candidate-specific,
+    не глобальный переключатель списка; «один „Медицинский педикюр" не
+    должен уничтожать безопасный массаж и остальных».
+
+    Снимать этот тест — только вместе с новым решением владельца, а не с
+    прочтением §53.1: он уже один раз пережил свою правду.
     """
     plain, sensitive = make_facts(), make_facts(requires_health_check=True)
 
@@ -109,7 +116,70 @@ def test_one_sensitive_candidate_closes_the_whole_answer():
         source=StaticSource([plain, sensitive]),
     )
 
+    assert _ranked_ids(decision) == [plain.ref.id]
+    excluded = {e.candidate_ref.id: e.reason_code for e in decision.excluded}
+    assert excluded == {sensitive.ref.id: ReasonCode.ELIG_EXCLUDED_SAFETY}
+
+
+def test_mixed_set_golden_one_sensitive_many_normal():
+    """Golden из тикета: один health-sensitive + несколько NORMAL → NORMAL остаются.
+
+    Считается ЧИСЛОМ, а не «непусто»: непустая выдача из одного выжившего
+    прошла бы и на коде, который гасит половину списка.
+    """
+    normals = [make_facts() for _ in range(5)]
+    sensitive = make_facts(requires_health_check=True)
+
+    decision = resolve(
+        make_request(safety_state=SafetyState.NOT_APPLICABLE),
+        source=StaticSource([*normals[:2], sensitive, *normals[2:]]),
+    )
+
+    assert sorted(_ranked_ids(decision)) == sorted(n.ref.id for n in normals)
+    assert [e.candidate_ref.id for e in decision.excluded] == [sensitive.ref.id]
+
+
+def test_request_context_that_needs_safety_closes_the_whole_list():
+    """Контекст ЗАПРОСА требует оценки всего ответа → список закрыт целиком.
+
+    Второй сторож из DRF-1627: снять `any(...)` и не оставить отказ на
+    уровне списка значило бы открыть то, что закрыто по делу. Два таких
+    контекста: STOP/UNKNOWN — и NOT_APPLICABLE при ответе, персонализированном
+    прошлым опытом человека (OD §72: интерпретация про человека требует
+    SafetyResult целиком, а не по кандидату).
+    """
+    plain_a, plain_b = make_facts(), make_facts()
+    personal = make_facts(prior_completed_visit=True)
+
+    personalised = resolve(
+        make_request(safety_state=SafetyState.NOT_APPLICABLE),
+        source=StaticSource([plain_a, personal, plain_b]),
+    )
+    assert personalised.is_empty
+    assert {e.reason_code for e in personalised.excluded} == {ReasonCode.ELIG_EXCLUDED_SAFETY}
+    assert len(personalised.excluded) == 3  # все трое, не один
+
+    unknown = resolve(
+        make_request(safety_state=SafetyState.UNKNOWN),
+        source=StaticSource([plain_a, make_facts(requires_health_check=True), plain_b]),
+    )
+    assert unknown.is_empty and len(unknown.excluded) == 3
+
+
+def test_candidate_fail_closed_is_pointwise_not_absent():
+    """Граница, которую легко потерять при снятии any(...): точечный отказ ОСТАЛСЯ.
+
+    Положительная стража к «соседи остаются»: без неё код, который просто
+    перестал смотреть на requires_health_check, прошёл бы все тесты выше,
+    кроме этого — и показал бы медицинский педикюр без SafetyResult.
+    """
+    sensitive = make_facts(requires_health_check=True)
+    decision = resolve(
+        make_request(safety_state=SafetyState.NOT_APPLICABLE),
+        source=StaticSource([sensitive]),
+    )
     assert decision.is_empty
+    assert [e.reason_code for e in decision.excluded] == [ReasonCode.ELIG_EXCLUDED_SAFETY]
 
 
 def test_declaration_still_works_on_a_plain_shelf():
