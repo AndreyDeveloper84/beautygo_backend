@@ -402,3 +402,8 @@ class SocialAccountAdmin(admin.ModelAdmin):
     search_fields = ('user__phone', 'user__username', 'provider_uid')
     readonly_fields = ('created_at', 'extra_data')
     raw_id_fields = ('user',)
+
+
+# Действие «Связать с Ayla» для внешних личностей без связи (DRF-1509, §148):
+# регистрируется при импорте модуля.
+from . import admin_actions  # noqa: E402,F401

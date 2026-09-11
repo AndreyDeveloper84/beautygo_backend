@@ -165,12 +165,33 @@ class IdentityBindingConflictError(IdentityBindingError):
     status_code = 409
 
 
+#: Roles a binding target may carry. ``bind_external_identity`` defaults
+#: to CLIENT only (security review P1-2: the s2s endpoint has no proof of
+#: ownership, so it must not be able to point a bot identity at a
+#: master/admin account). The operator path
+#: (``bind_external_identity_by_operator``) is the ONLY caller that
+#: widens this — to SPECIALIST, because a solo master's Ayla account IS a
+#: specialist (``services/serializers.py``: ``CatalogMaster.ayla_user_id``
+#: mirrors ``SpecialistProfile.user_id``), and the operator is an
+#: authenticated, audited human rather than a bearer.
+BIND_TARGET_ROLES_S2S: tuple[str, ...] = ("client",)
+BIND_TARGET_ROLES_OPERATOR: tuple[str, ...] = ("specialist",)
+
+#: ``initiator`` value written by the admin action. A distinct name so
+#: audit queries can tell "an operator pressed the button" from "the
+#: provisioning bearer called the endpoint" without parsing anything.
+INITIATOR_ADMIN_LINK_SOLO_MASTER = "admin_link_solo_master"
+
+
 def bind_external_identity(
     external_user_id: str,
     ayla_user_id,
     *,
     initiator: str = "internal_api",
     request_id: str | None = None,
+    initiator_user_id=None,
+    initiator_role: str | None = None,
+    target_roles: tuple[str, ...] = BIND_TARGET_ROLES_S2S,
 ) -> tuple[User, bool]:
     """Bind an external identity to a real Ayla account (E2E-BOT-02B).
 
@@ -216,8 +237,19 @@ def bind_external_identity(
     committed binding ALWAYS has its audit row. Non-mutating outcomes
     (conflict / rejected) are audited best-effort after the fact.
     ``initiator`` names the trusted caller (``identity_provisioning`` /
-    ``e2e_fixture_bootstrap``); ``request_id`` carries the HTTP
-    correlation id when called over the s2s endpoint.
+    ``e2e_fixture_bootstrap`` / ``admin_link_solo_master``);
+    ``request_id`` carries the HTTP correlation id when called over the
+    s2s endpoint. ``initiator_user_id`` / ``initiator_role`` name the
+    HUMAN who ran the operation when there is one (the admin action,
+    §143: a sensitive operation is never recorded without its author);
+    both stay absent from the payload on the s2s path, whose author is
+    the named service plus ``request_id`` — the "background operation
+    has its own kind of authorship" half of §143.
+
+    ``target_roles`` narrows which ``User.role`` the target may carry —
+    ``BIND_TARGET_ROLES_S2S`` (client only, P1-2) unless the caller is
+    the operator path, see ``bind_external_identity_by_operator``. It
+    is applied in BOTH the pre-check and the under-lock re-validation.
 
     Post-bind contract (client_id): before binding, s2s surfaces
     resolve the isolated proxy; after binding they resolve the REAL
@@ -267,6 +299,8 @@ def bind_external_identity(
             actor=None, external_user_id=external_user_id or "",
             result="rejected", reason=REASON_INVALID_EXTERNAL_ID,
             initiator=initiator, request_id=request_id,
+            initiator_user_id=initiator_user_id,
+            initiator_role=initiator_role,
         )
         raise InvalidExternalUserIDError(
             "external_user_id must match '<source>:<id>[:<id>...]', "
@@ -274,7 +308,7 @@ def bind_external_identity(
         )
     try:
         target = User.objects.get(
-            pk=ayla_user_id, is_proxy=False, role="client",
+            pk=ayla_user_id, is_proxy=False, role__in=target_roles,
             is_active=True, deleted_at=None,
         )
     except (User.DoesNotExist, ValueError, TypeError, ValidationError) as exc:
@@ -283,6 +317,8 @@ def bind_external_identity(
             target_user_id=ayla_user_id,
             result="rejected", reason=REASON_TARGET_NOT_BINDABLE,
             initiator=initiator, request_id=request_id,
+            initiator_user_id=initiator_user_id,
+            initiator_role=initiator_role,
         )
         raise BindTargetNotFoundError(
             f"ayla_user_id {ayla_user_id!r} does not name a bindable account"
@@ -313,7 +349,7 @@ def bind_external_identity(
             target = (
                 User.objects.select_for_update()
                 .filter(
-                    pk=target.pk, is_proxy=False, role="client",
+                    pk=target.pk, is_proxy=False, role__in=target_roles,
                     is_active=True, deleted_at=None,
                 )
                 .first()
@@ -339,6 +375,8 @@ def bind_external_identity(
                 proxy_user_id=proxy.pk, target_user_id=target.pk,
                 result=outcome, reason=reason,
                 initiator=initiator, request_id=request_id,
+                initiator_user_id=initiator_user_id,
+                initiator_role=initiator_role,
                 strict=True,
             )
 
@@ -354,6 +392,8 @@ def bind_external_identity(
         result="conflict" if outcome == "conflict" else "rejected",
         reason=reason,
         initiator=initiator, request_id=request_id,
+        initiator_user_id=initiator_user_id,
+        initiator_role=initiator_role,
     )
     if outcome == "collision":
         raise IdentityBindingConflictError(
@@ -374,6 +414,127 @@ class ExternalIdentityNotFoundError(IdentityBindingError):
     """The external identity has no proxy row to operate on."""
     code = "NOT_FOUND"
     status_code = 404
+
+
+class IdentityBindingActorRequiredError(IdentityBindingError):
+    """A human-initiated binding was attempted without a resolvable actor.
+
+    §143 fail-closed: if the author of a sensitive operation cannot be
+    reliably identified, the operation is NOT performed. Raised BEFORE
+    any read, lock, write or audit emission — a row saying "author
+    unknown" would look like a complete audit and is exactly what §143
+    forbids.
+    """
+    code = "ACTOR_REQUIRED"
+    status_code = 403
+
+
+class ExternalIdentityAlreadyBoundError(IdentityBindingError):
+    """The proxy row already carries a binding (to ANY account).
+
+    The operator path refuses a repeat by name rather than letting the
+    underlying service absorb it as an idempotent no-op: an operator who
+    pressed the button twice must read "already bound", not "done" —
+    §148 makes the retry safe, the message makes it honest.
+    """
+    code = "ALREADY_BOUND"
+    status_code = 409
+
+
+def _operator_actor_pk(actor):
+    """Return the actor's pk, or ``None`` when no reliable author exists.
+
+    "Reliable" = a persisted, authenticated User. ``AnonymousUser``
+    (``is_authenticated`` False, no pk), ``None`` and unsaved instances
+    all fail. Deliberately not ``getattr(actor, "pk", None)`` alone — an
+    AnonymousUser has ``pk = None`` but a test double could carry one.
+    """
+    if actor is None:
+        return None
+    if not getattr(actor, "is_authenticated", False):
+        return None
+    return getattr(actor, "pk", None)
+
+
+def bind_external_identity_by_operator(
+    external_user_id: str,
+    ayla_user_id,
+    *,
+    actor,
+    request_id: str | None = None,
+) -> User:
+    """Operator-driven binding of a MAX/bot identity to a solo master (§148 step 3).
+
+    This is the SAME operation the provisioning endpoint performs — it
+    delegates to ``bind_external_identity`` and therefore holds the same
+    invariants: proxy row locked, target re-validated under lock, strict
+    in-transaction audit, one-way binding, no proxy→proxy chains. The
+    endpoint itself is untouched: the automatic attempt (bot S2,
+    DRF-1509) keeps needing it and its bearer; this function is the
+    "operator finishes by hand" rung underneath it.
+
+    What differs from the s2s call, and why:
+
+    * **Actor is mandatory (§143 fail-closed).** ``actor`` must be an
+      authenticated, persisted User — in the admin it is
+      ``request.user``. Anything else raises
+      ``IdentityBindingActorRequiredError`` before a single row is read
+      or written. The author lands in the audit payload as
+      ``initiator_user_id`` / ``initiator_role``.
+    * **Target must be a SPECIALIST**, not a client: a solo master's
+      Ayla account is the ``SpecialistProfile.user`` that the catalog
+      export publishes as ``user_id`` and the bot stores as
+      ``CatalogMaster.ayla_user_id``. The s2s default (client only,
+      P1-2) stays as it is for the endpoint.
+    * **Only an EXISTING proxy row can be bound.** The endpoint lazily
+      creates the proxy; the operator path does not — a missing row
+      means the bot has never presented this identity to Ayla, so
+      there is nothing the operator can truthfully link (§148: the row
+      the bot will read afterwards is the one that must be re-pointed).
+      Raises ``ExternalIdentityNotFoundError``.
+    * **A repeat is refused by name.** A proxy that already carries a
+      binding raises ``ExternalIdentityAlreadyBoundError`` — whether it
+      points at the same specialist or another one. The underlying
+      service would absorb the same-target case silently as
+      ``idempotent``; the operator must be told instead.
+
+    After a successful call ``resolve_external_user(external_user_id)``
+    — and so ``GET /internal/me/identity/`` for that identity — returns
+    the specialist's real account with ``is_proxy=False``.
+
+    Returns the proxy row (now bound).
+    """
+    actor_pk = _operator_actor_pk(actor)
+    if actor_pk is None:
+        raise IdentityBindingActorRequiredError(
+            "binding by operator requires an authenticated actor (§143); "
+            "refusing to bind without an author"
+        )
+    if not external_user_id or not _EXTERNAL_USER_ID_RE.match(external_user_id):
+        raise InvalidExternalUserIDError(
+            "external_user_id must match '<source>:<id>[:<id>...]', "
+            f"got {external_user_id!r}"
+        )
+    proxy = User.objects.filter(username=external_user_id, is_proxy=True).first()
+    if proxy is None:
+        raise ExternalIdentityNotFoundError(
+            f"no proxy row for external identity {external_user_id!r}: "
+            "the bot has not presented this identity to Ayla yet"
+        )
+    if proxy.linked_user_id is not None:
+        raise ExternalIdentityAlreadyBoundError(
+            f"external identity {external_user_id!r} is already bound "
+            f"to account {proxy.linked_user_id}"
+        )
+    proxy, _created = bind_external_identity(
+        external_user_id, ayla_user_id,
+        initiator=INITIATOR_ADMIN_LINK_SOLO_MASTER,
+        request_id=request_id,
+        initiator_user_id=actor_pk,
+        initiator_role=getattr(actor, "role", None),
+        target_roles=BIND_TARGET_ROLES_OPERATOR,
+    )
+    return proxy
 
 
 def unlink_external_identity(

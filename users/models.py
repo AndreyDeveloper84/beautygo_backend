@@ -143,6 +143,43 @@ class User(AbstractUser):
         return self.role == 'admin'
 
 
+class PendingExternalIdentityManager(models.Manager):
+    """Rows in the catalog's ONLY carrier of "waiting to be linked".
+
+    §148 step 2 (``SETUP_PENDING``) lives in the bot; the catalog has no
+    setup state of its own. What it does have is the proxy row the bot's
+    automatic attempt (S2, DRF-1509) creates on its first
+    ``GET /internal/me/identity/`` for a MAX identity: ``is_proxy=True``
+    with ``linked_user`` still NULL. That pair — and nothing else — is
+    what "waiting" means here. The catalog CANNOT tell a registering solo
+    master from a client behind the same kind of row; the operator
+    matches the external id against the bot's ``SETUP_PENDING`` list.
+    """
+
+    def get_queryset(self):
+        return (
+            super().get_queryset()
+            .filter(is_proxy=True, linked_user__isnull=True)
+        )
+
+
+class PendingExternalIdentity(User):
+    """Admin-facing view of an unbound proxy row (DRF-1509, §148 step 3).
+
+    A proxy model, not a table: it exists so the admin can show ONLY the
+    rows an operator may link and hang the "Связать с Ayla" action on
+    them, without widening ``UserAdmin`` (where ``linked_user`` stays
+    read-only on purpose — the service layer is the only write path).
+    """
+
+    objects = PendingExternalIdentityManager()
+
+    class Meta:
+        proxy = True
+        verbose_name = "внешняя личность без связи с Ayla"
+        verbose_name_plural = "Внешние личности без связи с Ayla (ждут оператора)"
+
+
 class Profile(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(
