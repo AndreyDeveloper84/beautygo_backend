@@ -42,10 +42,12 @@
 """
 from __future__ import annotations
 
+import os
 from datetime import timedelta
 from pathlib import Path
 
 from django.apps import apps
+from django.conf import settings
 from django.core.exceptions import FieldDoesNotExist
 from django.core.management.base import BaseCommand
 from django.db.models import Count
@@ -68,15 +70,30 @@ LIMIT_LINES = (
     "любой строке ниже — факт о таблице, а не вывод о готовности контура.",
 )
 
+#: Рубильники каталога, чьё значение решает «ЗАПЕРТО или нет» по §138
+#: (построено, но false — ЗАПЕРТО). Имя setting == имя переменной
+#: окружения для каждого (base.py читает os.environ.get(<то же имя>)).
+#: GOAL_RESOLUTION_ENABLED здесь, а не в боте: бот-команда печатает его
+#: строкой «не setting бота — снимать каталогом».
+FLAGS = (
+    "GOAL_RESOLUTION_ENABLED",
+    "GOAL_ANKETA_ENABLED",
+    "CROSS_DOMAIN_ENABLED",
+    "EXTERNAL_BUSY_ENABLED",
+    "BOOKING_AUTO_COMPLETE_ENABLED",
+    "SMS_ENABLED",
+)
+_FLAG_W = max(len(n) for n in FLAGS) + 2
+
 #: Ширина колонки с подписью числа. Одна на всю таблицу, чтобы источник
 #: (таблица.поле) начинался в одной позиции и читался столбцом.
 _LABEL_W = 24
 _VALUE_W = 8
 
 
-def _row(label: str, value, source: str) -> str:
+def _row(label: str, value, source: str, *, label_w: int = _LABEL_W) -> str:
     """Одна строка вывода: подпись · число · откуда снято."""
-    return f"  {label:<{_LABEL_W}}: {str(value):>{_VALUE_W}}   {source}"
+    return f"  {label:<{label_w}}: {str(value):>{_VALUE_W}}   {source}"
 
 
 def _field_exists(model, name: str) -> bool:
@@ -142,6 +159,8 @@ class Command(BaseCommand):
         lines.append("")
         lines.extend(LIMIT_LINES)
         lines.append("")
+        lines.extend(self._flags())
+        lines.append("")
         lines.append("== СОСТОЯНИЕ ПОВЕРХНОСТИ ==")
         lines.append(
             f"  {'':<{_LABEL_W}}  {'число':>{_VALUE_W}}   откуда снято "
@@ -167,6 +186,30 @@ class Command(BaseCommand):
             )
             self.stdout.write("")
             self.stdout.write(f"записано: {path}")
+
+    # -- рубильники ---------------------------------------------------------
+
+    def _flags(self) -> list[str]:
+        """Живое значение каждого флага и откуда оно: env или умолчание кода.
+
+        Умолчание в коде и явное false в .env — разные новости, и §138
+        различает ИСПОЛНЕНО от ЗАПЕРТО ровно значением; поэтому печатается
+        и значение, и то, задан ли флаг в окружении.
+        """
+        out = ["== РУБИЛЬНИКИ (§138: построено, но false — ЗАПЕРТО) =="]
+        for name in FLAGS:
+            if not hasattr(settings, name):
+                # Флаг исчез из настроек — это новость, а не «выключен».
+                out.append(_row(name, "нет setting", f"settings.{name} отсутствует", label_w=_FLAG_W))
+                continue
+            value = bool(getattr(settings, name))
+            mark = "открыт" if value else "ЗАПЕРТО"
+            origin = (
+                f"env {name}={os.environ[name]!r}" if name in os.environ
+                else "env не задан → умолчание кода"
+            )
+            out.append(_row(name, mark, f"settings.{name} = {value}; {origin}", label_w=_FLAG_W))
+        return out
 
     # -- разделы --------------------------------------------------------------
     #

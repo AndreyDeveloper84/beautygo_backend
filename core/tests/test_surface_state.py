@@ -19,7 +19,7 @@ from django.utils import timezone
 
 from ai.tests.factories import make_specialist, make_user
 from appointments.models import Appointment, SpecialistWorkingHours
-from core.management.commands.surface_state import FILE_HEADER, _row
+from core.management.commands.surface_state import _FLAG_W, FILE_HEADER, FLAGS, _row
 from core.measurement_subject import PULSE_ANCHORS, Anchor, gather_pulse
 from goals.models import ClientGoal
 from nutrition.models import FoodLog, NutritionProfile
@@ -266,6 +266,38 @@ def test_goals_active_closed_and_distinct_people(surface):
 
 
 # --------------------------------------------------------------------------- #
+# Рубильники (§138)
+# --------------------------------------------------------------------------- #
+
+def test_every_listed_flag_exists_in_settings():
+    """Список флагов команды — не пересказ: каждый обязан быть в settings."""
+    from django.conf import settings as live
+
+    missing = [name for name in FLAGS if not hasattr(live, name)]
+    assert missing == [], missing
+
+
+def test_flags_print_live_value_and_env_origin(settings, monkeypatch):
+    settings.GOAL_RESOLUTION_ENABLED = False
+    monkeypatch.delenv("GOAL_RESOLUTION_ENABLED", raising=False)
+    settings.CROSS_DOMAIN_ENABLED = True
+    monkeypatch.setenv("CROSS_DOMAIN_ENABLED", "1")
+
+    report = _run()
+    block = report.split("== РУБИЛЬНИКИ", 1)[1].split("== СОСТОЯНИЕ ПОВЕРХНОСТИ ==", 1)[0]
+    assert _row(
+        "GOAL_RESOLUTION_ENABLED", "ЗАПЕРТО",
+        "settings.GOAL_RESOLUTION_ENABLED = False; env не задан → умолчание кода",
+        label_w=_FLAG_W,
+    ) in block
+    assert _row(
+        "CROSS_DOMAIN_ENABLED", "открыт",
+        "settings.CROSS_DOMAIN_ENABLED = True; env CROSS_DOMAIN_ENABLED='1'",
+        label_w=_FLAG_W,
+    ) in block
+
+
+# --------------------------------------------------------------------------- #
 # Шапка предмета, предел, порядок
 # --------------------------------------------------------------------------- #
 
@@ -273,8 +305,9 @@ def test_subject_and_limit_are_printed_before_any_number(surface):
     report = _run()
     subject = report.index("== ПРЕДМЕТ: кто отвечает на этот замер ==")
     limit = report.index("== ПРЕДЕЛ: что эта команда НЕ показывает ==")
+    flags = report.index("== РУБИЛЬНИКИ")
     numbers = report.index("== СОСТОЯНИЕ ПОВЕРХНОСТИ ==")
-    assert subject < limit < numbers
+    assert subject < limit < flags < numbers
     assert "СТАРТ ПРОЦЕССА БД" in report
     assert "время снятия" in report
     # Чего изнутри не видно — названо, а не пропущено молча.
