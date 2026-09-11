@@ -150,8 +150,11 @@ def surface():
     # -- цели: активных 2, закрытых 1, людей с целью 2 (закрытая — у того
     #    же человека, что и одна из активных)
     ClientGoal.objects.create(client=eater_a, goal_key="relax", source_channel="bot")
+    # DRF-1660: закрытая — состоянием, не флагом. SUPERSEDED — «закрыта
+    # выбором новой», ровно то, что комментарий выше и описывает.
     ClientGoal.objects.create(
-        client=eater_a, goal_key="old", source_channel="bot", is_active=False,
+        client=eater_a, goal_key="old", source_channel="bot",
+        state=ClientGoal.State.SUPERSEDED,
     )
     ClientGoal.objects.create(client=client, goal_key="beauty", source_channel="miniapp")
 
@@ -274,8 +277,14 @@ def test_nutrition_profiles_targets_source_and_eaters(surface):
 def test_goals_active_closed_and_distinct_people(surface):
     report = _run()
     block = report.split("\nцели", 1)[1]
-    assert "активных                :        2   goals.ClientGoal.is_active = true" in block
-    assert "закрытых                :        1   goals.ClientGoal.is_active = false" in block
+    assert "активных                :        2   goals.ClientGoal.state = active" in block
+    assert "закрытых                :        1   goals.ClientGoal.state != active" in block
+    # Распределение закрытых по состояниям — рядом со счётчиком.
+    assert "  superseded            :        1   goals.ClientGoal.state = superseded" in block
+    assert (
+        "  legacy_inactive_reason_unknown:        0   "
+        "goals.ClientGoal.state = legacy_inactive_reason_unknown"
+    ) in block
     assert "людей с целью           :        2   goals.ClientGoal.client_id (distinct" in block
 
 
