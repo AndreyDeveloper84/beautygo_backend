@@ -59,7 +59,7 @@ def surface():
     s_addr_coords.location_lng = D("45.0046")
     s_addr_coords.save()
     s_addr = make_specialist(display_name="Только адрес")
-    s_none = make_specialist(display_name="Без адреса", address="")
+    make_specialist(display_name="Без адреса", address="")
 
     # -- тенанты: default (из conftest) + 2 явных = 3; активных 2;
     #    с адресом 2; с городом 1
