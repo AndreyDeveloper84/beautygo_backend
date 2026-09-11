@@ -197,20 +197,21 @@ class TestRDASenior:
 class TestProfileFieldsPersisted:
     """``NutritionProfile`` carries the seven new norm fields."""
 
-    def test_fields_default_zero(self, django_user_model):
+    def test_fields_default_to_absent(self, django_user_model):
+        """Новая строка ориентира не имеет — ``NULL``, не ноль (§103)."""
         user = django_user_model.objects.create_user(
             username="rda_test_user", password="x",
             role="client", phone="+79990400001",
         )
         p = NutritionProfile.objects.create(user=user)
-        assert p.daily_vitamin_d_iu == 0
-        assert p.daily_vitamin_b12_mcg == 0.0
-        assert p.daily_vitamin_c_mg == 0
-        assert p.daily_iron_mg == 0.0
-        assert p.daily_calcium_mg == 0
-        assert p.daily_magnesium_mg == 0
-        assert p.daily_omega3_g == 0.0
-        assert p.daily_fiber_g == 0
+        assert p.daily_vitamin_d_iu is None
+        assert p.daily_vitamin_b12_mcg is None
+        assert p.daily_vitamin_c_mg is None
+        assert p.daily_iron_mg is None
+        assert p.daily_calcium_mg is None
+        assert p.daily_magnesium_mg is None
+        assert p.daily_omega3_g is None
+        assert p.daily_fiber_g is None
 
 
 @pytest.mark.django_db
