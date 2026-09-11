@@ -1,10 +1,22 @@
-"""Удаление параметров тела: что стирается, что нет, и когда именно (§120).
+"""Удаление параметров тела: что стирается, что нет, и когда именно (§144).
 
 Команда, а не миграция — намеренно: слияние в `dev` есть выкладка, и
 миграция стёрла бы данные живых людей в момент слияния, то есть как
 побочный эффект работы очереди PR. Здесь удаление отделено от слияния во
 времени, и тесты закрепляют именно это: **без `--apply` не меняется
 ничего**.
+
+### Что изменилось между §120 и §144
+
+§120 (10.09.2026) сузил объём до трёх столбцов — вес, рост, возраст — и
+пол СОХРАНЯЛ. §144 (11.09.2026) сужение ОТМЕНИЛ:
+
+    «Нельзя оставлять часть набора только потому, что отдельное поле
+    кажется менее чувствительным.»
+
+Тест, закреплявший выживание пола, ПЕРЕВЁРНУТ, а не удалён: он был
+верной фиксацией §120, и из диффа должно быть видно, что изменилось
+ПРАВИЛО, а не что тест ошибался.
 """
 
 from __future__ import annotations
@@ -82,13 +94,19 @@ class TestValuesArePrintedNotCounted:
         «Удалили четыре» — утверждение о числе строк; «удалили 95.0» — о
         том, что именно ушло. Проверять можно только второе.
         """
-        _profile("purge-values", weight_kg=95.0, height_cm=185, age=41)
+        _profile(
+            "purge-values",
+            weight_kg=95.0, height_cm=185, age=41, gender="male",
+        )
 
         out = _run()
 
         assert "95.0" in out
         assert "185" in out
         assert "41" in out
+        # §144: пол теперь в стираемом наборе, значит и в отчёте —
+        # значением, а не умолчанием.
+        assert "gender='male'" in out
 
     def test_the_values_are_printed_before_deletion_not_after(self):
         """Печать ДО удаления — иначе значений уже неоткуда взять.
@@ -105,7 +123,7 @@ class TestValuesArePrintedNotCounted:
 
 
 class TestWhatIsErasedAndWhatIsNot:
-    def test_apply_clears_the_three_named_columns(self):
+    def test_apply_clears_the_four_named_columns(self):
         profile = _profile("purge-apply")
 
         _run("--apply")
@@ -114,30 +132,72 @@ class TestWhatIsErasedAndWhatIsNot:
         assert profile.weight_kg is None
         assert profile.height_cm is None
         assert profile.age is None
+        assert profile.gender == ""
+
+    def test_the_gender_is_erased_too_because_144_revoked_the_narrowing(self):
+        """ПЕРЕВЁРНУТЫЙ тест. Был: «пол выживает» — и был верен по §120.
+
+        §120 (10.09.2026) сузил объём до трёх столбцов и пол оставлял.
+        §144 (11.09.2026) сужение отменил дословно:
+
+            «Нельзя оставлять часть набора только потому, что отдельное
+            поле кажется менее чувствительным.»
+
+        Подтверждение владельца 11.09.2026: удаляем пол у всех шести.
+        Изменилось ПРАВИЛО, поэтому тест перевёрнут, а не удалён.
+
+        Пусто у пола — ``""``, а не ``NULL``: столбец объявлен
+        ``CharField(blank=True, default="")`` и NOT NULL, а миграций в
+        этом срезе нет. Это то пусто, которое объявила схема, а не
+        выдуманное здесь.
+        """
+        profile = _profile("purge-gender-144")
+
+        _run("--apply")
+
+        profile.refresh_from_db()
+        assert profile.gender == ""
 
     def test_the_fields_the_owner_kept_survive(self):
         """Положительная стража: команда стирает НЕ всё.
 
         Без неё все тесты выше зеленели бы и на команде, которая чистит
         профиль целиком, — то есть на потере данных вместо исполнения
-        решения. `gender`, `activity_coefficient` и `goal` владелец
-        оставил явно.
+        решения. Подтверждение владельца 11.09.2026 вместе с §144:
+        `activity_coefficient` и `goal` ОСТАЮТСЯ.
+
+        Стража расширена снимком: сравнение со словарём целиком ловит
+        `_strip_purged`, выродившийся в «вернуть пустое», — построчные
+        `not in` такую подмену пропускают.
         """
-        profile = _profile("purge-keeps")
+        profile = _profile(
+            "purge-keeps",
+            targets_input_snapshot={
+                "gender": "female", "goal": "maintain", "pace": "moderate",
+            },
+        )
 
         _run("--apply")
 
         profile.refresh_from_db()
-        assert profile.gender == "female"
         assert profile.activity_coefficient == 1.4
         assert profile.goal == "maintain"
+        assert profile.targets_input_snapshot == {
+            "goal": "maintain", "pace": "moderate",
+        }
 
-    def test_the_input_snapshot_loses_the_same_three_keys(self):
-        """Второе место, где вес пережил бы удаление.
+    def test_the_input_snapshot_loses_the_same_four_keys(self):
+        """Второе место, где параметры пережили бы удаление.
 
         `targets_input_snapshot` хранит те же параметры под теми же
         именами. На пилоте он сегодня пуст, но пусто сегодня не значит
         пусто в день запуска — поэтому чистится, а не игнорируется.
+
+        Ключ пола в снимке ЕСТЬ по построению:
+        ``nutrition_profile_service.SNAPSHOT_INPUTS`` перечисляет
+        ``gender`` первым, и ``_input_snapshot`` собирается по этому
+        списку. Значит с §144 он обязан чиститься вместе с тремя
+        остальными, а не быть исключением «его тут всё равно не бывает».
         """
         profile = _profile(
             "purge-snapshot",
@@ -154,8 +214,8 @@ class TestWhatIsErasedAndWhatIsNot:
         assert "weight_kg" not in snap
         assert "height_cm" not in snap
         assert "age" not in snap
-        # Ключи вне объёма §120 остаются — тот же довод, что и о столбцах.
-        assert snap["gender"] == "female"
+        assert "gender" not in snap
+        # Ключи вне объёма §144 остаются — тот же довод, что и о столбцах.
         assert snap["goal"] == "maintain"
 
     def test_the_derived_numbers_are_left_alone_and_said_so(self):
@@ -180,21 +240,90 @@ class TestWhatIsErasedAndWhatIsNot:
         assert "bmr=1392" in out
 
 
-class TestRowsWithoutBodyParametersAreNotTouched:
-    def test_a_profile_without_them_is_not_reported(self):
+class TestTheScopeOfSelectionIsFourFieldsNotThree:
+    """§144 расширил отбор: «хоть одно из ЧЕТЫРЁХ», а не из трёх.
+
+    Замер пилота 11.09.2026: шесть профилей, вес/рост/возраст есть у
+    четырёх, пол — у всех шести. По условию §120 два профиля без весов
+    под удаление не попадали вовсе и остались бы с полом, то есть §144
+    был бы исполнен наполовину.
+    """
+
+    def test_a_profile_with_only_the_gender_filled_is_in_scope(self):
+        """Два новых профиля пилота — ровно этот случай.
+
+        Без этого сторожа расширение отбора не доказано: все остальные
+        тесты зеленели бы и на команде, которая по-прежнему смотрит
+        только на вес, рост и возраст.
+        """
+        profile = _profile(
+            "purge-only-gender",
+            gender="male", weight_kg=None, height_cm=None, age=None,
+        )
+
+        out = _run("--apply")
+
+        assert "Несут параметры тела: 1" in out
+        profile.refresh_from_db()
+        assert profile.gender == ""
+
+    def test_a_profile_without_any_of_the_four_is_not_reported(self):
         """Профиль без параметров тела в отчёт не попадает.
 
         Иначе счётчик «затронуто» раздувался бы строками, где стирать
         нечего, и отчёт перестал бы отвечать на вопрос «сколько людей».
+
+        Пол здесь пуст ЯВНО (``""``): пустое у пола — не ``NULL``, и
+        отбор, спрашивающий у всех четырёх ``is not None``, зачислил бы
+        сюда каждую строку базы. Тогда «расширили объём» означало бы
+        «стираем у всех подряд», а это другое решение.
         """
         _profile(
             "purge-empty",
-            weight_kg=None, height_cm=None, age=None,
+            weight_kg=None, height_cm=None, age=None, gender="",
         )
 
         out = _run()
 
         assert "Стирать нечего" in out
+
+
+class TestTheExceptionOfPara144IsNamedNotSilentlyImplemented:
+    """§144 допускает исключение — и сегодня оно неприменимо ни к одной строке.
+
+        «Если пол был независимо предоставлен для другой явно указанной
+        цели и для этого есть отдельное основание, такая запись может
+        сохраняться. Основание должно быть доказуемым.»
+
+    Поля провенанса у пола в схеме нет: ``NutritionProfile.gender`` —
+    одна колонка без источника, цели и даты. Доказать основание нечем ни
+    по одной строке, поэтому стираются все шесть.
+
+    Команда обязана это НАПЕЧАТАТЬ. Молчание прочиталось бы как
+    «исключений не нашлось», то есть как проверка, которой не было.
+    """
+
+    def test_the_report_says_the_exception_is_inapplicable_and_why(self):
+        _profile("purge-144-exception")
+
+        out = _run()
+
+        assert "Исключение §144" in out
+        assert "неприменимо" in out
+        # Не просто «неприменимо», а ПОЧЕМУ: нечем доказать.
+        assert "поля основания" in out
+
+    def test_the_same_is_said_on_apply_not_only_on_the_dry_run(self):
+        """Запускающий с ``--apply`` читает тот же отчёт.
+
+        Иначе довод жил бы только в сухом прогоне, который в день
+        удаления может никто и не сделать.
+        """
+        _profile("purge-144-exception-apply")
+
+        out = _run("--apply")
+
+        assert "Исключение §144" in out
 
 
 class TestTheOrderOfExecutionIsAConditionNotAWish:
@@ -293,7 +422,7 @@ class TestCompletenessIsCheckedByDataNotByOwnWork:
 
         profile.refresh_from_db()
         blob = json.dumps(profile.targets_input_snapshot, ensure_ascii=False)
-        for name in ("weight_kg", "height_cm", "age"):
+        for name in ("weight_kg", "height_cm", "age", "gender"):
             assert f'"{name}"' not in blob
         assert profile.targets_input_snapshot["goal"] == "maintain"
 
