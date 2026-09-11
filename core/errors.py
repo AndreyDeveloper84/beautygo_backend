@@ -140,6 +140,14 @@ class ErrorCode(str, Enum):
     # маркетплейса нет колонки, куда мог бы лечь ответ. За UNKNOWN
     # стоит работа (спросить салон), за этим — не стоит ничего.
     HEALTH_CHECK_NOT_APPLICABLE = "HEALTH_CHECK_NOT_APPLICABLE"
+
+    # --- Согласие на обработку личных данных (§92, срез N-a2) ---
+    # Свой код, а не общий VALIDATION_ERROR: вызывающему нужно отличить
+    # «данные невалидны» (чинится телом запроса) от «нет основания их
+    # принимать» (чинится согласием человека). По статусу причину
+    # восстановить нельзя — 422 в этом репозитории носят несколько
+    # разных отказов.
+    CONSENT_REQUIRED = "CONSENT_REQUIRED"
     BOOKING_ERROR = "BOOKING_ERROR"
 
     # --- Reviews (spec §Отзывы) ---
@@ -194,6 +202,13 @@ class ErrorCode(str, Enum):
     # документ на экране протух. Клиенту сюда — перечитать документ,
     # а не повторять тот же запрос.
     ANKETA_STEP_MISMATCH = "ANKETA_STEP_MISMATCH"
+
+    # --- Goal lifecycle (DRF-1660; §97 OD-GOAL-B) ---
+    # Два разных «нельзя» с разными адресами починки: первое — перехода
+    # нет в таблице (выбрать другое действие), второе — снять с паузы
+    # мешает другая ACTIVE цель (сначала поставить на паузу её).
+    GOAL_TRANSITION_NOT_ALLOWED = "GOAL_TRANSITION_NOT_ALLOWED"
+    GOAL_ANOTHER_ACTIVE = "GOAL_ANOTHER_ACTIVE"
 
     # --- Rate limiting ---
     THROTTLED = "THROTTLED"

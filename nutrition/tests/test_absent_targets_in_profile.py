@@ -21,6 +21,12 @@ import pytest
 
 from nutrition.models import NutritionProfile
 
+#: §103 N-b: пересчёт ориентиров — только с основанием. Эти тесты зовут
+#: сервис напрямую, минуя сторож ручки (#324), поэтому утверждение о
+#: согласии объявляется здесь как предусловие: предмет тестов — форма
+#: отказа, а не сам сторож (он в ``test_targets_recompute_gate.py``).
+CONSENT = {"type": "personal_calculation", "document_version": "v1"}
+
 
 @pytest.mark.django_db
 class TestAbsentTargetsLeaveNoZeroBehind:
@@ -37,7 +43,7 @@ class TestAbsentTargetsLeaveNoZeroBehind:
     def test_a_refused_calculation_sends_no_norms_at_all(self, django_user_model) -> None:
         user = django_user_model.objects.create(username="absent-refused")
 
-        body = self._upsert(user, {"gender": "female", "age": 30})
+        body = self._upsert(user, {"consent": CONSENT, "gender": "female", "age": 30})
 
         # Положительная стража: отказ действительно произошёл и НАЗВАН —
         # без неё «норм нет» зеленело бы и на профиле, который вообще не
@@ -58,6 +64,7 @@ class TestAbsentTargetsLeaveNoZeroBehind:
         body = self._upsert(
             user,
             {
+                "consent": CONSENT,
                 "gender": "female",
                 "age": 30,
                 "height_cm": 168,
@@ -77,11 +84,15 @@ class TestAbsentTargetsLeaveNoZeroBehind:
         """
         user = django_user_model.objects.create(username="absent-water")
 
-        refused = self._upsert(user, {"gender": "female"})
+        refused = self._upsert(user, {"consent": CONSENT, "gender": "female"})
         assert "daily_water_ml" not in refused["norms"]
 
         computed = self._upsert(
-            user, {"age": 30, "height_cm": 168, "weight_kg": 62, "goal": "maintain"}
+            user,
+            {
+                "consent": CONSENT,
+                "age": 30, "height_cm": 168, "weight_kg": 62, "goal": "maintain",
+            },
         )
         assert computed["norms"]["daily_kcal"] > 0, "стража: расчёт состоялся"
         assert "daily_water_ml" not in computed["norms"]
@@ -110,8 +121,14 @@ class TestTheTwoWaysOfSayingItDoNotDrift:
     @pytest.mark.parametrize(
         "payload,expect_targets",
         [
-            ({"gender": "female", "age": 30}, False),
-            ({"gender": "female", "age": 30, "height_cm": 168, "weight_kg": 62}, True),
+            ({"consent": CONSENT, "gender": "female", "age": 30}, False),
+            (
+                {
+                    "consent": CONSENT,
+                    "gender": "female", "age": 30, "height_cm": 168, "weight_kg": 62,
+                },
+                True,
+            ),
         ],
         ids=["refused", "computed"],
     )

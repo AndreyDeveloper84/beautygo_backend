@@ -97,6 +97,8 @@ def anketa_profile(anketa_user):
         user=anketa_user,
         external_user_id=str(anketa_user.id),
         payload={
+            # §103 N-b: пересчёт только с основанием — предусловие.
+            "consent": {"type": "personal_calculation", "document_version": "v1"},
             "gender": "female",
             "age": 30,
             "height_cm": 170,
@@ -178,11 +180,12 @@ class TestTheWaterFormulaIsGone:
     ) -> None:
         """Штатный upsert не записывает ориентир в строку профиля.
 
-        Столбец ``daily_water_ml`` объявлен ``default=0`` и остаётся в
-        схеме — миграция данных существующих клиентов это отдельный срез.
-        Правка здесь в том, что НОВЫХ фиктивных значений не появляется.
+        Столбец ``daily_water_ml`` nullable (§103, миграция 0018): у
+        новой строки ``NULL``, и штатный пересчёт его не заполняет.
+        Выход снятой формулы у старых строк стирает команда
+        ``clear_targets_without_provenance``.
         """
-        assert anketa_profile.daily_water_ml == 0, (
+        assert anketa_profile.daily_water_ml is None, (
             "формула снова записала ориентир в профиль: "
             f"{anketa_profile.daily_water_ml}"
         )
@@ -314,9 +317,10 @@ class TestNobodyGetsSomeoneElsesBody:
             kwargs = dict(complete)
             kwargs[field_name] = None if field_name != "gender" else ""
             norms = compute_norms(ProfileInputs(**kwargs))
-            assert norms.bmr == 0, f"{field_name}: bmr={norms.bmr}"
-            assert norms.daily_kcal == 0, f"{field_name}: kcal={norms.daily_kcal}"
-            assert norms.daily_protein_g == 0, field_name
+            # ``None``, не ноль (§103): отказ — отсутствие, а не число.
+            assert norms.bmr is None, f"{field_name}: bmr={norms.bmr}"
+            assert norms.daily_kcal is None, f"{field_name}: kcal={norms.daily_kcal}"
+            assert norms.daily_protein_g is None, field_name
             reasons = [o.get("reason") for o in norms.overrides_applied]
             assert "insufficient_inputs" in reasons, (
                 f"{field_name}: у пропуска нет имени — {norms.overrides_applied}"
@@ -363,6 +367,8 @@ class TestNobodyGetsSomeoneElsesBody:
             user=anketa_user,
             external_user_id=str(anketa_user.id),
             payload={
+                # §103 N-b: основание есть, входов — нет: отказ по входам.
+                "consent": {"type": "personal_calculation", "document_version": "v1"},
                 "gender": "female", "age": 30, "height_cm": 170,
                 # веса нет — человек его не назвал
                 "goal": "maintain", "complete": True,
@@ -370,7 +376,7 @@ class TestNobodyGetsSomeoneElsesBody:
             idempotency_key=None,
         )
         row = NutritionProfile.objects.get(user_id=anketa_user.id)
-        assert row.daily_kcal == 0, (
+        assert row.daily_kcal is None, (
             f"человеку без веса записали {row.daily_kcal} ккал от чужого тела"
         )
-        assert row.bmr == 0
+        assert row.bmr is None

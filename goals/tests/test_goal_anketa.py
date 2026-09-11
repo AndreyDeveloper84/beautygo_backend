@@ -283,7 +283,7 @@ class TestAnketaFormsAGoal:
             _answer(api, step.key, option_key=step.options[0][0])
         doc = _answer(api, anketa.FINAL_STEP_KEY, text="Маникюр").json()["data"]
 
-        goal = ClientGoal.objects.get(client=customer, is_active=True)
+        goal = ClientGoal.objects.get(client=customer, state=ClientGoal.State.ACTIVE)
         assert goal.goal_key is None
         assert goal.goal_text == "Маникюр"  # дословно, OD-2
         assert doc["missing"] == []  # названа услуга — уточнять нечего
@@ -642,7 +642,7 @@ class TestRepeatPass:
             assert doc["known"]["goal"]["goal_key"] == expected_key
 
         assert GoalAnketaRun.objects.filter(client=customer).count() == 3
-        assert ClientGoal.objects.filter(client=customer, is_active=True).count() == 1
+        assert ClientGoal.objects.filter(client=customer, state=ClientGoal.State.ACTIVE).count() == 1
 
     def test_double_start_does_not_open_two_runs(self, customer, token):
         api = _api()

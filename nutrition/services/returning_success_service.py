@@ -127,8 +127,9 @@ def _resolve_goal(profile: NutritionProfile | None) -> int:
     выражается нулём — ``detect_returning_success`` на ``goal <= 0``
     отдаёт ``detected=False``, то есть молчит.
 
-    Ноль безопасно читать как отсутствие: столбец объявлен
-    ``default=0``, а дневная цель ноль килокалорий физически невозможна.
+    Столбец nullable (§103): ``NULL`` — цели нет, и ``if profile.daily_kcal``
+    ловит и ``None``, и ноль у строк, не прошедших очистку командой.
+    Наружу число не уезжает — только ``detected=False``.
     """
     if profile and profile.daily_kcal:
         return profile.daily_kcal
