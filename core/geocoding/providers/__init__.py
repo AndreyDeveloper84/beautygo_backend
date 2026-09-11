@@ -14,10 +14,15 @@
 from __future__ import annotations
 
 from core.geocoding.providers.base import Geocoder
+from core.geocoding.providers.dadata import DaDataGeocoder
+from core.geocoding.providers.nominatim import NominatimGeocoder
 from core.geocoding.providers.yandex import YandexGeocoder
 
-#: имя → класс. DaData и Nominatim добавляются сюда после Р1/Р4.
+#: имя → класс. Порядок — рекомендация исследования: DaData основным,
+#: Nominatim вторым, Яндекс — заглушка до покупки лицензии.
 PROVIDERS: dict[str, type] = {
+    DaDataGeocoder.name: DaDataGeocoder,
+    NominatimGeocoder.name: NominatimGeocoder,
     YandexGeocoder.name: YandexGeocoder,
 }
 
@@ -30,9 +35,11 @@ GEOCODER_HOST_MARKERS: tuple[str, ...] = (
 
 #: Закрытый список модулей, которым можно эти хосты упоминать.
 GEOCODING_MODULES: frozenset[str] = frozenset({
-    "services/geocoding.py",                 # обратный, Яндекс, с 25.04 — не трогается
-    "core/geocoding/providers/__init__.py",  # этот реестр
-    "core/geocoding/providers/yandex.py",    # заглушка
+    "services/geocoding.py",                   # обратный, Яндекс, с 25.04 — не трогается
+    "core/geocoding/providers/__init__.py",    # этот реестр
+    "core/geocoding/providers/yandex.py",      # заглушка
+    "core/geocoding/providers/dadata.py",
+    "core/geocoding/providers/nominatim.py",
 })
 
 

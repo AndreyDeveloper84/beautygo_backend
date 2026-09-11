@@ -126,7 +126,17 @@ class Command(BaseCommand):
         now = timezone.now()
         applied: list[Applied] = []
         for tenant in candidates:
-            result = provider.geocode(tenant.address)
+            result = provider.geocode(tenant.address, city=tenant.city)
+            if result.outcome is Outcome.MISCONFIGURED:
+                # Ключ отклонён посреди прогона: это про нас, не про сервис,
+                # и повтор не поможет. Уже записанные строки остаются;
+                # остальные не получают pending, который выглядел бы как
+                # лежащий сервис.
+                self.stderr.write(self.style.ERROR(
+                    f"провайдер {name!r} отказал на {tenant.slug}: {result.reason}. "
+                    f"Прогон остановлен, записано строк: {sum(1 for x in applied if x.written)}."
+                ))
+                raise SystemExit(2)
             a = apply_result(
                 tenant, result,
                 source_address=tenant.address, now=now,

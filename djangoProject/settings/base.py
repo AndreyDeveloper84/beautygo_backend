@@ -735,6 +735,20 @@ YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = os.environ.get(
 YANDEX_VISION_API_KEY = os.environ.get("YANDEX_VISION_API_KEY", "")
 YANDEX_VISION_FOLDER_ID = os.environ.get("YANDEX_VISION_FOLDER_ID", "")
 
+# Геокодирование мест (§139, DRF-1662) — core/geocoding. Настройки
+# ОБЪЯВЛЕНЫ здесь с пустым умолчанием намеренно: провайдер читает
+# settings.<ИМЯ> напрямую, а не getattr(..., ""), чтобы отсутствие строки
+# в настройках было ошибкой кода, а не тихим «ключ пуст по решению»
+# (ср. YANDEX_GEOCODER_API_KEY у services/geocoding.py — объявлен только
+# в тестах, в бою всегда пуст, DRF-1685). Пустое значение → провайдер
+# отказывает в check() до первого запроса.
+DADATA_API_KEY = os.environ.get("DADATA_API_KEY", "")
+# Свой хост OSM-геокодера. Публичный хост OSM подставлять сюда только для
+# пробы: его политика — 1 запрос/с, без тяжёлого использования; провайдер
+# соблюдает интервал сам. (Имя хоста здесь не пишется намеренно: сторож
+# закрытого списка модулей-геокодеров ищет его по тексту.)
+NOMINATIM_BASE_URL = os.environ.get("NOMINATIM_BASE_URL", "")
+
 # Router primary / fallback vendor selection. Slice 2 will read these.
 # Keep names lowercase short tokens so env diffs stay readable.
 FOOD_SCANNER_PRIMARY = os.environ.get("FOOD_SCANNER_PRIMARY", "openai")
