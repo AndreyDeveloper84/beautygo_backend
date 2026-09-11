@@ -36,13 +36,35 @@
 создаёт направленную ложь там, где её сейчас нет. Поэтому команда
 печатает **и всего, и с координатами** — разрыв между ними и есть мера
 опасности.
+
+Почему команда начинается с того, КТО ей ответил
+------------------------------------------------
+
+11.09.2026 выяснилось, что машин две и совпадает у них всё, кроме адреса:
+путь, учётка, имена compose-проектов. У брошенной копии контейнер БД
+остался жив, когда прикладные вышли, — значит запрос туда не падает, он
+**отвечает** правдоподобным числом из замороженного состояния. Это
+опаснее отказа: отказ виден, а такой ответ выглядит как замер.
+
+Правило «печатать хост рядом с числом» дыру не закрывает: **имя хоста —
+это то, что я помню**, и неверный адрес называют честно. Поэтому блок
+предмета печатает не имя, а то, что машина говорит о себе сейчас, —
+время старта процесса БД и возраст последней записи
+(`core/measurement_subject.py`).
+
+`--max-age-hours` превращает это из строки для чтения в **проверку**:
+пульс старше порога означает «мерю не ту машину», и выход ненулевой
+(код 2, отдельный от кода 1 «геокодирование не готово»).
 """
 from __future__ import annotations
+
+from datetime import timedelta
 
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from ai.application.services.recommendation_engine import RecommendationEngine
+from core.measurement_subject import gather_pulse, newest, subject_lines
 from users.models import SpecialistProfile
 
 
@@ -62,9 +84,30 @@ class Command(BaseCommand):
             "--require-ready", action="store_true",
             help="Ненулевой код выхода, если координаты есть не у всех.",
         )
+        parser.add_argument(
+            "--max-age-hours", type=float, default=None,
+            help=(
+                "Код выхода 2, если последняя запись в контуре старше этого "
+                "возраста: замороженная копия отвечает так же охотно, как "
+                "живой пилот."
+            ),
+        )
 
     def handle(self, *args, **options) -> None:
         engine = RecommendationEngine()
+
+        # Предмет печатается ПЕРВЫМ и до всякого счёта: число, у которого
+        # не названо, кто его выдал, читателю не нужно.
+        #
+        # Пульс собирается один раз и отдаётся обоим: печати и проверке.
+        # Два сбора дали бы напечатанный возраст и проверенный возраст из
+        # разных мгновений, и расхождение осталось бы незамеченным.
+        pulses = gather_pulse()
+        for line in subject_lines(pulses=pulses):
+            self.stdout.write(line)
+        self._check_freshness(pulses, options["max_age_hours"])
+        self.stdout.write("")
+
         # `all_tenants` не нужен: профили специалистов глобальны. Если это
         # изменится, счёт молча схлопнется до одного салона — и строка
         # «предмет» ниже это покажет числом `всего`.
@@ -116,6 +159,40 @@ class Command(BaseCommand):
 
         if options["require_ready"] and with_coords < total:
             raise SystemExit(1)
+
+    def _check_freshness(self, pulses, max_age_hours) -> None:
+        """Пульс старше порога значит «мерю не ту машину».
+
+        Отдельный код выхода (2, а не 1) намеренно: «геокодирование не
+        готово» — новость про данные, «замер не с той машины» — новость
+        про то, что предыдущая строка вообще ничего не значит. Скрипт,
+        различающий их по коду, не станет чинить второе как первое.
+
+        Порог не имеет умолчания. Живой контур с редким трафиком молчит
+        сутками законно, и подставленное здесь число превращало бы тишину
+        в обвинение. Пока порог не назван, возраст — строка для чтения.
+        """
+        if max_age_hours is None:
+            return
+
+        freshest = newest(pulses)
+        limit = timedelta(hours=max_age_hours)
+        if freshest is None:
+            self.stderr.write(self.style.ERROR(
+                "СВЕЖЕСТЬ НЕ ПОДТВЕРЖДЕНА: ни одна опора не ответила. "
+                "Это не «база пустая» и не «всё хорошо» — это отсутствие "
+                "ответа на вопрос, та ли машина."
+            ))
+            raise SystemExit(2)
+
+        age = timezone.now() - freshest.at
+        if age > limit:
+            self.stderr.write(self.style.ERROR(
+                f"НЕ ТА МАШИНА (или контур стоит): последняя запись — "
+                f"{freshest.at.isoformat()} ({freshest.label}), это старше "
+                f"порога {max_age_hours} ч. Числа ниже недействительны."
+            ))
+            raise SystemExit(2)
 
     def _distinct_scores(self, engine, rows, from_lat, from_lon) -> str:
         """Сколько различных баллов расстояния даёт сегодняшний каталог.
