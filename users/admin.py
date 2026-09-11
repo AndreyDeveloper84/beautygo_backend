@@ -1,14 +1,23 @@
 """Django Admin configuration for users app."""
 from __future__ import annotations
 
+from datetime import date, time, timedelta
+
 from django import forms
+from django.conf import settings
 from django.contrib import admin, messages
+from django.contrib.admin import helpers as admin_helpers
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.core.exceptions import ValidationError
+from django.db import transaction
+from django.shortcuts import render
 from django.utils.html import format_html
 
+from appointments.admin import SpecialistWorkingHoursInline
+
 from .models import (
-    DeviceToken, OTPCode, Profile, SocialAccount, SpecialistProfile, User,
+    DeletionRequest, DeviceToken, OTPCode, Profile, SocialAccount,
+    SpecialistProfile, User,
 )
 
 
@@ -119,6 +128,145 @@ def reject_specialists(modeladmin, request, queryset):
     modeladmin.message_user(
         request, f'Отклонено мастеров: {updated}', messages.WARNING,
     )
+
+
+# ─── Пресет расписания (срез админской поверхности) ──────────────────────────
+#
+# Чтобы завести салон из пяти мастеров, человек делал ТРИДЦАТЬ ПЯТЬ отправок
+# формы: семь строк расписания на каждого, отдельным экраном, который про
+# мастера даже не упоминает. Вложенный блок на форме мастера убирает экран;
+# это действие убирает семь отправок из пяти.
+#
+# ПОЧЕМУ СО СТРАНИЦЕЙ ПОДТВЕРЖДЕНИЯ, А НЕ ОДНИМ НАЖАТИЕМ
+#
+# Четверо пилотных мастеров числятся работающими семь дней с 10:00 до 19:00
+# без обеда. Никто этого не вводил — это изготовленное умолчание прежнего
+# кода, и по нему сегодня продают клиенту. Второй раз заводить механизм,
+# который пишет часы за человека, нельзя: пресет обязан быть решением,
+# которое видно ДО записи, а не значением, которое появилось само.
+#
+# Поэтому действие сначала показывает, ЧТО именно оно напишет, и кому, и у
+# кого часы уже есть. Записывает — только после подтверждения.
+
+PRESET_WEEKDAYS = (0, 1, 2, 3, 4)
+PRESET_START = time(10, 0)
+PRESET_END = time(19, 0)
+
+
+def _preset_rows(specialist):
+    """Семь строк пресета: Пн–Пт 10:00–19:00, Сб и Вс — выходные.
+
+    Выходные приезжают СТРОКАМИ, а не отсутствием строк. Отсутствие строки
+    и «выходной» читаются потребителем одинаково только до первого вопроса
+    «а мы вообще заводили этому мастеру расписание»; строка на выходной
+    отвечает на него, пустота — нет.
+    """
+
+    from appointments.models import SpecialistWorkingHours
+
+    return [
+        SpecialistWorkingHours(
+            specialist=specialist,
+            day_of_week=day,
+            is_working_day=day in PRESET_WEEKDAYS,
+            start_time=PRESET_START if day in PRESET_WEEKDAYS else None,
+            end_time=PRESET_END if day in PRESET_WEEKDAYS else None,
+            break_start=None,
+            break_end=None,
+        )
+        for day in range(7)
+    ]
+
+
+@admin.action(description='🕘 Поставить расписание Пн–Пт 10:00–19:00')
+def apply_default_schedule(modeladmin, request, queryset):
+    """Пресет недели на выбранных мастеров — через подтверждение.
+
+    Возвращает страницу подтверждения на первом заходе и пишет только на
+    втором, когда человек увидел и часы, и список тех, у кого расписание
+    уже есть.
+
+    **По умолчанию существующее НЕ перезаписывается.** Перезапись —
+    отдельная отметка, выключенная. Довод: в API замена всех семи дней
+    (`PUT /schedule`) — явное намерение вызывающего, он прислал всю
+    неделю; в админке «выделить всё» ставится одним движением, и молчаливое
+    затирание чужого настоящего графика было бы тем же изготовленным
+    умолчанием, только поверх данных, а не вместо них.
+    """
+
+    from appointments.models import SpecialistWorkingHours
+
+    specialists = list(queryset.select_related('user'))
+    with_hours = {
+        row.specialist_id
+        for row in SpecialistWorkingHours.objects.filter(
+            specialist__in=specialists,
+        ).only('specialist_id')
+    }
+
+    if request.POST.get('confirm') != 'yes':
+        # Первый заход: показать, что будет написано, и кому.
+        return render(request, 'admin/users/apply_default_schedule.html', {
+            'title': 'Поставить расписание Пн–Пт 10:00–19:00',
+            'queryset': specialists,
+            'untouched': [s for s in specialists if s.pk in with_hours],
+            'fresh': [s for s in specialists if s.pk not in with_hours],
+            'preset_start': PRESET_START,
+            'preset_end': PRESET_END,
+            'action_checkbox_name': admin_helpers.ACTION_CHECKBOX_NAME,
+            'opts': modeladmin.model._meta,
+            'media': modeladmin.media,
+        })
+
+    overwrite = request.POST.get('overwrite') == 'yes'
+    written = 0
+    skipped = []
+
+    for specialist in specialists:
+        if specialist.pk in with_hours and not overwrite:
+            skipped.append(specialist)
+            continue
+        with transaction.atomic():
+            if specialist.pk in with_hours:
+                SpecialistWorkingHours.objects.filter(specialist=specialist).delete()
+            SpecialistWorkingHours.objects.bulk_create(_preset_rows(specialist))
+        _invalidate_specialist_slots(specialist.pk)
+        written += 1
+
+    modeladmin.message_user(
+        request,
+        f'Расписание поставлено мастерам: {written}.',
+        messages.SUCCESS,
+    )
+    if skipped:
+        # Пропуск называется поимённо, а не числом: «пропущено 3» человек
+        # прочитает как сбой, а список — как решение, которое он принял.
+        names = ', '.join(str(s) for s in skipped)
+        modeladmin.message_user(
+            request,
+            f'Пропущены — расписание уже есть, перезапись не отмечена: {names}.',
+            messages.WARNING,
+        )
+    return None
+
+
+def _invalidate_specialist_slots(specialist_id) -> None:
+    """Погасить кэш слотов на весь горизонт записи.
+
+    Тем же вызовом, что и писатель расписания в API
+    (``users/schedule_api._invalidate_slots``): без него часы поменялись
+    бы, а клиент продолжал видеть прежнюю сетку — расхождение, которое
+    ничем не выдаёт себя, кроме жалобы клиента.
+
+    Горизонт берётся из той же настройки ``BOOKING_MAX_AHEAD_DAYS``, а не
+    из своего числа: два горизонта на один кэш разошлись бы молча.
+    """
+
+    from users.schedule_api import _invalidate_slots
+
+    max_ahead = getattr(settings, 'BOOKING_MAX_AHEAD_DAYS', 60)
+    today = date.today()
+    _invalidate_slots(specialist_id, today, today + timedelta(days=max_ahead))
 
 
 # ─── Inlines ─────────────────────────────────────────────────────────────────
@@ -306,7 +454,11 @@ class ProfileAdmin(admin.ModelAdmin):
 
 @admin.register(SpecialistProfile)
 class SpecialistProfileAdmin(admin.ModelAdmin):
-    actions = [approve_specialists, reject_specialists]
+    actions = [approve_specialists, reject_specialists, apply_default_schedule]
+    # Расписание — рядом с человеком, а не отдельным экраном. Инлайн живёт
+    # в appointments.admin рядом с моделью и монтируется сюда: правила
+    # у одного объекта обязаны быть одни и те же, где бы его ни правили.
+    inlines = [SpecialistWorkingHoursInline]
 
     list_display = (
         'display_name', 'tenant', 'get_phone', 'status_badge',
@@ -402,6 +554,35 @@ class SocialAccountAdmin(admin.ModelAdmin):
     search_fields = ('user__phone', 'user__username', 'provider_uid')
     readonly_fields = ('created_at', 'extra_data')
     raw_id_fields = ('user',)
+
+
+@admin.register(DeletionRequest)
+class DeletionRequestAdmin(admin.ModelAdmin):
+    """Заявки на удаление — только чтение (DRF-1699, §7 свода).
+
+    Статус меняет исполнитель, не рука оператора: правка статуса из
+    админки сделала бы «завершено» без стирания, то есть ложный успех —
+    ровно то, что §7 запрещает. Заводить заявку отсюда тоже нельзя: она
+    заводится от имени человека его подтверждением.
+    """
+
+    list_display = ("id", "user", "status", "requested_at", "deadline_at", "completed_at", "initiator")
+    list_filter = ("status", "initiator")
+    search_fields = ("id", "user__phone", "user__username")
+    readonly_fields = (
+        "id", "user", "status", "requested_at", "deadline_at", "started_at",
+        "completed_at", "initiator", "steps", "failure_reason",
+    )
+    raw_id_fields = ("user",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 # Действие «Связать с Ayla» для внешних личностей без связи (DRF-1509, §148):
