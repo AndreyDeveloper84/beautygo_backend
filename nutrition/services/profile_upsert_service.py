@@ -220,6 +220,57 @@ def _flip_lifecycle_markers(profile: NutritionProfile, payload: dict) -> None:
         profile.onboarded_at = datetime.now(dt_tz.utc)
 
 
+def _norms_block(profile: NutritionProfile) -> dict[str, Any]:
+    """Посчитанные ориентиры — или ПУСТОЙ словарь, если расчёта не было.
+
+    ### Почему пустой словарь, а не нули
+
+    До этой правки блок уезжал целиком и всегда: ``daily_kcal: 0``,
+    ``bmr: 0``. Ноль здесь не «ориентир ноль калорий» — такого не бывает,
+    — а «расчёта не было», и эти два утверждения потребитель различить не
+    мог. Сводка ту же болезнь уже вылечила: ``calories_goal`` уходит
+    ``None`` и выбрасывается :class:`OmitAbsentTargetsMixin`. Профиль
+    остался последним местом, где отказ выглядел числом.
+
+    Пустой словарь, а не отсутствующий ключ ``norms``: ``{}`` — законный
+    ответ «спросили, ориентиров нет», и он отличается от «блок не
+    приехал», как пустой список отличается от отсутствующего. Ключ
+    ``norms`` читают потребители, и его исчезновение означало бы для них
+    сбой чтения, а сбоя нет.
+
+    ### Признак берётся из происхождения, а не из значений
+
+    Условие — ``targets_source``, а не ``daily_kcal > 0``. Разница видна
+    на строке, у которой расчёт отменён, а старое число ещё лежит в
+    столбце: по значению она выглядит посчитанной, по происхождению —
+    нет. Спрашивать надо у того, кто знает, ЧТО СТОИТ за числом, а не у
+    самого числа.
+
+    ``daily_water_ml`` не возвращается ни в одной ветке: формула, которая
+    его считала, снята (§82, §85), а в столбце у существующих строк ещё
+    лежит старое ``30 × вес`` — отдать его значило бы выдать снятую
+    методику за живую.
+    """
+    if profile.targets_source == NutritionProfile.TargetsSource.NONE:
+        return {}
+    return {
+        "bmr": profile.bmr,
+        "daily_kcal": profile.daily_kcal,
+        "daily_protein_g": profile.daily_protein_g,
+        "daily_fat_g": profile.daily_fat_g,
+        "daily_carbs_g": profile.daily_carbs_g,
+        # DRF-265: micronutrient RDA targets.
+        "daily_vitamin_d_iu": profile.daily_vitamin_d_iu,
+        "daily_vitamin_b12_mcg": profile.daily_vitamin_b12_mcg,
+        "daily_vitamin_c_mg": profile.daily_vitamin_c_mg,
+        "daily_iron_mg": profile.daily_iron_mg,
+        "daily_calcium_mg": profile.daily_calcium_mg,
+        "daily_magnesium_mg": profile.daily_magnesium_mg,
+        "daily_omega3_g": profile.daily_omega3_g,
+        "daily_fiber_g": profile.daily_fiber_g,
+    }
+
+
 def _serialize(
     profile: NutritionProfile, external_user_id: str, *, exists: bool,
 ) -> dict:
@@ -235,26 +286,7 @@ def _serialize(
         "goal": profile.goal or None,
         "pace": profile.pace or None,
         "diet_preference": profile.diet_preference or "none",
-        "norms": {
-            "bmr": profile.bmr,
-            "daily_kcal": profile.daily_kcal,
-            "daily_protein_g": profile.daily_protein_g,
-            "daily_fat_g": profile.daily_fat_g,
-            "daily_carbs_g": profile.daily_carbs_g,
-            # ``daily_water_ml`` из ответа снят вместе с формулой,
-            # которая его считала. Ключа нет — не ноль и не null: у
-            # существующих строк в столбце ещё лежит старое 30 × вес, и
-            # отдать его значило бы выдать снятую методику за живую.
-            # DRF-265: micronutrient RDA targets.
-            "daily_vitamin_d_iu": profile.daily_vitamin_d_iu,
-            "daily_vitamin_b12_mcg": profile.daily_vitamin_b12_mcg,
-            "daily_vitamin_c_mg": profile.daily_vitamin_c_mg,
-            "daily_iron_mg": profile.daily_iron_mg,
-            "daily_calcium_mg": profile.daily_calcium_mg,
-            "daily_magnesium_mg": profile.daily_magnesium_mg,
-            "daily_omega3_g": profile.daily_omega3_g,
-            "daily_fiber_g": profile.daily_fiber_g,
-        },
+        "norms": _norms_block(profile),
         "health_flags": profile.health_flags or {},
         "goal_overridden_by": profile.goal_overridden_by or None,
         "bmi_warning_overridden_at": _strip_microseconds(
