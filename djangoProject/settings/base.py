@@ -782,6 +782,18 @@ AYLA_IDENTITY_PROVISIONING_TOKEN = os.environ.get(
     "AYLA_IDENTITY_PROVISIONING_TOKEN", "",
 )
 
+# DRF-1695 (C1, 11.09.2026) — ВТОРОЙ провижининг-секрет, отдельный по силе.
+# ``AYLA_IDENTITY_PROVISIONING_TOKEN`` выше — право присваивать личность
+# (bind-external), и оно у бота НЕ лежит (OPEN_DECISIONS §151 «запрещено
+# явно»). Этот — право завести САЛОН по slug (POST /internal/tenants/),
+# и он у бота лежит: экран «подключить салон» ходит им. Один секрет на две
+# силы был бы выдачей боту первой ради второй. Каталог требует, чтобы все
+# три значения различались (users.E001/E002/E003 при старте). Пусто —
+# ручка тенантов выключена, экран бота отвечает SETUP_PENDING.
+AYLA_TENANT_PROVISIONING_TOKEN = os.environ.get(
+    "AYLA_TENANT_PROVISIONING_TOKEN", "",
+)
+
 # S3C — YClients catalog intake (read-only pull of the pilot salon's
 # services + staff). Dual-token auth: partner (application) token +
 # optional user token, both in one Authorization header. Empty partner
