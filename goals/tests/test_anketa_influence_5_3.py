@@ -131,7 +131,10 @@ class TestInfluenceDeclarationGuard:
     def test_step_with_rules_must_not_carry_the_note(self, monkeypatch):
         """Обратная поломка: правило есть, а текст всё ещё говорит «не влияет»."""
         monkeypatch.setattr(anketa, "shown_prompt", lambda s: f"{s.prompt} {NO_INFLUENCE_NOTE}")
-        step = AnketaStep(key="probe", prompt="?", rule_ids=("goal.category_match",))
+        # Своё правило с живым читателем, чтобы этот тест не зависел от
+        # состояния реальной записи goal.category_match.
+        monkeypatch.setitem(RULE_READERS, "probe.rule", "goals.anketa.shown_prompt")
+        step = AnketaStep(key="probe", prompt="?", rule_ids=("probe.rule",))
         errors = influence_declaration_errors((step,))
         assert errors == ["probe: есть правила, но текст говорит «не влияет»"]
 
