@@ -728,6 +728,54 @@ jobs:
       # `--no-recreate` so this can only ever add, never replace. This is
       # the automated form of the manual recovery that ended the
       # 2026-08-24 incident.
+      # ---- surface state ------------------------------------------------
+      # DRF-1661, каталожная половина (бот — #1609). После выкладки состояние
+      # поверхности снимается КОМАНДОЙ (#337, `manage.py surface_state`) и
+      # кладётся в дерево, в путь, который git игнорирует (docs/generated/ —
+      # см. .gitignore): файл живёт на пилоте и обновляется каждой выкладкой,
+      # а не в репозитории и не в чьей-то памяти.
+      #
+      # Три вещи, которые здесь не по привычке:
+      #   * процесс в контейнере идёт от ВЛАДЕЛЬЦА дерева — `--user` с uid/gid
+      #     самого дерева (stat), не `$(id -u)` зовущего: под root это дало
+      #     бы 0:0 (DRF-1646, класс «мера работает как написана и не делает
+      #     ничего»). Когда #354 (`user:` в compose) сольётся, флаг станет
+      #     избыточным и безвредным — оба говорят одно;
+      #   * `run --rm`, не `exec`: `exec` наследует uid работающего контейнера,
+      #     а он до #354 — root. entrypoint с командой пропускает migrate и
+      #     collectstatic (см. entrypoint.sh) — это не вторая выкладка;
+      #   * ::notice:: печатает uid ФАЙЛА числом рядом с uid ДЕРЕВА — чтобы
+      #     «записано» и «записано владельцем» были одной строкой, а не двумя
+      #     догадками; и число строк, чтобы пустой файл не читался как снятое
+      #     состояние.
+      # Файл не появился — шаг красный. Это не «предупреждение»: состояние
+      # поверхности, которого нет, читается как вчерашнее.
+      - name: Publish surface state (catalog) into the deploy tree
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          timeout: 300s
+          command_timeout: 5m
+          script: |
+            set -eo pipefail
+            cd /home/taximeter/beautygo/dev
+            echo "::notice::шаг идёт от uid=$(id -u) gid=$(id -g)"
+            TREE_UID=$(stat -c %u .)
+            TREE_GID=$(stat -c %g .)
+            OUT=docs/generated/SURFACE_STATE.md
+            mkdir -p docs/generated
+            rm -f "$OUT"
+            docker compose run --rm --no-deps --user "$TREE_UID:$TREE_GID" \
+              web python manage.py surface_state --write "$OUT" >/dev/null
+            if [ ! -s "$OUT" ]; then
+              echo "::error::surface_state (catalog): $OUT не появился или пуст — состояние поверхности НЕ снято, в дереве оно устарело или отсутствует"
+              exit 1
+            fi
+            echo "::notice::surface_state (catalog): записано $OUT, $(wc -l < "$OUT") строк, владелец uid $(stat -c %u "$OUT") (дерево: $TREE_UID)"
+
       - name: Diagnose and bring anything that is down back up
         if: failure()
         continue-on-error: true
