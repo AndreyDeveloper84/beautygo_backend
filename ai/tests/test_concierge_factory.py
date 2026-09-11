@@ -21,6 +21,7 @@ from ai.concierge_factory import (
     to_core_specialist_context,
 )
 from ai.application.services.specialist_context_builder import (
+    OrderProvenance as LocalOrderProvenance,
     SpecialistCandidate as LocalSpecialistCandidate,
     SpecialistContext as LocalSpecialistContext,
 )
@@ -40,14 +41,17 @@ pytestmark = pytest.mark.django_db
 class TestToCoreContext:
     def test_translates_local_to_core_with_frozen_id_set(self):
         ids = [uuid4() for _ in range(3)]
-        local = LocalSpecialistContext(candidates=[
-            LocalSpecialistCandidate(
-                id=i, display_name=f"M{n}", rating=Decimal("4.8"),
-                reviews_count=10, address="addr", distance_km=1.0,
-                services_preview=["a", "b"],
-            )
-            for n, i in enumerate(ids)
-        ])
+        local = LocalSpecialistContext(
+            order_provenance=LocalOrderProvenance.LEGACY_ENGINE,
+            candidates=[
+                LocalSpecialistCandidate(
+                    id=i, display_name=f"M{n}", rating=Decimal("4.8"),
+                    reviews_count=10, address="addr", distance_km=1.0,
+                    services_preview=["a", "b"],
+                )
+                for n, i in enumerate(ids)
+            ],
+        )
         core = to_core_specialist_context(local, tenant_id="test-tenant")
         assert isinstance(core, SpecialistContext)
         assert core.candidate_ids == frozenset(ids)
@@ -56,7 +60,9 @@ class TestToCoreContext:
         assert core.candidate_service_ids == frozenset()
 
     def test_empty_local_context_yields_empty_core_context(self):
-        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]), tenant_id="test-tenant")
+        core = to_core_specialist_context(LocalSpecialistContext(
+                order_provenance=LocalOrderProvenance.NEUTRAL, candidates=[],
+            ), tenant_id="test-tenant")
         assert core.candidates == []
         assert core.candidate_ids == frozenset()
 
@@ -87,7 +93,9 @@ class TestBuildContextForActor:
 
 class TestRenderPrompt:
     def test_uses_ayla_marketplace_voice(self):
-        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]), tenant_id="test-tenant")
+        core = to_core_specialist_context(LocalSpecialistContext(
+                order_provenance=LocalOrderProvenance.NEUTRAL, candidates=[],
+            ), tenant_id="test-tenant")
         prompt = render_ayla_system_prompt(
             core, today=date(2026, 5, 3), client_name="Анна", bookings_count=2,
         )
@@ -97,7 +105,9 @@ class TestRenderPrompt:
         assert "2026-05-03" in prompt
 
     def test_extra_hint_renders_advisory_block(self):
-        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]), tenant_id="test-tenant")
+        core = to_core_specialist_context(LocalSpecialistContext(
+                order_provenance=LocalOrderProvenance.NEUTRAL, candidates=[],
+            ), tenant_id="test-tenant")
         prompt = render_ayla_system_prompt(
             core, today=date(2026, 5, 3), extra_hint="Дефицит белка 4 дня подряд",
         )
@@ -105,7 +115,9 @@ class TestRenderPrompt:
         assert "ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ" in prompt
 
     def test_empty_extra_hint_skips_block(self):
-        core = to_core_specialist_context(LocalSpecialistContext(candidates=[]), tenant_id="test-tenant")
+        core = to_core_specialist_context(LocalSpecialistContext(
+                order_provenance=LocalOrderProvenance.NEUTRAL, candidates=[],
+            ), tenant_id="test-tenant")
         prompt = render_ayla_system_prompt(core, today=date(2026, 5, 3))
         assert "ДОПОЛНИТЕЛЬНЫЙ КОНТЕКСТ" not in prompt
 
