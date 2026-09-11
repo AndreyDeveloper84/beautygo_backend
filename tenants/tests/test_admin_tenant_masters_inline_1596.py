@@ -109,6 +109,12 @@ def test_salon_and_master_are_created_in_one_pass(client):
             "specialist_profiles-INITIAL_FORMS": "0",
             "specialist_profiles-MIN_NUM_FORMS": "0",
             "specialist_profiles-MAX_NUM_FORMS": "1000",
+            # L1 DRF-1687: у салона появился второй вложенный блок — места
+            # оказания услуг; браузер шлёт его management-форму всегда.
+            "locations-TOTAL_FORMS": "0",
+            "locations-INITIAL_FORMS": "0",
+            "locations-MIN_NUM_FORMS": "0",
+            "locations-MAX_NUM_FORMS": "1000",
             "specialist_profiles-0-id": "",
             "specialist_profiles-0-tenant": "",
             "specialist_profiles-0-user": str(master_user.id),
@@ -168,6 +174,12 @@ def test_inline_refuses_to_steal_a_master_from_another_salon(client):
             "specialist_profiles-INITIAL_FORMS": "0",
             "specialist_profiles-MIN_NUM_FORMS": "0",
             "specialist_profiles-MAX_NUM_FORMS": "1000",
+            # L1 DRF-1687: у салона появился второй вложенный блок — места
+            # оказания услуг; браузер шлёт его management-форму всегда.
+            "locations-TOTAL_FORMS": "0",
+            "locations-INITIAL_FORMS": "0",
+            "locations-MIN_NUM_FORMS": "0",
+            "locations-MAX_NUM_FORMS": "1000",
             "specialist_profiles-0-id": "",
             "specialist_profiles-0-tenant": "",
             "specialist_profiles-0-user": str(master_user.id),
