@@ -156,10 +156,14 @@ class TestDryRun:
         assert "weight_kg=есть" in out
         assert "weight_kg=нет" in out
         assert "age=есть" in out and "age=нет" in out
-        # Само значение веса/роста/возраста в выводе не встречается.
-        assert "95.0" not in out
-        assert "185" not in out
-        assert "=41" not in out
+        # Само значение веса/роста/возраста в выводе не встречается —
+        # проверяется ПО КЛЮЧУ, а не подстрокой: команда печатает и другие
+        # числа (``user=<pk>``, счётчики), и голое ``"=41"`` совпало с
+        # ``user=41`` в чужом прогоне (#283) — тест краснел по данным, а не
+        # по предмету.
+        for leak in ("weight_kg=95.0", "height_cm=185", "age=41"):
+            assert leak not in out, leak
+        assert "95.0" not in out  # вес — единственное число, которого нет среди счётчиков
 
     def test_nothing_to_clear_when_no_legacy_and_no_residue(self):
         _profile("dry-calc", Source.AYLA_CALCULATED, **PILOT_FULL)
