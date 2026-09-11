@@ -164,7 +164,97 @@ jobs:
           # use LocMemCache via settings.test, so REDIS_URL only matters
           # when someone runs `pytest -m integration`.
           REDIS_URL: redis://localhost:6379
-        run: pytest --tb=short -q
+        # 2026-09-11 — `--junitxml`: первая половина шардирования (вторая —
+        # раскладка по ИЗМЕРЕННОМУ времени, для которой и нужен junit с
+        # `time` на каждом тесте). Заодно красный прогон называет числа:
+        # `tests= failures= errors=` вместо обрезанного лога. Сентинел ниже
+        # отказывает на «файла нет» и на «tests=0» — оба не есть «ноль
+        # падений».
+        run: pytest --tb=short -q --junitxml=junit-catalog.xml
+
+      - name: pytest test counts (junit sentinel)
+        if: always()
+        env:
+          JUNIT_FILE: junit-catalog.xml
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          path = os.environ["JUNIT_FILE"]
+
+          if not os.path.exists(path):
+              print(
+                  f"JUNIT MISSING - {path} was never written: pytest did not reach "
+                  "test collection. This is NOT zero failures."
+              )
+              sys.exit(1)
+
+          root = ET.parse(path).getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          if suite is None:
+              print(f"JUNIT UNREADABLE - no <testsuite> element in {path}.")
+              sys.exit(1)
+
+          def count(key: str) -> int:
+              return int(suite.get(key) or 0)
+
+          tests = count("tests")
+          failures = count("failures")
+          errors = count("errors")
+          skipped = count("skipped")
+
+          # `tests` печатается ДО `failures`: failures=0 при tests=0 — это
+          # «не запускалось», и первое число в логе обязано быть tests.
+          print(f"JUNIT tests={tests}")
+          print(f"JUNIT failures={failures} errors={errors} skipped={skipped}")
+          print(f"JUNIT passed={tests - failures - errors - skipped}")
+
+          if tests == 0:
+              print("JUNIT EMPTY - 0 tests collected. An empty run is not a green run.")
+              sys.exit(1)
+          PY
+
+      - name: Upload pytest junit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-catalog-${{ github.sha }}
+          path: junit-catalog.xml
+          retention-days: 14
+
+      # Перепись собранных тестов — сентинел для будущей раскладки по шардам
+      # (сумма junit'ов шардов обязана совпасть с этим числом, иначе тест,
+      # выпавший из всех селекторов сразу, исчезнет молча). Сегодня шард один,
+      # и число просто записывается; парсер вынесен в файл и сам под тестом
+      # (`tests/test_census_parser.py`), потому что он — сторож, и сторож,
+      # который неверно читает, хуже отсутствующего.
+      - name: collection census (sentinel for the shard layout)
+        env:
+          DJANGO_SETTINGS_MODULE: djangoProject.settings.test
+          DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: '5432'
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: beautygo
+          SENTRY_DSN: ''
+          REDIS_URL: redis://localhost:6379
+        run: |
+          set -o pipefail
+          pytest --collect-only -q > census-raw.txt 2>&1 \
+            || { tail -30 census-raw.txt; echo "CENSUS FAILED - the suite did not collect."; exit 1; }
+          tail -3 census-raw.txt
+          python3 .github/scripts/census_count.py census-raw.txt catalog-census.txt
+
+      - name: Upload collection census
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-census-${{ github.sha }}
+          path: catalog-census.txt
+          retention-days: 14
 
       - name: Django system checks
         env:
