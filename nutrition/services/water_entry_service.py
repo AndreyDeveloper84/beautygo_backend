@@ -7,10 +7,10 @@ WaterEntry is the bot-driven path with beverage support, macros, soft-delete,
 and milestone detection. The two flows will reconcile in a Phase 3 cleanup
 pass once mobile picks up the same model.
 
-Profile-aware fields (timezone, daily_water_ml, pregnant, eating_disorder)
-come from ``_load_nutrition_context``. Until DRF-300 ships ``NutritionProfile``,
-the loader returns a defaults shim using ``settings.NUTRITION_DEFAULT_WATER_GOAL_ML``,
-UTC, and pregnant=eating_disorder=False so behaviour stays predictable.
+Profile-aware fields (timezone, pregnant, eating_disorder)
+come from ``_load_nutrition_context``. Без профиля берутся безопасные
+значения — UTC, pregnant=eating_disorder=False — и **нулевая норма**:
+норму подставлять некому и не из чего, см. докстринг загрузчика.
 """
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone as dt_tz
 from uuid import UUID
 
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Sum
 
@@ -52,29 +51,66 @@ class NutritionContext:
     contract between the loader and the service.
     """
     timezone: dt_tz = dt_tz.utc
-    daily_water_ml: int = 2000
+    #: ``None`` — ориентира НЕТ, и это единственное его значение.
+    #:
+    #: Считался он снятой формулой 30 мл × вес (+300 при беременности,
+    #: +700 при кормлении) — методика не утверждена, §82/§85. Поле
+    #: оставлено, чтобы место, куда ориентир вернётся после утверждения
+    #: методики, было названо, а не заведено заново вслепую.
+    #:
+    #: ``None``, а не ноль: ноль ниже сравнивался с ``<= 0`` и потому
+    #: работал, но уезжал наружу ЗНАЧЕНИЕМ. Отсутствие обязано доезжать
+    #: отсутствием.
+    #: Имя НАРОЧНО не совпадает со столбцом ``NutritionProfile.
+    #: daily_water_ml``: у столбца и у этого поля разная судьба. В
+    #: столбце у существующих клиентов лежит выход снятой формулы
+    #: 30 мл × вес, и его читать нельзя до миграции; сюда ориентир
+    #: вернётся из утверждённой методики (§85, раздел 4). Совпадение
+    #: имён делало эти два разных предмета неотличимыми для стража —
+    #: и, что хуже, для человека.
+    fluid_target_ml: int | None = None
     pregnant: bool = False
     eating_disorder: bool = False
 
 
 def _load_nutrition_context(user_id: int) -> NutritionContext:
-    """Read NutritionProfile (DRF-300) when present, fall back to defaults.
+    """Read NutritionProfile (DRF-300) when present; NO target ever.
 
-    The profile is optional — pre-onboarding users still log water and we
-    want sensible behaviour (no eating-disorder strip, UTC, settings
-    default norm). Once DRF-300 lands the profile, all four fields here
-    pick up the real values and the rest of the service Just Works.
+    Профиль необязателен — воду логируют и до анкеты, и всё остальное
+    поведение (полоса РПП, часовой пояс) обязано оставаться разумным.
+
+    Ориентир отсюда БОЛЬШЕ НЕ ПРИХОДИТ ни у кого. Дорога была длинной и
+    её стоит помнить целиком, иначе она пройдётся заново:
+
+    1. Здесь стояла ``NUTRITION_DEFAULT_WATER_GOAL_ML`` (2000 мл). При
+       стакане 250 мл это ровно **восемь стаканов** — та самая константа
+       «8», которую из клиента уже выкидывали со словами «норму воды не
+       придумываем, восемь — число ниоткуда» (``apps/miniapp_api/
+       views.py`` в ai-bot-platform). Клиент её больше не подставлял;
+       подставляли мы.
+    2. Её сняли, и ориентир стал читаться из анкеты —
+       ``NutritionProfile.daily_water_ml``. Выглядело как «своё число
+       человека», но своим оно не было: считалось как
+       ``WATER_ML_PER_KG (=30) × вес`` плюс 300 при беременности и 700
+       при кормлении. Норма на экране называла вес, а не делящаяся на 30
+       нацело — состояние (§35 п.10).
+    3. Владелец 09.09.2026 снял и формулу: «``30 мл × вес`` и прибавки
+       за беременность или кормление не используются без отдельно
+       утверждённой методики» (§82). На замену придёт справочные
+       2200/3000 мл по полу (§85, раздел 4) — отдельным срезом.
+
+    Столбец остаётся заполненным у существующих клиентов, поэтому read
+    снят вместе с write: пока значение в базе — выход снятой формулы,
+    любое его чтение эту формулу применяет.
     """
     from nutrition.models import NutritionProfile  # local import to avoid cycle
 
-    default_norm = int(getattr(settings, "NUTRITION_DEFAULT_WATER_GOAL_ML", 2000))
-
     try:
         profile = NutritionProfile.objects.only(
-            "timezone", "daily_water_ml", "health_flags",
+            "timezone", "health_flags",
         ).get(user_id=user_id)
     except NutritionProfile.DoesNotExist:
-        return NutritionContext(daily_water_ml=default_norm)
+        return NutritionContext()
 
     tz = dt_tz.utc
     if profile.timezone and profile.timezone != "UTC":
@@ -87,7 +123,10 @@ def _load_nutrition_context(user_id: int) -> NutritionContext:
     flags = profile.health_flags or {}
     return NutritionContext(
         timezone=tz,
-        daily_water_ml=int(profile.daily_water_ml or default_norm),
+        # ``profile.daily_water_ml`` здесь БОЛЬШЕ НЕ ЧИТАЕТСЯ. У
+        # существующих строк в нём ещё лежит 30 × вес — выход снятой
+        # формулы; прочитать его значит применить снятую методику.
+        # Миграция самих данных — отдельный срез (§85, замечание 1).
         pregnant=bool(flags.get("pregnant")),
         eating_disorder=bool(flags.get("eating_disorder")),
     )
@@ -120,8 +159,8 @@ class WaterEntryResponse:
     carbs_g: float
     caffeine_mg: float
     today_total_water_ml: int
-    today_norm_water_ml: int
-    today_progress_pct: int
+    today_norm_water_ml: int | None
+    today_progress_pct: int | None
     milestone_text: str | None
     alcohol_recovery_hint: bool
     caffeine_warning: str | None
@@ -133,7 +172,7 @@ class TodayWaterResponse:
     date: date
     entries: list[dict] = field(default_factory=list)
     today_total_water_ml: int = 0
-    today_norm_water_ml: int = 0
+    today_norm_water_ml: int | None = None
     today_kcal_from_beverages: float = 0.0
     today_caffeine_mg: float = 0.0
     today_total_coffee_cups: int = 0
@@ -380,7 +419,7 @@ class WaterEntryService:
                 for e in entries
             ],
             today_total_water_ml=total_water_ml,
-            today_norm_water_ml=ctx.daily_water_ml,
+            today_norm_water_ml=ctx.fluid_target_ml,
             today_kcal_from_beverages=round(total_kcal, 1),
             today_caffeine_mg=round(total_caffeine, 1),
             today_total_coffee_cups=coffee_cups,
@@ -445,8 +484,11 @@ class WaterEntryService:
     ) -> int | None:
         if ctx.eating_disorder:
             return None
-        norm = ctx.daily_water_ml
-        if norm <= 0:
+        norm = ctx.fluid_target_ml
+        if norm is None or norm <= 0:
+            # Вехи «50% / 100% / 150%» — производная ориентира. Нет
+            # ориентира — нет и вех: «дневная норма выполнена 💧» без
+            # нормы это поздравление с выдуманным.
             return None
         # Already-fired thresholds today — including soft-deleted entries.
         # Once the user saw "100% 🎉" we shouldn't flash it again even if
@@ -508,8 +550,14 @@ class WaterEntryService:
         ctx = _load_nutrition_context(entry.user_id)
         total = self._sum_water_ml(entry.user_id, entry.ts.date(), ctx.timezone)
         total = max(0, int(total))
-        norm = ctx.daily_water_ml
-        pct = min(100, int(round(total * 100 / norm))) if norm > 0 else 0
+        norm = ctx.fluid_target_ml
+        # Процент — производная ориентира, и без него он не ноль, а
+        # отсутствие ответа (§85, раздел 8).
+        pct = (
+            min(100, int(round(total * 100 / norm)))
+            if norm is not None and norm > 0
+            else None
+        )
 
         beverage = entry.beverage
         is_alcohol = (

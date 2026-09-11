@@ -32,6 +32,11 @@ from nutrition.services.nutrition_profile_service import (
     compute_norms,
 )
 
+#: §92 / срез N-a2: параметры тела принимаются только с утверждением о
+#: согласии. Здесь оно часть ВАЛИДНОГО запроса, а не предмет проверки —
+#: сторож проверяется в ``test_personal_calculation_consent.py``.
+CONSENT = {"type": "personal_calculation", "document_version": "v1"}
+
 
 # Adult women 19-50 RDA targets (USDA / NIH ODS) — the baseline the
 # pattern engine compares against. Fenced here so the calculation can
@@ -192,20 +197,21 @@ class TestRDASenior:
 class TestProfileFieldsPersisted:
     """``NutritionProfile`` carries the seven new norm fields."""
 
-    def test_fields_default_zero(self, django_user_model):
+    def test_fields_default_to_absent(self, django_user_model):
+        """Новая строка ориентира не имеет — ``NULL``, не ноль (§103)."""
         user = django_user_model.objects.create_user(
             username="rda_test_user", password="x",
             role="client", phone="+79990400001",
         )
         p = NutritionProfile.objects.create(user=user)
-        assert p.daily_vitamin_d_iu == 0
-        assert p.daily_vitamin_b12_mcg == 0.0
-        assert p.daily_vitamin_c_mg == 0
-        assert p.daily_iron_mg == 0.0
-        assert p.daily_calcium_mg == 0
-        assert p.daily_magnesium_mg == 0
-        assert p.daily_omega3_g == 0.0
-        assert p.daily_fiber_g == 0
+        assert p.daily_vitamin_d_iu is None
+        assert p.daily_vitamin_b12_mcg is None
+        assert p.daily_vitamin_c_mg is None
+        assert p.daily_iron_mg is None
+        assert p.daily_calcium_mg is None
+        assert p.daily_magnesium_mg is None
+        assert p.daily_omega3_g is None
+        assert p.daily_fiber_g is None
 
 
 @pytest.mark.django_db
@@ -229,6 +235,7 @@ class TestProfileUpsertWritesRDA:
         settings.NUTRITION_SERVICE_TOKEN = "test-rda-token"
 
         resp = self._post_profile({
+            "consent": CONSENT,
             "gender": "female", "age": 40,
             "height_cm": 165, "weight_kg": 70.0,
             "goal": "maintain",
@@ -263,7 +270,23 @@ class TestRDABackwardsCompat:
         # Protein floor: 1.4 g/kg for maintain.
         assert 95 <= norms.daily_protein_g <= 105
 
-    def test_water_unchanged(self, adult_female_inputs):
-        # 30 ml/kg × 70 = 2100.
+    def test_the_fluid_target_is_gone_entirely(self, adult_female_inputs):
+        """Ориентира по жидкости в расчёте больше НЕТ вовсе.
+
+        Тест назывался ``test_water_unchanged`` и сторожил, что RDA-слой
+        (DRF-265) не тронул воду: 30 мл × 70 = 2100. Формулу
+        владелец снял 09.09.2026 (§82), и поля больше нет — не
+        ноль в нём и не ``None``, а нет самого поля: пустое поле
+        пережило бы правку и через неделю снова получило бы число
+        «по умолчанию».
+
+        Витаминные RDA рядом ОСТАЮТСЯ и проверяются тем же
+        тестом: RDA — популяционная норма по определению, она не
+        выводится из веса и не притворяется персональной. Снять их
+        заодно значило бы решить за владельца.
+        """
         norms = compute_norms(adult_female_inputs)
-        assert norms.daily_water_ml == 2100
+        assert not hasattr(norms, "daily_water_ml")
+        # POSITIVE: витаминный слой цел — отрицание выше
+        # про воду, а не про сломанный ``compute_norms``.
+        assert norms.daily_vitamin_c_mg > 0

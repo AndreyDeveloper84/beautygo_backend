@@ -65,7 +65,35 @@ INSTALLED_APPS = [
     'analytics',
     'goals',
     'wellness',
+    # Recommendation Resolver — единственный авторитет RecommendationDecision
+    # (OD §53, RECOMMENDATION_RESOLVER_CONTRACT_v1.0). Приложение без моделей:
+    # решение резолвером не сохраняется, персистенция — авторитет домена (§6.1).
+    'recommendation',
+    # Общие модули без моделей (ошибки, пагинация, предмет замера). В
+    # INSTALLED_APPS — ради `core/management/commands/`: Django ищет
+    # команды только в установленных приложениях, и `surface_state`
+    # (DRF-1661) иначе не существует для manage.py.
+    'core',
 ]
+
+# Порт к доменной правде для резолвера рекомендаций. Путь к ФАБРИКЕ, а не
+# к готовому объекту: источник живёт ровно одно решение, иначе доменная
+# правда кешировалась бы дольше, чем она верна.
+#
+# Резолвер не импортирует домен — домен реализует порт. Ровно это свойство
+# позволит вынести модуль в `ayla-ai-core` после пилота, не переписывая
+# ни одной стадии.
+RECOMMENDATION_CANDIDATE_SOURCE = 'users.recommendation_source.build_candidate_source'
+
+# Здесь стояло пилотное исключение маппинга — «на пилоте считать каталог
+# VERIFIED», реализация §10.4 (а). Владелец ответил иначе (§76): ноль
+# подтверждённых связей НЕ разрешает fallback на непроверенные, иначе
+# статус декоративен. Настройка удалена вместе с возможностью: запрет,
+# обходимый одной строкой здесь, — не запрет (§74).
+#
+# Имя намеренно не названо: его существование в коде красит билд
+# (recommendation/tests/test_boundary_guards.py). Строка оставлена, чтобы
+# вернувшийся не решил, что настройку потеряли при рефакторинге.
 
 AUTH_USER_MODEL = 'users.User'
 
@@ -724,6 +752,19 @@ NUTRITION_SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN", "")
 # this token authenticates the calling service. Empty value disables
 # internal endpoints (IsBotServiceWithVerifiedClient fails closed). Rotate
 # quarterly; treat as production secret.
+# B-R (DRF-1617) — accounts `reset_test_account` may free. Entries are either
+# `channel:channel_user_id` (a bot proxy, e.g. max:83146139) or the bare UUID
+# of a real account. A proxy being listed does NOT list the real account it
+# is bound to: that one has to be listed by its own UUID, or the command
+# refuses and names it. Empty means the command refuses every account —
+# there is no confirmation flag, because a confirmation protects against
+# inattention and this list protects against a wrong identifier. Getting
+# onto it is a deliberate, separate act on the host. The pilot's list is
+# empty.
+ACCOUNT_RESET_ALLOWLIST = [
+    p.strip() for p in os.environ.get("ACCOUNT_RESET_ALLOWLIST", "").split(",") if p.strip()
+]
+
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
 # Provisioning-only Bearer for POST /api/v1/internal/users/bind-external/
@@ -873,8 +914,28 @@ FOOD_DEFICIT_MIN_STREAK_DAYS = int(
 # GET /nutrition/summary. UserPersonalContext doesn't carry per-user goals
 # yet (DRF-174 reduced scope) so the daily summary uses these flat defaults.
 # Override at the env level if a particular pilot wants different anchors.
-NUTRITION_DEFAULT_CALORIES_GOAL = int(os.environ.get("NUTRITION_DEFAULT_CALORIES_GOAL", "2000"))
-NUTRITION_DEFAULT_WATER_GOAL_ML = int(os.environ.get("NUTRITION_DEFAULT_WATER_GOAL_ML", "2000"))
+# ``NUTRITION_DEFAULT_CALORIES_GOAL`` УДАЛЕНА. Была плоская константа
+# 2000 ккал — одна на всех: ни роста, ни веса, ни возраста в той ветке
+# не участвовало вовсе, и человеку она показывалась как ЕГО дневная
+# цель, со шкалой и процентом выполнения.
+#
+# Владелец снял её дословно 09.09.2026: «Текущая плоская норма калорий
+# для всех удаляется» (§82). Замена — версионированный расчёт Миффлина
+# — Сан Жеора (§85), и он ОТДЕЛЬНЫЙ срез.
+#
+# Настройки здесь больше нет намеренно: пока имя живо, вернуть
+# подстановку — одна строка ``getattr(settings, ..., 2000)``. Страж на
+# это имя стоит в ``nutrition/tests/test_no_invented_norms.py``.
+# ``NUTRITION_DEFAULT_WATER_GOAL_ML`` УДАЛЕНА по той же причине и тем
+# же решением. 2000 мл при стакане 250 — ровно ВОСЕМЬ СТАКАНОВ: то самое
+# число, которое из клиента уже выбрасывали со словами «норму воды не
+# придумываем, восемь — число ниоткуда», после чего оно вернулось по
+# проводу с нашей стороны. Читателей у неё не осталось ещё 08.09.2026;
+# снято само имя, чтобы вернуть подстановку нельзя было одной строкой.
+#
+# ``NUTRITION_DEFAULT_PROTEIN_GOAL_G`` выше оставлена намеренно: белок
+# в решении владельца не назван, и снимать его заодно значило бы решить
+# за владельца. Читателей у неё тоже нет, и страж держит их отсутствие.
 
 # Water reminder beat task — only nag users active in the last N days
 # so dormant accounts don't get spammed. Pilot starts strict (7 days);

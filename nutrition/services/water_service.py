@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from uuid import UUID
 
-from django.conf import settings
 from django.db.models import Sum
 
 from nutrition.models import WaterLog
@@ -24,9 +23,19 @@ from nutrition.models import WaterLog
 
 @dataclass(frozen=True)
 class WaterAggregate:
+    """Факт и — пока не будет методики — ОТСУТСТВИЕ ориентира.
+
+    ``water_goal_ml`` и ``water_pct`` объявлены ``None`` и другими не
+    бывают: единственный источник ориентира, ``NutritionProfile.
+    daily_water_ml``, считался снятой формулой 30 мл × вес (§82, §85).
+    Поля оставлены на месте — они несут ФОРМУ контракта, и сериализатор
+    выкидывает их из ответа именно по ``None``. Значение сюда положить
+    неоткуда, и положить его — значит вернуть дефект.
+    """
+
     water_ml: int
-    water_goal_ml: int
-    water_pct: int                 # 0..100, capped
+    water_goal_ml: int | None = None
+    water_pct: int | None = None
 
 
 @dataclass(frozen=True)
@@ -60,7 +69,7 @@ class WaterService:
             .filter(user_id=user_id, logged_at__gte=start, logged_at__lte=end)
             .order_by("logged_at")
         )
-        agg = self._aggregate_from_logs(logs)
+        agg = self._aggregate_from_logs(logs, user_id=user_id)
         return WaterTodayResponse(logs=logs, aggregate=agg)
 
     # ------------------------------------------------------------------
@@ -74,21 +83,18 @@ class WaterService:
             .filter(user_id=user_id, logged_at__gte=start, logged_at__lte=end)
             .aggregate(s=Sum("amount_ml"))["s"]
         ) or 0
-        goal = settings.NUTRITION_DEFAULT_WATER_GOAL_ML
-        return WaterAggregate(
-            water_ml=int(total),
-            water_goal_ml=int(goal),
-            water_pct=_pct(int(total), int(goal)),
-        )
+        # Ориентира нет ни у кого — ни ``water_goal_ml``, ни ``water_pct``.
+        return WaterAggregate(water_ml=int(total))
 
-    def _aggregate_from_logs(self, logs: list[WaterLog]) -> WaterAggregate:
+    def _aggregate_from_logs(
+        self, logs: list[WaterLog], *, user_id: int
+    ) -> WaterAggregate:
+        # ``user_id`` пришёл в подпись вместе с нормой: раньше она была
+        # общей на всех и человека не спрашивала. Подпись сохранена — она
+        # ждёт методику (§85, раздел 4), после которой ориентир снова
+        # станет ЧЬИМ-ТО, а не общим.
         total = sum(log.amount_ml for log in logs)
-        goal = settings.NUTRITION_DEFAULT_WATER_GOAL_ML
-        return WaterAggregate(
-            water_ml=int(total),
-            water_goal_ml=int(goal),
-            water_pct=_pct(int(total), int(goal)),
-        )
+        return WaterAggregate(water_ml=int(total))
 
 
 # ---------------------------------------------------------------------------
@@ -106,9 +112,7 @@ def _utc_day_bounds(day: date) -> tuple[datetime, datetime]:
         datetime.combine(day, time.max, tzinfo=timezone.utc),
     )
 
-
-def _pct(value: int, goal: int) -> int:
-    if goal <= 0:
-        return 0
-    # Cap at 100 — UI progress ring shouldn't keep growing past goal.
-    return min(100, round(value * 100 / goal))
+# ``_pct`` снят вместе с ориентиром. Процент — ПРОИЗВОДНАЯ ориентира, и
+# без него он не «ноль процентов», а отсутствие ответа: доли от
+# несуществующей нормы не бывает (§85, раздел 8 — «активного ориентира
+# нет → шкалы нет, процента нет»).

@@ -43,6 +43,14 @@ urlpatterns = [
         'api/v1/internal/me/catalog/recommendations/',
         include('users.catalog_recommendations_urls'),
     ),
+    # Граница Recommendation Resolver (OD §53, контракт §9.4). Единственная
+    # ручка, у которой есть владелец формы ответа. Ручка выше остаётся до
+    # миграции своего потребителя (T6/T7) и после неё становится проекцией
+    # этого решения, а не вторым местом, где считается порядок.
+    path(
+        'api/v1/internal/recommendation/',
+        include('recommendation.urls'),
+    ),
     # DRF-1190 — goal layer: эфемерный документ состояния (проекция
     # понимания, экран-отрисовщик) + фиксация выбора цели. Новая
     # аддитивная поверхность; поведение существующих ручек не меняется.
@@ -53,6 +61,11 @@ urlpatterns = [
     path(
         'api/v1/internal/me/goals/select/',
         include('goals.select_urls'),
+    ),
+    # DRF-1660 — переход состояния цели без замещающей (§97 OD-GOAL-B).
+    path(
+        'api/v1/internal/me/goals/state/',
+        include('goals.state_urls'),
     ),
     # DRF-1344 — wellness-context read для решающего слоя бота: только
     # коды состояний (никогда значения наблюдений), fail-closed через
@@ -68,6 +81,13 @@ urlpatterns = [
     path(
         'api/v1/internal/me/identity/',
         include('users.internal_identity_urls'),
+    ),
+    # DRF-1525 — «салон по slug» для экрана «подключить салон» админки
+    # бота: провижининг-only (IsIdentityProvisioningBearer), идемпотентно
+    # по slug. Человек UUID салона не вводит и не видит.
+    path(
+        'api/v1/internal/tenants/',
+        include('tenants.internal_urls'),
     ),
     # #1016 S2 — internal Bearer REST surface the Ayla bot reads/writes
     # (slots + catalog mirror + booking create/cancel/reschedule).

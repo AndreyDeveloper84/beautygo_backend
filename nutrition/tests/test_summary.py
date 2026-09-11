@@ -4,11 +4,15 @@ Per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION:
 
 Query: date? (YYYY-MM-DD, default today)
 Response 200 (NutritionSummaryResponse):
-    date, calories_total, calories_goal, protein_g, fat_g, carbs_g,
-    water_ml, water_goal_ml, entries[], vitamin_deficits
+    date, calories_total, protein_g, fat_g, carbs_g,
+    water_ml, entries[], vitamin_deficits
+
+Ключей ОРИЕНТИРА (`calories_goal`, `water_goal_ml`) в ответе больше
+нет — §82 и §85 сняли обе фикции, и отсутствие доезжает отсутствием
+ключа.
 
 Slice 3c stubs:
-- water_ml = 0, water_goal_ml = settings default 2000 (Slice 4 fills)
+- water_ml = 0 (Slice 4 fills)
 - vitamin_deficits = {} (Slice 3a' fills)
 """
 from __future__ import annotations
@@ -115,15 +119,33 @@ class TestQueryValidation:
 
 
 class TestEmptyDay:
-    def test_no_entries_returns_zero_totals_and_default_goals(self, auth_client):
+    def test_no_entries_returns_zero_totals_and_no_invented_goals(self, auth_client):
+        """Пустой день — нули, и НИ ОДНОЙ придуманной цели.
+
+        Тест назывался «...and default goals» и проверял ровно то, что
+        оказалось дефектом: `calories_goal == 2000` (плоская константа
+        ``NUTRITION_DEFAULT_CALORIES_GOAL``, одна на всех) и
+        `water_goal_ml == 2000` (та же константа, ровно восемь стаканов
+        по 250). Человеку это показывалось как ЕГО дневная цель, со
+        шкалой и процентом выполнения.
+
+        Ноль здесь означает «цели нет» и доезжает до клиента отсутствием
+        ключа. Что человек увидит вместо цели — вопрос владельца
+        (OD-NUT-1), и до ответа он не видит ничего сверх съеденного.
+        """
         resp = auth_client.get(URL, {"date": "2026-04-29"})
         assert resp.status_code == status.HTTP_200_OK
         body = resp.json()["data"]
         # Spec NutritionSummaryResponse keys (DRF-303 added ai_comment).
+        # Ключей ОРИЕНТИРА в ответе нет вовсе — ни `calories_goal`,
+        # ни `water_goal_ml`. Раньше они приезжали со значением 0, и это
+        # был последний слой той же болезни: ноль внутри модуля читался
+        # как «цели нет», а наружу уезжал значением, которое потребитель
+        # вправе показать («0 из 0 ккал · 0 %»).
         assert set(body.keys()) == {
-            "date", "calories_total", "calories_goal",
+            "date", "calories_total",
             "protein_g", "fat_g", "carbs_g",
-            "water_ml", "water_goal_ml",
+            "water_ml",
             "entries", "vitamin_deficits",
             "ai_comment",
         }
@@ -137,10 +159,12 @@ class TestEmptyDay:
         assert body["entries"] == []
         # Slice 3c stubs
         assert body["water_ml"] == 0
-        assert body["water_goal_ml"] == 2000
         assert body["vitamin_deficits"] == {}
-        # Settings default
-        assert body["calories_goal"] == 2000
+        # Цели нет ни одной, и это выражено ОТСУТСТВИЕМ КЛЮЧА.
+        # Плоская норма калорий удалена решением владельца (§82),
+        # формула воды снята до утверждения методики (§85 раздел 4).
+        assert "water_goal_ml" not in body
+        assert "calories_goal" not in body
 
     def test_default_date_is_today(self, auth_client):
         resp = auth_client.get(URL)

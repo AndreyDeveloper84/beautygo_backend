@@ -254,30 +254,41 @@ def dispatch_water_reminders() -> dict:
 
     Active = at least one WaterLog in the last
     ``WATER_REMINDER_ACTIVE_WINDOW_DAYS`` days. Behind = today's
-    water_ml < goal × ``WATER_REMINDER_BEHIND_PCT``. Idempotent
+    water_ml < HIS OWN norm × ``WATER_REMINDER_BEHIND_PCT``. Idempotent
     per-user-per-window via Notification existence check on
     (user, template_id='water_reminder', date(created_at)=today).
 
     Beat fires twice daily (14:00 and 18:00 UTC); the per-window
     de-dup key resets at midnight UTC, so two reminders/day max.
+
+    Норма — только своя, из анкеты питания. Здесь стояла
+    ``NUTRITION_DEFAULT_WATER_GOAL_ML`` (2000 мл = ровно те самые восемь
+    стаканов по 250, которые из клиента уже выбрасывали), и она решала
+    ДВЕ вещи: кого считать отстающим и какое число написать в тексте.
+    Это самое острое из трёх мест той же болезни: экран человек
+    открывает сам, а пуш приезжает к нему САМ, дважды в день, и называет
+    выдуманное число его нормой.
+
+    Нет анкеты — нет нормы, а значит и отставать не от чего:
+    напоминание не уходит вовсе. «Нормы нет» доезжает отсутствием
+    сообщения, а не сообщением с другим числом.
+
+    Само число в текст не идёт и тогда, когда норма есть. Норма воды
+    считается как 30 мл × вес (плюс надбавки за беременность и
+    кормление), то есть называет вес и состояние — §35 п.10, — а пуш
+    читается с заблокированного экрана кем угодно рядом. В сообщении
+    остаётся правда о самом человеке: сколько он сегодня выпил.
     """
     from datetime import datetime, timezone as dt_tz
 
     from django.conf import settings as dj_settings
-    from django.db.models import Sum
 
     from nutrition.models import WaterLog
-    from .services.dispatcher import NotificationService
 
     today = datetime.now(dt_tz.utc).date()
     today_start = datetime.combine(today, datetime.min.time(), tzinfo=dt_tz.utc)
-    today_end = datetime.combine(today, datetime.max.time(), tzinfo=dt_tz.utc)
     active_since = today_start - timedelta(
         days=dj_settings.WATER_REMINDER_ACTIVE_WINDOW_DAYS,
-    )
-    behind_threshold = (
-        dj_settings.NUTRITION_DEFAULT_WATER_GOAL_ML
-        * dj_settings.WATER_REMINDER_BEHIND_PCT
     )
 
     # Active users: distinct user_ids with any WaterLog in the lookback
@@ -291,67 +302,33 @@ def dispatch_water_reminders() -> dict:
     if not active_user_ids:
         return {"queued": 0, "skipped": 0}
 
-    # Today's totals per user — single aggregate query.
-    todays_totals = dict(
-        WaterLog.objects
-        .filter(
-            user_id__in=active_user_ids,
-            logged_at__gte=today_start,
-            logged_at__lte=today_end,
-        )
-        .values_list("user_id")
-        .annotate(s=Sum("amount_ml"))
-        .values_list("user_id", "s")
+    # ОТСТАВАТЬ НЕ ОТ ЧЕГО — и потому не уходит никто.
+    #
+    # Здесь читался ``NutritionProfile.daily_water_ml`` и сравнивался с
+    # выпитым за сегодня. Столбец — выход формулы 30 мл × вес (+300 при
+    # беременности, +700 при кормлении), которую владелец снял
+    # 09.09.2026: «Формула воды ``30 мл × вес`` и прибавки за
+    # беременность или кормление не используются без отдельно
+    # утверждённой методики» (§82). У существующих клиентов столбец
+    # остаётся заполненным, поэтому чтение снято вместе с записью:
+    # прочитать его — значит применить снятую методику.
+    #
+    # Следствие названо, а не спрятано: пуш про воду не уходит НИКОМУ,
+    # пока не утверждена методика (§85, раздел 4 — справочные 2200 мл
+    # женщинам и 3000 мужчинам). Это самое острое из мест, где выдумка
+    # уезжала человеку САМА, дважды в день, и читается она с
+    # заблокированного экрана. Выдуманный повод написать человеку хуже
+    # молчания; молчание при этом СЧИТАЕТСЯ — ``skipped`` растёт, и в
+    # логе видно, скольким сегодня не написали и почему.
+    #
+    # Ветка «кому и что слать» вернётся вместе с ориентиром. Возвращать
+    # её без него — значит снова решать за человека по чужой мерке.
+    skipped = len(active_user_ids)
+    logger.info(
+        "water_reminders.dispatched queued=0 skipped=%d reason=no_fluid_target",
+        skipped,
     )
-
-    # Already-reminded today — pulled in one query, used as a set lookup.
-    already_reminded = set(
-        Notification.objects
-        .filter(
-            template_id="water_reminder",
-            user_id__in=active_user_ids,
-            created_at__gte=today_start,
-        )
-        # order_by() clears Meta.ordering. Django appends every ordering
-        # column to a SELECT DISTINCT list, so leaving it on would make
-        # the DISTINCT per (user_id, created_at, id) — i.e. one row per
-        # notification — instead of one row per user. DRF-1128 added id
-        # to Meta.ordering, which turned that from nearly-per-row into
-        # exactly-per-row.
-        .order_by()
-        .values_list("user_id", flat=True).distinct()
-    )
-
-    queued = 0
-    skipped = 0
-    service = NotificationService()
-    # Lazy User load: select_related not needed (template only uses
-    # water_ml / goal). Plain user fetch by id.
-    from users.models import User
-
-    for user in User.objects.filter(id__in=active_user_ids):
-        if user.id in already_reminded:
-            skipped += 1
-            continue
-        water_ml = int(todays_totals.get(user.id) or 0)
-        if water_ml >= behind_threshold:
-            skipped += 1
-            continue
-        service.send(
-            user=user, template_id="water_reminder",
-            context={
-                "water_ml": water_ml,
-                "water_goal_ml": dj_settings.NUTRITION_DEFAULT_WATER_GOAL_ML,
-            },
-        )
-        queued += 1
-
-    if queued or skipped:
-        logger.info(
-            "water_reminders.dispatched queued=%d skipped=%d",
-            queued, skipped,
-        )
-    return {"queued": queued, "skipped": skipped}
+    return {"queued": 0, "skipped": skipped}
 
 
 @shared_task(name="notifications.dispatch_beauty_insights")

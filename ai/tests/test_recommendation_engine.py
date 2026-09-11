@@ -9,7 +9,6 @@ from ai.application.services.recommendation_engine import (
     RecommendationEngine,
     RecommendationQuery,
     ScoreBreakdown,
-    WEIGHT_AVAILABILITY,
     WEIGHT_DISTANCE,
     WEIGHT_HISTORY,
     WEIGHT_RATING,
@@ -42,19 +41,33 @@ def _make_service(specialist, *, name="Test Service", price="1500", category=Non
 class TestWeights:
     def test_weights_sum_to_one(self):
         total = (
-            WEIGHT_RATING + WEIGHT_DISTANCE + WEIGHT_AVAILABILITY
+            WEIGHT_RATING + WEIGHT_DISTANCE
             + WEIGHT_SERVICE_MATCH + WEIGHT_HISTORY
         )
         assert abs(total - 1.0) < 1e-9
 
-    def test_weights_match_drf_105_contract(self):
-        """Spec: 30/25/20/15/10. Locked here so a stealth weight tweak
-        breaks the test instead of changing recommendations silently."""
-        assert WEIGHT_RATING == 0.30
-        assert WEIGHT_DISTANCE == 0.25
-        assert WEIGHT_AVAILABILITY == 0.20
-        assert WEIGHT_SERVICE_MATCH == 0.15
-        assert WEIGHT_HISTORY == 0.10
+    def test_weights_match_the_contract(self):
+        """Замок на веса. Компонентов ЧЕТЫРЕ — доступность снята §125.
+
+        Прежний замок держал 30/25/20/15/10 и был прав: он существует,
+        чтобы тихая правка веса ломала тест, а не меняла выдачу молча.
+        Он и сломался на этой правке — как задумано.
+
+        Замок не ослаблен, а переставлен: `availability` весил 20% и
+        возвращал `1.0` всем, то есть был фикцией; снятие санкционировано
+        §125 от 10.09.2026. Оставшиеся перенормированы **пропорционально**
+        — отношения между ними те же, что были, и это проверяется
+        отдельно в `test_availability_fiction_removed.py` вместе с
+        доказательством, что порядок кандидатов не изменился.
+
+        Числа записаны литералами намеренно: вычислять их здесь из
+        старых весов значило бы проверять арифметику теста, а не
+        зафиксированный контракт.
+        """
+        assert WEIGHT_RATING == 0.375
+        assert WEIGHT_DISTANCE == 0.3125
+        assert WEIGHT_SERVICE_MATCH == 0.1875
+        assert WEIGHT_HISTORY == 0.125
 
 
 # ---------------------------------------------------------------------------
@@ -312,10 +325,18 @@ class TestCaching:
 
 
 class TestScoreBreakdown:
+    """Поле `availability` снято §125 — оно было фикцией с весом 20%.
+
+    Тесты ниже переписаны без него. Утверждения не ослаблены: «Близко»
+    остаётся крупнейшим вкладчиком и на перенормированных весах
+    (0.3125 против 0.1875 у рейтинга при тех же входах), а сумма
+    по-прежнему даёт 1.0 на единицах.
+    """
+
     def test_top_reasons_picks_largest_contributors(self):
         # Distance is dominant.
         b = ScoreBreakdown(
-            rating=0.5, distance=1.0, availability=1.0,
+            rating=0.5, distance=1.0,
             service_match=0.5, history=0.0,
         )
         reasons = b.top_reasons()
@@ -323,7 +344,7 @@ class TestScoreBreakdown:
 
     def test_top_reasons_skips_low_contribution(self):
         b = ScoreBreakdown(
-            rating=0.0, distance=0.0, availability=0.0,
+            rating=0.0, distance=0.0,
             service_match=0.0, history=0.0,
         )
         # All zero — no reasons surface.
@@ -331,11 +352,11 @@ class TestScoreBreakdown:
 
     def test_composite_in_zero_one_range(self):
         b = ScoreBreakdown(
-            rating=1.0, distance=1.0, availability=1.0,
+            rating=1.0, distance=1.0,
             service_match=1.0, history=1.0,
         )
         assert b.composite == pytest.approx(1.0)
-        z = ScoreBreakdown(0.0, 0.0, 0.0, 0.0, 0.0)
+        z = ScoreBreakdown(0.0, 0.0, 0.0, 0.0)
         assert z.composite == 0.0
 
 
@@ -452,12 +473,19 @@ class TestUnratedSpecialistIsNotCutOff:
         )
         by_id = {s.id: s for s in result.candidates}
         assert by_id[newcomer.id].breakdown.rating == 0.0
-        assert "Высокий рейтинг" not in by_id[newcomer.id].match_reasons
+        # Проверка переехала с `match_reasons` на разбор: T9 закрыл
+        # `match_reasons` — готовые фразы, выведенные из весов формулы,
+        # больше не уезжают человеку как причина (канон §8, EVIDENCE
+        # ORIGIN). Предмет теста от этого не изменился: он про вклад
+        # рейтинга при нуле отзывов, а не про канал доставки.
+        assert "Высокий рейтинг" not in by_id[newcomer.id].breakdown.top_reasons()
         # Положительная сторона на тех же данных: у мастера с отзывами
-        # причина «Высокий рейтинг» есть — значит тест выше проверяет
-        # отсутствие, а не сломанный расчёт причин.
+        # вклад есть — значит тест выше проверяет отсутствие, а не
+        # сломанный расчёт.
         assert by_id[good.id].breakdown.rating > 0.0
-        assert "Высокий рейтинг" in by_id[good.id].match_reasons
+        assert "Высокий рейтинг" in by_id[good.id].breakdown.top_reasons()
+        # И наружу не уходит ни одна из этих фраз.
+        assert by_id[good.id].match_reasons == []
 
     def test_newcomer_survives_prefetch_slice_on_a_full_catalog(self, db):
         """Порог снят — но выборку до скоринга режет ``[: limit * 3]``

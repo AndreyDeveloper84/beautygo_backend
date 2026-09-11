@@ -9,6 +9,8 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.text import slugify
 
+from services.normalization import normalize_service_name
+
 
 class ServiceCategory(models.Model):
     """Hierarchical category for beauty services."""
@@ -76,12 +78,47 @@ class ServiceCategory(models.Model):
 
 
 class ServiceTemplate(models.Model):
-    """Предустановленный шаблон услуги, привязанный к категории.
+    """Каноническая услуга. В коде — шаблон, в разговорах — канон.
 
     Используется на онбординге мастера, чтобы предложить готовый список
     популярных услуг с рекомендованной длительностью вместо пустой формы.
     Реальные цены вычисляются через `RegionalPricing` отдельно (DRF-197).
+
+    С §93 справочник перестал быть замороженным закрытым списком и стал
+    **курируемым расширяемым реестром**: нет подходящего канона —
+    оператор заводит новый. Отсюда жизненный цикл, см. `Lifecycle`.
     """
+
+    class Lifecycle(models.TextChoices):
+        """Состояние самой канонической услуги. Решение владельца §93.
+
+        Не путать с `SalonService.MappingStatus`: тот про **связь**
+        услуги салона с каноном, этот — про **канон**. Оси разные, и
+        вопросы разные::
+
+            MappingStatus   «чем доказано, что вот эта услуга салона —
+                             вот этот канон»
+            Lifecycle       «проверял ли кто-нибудь, что вот этот канон
+                             вообще должен существовать»
+
+        `PROVISIONAL` — оператор завёл его на ходу, потому что
+        подходящего не нашлось (§93, шаг 1). Это рабочее состояние, а не
+        брак: без него разбор упирается в закрытый справочник, ровно как
+        упёрся на пилоте.
+
+        `APPROVED` — кто-то проверил и отвечает за это именем или
+        правилом. Провенанс обязателен и стоит `CheckConstraint`'ом:
+        одобрение без автора через месяц читается как умолчание.
+
+        **Умолчание — `PROVISIONAL`**, и это не придирка. Канон,
+        заведённый кодом, миграцией или чужой рукой, никем не проверен
+        по определению. Умолчание `APPROVED` означало бы, что каждая
+        новая строка сама себя одобрила.
+        """
+
+        PROVISIONAL = "provisional", "Черновой"
+        APPROVED = "approved", "Одобрен"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     category = models.ForeignKey(
         ServiceCategory,
@@ -124,6 +161,27 @@ class ServiceTemplate(models.Model):
         help_text="Показывать в верхней части списка категории",
     )
     sort_order = models.PositiveIntegerField(default=0)
+
+    # -- Жизненный цикл самого канона (§93) --------------------------------
+    lifecycle = models.CharField(
+        max_length=16,
+        choices=Lifecycle.choices,
+        default=Lifecycle.PROVISIONAL,
+    )
+    #: Кто одобрил. Взаимоисключающе с `approved_rule` — «кто ИЛИ какое
+    #: правило», та же форма, что у связи (§76).
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    approved_rule = models.CharField(max_length=100, blank=True, default="")
+    approval_rule_version = models.CharField(max_length=32, blank=True, default="")
+    approved_at = models.DateTimeField(null=True, blank=True)
+    #: Основание одобрения — разбор, реестр владельца, тикет.
+    approval_source_ref = models.CharField(max_length=200, blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -132,6 +190,43 @@ class ServiceTemplate(models.Model):
         ordering = ['-is_popular', 'sort_order', 'name']
         indexes = [
             models.Index(fields=['category', 'is_popular', 'sort_order']),
+            # Очередь одобрения выбирается по этому полю, и она же —
+            # рабочий список куратора справочника.
+            models.Index(fields=['lifecycle'], name='svctpl_lifecycle_idx'),
+        ]
+        constraints = [
+            # Одобрение — решение, и провенанс ему нужен по той же
+            # причине, что и подтверждению связи: без автора оно через
+            # месяц неотличимо от умолчания. Форма условия намеренно
+            # повторяет `salonservice_verified_requires_provenance`.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(lifecycle="approved")
+                    | (
+                        models.Q(approved_at__isnull=False)
+                        & ~models.Q(approval_source_ref="")
+                        & (
+                            models.Q(approved_by__isnull=False)
+                            | ~models.Q(approved_rule="")
+                        )
+                    )
+                ),
+                name="servicetemplate_approved_requires_provenance",
+            ),
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(approved_by__isnull=False)
+                    & ~models.Q(approved_rule="")
+                ),
+                name="servicetemplate_approval_is_who_xor_rule",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(approved_rule="")
+                    | ~models.Q(approval_rule_version="")
+                ),
+                name="servicetemplate_approval_rule_carries_version",
+            ),
         ]
 
     def clean(self) -> None:
@@ -211,6 +306,163 @@ class RegionalPricing(models.Model):
             f"{self.template.name} — {self.region_name} "
             f"({self.price_min:.0f}–{self.price_max:.0f} ₽)"
         )
+
+
+class ServiceTemplateSynonym(models.Model):
+    """Подтверждённое название канонической услуги словами салона (§93).
+
+    Зачем
+    -----
+
+    Решение владельца §93: когда услугу связывают с каноном, **исходное
+    название салона сохраняется как подтверждённый синоним.** Замер
+    10.09 показал, зачем это на самом деле нужно, и это не мелочь.
+
+    Из 56 услуг пилотного салона точным совпадением имени с каноном
+    находились 8, и вывод был «сорока восьми не с чем сопоставлять».
+    Вывод оказался свойством метода. Салон держит вид процедуры **в
+    категории**, а канон — в имени::
+
+        салон:  категория «Лазерная эпиляция» + услуга «Подмышки»
+        канон:  «Лазерная эпиляция подмышек»               (7.1.6)
+
+    Сравнение имени с именем такую пару найти не может по устройству. В
+    каталоге 32 канона лазерной эпиляции, и ручная сверка зона к зоне
+    дала **15 из 17**. То есть преобладающая нужда пилота — не создавать
+    недостающие каноны, а **записывать синонимы к существующим**.
+
+    Что синоним делает и чего НЕ делает
+    -----------------------------------
+
+    Синоним **находит** канон, и на этом его полномочия кончаются.
+
+    Он не создаёт связь, не меняет `SalonService.mapping_status` и никого
+    не пускает в подбор. Гейт §76 остаётся единственной дверью:
+    `recommendation_eligible = (mapping_status == VERIFIED)`, а `VERIFIED`
+    ставит человек, отвечая за это своим именем.
+
+    Разделение намеренное и оно здесь главное. Синоним — **находка**,
+    связь — **решение**. Позволить синониму проставлять связь значило бы
+    вернуть ровно ту выдумку, против которой §93 и написан: совпадение
+    строк снова стало бы доказательством происхождения (§73). Поэтому
+    таблица не имеет ни статуса, ни флага «применить»: она отвечает на
+    вопрос «как ещё называют вот этот канон», а не «чем является вот эта
+    услуга салона».
+
+    Почему провенанс обязателен у каждой строки
+    -------------------------------------------
+
+    §93 говорит «**подтверждённый** синоним», и здесь нет второго
+    состояния: неподтверждённых синонимов эта таблица не хранит вовсе.
+    Значит жизненный цикл не нужен, а провенанс нужен всегда — кто или
+    какое правило, когда, на каком основании. Форма та же, что у
+    `SalonService`, и по той же причине: запись без автора через месяц
+    читается как умолчание.
+
+    Один синоним может вести к нескольким канонам
+    ---------------------------------------------
+
+    Ограничение уникальности стоит на паре «шаблон + нормализованный
+    текст», а не на тексте одном. То есть «Массаж спины» вправе быть
+    синонимом и `1.1.5`, и `1.3.6`.
+
+    **Это не ответ на открытый вопрос владельцу** (ведёт ли синоним к
+    одному канону или к нескольким), а отказ отвечать за него кодом.
+    Разрешать безопасно: синоним ничего не решает, и оператор, увидев
+    двух кандидатов, выбирает сам. Запрещать было бы опаснее — второй
+    салон не смог бы записать своё настоящее название, не удалив чужое.
+    Если владелец скажет «один канон» — это одна миграция с
+    `UniqueConstraint` на `normalized`.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    template = models.ForeignKey(
+        ServiceTemplate,
+        on_delete=models.CASCADE,
+        related_name="synonyms",
+    )
+    #: Как это называется у салона — дословно, включая регистр и знаки.
+    #: Хранится нетронутым: оператор должен видеть исходную строку, а не
+    #: её обработанный след.
+    text = models.CharField(max_length=200)
+    #: Ключ поиска. Заполняется в `save()` из `text`, руками не вводится.
+    normalized = models.CharField(max_length=200, editable=False, db_index=True)
+    #: Чьё это название. Не обязателен: синоним может прийти из
+    #: справочника или из разбора, а не от конкретного салона.
+    source_tenant = models.ForeignKey(
+        "tenants.Tenant",
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    #: Провенанс. Та же форма, что у `SalonService`: кто ИЛИ правило.
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    confirmed_rule = models.CharField(max_length=100, blank=True, default="")
+    rule_version = models.CharField(max_length=32, blank=True, default="")
+    confirmed_at = models.DateTimeField()
+    source_ref = models.CharField(max_length=200)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["template", "text"]
+        constraints = [
+            # Один и тот же синоним дважды у одного шаблона — дубль.
+            # Уникальность по НОРМАЛИЗОВАННОМУ тексту, иначе «Подмышки»
+            # и «подмышки » считались бы разными записями и обе висели
+            # бы в выдаче.
+            models.UniqueConstraint(
+                fields=["template", "normalized"],
+                name="templatesynonym_template_normalized_uniq",
+            ),
+            # Провенанс обязателен у КАЖДОЙ строки: неподтверждённых
+            # синонимов эта таблица не хранит (§93). `confirmed_at`
+            # закрыт `NOT NULL` самим полем, здесь — остальные два.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(source_ref="")
+                    & (
+                        models.Q(confirmed_by__isnull=False)
+                        | ~models.Q(confirmed_rule="")
+                    )
+                ),
+                name="templatesynonym_requires_provenance",
+            ),
+            # Кто ИЛИ правило, но не оба — как у связи. Оба заполненных
+            # означают, что происхождение известно неточно.
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(confirmed_by__isnull=False)
+                    & ~models.Q(confirmed_rule="")
+                ),
+                name="templatesynonym_provenance_is_who_xor_rule",
+            ),
+            # Правило без версии — «подтверждено какой-то из версий».
+            models.CheckConstraint(
+                condition=(
+                    models.Q(confirmed_rule="")
+                    | ~models.Q(rule_version="")
+                ),
+                name="templatesynonym_rule_carries_version",
+            ),
+        ]
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        # Нормализованный ключ считается ЗДЕСЬ, а не в форме и не в
+        # вызывающем коде: строка может приехать миграцией, командой или
+        # админкой, и ключ обязан получиться один и тот же во всех трёх
+        # случаях. Поле `editable=False` именно поэтому — вводить его
+        # руками некому.
+        self.normalized = normalize_service_name(self.text)
+        super().save(*args, **kwargs)
+
+    def __str__(self) -> str:
+        return f"{self.text} → {self.template.name}"
 
 
 class Service(models.Model):
@@ -324,6 +576,54 @@ class SalonService(models.Model):
         YCLIENTS = "yclients", "YClients"
         SEED = "seed", "Seed"
 
+    class MappingStatus(models.TextChoices):
+        """Статус связи услуги с каноническим шаблоном. §76, расширен §93.
+
+        Четыре состояния, и путать их запрещено::
+
+            UNMAPPED         REVIEW_REQUIRED  VERIFIED         NOT_RECOMMENDABLE
+            валидной связи   связь есть, но   подтверждена     решено, что связи
+            ещё нет          происхождения    человеком ЛИБО   НЕ БУДЕТ
+                             недостаточно     правилом
+                |                  |                |                  |
+            не участвует ----------+                |          не участвует
+            в подборе                               |          в подборе
+                                        участвует в подборе
+
+        **`UNMAPPED` и `NOT_RECOMMENDABLE` — не одно и то же**, хотя на
+        гейте ведут себя одинаково. Это третий исход разбора по §93, и
+        отличается он не поведением, а тем, что за ним стоит::
+
+            UNMAPPED           про строку ещё никто ничего не сказал
+            NOT_RECOMMENDABLE  человек посмотрел и решил; у решения есть
+                               автор, дата и основание
+
+        Отсутствие и отказ совпадают ровно один раз — когда гейт их не
+        пускает. Дальше они расходятся: `UNMAPPED` — очередь работы,
+        `NOT_RECOMMENDABLE` — работа сделанная. Слитые в одно, они
+        превращают убывающую очередь в вечную: пятьдесят шесть
+        разобранных услуг пилота возвращались бы в неё каждым отчётом, и
+        по переписи было бы не видно, что разбор вообще шёл.
+
+        Поэтому у отказа своё `CheckConstraint` на происхождение — такое
+        же, как у `VERIFIED`, и по той же причине: **решение без автора
+        через месяц читается как умолчание.**
+
+        **Ноль `VERIFIED` не разрешает откат на `REVIEW_REQUIRED`**
+        (формулировка владельца): иначе статус декоративен, а система
+        продолжает выдавать непроверенные связи. Пустая выдача при нуле
+        подтверждённых — штатное состояние с именем, а не поломка.
+
+        Умолчание — `UNMAPPED`, а не `REVIEW_REQUIRED`. Разница смысловая:
+        строка, про которую ещё ничего не сказано, не должна выглядеть как
+        строка, про которую сказано «связь есть».
+        """
+
+        UNMAPPED = "unmapped", "Unmapped"
+        REVIEW_REQUIRED = "review_required", "Review required"
+        VERIFIED = "verified", "Verified"
+        NOT_RECOMMENDABLE = "not_recommendable", "Не подлежит рекомендациям"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant = models.ForeignKey(
         "tenants.Tenant",
@@ -359,11 +659,63 @@ class SalonService(models.Model):
     # Escalate-only floor vs template (D1): admin may set True on a salon
     # even when the template does not require it; cannot relax a gated
     # template downstream (SpecialistService.resolved_requires_health_check).
-    requires_health_check = models.BooleanField(default=False)
+    #
+    # ТРЁХЗНАЧНОЕ, и третье состояние несущее::
+    #
+    #     NULL   салон на вопрос НЕ ОТВЕЧАЛ
+    #     True   салон говорит: скрининг нужен
+    #     False  салон говорит: скрининг НЕ нужен
+    #
+    # Двузначным поле быть не может, и это выяснилось на живом решении.
+    # Владелец постановил (§90) размечать пилотный каталог явными ответами
+    # салона вместо умолчаний кода — и оказалось, что сказать «нет» салону
+    # нечем: поставленный человеком `False` был неотличим от `False`,
+    # которого никто не касался. Решение было бы исполнимо наполовину:
+    # «да» записывалось бы, «нет» пропадало молча, а услуга навсегда
+    # оставалась бы «неизвестной» и уезжала оператору.
+    #
+    # Это тот же инвариант, который на этой границе уже проведён дважды —
+    # у зеркала (`MasterService.resolved_requires_health_check`) и у самого
+    # вердикта: **отсутствие обязано быть отличимо от значения.** Здесь, у
+    # источника признака, он оставался непроведённым дольше всех.
+    requires_health_check = models.BooleanField(null=True, blank=True, default=None)
     is_active = models.BooleanField(default=True)
     source = models.CharField(
         max_length=10, choices=Source.choices, default=Source.MANUAL,
     )
+
+    # -- Статус связи с шаблоном и его происхождение (§76) -------------------
+    #
+    # `source` выше говорит, откуда взялась СТРОКА (ручной ввод, YClients,
+    # сид). Поля ниже говорят, чем доказана СВЯЗЬ с каноническим шаблоном.
+    # Это разные вопросы: строка из YClients может нести связь, которую
+    # никто не проверял, а строка, заведённая руками, — связь, выбранную
+    # человеком осознанно.
+    mapping_status = models.CharField(
+        max_length=24,
+        choices=MappingStatus.choices,
+        default=MappingStatus.UNMAPPED,
+    )
+    #: Кто подтвердил. Взаимоисключающе с `mapping_confirmed_rule`:
+    #: владелец назвал «кто ИЛИ какое правило», и оба сразу означали бы,
+    #: что происхождение неизвестно точно.
+    mapping_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    #: Имя детерминированного правила, если подтверждал не человек.
+    mapping_confirmed_rule = models.CharField(max_length=100, blank=True, default="")
+    #: Версия правила. Без неё «подтверждено правилом» неотличимо от
+    #: «подтверждено какой-то из его версий», а правило меняется.
+    mapping_rule_version = models.CharField(max_length=32, blank=True, default="")
+    mapping_confirmed_at = models.DateTimeField(null=True, blank=True)
+    #: Ссылка на исходное основание — драфт, выгрузка, решение, тикет.
+    #: Свободная строка намеренно: оснований разных видов, и требовать
+    #: одного типа значило бы запретить те, которых мы ещё не видели.
+    mapping_source_ref = models.CharField(max_length=200, blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -372,6 +724,82 @@ class SalonService(models.Model):
             models.UniqueConstraint(
                 fields=["tenant", "template", "name"],
                 name="salonservice_tenant_template_name_uniq",
+            ),
+            # `VERIFIED` без provenance невозможен НА УРОВНЕ СХЕМЫ, а не по
+            # договорённости. §76 требует хранить, кто или какое правило
+            # подтвердило, когда и по какому основанию; статус без этого —
+            # то же самое, что объяснение без evidence (§73), а именно так
+            # литерал рейтинга однажды и стал «проверенным фактом».
+            #
+            # Проверка стоит здесь, а не в `clean()`, потому что `clean()`
+            # обходится любым `update()` и любой миграцией данных.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(mapping_status="verified")
+                    | (
+                        models.Q(mapping_confirmed_at__isnull=False)
+                        & ~models.Q(mapping_source_ref="")
+                        & (
+                            models.Q(mapping_confirmed_by__isnull=False)
+                            | ~models.Q(mapping_confirmed_rule="")
+                        )
+                    )
+                ),
+                name="salonservice_verified_requires_provenance",
+            ),
+            # Отказ — тоже решение, и провенанс ему нужен по той же
+            # причине, что и подтверждению (§93). Форма условия
+            # намеренно та же, что у `verified` выше: два терминальных
+            # состояния связи, и оба обязаны отвечать на «кто, когда, на
+            # каком основании».
+            #
+            # Отдельным ограничением, а не расширением верхнего через
+            # `IN (verified, not_recommendable)`: имя ограничения — это
+            # то, что читает человек в тексте ошибки, и «нарушено
+            # not_recommendable_requires_provenance» говорит ему, какое
+            # именно решение он пытается записать без автора.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(mapping_status="not_recommendable")
+                    | (
+                        models.Q(mapping_confirmed_at__isnull=False)
+                        & ~models.Q(mapping_source_ref="")
+                        & (
+                            models.Q(mapping_confirmed_by__isnull=False)
+                            | ~models.Q(mapping_confirmed_rule="")
+                        )
+                    )
+                ),
+                name="salonservice_not_recommendable_requires_provenance",
+            ),
+            # Правило без версии — «подтверждено какой-то из версий».
+            # Человеку версия не нужна: он и есть провенанс.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(mapping_confirmed_rule="")
+                    | ~models.Q(mapping_rule_version="")
+                ),
+                name="salonservice_rule_confirmation_carries_version",
+            ),
+            # Кто ИЛИ правило, но не оба. Второй инвариант этой
+            # миграции, и он чинит РАСХОЖДЕНИЕ, а не добавляет новое:
+            # докстринг `mapping_confirmed_by` называл поля
+            # взаимоисключающими со ссылкой на §76 с самого начала, а
+            # оба ограничения выше написаны через `OR` и обе заполненные
+            # строки пропускали. То есть решение владельца было записано
+            # и не исполнялось, а выглядело исполненным —
+            # «проверяемый инвариант не живёт в комментарии».
+            #
+            # Условие глобальное, а не только для терминальных
+            # состояний: происхождение, набранное на строке, которая ещё
+            # не решена, тоже обязано быть однозначным — иначе
+            # неоднозначность просто дожидается смены статуса.
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(mapping_confirmed_by__isnull=False)
+                    & ~models.Q(mapping_confirmed_rule="")
+                ),
+                name="salonservice_provenance_is_who_xor_rule",
             ),
         ]
         indexes = [
@@ -382,6 +810,12 @@ class SalonService(models.Model):
             models.Index(
                 fields=["tenant", "category", "is_active"],
                 name="salonsvc_tenant_cat_active_idx",
+            ),
+            # Допустимость подбора спрашивает статус на каждом запросе,
+            # а очередь проверки выбирает по нему же.
+            models.Index(
+                fields=["tenant", "mapping_status"],
+                name="salonsvc_tenant_mapstatus_idx",
             ),
         ]
 
@@ -435,6 +869,21 @@ class SpecialistService(models.Model):
         max_digits=10, decimal_places=2,
         validators=[MinValueValidator(1)],
     )
+    # ДВУЗНАЧНОЕ — сознательно, и это решение, а не недосмотр рядом с
+    # трёхзначным полем салона.
+    #
+    # У мастера по D1 есть право только ПОДНЯТЬ признак и нет права его
+    # опустить: ослабить пол шаблона или ответ салона он не может. Значит
+    # высказывание «мастер говорит: не нужно» в модели не существует, и
+    # третьему состоянию нечего было бы означать. `False` здесь — полный
+    # ответ («не эскалирую»), а не молчание.
+    #
+    # У салона иначе: он — авторитет по собственным внетаксономическим
+    # услугам и вправе отвечать в обе стороны, поэтому его поле обязано
+    # различать «нет» и «не отвечал».
+    #
+    # Половинчатая трёхзначность была бы хуже последовательной
+    # двузначности: читатель не знал бы, чему верить.
     requires_health_check = models.BooleanField(default=False)
     buffer_after_minutes = models.PositiveSmallIntegerField(default=0)
     is_active = models.BooleanField(default=True)
@@ -475,16 +924,77 @@ class SpecialistService(models.Model):
             return template.duration_default
         return None
 
-    def resolved_requires_health_check(self) -> bool:
-        """Escalate-only OR across template floor, salon, specialist (D1)."""
+    def resolved_requires_health_check(self) -> bool | None:
+        """Escalate-only OR across template floor, salon, specialist (D1).
+
+        Tri-state. ``None`` means **unknown**, not ``False``.
+
+        Precedence, and it is deliberate:
+
+        1. An explicit raise anywhere wins. ``salon.requires_health_check``
+           or ``self.requires_health_check`` being ``True`` returns ``True``
+           even with no template — escalate-only is preserved exactly.
+        2. With a template, its flag is the canonical floor and the answer
+           is a real ``bool``.
+        3. **Without a template, and with nobody having raised the flag,
+           the answer is ``None``.** There is no canonical floor to read,
+           so the honest answer is "not known".
+
+        Why case 3 is not ``False``. The previous version wrote
+        ``template.requires_health_check if template is not None else False``,
+        which turned *the absence of a canonical link* into *a positive
+        claim about safety*. Measured on the pilot 09.09.2026: of 387 active
+        bookable edges, 96 resolved ``False`` solely because no template was
+        attached — 95 of them the pilot salon's, i.e. every edge a real
+        person can book there. The salon had not answered the question; the
+        cascade answered it for the salon.
+
+        Consumers must decide what to do with ``None`` explicitly. The bot
+        mirror already models it — ``MasterService.resolved_requires_health_check``
+        is ``null=True`` and its booking gate treats ``NULL`` as "screening
+        required" — and never saw a ``NULL`` only because this method never
+        produced one.
+        """
         salon = self.salon_service
         template = salon.template
         template_floor = (
-            template.requires_health_check if template is not None else False
+            template.requires_health_check if template is not None else None
         )
-        return bool(
-            template_floor or salon.requires_health_check or self.requires_health_check
-        )
+
+        # 1. Поднятый пол шаблона не снимает никто — это и есть D1
+        #    «escalate-only»: салон не вправе ослабить канон.
+        #
+        #    СРОК ГОДНОСТИ У ЭТОГО ШАГА. Он трактует поднятый пол
+        #    БЕЗУСЛОВНО — не потому, что так решено, а потому, что
+        #    различить нечем: у `ServiceTemplate.requires_health_check`
+        #    нет поля происхождения. Решение владельца §95 (10.09.2026):
+        #    гейт, выведенный правилом, — черновой, и скрининга по нему
+        #    не требуем; просмотренный человеком — требуем. Сегодня из
+        #    102 гейтованных шаблонов человеком не просмотрен ни один
+        #    (85 выведены членством в подкатегории, 17 — словом в
+        #    названии), и сид про себя говорит «draft flags for later
+        #    owner review», а поля под этот review не существует.
+        #
+        #    Как только провенанс шаблона появится, ЭТОТ ШАГ ОБЯЗАН
+        #    измениться: черновой пол перестаёт быть безусловным. Пока
+        #    поля нет, безусловность — граница знания, а не решение, и
+        #    принимать её за решение нельзя.
+        if template_floor is True:
+            return True
+        # 2. Эскалация мастера. Он вправе поднять и не вправе опустить,
+        #    поэтому поле остаётся двузначным — см. его докстринг.
+        if self.requires_health_check:
+            return True
+        # 3. Ответ салона, если салон отвечал. Трёхзначное поле: `False`
+        #    здесь — это сказанное «нет», а не молчание.
+        if salon.requires_health_check is not None:
+            return bool(salon.requires_health_check)
+        # 4. Шаблон есть и флага не несёт — ответил канон.
+        if template_floor is False:
+            return False
+        # 5. Опоры нет и никто не отвечал. Отсутствие свидетельства не
+        #    является свидетельством безопасности.
+        return None
 
     def clean(self) -> None:
         if self.is_active and self.resolved_duration() is None:

@@ -28,6 +28,11 @@ from nutrition.webhook_delivery import (
 )
 from users.models import User
 
+#: §92 / срез N-a2: параметры тела принимаются только с утверждением о
+#: согласии. Здесь оно часть ВАЛИДНОГО запроса, а не предмет проверки —
+#: сторож проверяется в ``test_personal_calculation_consent.py``.
+CONSENT = {"type": "personal_calculation", "document_version": "v1"}
+
 
 pytestmark = pytest.mark.django_db
 
@@ -248,7 +253,8 @@ class TestWiringProfileEmit:
         }
         c.post(
             "/api/v1/nutrition/internal/profile/",
-            {"gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
+            {"consent": CONSENT,
+             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
              "goal": "maintain"},
             format="json",
             **headers,

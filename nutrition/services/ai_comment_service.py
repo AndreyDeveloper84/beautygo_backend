@@ -53,12 +53,12 @@ class SummaryFacts:
     boring. Not a Pydantic model on purpose; this is internal.
     """
     calories_total: float
-    calories_goal: int
+    calories_goal: int | None
     protein_g: float
     fat_g: float
     carbs_g: float
     water_ml: int
-    water_goal_ml: int
+    water_goal_ml: int | None
     entries_count: int
 
 
@@ -210,12 +210,26 @@ def _build_prompt(profile: NutritionProfile | None, facts: SummaryFacts) -> str:
         f"Цель пользователя: {goal} (тон: {tone_hint}).\n"
         f"{flags_block}\n\n"
         f"Факты дня:\n"
-        f"- калории: {int(facts.calories_total)} из {facts.calories_goal} цели\n"
-        f"- белок: {int(facts.protein_g)} г\n"
+        # Цель уходит в промпт, ТОЛЬКО когда она есть. Ноль означает «цели
+        # нет» (nutrition_summary_service, water_entry_service), а «из 0
+        # цели» модель прочитала бы как факт о человеке — и сказала бы ему,
+        # что он не добрал до нуля. Дефект того же класса, что выдуманная
+        # цель на экране; адресат только не человек, а модель, которой
+        # разрешено делать выводы.
+        + (
+            f"- калории: {int(facts.calories_total)} из {facts.calories_goal} цели\n"
+            if facts.calories_goal
+            else f"- калории: {int(facts.calories_total)} (дневной цели нет)\n"
+        )
+        + f"- белок: {int(facts.protein_g)} г\n"
         f"- жиры: {int(facts.fat_g)} г\n"
         f"- углеводы: {int(facts.carbs_g)} г\n"
-        f"- вода: {facts.water_ml} из {facts.water_goal_ml} мл\n"
-        f"- записей в дневнике: {facts.entries_count}\n\n"
+        + (
+            f"- вода: {facts.water_ml} из {facts.water_goal_ml} мл\n"
+            if facts.water_goal_ml
+            else f"- вода: {facts.water_ml} мл (дневной нормы нет)\n"
+        )
+        + f"- записей в дневнике: {facts.entries_count}\n\n"
         f"Напиши 1-3 предложения, ≤220 символов, на русском, без цифр в "
         f"финале (число — только если естественно ложится в фразу)."
     )
@@ -241,7 +255,10 @@ def _validate(text: str) -> str | None:
 def _neutral_fallback(facts: SummaryFacts) -> str:
     if facts.entries_count == 0:
         return "Сегодня записей пока нет — попробуем завтра. Я рядом."
-    if facts.water_ml < facts.water_goal_ml * 0.7:
+    # Сравнение с ориентиром — только когда ориентир ЕСТЬ. Без него
+    # ``None * 0.7`` уронило бы фолбэк, а ``0 * 0.7`` сделало бы совет
+    # про воду недостижимым: любой человек «не отстаёт» от нуля.
+    if facts.water_goal_ml and facts.water_ml < facts.water_goal_ml * 0.7:
         return "Хороший день. Завтра попробуй чуть больше воды — это поддержит самочувствие."
     return "Хороший день — почти в норме. Завтра попробуй немного больше белка с утра."
 
