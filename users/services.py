@@ -1362,6 +1362,9 @@ def apply_absence_with_resolutions(
             start_at=start_at,
             end_at=end_at,
             reason=reason or "",
+            # Тот же actor, что подписал отмены выше: у отсутствия и у
+            # решений по записям один автор, и строка это теперь хранит.
+            created_by=actor,
         )
         summary["time_off_id"] = str(time_off.id)
 
