@@ -227,16 +227,26 @@ class Command(BaseCommand):
         out.append(_row("активных", qs.filter(is_active=True).count(), "tenants.Tenant.is_active = true"))
         out.append(_row("с адресом", qs.exclude(address="").count(), "tenants.Tenant.address <> ''"))
         out.append(_row("с городом", qs.exclude(city="").count(), "tenants.Tenant.city <> ''"))
-        # Имя поля — как у SpecialistProfile; если DRF-1662 назовёт иначе,
-        # строка ниже скажет «поля нет» при уже слитой миграции, и это
-        # видно, а не молчит.
-        if _field_exists(Tenant, "location_lat") and _field_exists(Tenant, "location_lng"):
-            n = qs.filter(location_lat__isnull=False, location_lng__isnull=False).count()
-            out.append(_row("с координатами", n, "tenants.Tenant.location_lat, location_lng IS NOT NULL"))
+        # §139 / #333: координаты тенанта считаются ЕДИНСТВЕННЫМ правилом
+        # `Tenant.is_geocoded` (статус ok/confirmed И обе координаты И не
+        # 0/0), а не запросом «lat IS NOT NULL»: тот вернул бы в счёт
+        # `pending` и `ambiguous`, что §139 запрещает дословно. Тенантов
+        # мало — обход строк дешевле, чем своя копия условий в SQL.
+        if hasattr(Tenant, "is_geocoded") and _field_exists(Tenant, "geocode_status"):
+            n = sum(1 for t in qs.only("latitude", "longitude", "geocode_status") if t.is_geocoded)
+            out.append(_row(
+                "с координатами", n,
+                "tenants.Tenant.is_geocoded (geocode_status ∈ ok/confirmed И latitude, longitude И не 0/0)",
+            ))
+            for value, k in _by_value(qs, "geocode_status", Tenant._meta.get_field("geocode_status").choices):
+                out.append(_row(f"  {value}", k, f"tenants.Tenant.geocode_status = {value.split(' ')[0]}"))
         else:
+            # Поле исчезло — это новость, а не ноль: ноль читался бы как
+            # «никого не геокодировали», отсутствие поля — «геокодировать
+            # некуда».
             out.append(_row(
                 "с координатами", "нет поля",
-                "tenants.Tenant.location_lat/location_lng отсутствуют — появятся с DRF-1662",
+                "tenants.Tenant.geocode_status / is_geocoded отсутствуют (§139, #333)",
             ))
         return out
 

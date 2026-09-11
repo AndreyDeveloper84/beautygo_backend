@@ -24,7 +24,7 @@ from core.measurement_subject import PULSE_ANCHORS, Anchor, gather_pulse
 from goals.models import ClientGoal
 from nutrition.models import FoodLog, NutritionProfile
 from services.models import SalonService, ServiceCategory, ServiceTemplate
-from tenants.models import Tenant
+from tenants.models import GeocodeStatus, Tenant
 
 pytestmark = pytest.mark.django_db
 
@@ -173,21 +173,35 @@ def test_tenants_are_counted_from_all_rows_not_the_active_manager(surface):
     assert _row("с городом", e["city"], "tenants.Tenant.city <> ''") in tenants
 
 
-def test_tenant_coordinates_are_a_named_absence_until_the_field_exists(surface):
-    """Ноль читается как «никого не геокодировали». Отсутствие поля — нет.
+def test_tenant_coordinates_are_counted_by_is_geocoded_not_by_null(surface):
+    """§139: `pending` с координатами в расчёт НЕ входит — и в счёт тоже.
 
-    Когда DRF-1662 добавит координаты тенанту, ветка `else` этого теста
-    начнёт исполняться сама — без правки теста.
+    Запрос «lat IS NOT NULL» насчитал бы двоих; единственное правило
+    `Tenant.is_geocoded` — одного. Команда обязана считать правилом.
     """
+    from decimal import Decimal as D
+
+    Tenant.all_objects.create(
+        slug="t-geo-ok", name="Геокодирован", latitude=D("53.2"), longitude=D("45.0"),
+        geocode_status=GeocodeStatus.OK,
+    )
+    Tenant.all_objects.create(
+        slug="t-geo-pending", name="Ждёт повтора", latitude=D("53.2"), longitude=D("45.0"),
+        geocode_status=GeocodeStatus.PENDING,
+    )
+    assert Tenant.all_objects.filter(latitude__isnull=False).count() == 2
+
     report = _run()
     tenants = report.split("тенанты", 1)[1].split("специалисты", 1)[0]
-    try:
-        Tenant._meta.get_field("location_lat")
-    except FieldDoesNotExist:
-        assert "с координатами          : нет поля   tenants.Tenant.location_lat/location_lng отсутствуют" in tenants
-        assert "DRF-1662" in tenants
-    else:
-        assert "с координатами          :        0   tenants.Tenant.location_lat, location_lng IS NOT NULL" in tenants
+    assert _row(
+        "с координатами", 1,
+        "tenants.Tenant.is_geocoded (geocode_status ∈ ok/confirmed И latitude, longitude И не 0/0)",
+    ) in tenants
+    assert _row("  ok", 1, "tenants.Tenant.geocode_status = ok") in tenants
+    assert _row("  pending", 1, "tenants.Tenant.geocode_status = pending") in tenants
+    # Все статусы напечатаны, включая нулевые.
+    for value, _label in GeocodeStatus.choices:
+        assert f"  {value:<22}:" in tenants, value
 
 
 def test_specialists_address_and_coordinates(surface):
