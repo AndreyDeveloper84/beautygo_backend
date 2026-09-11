@@ -30,6 +30,7 @@ from appointments.models import Appointment
 from users.models import SpecialistProfile
 
 from ai.application.services.specialist_context_builder import (
+    OrderProvenance,
     SpecialistContext,
 )
 from ai.tools import ActionType
@@ -105,6 +106,33 @@ def _resolve_service(service_id: UUID, specialist, surface: str):
 # show_specialists
 # ---------------------------------------------------------------------------
 
+def _order_for_display(
+    valid_set: set[UUID], context: SpecialistContext,
+) -> list[UUID]:
+    """Порядок карточек: смысловой — только от канонического авторитета.
+
+    Три исхода, и различает их **происхождение**, а не форма списка:
+
+    * `CANONICAL_RESOLVER` — порядок назван авторитетом, сохраняется как
+      есть: переставить его значило бы нарушить границу с другой стороны;
+    * всё остальное (`LEGACY_ENGINE`, `NEUTRAL`) — смысла в порядке нет
+      либо он не тот, поэтому карточки раскладываются нейтрально.
+
+    Нейтральный порядок — по имени, идентификатор тай-брейком. Та же
+    форма, что у промпта (DRF-1630), и по той же причине: алфавит
+    человек читает как список, а не как рейтинг, и он воспроизводим
+    между репликами.
+    """
+    by_id = {c.id: c for c in context.candidates}
+    if context.order_provenance is OrderProvenance.CANONICAL_RESOLVER:
+        position = {c.id: index for index, c in enumerate(context.candidates)}
+        return sorted(valid_set, key=lambda sid: position[sid])
+    return sorted(
+        valid_set,
+        key=lambda sid: (by_id[sid].display_name.casefold(), str(sid)),
+    )
+
+
 def handle_show_specialists(
     args: dict[str, Any], context: SpecialistContext
 ) -> ToolResult:
@@ -124,15 +152,21 @@ def handle_show_specialists(
         return _fallback_clarification("show_specialists_no_valid_ids")
 
     by_id = {c.id: c for c in context.candidates}
-    # ПОРЯДОК ВОССТАНАВЛИВАЕТСЯ ПО КОНТЕКСТУ, а не берётся из ответа модели.
+    # ПОРЯДОК НЕ БЕРЁТСЯ ИЗ ОТВЕТА МОДЕЛИ — и этого мало.
     #
-    # Раньше карточки шли в том порядке, в каком их перечислила модель, —
-    # то есть порядок, показанный человеку, определяла она. Это политика
-    # ранжирования, и она `LLM_FORBIDDEN` (контракт §2.1 C1, §15).
-    # Модель выбирает, КОГО показать из уже отобранных кандидатов;
-    # в каком порядке — решено до неё.
-    context_position = {c.id: index for index, c in enumerate(context.candidates)}
-    ordered_ids = sorted(valid_set, key=lambda sid: context_position[sid])
+    # Раньше здесь стояло только первое: карточки шли в порядке
+    # контекста, потому что порядок — политика ранжирования, а она
+    # `LLM_FORBIDDEN` (контракт §2.1 C1, §15). Намерение верное, но
+    # восстанавливался при этом порядок ЛЕГАСИ-ДВИЖКА, то есть защита
+    # от неверного авторитета стояла поверх другого неверного.
+    #
+    # Решение владельца В-16: потребитель вправе сохранять смысловой
+    # порядок **только когда его происхождение называет канонический
+    # Recommendation Authority**. Порядок движка, сохранённый идеально,
+    # остаётся порядком движка.
+    #
+    # Поэтому спрашивается происхождение, а не соблюдается намерение.
+    ordered_ids = _order_for_display(valid_set, context)
 
     items: list[dict[str, Any]] = []
     for sid in ordered_ids:
