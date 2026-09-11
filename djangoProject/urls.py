@@ -77,6 +77,13 @@ urlpatterns = [
         'api/v1/internal/me/identity/',
         include('users.internal_identity_urls'),
     ),
+    # DRF-1525 — «салон по slug» для экрана «подключить салон» админки
+    # бота: провижининг-only (IsIdentityProvisioningBearer), идемпотентно
+    # по slug. Человек UUID салона не вводит и не видит.
+    path(
+        'api/v1/internal/tenants/',
+        include('tenants.internal_urls'),
+    ),
     # #1016 S2 — internal Bearer REST surface the Ayla bot reads/writes
     # (slots + catalog mirror + booking create/cancel/reschedule).
     # Contract co-owned with S1: ai-bot-platform/docs/architecture/.
