@@ -39,6 +39,7 @@ from ayla_ai_core import (
 )
 
 from ai.application.services.specialist_context_builder import (
+    OrderProvenance as LocalOrderProvenance,
     SpecialistContext as LocalSpecialistContext,
     SpecialistContextBuilder,
 )
@@ -269,7 +270,11 @@ def get_concierge_for(
         local_context = state["local_context"]
         if local_context is None:  # pragma: no cover — defensive
             logger.error("ai.dispatcher.missing_local_context")
-            local_context = LocalSpecialistContext(candidates=[])
+            # Пустой список порядка не имеет — происхождение
+            # нейтральное, и это не отговорка: сохранять нечего.
+            local_context = LocalSpecialistContext(
+                order_provenance=LocalOrderProvenance.NEUTRAL, candidates=[],
+            )
 
         name = getattr(tool_call.function, "name", "") or ""
         raw_args = getattr(tool_call.function, "arguments", "") or "{}"
