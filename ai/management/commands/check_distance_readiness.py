@@ -55,6 +55,14 @@
 `--max-age-hours` превращает это из строки для чтения в **проверку**:
 пульс старше порога означает «мерю не ту машину», и выход ненулевой
 (код 2, отдельный от кода 1 «геокодирование не готово»).
+
+Дополнено 11.09.2026 по находке главного окна. На пилоте `last_login`
+оказался мёртв: поле обновляет форма входа Django, а каталог пускает по
+JWT, — опора, взятая именно за «пишется при каждом визите», отстала от
+регистраций на десять дней. Одна тихая опора в широком наборе прячется
+за чужой свежестью, поэтому возраст печатается у **каждой**, а
+`--min-fresh-anchors` требует, чтобы в порог уложилась не одна:
+единственная уцелевшая опора неотличима от заливки или миграции.
 """
 from __future__ import annotations
 
@@ -64,7 +72,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from ai.application.services.recommendation_engine import RecommendationEngine
-from core.measurement_subject import gather_pulse, newest, subject_lines
+from core.measurement_subject import fresh, gather_pulse, newest, subject_lines
 from users.models import SpecialistProfile
 
 
@@ -85,6 +93,14 @@ class Command(BaseCommand):
             help="Ненулевой код выхода, если координаты есть не у всех.",
         )
         parser.add_argument(
+            "--min-fresh-anchors", type=int, default=1,
+            help=(
+                "Сколько опор обязаны уложиться в --max-age-hours. Одна "
+                "свежая опора может оказаться единственной живой в мёртвом "
+                "наборе; для приёмки ставить 2."
+            ),
+        )
+        parser.add_argument(
             "--max-age-hours", type=float, default=None,
             help=(
                 "Код выхода 2, если последняя запись в контуре старше этого "
@@ -103,9 +119,15 @@ class Command(BaseCommand):
         # Два сбора дали бы напечатанный возраст и проверенный возраст из
         # разных мгновений, и расхождение осталось бы незамеченным.
         pulses = gather_pulse()
-        for line in subject_lines(pulses=pulses):
+        max_age_hours = options["max_age_hours"]
+        fresh_within = (
+            timedelta(hours=max_age_hours) if max_age_hours is not None else None
+        )
+        for line in subject_lines(pulses=pulses, fresh_within=fresh_within):
             self.stdout.write(line)
-        self._check_freshness(pulses, options["max_age_hours"])
+        self._check_freshness(
+            pulses, fresh_within, options["min_fresh_anchors"], max_age_hours,
+        )
         self.stdout.write("")
 
         # `all_tenants` не нужен: профили специалистов глобальны. Если это
@@ -160,7 +182,9 @@ class Command(BaseCommand):
         if options["require_ready"] and with_coords < total:
             raise SystemExit(1)
 
-    def _check_freshness(self, pulses, max_age_hours) -> None:
+    def _check_freshness(
+        self, pulses, fresh_within, min_fresh_anchors, max_age_hours,
+    ) -> None:
         """Пульс старше порога значит «мерю не ту машину».
 
         Отдельный код выхода (2, а не 1) намеренно: «геокодирование не
@@ -172,11 +196,11 @@ class Command(BaseCommand):
         сутками законно, и подставленное здесь число превращало бы тишину
         в обвинение. Пока порог не назван, возраст — строка для чтения.
         """
-        if max_age_hours is None:
+        if fresh_within is None:
             return
 
         freshest = newest(pulses)
-        limit = timedelta(hours=max_age_hours)
+        limit = fresh_within
         if freshest is None:
             self.stderr.write(self.style.ERROR(
                 "СВЕЖЕСТЬ НЕ ПОДТВЕРЖДЕНА: ни одна опора не ответила. "
@@ -185,12 +209,34 @@ class Command(BaseCommand):
             ))
             raise SystemExit(2)
 
-        age = timezone.now() - freshest.at
-        if age > limit:
+        # Свежих опор считаем ЧИСЛО, а не «есть ли хоть одна».
+        # 11.09.2026 на пилоте `last_login` оказался мёртв: поле пишет
+        # форма входа Django, а каталог пускает по JWT. Тихая опора в
+        # широком наборе прячется за чужой свежестью, и одна уцелевшая
+        # неотличима от заливки или миграции. Две независимые — отличима.
+        alive = fresh(pulses, limit)
+
+        # Две ветки РАЗДЕЛЕНЫ по `0 <` намеренно. Сначала было отдельное
+        # сравнение возраста самой новой записи с порогом — и подмена
+        # показала, что оно ничего не доказывает: «новейшая просрочена»
+        # и «свежих нуль» — одно и то же условие, поэтому счётчик ловил
+        # обе пробы, и отключение любой из проверок оставалось зелёным.
+        # Пересечение guard'ов читается как надёжность, а на деле делает
+        # каждый из них недоказуемым.
+        if not alive:
             self.stderr.write(self.style.ERROR(
                 f"НЕ ТА МАШИНА (или контур стоит): последняя запись — "
                 f"{freshest.at.isoformat()} ({freshest.label}), это старше "
                 f"порога {max_age_hours} ч. Числа ниже недействительны."
+            ))
+            raise SystemExit(2)
+
+        if len(alive) < min_fresh_anchors:
+            self.stderr.write(self.style.ERROR(
+                f"СВЕЖЕСТЬ НА ОДНОЙ ОПОРЕ: в порог уложилось {len(alive)} "
+                f"из {len(pulses)} ({', '.join(p.label for p in alive)}), "
+                f"требуется {min_fresh_anchors}. Одна опора не отличает "
+                f"живой контур от заливки; смотреть, какие опоры молчат."
             ))
             raise SystemExit(2)
 

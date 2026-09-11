@@ -53,7 +53,18 @@ PULSE_ANCHORS = (
     Anchor("записи к мастеру", "appointments.Appointment", "created_at"),
     Anchor("исходящие события", "appointments.OutboxEvent", "created_at"),
     Anchor("коды входа", "users.OTPCode", "created_at"),
+    # 11.09.2026, найдено главным окном на пилоте: здесь опора МЁРТВАЯ.
+    # `last_login` пишет форма входа Django, а каталог пускает по JWT —
+    # значит поле, выбранное именно за «пишется при каждом визите», не
+    # пишется вовсе и отстаёт от регистраций на десять дней. Опора
+    # оставлена: на контуре с формой входа она работает, а её молчание
+    # теперь видно возрастом в каждой строке.
     Anchor("входы пользователей", "users.User", "last_login"),
+    # Слабая намеренно: пишется один раз на пользователя, поэтому одна
+    # она свежести не доказывает. В наборе полезна — лишняя опора пульс
+    # не портит: свежесть берётся по самой новой, а у замороженной
+    # машины старые все.
+    Anchor("регистрации", "users.User", "date_joined"),
 )
 
 
@@ -103,6 +114,18 @@ def newest(pulses: list[Pulse]) -> Pulse | None:
     if not alive:
         return None
     return max(alive, key=lambda p: p.at)
+
+
+def fresh(pulses: list[Pulse], within: timedelta, now: datetime | None = None):
+    """Опоры, писавшие не позже `within` назад.
+
+    Считать их **числом**, а не «есть или нет», заставил разбор 11.09: одна
+    свежая опора может оказаться единственной живой в мёртвом наборе, и
+    отличить её от заливки или миграции нечем. Две независимые опоры,
+    согласные между собой, — другой разговор.
+    """
+    now = now or timezone.now()
+    return [p for p in pulses if p.at is not None and now - p.at <= within]
 
 
 def db_identity(connection=None) -> dict[str, object]:
@@ -173,7 +196,8 @@ def _age(value: datetime | None, now: datetime) -> str:
 
 
 def subject_lines(
-    connection=None, *, anchors=PULSE_ANCHORS, now=None, pulses=None
+    connection=None, *, anchors=PULSE_ANCHORS, now=None, pulses=None,
+    fresh_within: timedelta | None = None,
 ) -> list[str]:
     """Блок «кто отвечает на этот замер», готовый к печати.
 
@@ -209,8 +233,31 @@ def subject_lines(
             f"ПУЛЬС (новейшая запись)    : {freshest.at}  "
             f"{_age(freshest.at, now)}  ← {freshest.label}"
         )
-    for pulse in pulses:
-        mark = pulse.error or (pulse.at.isoformat() if pulse.at else "пусто")
+    if fresh_within is not None:
+        count = len(fresh(pulses, fresh_within, now))
+        lines.append(
+            f"СВЕЖИХ ОПОР                : {count} из {len(pulses)} "
+            f"в пределах порога"
+        )
+
+    # Возраст печатается у КАЖДОЙ опоры, а не только у самой новой.
+    # 11.09.2026 на пилоте `last_login` отстал от регистраций на десять
+    # дней — опора не пишется вовсе. Пятый исход («молчат все») этого не
+    # ловит: ОДНА тихая опора в широком наборе прячется за чужой
+    # свежестью, и видно её только возрастом рядом.
+    for pulse in sorted(
+        pulses, key=lambda p: (p.at is None, -(p.at.timestamp() if p.at else 0))
+    ):
+        if pulse.error:
+            mark = pulse.error
+        elif pulse.at is None:
+            mark = "пусто"
+        else:
+            mark = f"{pulse.at.isoformat(timespec='seconds')}  {_age(pulse.at, now)}"
+            if fresh_within is not None:
+                mark += (
+                    "  свежая" if now - pulse.at <= fresh_within else "  ПРОСРОЧЕНА"
+                )
         lines.append(f"    {pulse.label:<22}: {mark}")
 
     lines.append(OUTSIDE_HINT)

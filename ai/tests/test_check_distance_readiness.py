@@ -189,8 +189,11 @@ def test_stale_pulse_stops_the_measurement_with_its_own_exit_code():
     «мерю не ту машину» — новость про то, что данных вообще не было.
     """
     user = make_user()
+    long_ago = timezone.now() - timedelta(days=8)
+    # Оба поля: `регистрации` — такая же опора, и свежий `date_joined`
+    # оставил бы пульс живым, а тест доказывал бы не то, что называет.
     User.objects.filter(pk=user.pk).update(
-        last_login=timezone.now() - timedelta(days=8)
+        last_login=long_ago, date_joined=long_ago,
     )
 
     with pytest.raises(SystemExit) as exc:
@@ -209,6 +212,7 @@ def test_fresh_pulse_passes_the_same_threshold():
 
     report, _ = _run_full(max_age_hours=24)
     assert "специалистов всего" in report
+    assert "СВЕЖИХ ОПОР" in report
 
 
 def test_printed_pulse_and_checked_pulse_are_one_snapshot():
@@ -220,7 +224,9 @@ def test_printed_pulse_and_checked_pulse_are_one_snapshot():
     """
     user = make_user()
     stale = timezone.now() - timedelta(days=8)
-    User.objects.filter(pk=user.pk).update(last_login=stale)
+    User.objects.filter(pk=user.pk).update(
+        last_login=stale, date_joined=stale,
+    )
 
     out, err = StringIO(), StringIO()
     with pytest.raises(SystemExit):
@@ -235,3 +241,70 @@ def test_printed_pulse_and_checked_pulse_are_one_snapshot():
     stamp = stale.isoformat()
     assert stamp in printed or stale.strftime("%Y-%m-%d %H:%M") in printed
     assert stamp in refused
+
+
+# ---------------------------------------------------------------------------
+# Тихая опора: молчат не все, молчит одна
+# ---------------------------------------------------------------------------
+#
+# 11.09.2026 главное окно нашло на пилоте, что `last_login` там не пишется
+# вовсе: поле обновляет форма входа Django, а каталог пускает по JWT. Опора,
+# взятая именно за «пишется при каждом визите», отстала от регистраций на
+# десять дней. Исход «молчат ВСЕ» этого не ловит — одна тихая опора прячется
+# за чужой свежестью.
+
+
+def test_every_anchor_prints_its_own_age_not_only_the_freshest():
+    """У каждой опоры свой возраст, иначе мёртвую не видно.
+
+    Пульс по самой новой отвечает на «жива ли машина». На «жива ли
+    опора» отвечает только возраст рядом с каждой строкой.
+    """
+    user = make_user()
+    User.objects.filter(pk=user.pk).update(
+        last_login=timezone.now() - timedelta(days=10)
+    )
+
+    report, _ = _run_full(max_age_hours=24)
+    assert "входы пользователей   : " in report
+    assert "ПРОСРОЧЕНА" in report  # мёртвая опора названа
+    assert "свежая" in report      # живая рядом — значит дело не в машине
+
+
+def test_one_fresh_anchor_is_not_enough_when_two_are_required():
+    """Одна уцелевшая опора неотличима от заливки или миграции.
+
+    Вывод «контур жив» становится доказанным, когда его держат **две
+    независимые** опоры. Одна — это ещё гипотеза.
+    """
+    user = make_user()
+    User.objects.filter(pk=user.pk).update(
+        last_login=timezone.now() - timedelta(days=10)
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        _run_full(max_age_hours=24, min_fresh_anchors=2)
+    assert exc.value.code == 2
+
+
+def test_two_fresh_anchors_satisfy_the_same_requirement():
+    """Положительная стража к предыдущему тесту.
+
+    Без неё «требуется две» зеленело бы и на проверке, которая отвергает
+    всегда, — доказывался бы её постоянный отказ, а не счёт.
+    """
+    user = make_user()
+    User.objects.filter(pk=user.pk).update(last_login=timezone.now())
+
+    report, _ = _run_full(max_age_hours=24, min_fresh_anchors=2)
+    assert "специалистов всего" in report
+
+
+def test_dead_anchor_is_still_listed_not_dropped():
+    """Мёртвую опору не выбрасываем из набора — её молчание есть данные.
+
+    Убрать `last_login` значило бы потерять и контуры, где форма входа
+    работает, и сам признак «здесь вход идёт мимо Django».
+    """
+    assert any(a.field == "last_login" for a in PULSE_ANCHORS)
+    assert any(a.field == "date_joined" for a in PULSE_ANCHORS)
