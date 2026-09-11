@@ -424,25 +424,133 @@ class NutritionProfile(models.Model):
     # Health flags + skipped markers + allergies
     health_flags = models.JSONField(default=dict, blank=True)
 
-    # Computed norms (post-override)
-    bmr = models.PositiveIntegerField(default=0)
-    daily_kcal = models.PositiveIntegerField(default=0)
-    daily_protein_g = models.PositiveSmallIntegerField(default=0)
-    daily_fat_g = models.PositiveSmallIntegerField(default=0)
-    daily_carbs_g = models.PositiveSmallIntegerField(default=0)
-    daily_water_ml = models.PositiveIntegerField(default=0)
+    # ── Ориентиры (post-override) — NULL, когда ориентира нет ──────────
+    #
+    # §103 (OD-NUT-5), вариант A, решение владельца 11.09.2026: «значение
+    # NULL, источник none». До этого столбцы были ``default=0`` и ноль
+    # читался как «расчёта не было» по уговору внутри модуля. Уговор
+    # держался на том, что дневная норма ноль килокалорий физически
+    # невозможна, — но снаружи ноль всё равно ЧИСЛО: он попадает в
+    # арифметику, в JSON и на экран как «0 из 0 · 0 %». Отсутствие
+    # доезжает отсутствием (§65, §82): NULL нельзя ни сложить, ни
+    # показать, не заметив.
+    #
+    # Миграция ``0018`` ТОЛЬКО схемная: значения существующих строк она не
+    # трогает. Стирать данные живых людей в момент слияния нельзя —
+    # довод в докстринге ``purge_unconsented_body_parameters``. Очистка
+    # старых ориентиров — отдельная команда
+    # ``clear_targets_without_provenance`` (§103, N-b), запускаемая тем и
+    # тогда, кем решено.
+    bmr = models.PositiveIntegerField(null=True, blank=True, default=None)
+    daily_kcal = models.PositiveIntegerField(null=True, blank=True, default=None)
+    daily_protein_g = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_fat_g = models.PositiveSmallIntegerField(null=True, blank=True, default=None)
+    daily_carbs_g = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_water_ml = models.PositiveIntegerField(null=True, blank=True, default=None)
 
     # DRF-265: micronutrient RDA targets — recomputed on every upsert from
     # gender/age + health_flags via nutrition_profile_service.compute_rda.
     # Pattern engine (Track E) compares per-day intake against these.
-    daily_vitamin_d_iu = models.PositiveSmallIntegerField(default=0)
-    daily_vitamin_b12_mcg = models.FloatField(default=0.0)
-    daily_vitamin_c_mg = models.PositiveSmallIntegerField(default=0)
-    daily_iron_mg = models.FloatField(default=0.0)
-    daily_calcium_mg = models.PositiveSmallIntegerField(default=0)
-    daily_magnesium_mg = models.PositiveSmallIntegerField(default=0)
-    daily_omega3_g = models.FloatField(default=0.0)
-    daily_fiber_g = models.PositiveSmallIntegerField(default=0)
+    daily_vitamin_d_iu = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_vitamin_b12_mcg = models.FloatField(null=True, blank=True, default=None)
+    daily_vitamin_c_mg = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_iron_mg = models.FloatField(null=True, blank=True, default=None)
+    daily_calcium_mg = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_magnesium_mg = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_omega3_g = models.FloatField(null=True, blank=True, default=None)
+    daily_fiber_g = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+
+    # ── Происхождение ориентира (DRF-1623, срез N-d) ────────────────────
+    #
+    # Значение ориентира без происхождения — число неизвестно чьё. §92 п.5
+    # (решение владельца 10.09.2026) запрещает показывать посчитанный
+    # ориентир «как актуальный без его происхождения», а §85 требует
+    # воспроизводимости: те же входы и та же версия методики дают тот же
+    # результат. Оба требования об одном — о том, ЧТО СТОИТ ЗА ЧИСЛОМ.
+    #
+    # До этих полей ответа не было ни у кого: grep по ``method_version``,
+    # ``input_snapshot`` и ``target_source`` в ``nutrition/**`` давал ноль.
+    # Замер пилота 10.09 показал цену: у ДВУХ профилей из шести полный
+    # набор ориентиров при пустых весе, росте и возрасте — числа,
+    # выведенные из подставленной медианы, лежат рядом с выведенными из
+    # настоящих данных и ничем от них не отличаются.
+
+    class TargetsSource(models.TextChoices):
+        """Кем поставлен действующий ориентир.
+
+        ``UNKNOWN_LEGACY`` — не «пусто» и не умолчание, а НАЗВАННОЕ
+        состояние: ориентир посчитан до того, как происхождение начали
+        хранить. Проставить таким строкам ``AYLA_CALCULATED`` значило бы
+        утверждать то, чего мы не знаем: часть из них выведена из
+        подставленной пензенской медианы, а не из данных человека.
+        Судьбу этих строк решает отдельный срез (N-b) и открытый вопрос
+        владельцу OD-NUT-5; здесь они получают честное имя, а не удобное.
+        """
+
+        NONE = "none", "Ориентира нет"
+        UNKNOWN_LEGACY = "unknown_legacy", "Происхождение не сохранялось"
+        AYLA_CALCULATED = "ayla_calculated", "Рассчитано Ayla"
+        USER_ENTERED = "user_entered", "Установлено клиентом"
+
+    targets_source = models.CharField(
+        max_length=24,
+        choices=TargetsSource.choices,
+        # Умолчание — «ориентира нет»: новая строка профиля его и не
+        # имеет, пока расчёт не прошёл. Уже существующим строкам миграция
+        # проставит `unknown_legacy` — но только тем, у кого ориентир
+        # действительно есть, и это РАЗНЫЕ состояния, а не оттенки
+        # пустоты: «нет ориентира» и «ориентир есть, происхождение не
+        # сохранялось» требуют разной работы.
+        default=TargetsSource.NONE,
+        help_text=(
+            "Происхождение действующих ориентиров. `unknown_legacy` — "
+            "названное отсутствие: посчитано до введения этих полей."
+        ),
+    )
+    targets_method_versions = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Версии методик по видам ориентира: "
+            '{"calories": "mifflin_st_jeor_v1", '
+            '"fluids": "adult_beverages_reference_v1"}. Словарь, а не одна '
+            "строка, потому что у калорий и жидкости методики разные и "
+            "меняются порознь (§85). Пустой словарь — не сохранялось."
+        ),
+    )
+    targets_input_snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Входы, из которых посчитан ориентир, на момент расчёта (§85: "
+            "те же входы и версия дают тот же результат). Лежит ЗДЕСЬ, в "
+            "одной строке с параметрами тела, намеренно: при отзыве "
+            "согласия на расчёт (§92 п.4) удалять надо обе копии, а копию "
+            "в той же строке невозможно забыть."
+        ),
+    )
+    targets_computed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Когда посчитан действующий ориентир. NULL — не считался либо "
+            "считался до введения этих полей."
+        ),
+    )
 
     # Override audit
     goal_overridden_by = models.CharField(max_length=24, blank=True, default="")

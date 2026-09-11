@@ -30,13 +30,99 @@ version of this check — out of scope until the pilot expands there.
 """
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from django.conf import settings
 
-from appointments.domain.exceptions import BookingWindowError, SlotNotAvailableError
+from appointments.domain.exceptions import (
+    BookingWindowError,
+    HealthScreeningRequiredError,
+    SlotNotAvailableError,
+)
 from appointments.domain.policies import BookingWindowPolicy, DefaultBookingWindowPolicy
 from appointments.domain.value_objects import TimeInterval
+
+logger = logging.getLogger(__name__)
+
+
+def check_health_screening(resolved_service) -> None:
+    """Refuse a booking whose service needs — or might need — a screening.
+
+    ``resolved_service`` is the :class:`~services.service_resolver.
+    ResolvedService` the caller already produced — the resolver computes the
+    verdict where the ``SpecialistService`` edge is in hand, so this guard
+    reads an answer instead of going back to the ORM for what was read a
+    moment ago. The verdict is tri-state, and all three states matter:
+
+    * ``True``  — the catalog says a screening is required. Refuse,
+      ``HEALTH_CHECK_REQUIRED``.
+    * ``None``  — nobody has said anything: no canonical template, and
+      neither salon nor specialist raised the flag. Refuse,
+      ``HEALTH_CHECK_UNKNOWN``. Absence of evidence is not evidence of
+      safety for a medical check.
+    * ``False`` — somebody answered, and the answer was no. Allow.
+
+    ### Why the two refusals carry different names
+
+    They describe different people. One must pass a screening; the other is
+    waiting on the salon to answer a question nobody asked it. Outward the
+    surface may render one blunt sentence — the customer does not need our
+    taxonomy — but the counters must stay apart, or we lose the only number
+    that says how much of the refusal is our own missing data.
+
+    ### Why this is not part of the time-context rule set
+
+    ``CreateBookingDTO.time_override_reason`` lifts the WHOLE time contract:
+    booking window, slot grid, schedule frame, tenant closure, even
+    time-off. **It does not lift this guard, and must never be extended to.**
+    The override exists so a human can record a booking outside published
+    hours; a contraindication is not a scheduling rule and does not stop
+    being true because staff typed a reason. DRF-1545 already removed the
+    one mechanism that could open this gate per tenant — the owner's words
+    were «требование расспросить человека принадлежит процедуре, а не
+    площадке» — and re-introducing it as a side effect of a time override
+    would be the same hole under a different name and without a line in the
+    decisions register.
+
+    If a future reader thinks this guard's placement outside the override
+    branch is an oversight: it is not. It is the requirement.
+
+    ### Why creation only, and not reschedule
+
+    ``RescheduleBookingDTO`` carries no ``service_id`` — a reschedule moves
+    the time and cannot introduce a service whose health status was never
+    considered. The decision this guard protects is the decision to book,
+    and that decision is made once. Gating reschedule as well would, on the
+    day this ships, make every booking already on the pilot's books
+    unmovable (95 of 95 edges resolve UNKNOWN) — cost with no safety gained.
+    """
+    verdict = resolved_service.requires_health_check
+    if verdict is False:
+        return
+
+    if not resolved_service.health_check_answerable:
+        # Слой, у которого нет места под ответ, не «промолчал» — его не
+        # спрашивали, потому что спросить негде. Отказ тот же (§100:
+        # fail-closed), имя другое, и разница нужна не эстетике: за
+        # UNKNOWN стоит очередь разметки, за этим не стоит ничего.
+        reason = HealthScreeningRequiredError.NOT_APPLICABLE
+    elif verdict is True:
+        reason = HealthScreeningRequiredError.REQUIRED
+    else:
+        reason = HealthScreeningRequiredError.UNKNOWN
+    # Раздельные счётчики: наружу пойдёт одно грубое имя, внутрь — три
+    # разных положения. Без этой строки «гейт сработал N раз» не
+    # отвечает ни на один полезный вопрос: сколько из N — запрет,
+    # сколько наше незнание (работа для очереди разметки), а сколько
+    # закрытый устаревший путь (работы нет вовсе).
+    logger.info(
+        "booking.health_gate.refused reason=%s layer=%s service=%s",
+        reason,
+        resolved_service.kind,
+        resolved_service.service_id,
+    )
+    raise HealthScreeningRequiredError(reason)
 
 
 def check_grid_alignment(start_at) -> None:

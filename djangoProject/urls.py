@@ -62,6 +62,11 @@ urlpatterns = [
         'api/v1/internal/me/goals/select/',
         include('goals.select_urls'),
     ),
+    # DRF-1660 — переход состояния цели без замещающей (§97 OD-GOAL-B).
+    path(
+        'api/v1/internal/me/goals/state/',
+        include('goals.state_urls'),
+    ),
     # DRF-1344 — wellness-context read для решающего слоя бота: только
     # коды состояний (никогда значения наблюдений), fail-closed через
     # гейты wellness/services.py. Аддитивная поверхность.
@@ -76,6 +81,13 @@ urlpatterns = [
     path(
         'api/v1/internal/me/identity/',
         include('users.internal_identity_urls'),
+    ),
+    # DRF-1525 — «салон по slug» для экрана «подключить салон» админки
+    # бота: провижининг-only (IsIdentityProvisioningBearer), идемпотентно
+    # по slug. Человек UUID салона не вводит и не видит.
+    path(
+        'api/v1/internal/tenants/',
+        include('tenants.internal_urls'),
     ),
     # #1016 S2 — internal Bearer REST surface the Ayla bot reads/writes
     # (slots + catalog mirror + booking create/cancel/reschedule).

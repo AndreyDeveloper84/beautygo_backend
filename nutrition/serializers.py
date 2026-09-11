@@ -485,6 +485,19 @@ class DisclaimerAckSerializer(serializers.Serializer):
     screen = serializers.CharField(max_length=64)
 
 
+class ConsentAttestationSerializer(serializers.Serializer):
+    """Чьё согласие и под какой версией текста получено (§92).
+
+    Версия — не украшение и не необязательное поле: согласие без версии
+    через полгода нельзя отличить от согласия на другой текст, а §92
+    требует хранить «версию текста, дату, способ получения и отзыв».
+    Каталог версию не толкует — он отказывается принимать данные без неё.
+    """
+
+    type = serializers.CharField(max_length=64)
+    document_version = serializers.CharField(max_length=64)
+
+
 class NutritionProfileUpsertSerializer(serializers.Serializer):
     """POST /internal/profile/ request — every field optional (PATCH semantics).
 
@@ -521,6 +534,14 @@ class NutritionProfileUpsertSerializer(serializers.Serializer):
     )
     disclaimer_acked = DisclaimerAckSerializer(required=False)
     complete = serializers.BooleanField(required=False, default=False)
+    #: Утверждение вызывающего о согласии (§92, срез N-a2). Здесь
+    #: `required=False` намеренно: обязательность зависит не от ручки, а
+    #: от СОСТАВА запроса — дневник без параметров тела согласия этого
+    #: вида не требует. Решает
+    #: `nutrition.services.personal_calculation_consent.require_consent`,
+    #: и решает ПОСЛЕ валидации, чтобы отказ по согласию не подменялся
+    #: отказом по формату.
+    consent = ConsentAttestationSerializer(required=False)
 
     def validate_health_flags(self, value: dict) -> dict:
         unknown = set(value.keys()) - _HEALTH_FLAG_KEYS
@@ -555,6 +576,14 @@ class NutritionProfileResponseSerializer(serializers.Serializer):
     overrides_applied = serializers.ListField(child=serializers.DictField())
     # DRF-1339: inputs substituted with defaults for the norm computation.
     assumed_inputs = serializers.ListField(child=serializers.CharField())
+
+    # DRF-1623 N-d — происхождение ориентира: {source, method_versions,
+    # computed_at}. Объявлено ОБЯЗАТЕЛЬНЫМ полем ответа, а не
+    # ``required=False``: §92 п.5 запрещает показывать ориентир без
+    # происхождения, и необязательный ключ означал бы, что показывающая
+    # сторона может его не получить и всё равно показать. Снимка входов
+    # здесь нет намеренно — он для воспроизводимости, а не для экрана.
+    targets_provenance = serializers.DictField()
 
     disclaimer_acked = serializers.JSONField(allow_null=True)
     onboarded_at = serializers.DateTimeField(allow_null=True)

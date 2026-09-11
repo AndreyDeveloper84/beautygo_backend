@@ -63,6 +63,36 @@ from typing import Any
 #: четыре, что стоят в формуле Миффлина — Сан Жеора.
 REQUIRED_INPUTS: tuple[str, ...] = ("gender", "age", "height_cm", "weight_kg")
 
+#: Версия методики расчёта калорий — §85, решение владельца 09.09.2026:
+#: Миффлин — Сан Жеор с коэффициентом активности и поправкой на цель.
+#:
+#: Версия здесь не украшение, а условие воспроизводимости. §85 требует
+#: двух вещей сразу: те же входы и та же версия дают тот же результат, и
+#: изменение методики НЕ переписывает молча уже показанные значения.
+#: Строка, сохранённая рядом с ориентиром, — единственное, что позволит
+#: через полгода сказать, по какой формуле посчитано число, которое
+#: человек видит на экране.
+CALORIES_METHOD_VERSION: str = "mifflin_st_jeor_v1"
+
+#: Входы, уходящие в снимок вместе с результатом. Список ШИРЕ, чем
+#: ``REQUIRED_INPUTS``: активность, цель и темп на результат влияют, и без
+#: них расчёт не воспроизвести.
+#:
+#: ``health_flags`` в снимок НЕ входят намеренно. Это спецкатегория
+#: 152-ФЗ, и держать её второй копией рядом с ориентиром значило бы
+#: расширить периметр хранения ради воспроизводимости, которой она не
+#: добавляет: след лестницы переопределений и так пишется в
+#: ``overrides_applied``, причём именами причин, а не самими признаками.
+SNAPSHOT_INPUTS: tuple[str, ...] = (
+    "gender",
+    "age",
+    "height_cm",
+    "weight_kg",
+    "activity_coefficient",
+    "goal",
+    "pace",
+)
+
 # ``DEFAULT_ACTIVITY`` оставлен и НЕ снят здесь намеренно. Он того же
 # класса — умолчание, равное осмысленному значению, — но живёт ещё и в
 # схеме: ``NutritionProfile.activity_coefficient = FloatField(default=1.4)``.
@@ -144,27 +174,59 @@ class ProfileInputs:
 
 @dataclass
 class ComputedNorms:
-    bmr: int
-    daily_kcal: int
-    daily_protein_g: int
-    daily_fat_g: int
-    daily_carbs_g: int
+    """Результат расчёта — или ОТКАЗ, у которого все ориентиры ``None``.
+
+    ``int | None``, а не ``int`` с нулём в роли «нет» (§103, вариант A):
+    ноль — число, и в арифметике, в JSON и на экране он ведёт себя как
+    число. ``None`` ни сложить, ни показать, не заметив, нельзя. Столбцы
+    профиля объявлены nullable той же правкой (миграция ``0018``), так что
+    отказ доезжает до базы отсутствием, а не нулём.
+    """
+
+    bmr: int | None
+    daily_kcal: int | None
+    daily_protein_g: int | None
+    daily_fat_g: int | None
+    daily_carbs_g: int | None
     goal: str
     pace: str
     goal_overridden_by: str
     overrides_applied: list[dict[str, Any]] = field(default_factory=list)
 
+    # ── Происхождение (DRF-1623 N-d) ────────────────────────────────────
+    #
+    # Едет ВМЕСТЕ с результатом, а не собирается вызывающей стороной по
+    # памяти. Собранное снаружи происхождение — пересказ: оно утверждало
+    # бы про расчёт то, что вызывающий о нём думает, а не то, что расчёт
+    # сделал. Здесь же снимок собирает та самая функция, которая считала.
+    #
+    # У ОТКАЗА происхождения нет: при нехватке входов оба поля остаются
+    # пустыми, и по ним видно, что ориентира не появилось. Заполнить их
+    # на отказе значило бы выдать несостоявшийся расчёт за состоявшийся.
+    method_versions: dict[str, str] = field(default_factory=dict)
+    input_snapshot: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def computed(self) -> bool:
+        """Состоялся ли расчёт. Пустой снимок — расчёта не было."""
+        return bool(self.input_snapshot)
+
     # DRF-265: micronutrient RDA targets (USDA / NIH ODS-derived).
-    # Filled by compute_rda(); pure ints/floats — no override audit
-    # because RDA adjustments are deterministic (age/gender/flags-driven).
-    daily_vitamin_d_iu: int = 0
-    daily_vitamin_b12_mcg: float = 0.0
-    daily_vitamin_c_mg: int = 0
-    daily_iron_mg: float = 0.0
-    daily_calcium_mg: int = 0
-    daily_magnesium_mg: int = 0
-    daily_omega3_g: float = 0.0
-    daily_fiber_g: int = 0
+    # Filled by compute_rda(); no override audit because RDA adjustments
+    # are deterministic (age/gender/flags-driven).
+    #
+    # ``None`` на отказе — и у RDA тоже, хотя RDA считается только от пола
+    # и возраста: расчёт либо состоялся целиком, либо не состоялся.
+    # Половина ориентиров при пустой другой половине выглядела бы как
+    # «посчитали, но не всё», а посчитано не было ничего.
+    daily_vitamin_d_iu: int | None = None
+    daily_vitamin_b12_mcg: float | None = None
+    daily_vitamin_c_mg: int | None = None
+    daily_iron_mg: float | None = None
+    daily_calcium_mg: int | None = None
+    daily_magnesium_mg: int | None = None
+    daily_omega3_g: float | None = None
+    daily_fiber_g: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -186,28 +248,48 @@ def _missing_inputs(inputs: ProfileInputs) -> list[str]:
     return missing
 
 
+def _input_snapshot(inputs: ProfileInputs, *, goal: str, pace: str) -> dict[str, Any]:
+    """Снимок входов состоявшегося расчёта — §85, воспроизводимость.
+
+    Собирается по :data:`SNAPSHOT_INPUTS`, а не перечислением полей
+    руками: список один, и он же читается тестом. Перечисленный дважды,
+    он разошёлся бы при следующем поле, и разошёлся бы молча.
+
+    ``goal`` и ``pace`` передаются отдельно, потому что к моменту вызова
+    лестница переопределений могла их изменить, и в снимок обязано
+    попасть то, ПО ЧЕМУ считали.
+    """
+    snapshot: dict[str, Any] = {}
+    for name in SNAPSHOT_INPUTS:
+        snapshot[name] = getattr(inputs, name, None)
+    snapshot["goal"] = goal
+    snapshot["pace"] = pace
+    return snapshot
+
+
 def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
     """Pure deterministic computation — или ОТКАЗ, если входов не хватает.
 
     Раньше функция заполняла пропуски медианой пензенской аудитории и
     считала всегда. Теперь пропуск любого из ``REQUIRED_INPUTS`` отменяет
-    расчёт целиком: возвращаются нули и запись в аудите с именем отказа.
+    расчёт целиком: все ориентиры ``None`` и запись в аудите с именем
+    отказа.
 
-    Нули, а не ``None``: столбцы профиля объявлены ``PositiveIntegerField
-    (default=0)``, и переводить их в nullable — миграция существующих
-    клиентов, отдельный срез. Ноль здесь безопасен ровно потому, что
-    дневная норма ноль калорий физически невозможна, и все потребители
-    уже проверяют её на положительность. Наружу отказ уезжает не нулём:
-    ключ ориентира сериализатор выкидывает (``OmitAbsentTargetsMixin``).
+    ``None``, а не нули (§103, вариант A). Здесь стояли нули с доводом
+    «столбцы объявлены ``default=0``, переводить их в nullable — отдельный
+    срез». Это тот срез: столбцы nullable (миграция ``0018``), и отказ
+    доезжает до базы отсутствием. Ноль был безопасен по уговору («норма
+    ноль калорий невозможна»), а уговор — это то, что первый читатель вне
+    модуля не знает: снаружи ноль всё равно число.
     """
     missing = _missing_inputs(inputs)
     if missing:
         return ComputedNorms(
-            bmr=0,
-            daily_kcal=0,
-            daily_protein_g=0,
-            daily_fat_g=0,
-            daily_carbs_g=0,
+            bmr=None,
+            daily_kcal=None,
+            daily_protein_g=None,
+            daily_fat_g=None,
+            daily_carbs_g=None,
             goal=inputs.goal or "maintain",
             pace=inputs.pace or "moderate",
             goal_overridden_by="",
@@ -308,6 +390,14 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
         pace=pace,
         goal_overridden_by=overridden_by,
         overrides_applied=overrides,
+        # Происхождение состоявшегося расчёта. ``goal`` и ``pace`` берутся
+        # ПОСЛЕ лестницы переопределений — то есть в снимке лежит то, по
+        # чему на самом деле считали, а не то, что человек попросил.
+        # Разница между ними уже названа в ``overrides_applied``, и
+        # дублировать её снимком значило бы завести второй ответ на один
+        # вопрос.
+        method_versions={"calories": CALORIES_METHOD_VERSION},
+        input_snapshot=_input_snapshot(inputs, goal=goal, pace=pace),
         # DRF-265: RDA layer — independent of macro override ladder.
         daily_vitamin_d_iu=rda["vitamin_d_iu"],
         daily_vitamin_b12_mcg=rda["vitamin_b12_mcg"],

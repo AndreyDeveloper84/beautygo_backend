@@ -27,7 +27,7 @@ import pytest
 from rest_framework.test import APIClient
 
 from appointments.models import Appointment
-from services.models import Service, ServiceCategory
+from services.models import SalonService, ServiceCategory, SpecialistService
 from tenants.models import Tenant
 from users.models import SpecialistProfile, TenantUserRelationship, User
 
@@ -81,15 +81,39 @@ def category(db):
 
 @pytest.fixture
 def service_in_b(olga_in_b, category):
-    return Service.objects.create(
-        specialist=olga_in_b,
+    # Тенант читаем ИЗ БАЗЫ, а не из объекта: профиль здесь
+    # правился отдельным экземпляром, и закешированный `.tenant`
+    # показывает подставной тенант autouse-фикстуры вместо
+    # настоящего. Резолвер фильтрует по тенанту, и расхождение
+    # читалось бы как «услуги не существует».
+    _tenant_id = SpecialistProfile.objects.values_list(
+        "tenant_id", flat=True
+    ).get(pk=olga_in_b.pk)
+    salon_service = SalonService.objects.create(
+        tenant_id=_tenant_id,
         category=category,
         name="Manicure",
-        price=Decimal("1500.00"),
         duration_minutes=60,
+        base_price=Decimal("1500.00"),
         is_active=True,
-        buffer_after_minutes=0,
+        # §100: путь маркетплейса закрыт fail-closed — он не несёт
+        # медицинского признака и отвечает NOT_APPLICABLE. Предмет
+        # этого файла — кросс-тенантная изоляция, а не слой каталога,
+        # поэтому фикстура переехала на слой, которым идёт боевая
+        # запись. Салон отвечает на вопрос о здоровье явным «нет»:
+        # это ответ, а не умолчание колонки — после 0018 они
+        # различимы.
+        requires_health_check=False,
     )
+    SpecialistService.objects.create(
+        salon_service=salon_service,
+        specialist=olga_in_b,
+        duration_minutes=60,
+        price=Decimal("1500.00"),
+        buffer_after_minutes=0,
+        is_active=True,
+    )
+    return salon_service
 
 
 def _future_iso(hours: int = 3) -> str:
@@ -226,9 +250,37 @@ class TestNonCrossTenantPaths:
         category = ServiceCategory.objects.create(
             name="Same", slug="ct404-same",
         )
-        service = Service.objects.create(
-            specialist=p, category=category, name="Same Service",
-            price=Decimal("1500"), duration_minutes=60, is_active=True,
+        # Тенант читаем ИЗ БАЗЫ, а не из объекта: профиль здесь
+        # правился отдельным экземпляром, и закешированный `.tenant`
+        # показывает подставной тенант autouse-фикстуры вместо
+        # настоящего. Резолвер фильтрует по тенанту, и расхождение
+        # читалось бы как «услуги не существует».
+        _tenant_id = SpecialistProfile.objects.values_list(
+            "tenant_id", flat=True
+        ).get(pk=p.pk)
+        service = SalonService.objects.create(
+            tenant_id=_tenant_id,
+            category=category,
+            name="Same Service",
+            duration_minutes=60,
+            base_price=Decimal("1500"),
+            is_active=True,
+            # §100: путь маркетплейса закрыт fail-closed — он не несёт
+            # медицинского признака и отвечает NOT_APPLICABLE. Предмет
+            # этого файла — кросс-тенантная изоляция, а не слой каталога,
+            # поэтому фикстура переехала на слой, которым идёт боевая
+            # запись. Салон отвечает на вопрос о здоровье явным «нет»:
+            # это ответ, а не умолчание колонки — после 0018 они
+            # различимы.
+            requires_health_check=False,
+        )
+        SpecialistService.objects.create(
+            salon_service=service,
+            specialist=p,
+            duration_minutes=60,
+            price=Decimal("1500"),
+            buffer_after_minutes=0,
+            is_active=True,
         )
 
         tur_count_before = TenantUserRelationship.objects.filter(
