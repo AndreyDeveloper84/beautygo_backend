@@ -147,10 +147,19 @@ class TestProvenanceIsStoredAndLeavesTheService:
         assert provenance["method_versions"] == {"calories": CALORIES_METHOD_VERSION}
         assert provenance["computed_at"] is not None
 
-        # Снимок входов наружу НЕ уходит: он для воспроизводимости на
-        # нашей стороне, а не для экрана. Отдать его значило бы разослать
-        # параметры тела туда, где они не нужны.
-        assert "input_snapshot" not in provenance
+        # Снимок входов уезжает владельцу данных (решение владельца
+        # 11.09.2026 §5.1: «методика и использованные данные показываются
+        # человеку»). До этого решения ключа не было намеренно — и тест
+        # это стерёг; теперь стережёт обратное, и ровно так же строго:
+        # снимок это ТЕ ЖЕ входы, что и в расчёте, а не пересказ полей
+        # профиля, и в нём нет спецкатегории (health_flags).
+        snapshot = provenance["input_snapshot"]
+        assert set(snapshot) == set(SNAPSHOT_INPUTS)
+        assert snapshot["weight_kg"] == 62
+        assert snapshot["gender"] == "female"
+        assert snapshot["activity_coefficient"] == 1.375
+        assert "health_flags" not in snapshot
+        assert "pregnant" not in snapshot
 
     def test_a_refused_calculation_reports_no_target_not_a_stale_source(
         self, django_user_model
@@ -188,3 +197,7 @@ class TestProvenanceIsStoredAndLeavesTheService:
         assert provenance["source"] == "none"
         assert provenance["method_versions"] == {}
         assert provenance["computed_at"] is None
+        # Снимок стёрт вместе с ориентиром: наружу пустой словарь, а не
+        # входы прошлого расчёта, которые объясняли бы число, которого
+        # больше нет.
+        assert provenance["input_snapshot"] == {}

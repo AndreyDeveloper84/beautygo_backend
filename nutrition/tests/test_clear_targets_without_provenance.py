@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone as dt_tz
+from datetime import datetime, timezone as dt_tz
 from io import StringIO
 from unittest.mock import patch
 
@@ -431,8 +431,16 @@ class TestDiaryDoesNotDependOnTargets:
         assert water.ml == 250
         assert water.today_norm_water_ml is None
 
+        # День — ОТ ТОГО ЖЕ ``now``, что и запись, и в той же зоне, в которой
+        # сводка режет сутки (``datetime.combine(day, …, tzinfo=utc)``).
+        # ``date.today()`` здесь красило dev три часа в сутки: Django ставит
+        # ``TZ = settings.TIME_ZONE`` (Europe/Moscow), и с 21:00 UTC
+        # локальная дата уже «завтра», а запись лежит во «вчера» по UTC —
+        # сводка за «сегодня» находила ноль (прогон dev c40666f4, 00:00 MSK).
+        # Пояс прогона — молчаливый параметр; тест обязан расходиться при
+        # любом пересчёте, а не совпадать по удаче.
         summary = NutritionSummaryService().summary(
-            user_id=user.id, day=date.today(),
+            user_id=user.id, day=now.date(),
         )
         data = NutritionSummaryResponseSerializer(summary).data
         assert data["calories_total"] == pytest.approx(log.calories)
