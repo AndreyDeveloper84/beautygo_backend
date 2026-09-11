@@ -141,9 +141,35 @@ class TestAbsentObjectIsNotSuccess:
         output = _run("--apply")
 
         assert "Удалено (объект + строка): 1" in output
-        assert "Строка снята, объекта не было: 1" in output
+        assert "Строка снята, объекта нет в ЭТОМ хранилище: 1" in output
         # Обе строки сняты — исход отличается отчётом, а не действием.
         assert not FoodScan.objects.filter(pk__in=[real.pk, ghost.pk]).exists()
+
+    def test_absence_here_is_not_called_proof_of_deletion(self, user) -> None:
+        """«Объекта нет» значит «нет ЗДЕСЬ», и отчёт обязан это сказать.
+
+        Пилот переехал 03.09; объекты прежних строк могли остаться в
+        MinIO брошенной машины. Отличить «удалён» от «лежит в другом
+        месте» изнутри нельзя — значит нельзя и молчать об этом.
+        """
+        ghost = _scan(user, age_days=40)
+        ghost.image.storage.delete(ghost.image.name)
+
+        output = _run("--apply")
+
+        assert "НЕ доказательство удаления" in output
+
+    def test_a_row_that_never_had_a_photo_is_counted_apart(self, user) -> None:
+        """Пятый исход. «Фотография была и делась» и «её не было никогда»
+        — разные утверждения; слитые, они сообщали бы об исчезновении
+        снимков, которых не существовало."""
+        bare = _scan(user, age_days=40, with_image=False)
+
+        output = _run("--apply")
+
+        assert "Строка снята, фотографии не было вовсе: 1" in output
+        assert "Строка снята, объекта нет в ЭТОМ хранилище: 0" in output
+        assert not FoodScan.objects.filter(pk=bare.pk).exists()
 
 
 class TestTheClockAndTheDryRun:
