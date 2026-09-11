@@ -86,3 +86,8 @@ build/
 # Test logs
 test_results.log
 tests/integration_results.log
+
+# DRF-1661. Вывод `manage.py surface_state --write` — замер, а не исходник.
+# Пишется шагом выкладки в дерево; отслеживаемым он ронял бы следующий
+# `git checkout` («local changes would be overwritten»).
+docs/generated/
