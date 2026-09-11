@@ -234,6 +234,7 @@ class HomeView(APIView):
             RecommendationEngine,
             RecommendationQuery,
         )
+        from goals.wiring import goal_category_ids_for
 
         # If client didn't share geo, fall back to top-rated (RecommendationEngine
         # treats None lat/lon as neutral 0.5 distance score, so rating dominates).
@@ -249,9 +250,6 @@ class HomeView(APIView):
         #
         # Ушло отсюда и НЕ ВЕРНЁТСЯ без нового решения владельца:
         #
-        #   goal_category_ids   участие цели (прежнее OD-1). Цель — это
-        #                       намерение человека, и выдача, собранная
-        #                       по ней, персональна, как её ни назови.
         #   client_id           история визитов (`WEIGHT_HISTORY`).
         #                       §125 её не называет — это моё чтение
         #                       «не выдаёт себя за Recommendation»:
@@ -275,6 +273,17 @@ class HomeView(APIView):
                 client_lon=lon,
                 city=city,
                 limit=LIMIT_NEARBY,
+                # OD-1 ОСТАЁТСЯ. Я убирал отсюда и цель тоже, читая §125
+                # как «никакой персонализации». Это было МОЁ чтение, а не
+                # слова владельца: §125 говорит, что секция не выдаёт себя
+                # за semantic Recommendation, и не отменяет OD-1, который
+                # прямо велит цели влиять на пассивную выдачу — и который
+                # закреплён тестами `goals/tests/test_goal_wiring_od1.py`.
+                #
+                # Два решения владельца сходятся здесь под углом, и выбор
+                # между ними не инженерный. Пока владелец не сказал иначе,
+                # действует то, у которого есть сторож.
+                goal_category_ids=goal_category_ids_for(user),
             ),
         )
         return [
