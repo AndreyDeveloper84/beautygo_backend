@@ -252,10 +252,12 @@ class IsInternalBearer(permissions.BasePermission):
 
 
 class IsIdentityProvisioningBearer(permissions.BasePermission):
-    """Provisioning-only Bearer for the identity-binding endpoint.
+    """Provisioning-only Bearer for the provisioning endpoints.
 
-    Used ONLY by ``POST /api/v1/internal/users/bind-external/``
-    (E2E-BOT-02B hardening). Identity binding takes a caller-named
+    Used by ``POST /api/v1/internal/users/bind-external/`` (E2E-BOT-02B
+    hardening) and, since DRF-1525, by ``POST /api/v1/internal/tenants/``
+    (§11 свода владельца: заведение салона — та же сила, что связывание
+    личности, и тот же токен). Identity binding takes a caller-named
     ``(external_user_id, ayla_user_id)`` pair with no server-side proof
     of ownership, so it must NOT be reachable by the standard BOT
     runtime credential: this class checks
