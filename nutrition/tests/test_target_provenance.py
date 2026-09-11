@@ -29,6 +29,11 @@ from nutrition.services.nutrition_profile_service import (
     compute_norms,
 )
 
+#: §103 N-b: пересчёт — только с основанием; сервисные вызовы объявляют
+#: утверждение о согласии как предусловие (сторож — в
+#: ``test_targets_recompute_gate.py``).
+CONSENT = {"type": "personal_calculation", "document_version": "v1"}
+
 
 def _full_inputs(**overrides) -> ProfileInputs:
     base = dict(
@@ -97,7 +102,8 @@ class TestARefusalIsNotDressedAsACalculation:
         norms = compute_norms(_full_inputs(**{missing: None}))
 
         # Положительная стража: отказ действительно произошёл и НАЗВАН.
-        assert norms.daily_kcal == 0
+        # ``None``, не ноль (§103): отказ — отсутствие, а не число.
+        assert norms.daily_kcal is None
         assert [o["reason"] for o in norms.overrides_applied] == ["insufficient_inputs"]
 
         assert norms.computed is False
@@ -125,6 +131,7 @@ class TestProvenanceIsStoredAndLeavesTheService:
         body = self._upsert(
             user,
             {
+                "consent": CONSENT,
                 "gender": "female",
                 "age": 30,
                 "height_cm": 168,
@@ -161,6 +168,7 @@ class TestProvenanceIsStoredAndLeavesTheService:
         first = self._upsert(
             user,
             {
+                "consent": CONSENT,
                 "gender": "female",
                 "age": 30,
                 "height_cm": 168,
@@ -170,9 +178,12 @@ class TestProvenanceIsStoredAndLeavesTheService:
         )
         assert first["targets_provenance"]["source"] == "ayla_calculated"
 
-        second = self._upsert(user, {"weight_kg": None})
+        second = self._upsert(user, {"consent": CONSENT, "weight_kg": None})
 
-        assert second["norms"]["daily_kcal"] == 0, "стража: расчёт действительно отменён"
+        # Стража: расчёт действительно отменён. Проверяется отсутствием
+        # блока, а не нулём в нём — с N-c ноль перестал быть
+        # представимым (`norms` уезжает пустым).
+        assert second["norms"] == {}
         provenance = second["targets_provenance"]
         assert provenance["source"] == "none"
         assert provenance["method_versions"] == {}

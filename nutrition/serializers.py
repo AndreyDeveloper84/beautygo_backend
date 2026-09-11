@@ -485,6 +485,19 @@ class DisclaimerAckSerializer(serializers.Serializer):
     screen = serializers.CharField(max_length=64)
 
 
+class ConsentAttestationSerializer(serializers.Serializer):
+    """Чьё согласие и под какой версией текста получено (§92).
+
+    Версия — не украшение и не необязательное поле: согласие без версии
+    через полгода нельзя отличить от согласия на другой текст, а §92
+    требует хранить «версию текста, дату, способ получения и отзыв».
+    Каталог версию не толкует — он отказывается принимать данные без неё.
+    """
+
+    type = serializers.CharField(max_length=64)
+    document_version = serializers.CharField(max_length=64)
+
+
 class NutritionProfileUpsertSerializer(serializers.Serializer):
     """POST /internal/profile/ request — every field optional (PATCH semantics).
 
@@ -521,6 +534,14 @@ class NutritionProfileUpsertSerializer(serializers.Serializer):
     )
     disclaimer_acked = DisclaimerAckSerializer(required=False)
     complete = serializers.BooleanField(required=False, default=False)
+    #: Утверждение вызывающего о согласии (§92, срез N-a2). Здесь
+    #: `required=False` намеренно: обязательность зависит не от ручки, а
+    #: от СОСТАВА запроса — дневник без параметров тела согласия этого
+    #: вида не требует. Решает
+    #: `nutrition.services.personal_calculation_consent.require_consent`,
+    #: и решает ПОСЛЕ валидации, чтобы отказ по согласию не подменялся
+    #: отказом по формату.
+    consent = ConsentAttestationSerializer(required=False)
 
     def validate_health_flags(self, value: dict) -> dict:
         unknown = set(value.keys()) - _HEALTH_FLAG_KEYS

@@ -15,7 +15,6 @@ Per DRF-105 / M3. Scoring model:
 
   rating          30%
   distance        25%
-  availability    20%
   service match   15%
   client history  10%
 
@@ -65,17 +64,37 @@ logger = logging.getLogger(__name__)
 
 # --- Scoring weights — DRF-105 contract --------------------------------------
 
-WEIGHT_RATING = 0.30
-WEIGHT_DISTANCE = 0.25
-WEIGHT_AVAILABILITY = 0.20
-WEIGHT_SERVICE_MATCH = 0.15
-WEIGHT_HISTORY = 0.10
+# Доступности здесь БОЛЬШЕ НЕТ, и это не оптимизация — снята фикция.
+#
+# Компонент `availability` весил 20% и возвращал `1.0` ВСЕМ: он проверял
+# `is_booking_enabled`, а кандидаты этим же флагом уже отфильтрованы
+# выше. Пятая часть формулы не различала никого.
+#
+# Поведение это не меняло (константа сокращается), но читалось как
+# работающий механизм: всякий, кто видел «availability 20%», полагал,
+# что подбор учитывает занятость. Не учитывал. §125 объявил секцию
+# ЧЕСТНЫМ каталогом, и вес, называющийся доступностью без доступности,
+# противоречит этому сильнее, чем её отсутствие.
+#
+# Оставшиеся четыре перенормированы пропорционально: их отношения
+# сохранены, сумма снова 1.0. Порядок кандидатов от этого не меняется —
+# и это доказано ПРОГОНОМ, а не рассуждением, см.
+# `ai/tests/test_availability_fiction_removed.py`.
+#
+#   было           стало (× 1/0.80)
+#   rating   0.30   0.375
+#   distance 0.25   0.3125
+#   service  0.15   0.1875
+#   history  0.10   0.125
+WEIGHT_RATING = 0.375
+WEIGHT_DISTANCE = 0.3125
+WEIGHT_SERVICE_MATCH = 0.1875
+WEIGHT_HISTORY = 0.125
 
 # Sanity check: weights must sum to 1.0 (within float tolerance) so the
 # composite score stays in [0, 1].
 _TOTAL_WEIGHT = (
-    WEIGHT_RATING + WEIGHT_DISTANCE + WEIGHT_AVAILABILITY
-    + WEIGHT_SERVICE_MATCH + WEIGHT_HISTORY
+    WEIGHT_RATING + WEIGHT_DISTANCE + WEIGHT_SERVICE_MATCH + WEIGHT_HISTORY
 )
 assert abs(_TOTAL_WEIGHT - 1.0) < 1e-9, f"weights must sum to 1.0, got {_TOTAL_WEIGHT}"
 
@@ -158,7 +177,6 @@ class ScoreBreakdown:
 
     rating: float
     distance: float
-    availability: float
     service_match: float
     history: float
 
@@ -167,7 +185,6 @@ class ScoreBreakdown:
         return (
             WEIGHT_RATING * self.rating
             + WEIGHT_DISTANCE * self.distance
-            + WEIGHT_AVAILABILITY * self.availability
             + WEIGHT_SERVICE_MATCH * self.service_match
             + WEIGHT_HISTORY * self.history
         )
@@ -183,7 +200,6 @@ class ScoreBreakdown:
         items = [
             ("Высокий рейтинг", self.rating * WEIGHT_RATING),
             ("Близко", self.distance * WEIGHT_DISTANCE),
-            ("Свободные слоты", self.availability * WEIGHT_AVAILABILITY),
             ("Подходящие услуги", self.service_match * WEIGHT_SERVICE_MATCH),
             ("Уже записывались", self.history * WEIGHT_HISTORY),
         ]
@@ -278,7 +294,6 @@ class RecommendationEngine:
             breakdown = ScoreBreakdown(
                 rating=self._score_rating(s),
                 distance=self._score_distance(distance),
-                availability=self._score_availability(s),
                 service_match=self._score_service_match(s, query),
                 history=self._score_history(s, history_set, history_categories),
             )
@@ -529,19 +544,21 @@ class RecommendationEngine:
             return 0.0
         return 1.0 - (distance_km / self._max_distance_km)
 
-    @staticmethod
-    def _score_availability(s: SpecialistProfile) -> float:
-        """MVP proxy: binary on ``is_booking_enabled``.
-
-        Real slot count would mean N calls to AvailabilityQueryService —
-        too expensive on the recommendation hot path. Phase 6 follow-up:
-        precompute ``has_slots_next_7d`` flag via Celery beat and read here.
-        """
-        # All candidates are pre-filtered by is_booking_enabled=True,
-        # so this currently returns 1.0 for everyone. Kept as separate
-        # sub-score so the Phase 6 upgrade has a single place to land
-        # without reshaping the scoring model.
-        return 1.0
+    # НАЗВАННЫЙ ПРОБЕЛ: ранжирование НЕ УЧИТЫВАЕТ ЗАНЯТОСТЬ.
+    #
+    # Здесь стоял `_score_availability`: вес 20% и `return 1.0`
+    # для всех. Снят как фикция (§125). Настоящего входа —
+    # «есть ли у мастера свободное время» — у подбора нет: он
+    # потребовал бы N вызовов `AvailabilityQueryService` на
+    # горячем пути.
+    #
+    # Пробел назван, а не умолчан, намеренно: слепое пятно, о
+    # котором написано, — долг; о котором не написано —
+    # уверенность. Вернуть доступность в формулу можно только
+    # вместе с настоящим входом; контракт доступности —
+    # DRF-1637, и сторож
+    # `test_availability_fiction_removed.py` не даст вернуть вес
+    # без него.
 
     @staticmethod
     def _score_service_match(

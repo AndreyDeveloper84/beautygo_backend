@@ -54,6 +54,7 @@ from django.db.models.functions import Lower
 from services.models import GoalOption
 
 from . import anketa
+from .lifecycle import OPEN_STATES
 from .models import ClientGoal, GoalAnketaRun
 from .service_match import match_named_service
 
@@ -102,6 +103,10 @@ MISSING_GOAL_GUIDANCE = "goal_guidance"
 
 def _goal_payload(goal: ClientGoal) -> dict[str, Any]:
     return {
+        # DRF-1660: id и состояние — чтобы у цели был адрес для перехода
+        # (``POST /goals/state/`` требует goal_id) и чтобы пауза была видна.
+        "id": str(goal.id),
+        "state": goal.state,
         "goal_key": goal.goal_key,
         "goal_text": goal.goal_text,
         "selected_at": goal.selected_at.isoformat(),
@@ -193,12 +198,24 @@ def build_decision_context(
     в ClientGoal, потому что цели ещё нет).
     """
     active_goal = (
-        ClientGoal.objects.filter(client=client, is_active=True)
+        ClientGoal.objects.filter(client=client, state=ClientGoal.State.ACTIVE)
         .order_by("-selected_at")
         .first()
     )
+    # DRF-1660: открытые цели (ACTIVE + PAUSED) списком, аддитивно к
+    # скаляру ``known.goal``. Скаляр не переводится на список намеренно
+    # (§97 OD-GOAL-E: двенадцать его потребителей механически не
+    # переводятся); список нужен, чтобы у цели на паузе был выход —
+    # человек видит её и может снять с паузы (§122).
+    open_goals = list(
+        ClientGoal.objects.filter(client=client, state__in=OPEN_STATES)
+        .order_by("-selected_at")
+    )
 
-    known: dict[str, Any] = {"goal": _goal_payload(active_goal) if active_goal else None}
+    known: dict[str, Any] = {
+        "goal": _goal_payload(active_goal) if active_goal else None,
+        "goals": [_goal_payload(goal) for goal in open_goals],
+    }
 
     anketa_on = _anketa_enabled()
     run = open_anketa_run(client) if anketa_on else None

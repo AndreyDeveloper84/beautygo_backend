@@ -16,6 +16,7 @@ Filter chain (per spec v2.0 §AI ASSISTANT):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import StrEnum
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -62,8 +63,44 @@ class SpecialistCandidate:
         )
 
 
+class OrderProvenance(StrEnum):
+    """Чей это порядок. Обязателен, потому что сохранённость его не доказывает.
+
+    Решение владельца В-16, дословно: «LLM не переставляла кандидатов» —
+    **недостаточно**. Потребитель вправе сохранять смысловой порядок
+    только когда происхождение порядка называет канонический
+    Recommendation Authority. **Порядок легаси-движка, сохранённый
+    идеально, остаётся порядком легаси-движка.**
+
+    До этого поля защита выглядела так: `handle_show_specialists`
+    восстанавливал позицию из контекста и объяснял в комментарии, что
+    порядок не вправе выбирать модель (`LLM_FORBIDDEN`). Намерение
+    верное, результат — **защита от неверного авторитета, построенная
+    поверх другого неверного авторитета**: восстанавливался порядок
+    движка.
+
+    Намерение в комментарии проверить нечем. Происхождение в данных —
+    можно, и потребитель обязан его спросить.
+    """
+
+    #: Порядок назвал канонический резолвер. Только он смысловой, и
+    #: только его потребитель вправе сохранять.
+    CANONICAL_RESOLVER = "CANONICAL_RESOLVER"
+    #: Порядок посчитал легаси-движок. Он retrieval, а не авторитет
+    #: (DRF-1628): сохранять его как смысловой запрещено.
+    LEGACY_ENGINE = "LEGACY_ENGINE"
+    #: Порядок несемантичен по построению — алфавит, идентификатор.
+    #: Сохранять можно: сохранять нечего.
+    NEUTRAL = "NEUTRAL"
+
+
 @dataclass(frozen=True)
 class SpecialistContext:
+    #: Без умолчания НАМЕРЕННО. Поле с умолчанием можно не заметить, и
+    #: следующий производитель контекста промолчит о происхождении
+    #: ровно так же, как молчал прежний. Обязательность — единственное,
+    #: что заставляет назвать источник в момент создания.
+    order_provenance: OrderProvenance
     candidates: list[SpecialistCandidate] = field(default_factory=list)
 
     @property
@@ -115,7 +152,11 @@ class SpecialistContextBuilder:
         )
         result = self._engine.recommend(query)
         return SpecialistContext(
+            # Порядок здесь считает движок — и это законно, он retrieval.
+            # Незаконно было бы промолчать об этом: потребитель, не
+            # спросивший происхождения, сохранил бы его как смысловой.
+            order_provenance=OrderProvenance.LEGACY_ENGINE,
             candidates=[
                 SpecialistCandidate.from_scored(s) for s in result.candidates
-            ]
+            ],
         )

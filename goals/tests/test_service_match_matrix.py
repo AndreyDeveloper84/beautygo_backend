@@ -471,4 +471,4 @@ class TestGoalCarriesNoSalon:
         )
         assert resp.status_code == 200, resp.content
         assert resp.json()["data"]["missing"] == []
-        assert ClientGoal.objects.filter(client=client_of_a, is_active=True).exists()
+        assert ClientGoal.objects.filter(client=client_of_a, state=ClientGoal.State.ACTIVE).exists()
