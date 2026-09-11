@@ -51,12 +51,91 @@ FINAL_STEP_KEY = "goal"
 
 @dataclass(frozen=True)
 class AnketaStep:
-    """Один вопрос анкеты — ровно то, что уедет в ``missing``."""
+    """Один вопрос анкеты — ровно то, что уедет в ``missing``.
+
+    ``rule_ids`` — правила, через которые ответ на этот шаг влияет на
+    решение (§5.3 решений владельца 11.09.2026). Пустой кортеж — честное
+    «пока ни на что»: тогда человеку это говорится прямо в тексте шага
+    (:func:`shown_prompt`), а не подразумевается вопросом. Непустой —
+    каждый id обязан иметь читателя в :data:`RULE_READERS`; за парой
+    следит :func:`influence_declaration_errors`.
+    """
 
     key: str
     prompt: str
     options: tuple[tuple[str, str], ...] = ()
     allow_free_text: bool = False
+    rule_ids: tuple[str, ...] = ()
+
+
+# ─── влияние ответа на решение (§5.3) ─────────────────────────────────────
+#
+# «Если система не может показать rule_id, где поле повлияло на решение,
+# нельзя заявлять, что поле было учтено». Замер 11.09
+# (docs/MEASUREMENT_AREA_FEELING_5_3.md): ответы на ``area`` и ``feeling``
+# пишутся и не читаются — 0 читателей значения, 0 влияния на выдачу; при
+# этом сами вопросы с прогрессом «шаг 1 из 3» читаются человеком как
+# учтённые. Пока правил нет, это говорится ему словами.
+
+#: Пометка на шаге, ответ на который ни на что не влияет. Одна строка на
+#: все такие шаги: разные формулировки одного и того же факта дали бы
+#: разное впечатление о разных полях.
+NO_INFLUENCE_NOTE = "Ответ сохраню, на подбор он пока не влияет."
+
+#: rule_id → путь функции, которая этот ответ читает и применяет к
+#: решению. Заводить rule_id без читателя нельзя (сторож ниже) — иначе
+#: обещание «учтено» снова окажется без адреса.
+RULE_READERS: dict[str, str] = {
+    # Финальный шаг: выбранная цель → категории → фильтр выдачи.
+    "goal.category_match": "goals.resolution.resolve_goal_category_ids",
+}
+
+
+def shown_prompt(step: AnketaStep) -> str:
+    """Текст шага, каким его увидит человек.
+
+    Без правил — вопрос плюс пометка; с правилами — вопрос как есть.
+    Пометка приходит с сервера в самом ``prompt`` (условие C-1: экран
+    рисует, не решает), поэтому мини-приложению для неё правка не нужна.
+    """
+    if step.rule_ids:
+        return step.prompt
+    return f"{step.prompt} {NO_INFLUENCE_NOTE}"
+
+
+def influence_declaration_errors(steps: tuple[AnketaStep, ...]) -> list[str]:
+    """Сторож класса DRF-1656: у каждого шага либо читатель, либо пометка.
+
+    Возвращает список нарушений (пусто — чисто), чтобы тест печатал
+    ВСЕ, а не первое. Проверяет обе половины, потому что они ломаются
+    в разные стороны: rule_id без читателя — «учтено» без адреса,
+    читатель без rule_id — влияние без объявления.
+    """
+    import importlib
+
+    errors: list[str] = []
+    for step in steps:
+        prompt = shown_prompt(step)
+        if not step.rule_ids:
+            if NO_INFLUENCE_NOTE not in prompt:
+                errors.append(f"{step.key}: нет правил и нет пометки")
+            continue
+        if NO_INFLUENCE_NOTE in prompt:
+            errors.append(f"{step.key}: есть правила, но текст говорит «не влияет»")
+        for rule_id in step.rule_ids:
+            path = RULE_READERS.get(rule_id)
+            if not path:
+                errors.append(f"{step.key}: rule_id {rule_id!r} без читателя в RULE_READERS")
+                continue
+            module_name, _, attr = path.rpartition(".")
+            try:
+                reader = getattr(importlib.import_module(module_name), attr)
+            except (ImportError, AttributeError) as exc:
+                errors.append(f"{step.key}: читатель {path!r} не импортируется: {exc}")
+                continue
+            if not callable(reader):
+                errors.append(f"{step.key}: читатель {path!r} не вызываем")
+    return errors
 
 
 # Сужающие шаги. Держатся короткими сознательно: анкета — вход, а не
@@ -113,6 +192,9 @@ def _final_step() -> AnketaStep:
         prompt=FINAL_STEP_PROMPT,
         options=options,
         allow_free_text=True,
+        # Единственный шаг, ответ на который доезжает до выдачи:
+        # goal_key → GoalOptionCategory → фильтр главной и полок.
+        rule_ids=("goal.category_match",),
     )
 
 
@@ -146,7 +228,7 @@ def as_missing_item(step: AnketaStep) -> dict[str, Any]:
     """
     return {
         "kind": MISSING_GOAL_ANKETA,
-        "prompt": step.prompt,
+        "prompt": shown_prompt(step),
         "step": step.key,
         "options": [{"key": key, "label": label} for key, label in step.options],
         "allow_free_text": step.allow_free_text,
