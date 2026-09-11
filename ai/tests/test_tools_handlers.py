@@ -6,6 +6,7 @@ import uuid as _uuid
 import pytest
 
 from ai.application.services.specialist_context_builder import (
+    OrderProvenance,
     SpecialistCandidate,
     SpecialistContext,
 )
@@ -36,7 +37,8 @@ def _candidate(name="Анна"):
 class TestShowSpecialists:
     def test_drops_invalid_ids_silently(self):
         good = _candidate()
-        ctx = SpecialistContext(candidates=[good])
+        ctx = SpecialistContext(
+            order_provenance=OrderProvenance.CANONICAL_RESOLVER, candidates=[good])
         bogus = _uuid.uuid4()
         result = handle_show_specialists(
             {
@@ -60,7 +62,8 @@ class TestShowSpecialists:
         порядке. Обработчик восстанавливает порядок по контексту.
         """
         first, second = _candidate(), _candidate()
-        ctx = SpecialistContext(candidates=[first, second])
+        ctx = SpecialistContext(
+            order_provenance=OrderProvenance.CANONICAL_RESOLVER, candidates=[first, second])
 
         result = handle_show_specialists(
             {
@@ -83,7 +86,8 @@ class TestShowSpecialists:
         число на экране запрещено отдельно (канон §8, §35 п.13).
         """
         good = _candidate()
-        ctx = SpecialistContext(candidates=[good])
+        ctx = SpecialistContext(
+            order_provenance=OrderProvenance.CANONICAL_RESOLVER, candidates=[good])
 
         result = handle_show_specialists(
             {
@@ -100,7 +104,8 @@ class TestShowSpecialists:
         assert item["match_reasons"] == []
 
     def test_no_valid_ids_falls_back_to_clarification(self):
-        ctx = SpecialistContext(candidates=[_candidate()])
+        ctx = SpecialistContext(
+            order_provenance=OrderProvenance.CANONICAL_RESOLVER, candidates=[_candidate()])
         result = handle_show_specialists(
             {
                 "specialist_ids": [str(_uuid.uuid4())],
@@ -111,7 +116,8 @@ class TestShowSpecialists:
         assert result.action_type == ActionType.ASK_CLARIFICATION
 
     def test_empty_ids_falls_back(self):
-        ctx = SpecialistContext(candidates=[_candidate()])
+        ctx = SpecialistContext(
+            order_provenance=OrderProvenance.CANONICAL_RESOLVER, candidates=[_candidate()])
         result = handle_show_specialists(
             {"specialist_ids": [], "explanation": ""}, ctx
         )
