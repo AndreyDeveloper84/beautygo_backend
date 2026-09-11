@@ -42,6 +42,10 @@ class Anchor:
     label: str
     model: str  # "app_label.ModelName"
     field: str
+    #: Почему эта опора молчит здесь ЗАКОНОМЕРНО. Заполняется только
+    #: тогда, когда молчание объяснено устройством контура, а не
+    #: предположением: иначе пометка превращается в глушилку.
+    silent_reason: str | None = None
 
 
 #: Пульс контура. Набор намеренно широкий: отдельная таблица может не
@@ -59,7 +63,10 @@ PULSE_ANCHORS = (
     # пишется вовсе и отстаёт от регистраций на десять дней. Опора
     # оставлена: на контуре с формой входа она работает, а её молчание
     # теперь видно возрастом в каждой строке.
-    Anchor("входы пользователей", "users.User", "last_login"),
+    Anchor(
+        "входы пользователей", "users.User", "last_login",
+        silent_reason="каталог пускает по JWT, поле пишет только форма входа",
+    ),
     # Слабая намеренно: пишется один раз на пользователя, поэтому одна
     # она свежести не доказывает. В наборе полезна — лишняя опора пульс
     # не портит: свежесть берётся по самой новой, а у замороженной
@@ -76,6 +83,7 @@ class Pulse:
     model: str
     at: datetime | None
     error: str | None = None
+    silent_reason: str | None = None
 
 
 def gather_pulse(anchors=PULSE_ANCHORS) -> list[Pulse]:
@@ -102,9 +110,15 @@ def gather_pulse(anchors=PULSE_ANCHORS) -> list[Pulse]:
             # предмет перестаёт читаться с одного взгляда. Причина
             # («relation does not exist») укладывается в первую строку.
             reason = str(exc).strip().splitlines()[0]
-            out.append(Pulse(anchor.label, anchor.model, None, error=reason))
+            out.append(Pulse(
+                anchor.label, anchor.model, None, error=reason,
+                silent_reason=anchor.silent_reason,
+            ))
             continue
-        out.append(Pulse(anchor.label, anchor.model, value))
+        out.append(Pulse(
+            anchor.label, anchor.model, value,
+            silent_reason=anchor.silent_reason,
+        ))
     return out
 
 
@@ -255,9 +269,23 @@ def subject_lines(
         else:
             mark = f"{pulse.at.isoformat(timespec='seconds')}  {_age(pulse.at, now)}"
             if fresh_within is not None:
-                mark += (
-                    "  свежая" if now - pulse.at <= fresh_within else "  ПРОСРОЧЕНА"
-                )
+                is_fresh = now - pulse.at <= fresh_within
+                if is_fresh and pulse.silent_reason:
+                    # Обратная стража к самой пометке. Объяснение
+                    # молчания устаревает молча: контур переходит на
+                    # форму входа, опора оживает, а строка продолжает
+                    # уверять, что здесь всегда тихо. Ожившая опора
+                    # обязана сказать об этом сама.
+                    mark += "  ПОМЕТКА УСТАРЕЛА: опора объявлена молчащей, но пишет"
+                elif is_fresh:
+                    mark += "  свежая"
+                elif pulse.silent_reason:
+                    # Не «ПРОСРОЧЕНА»: это не новость про машину, это
+                    # известное свойство контура. Иначе её тишина будет
+                    # вызывать разбирательство при каждом замере.
+                    mark += f"  молчит по устройству: {pulse.silent_reason}"
+                else:
+                    mark += "  ПРОСРОЧЕНА"
         lines.append(f"    {pulse.label:<22}: {mark}")
 
     lines.append(OUTSIDE_HINT)

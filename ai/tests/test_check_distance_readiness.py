@@ -15,6 +15,7 @@ import pytest
 from django.core.management import CommandError, call_command
 from django.utils import timezone
 
+from ai.models import Conversation, Message
 from ai.tests.factories import make_specialist, make_user
 from core.measurement_subject import PULSE_ANCHORS, gather_pulse
 from users.models import User
@@ -267,8 +268,10 @@ def test_every_anchor_prints_its_own_age_not_only_the_freshest():
 
     report, _ = _run_full(max_age_hours=24)
     assert "входы пользователей   : " in report
-    assert "ПРОСРОЧЕНА" in report  # мёртвая опора названа
-    assert "свежая" in report      # живая рядом — значит дело не в машине
+    # `last_login` объявлена молчащей по устройству — её тишина названа
+    # свойством контура, а не новостью про машину.
+    assert "молчит по устройству" in report
+    assert "свежая" in report  # живая опора рядом — значит дело не в машине
 
 
 def test_one_fresh_anchor_is_not_enough_when_two_are_required():
@@ -308,3 +311,42 @@ def test_dead_anchor_is_still_listed_not_dropped():
     """
     assert any(a.field == "last_login" for a in PULSE_ANCHORS)
     assert any(a.field == "date_joined" for a in PULSE_ANCHORS)
+
+
+def test_a_silent_by_design_anchor_that_wakes_up_says_so():
+    """Обратная стража к пометке: объяснение молчания устаревает молча.
+
+    Пометка «здесь эта опора не пишется» — такое же утверждение, как
+    всякое другое, и она переживает свою правду: контур перейдёт на
+    форму входа, `last_login` оживёт, а строка продолжит уверять, что
+    тишина нормальна. Ожившая опора обязана сказать об этом сама.
+    """
+    user = make_user()
+    User.objects.filter(pk=user.pk).update(last_login=timezone.now())
+
+    report, _ = _run_full(max_age_hours=24)
+    assert "ПОМЕТКА УСТАРЕЛА" in report
+    assert "молчит по устройству" not in report
+
+
+def test_the_mark_does_not_hide_a_genuinely_late_anchor():
+    """Пометка не глушилка: без неё просрочка называется просрочкой.
+
+    Положительная стража — иначе «молчит по устройству» зеленело бы на
+    коде, который так пишет про ЛЮБУЮ отставшую опору, и настоящая
+    новость про машину пропала бы.
+    """
+    user = make_user()
+    User.objects.filter(pk=user.pk).update(
+        last_login=timezone.now() - timedelta(days=10),
+        date_joined=timezone.now() - timedelta(days=10),
+    )
+    # Одна живая опора, чтобы прогон дошёл до печати: сообщения свежие.
+    conversation = Conversation.objects.create(user=user)
+    Message.objects.create(
+        conversation=conversation, role=Message.Role.USER, content="привет",
+    )
+
+    report, _ = _run_full(max_age_hours=24)
+    assert "регистрации           : " in report
+    assert "ПРОСРОЧЕНА" in report  # у опоры БЕЗ пометки
