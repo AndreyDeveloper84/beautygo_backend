@@ -40,7 +40,7 @@ def api(bearer_token):
 @pytest.fixture
 def user(db):
     return User.objects.create_user(
-        username="dr-user", password="pass", role="client", phone="+79992221699",
+        username="dr-user", password="pass", role="client", phone="+79992221699",  # pragma: allowlist secret
     )
 
 
@@ -200,7 +200,7 @@ class TestTheGuardAndTheShape:
 
     def test_get_of_someone_elses_request_is_404(self, api, user):
         other = User.objects.create_user(
-            username="dr-other", password="pass", role="client", phone="+79992221698",
+            username="dr-other", password="pass", role="client", phone="+79992221698",  # pragma: allowlist secret
         )
         theirs = DeletionRequest.objects.create(
             user=other, initiator="bot", deadline_at=timezone.now() + timedelta(days=30),
