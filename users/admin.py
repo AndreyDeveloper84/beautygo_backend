@@ -16,7 +16,8 @@ from django.utils.html import format_html
 from appointments.admin import SpecialistWorkingHoursInline
 
 from .models import (
-    DeviceToken, OTPCode, Profile, SocialAccount, SpecialistProfile, User,
+    DeletionRequest, DeviceToken, OTPCode, Profile, SocialAccount,
+    SpecialistProfile, User,
 )
 
 
@@ -553,6 +554,35 @@ class SocialAccountAdmin(admin.ModelAdmin):
     search_fields = ('user__phone', 'user__username', 'provider_uid')
     readonly_fields = ('created_at', 'extra_data')
     raw_id_fields = ('user',)
+
+
+@admin.register(DeletionRequest)
+class DeletionRequestAdmin(admin.ModelAdmin):
+    """Заявки на удаление — только чтение (DRF-1699, §7 свода).
+
+    Статус меняет исполнитель, не рука оператора: правка статуса из
+    админки сделала бы «завершено» без стирания, то есть ложный успех —
+    ровно то, что §7 запрещает. Заводить заявку отсюда тоже нельзя: она
+    заводится от имени человека его подтверждением.
+    """
+
+    list_display = ("id", "user", "status", "requested_at", "deadline_at", "completed_at", "initiator")
+    list_filter = ("status", "initiator")
+    search_fields = ("id", "user__phone", "user__username")
+    readonly_fields = (
+        "id", "user", "status", "requested_at", "deadline_at", "started_at",
+        "completed_at", "initiator", "steps", "failure_reason",
+    )
+    raw_id_fields = ("user",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 # Действие «Связать с Ayla» для внешних личностей без связи (DRF-1509, §148):
