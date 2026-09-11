@@ -57,6 +57,7 @@ class TestTheRequestIsARecordBeforeAnything:
 
         assert r.status_code == 201, r.content
         data = r.json()["data"]
+        assert data["created"] is True
         row = DeletionRequest.objects.get(pk=data["request_id"])
         assert row.user_id == user.pk
         assert data["status"] == "DELETION_REQUESTED"
@@ -85,6 +86,7 @@ class TestTheRequestIsARecordBeforeAnything:
         second = api.post(_url(user.pk), {"initiator": "bot"}, format="json")
 
         assert second.status_code == 200, second.content
+        assert second.json()["data"]["created"] is False
         assert second.json()["data"]["request_id"] == first["request_id"]
         assert second.json()["data"]["deadline_at"] == first["deadline_at"]
         assert DeletionRequest.objects.filter(user=user).count() == 1
@@ -176,7 +178,7 @@ class TestTheGuardAndTheShape:
         got = api.get(_url(user.pk, posted["request_id"]))
 
         assert got.status_code == 200, got.content
-        assert got.json()["data"] == posted
+        assert got.json()["data"] == {k: v for k, v in posted.items() if k != "created"}
 
     def test_current_is_404_then_open_then_latest_completed(self, api, user):
         """Профиль номера не помнит — спрашивает «текущую»."""
@@ -185,7 +187,7 @@ class TestTheGuardAndTheShape:
         posted = api.post(_url(user.pk), {"initiator": "bot"}, format="json").json()["data"]
         current = api.get(_url(user.pk))
         assert current.status_code == 200, current.content
-        assert current.json()["data"] == posted
+        assert current.json()["data"] == {k: v for k, v in posted.items() if k != "created"}
 
         row = DeletionRequest.objects.get(pk=posted["request_id"])
         row.status = DeletionRequest.Status.COMPLETED
