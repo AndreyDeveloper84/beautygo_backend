@@ -20,7 +20,8 @@ Both ask "which bookings fall outside the new frame", which needs the
 old frame to compare against — a booking outside working hours is legal
 (walk-ins and salon-made bookings skip the frame check on purpose), so
 "outside the new frame" proves nothing by itself.
-:class:`TestWhatIsDeliberatelyNotGuarded` pins that gap as a decision
+:class:`TestWhatWasDeliberatelyNotGuardedUntil_2026_09_10` held that gap
+as a recorded decision until it was closed on 10.09.2026
 rather than leaving it as an accident, so the day it is closed, a test
 has to be changed on purpose.
 """
@@ -416,22 +417,39 @@ class TestTenantClosure:
 
 
 @pytest.mark.django_db
-class TestWhatIsDeliberatelyNotGuarded:
-    """The recorded shape of the gap the owner's ruling leaves open.
+class TestWhatWasDeliberatelyNotGuardedUntil_2026_09_10:
+    """Пробел закрыт 10.09.2026. Класс перевёрнут, а не удалён.
 
-    These assert current behaviour, not desired behaviour. They exist so
-    that closing the weekly-shrink gap is a deliberate act — someone has
-    to come here and change an assertion — rather than something that
-    happens by accident and is discovered in production.
+    Раньше здесь стояли два теста, УТВЕРЖДАВШИЕ открытость пробела: они
+    проверяли, что сокращение рамки отвечает 200 поверх живой записи.
+    Это была запись решения — «закрытие пробела должно быть осознанным
+    действием, кто-то обязан прийти сюда и поменять утверждение».
+
+    Кто-то пришёл. Утверждения перевёрнуты на месте, с датой, потому что
+    молчаливое удаление и переворот выглядят в диффе одинаково, а значат
+    противоположное: первое стирает историю решения, второе показывает
+    момент, когда его отменили.
+
+    Чем закрыт: сравнением старой действующей рамки с новой
+    (``refuse_if_the_change_strands_bookings``). Наивная проверка «есть
+    запись вне новых часов → конфликт» была бы неверной — запись вне
+    рамки бывает законной, — поэтому виновата только та, что была внутри
+    старой рамки и оказалась вне новой.
+
+    Предел остался прежним и назван в самом стороже: он вне транзакции по
+    отношению к чужим записям и не берёт блокировку. Ловит администратора,
+    сокращающего график поверх забытого клиента; гонку не ловит.
     """
 
-    def test_shrinking_the_weekly_template_is_not_guarded(
+    def test_shrinking_the_weekly_template_is_refused_over_a_live_booking(
         self, salon, admin, master, customer, service
     ):
-        """Needs old-frame-vs-new over the booking horizon, plus
-        transaction guarantees this endpoint does not have. Out of scope
-        by ruling; Ayla must not offer weekly edits as a supported write
-        until it is closed."""
+        """Было: 200 и клиент без мастера. Стало: 409.
+
+        Запись стоит на 03.12 — дальше горизонта записи. Это не деталь
+        фикстуры: первая версия сторожа ограничивалась
+        ``BOOKING_MAX_AHEAD_DAYS`` и этот тест НЕ покраснел. Горизонт
+        говорит, как далеко можно записать, а не какие записи защищать."""
         SpecialistWorkingHours.objects.create(
             specialist=master, day_of_week=TARGET.weekday(),
             is_working_day=True, start_time=time(10, 0), end_time=time(19, 0),
@@ -447,15 +465,17 @@ class TestWhatIsDeliberatelyNotGuarded:
             format="json",
         )
 
-        assert resp.status_code == 200, resp.data
+        assert resp.status_code == 409, resp.data
+        assert resp.data["error"]["code"] == "HAS_ACTIVE_APPOINTMENTS"
 
-    def test_trimming_a_working_day_override_is_not_guarded(
+    def test_trimming_a_working_day_override_is_refused_over_a_live_booking(
         self, salon, admin, master, customer, service
     ):
-        """Same comparison problem, one date instead of a template. The
-        booking below sits outside the proposed hours, but so might a
-        booking the salon placed there on purpose — the endpoint cannot
-        yet tell the two apart."""
+        """Та же задача сравнения, одна дата вместо шаблона.
+
+        Запись в 18:00 была внутри рамки 10:00–19:00 и оказывается вне
+        предлагаемой 10:00–14:00. Именно ЭТО делает её вытесненной —
+        а не то, что она вне новых часов."""
         _booking(salon, customer, master, service, at_local=time(18, 0))
 
         resp = _api(admin, salon).put(
@@ -467,4 +487,5 @@ class TestWhatIsDeliberatelyNotGuarded:
             format="json",
         )
 
-        assert resp.status_code == 200, resp.data
+        assert resp.status_code == 409, resp.data
+        assert resp.data["error"]["code"] == "HAS_ACTIVE_APPOINTMENTS"
