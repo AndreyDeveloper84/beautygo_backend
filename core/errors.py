@@ -184,6 +184,10 @@ class ErrorCode(str, Enum):
     # --- Resource ---
     NOT_FOUND = "NOT_FOUND"
     CONFLICT = "CONFLICT"
+    # DRF-1525 — «салон по slug» для экрана бота: slug занят салоном с
+    # другим названием. Не общий CONFLICT: оператору нужно имя занявшего,
+    # а боту — отличить «опечатка в названии» от «Ayla недоступна».
+    TENANT_SLUG_TAKEN = "TENANT_SLUG_TAKEN"
 
     # --- Goal anketa (DRF-1451; project — not in spec) ---
     # Ответ на шаг анкеты разошёлся с тем шагом, который ждёт сервер:
