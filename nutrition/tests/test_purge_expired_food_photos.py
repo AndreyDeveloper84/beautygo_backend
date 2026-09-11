@@ -65,14 +65,31 @@ def _run(*args) -> str:
 
 @pytest.fixture(autouse=True)
 def isolated_media(settings, tmp_path):
-    """Свой MEDIA_ROOT на каждый тест.
+    """Своё хранилище на каждый тест — ``STORAGES`` целиком, не ``MEDIA_ROOT``.
 
-    Без него проверка сирот читает мусор ПРОШЛЫХ прогонов: `MEDIA_ROOT`
-    по умолчанию — `BASE_DIR/media`, `FileSystemStorage` пишет туда
-    по-настоящему, и файлы там остаются после теста. На этой машине их
-    накопилось шестьдесят шесть, и проверка «сирота одна» падала с
-    числом 66 — верным для каталога и бессмысленным для предмета.
+    Первая редакция переопределяла только ``MEDIA_ROOT``. Этого хватало,
+    пока хранилище строилось от него; с DRF-1663 (#341) корневой
+    ``conftest.py`` подменяет ``STORAGES["default"]`` на ``FileSystemStorage``
+    с ЯВНЫМ ``location`` на всю сессию — и ``MEDIA_ROOT`` для него больше
+    ничего не значит. Изоляция стала пустой: все тесты сессии писали в один
+    каталог, и проверка «сирота одна» падала в CI с числом 9 — чужие
+    ``food-scans/*.jpg`` из соседних тестов той же сессии. Верно для
+    каталога, бессмысленно для предмета — тот же класс, что 66 файлов в
+    первой редакции, только этажом ниже.
+
+    Поэтому подмена — той же формы, что корневая, но на функцию: свой
+    ``location`` на каждый тест, ``setting_changed`` пересобирает
+    ``default_storage``. Корневая сессионная остаётся страховкой от записи
+    в настоящий бакет; эта — от соседей по сессии.
     """
+    import copy
+
+    storages_cfg = copy.deepcopy(settings.STORAGES)
+    storages_cfg["default"] = {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+        "OPTIONS": {"location": str(tmp_path)},
+    }
+    settings.STORAGES = storages_cfg
     settings.MEDIA_ROOT = str(tmp_path)
 
 
