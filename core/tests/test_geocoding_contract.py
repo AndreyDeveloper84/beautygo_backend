@@ -38,7 +38,7 @@ from core.geocoding.providers import (
     get_provider,
 )
 from core.geocoding.providers.yandex import LICENCE_NOTE, YandexGeocoder
-from tenants.models import GeocodeStatus, Tenant
+from tenants.models import GeocodeStatus, ServiceLocation, Tenant
 
 PENZA = ("Пенза", D("53.195878"), D("45.018316"))
 
@@ -134,10 +134,13 @@ def test_confirmed_and_not_attempted_never_come_out_of_the_adapter():
 # Путь записи
 # ---------------------------------------------------------------------------
 
-def _tenant(**kw) -> Tenant:
-    defaults = dict(name="Салон", slug="salon", address="ул Кирова, д 20", city="Пенза")
+def _tenant(**kw) -> ServiceLocation:
+    """Место салона — цель записи адаптера (§9, L4). Имя оставлено, чтобы
+    диф тестов читался: изменилась цель, не правила."""
+    t = Tenant.objects.create(name="Салон", slug="salon", address="ул Кирова, д 20", city="Пенза")
+    defaults = dict(tenant=t, address="ул Кирова, д 20", city="Пенза")
     defaults.update(kw)
-    return Tenant.objects.create(**defaults)
+    return ServiceLocation.objects.create(**defaults)
 
 
 @pytest.mark.django_db
@@ -163,7 +166,7 @@ def test_dry_run_changes_nothing_in_the_database_but_reports_the_same():
     t = _tenant()
     a = apply_result(t, _found(), source_address=t.address, dry_run=True)
     assert a.status == GeocodeStatus.OK  # тот же ответ, что при записи
-    fresh = Tenant.objects.get(pk=t.pk)
+    fresh = ServiceLocation.objects.get(pk=t.pk)
     assert fresh.geocode_status == GeocodeStatus.NOT_ATTEMPTED
     assert fresh.latitude is None
 
@@ -224,7 +227,7 @@ def test_zero_zero_from_a_provider_is_refused_and_nothing_is_saved():
     t = _tenant()
     with pytest.raises(ValidationError):
         apply_result(t, _found(lat=D("0"), lng=D("0")), source_address=t.address)
-    fresh = Tenant.objects.get(pk=t.pk)
+    fresh = ServiceLocation.objects.get(pk=t.pk)
     assert fresh.geocode_status == GeocodeStatus.NOT_ATTEMPTED and fresh.latitude is None
 
 

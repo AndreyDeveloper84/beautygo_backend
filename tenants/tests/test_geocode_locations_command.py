@@ -1,4 +1,8 @@
-"""Команда ``geocode_tenants``: сухой прогон по умолчанию, отказ до первого запроса.
+"""Команда ``geocode_locations``: сухой прогон по умолчанию, отказ до первого запроса.
+
+Цель записи — ``ServiceLocation`` (§9, L4). Вспомогательный ``_tenant`` заводит
+салон и одно его место с адресом — так читается ближе к пилоту, где место
+салона получается из ``Tenant.address`` командой ``promote_tenant_location``.
 
 Провайдер здесь — подставной и **считает вызовы**. Это главное: лицензия
 DaData считает запросы, и «команда отказалась» обязано значить «ни одного
@@ -14,8 +18,8 @@ from django.core.management import call_command
 
 from core.geocoding.contract import GeocodeResult, Outcome, Precision
 from core.geocoding.providers import PROVIDERS
-from tenants.management.commands import geocode_tenants as cmd_module
-from tenants.models import GeocodeStatus, Tenant
+from tenants.management.commands import geocode_locations as cmd_module
+from tenants.models import GeocodeStatus, LocationStatus, ServiceLocation, Tenant
 
 pytestmark = pytest.mark.django_db
 
@@ -63,14 +67,20 @@ def _run(*args, **kw):
     out, err = StringIO(), StringIO()
     code = 0
     try:
-        call_command("geocode_tenants", *args, stdout=out, stderr=err, **kw)
+        call_command("geocode_locations", *args, stdout=out, stderr=err, **kw)
     except SystemExit as exc:
         code = exc.code
     return code, out.getvalue(), err.getvalue()
 
 
 def _tenant(slug, address, **kw):
-    return Tenant.objects.create(name=slug, slug=slug, address=address, city="Пенза", **kw)
+    """Салон + одно его место с этим адресом. Возвращает МЕСТО — цель записи."""
+    t = Tenant.objects.create(name=slug, slug=slug, address=address, city="Пенза")
+    return ServiceLocation.objects.create(tenant=t, address=address, city="Пенза", **kw)
+
+
+def _loc(slug):
+    return ServiceLocation.objects.get(tenant__slug=slug)
 
 
 def test_dry_run_is_the_default_and_writes_nothing(fake):
@@ -104,10 +114,10 @@ def test_apply_writes_and_counts_by_all_six_statuses(fake):
     assert "  failed        : 1" in out
     assert "  pending       : 1" in out
     assert "ЖДУТ ЧЕЛОВЕКА: 1" in out
-    assert Tenant.objects.get(slug="s-ok").is_geocoded
-    assert Tenant.objects.get(slug="s-amb").geocode_status == GeocodeStatus.AMBIGUOUS
-    assert Tenant.objects.get(slug="s-fail").geocode_status == GeocodeStatus.FAILED
-    assert Tenant.objects.get(slug="s-down").geocode_status == GeocodeStatus.PENDING
+    assert _loc("s-ok").is_geocoded
+    assert _loc("s-amb").geocode_status == GeocodeStatus.AMBIGUOUS
+    assert _loc("s-fail").geocode_status == GeocodeStatus.FAILED
+    assert _loc("s-down").geocode_status == GeocodeStatus.PENDING
 
 
 def test_a_provider_that_is_not_ready_stops_before_the_first_request(fake):
@@ -120,7 +130,7 @@ def test_a_provider_that_is_not_ready_stops_before_the_first_request(fake):
     assert code == 2
     assert "ни одного запроса не сделано" in err and "ключ" in err
     assert fake.calls == []
-    assert Tenant.objects.get(slug="s-a").geocode_status == GeocodeStatus.NOT_ATTEMPTED
+    assert _loc("s-a").geocode_status == GeocodeStatus.NOT_ATTEMPTED
 
 
 def test_yandex_stub_is_refused_with_the_price_and_makes_no_call():
@@ -142,19 +152,20 @@ def test_batch_above_the_ceiling_is_refused_before_any_request(fake, monkeypatch
     assert fake.calls == []
 
 
-def test_rows_without_an_address_are_not_sent_and_are_counted(fake):
-    """formula-tela: настоящий салон, адрес пуст намеренно. Геокодеру
-    нечего дать, и pending на пустой строке выглядел бы как лежащий сервис."""
+def test_inactive_places_and_empty_addresses_are_not_sent(fake):
+    """inactive (§9: тестовый, личный, недействительный) координат не
+    заслуживает; пустой адрес геокодеру нечего дать — pending на нём
+    выглядел бы как лежащий сервис."""
     _tenant("with-addr", "ул Кирова, д 20")
-    _tenant("no-addr", "")  # как formula-tela на пилоте; тот slug занят миграцией
+    _tenant("gone", "ул Снесённая, д 1", status=LocationStatus.INACTIVE)
+    _tenant("no-addr", "")  # мимо clean() — как строка, оставшаяся от старого импорта
     fake.script["ул Кирова, д 20"] = _found()
 
-    # --slug: в тестовой базе уже сидят тенанты из миграций без адреса, и
-    # счётчик «без адреса» посчитал бы их вместе с нашим.
-    code, out, _ = _run(provider="fake", slug=["with-addr", "no-addr"])
+    code, out, _ = _run(provider="fake", slug=["with-addr", "gone", "no-addr"])
 
     assert fake.calls == ["ул Кирова, д 20"]
     assert "без адреса=1" in out and "  без адреса     : 1" in out
+    assert "Снесённая" not in out
 
 
 def test_confirmed_rows_are_skipped_and_the_reason_is_counted(fake):
@@ -165,7 +176,7 @@ def test_confirmed_rows_are_skipped_and_the_reason_is_counted(fake):
     code, out, _ = _run(provider="fake", apply=True)
 
     assert "пропуск — подтверждено человеком" in out
-    assert Tenant.objects.get(slug="human").geocode_provider == "manual"
+    assert _loc("human").geocode_provider == "manual"
 
 
 def test_slug_filter_narrows_the_run(fake):
@@ -202,5 +213,5 @@ def test_a_key_rejected_mid_run_stops_the_run_and_keeps_what_was_written(fake):
     code, _, err = _run(provider="fake", apply=True)
 
     assert code == 2 and "отклонила ключ" in err and "записано строк: 1" in err
-    assert Tenant.objects.get(slug="s-first").is_geocoded
-    assert Tenant.objects.get(slug="s-second").geocode_status == GeocodeStatus.NOT_ATTEMPTED
+    assert _loc("s-first").is_geocoded
+    assert _loc("s-second").geocode_status == GeocodeStatus.NOT_ATTEMPTED

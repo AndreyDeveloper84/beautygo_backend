@@ -1,4 +1,8 @@
-"""Разовое заполнение координат мест (§139) — сухой прогон по умолчанию.
+"""Геокодирование мест оказания услуг — `ServiceLocation` (§139, §9 / DRF-1687 L4). Сухой прогон по умолчанию.
+
+Цель записи — **место**, не салон (§9): `Tenant.address` — вход, в место его
+переносит `promote_tenant_location` по одному салону. Здесь геокодируются
+строки `ServiceLocation` со статусом, отличным от `inactive`.
 
 Зачем команда, если §139 говорит «при сохранении адреса»
 --------------------------------------------------------
@@ -25,7 +29,7 @@
 1. **Предмет** — кто отвечает на замер (``core.measurement_subject``):
    хост, база, время старта БД, пульс. Числа без предмета не читаются.
 2. **Предмет прогона** — провайдер, режим, порог пачки, число строк.
-3. Построчно: slug, адрес, исход, статус, точность, город из ответа.
+3. Построчно: салон/место, адрес, исход, статус, точность, город из ответа.
 4. **Счётчики по шести статусам** и по причинам пропуска. Отдельной строкой
    — сколько строк ждут человека (``AMBIGUOUS``): поверхности подтверждения
    пока нет ни у кого, и без этой строки очередь на подтверждение невидима.
@@ -45,15 +49,19 @@ from core.geocoding.apply import Applied, apply_result
 from core.geocoding.contract import Outcome
 from core.geocoding.providers import PROVIDERS, get_provider
 from core.measurement_subject import gather_pulse, subject_lines
-from tenants.models import GeocodeStatus, Tenant
+from tenants.models import GeocodeStatus, LocationStatus, ServiceLocation
 
 #: Выше — не «разовое заполнение введённых людьми адресов», а обработка
 #: базы. Одиннадцать мест на пилоте — внутри с запасом; импорт — нет.
 BATCH_CEILING = 50
 
 
+def _name(loc: ServiceLocation) -> str:
+    return f"{loc.tenant.slug}/{loc.label or '·'}" if loc.tenant_id else f"соло/{loc.label or '·'}"
+
+
 class Command(BaseCommand):
-    help = "Геокодировать адреса мест (Tenant.address) с происхождением по §139. Сухой прогон по умолчанию."
+    help = "Геокодировать места оказания услуг (ServiceLocation) с происхождением по §139. Сухой прогон по умолчанию."
 
     def add_arguments(self, parser) -> None:
         parser.add_argument(
@@ -70,7 +78,7 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--slug", action="append", default=None,
-            help="Ограничить прогон этими slug'ами (можно несколько раз).",
+            help="Ограничить прогон местами этих салонов (slug, можно несколько раз).",
         )
 
     def handle(self, *args, **options) -> None:
@@ -101,10 +109,13 @@ class Command(BaseCommand):
 
         # 3. Вход. Пустой адрес — не кандидат: геокодеру нечего дать, и
         # запись pending на пустой строке выглядела бы как лежащий сервис.
-        qs = Tenant.objects.order_by("slug")
+        # inactive не геокодируем: тестовый/личный/недействительный адрес (§9)
+        # координат не заслуживает, а его pending выглядел бы как лежащий сервис.
+        qs = (ServiceLocation.objects.exclude(status=LocationStatus.INACTIVE)
+              .select_related("tenant").order_by("tenant__slug", "label", "address"))
         if options["slug"]:
-            qs = qs.filter(slug__in=options["slug"])
-        candidates = [t for t in qs if t.address.strip()]
+            qs = qs.filter(tenant__slug__in=options["slug"])
+        candidates = [loc for loc in qs if loc.address.strip()]
         without_address = qs.count() - len(candidates)
 
         mode = "ЗАПИСЬ (--apply)" if options["apply"] else "СУХОЙ ПРОГОН"
@@ -125,27 +136,27 @@ class Command(BaseCommand):
         # 4. Построчно.
         now = timezone.now()
         applied: list[Applied] = []
-        for tenant in candidates:
-            result = provider.geocode(tenant.address, city=tenant.city)
+        for loc in candidates:
+            result = provider.geocode(loc.address, city=loc.city)
             if result.outcome is Outcome.MISCONFIGURED:
                 # Ключ отклонён посреди прогона: это про нас, не про сервис,
                 # и повтор не поможет. Уже записанные строки остаются;
                 # остальные не получают pending, который выглядел бы как
                 # лежащий сервис.
                 self.stderr.write(self.style.ERROR(
-                    f"провайдер {name!r} отказал на {tenant.slug}: {result.reason}. "
+                    f"провайдер {name!r} отказал на {_name(loc)}: {result.reason}. "
                     f"Прогон остановлен, записано строк: {sum(1 for x in applied if x.written)}."
                 ))
                 raise SystemExit(2)
             a = apply_result(
-                tenant, result,
-                source_address=tenant.address, now=now,
+                loc, result,
+                source_address=loc.address, now=now,
                 overwrite_ok=options["overwrite_ok"], dry_run=not options["apply"],
             )
             applied.append(a)
             verdict = a.status.value if a.written else f"пропуск: {a.skipped_because}"
             self.stdout.write(
-                f"  {tenant.slug:<24} {tenant.address[:40]:<40} "
+                f"  {_name(loc):<24} {loc.address[:40]:<40} "
                 f"{result.outcome.value:<13} → {verdict}"
                 + (f"  [{result.precision.value}; {result.locality or '—'}]"
                    if result.outcome in (Outcome.FOUND, Outcome.MULTIPLE) else "")
