@@ -89,6 +89,41 @@ class NominatimGeocoder:
                 self._sleep(wait)
         self._last_call = time.monotonic()
 
+    def reverse(self, lat: float, lon: float) -> GeocodeResult:
+        params = {"lat": lat, "lon": lon, "format": "jsonv2", "addressdetails": 1}
+        self._respect_public_policy()
+        try:
+            resp = self._session.get(
+                f"{self.base_url}/reverse", params=params,
+                headers={"User-Agent": USER_AGENT}, timeout=TIMEOUT_SEC,
+            )
+        except requests.RequestException as exc:
+            return GeocodeResult(outcome=Outcome.UNAVAILABLE, provider=self.name, reason=f"сеть: {exc}")
+        if resp.status_code == 429 or resp.status_code >= 500:
+            return GeocodeResult(
+                outcome=Outcome.UNAVAILABLE, provider=self.name,
+                reason=f"HTTP {resp.status_code} — лимит или сбой, повторить позже",
+            )
+        if resp.status_code != 200:
+            return GeocodeResult(
+                outcome=Outcome.UNAVAILABLE, provider=self.name,
+                reason=f"неожиданный HTTP {resp.status_code}",
+            )
+        try:
+            item = resp.json()
+        except ValueError:
+            return GeocodeResult(outcome=Outcome.UNAVAILABLE, provider=self.name, reason="ответ не JSON")
+        # /reverse отвечает объектом; «ничего нет» — объект с ключом error.
+        if not isinstance(item, dict) or item.get("error"):
+            return GeocodeResult(outcome=Outcome.NOT_FOUND, provider=self.name)
+        locality = _locality(item.get("address") or {})
+        if not locality:
+            return GeocodeResult(outcome=Outcome.NOT_FOUND, provider=self.name, reason="в ответе нет города")
+        return GeocodeResult(
+            outcome=Outcome.FOUND, provider=self.name,
+            normalized_address=item.get("display_name") or "", locality=locality,
+        )
+
     def geocode(self, address: str, *, city: str = "") -> GeocodeResult:
         # Город — частью запроса: у Nominatim нет фильтра «в этом городе»,
         # но строка «…, Пенза» ранжирует пензенский дом выше кузнецкого.

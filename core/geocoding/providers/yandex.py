@@ -41,3 +41,9 @@ class YandexGeocoder:
 
     def geocode(self, address: str, *, city: str = "") -> GeocodeResult:
         raise NotImplementedError(LICENCE_NOTE)
+
+    def reverse(self, lat: float, lon: float) -> GeocodeResult:
+        # Обратное геокодирование ничего не хранит, и формально бесплатный
+        # тариф его допускает — но только вместе с показом карты Яндекса,
+        # которой у каталога нет. Та же заглушка, та же причина.
+        raise NotImplementedError(LICENCE_NOTE)
