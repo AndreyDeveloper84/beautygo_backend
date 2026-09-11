@@ -158,6 +158,10 @@ jobs:
             docker compose exec -T web python manage.py seed_beverages
             echo
 
+            echo "=== storage backend pytest will inherit (env DJANGO_SETTINGS_MODULE wins over pytest.ini; DRF-1663) ==="
+            docker compose exec -T web python manage.py shell -c "import os; from django.conf import settings; print('DJANGO_SETTINGS_MODULE=' + str(os.environ.get('DJANGO_SETTINGS_MODULE')), 'STORAGES.default.BACKEND=' + settings.STORAGES['default']['BACKEND'])"
+            echo
+
             echo "=== smoke suite ==="
             # Two-step resolution for PYTEST_ARGS: previously this was a
             # single ${PYTEST_ARGS:-"-v --tb=short"} on the docker-exec line.
