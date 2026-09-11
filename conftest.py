@@ -1,8 +1,44 @@
+import copy
 import logging
+import shutil
 
 import pytest
+from django.test import override_settings
 
 logger = logging.getLogger("test_runner")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _isolated_file_storage(tmp_path_factory):
+    """DRF-1663: every test session writes media into a throwaway dir.
+
+    pytest-django takes ``DJANGO_SETTINGS_MODULE`` from the ENVIRONMENT
+    ahead of pytest.ini. In the ``web`` container (docker-compose.dev.yml)
+    the env names ``djangoProject.settings.dev``, whose STORAGES point at
+    the S3Boto3Storage bucket of the running stack — so the daily smoke
+    run (.github/workflows/smoke-on-dev.yml) posted a PNG into the PILOT
+    bucket. The test DB is dropped afterwards, the object is not: 119
+    stubs on the old MinIO, one per day. Locally the same gap left files
+    in the project MEDIA_ROOT.
+
+    The override swaps STORAGES["default"] as a whole — not just
+    MEDIA_ROOT, which the S3 backend never reads — to a FileSystemStorage
+    rooted in a pytest temp dir, whatever settings module is in force.
+    Django's ``setting_changed`` receivers reset the ``storages`` handler
+    and ``default_storage``, so FileFields bound to ``default_storage``
+    at import time follow the swap. The dir is removed after the session.
+    """
+    from django.conf import settings
+
+    location = tmp_path_factory.mktemp("media")
+    storages_cfg = copy.deepcopy(settings.STORAGES)
+    storages_cfg["default"] = {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+        "OPTIONS": {"location": str(location)},
+    }
+    with override_settings(STORAGES=storages_cfg, MEDIA_ROOT=str(location)):
+        yield location
+    shutil.rmtree(location, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

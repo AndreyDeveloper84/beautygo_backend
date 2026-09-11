@@ -10,14 +10,29 @@ services:
         # pilot VPS reaches Hub badly — see the comment block at the top
         # of the Dockerfile for the measurements.
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
-        # Forwards GH_DEPLOY_TOKEN from the host env into the build so
-        # `pip install -r requirements.txt` can clone the private
-        # ayla-ai-core repo (DRF-242 post-merge ops fix, 2026-05-07).
-        # Empty / unset on host = Dockerfile skips git config; build
-        # still succeeds for any future requirements.txt that has no
-        # git+https deps.
+        # Forwards GH_DEPLOY_TOKEN from the host env into the build for
+        # the ayla-ai-core clone (DRF-242 post-merge ops fix, 2026-05-07).
+        # It is OPTIONAL: that repo is public (owner's decision
+        # 04.09.2026, OPEN_DECISIONS.md §22 in the workspace root), so
+        # empty / unset on the host is the normal case — the Dockerfile
+        # skips the git config
+        # and pip clones the pinned SHA anonymously. Kept wired so the
+        # authenticated path revives untouched if the visibility is closed
+        # again (DRF-1466).
         GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
     restart: unless-stopped
+    # DRF-1677 (класс DRF-1646). Без `user:` контейнер идёт от root образа —
+    # в Dockerfile нет USER, — и всё, что entrypoint пишет в смонтированные
+    # каталоги (`collectstatic` → staticfiles/, загрузки → media/), ложится
+    # на хост от root. Замер 11.09.2026 на пилоте: 197 root-объектов, все в
+    # staticfiles/. Владелец дерева их не перезапишет.
+    #
+    # Умолчание 1000 здесь допустимо — в отличие от `--user "$(id -u)"` у
+    # бота (DRF-1646), который под root честно давал 0:0. Неверный uid тут
+    # падает ВИДИМО: EACCES на записи в staticfiles/, а не молчаливый root.
+    # 1000 — uid владельца дерева на пилоте (taximeter); другая машина задаёт
+    # APP_UID/APP_GID в .env рядом с compose.
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     ports:
       - "127.0.0.1:8000:8000"
     env_file:
@@ -65,10 +80,23 @@ services:
       # always built without it and does so successfully today (verified
       # on the pilot 2026-08-31 — dev-celery_worker:latest builds clean).
       # Adding it would change what pip is authenticated as, which is a
-      # separate question from this ticket.
+      # separate question from this ticket. DRF-1466 explains why it is
+      # not needed at all: ayla-ai-core is public and clones anonymously.
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     restart: unless-stopped
+    # DRF-1677 (класс DRF-1646). Без `user:` контейнер идёт от root образа —
+    # в Dockerfile нет USER, — и всё, что entrypoint пишет в смонтированные
+    # каталоги (`collectstatic` → staticfiles/, загрузки → media/), ложится
+    # на хост от root. Замер 11.09.2026 на пилоте: 197 root-объектов, все в
+    # staticfiles/. Владелец дерева их не перезапишет.
+    #
+    # Умолчание 1000 здесь допустимо — в отличие от `--user "$(id -u)"` у
+    # бота (DRF-1646), который под root честно давал 0:0. Неверный uid тут
+    # падает ВИДИМО: EACCES на записи в staticfiles/, а не молчаливый root.
+    # 1000 — uid владельца дерева на пилоте (taximeter); другая машина задаёт
+    # APP_UID/APP_GID в .env рядом с compose.
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     env_file:
       - .env
     environment:
@@ -90,6 +118,18 @@ services:
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
     restart: unless-stopped
+    # DRF-1677 (класс DRF-1646). Без `user:` контейнер идёт от root образа —
+    # в Dockerfile нет USER, — и всё, что entrypoint пишет в смонтированные
+    # каталоги (`collectstatic` → staticfiles/, загрузки → media/), ложится
+    # на хост от root. Замер 11.09.2026 на пилоте: 197 root-объектов, все в
+    # staticfiles/. Владелец дерева их не перезапишет.
+    #
+    # Умолчание 1000 здесь допустимо — в отличие от `--user "$(id -u)"` у
+    # бота (DRF-1646), который под root честно давал 0:0. Неверный uid тут
+    # падает ВИДИМО: EACCES на записи в staticfiles/, а не молчаливый root.
+    # 1000 — uid владельца дерева на пилоте (taximeter); другая машина задаёт
+    # APP_UID/APP_GID в .env рядом с compose.
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     env_file:
       - .env
     environment:

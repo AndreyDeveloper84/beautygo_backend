@@ -74,9 +74,9 @@ class NutritionSummary:
     """Carrier shape — serialiser maps this to the spec response."""
     date: date
     totals: SummaryTotals
-    calories_goal: int
+    calories_goal: int | None
     water_ml: int
-    water_goal_ml: int
+    water_goal_ml: int | None
     entries: list[FoodLog]
     vitamin_deficits: dict[str, float]
     # DRF-303 §4.2 — present only when the caller asked with_comment=true.
@@ -138,7 +138,27 @@ class NutritionSummaryService:
         # Slice 4: water aggregate now lives — drops the stub.
         water = self._water_service.aggregate_for_day(user_id, day)
         entries = list(qs)
-        calories_goal = settings.NUTRITION_DEFAULT_CALORIES_GOAL
+        # Ориентира по калориям НЕТ, и наружу это уезжает отсутствием
+        # ключа (``None`` → сериализатор выкидывает поле).
+        #
+        # Здесь стояла ``NUTRITION_DEFAULT_CALORIES_GOAL`` — плоская
+        # константа 2000 ккал, ОДНА НА ВСЕХ: ни BMR, ни веса, ни профиля
+        # в этой ветке нет вовсе. Человеку она показывалась как ЕГО
+        # дневная цель, со шкалой и процентом выполнения. Владелец снял
+        # её дословно: «Текущая плоская норма калорий для всех
+        # удаляется» (§82).
+        #
+        # Потом на её месте стоял НОЛЬ, и внутри модуля он читался как
+        # «цели нет» правильно. Наружу же ноль уезжал ЗНАЧЕНИЕМ: ключ в
+        # JSON был, и потребитель, который про уговор не знает, вправе
+        # показать «0 из 0 ккал · 0 %». Это не «ориентира нет», это
+        # ориентир ноль. Отсутствие доезжает отсутствием (§65, §82).
+        #
+        # Профиль умеет считать калории сам (``daily_kcal`` от BMR), но
+        # подставить ЕГО тоже нельзя: методика утверждена только
+        # 09.09.2026 (§85 — Миффлин — Сан Жеор, ±10%), и её реализация
+        # это отдельный срез со своими стоп-сценариями.
+        calories_goal: int | None = None
 
         ai_comment: str | None = None
         if with_comment:
@@ -177,6 +197,25 @@ class NutritionSummaryService:
             ai_comment=ai_comment,
         )
 
+    @staticmethod
+    def _protein_goal_g(user_id) -> float:
+        """Дневная норма белка ЭТОГО человека, или 0.0 — «нормы нет».
+
+        Столбец nullable (§103): ``NULL`` — ориентира нет, и ``row or
+        0.0`` переводит его в ноль ТОЛЬКО здесь, внутри модуля, где
+        вызывающий проверяет знаменатель на положительность и наружу
+        число не отдаёт. Профиля нет вовсе — тот же ответ.
+        """
+        from nutrition.models import NutritionProfile
+
+        row = (
+            NutritionProfile.objects
+            .filter(user_id=user_id)
+            .values_list("daily_protein_g", flat=True)
+            .first()
+        )
+        return float(row or 0.0)
+
     def weekly_deficits(self, *, user_id, days: int = 7) -> WeeklyDeficits:
         """Compute trailing-N-day deficit signals for cross-domain bridge (DRF-248).
 
@@ -205,7 +244,26 @@ class NutritionSummaryService:
                 protein_low_streak_days=0,
             )
 
-        goal = float(settings.NUTRITION_DEFAULT_PROTEIN_GOAL_G or 0.0)
+        # Знаменатель обязан быть НОРМОЙ ЭТОГО ЧЕЛОВЕКА.
+        #
+        # Здесь стояла ``NUTRITION_DEFAULT_PROTEIN_GOAL_G`` — плоская
+        # константа на всех, — и получавшийся процент уходил в промпт
+        # модели строкой «Белок: в среднем 62% от нормы», то есть как факт
+        # об этом человеке. Это тяжелее экранного дефекта: экран
+        # показывает выдуманную цель одному человеку, а промпт скармливает
+        # выдуманный факт механизму, которому §48 разрешил делать из
+        # фактов выводы о его самочувствии.
+        #
+        # Берётся ``NutritionProfile.daily_protein_g`` — норма, которую
+        # посчитали по ЕГО анкете. Нет анкеты — нет и знаменателя, и
+        # сигнал не отдаётся вовсе: подставить сюда общее число значит
+        # вернуть тот же дефект под другим именем.
+        #
+        # Процент, в отличие от миллилитров воды, веса не называет: в
+        # выдачу идут только доля и число дней, абсолютных граммов рядом
+        # нет, поэтому обратный счёт не собирается. Именно поэтому
+        # персональная норма здесь допустима, а на экране воды — нет.
+        goal = float(self._protein_goal_g(user_id) or 0.0)
         threshold_pct = float(settings.FOOD_DEFICIT_PROTEIN_THRESHOLD_PCT or 0.0)
         if goal <= 0:
             return WeeklyDeficits(
@@ -411,8 +469,27 @@ def _compute_habits(user, period: int) -> dict:
 
 
 def _compute_goal_progress(profile) -> dict | None:
-    """Only goal=lose/gain return a progress block. tone/maintain → None."""
+    """Only goal=lose/gain return a progress block. tone/maintain → None.
+
+    Блок цели несёт ЧИСЛА ориентира, поэтому подчинён тому же правилу,
+    что и ``_norms_block`` профиля: признак — ``targets_source``, а не
+    значение столбца. Строка с ``source=none`` ориентира не имеет, и
+    ``daily_kcal`` у неё ``NULL`` (§103); отдать блок с ``None`` внутри
+    значило бы показать цель без числа, отдать старое число — показать
+    ориентир без происхождения (§92 п.5). Блока нет целиком.
+
+    ``unknown_legacy`` до очистки командой сюда всё ещё доезжает: этот
+    признак §92 п.5 тоже нарушает, но его судьба — команда
+    ``clear_targets_without_provenance``, а не молчаливый фильтр здесь:
+    иначе очистка выглядела бы сделанной там, где она не сделана.
+    Читателей ``goal_progress`` в боте нет (grep 11.09.2026), так что
+    сужение блока контракт не ломает.
+    """
+    from nutrition.models import NutritionProfile
+
     if profile is None or profile.goal not in ("lose", "gain"):
+        return None
+    if profile.targets_source == NutritionProfile.TargetsSource.NONE:
         return None
     return {
         "type": "weight_loss" if profile.goal == "lose" else "weight_gain",

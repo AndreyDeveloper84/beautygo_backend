@@ -30,6 +30,7 @@ from appointments.models import Appointment
 from users.models import SpecialistProfile
 
 from ai.application.services.specialist_context_builder import (
+    OrderProvenance,
     SpecialistContext,
 )
 from ai.tools import ActionType
@@ -105,6 +106,33 @@ def _resolve_service(service_id: UUID, specialist, surface: str):
 # show_specialists
 # ---------------------------------------------------------------------------
 
+def _order_for_display(
+    valid_set: set[UUID], context: SpecialistContext,
+) -> list[UUID]:
+    """Порядок карточек: смысловой — только от канонического авторитета.
+
+    Три исхода, и различает их **происхождение**, а не форма списка:
+
+    * `CANONICAL_RESOLVER` — порядок назван авторитетом, сохраняется как
+      есть: переставить его значило бы нарушить границу с другой стороны;
+    * всё остальное (`LEGACY_ENGINE`, `NEUTRAL`) — смысла в порядке нет
+      либо он не тот, поэтому карточки раскладываются нейтрально.
+
+    Нейтральный порядок — по имени, идентификатор тай-брейком. Та же
+    форма, что у промпта (DRF-1630), и по той же причине: алфавит
+    человек читает как список, а не как рейтинг, и он воспроизводим
+    между репликами.
+    """
+    by_id = {c.id: c for c in context.candidates}
+    if context.order_provenance is OrderProvenance.CANONICAL_RESOLVER:
+        position = {c.id: index for index, c in enumerate(context.candidates)}
+        return sorted(valid_set, key=lambda sid: position[sid])
+    return sorted(
+        valid_set,
+        key=lambda sid: (by_id[sid].display_name.casefold(), str(sid)),
+    )
+
+
 def handle_show_specialists(
     args: dict[str, Any], context: SpecialistContext
 ) -> ToolResult:
@@ -114,8 +142,6 @@ def handle_show_specialists(
     better than dead chat turn.
     """
     raw_ids = args.get("specialist_ids") or []
-    scores = args.get("match_scores") or []
-    reasons = args.get("match_reasons") or []
     explanation = args.get("explanation") or ""
 
     valid_ids = [_safe_uuid(rid) for rid in raw_ids]
@@ -126,10 +152,24 @@ def handle_show_specialists(
         return _fallback_clarification("show_specialists_no_valid_ids")
 
     by_id = {c.id: c for c in context.candidates}
+    # ПОРЯДОК НЕ БЕРЁТСЯ ИЗ ОТВЕТА МОДЕЛИ — и этого мало.
+    #
+    # Раньше здесь стояло только первое: карточки шли в порядке
+    # контекста, потому что порядок — политика ранжирования, а она
+    # `LLM_FORBIDDEN` (контракт §2.1 C1, §15). Намерение верное, но
+    # восстанавливался при этом порядок ЛЕГАСИ-ДВИЖКА, то есть защита
+    # от неверного авторитета стояла поверх другого неверного.
+    #
+    # Решение владельца В-16: потребитель вправе сохранять смысловой
+    # порядок **только когда его происхождение называет канонический
+    # Recommendation Authority**. Порядок движка, сохранённый идеально,
+    # остаётся порядком движка.
+    #
+    # Поэтому спрашивается происхождение, а не соблюдается намерение.
+    ordered_ids = _order_for_display(valid_set, context)
+
     items: list[dict[str, Any]] = []
-    for idx, sid in enumerate(valid_ids):
-        if sid not in valid_set:
-            continue
+    for sid in ordered_ids:
         c = by_id[sid]
         items.append({
             "specialist": {
@@ -141,8 +181,19 @@ def handle_show_specialists(
                 "distance_km": c.distance_km,
                 "services_preview": c.services_preview,
             },
-            "match_score": scores[idx] if idx < len(scores) else None,
-            "match_reasons": reasons[idx] if idx < len(reasons) else [],
+            # Ключи сохранены ради потребителей, значения — пусты.
+            #
+            # Раньше сюда клались балл и «короткие причины», присланные
+            # МОДЕЛЬЮ, и они уходили человеку как основание выбора. Это
+            # происхождение свидетельства (`LLM_FORBIDDEN`); число на
+            # экране запрещено отдельно (канон §8, §35 п.13).
+            #
+            # Пусто — потому что честного WHY у этой поверхности сейчас
+            # нет: `reason_codes` появятся здесь, когда контекст начнёт
+            # собираться резолвером. Пустое поле честнее придуманного:
+            # решение владельца 25.08 «нет displayable WHY → нет блока».
+            "match_score": None,
+            "match_reasons": [],
         })
 
     return ToolResult(

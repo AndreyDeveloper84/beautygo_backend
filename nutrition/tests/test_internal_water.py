@@ -35,14 +35,35 @@ TODAY_URL = "/api/v1/nutrition/internal/water/today/"
 @pytest.fixture(autouse=True)
 def _set_service_token(settings):
     settings.NUTRITION_SERVICE_TOKEN = SERVICE_TOKEN
-    settings.NUTRITION_DEFAULT_WATER_GOAL_ML = 2000
 
 
 @pytest.fixture
 def proxy_user(db):
-    return User.objects.create(
+    """Человек С анкетой питания — и всё равно БЕЗ ориентира.
+
+    Дорога сюда была двухступенчатой, и помнить её надо целиком:
+
+    1. Норма приезжала из ``settings.NUTRITION_DEFAULT_WATER_GOAL_ML``
+       и была у всех, включая тех, кто анкету не проходил: 2000 мл при
+       стакане 250 — ровно та «восьмёрка», которую из клиента уже
+       выбрасывали. Её сняли, и норма стала читаться из анкеты.
+    2. Читалась она из ``NutritionProfile.daily_water_ml``, а туда её
+       клала формула ``30 мл × вес`` (+300/+700). Владелец снял и
+       формулу (§82), так что «своё число из анкеты» оказалось тем же
+       чужим числом с лишним шагом.
+
+    Профиль в фикстуре оставлен со СТАРЫМ значением 2000 нарочно: это
+    самое невыгодное предусловие для правки. У существующих клиентов
+    столбец так и остался заполненным (миграция — отдельный срез), и
+    тесты ниже доказывают, что наружу оно всё равно не уезжает.
+    """
+    from nutrition.models import NutritionProfile
+
+    user = User.objects.create(
         username="bot:302", role="client", is_proxy=True,
     )
+    NutritionProfile.objects.create(user=user, daily_water_ml=2000)
+    return user
 
 
 @pytest.fixture
@@ -114,8 +135,11 @@ class TestCreateWater:
         assert body["kcal"] == 0
         assert body["beverage_name"] is None
         assert body["today_total_water_ml"] == 250
-        assert body["today_norm_water_ml"] == 2000
-        assert body["today_progress_pct"] == 12
+        # Ориентира и процента в ответе НЕТ. Формула 30 мл × вес снята
+        # до утверждения методики (§82, §85 раздел 4), а процент — её
+        # производная: доли от несуществующей нормы не бывает.
+        assert "today_norm_water_ml" not in body
+        assert "today_progress_pct" not in body
 
     def test_coffee_applies_macros(self, proxy_user, seed, headers):
         c = APIClient()
@@ -167,37 +191,41 @@ class TestIdempotency:
 
 
 class TestMilestoneIdempotency:
-    def test_50pct_fires_once(self, proxy_user, seed, headers):
-        c = APIClient()
-        # Two 500ml drinks → 1000ml = 50% of 2000ml goal
-        r1 = _post_water(c, {"ml": 500}, headers)
-        assert r1.json()["data"]["milestone_text"] is None
-        r2 = _post_water(c, {"ml": 500}, headers)
-        assert "Половина" in (r2.json()["data"]["milestone_text"] or "")
-        # Add another bracket-crossing entry — should NOT re-fire 50%.
-        r3 = _post_water(c, {"ml": 200}, headers)
-        body3 = r3.json()["data"]
-        assert body3["milestone_text"] is None or "Половина" not in body3["milestone_text"]
+    """Вехи не срабатывают, потому что срабатывать им не от чего.
 
-    def test_each_threshold_fires_independently(self, proxy_user, seed, headers):
-        c = APIClient()
-        # One large drink crossing 50% boundary
-        _post_water(c, {"ml": 1100}, headers)  # 1100 / 2000 = 55%
-        # Push to 100%
-        r2 = _post_water(c, {"ml": 950}, headers)  # total 2050
-        assert "норма выполнена" in (r2.json()["data"]["milestone_text"] or "").lower()
-        # And to 150%
-        r3 = _post_water(c, {"ml": 1000}, headers)  # total 3050 = 152%
-        assert "запасом" in (r3.json()["data"]["milestone_text"] or "")
+    Класс сторожил идемпотентность порогов «50% / 100% / 150%»: чтобы
+    «Половина дня — отличный темп!» не мигало дважды за день. Порог —
+    ПРОИЗВОДНАЯ ориентира (``norm × threshold / 100``), а ориентира по
+    жидкости больше нет ни у кого: формула 30 мл × вес снята до
+    утверждения методики (§82; §85 раздел 4).
 
-    def test_undo_does_not_unlock_milestone(self, proxy_user, seed, headers):
-        """Once user saw 50% message, undoing the entry shouldn't re-arm it."""
+    Поздравить человека с выполнением числа, которое мы ему придумали,
+    хуже, чем промолчать, — и «норма выполнена 💧» было самым громким
+    местом, где выдумка возвращалась ему как достижение.
+
+    Утверждения перевёрнуты: ни один порог не срабатывает ни при каком
+    объёме, включая тот, что раньше давал все три подряд. Записи при
+    этом пишутся и суммируются — снимается ориентир, не факт.
+    """
+
+    def test_no_threshold_fires_at_any_volume(self, proxy_user, seed, headers):
+        c = APIClient()
+        # Те же объёмы, что раньше давали 50%, 100% и 150% от 2000 мл.
+        r1 = _post_water(c, {"ml": 1100}, headers)
+        r2 = _post_water(c, {"ml": 950}, headers)   # было «норма выполнена»
+        r3 = _post_water(c, {"ml": 1000}, headers)  # было «с запасом»
+        for r in (r1, r2, r3):
+            assert not (r.json()["data"].get("milestone_text") or "")
+        # POSITIVE: выпитое посчитано — 1100 + 950 + 1000.
+        assert r3.json()["data"]["today_total_water_ml"] == 3050
+
+    def test_undo_still_works_without_milestones(self, proxy_user, seed, headers):
+        """Отмена записи цела: снят порог, а не путь назад."""
         c = APIClient()
         _post_water(c, {"ml": 500}, headers)
         r2 = _post_water(c, {"ml": 500}, headers)
         entry_id = r2.json()["data"]["entry_id"]
-        assert "Половина" in (r2.json()["data"]["milestone_text"] or "")
-        # Undo the milestone-firing entry
+        assert not (r2.json()["data"].get("milestone_text") or "")
         del_resp = c.delete(
             f"{WATER_URL}{entry_id}/", **headers,
         )
@@ -234,7 +262,7 @@ class TestAlcoholHint:
 class TestCaffeineWarning:
     @patch(
         "nutrition.services.water_entry_service._load_nutrition_context",
-        return_value=NutritionContext(pregnant=True, daily_water_ml=2000),
+        return_value=NutritionContext(pregnant=True),
     )
     def test_pregnant_over_threshold_warns(self, _ctx, proxy_user, seed, headers):
         c = APIClient()
@@ -244,7 +272,7 @@ class TestCaffeineWarning:
 
     @patch(
         "nutrition.services.water_entry_service._load_nutrition_context",
-        return_value=NutritionContext(pregnant=True, daily_water_ml=2000),
+        return_value=NutritionContext(pregnant=True),
     )
     def test_pregnant_under_threshold_no_warning(
         self, _ctx, proxy_user, seed, headers,
@@ -268,7 +296,7 @@ class TestCaffeineWarning:
 class TestEatingDisorderMode:
     @patch(
         "nutrition.services.water_entry_service._load_nutrition_context",
-        return_value=NutritionContext(eating_disorder=True, daily_water_ml=2000),
+        return_value=NutritionContext(eating_disorder=True),
     )
     def test_strips_kcal_milestone_alcohol_hint(
         self, _ctx, proxy_user, seed, headers,
@@ -285,7 +313,7 @@ class TestEatingDisorderMode:
 
     @patch(
         "nutrition.services.water_entry_service._load_nutrition_context",
-        return_value=NutritionContext(eating_disorder=True, daily_water_ml=2000),
+        return_value=NutritionContext(eating_disorder=True),
     )
     def test_persistence_still_records_macros_internally(
         self, _ctx, proxy_user, seed, headers,
@@ -381,7 +409,7 @@ class TestTodayEndpoint:
         body = resp.json()["data"]
         assert body["entries"] == []
         assert body["today_total_water_ml"] == 0
-        assert body["today_norm_water_ml"] == 2000
+        assert "today_norm_water_ml" not in body
 
     def test_aggregates_per_category_cups(self, proxy_user, seed, headers):
         c = APIClient()
@@ -431,3 +459,39 @@ class TestPurgeOlderThan90Days:
         assert purged == 1
         assert not WaterEntry.objects.filter(id=old.id).exists()
         assert WaterEntry.objects.filter(id=recent.id).exists()
+
+
+class TestNoAnketaNoNorm:
+    """Ориентира нет ни с анкетой, ни без неё.
+
+    Класс заводился как пара к ``proxy_user``, где анкета есть. Разницы
+    больше нет: формула ``30 мл × вес`` снята для всех до утверждения
+    методики (§82; §85 раздел 4). Класс оставлен — он проверяет самый
+    невыгодный для правки случай, человека БЕЗ профиля вовсе, и держит
+    вторую половину утверждения: запись при этом пишется.
+    """
+
+    @pytest.fixture
+    def bare_user(self, db):
+        return User.objects.create(
+            username="bot:303", role="client", is_proxy=True,
+        )
+
+    def test_norm_is_zero_and_no_milestone_fires(self, bare_user, seed):
+        c = APIClient()
+        headers = {
+            "HTTP_X_SERVICE_TOKEN": SERVICE_TOKEN,
+            "HTTP_X_EXTERNAL_USER_ID": "bot:303",
+        }
+
+        resp = _post_water(c, {"ml": 1000}, headers)
+
+        assert resp.status_code == status.HTTP_201_CREATED, resp.json()
+        body = resp.json()["data"]
+        # POSITIVE: выпитое записано и посчитано — правда не теряется.
+        assert body["today_total_water_ml"] == 1000
+        # NEGATIVE: ни 2000, ни поздравления с половиной несуществующей
+        # нормы. И больше даже не ноль: ноль был внутренним словом
+        # «нормы нет», а наружу уезжал значением — ключа теперь нет.
+        assert "today_norm_water_ml" not in body
+        assert not (body.get("milestone_text") or "")

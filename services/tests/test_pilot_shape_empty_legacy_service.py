@@ -47,7 +47,7 @@ from services.models import (
     SpecialistService,
 )
 from tenants.models import Tenant
-from users.models import User
+from users.models import SpecialistProfile, User
 
 pytestmark = pytest.mark.django_db
 
@@ -83,6 +83,11 @@ def _clear_cache():
 @pytest.fixture(autouse=True)
 def _token(settings):
     settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+    # Полки 1 и 2 — проекции решения резолвера, а он пускает только
+    # подтверждённую связь (§76). Настройки, включавшей исключение,
+    # больше нет: путь убран, а не выключен (T16). Предмет набора —
+    # чтение ОБОИХ слоёв каталога, и полку он получает честно:
+    # `_canonical` создаёт услугу со статусом VERIFIED.
 
 
 @pytest.fixture
@@ -106,6 +111,14 @@ def _canonical(profile, tenant, *, name, category=None, template=None,
     salon = SalonService.objects.create(
         tenant=tenant, category=category, template=template, name=name,
         duration_minutes=duration,
+        mapping_status=SalonService.MappingStatus.VERIFIED,
+        # `VERIFIED` без provenance схема не сохранит (§76). Фикстура
+        # называет себя правилом честно: подставлять сюда человека
+        # значило бы утверждать, что связь подтвердил кто-то, кого нет.
+        mapping_confirmed_rule="test_fixture",
+        mapping_rule_version="1.0.0",
+        mapping_confirmed_at=timezone.now(),
+        mapping_source_ref="fixture:test_pilot_shape",
     )
     link = SpecialistService.objects.create(
         salon_service=salon, specialist=profile,
@@ -217,7 +230,26 @@ def _assert_pilot_shape():
     )
 
 
+def _picked_names(payload) -> set[str]:
+    """Имена по ссылкам на кандидатов — строка полки имени не несёт (T18)."""
+    ids = [row["candidate"]["id"] for row in payload["layer_2_ayla_picks"]["items"]]
+    return set(
+        SpecialistProfile.objects
+        # Ключ кандидата — ПОЛЬЗОВАТЕЛЬСКИЙ (контракт §5 K1.1), а не
+        # первичный ключ профиля: за границей мастера ищут по нему.
+        .filter(user_id__in=ids)
+        .values_list("display_name", flat=True)
+    )
+
+
 def _catalog(api, **body) -> dict:
+    # T6: полки 1 и 2 — проекции решения резолвера. Исключение маппинга —
+    # решение владельца (§10.4), включается явно в самих тестах.
+    #
+    # Состояние безопасности здесь НЕ подставляется: поверхность объявляет
+    # `NOT_APPLICABLE` своим типом (§72), поля в запросе нет. Подстановка
+    # «NORMAL» стояла бы тогда за утверждение о пройденной проверке,
+    # которой никто не делал.
     response = api.post(CATALOG_URL, body, format="json")
     assert response.status_code == 200, response.data
     return response.data["data"]
@@ -244,7 +276,7 @@ class TestLayer3Explore:
 
         # Положительная стража: пул не пуст — падать обязан именно
         # подсчёт категорий, а не сама выборка мастеров.
-        assert len(data["layer_2_ayla_picks"]) == 2, data["layer_2_ayla_picks"]
+        assert len(data["layer_2_ayla_picks"]["items"]) == 2, data["layer_2_ayla_picks"]["items"]
 
         categories = data["layer_3_explore"]["categories"]
         by_slug = {row["slug"]: row for row in categories}
@@ -294,10 +326,7 @@ class TestExplicitGoalFilter:
         """
         _assert_pilot_shape()
 
-        names = {
-            row["display_name"]
-            for row in _catalog(catalog_api, goal="массаж")["layer_2_ayla_picks"]
-        }
+        names = _picked_names(_catalog(catalog_api, goal="массаж"))
 
         assert names == {"Ирина П."}, names
 
@@ -306,33 +335,34 @@ class TestExplicitGoalFilter:
     ):
         _assert_pilot_shape()
 
-        names = {
-            row["display_name"]
-            for row in _catalog(catalog_api, goal="Маникюр")["layer_2_ayla_picks"]
-        }
+        names = _picked_names(_catalog(catalog_api, goal="Маникюр"))
 
         assert names == {"Ольга К."}, names
 
-    def test_goal_reasoning_text_names_the_match(
+    def test_goal_match_is_named_by_code_not_by_a_sentence(
         self, catalog_api, massage_master,
     ):
-        """`_goal_matches` тоже ходит в легаси — совпадение не называется."""
+        """Совпадение называется КОДОМ, а не строкой (T6, контракт §7).
+
+        Раньше здесь проверялась фраза «Совпадает с твоей целью»: её
+        собирал источник. Теперь источник отдаёт `reason_codes`, а фразу
+        собирает представление — потребитель WHY не придумывает, но и
+        источник за него не пишет.
+        """
         _assert_pilot_shape()
 
-        rows = _catalog(catalog_api, goal="массаж")["layer_2_ayla_picks"]
+        rows = _catalog(catalog_api, goal="массаж")["layer_2_ayla_picks"]["items"]
 
         assert len(rows) == 1, rows
-        assert "Совпадает с твоей целью" in rows[0]["reasoning_text"]
+        assert "reasoning_text" not in rows[0]
+        assert any(code.startswith("MATCH_") for code in rows[0]["reason_codes"])
 
     def test_goal_falls_back_to_template_category(
         self, catalog_api, template_master, manicure_master,
     ):
         _assert_pilot_shape()
 
-        names = {
-            row["display_name"]
-            for row in _catalog(catalog_api, goal="Массаж тела")["layer_2_ayla_picks"]
-        }
+        names = _picked_names(_catalog(catalog_api, goal="Массаж тела"))
 
         assert names == {"Дарья Ш."}, names
 
@@ -343,10 +373,7 @@ class TestExplicitGoalFilter:
         кто действительно в этой категории."""
         _assert_pilot_shape()
 
-        names = {
-            row["display_name"]
-            for row in _catalog(catalog_api, goal="Массаж тела")["layer_2_ayla_picks"]
-        }
+        names = _picked_names(_catalog(catalog_api, goal="Массаж тела"))
 
         assert names == {"Ирина П."}, names
 
@@ -364,6 +391,8 @@ class TestSpecialistServicesPreview:
         response = app_api.get(SPECIALISTS_URL)
         assert response.status_code == 200, response.data
         rows = response.data["results"]
+        # `/specialists/` — НЕ полка рекомендаций: карточка каталога,
+        # и ключ у неё прежний. T18 сменил форму только у полок.
         row = next(r for r in rows if r["id"] == str(massage_master.id))
 
         assert row["services_count"] == 1, row
@@ -415,6 +444,7 @@ class TestSpecialistServicesPreview:
         assert response.status_code == 200, response.data
         rows = response.data["data"]["nearby_specialists"]
 
+        # `nearby_specialists` на главной — тоже не полка рекомендаций.
         row = next(r for r in rows if r["id"] == str(massage_master.id))
         assert row["services_preview"] == [MASSAGE], row
 

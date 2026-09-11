@@ -75,8 +75,35 @@ class TestBindExternalAuth:
                                               real_customer):
         """P1-1 proof: the standard BOT runtime credential — valid for
         every other internal s2s surface — CANNOT call the binding
-        endpoint. Only the dedicated provisioning token passes."""
+        endpoint. Only the dedicated provisioning token passes.
+
+        УСЛОВИЕ ПРОВЕРЯЕТСЯ ЯВНО, и это не церемония. Проба подменой: с
+        обнулённым ``AYLA_IDENTITY_PROVISIONING_TOKEN`` тест **оставался
+        зелёным** — отказ приходил из ветки «токен пуст → отказать
+        ВСЕМ» (``users/permissions.py:288``), а не из «боевой токен бота
+        отвергнут». Зелень бралась из соседства, и предмет, ради
+        которого тест написан, не проверялся.
+
+        Это не гипотетический риск. Замер пилота 11.09.2026
+        (``176.119.159.141``, ``dev-web-1``): провижининг-токен **не
+        задан**, ручка выключена целиком. Живое развёртывание находится
+        ровно в том состоянии, в котором этот тест переставал что-либо
+        доказывать.
+        """
         settings.AYLA_INTERNAL_API_TOKEN = "test-general-bot-token"
+
+        # Предусловие предмета: провижининг-токен ЗАДАН и ОТЛИЧАЕТСЯ.
+        # Без этих двух строк «боту отказано» неотличимо от «отказано
+        # всем».
+        assert settings.AYLA_IDENTITY_PROVISIONING_TOKEN, (
+            "провижининг-токен пуст: страж откажет всем, и тест перестанет "
+            "проверять запрет ИМЕННО для боевого токена бота"
+        )
+        assert (
+            settings.AYLA_IDENTITY_PROVISIONING_TOKEN
+            != settings.AYLA_INTERNAL_API_TOKEN
+        ), "токены совпали: сработает ветка misconfiguration, а не запрет для бота"
+
         api.credentials(HTTP_AUTHORIZATION="Bearer test-general-bot-token")
         r = api.post(URL, _payload(real_customer), format="json")
         assert r.status_code == 403

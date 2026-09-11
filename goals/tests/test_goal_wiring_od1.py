@@ -38,6 +38,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from ai.tests.factories import make_specialist, make_user
@@ -52,7 +53,7 @@ from services.models import (
     SpecialistService,
 )
 from tenants.models import Tenant
-from users.models import User
+from users.models import SpecialistProfile, User
 
 pytestmark = pytest.mark.django_db
 
@@ -85,6 +86,10 @@ def _clear_cache():
 @pytest.fixture(autouse=True)
 def _token(settings):
     settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+    # Полки 1 и 2 — проекции решения резолвера, а он пускает только
+    # подтверждённую связь (§76). Настройки, включавшей исключение,
+    # больше нет: путь убран, а не выключен (T16). Полку набор
+    # получает честно — фикстура создаёт услугу со статусом VERIFIED.
 
 
 @pytest.fixture
@@ -124,6 +129,14 @@ def _canonical(profile, tenant, *, name, category=None, template=None):
     """Каноническая связка: SalonService + бронируемый SpecialistService."""
     salon = SalonService.objects.create(
         tenant=tenant, category=category, template=template, name=name,
+        mapping_status=SalonService.MappingStatus.VERIFIED,
+        # `VERIFIED` без provenance схема не сохранит (§76). Фикстура
+        # называет себя правилом честно: подставлять сюда человека
+        # значило бы утверждать, что связь подтвердил кто-то, кого нет.
+        mapping_confirmed_rule="test_fixture",
+        mapping_rule_version="1.0.0",
+        mapping_confirmed_at=timezone.now(),
+        mapping_source_ref="fixture:test_goal_wiring_od1",
     )
     SpecialistService.objects.create(
         salon_service=salon, specialist=profile,
@@ -263,16 +276,28 @@ def _home_names(api) -> set[str]:
 
 
 def _catalog_payload(api, **body) -> dict:
+    # T6: полки 1 и 2 — проекции решения резолвера. Исключение маппинга —
+    # решение владельца (§10.4), включается явно; без него набор проверял бы
+    # пустую выдачу, а его предмет — связка «цель → категории».
+    #
+    # Состояние безопасности не подставляется: поверхность объявляет
+    # `NOT_APPLICABLE` своим типом (§72), поля в запросе нет.
     response = api.post(CATALOG_URL, body, format="json")
     assert response.status_code == 200, response.data
     return response.data["data"]
 
 
 def _layer_2_names(api, **body) -> set[str]:
-    return {
-        row["display_name"]
-        for row in _catalog_payload(api, **body)["layer_2_ayla_picks"]
-    }
+    """Имена по ссылкам на кандидатов — строка полки имени не несёт (T18)."""
+    rows = _catalog_payload(api, **body)["layer_2_ayla_picks"]["items"]
+    ids = [row["candidate"]["id"] for row in rows]
+    return set(
+        SpecialistProfile.objects
+        # Ключ кандидата — ПОЛЬЗОВАТЕЛЬСКИЙ (контракт §5 K1.1), а не
+        # первичный ключ профиля: за границей мастера ищут по нему.
+        .filter(user_id__in=ids)
+        .values_list("display_name", flat=True)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -546,3 +571,87 @@ class TestRecommendationCacheKey:
             RecommendationQuery(client_id=None).cache_key()
             == RecommendationQuery(client_id=None, goal_category_ids=None).cache_key()
         )
+
+
+# ---------------------------------------------------------------------------
+# DRF-1660: цель на паузе не режет выдачу (§97 OD-GOAL-B «PAUSED — Ayla по
+# ней не ведёт»). Положительная стража ВПЕРЕДИ: сначала показать, что
+# ACTIVE цель действительно режет, — иначе «пауза не режет» зеленело бы и
+# на выключенном фильтре.
+# ---------------------------------------------------------------------------
+
+def _pause(goal: ClientGoal) -> None:
+    from goals.lifecycle import transition
+
+    transition(goal, ClientGoal.State.PAUSED)
+    from django.core.cache import cache
+
+    cache.clear()
+
+
+class TestPausedGoalDoesNotTrimTheFeed:
+    def test_home_feed_is_trimmed_by_active_and_restored_by_pause(
+        self, settings, home_api, client_user, relax_option, both_specialists,
+    ):
+        settings.GOAL_RESOLUTION_ENABLED = True
+        goal = _select_goal(client_user)
+        assert _home_names(home_api) == {"В цели"}, "положительная стража: ACTIVE режет"
+
+        _pause(goal)
+
+        assert _home_names(home_api) == {"В цели", "Вне цели"}, (
+            "цель на паузе не должна резать главную"
+        )
+
+    def test_layer_2_is_trimmed_by_active_and_restored_by_pause(
+        self, settings, catalog_api, bot_customer, relax_option, both_specialists,
+    ):
+        settings.GOAL_RESOLUTION_ENABLED = True
+        goal = _select_goal(bot_customer)
+        assert _layer_2_names(catalog_api) == {"В цели"}, "положительная стража: ACTIVE режет"
+
+        _pause(goal)
+
+        assert _layer_2_names(catalog_api) == {"В цели", "Вне цели"}, (
+            "цель на паузе не должна резать полку 2"
+        )
+
+    def test_resume_trims_again(
+        self, settings, home_api, client_user, relax_option, both_specialists,
+    ):
+        """Выход из паузы существует и действует: снял — ведение вернулось."""
+        from django.core.cache import cache
+
+        from goals.lifecycle import transition
+
+        settings.GOAL_RESOLUTION_ENABLED = True
+        goal = _select_goal(client_user)
+        _pause(goal)
+        assert _home_names(home_api) == {"В цели", "Вне цели"}
+
+        transition(goal, ClientGoal.State.ACTIVE)
+        cache.clear()
+
+        assert _home_names(home_api) == {"В цели"}
+
+    def test_every_non_active_state_leaves_the_feed_whole(
+        self, settings, home_api, client_user, relax_option, both_specialists,
+    ):
+        """Не только пауза: ни одно состояние, кроме ACTIVE, не ведёт.
+
+        Перечислено по ``State.choices``, а не руками: новое состояние
+        попадёт сюда само и обязано будет назвать, режет оно или нет.
+        """
+        settings.GOAL_RESOLUTION_ENABLED = True
+        from django.core.cache import cache
+
+        for state, _label in ClientGoal.State.choices:
+            if state == ClientGoal.State.ACTIVE:
+                continue
+            ClientGoal.objects.filter(client=client_user).delete()
+            ClientGoal.objects.create(
+                client=client_user, goal_key="relax",
+                source_channel=ClientGoal.SourceChannel.BOT, state=state,
+            )
+            cache.clear()
+            assert _home_names(home_api) == {"В цели", "Вне цели"}, state

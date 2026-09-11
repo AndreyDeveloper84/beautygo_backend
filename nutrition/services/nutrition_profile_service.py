@@ -30,11 +30,74 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 
-# Defaults for skipped anthropometry fields — Penza pilot audience median.
-DEFAULT_GENDER = "female"
-DEFAULT_AGE = 40
-DEFAULT_HEIGHT_CM = 165
-DEFAULT_WEIGHT_KG = 70.0
+# Медианы пензенской аудитории УДАЛЕНЫ (§82, §85; §35 п.10).
+#
+# Стояло::
+#
+#     DEFAULT_GENDER = "female"
+#     DEFAULT_AGE = 40
+#     DEFAULT_HEIGHT_CM = 165
+#     DEFAULT_WEIGHT_KG = 70.0   # «Penza pilot audience median»
+#
+# и подставлялось за ЛЮБОЕ пропущенное поле. Человек, не назвавший вес,
+# получал ориентир, посчитанный ОТ ЧУЖОГО ТЕЛА, и на экране это было
+# неотличимо от своего.
+#
+# Это тяжелее плоской константы, а не легче. Плоскую 2000 видно — она
+# одинаковая у всех, и рано или поздно кто-то замечает. Медиана даёт
+# правдоподобное и РАЗНОЕ число: оно меняется от ответов человека и
+# потому выглядит персональным. Сверить его не с чем, оспорить нечем.
+#
+# DRF-1339 завёл маркер ``{"reason": "assumed_input", "field":
+# "weight_kg"}`` — но маркер это признание, а не отказ: число всё равно
+# считалось, уезжало в профиль и показывалось. Теперь пропуск любого из
+# четырёх обязательных входов отменяет расчёт целиком, и у отказа есть
+# имя: ``insufficient_inputs`` с перечнем недостающих полей.
+#
+# Раздел 3.2 решения перечисляет входы как ОБЯЗАТЕЛЬНЫЕ: возраст, рост,
+# вес, физиологический пол. Раздел 11: «для каждого результата
+# воспроизводимы входы, формула и версия» — подставленный вход
+# воспроизводимость ломает молча.
+
+#: Входы, без которых расчёта нет. Пол, возраст, рост и вес — ровно те
+#: четыре, что стоят в формуле Миффлина — Сан Жеора.
+REQUIRED_INPUTS: tuple[str, ...] = ("gender", "age", "height_cm", "weight_kg")
+
+#: Версия методики расчёта калорий — §85, решение владельца 09.09.2026:
+#: Миффлин — Сан Жеор с коэффициентом активности и поправкой на цель.
+#:
+#: Версия здесь не украшение, а условие воспроизводимости. §85 требует
+#: двух вещей сразу: те же входы и та же версия дают тот же результат, и
+#: изменение методики НЕ переписывает молча уже показанные значения.
+#: Строка, сохранённая рядом с ориентиром, — единственное, что позволит
+#: через полгода сказать, по какой формуле посчитано число, которое
+#: человек видит на экране.
+CALORIES_METHOD_VERSION: str = "mifflin_st_jeor_v1"
+
+#: Входы, уходящие в снимок вместе с результатом. Список ШИРЕ, чем
+#: ``REQUIRED_INPUTS``: активность, цель и темп на результат влияют, и без
+#: них расчёт не воспроизвести.
+#:
+#: ``health_flags`` в снимок НЕ входят намеренно. Это спецкатегория
+#: 152-ФЗ, и держать её второй копией рядом с ориентиром значило бы
+#: расширить периметр хранения ради воспроизводимости, которой она не
+#: добавляет: след лестницы переопределений и так пишется в
+#: ``overrides_applied``, причём именами причин, а не самими признаками.
+SNAPSHOT_INPUTS: tuple[str, ...] = (
+    "gender",
+    "age",
+    "height_cm",
+    "weight_kg",
+    "activity_coefficient",
+    "goal",
+    "pace",
+)
+
+# ``DEFAULT_ACTIVITY`` оставлен и НЕ снят здесь намеренно. Он того же
+# класса — умолчание, равное осмысленному значению, — но живёт ещё и в
+# схеме: ``NutritionProfile.activity_coefficient = FloatField(default=1.4)``.
+# Снять его значит тронуть колонку, то есть миграцию существующих
+# клиентов, а это отдельный срез. Названо главному окну строкой.
 DEFAULT_ACTIVITY = 1.4
 
 # BMR floor margin — daily_kcal must stay at least this far above BMR
@@ -61,9 +124,29 @@ PREGNANCY_KCAL_BONUS = 200
 BREASTFEEDING_KCAL_BONUS = 400
 PREGNANCY_PROTEIN_BONUS_G = 25
 
-# Per-kg water target. Spec: 30 ml/kg + adjustments. Lightweight model
-# for now — adjustments come in Phase 3.2 (heat/exercise/breastfeeding).
-WATER_ML_PER_KG = 30
+# Ориентира по жидкости здесь БОЛЬШЕ НЕТ, и это решение владельца от
+# 09.09.2026 (§82, §85; `docs/decisions/AYLA_NUTRITION_TARGETS_
+# ARCHITECTURE_DECISION.md` раздел 4), а не упрощение.
+#
+# Стояло: ``WATER_ML_PER_KG = 30`` и ``_water_target(weight_kg, flags)``
+# = 30 × вес, плюс 300 при беременности и плюс 700 при кормлении.
+# Дословно из решения: «Формула воды ``30 мл × вес`` и прибавки за
+# беременность или кормление НЕ ИСПОЛЬЗУЮТСЯ без отдельно утверждённой
+# методики».
+#
+# Прибавки сняты ДВАЖДЫ. Первый раз — как неутверждённая методика.
+# Второй — по разделу 7: беременным и кормящим Ayla не рассчитывает
+# ориентиры вовсе, так что прибавлять было не к чему.
+#
+# Была и третья причина, видная только из кода: непустая норма
+# вычислялась ИЗ ВЕСА, поэтому число на экране называло вес человека, а
+# не делящееся на 30 нацело — его состояние. §35 п.10 это запрещает.
+#
+# Что придёт на замену — справочный ориентир по напиткам 2200 мл
+# женщинам и 3000 мл мужчинам, версия ``adult_beverages_reference_v1``
+# (раздел 4 решения). Это ОТДЕЛЬНЫЙ срез: у него свои стоп-сценарии
+# (раздел 7) и своё согласие на пол. Подставить 2200 здесь и сейчас
+# значило бы повторить ту же ошибку с другим числом.
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +162,7 @@ class ProfileInputs:
     NutritionProfile directly here so the function stays pure and easy
     to fuzz-test.
     """
-    gender: str = DEFAULT_GENDER
+    gender: str = ""
     age: int | None = None
     height_cm: int | None = None
     weight_kg: float | None = None
@@ -91,28 +174,59 @@ class ProfileInputs:
 
 @dataclass
 class ComputedNorms:
-    bmr: int
-    daily_kcal: int
-    daily_protein_g: int
-    daily_fat_g: int
-    daily_carbs_g: int
-    daily_water_ml: int
+    """Результат расчёта — или ОТКАЗ, у которого все ориентиры ``None``.
+
+    ``int | None``, а не ``int`` с нулём в роли «нет» (§103, вариант A):
+    ноль — число, и в арифметике, в JSON и на экране он ведёт себя как
+    число. ``None`` ни сложить, ни показать, не заметив, нельзя. Столбцы
+    профиля объявлены nullable той же правкой (миграция ``0018``), так что
+    отказ доезжает до базы отсутствием, а не нулём.
+    """
+
+    bmr: int | None
+    daily_kcal: int | None
+    daily_protein_g: int | None
+    daily_fat_g: int | None
+    daily_carbs_g: int | None
     goal: str
     pace: str
     goal_overridden_by: str
     overrides_applied: list[dict[str, Any]] = field(default_factory=list)
 
+    # ── Происхождение (DRF-1623 N-d) ────────────────────────────────────
+    #
+    # Едет ВМЕСТЕ с результатом, а не собирается вызывающей стороной по
+    # памяти. Собранное снаружи происхождение — пересказ: оно утверждало
+    # бы про расчёт то, что вызывающий о нём думает, а не то, что расчёт
+    # сделал. Здесь же снимок собирает та самая функция, которая считала.
+    #
+    # У ОТКАЗА происхождения нет: при нехватке входов оба поля остаются
+    # пустыми, и по ним видно, что ориентира не появилось. Заполнить их
+    # на отказе значило бы выдать несостоявшийся расчёт за состоявшийся.
+    method_versions: dict[str, str] = field(default_factory=dict)
+    input_snapshot: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def computed(self) -> bool:
+        """Состоялся ли расчёт. Пустой снимок — расчёта не было."""
+        return bool(self.input_snapshot)
+
     # DRF-265: micronutrient RDA targets (USDA / NIH ODS-derived).
-    # Filled by compute_rda(); pure ints/floats — no override audit
-    # because RDA adjustments are deterministic (age/gender/flags-driven).
-    daily_vitamin_d_iu: int = 0
-    daily_vitamin_b12_mcg: float = 0.0
-    daily_vitamin_c_mg: int = 0
-    daily_iron_mg: float = 0.0
-    daily_calcium_mg: int = 0
-    daily_magnesium_mg: int = 0
-    daily_omega3_g: float = 0.0
-    daily_fiber_g: int = 0
+    # Filled by compute_rda(); no override audit because RDA adjustments
+    # are deterministic (age/gender/flags-driven).
+    #
+    # ``None`` на отказе — и у RDA тоже, хотя RDA считается только от пола
+    # и возраста: расчёт либо состоялся целиком, либо не состоялся.
+    # Половина ориентиров при пустой другой половине выглядела бы как
+    # «посчитали, но не всё», а посчитано не было ничего.
+    daily_vitamin_d_iu: int | None = None
+    daily_vitamin_b12_mcg: float | None = None
+    daily_vitamin_c_mg: int | None = None
+    daily_iron_mg: float | None = None
+    daily_calcium_mg: int | None = None
+    daily_magnesium_mg: int | None = None
+    daily_omega3_g: float | None = None
+    daily_fiber_g: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -120,16 +234,79 @@ class ComputedNorms:
 # ---------------------------------------------------------------------------
 
 
-def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
-    """Pure deterministic computation.
+def _missing_inputs(inputs: ProfileInputs) -> list[str]:
+    """Обязательные входы, которых человек не назвал.
 
-    Fills defaults for skipped fields, computes BMR, applies the
-    override ladder in priority order, then derives daily targets.
+    Пустая строка считается пропуском наравне с ``None``: пол хранится
+    строкой, и незаполненный он приходит как ``""``.
     """
-    gender = inputs.gender or DEFAULT_GENDER
-    age = inputs.age if inputs.age is not None else DEFAULT_AGE
-    height_cm = inputs.height_cm if inputs.height_cm is not None else DEFAULT_HEIGHT_CM
-    weight_kg = inputs.weight_kg if inputs.weight_kg is not None else DEFAULT_WEIGHT_KG
+    missing = []
+    for name in REQUIRED_INPUTS:
+        value = getattr(inputs, name, None)
+        if value is None or value == "":
+            missing.append(name)
+    return missing
+
+
+def _input_snapshot(inputs: ProfileInputs, *, goal: str, pace: str) -> dict[str, Any]:
+    """Снимок входов состоявшегося расчёта — §85, воспроизводимость.
+
+    Собирается по :data:`SNAPSHOT_INPUTS`, а не перечислением полей
+    руками: список один, и он же читается тестом. Перечисленный дважды,
+    он разошёлся бы при следующем поле, и разошёлся бы молча.
+
+    ``goal`` и ``pace`` передаются отдельно, потому что к моменту вызова
+    лестница переопределений могла их изменить, и в снимок обязано
+    попасть то, ПО ЧЕМУ считали.
+    """
+    snapshot: dict[str, Any] = {}
+    for name in SNAPSHOT_INPUTS:
+        snapshot[name] = getattr(inputs, name, None)
+    snapshot["goal"] = goal
+    snapshot["pace"] = pace
+    return snapshot
+
+
+def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
+    """Pure deterministic computation — или ОТКАЗ, если входов не хватает.
+
+    Раньше функция заполняла пропуски медианой пензенской аудитории и
+    считала всегда. Теперь пропуск любого из ``REQUIRED_INPUTS`` отменяет
+    расчёт целиком: все ориентиры ``None`` и запись в аудите с именем
+    отказа.
+
+    ``None``, а не нули (§103, вариант A). Здесь стояли нули с доводом
+    «столбцы объявлены ``default=0``, переводить их в nullable — отдельный
+    срез». Это тот срез: столбцы nullable (миграция ``0018``), и отказ
+    доезжает до базы отсутствием. Ноль был безопасен по уговору («норма
+    ноль калорий невозможна»), а уговор — это то, что первый читатель вне
+    модуля не знает: снаружи ноль всё равно число.
+    """
+    missing = _missing_inputs(inputs)
+    if missing:
+        return ComputedNorms(
+            bmr=None,
+            daily_kcal=None,
+            daily_protein_g=None,
+            daily_fat_g=None,
+            daily_carbs_g=None,
+            goal=inputs.goal or "maintain",
+            pace=inputs.pace or "moderate",
+            goal_overridden_by="",
+            # У пропуска есть ИМЯ и перечень. Молчаливая пустота — отказ
+            # без имени: потребитель видит нули и не может отличить «не
+            # спросили» от «посчитали и вышло ноль».
+            overrides_applied=[{
+                "reason": "insufficient_inputs",
+                "fields": missing,
+            }],
+        )
+
+    gender = inputs.gender
+    age = inputs.age
+    height_cm = inputs.height_cm
+    weight_kg = inputs.weight_kg
+    assert age is not None and height_cm is not None and weight_kg is not None
 
     bmr = _mifflin_st_jeor(gender, age, height_cm, weight_kg)
     activity = inputs.activity_coefficient or DEFAULT_ACTIVITY
@@ -196,7 +373,6 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
 
     protein_g, fat_g, carbs_g = _macros_split(daily_kcal, weight_kg, goal)
     protein_g += bonus_protein_g
-    daily_water_ml = _water_target(weight_kg, flags)
 
     rda = compute_rda(
         gender=gender,
@@ -210,11 +386,18 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
         daily_protein_g=int(round(protein_g)),
         daily_fat_g=int(round(fat_g)),
         daily_carbs_g=int(round(carbs_g)),
-        daily_water_ml=int(round(daily_water_ml)),
         goal=goal,
         pace=pace,
         goal_overridden_by=overridden_by,
         overrides_applied=overrides,
+        # Происхождение состоявшегося расчёта. ``goal`` и ``pace`` берутся
+        # ПОСЛЕ лестницы переопределений — то есть в снимке лежит то, по
+        # чему на самом деле считали, а не то, что человек попросил.
+        # Разница между ними уже названа в ``overrides_applied``, и
+        # дублировать её снимком значило бы завести второй ответ на один
+        # вопрос.
+        method_versions={"calories": CALORIES_METHOD_VERSION},
+        input_snapshot=_input_snapshot(inputs, goal=goal, pace=pace),
         # DRF-265: RDA layer — independent of macro override ladder.
         daily_vitamin_d_iu=rda["vitamin_d_iu"],
         daily_vitamin_b12_mcg=rda["vitamin_b12_mcg"],
@@ -258,16 +441,6 @@ def _macros_split(daily_kcal: float, weight_kg: float, goal: str) -> tuple[float
     used_kcal = protein_g * 4 + fat_g * 9
     carbs_g = max(0.0, (daily_kcal - used_kcal) / 4.0)
     return protein_g, fat_g, carbs_g
-
-
-def _water_target(weight_kg: float, flags: dict) -> float:
-    base = WATER_ML_PER_KG * weight_kg
-    # Pregnancy / breastfeeding nudge — small, conservative additions.
-    if flags.get("pregnant"):
-        base += 300
-    if flags.get("breastfeeding"):
-        base += 700
-    return base
 
 
 # ---------------------------------------------------------------------------
