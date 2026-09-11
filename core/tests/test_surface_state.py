@@ -400,3 +400,28 @@ def test_write_replaces_the_file_with_the_report_and_a_warning_header(surface, t
     assert "== ПРЕДМЕТ: кто отвечает на этот замер ==" in written
     assert "с координатами          :        1   users.SpecialistProfile.location_lat" in written
     assert f"записано: {target}" in report
+
+
+# --------------------------------------------------------------------------- #
+# Путь записи — вне репозитория
+# --------------------------------------------------------------------------- #
+
+def test_the_default_write_path_is_ignored_by_git_and_not_tracked():
+    """Замер, перезаписанный в отслеживаемый файл, роняет следующую выкладку:
+    `git checkout` откажет «local changes would be overwritten» ещё до
+    миграций. Путь по умолчанию обязан быть игнорируемым, и файла с таким
+    путём в индексе быть не должно."""
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    path = "docs/generated/SURFACE_STATE.md"
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", path], cwd=root, check=False, capture_output=True,
+    )
+    assert ignored.returncode == 0, f"{path} не игнорируется git — шаг выкладки уронит checkout"
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "docs/SURFACE_STATE.md", path],
+        cwd=root, check=False, capture_output=True,
+    )
+    assert tracked.returncode != 0, "файл состояния отслеживается — это замер, а не исходник"
