@@ -35,7 +35,7 @@ class FakeGeocoder:
             return GeocodeResult(outcome=Outcome.MISCONFIGURED, provider=self.name, reason=self.refuse)
         return None
 
-    def geocode(self, address: str) -> GeocodeResult:
+    def geocode(self, address: str, *, city: str = "") -> GeocodeResult:
         FakeGeocoder.calls.append(address)
         return self.script.get(
             address, GeocodeResult(outcome=Outcome.NOT_FOUND, provider=self.name),
@@ -187,3 +187,20 @@ def test_missing_provider_argument_is_an_error_not_a_default(fake):
     code, _, err = _run()
     assert code == 2 and "--provider обязателен" in err
     assert fake.calls == []
+
+
+def test_a_key_rejected_mid_run_stops_the_run_and_keeps_what_was_written(fake):
+    """Отклонённый ключ — про нас, не про сервис. Остальные строки не
+    получают pending, который выглядел бы как лежащий сервис."""
+    _tenant("s-first", "ул Кирова, д 20")
+    _tenant("s-second", "ул Ладожская, д 130")
+    fake.script["ул Кирова, д 20"] = _found()
+    fake.script["ул Ладожская, д 130"] = GeocodeResult(
+        outcome=Outcome.MISCONFIGURED, provider="fake", reason="DaData отклонила ключ (HTTP 403)",
+    )
+
+    code, _, err = _run(provider="fake", apply=True)
+
+    assert code == 2 and "отклонила ключ" in err and "записано строк: 1" in err
+    assert Tenant.objects.get(slug="s-first").is_geocoded
+    assert Tenant.objects.get(slug="s-second").geocode_status == GeocodeStatus.NOT_ATTEMPTED

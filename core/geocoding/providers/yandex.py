@@ -39,5 +39,5 @@ class YandexGeocoder:
         # другой неготовности провайдера.
         return GeocodeResult(outcome=Outcome.MISCONFIGURED, provider=self.name, reason=LICENCE_NOTE)
 
-    def geocode(self, address: str) -> GeocodeResult:
+    def geocode(self, address: str, *, city: str = "") -> GeocodeResult:
         raise NotImplementedError(LICENCE_NOTE)
