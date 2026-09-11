@@ -539,9 +539,35 @@ jobs:
           script: |
             set -eo pipefail
             cd /home/taximeter/beautygo/dev
+            echo "::notice::шаг идёт от uid=$(id -u) gid=$(id -g) — числом, не именем: имя совпадает с секретом VPS_USER и было бы замаскировано"
 
-            # Configure git auth via deploy token (HTTPS)
-            git remote set-url origin https://${{ secrets.GH_DEPLOY_TOKEN }}@github.com/AndreyDeveloper84/beautygo_backend.git
+            # DRF-979 — токена в .git/config больше не будет.
+            #
+            # Здесь стояло `git remote set-url origin https://<секрет>@github.com/…`
+            # с раскрытым `secrets.GH_DEPLOY_TOKEN`: GitHub подставлял его ДО
+            # отправки скрипта на хост, а set-url записывал в
+            # /home/taximeter/beautygo/dev/.git/config — файл 664, читаемый
+            # группой, — навсегда и на каждом прогоне. Замер 11.09.2026: одна
+            # строка credential-формы в конфиге; снять руками бессмысленно,
+            # следующая выкладка клала бы обратно.
+            #
+            # Теперь remote настроен на хосте ОДИН РАЗ владельцем — read-only
+            # deploy key по ssh — и шаг только читает его. Сторож ниже
+            # отказывает, если origin снова несёт credential (`@` перед
+            # github.com): ни рукой, ни следующей правкой workflow токен в
+            # конфиг не вернётся молча. Печатается только маска origin.
+            #
+            # Тот же токен читают ещё два места, и ЭТОТ шаг их не трогает:
+            # job `test` на раннере (auth для ayla-ai-core, необязательный —
+            # репозиторий публичный) и шаг 2/4 ниже (GH_DEPLOY_TOKEN= в .env
+            # хоста как запасной вход в ghcr). Отзыв токена владельцем
+            # обязан учитывать оба — см. тело PR.
+            ORIGIN="$(git remote get-url origin)"
+            if printf '%s' "$ORIGIN" | grep -qE '^https?://[^/@]+@github[.]com'; then
+              echo "::error::origin несёт credential (форма https://<…>@github.com). DRF-979: токен в .git/config запрещён. Перевести remote на deploy key: git remote set-url origin git@github.com:AndreyDeveloper84/beautygo_backend.git"
+              exit 1
+            fi
+            echo "::notice::origin без credential: $(printf '%s' "$ORIGIN" | sed -E 's#(://|@)[^/:]+#\1<host>#')"
 
             # Проверенный SHA обязан быть 40 hex: пустой дал бы `reset --hard ''`.
             if ! printf '%s' "$DEPLOY_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
@@ -669,6 +695,7 @@ jobs:
           script: |
             set -eo pipefail
             cd /home/taximeter/beautygo/dev
+            echo "::notice::шаг идёт от uid=$(id -u) gid=$(id -g) — числом, не именем: имя совпадает с секретом VPS_USER и было бы замаскировано"
 
             # --- where the base layer comes from (DRF-1431) --------------
             # The Dockerfile's `ARG PYTHON_BASE_IMAGE=` line is the single
@@ -767,6 +794,7 @@ jobs:
           script: |
             set -eo pipefail
             cd /home/taximeter/beautygo/dev
+            echo "::notice::шаг идёт от uid=$(id -u) gid=$(id -g) — числом, не именем: имя совпадает с секретом VPS_USER и было бы замаскировано"
 
             # Storage tier: start what is down, replace nothing.
             # `--no-recreate` is the opposite of what killed the pilot —
@@ -809,6 +837,7 @@ jobs:
           script: |
             set -eo pipefail
             cd /home/taximeter/beautygo/dev
+            echo "::notice::шаг идёт от uid=$(id -u) gid=$(id -g) — числом, не именем: имя совпадает с секретом VPS_USER и было бы замаскировано"
 
             # web publishes on 127.0.0.1:8000 only (docker-compose.yml),
             # so the probe runs on the box. settings.prod builds
@@ -981,6 +1010,7 @@ jobs:
           command_timeout: 8m
           script: |
             cd /home/taximeter/beautygo/dev
+            echo "::notice::шаг идёт от uid=$(id -u) gid=$(id -g) — числом, не именем: имя совпадает с секретом VPS_USER и было бы замаскировано"
             echo "=== state as the failed deploy left it ==="
             docker compose ps -a
             echo
