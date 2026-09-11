@@ -305,6 +305,34 @@ class TestThirdWindowIsClosed:
 # ===========================================================================
 
 
+class TestOpenFieldDoesNotMoveAHandSetNumber:
+    """``pace`` открыт согласием, но меняет телесное число через ``PACE_FACTORS``.
+
+    Единственный случай, где читатель мог бы связать темп с ручной нормой:
+    ``user_entered`` + смена ``pace`` без утверждения. Число не двигается,
+    источник не меняется, отказ записан. (Находка ayla-8b при чтении #332.)
+    """
+
+    def test_user_entered_number_survives_a_pace_change(self, proxy_user, headers):
+        p = NutritionProfile.objects.create(
+            user=proxy_user, targets_source=Source.USER_ENTERED,
+            daily_kcal=1700, bmr=1400, **FULL_INPUTS,
+        )
+
+        resp = _post({"pace": "gentle"}, headers)
+
+        assert resp.status_code == status.HTTP_200_OK, resp.json()
+        p.refresh_from_db()
+        assert p.pace == "gentle"  # открытое поле записано
+        assert p.daily_kcal == 1700  # закрытый исход не двинулся
+        assert p.bmr == 1400
+        assert p.targets_source == Source.USER_ENTERED
+        assert _refusals(p) == [{
+            "reason": RECOMPUTE_REFUSED_NO_CONSENT,
+            "targets_source": "user_entered",
+        }]
+
+
 class TestGuardLetsGroundedRecomputeThrough:
     def test_full_inputs_with_attestation_compute_and_snapshot(
         self, proxy_user, headers,
