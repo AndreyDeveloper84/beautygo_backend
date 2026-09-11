@@ -78,6 +78,19 @@ def ensure_deletion_request(user: User, *, initiator: str) -> EnsuredDeletionReq
     return EnsuredDeletionRequest(request=created, created=True)
 
 
+def current_request_for(user: User) -> DeletionRequest | None:
+    """Заявка, которую экран показывает как «текущую».
+
+    Открытая, если есть; иначе последняя завершённая — человек, чьё
+    удаление уже исполнено, вправе видеть номер и дату завершения, а не
+    «заявок нет». ``None`` — заявок не было вовсе.
+    """
+    open_one = open_request_for(user)
+    if open_one is not None:
+        return open_one
+    return DeletionRequest.objects.filter(user=user).order_by("-requested_at").first()
+
+
 def get_deletion_request(user: User, request_id: UUID) -> DeletionRequest | None:
     """Заявка по номеру — только своя: чужой номер неотличим от несуществующего."""
     return DeletionRequest.objects.filter(pk=request_id, user=user).first()
