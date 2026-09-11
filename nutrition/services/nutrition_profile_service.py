@@ -174,11 +174,20 @@ class ProfileInputs:
 
 @dataclass
 class ComputedNorms:
-    bmr: int
-    daily_kcal: int
-    daily_protein_g: int
-    daily_fat_g: int
-    daily_carbs_g: int
+    """Результат расчёта — или ОТКАЗ, у которого все ориентиры ``None``.
+
+    ``int | None``, а не ``int`` с нулём в роли «нет» (§103, вариант A):
+    ноль — число, и в арифметике, в JSON и на экране он ведёт себя как
+    число. ``None`` ни сложить, ни показать, не заметив, нельзя. Столбцы
+    профиля объявлены nullable той же правкой (миграция ``0018``), так что
+    отказ доезжает до базы отсутствием, а не нулём.
+    """
+
+    bmr: int | None
+    daily_kcal: int | None
+    daily_protein_g: int | None
+    daily_fat_g: int | None
+    daily_carbs_g: int | None
     goal: str
     pace: str
     goal_overridden_by: str
@@ -203,16 +212,21 @@ class ComputedNorms:
         return bool(self.input_snapshot)
 
     # DRF-265: micronutrient RDA targets (USDA / NIH ODS-derived).
-    # Filled by compute_rda(); pure ints/floats — no override audit
-    # because RDA adjustments are deterministic (age/gender/flags-driven).
-    daily_vitamin_d_iu: int = 0
-    daily_vitamin_b12_mcg: float = 0.0
-    daily_vitamin_c_mg: int = 0
-    daily_iron_mg: float = 0.0
-    daily_calcium_mg: int = 0
-    daily_magnesium_mg: int = 0
-    daily_omega3_g: float = 0.0
-    daily_fiber_g: int = 0
+    # Filled by compute_rda(); no override audit because RDA adjustments
+    # are deterministic (age/gender/flags-driven).
+    #
+    # ``None`` на отказе — и у RDA тоже, хотя RDA считается только от пола
+    # и возраста: расчёт либо состоялся целиком, либо не состоялся.
+    # Половина ориентиров при пустой другой половине выглядела бы как
+    # «посчитали, но не всё», а посчитано не было ничего.
+    daily_vitamin_d_iu: int | None = None
+    daily_vitamin_b12_mcg: float | None = None
+    daily_vitamin_c_mg: int | None = None
+    daily_iron_mg: float | None = None
+    daily_calcium_mg: int | None = None
+    daily_magnesium_mg: int | None = None
+    daily_omega3_g: float | None = None
+    daily_fiber_g: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -258,23 +272,24 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
 
     Раньше функция заполняла пропуски медианой пензенской аудитории и
     считала всегда. Теперь пропуск любого из ``REQUIRED_INPUTS`` отменяет
-    расчёт целиком: возвращаются нули и запись в аудите с именем отказа.
+    расчёт целиком: все ориентиры ``None`` и запись в аудите с именем
+    отказа.
 
-    Нули, а не ``None``: столбцы профиля объявлены ``PositiveIntegerField
-    (default=0)``, и переводить их в nullable — миграция существующих
-    клиентов, отдельный срез. Ноль здесь безопасен ровно потому, что
-    дневная норма ноль калорий физически невозможна, и все потребители
-    уже проверяют её на положительность. Наружу отказ уезжает не нулём:
-    ключ ориентира сериализатор выкидывает (``OmitAbsentTargetsMixin``).
+    ``None``, а не нули (§103, вариант A). Здесь стояли нули с доводом
+    «столбцы объявлены ``default=0``, переводить их в nullable — отдельный
+    срез». Это тот срез: столбцы nullable (миграция ``0018``), и отказ
+    доезжает до базы отсутствием. Ноль был безопасен по уговору («норма
+    ноль калорий невозможна»), а уговор — это то, что первый читатель вне
+    модуля не знает: снаружи ноль всё равно число.
     """
     missing = _missing_inputs(inputs)
     if missing:
         return ComputedNorms(
-            bmr=0,
-            daily_kcal=0,
-            daily_protein_g=0,
-            daily_fat_g=0,
-            daily_carbs_g=0,
+            bmr=None,
+            daily_kcal=None,
+            daily_protein_g=None,
+            daily_fat_g=None,
+            daily_carbs_g=None,
             goal=inputs.goal or "maintain",
             pace=inputs.pace or "moderate",
             goal_overridden_by="",

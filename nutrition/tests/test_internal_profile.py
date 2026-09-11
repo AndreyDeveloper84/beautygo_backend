@@ -100,8 +100,9 @@ class TestSkippedFieldsCancelTheCalculation:
 
     def test_all_fields_missing_yields_no_norms_at_all(self):
         norms = compute_norms(ProfileInputs(goal="maintain", pace="moderate"))
-        assert norms.bmr == 0
-        assert norms.daily_kcal == 0
+        # ``None``, не ноль (§103): отказ — отсутствие, а не число.
+        assert norms.bmr is None
+        assert norms.daily_kcal is None
         assert [o.get("reason") for o in norms.overrides_applied] == [
             "insufficient_inputs",
         ]

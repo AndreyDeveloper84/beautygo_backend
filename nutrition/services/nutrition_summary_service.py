@@ -201,9 +201,10 @@ class NutritionSummaryService:
     def _protein_goal_g(user_id) -> float:
         """Дневная норма белка ЭТОГО человека, или 0.0 — «нормы нет».
 
-        Ноль означает отсутствие: столбец объявлен ``default=0``, и
-        незаполненный профиль читается как «анкеты нет», а не как «норма
-        ноль граммов». Профиля нет вовсе — тот же ответ.
+        Столбец nullable (§103): ``NULL`` — ориентира нет, и ``row or
+        0.0`` переводит его в ноль ТОЛЬКО здесь, внутри модуля, где
+        вызывающий проверяет знаменатель на положительность и наружу
+        число не отдаёт. Профиля нет вовсе — тот же ответ.
         """
         from nutrition.models import NutritionProfile
 
@@ -468,8 +469,27 @@ def _compute_habits(user, period: int) -> dict:
 
 
 def _compute_goal_progress(profile) -> dict | None:
-    """Only goal=lose/gain return a progress block. tone/maintain → None."""
+    """Only goal=lose/gain return a progress block. tone/maintain → None.
+
+    Блок цели несёт ЧИСЛА ориентира, поэтому подчинён тому же правилу,
+    что и ``_norms_block`` профиля: признак — ``targets_source``, а не
+    значение столбца. Строка с ``source=none`` ориентира не имеет, и
+    ``daily_kcal`` у неё ``NULL`` (§103); отдать блок с ``None`` внутри
+    значило бы показать цель без числа, отдать старое число — показать
+    ориентир без происхождения (§92 п.5). Блока нет целиком.
+
+    ``unknown_legacy`` до очистки командой сюда всё ещё доезжает: этот
+    признак §92 п.5 тоже нарушает, но его судьба — команда
+    ``clear_targets_without_provenance``, а не молчаливый фильтр здесь:
+    иначе очистка выглядела бы сделанной там, где она не сделана.
+    Читателей ``goal_progress`` в боте нет (grep 11.09.2026), так что
+    сужение блока контракт не ломает.
+    """
+    from nutrition.models import NutritionProfile
+
     if profile is None or profile.goal not in ("lose", "gain"):
+        return None
+    if profile.targets_source == NutritionProfile.TargetsSource.NONE:
         return None
     return {
         "type": "weight_loss" if profile.goal == "lose" else "weight_gain",

@@ -1333,7 +1333,7 @@ class TestSection8CrossFeature:
         row_before = NutritionProfile.objects.get(user=proxy_user)
         before_water = row_before.daily_water_ml
         before_kcal = row_before.daily_kcal
-        assert before_water == 0
+        assert before_water is None  # §103: ориентира нет — NULL, не ноль
         # POSITIVE: пересчёт на POST состоялся — калории посчитаны.
         assert before_kcal > 0
 
@@ -1344,7 +1344,7 @@ class TestSection8CrossFeature:
         )
         row_after = NutritionProfile.objects.get(user=proxy_user)
         # NEGATIVE: ориентира по жидкости нет ни до, ни после.
-        assert row_after.daily_water_ml == 0
+        assert row_after.daily_water_ml is None
         # POSITIVE: загрузчик профиль ПЕРЕЧИТАЛ — калории сдвинулись
         # вслед за весом. Без этой половины отрицание выше прошло бы и
         # у сломанного пересчёта.

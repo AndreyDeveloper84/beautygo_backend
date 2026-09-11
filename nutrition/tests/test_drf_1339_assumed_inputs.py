@@ -100,9 +100,9 @@ class TestAssumedInputsMarker:
         assert body["weight_kg"] is None
         profile = NutritionProfile.objects.get(user=proxy_user)
         assert profile.weight_kg is None
-        # Норм НЕТ — вместо чисел от чужого тела ноль, и у отказа имя.
-        assert profile.daily_kcal == 0
-        assert profile.bmr == 0
+        # Норм НЕТ — вместо чисел от чужого тела NULL (§103), и у отказа имя.
+        assert profile.daily_kcal is None
+        assert profile.bmr is None
         assert {
             "reason": "insufficient_inputs", "fields": ["weight_kg"],
         } in profile.last_overrides_applied
@@ -435,9 +435,10 @@ class TestComputedNormsSnapshot:
         же — чужой.
         """
         norms = compute_norms(_SNAPSHOT[case]["inputs"])
-        assert norms.bmr == 0
-        assert norms.daily_kcal == 0
-        assert norms.daily_protein_g == 0
+        # ``None``, не ноль (§103): отказ — отсутствие, а не число.
+        assert norms.bmr is None
+        assert norms.daily_kcal is None
+        assert norms.daily_protein_g is None
         assert [o.get("reason") for o in norms.overrides_applied] == [
             "insufficient_inputs",
         ]
