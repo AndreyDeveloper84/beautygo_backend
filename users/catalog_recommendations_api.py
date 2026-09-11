@@ -133,6 +133,7 @@ from users.models import SpecialistProfile, TenantUserRelationship
 from users.permissions import IsBotServiceWithVerifiedClient
 from users.recommendation_source import SpecialistCandidateSource
 from users.response import success_response
+from users.deletion_requests import deletion_block_for, deletion_refusal
 
 
 logger = logging.getLogger(__name__)
@@ -465,6 +466,10 @@ class CatalogRecommendationsView(APIView):
         },
     )
     def post(self, request: Request) -> Response:
+        # D2 (§7): живая заявка на удаление — персональной выдачи нет.
+        blocked = deletion_block_for(request.user)
+        if blocked is not None:
+            return deletion_refusal(blocked)
         serializer = RecommendationsRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         goal = (serializer.validated_data.get("goal") or "").strip()
