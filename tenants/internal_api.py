@@ -5,15 +5,17 @@
 служит общим ключом синхронизации (``?tenant=<uuid>`` в зеркале). Сам
 человек UUID не вводит и не видит — решение владельца 11.09.2026.
 
-### Почему провижининг-токен, а не общий Bearer бота
+### Почему свой провижининг-токен, а не общий Bearer и не identity-токен
 
 Ручка ЗАВОДИТ строку в источнике истины. Общий ``AYLA_INTERNAL_API_TOKEN``
 лежит в рантайме бота и даёт право читать зеркало и писать записи;
-право заводить салоны — другая сила, и §11 свода владельца отводит под
-неё ``AYLA_IDENTITY_PROVISIONING_TOKEN`` (тот же, что у S2). Сторож
-``IsIdentityProvisioningBearer`` фейлится ЗАКРЫТО: пустой токен — 403,
-не 500 и не 201. Бот обязан читать этот 403 как «токен не задан →
-``SETUP_PENDING``», а не как сбой.
+право заводить салоны — другая сила. Но и не та, что у ``bind-external``:
+заведение салона не присваивает никому личность, а identity-токен боту
+выдавать запрещено (OPEN_DECISIONS §151). Поэтому — свой секрет,
+``AYLA_TENANT_PROVISIONING_TOKEN``, сторож :class:`IsTenantProvisioningBearer`
+(DRF-1695, C1). Фейлится ЗАКРЫТО: пустой токен — 403, не 500 и не 201.
+Бот обязан читать этот 403 как «токен не задан → ``SETUP_PENDING``», а не
+как сбой.
 
 ### Ответы
 
@@ -41,7 +43,7 @@ from rest_framework.views import APIView
 
 from core.errors import ErrorCode
 from tenants.provisioning import TenantNameMismatch, ensure_tenant
-from users.permissions import IsIdentityProvisioningBearer
+from users.permissions import IsTenantProvisioningBearer
 from users.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
@@ -77,7 +79,7 @@ class InternalEnsureTenantView(APIView):
     """См. докстринг модуля."""
 
     authentication_classes: list = []
-    permission_classes = [IsIdentityProvisioningBearer]
+    permission_classes = [IsTenantProvisioningBearer]
     serializer_class = _EnsureTenantRequestSerializer
 
     @extend_schema(

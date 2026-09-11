@@ -27,13 +27,16 @@ URL = "/api/v1/internal/tenants/"
 # создаёт» на нём получал бы 200 от чужой строки.
 SLUG = "salon-u-olgi-1525"
 NAME = "Салон у Ольги"
-PROVISIONING = "test-provisioning-1525"
+PROVISIONING = "test-tenant-provisioning-1525"
+IDENTITY = "test-identity-provisioning-1525"
 GENERAL = "test-general-bot-token-1525"
 
 
 @pytest.fixture
 def tokens(settings):
-    settings.AYLA_IDENTITY_PROVISIONING_TOKEN = PROVISIONING
+    # DRF-1695 (C1): три секрета, три силы. Ручка тенантов — под своим.
+    settings.AYLA_TENANT_PROVISIONING_TOKEN = PROVISIONING
+    settings.AYLA_IDENTITY_PROVISIONING_TOKEN = IDENTITY
     settings.AYLA_INTERNAL_API_TOKEN = GENERAL
 
 
@@ -57,6 +60,7 @@ class TestTheGuardRefusesByName:
         Три утверждения, а не одно: код 403 (не 500 — ручка не упала до
         сторожа; не 201 — ручка не завела), и в базе пусто.
         """
+        settings.AYLA_TENANT_PROVISIONING_TOKEN = ""
         settings.AYLA_IDENTITY_PROVISIONING_TOKEN = ""
         settings.AYLA_INTERNAL_API_TOKEN = GENERAL
         c = APIClient()
@@ -80,6 +84,43 @@ class TestTheGuardRefusesByName:
     def test_no_bearer_at_all_is_403(self, tokens):
         r = APIClient().post(URL, _body(), format="json")
         assert r.status_code == 403, r.content
+
+    def test_the_identity_secret_does_not_open_tenants_once_the_tenant_secret_exists(self, tokens):
+        """DRF-1695 (C1): одна сила — один секрет. Identity-токен здесь чужой."""
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f"Bearer {IDENTITY}")
+
+        r = c.post(URL, _body(), format="json")
+
+        assert r.status_code == 403, r.content
+        assert Tenant.all_objects.filter(slug=SLUG).count() == 0
+
+    def test_transition_identity_secret_opens_tenants_only_while_tenant_secret_is_empty(
+        self, settings
+    ):
+        """Одна выкладка: пока новый секрет не задан, форма владельца живёт на
+        старом; как задан — старый закрыт (положительная стража к тесту выше)."""
+        settings.AYLA_TENANT_PROVISIONING_TOKEN = ""
+        settings.AYLA_IDENTITY_PROVISIONING_TOKEN = IDENTITY
+        settings.AYLA_INTERNAL_API_TOKEN = GENERAL
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f"Bearer {IDENTITY}")
+
+        assert c.post(URL, _body(), format="json").status_code == 201
+
+        settings.AYLA_TENANT_PROVISIONING_TOKEN = PROVISIONING
+        assert c.post(URL, _body(slug="vtoroy-1525"), format="json").status_code == 403
+
+    def test_equal_secrets_fail_closed_per_request(self, settings):
+        """Совпали tenant и identity — снова одна сила; ручка отказывает всем."""
+        settings.AYLA_TENANT_PROVISIONING_TOKEN = IDENTITY
+        settings.AYLA_IDENTITY_PROVISIONING_TOKEN = IDENTITY
+        settings.AYLA_INTERNAL_API_TOKEN = GENERAL
+        c = APIClient()
+        c.credentials(HTTP_AUTHORIZATION=f"Bearer {IDENTITY}")
+
+        assert c.post(URL, _body(), format="json").status_code == 403
+        assert Tenant.all_objects.filter(slug=SLUG).count() == 0
 
 
 class TestTheCallIsIdempotentBySlug:
@@ -188,3 +229,31 @@ class TestTheRequestShape:
 
         assert r.status_code == 201, r.content
         assert r.json()["data"]["city"] is None
+
+
+class TestTheBootCheckRefusesOnePowerUnderTwoNames:
+    def _errors(self):
+        from users.checks import tenant_provisioning_token_check
+
+        return {e.id for e in tenant_provisioning_token_check(None)}
+
+    def test_distinct_secrets_are_clean(self, settings):
+        settings.AYLA_TENANT_PROVISIONING_TOKEN = PROVISIONING
+        settings.AYLA_IDENTITY_PROVISIONING_TOKEN = IDENTITY
+        settings.AYLA_INTERNAL_API_TOKEN = GENERAL
+        assert self._errors() == set()
+
+    def test_empty_tenant_secret_is_clean(self, settings):
+        settings.AYLA_TENANT_PROVISIONING_TOKEN = ""
+        settings.AYLA_IDENTITY_PROVISIONING_TOKEN = IDENTITY
+        settings.AYLA_INTERNAL_API_TOKEN = GENERAL
+        assert self._errors() == set()
+
+    def test_equal_to_general_is_E002_and_equal_to_identity_is_E003(self, settings):
+        settings.AYLA_TENANT_PROVISIONING_TOKEN = GENERAL
+        settings.AYLA_IDENTITY_PROVISIONING_TOKEN = IDENTITY
+        settings.AYLA_INTERNAL_API_TOKEN = GENERAL
+        assert self._errors() == {"users.E002"}
+
+        settings.AYLA_TENANT_PROVISIONING_TOKEN = IDENTITY
+        assert self._errors() == {"users.E003"}

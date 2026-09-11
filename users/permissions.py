@@ -252,12 +252,15 @@ class IsInternalBearer(permissions.BasePermission):
 
 
 class IsIdentityProvisioningBearer(permissions.BasePermission):
-    """Provisioning-only Bearer for the provisioning endpoints.
+    """Provisioning-only Bearer for the identity-binding endpoint.
 
-    Used by ``POST /api/v1/internal/users/bind-external/`` (E2E-BOT-02B
-    hardening) and, since DRF-1525, by ``POST /api/v1/internal/tenants/``
-    (§11 свода владельца: заведение салона — та же сила, что связывание
-    личности, и тот же токен). Identity binding takes a caller-named
+    Used ONLY by ``POST /api/v1/internal/users/bind-external/``
+    (E2E-BOT-02B hardening). DRF-1525 briefly put ``POST
+    /api/v1/internal/tenants/`` behind this same class on the argument
+    «заведение салона — та же сила»; that was wrong (DRF-1695, C1):
+    creating a salon claims no identity, and one secret for two powers
+    handed the bot the binding power §151 forbids. Tenants now sit behind
+    :class:`IsTenantProvisioningBearer`. Identity binding takes a caller-named
     ``(external_user_id, ayla_user_id)`` pair with no server-side proof
     of ownership, so it must NOT be reachable by the standard BOT
     runtime credential: this class checks
@@ -295,6 +298,56 @@ class IsIdentityProvisioningBearer(permissions.BasePermission):
             # Equal-values misconfiguration: the general bot credential
             # would pass. Fail closed rather than trusting ops to keep
             # the two secrets distinct.
+            return False
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        prefix = "Bearer "
+        if not auth_header.startswith(prefix):
+            return False
+        provided = auth_header[len(prefix):].strip()
+        if not provided or not compare_digest(provided, expected):
+            return False
+        return True
+
+
+class IsTenantProvisioningBearer(permissions.BasePermission):
+    """Provisioning-only Bearer for ``POST /api/v1/internal/tenants/`` (DRF-1695).
+
+    A power of its own — «завести салон по slug» — held by the bot's
+    «подключить салон» screen (actor: the bot admin's superuser, a named
+    human), and deliberately NOT the identity-binding power: the two
+    secrets differ, and system checks ``users.E002``/``E003`` refuse to boot
+    when ops sets them equal.
+
+    Auth contract mirrors :class:`IsIdentityProvisioningBearer`: constant-time
+    Bearer match against ``settings.AYLA_TENANT_PROVISIONING_TOKEN``; empty
+    setting fails closed; a value equal to the general Bearer or to the
+    identity secret is refused per request as well as at boot.
+
+    Transition (one deploy, DRF-1695 step 1→3): while the tenant secret is
+    still EMPTY, the identity secret is accepted here so the form the owner
+    is using today keeps working until ops provisions the new value. The
+    moment ``AYLA_TENANT_PROVISIONING_TOKEN`` is set, the identity secret
+    stops opening this route — no flag to forget, the cut-over is the
+    presence of the new value.
+    """
+
+    message = "Tenant provisioning auth required"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        general = getattr(settings, "AYLA_INTERNAL_API_TOKEN", "") or ""
+        identity = getattr(settings, "AYLA_IDENTITY_PROVISIONING_TOKEN", "") or ""
+        expected = getattr(settings, "AYLA_TENANT_PROVISIONING_TOKEN", "") or ""
+        if not expected:
+            # Transition only: identity secret opens tenants until the
+            # dedicated one is provisioned. Still never the general Bearer.
+            expected = identity
+        if not expected:
+            return False
+        if general and compare_digest(expected, general):
+            return False
+        tenant = getattr(settings, "AYLA_TENANT_PROVISIONING_TOKEN", "") or ""
+        if tenant and identity and compare_digest(tenant, identity):
+            # Equal secrets = one power again. Fail closed (users.E003 at boot).
             return False
         auth_header = request.META.get("HTTP_AUTHORIZATION", "")
         prefix = "Bearer "

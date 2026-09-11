@@ -28,3 +28,38 @@ def identity_provisioning_token_check(app_configs, **kwargs):
             id="users.E001",
         )]
     return []
+
+
+@register("security")
+def tenant_provisioning_token_check(app_configs, **kwargs):
+    """DRF-1695 (C1): the tenant-provisioning secret must differ from BOTH
+    the general bot Bearer and the identity-provisioning secret.
+
+    Equal to the general Bearer → the bot runtime credential could create
+    salons. Equal to the identity secret → the one value the bot holds for
+    salons would also open ``bind-external``, i.e. the exact grant §151
+    forbids. Either way the split of powers collapses silently; refuse at
+    boot, where the misconfiguration is visible, not per request.
+    """
+    tenant = getattr(settings, "AYLA_TENANT_PROVISIONING_TOKEN", "") or ""
+    if not tenant:
+        return []
+    errors = []
+    general = getattr(settings, "AYLA_INTERNAL_API_TOKEN", "") or ""
+    identity = getattr(settings, "AYLA_IDENTITY_PROVISIONING_TOKEN", "") or ""
+    if general and tenant == general:
+        errors.append(Error(
+            "AYLA_TENANT_PROVISIONING_TOKEN equals AYLA_INTERNAL_API_TOKEN — the "
+            "general bot credential would create tenants. Provision a DISTINCT "
+            "secret.",
+            id="users.E002",
+        ))
+    if identity and tenant == identity:
+        errors.append(Error(
+            "AYLA_TENANT_PROVISIONING_TOKEN equals AYLA_IDENTITY_PROVISIONING_TOKEN "
+            "— the salon-creation secret the bot holds would also open "
+            "POST /api/v1/internal/users/bind-external/ (OPEN_DECISIONS §151). "
+            "Provision a DISTINCT secret.",
+            id="users.E003",
+        ))
+    return errors
