@@ -68,11 +68,12 @@ BOOKING_HELP = (
 )
 
 LOCATION_HELP = (
-    "Координаты необязательны и сегодня пусты у всех мастеров пилота — "
-    "заполнять их наугад нельзя. Адрес остаётся полем мастера, но клиенту "
-    "показывается адрес салона (DRF-1587): для мастера в салоне это поле "
-    "дублирует салонное и вводит в заблуждение. Правило старшинства — "
-    "DRF-1589."
+    "Место оказания услуг (§9, DRF-1687) — то, до чего считается расстояние. "
+    "Для мастера салона выберите место этого салона, для самостоятельного — "
+    "его собственную точку (заводится в «Места оказания услуг»). Пусто — "
+    "расстояние неизвестно, не ноль. Адрес и координаты ниже — старые поля "
+    "мастера: после §9 они не авторитетны, читатели переводятся на место, "
+    "заполнять их не нужно."
 )
 
 STATS_HELP = (
@@ -374,6 +375,7 @@ class TenantMastersInline(admin.StackedInline):
     verbose_name = 'Мастер'
     verbose_name_plural = 'Мастера салона'
     autocomplete_fields = ('user',)
+    raw_id_fields = ('works_at',)
     show_change_link = True
     # Разделы, а не плоский список полей: подсказки нужны здесь даже
     # больше, чем на отдельной форме мастера. Владелец заводит салон
@@ -387,6 +389,10 @@ class TenantMastersInline(admin.StackedInline):
         ('Кого видит клиент', {
             'fields': ('status', 'is_available', 'is_booking_enabled'),
             'description': VISIBILITY_HELP,
+        }),
+        ('Где работает', {
+            'fields': ('works_at',),
+            'description': LOCATION_HELP,
         }),
         ('Приём записей', {
             'fields': ('timezone', 'booking_source'),
@@ -472,7 +478,7 @@ class SpecialistProfileAdmin(admin.ModelAdmin):
     )
     readonly_fields = ('rating', 'reviews_count', 'created_at', 'updated_at')
     ordering = ('-created_at',)
-    raw_id_fields = ('user',)
+    raw_id_fields = ('user', 'works_at')
 
     # DRF-1596. Порядок разделов повторяет порядок решений оператора:
     # чей мастер → кто он → увидит ли его клиент → как он принимает
@@ -501,7 +507,7 @@ class SpecialistProfileAdmin(admin.ModelAdmin):
             'description': BOOKING_HELP,
         }),
         ('Опыт и локация', {
-            'fields': ('experience_years', 'address', 'location_lat', 'location_lng'),
+            'fields': ('experience_years', 'works_at', 'address', 'location_lat', 'location_lng'),
             'description': LOCATION_HELP,
         }),
         ('Статистика', {
