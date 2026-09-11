@@ -11,12 +11,17 @@ import logging
 from datetime import date, timedelta
 
 from django.conf import settings
+from django.db import transaction
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import permissions, serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from appointments.application.services.schedule_impact_service import (
+    ScheduleShrinkConflict,
+    refuse_if_the_change_strands_bookings,
+)
 from appointments.models import SpecialistTimeOff, SpecialistWorkingHours
 
 from .permissions import IsSpecialist
@@ -265,20 +270,39 @@ class ScheduleView(APIView):
 
         schedule_data = serializer.validated_data['schedule']
 
-        # Atomic replace: delete all + recreate
-        SpecialistWorkingHours.objects.filter(specialist=specialist).delete()
-        SpecialistWorkingHours.objects.bulk_create([
-            SpecialistWorkingHours(
-                specialist=specialist,
-                day_of_week=item['day_of_week'],
-                is_working_day=item['is_working_day'],
-                start_time=item.get('start_time'),
-                end_time=item.get('end_time'),
-                break_start=item.get('break_start'),
-                break_end=item.get('break_end'),
+        # DRF-1297 B-4 — сокращение недельного шаблона больше не проходит
+        # поверх живых записей. Сторож стоит ЗДЕСЬ, в базовом классе, а не
+        # в салонном наследнике: дверей две — своя у мастера
+        # (``/specialists/me/schedule/``) и салонная
+        # (``AdminScheduleView``, зовёт этот же ``super().put()``), — и
+        # сторож на одной оставил бы вторую открытой.
+        try:
+            with transaction.atomic():
+                with refuse_if_the_change_strands_bookings(specialist):
+                    # Atomic replace: delete all + recreate
+                    SpecialistWorkingHours.objects.filter(specialist=specialist).delete()
+                    SpecialistWorkingHours.objects.bulk_create([
+                        SpecialistWorkingHours(
+                            specialist=specialist,
+                            day_of_week=item['day_of_week'],
+                            is_working_day=item['is_working_day'],
+                            start_time=item.get('start_time'),
+                            end_time=item.get('end_time'),
+                            break_start=item.get('break_start'),
+                            break_end=item.get('break_end'),
+                        )
+                        for item in schedule_data
+                    ])
+        except ScheduleShrinkConflict as conflict:
+            # Тот же код и та же форма, что у соседнего отказа по датам:
+            # клиенту есть одна вещь на весь этот контур, которую рисовать
+            # для «закрыть нельзя».
+            return error_response(
+                "HAS_ACTIVE_APPOINTMENTS",
+                f"Cannot shrink this schedule: {conflict.stranded} active "
+                "appointment(s) would be left outside working hours.",
+                status_code=409,
             )
-            for item in schedule_data
-        ])
 
         max_ahead = getattr(settings, 'BOOKING_MAX_AHEAD_DAYS', 60)
         today = date.today()
@@ -312,17 +336,30 @@ class ScheduleView(APIView):
         serializer = SchedulePatchSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        for item in serializer.validated_data['schedule']:
-            SpecialistWorkingHours.objects.update_or_create(
-                specialist=specialist,
-                day_of_week=item['day_of_week'],
-                defaults={
-                    'is_working_day': item['is_working_day'],
-                    'start_time': item.get('start_time'),
-                    'end_time': item.get('end_time'),
-                    'break_start': item.get('break_start'),
-                    'break_end': item.get('break_end'),
-                },
+        # Тот же сторож, что на PUT: частичная правка сокращает рамку ровно
+        # так же, и «не работает по вторникам» поверх вторничной записи — то
+        # же самое действие, только короче записанное.
+        try:
+            with transaction.atomic():
+                with refuse_if_the_change_strands_bookings(specialist):
+                    for item in serializer.validated_data['schedule']:
+                        SpecialistWorkingHours.objects.update_or_create(
+                            specialist=specialist,
+                            day_of_week=item['day_of_week'],
+                            defaults={
+                                'is_working_day': item['is_working_day'],
+                                'start_time': item.get('start_time'),
+                                'end_time': item.get('end_time'),
+                                'break_start': item.get('break_start'),
+                                'break_end': item.get('break_end'),
+                            },
+                        )
+        except ScheduleShrinkConflict as conflict:
+            return error_response(
+                "HAS_ACTIVE_APPOINTMENTS",
+                f"Cannot shrink this schedule: {conflict.stranded} active "
+                "appointment(s) would be left outside working hours.",
+                status_code=409,
             )
 
         max_ahead = getattr(settings, 'BOOKING_MAX_AHEAD_DAYS', 60)
