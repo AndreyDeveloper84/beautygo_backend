@@ -162,7 +162,10 @@ class TestAssumedInputsMarker:
         # NEGATIVE: веса нет — вердикта нет, и цель человека не тронута.
         assert body_assumed["goal_overridden_by"] is None
         assert body_assumed["goal"] == "lose"
-        assert body_assumed["norms"]["daily_kcal"] == 0
+        # Не ноль, а ОТСУТСТВИЕ: с DRF-1623 N-c блок `norms` при отказе
+        # уезжает пустым. Ноль здесь и был молчаливым именем отсутствия —
+        # теперь у него имя явное, и проверка проверяет его, а не число.
+        assert body_assumed["norms"] == {}
 
         User.objects.create(username="bot:1339-b", role="client", is_proxy=True)
         resp_real = c.post(URL, {**payload, "weight_kg": 45.0}, format="json", **{

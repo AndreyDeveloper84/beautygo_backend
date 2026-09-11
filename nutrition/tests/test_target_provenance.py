@@ -172,7 +172,10 @@ class TestProvenanceIsStoredAndLeavesTheService:
 
         second = self._upsert(user, {"weight_kg": None})
 
-        assert second["norms"]["daily_kcal"] == 0, "стража: расчёт действительно отменён"
+        # Стража: расчёт действительно отменён. Проверяется отсутствием
+        # блока, а не нулём в нём — с N-c ноль перестал быть
+        # представимым (`norms` уезжает пустым).
+        assert second["norms"] == {}
         provenance = second["targets_provenance"]
         assert provenance["source"] == "none"
         assert provenance["method_versions"] == {}
