@@ -52,7 +52,7 @@ def test_field_shape_is_optional_fk_with_protect():
 
 def test_migration_only_adds_the_field_and_moves_no_data():
     """§9: 27 старых адресов мастеров НЕ переносятся — и в миграции нечем."""
-    src = Path(__file__).resolve().parents[1] / "migrations" / "0019_specialistprofile_works_at.py"
+    src = Path(__file__).resolve().parents[1] / "migrations" / "0020_specialistprofile_works_at.py"
     tree = ast.parse(src.read_text(encoding="utf-8"))
     ops = [
         n.func.attr for n in ast.walk(tree)

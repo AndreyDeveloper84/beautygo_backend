@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("tenants", "0006_service_location"),
-        ("users", "0018_pendingexternalidentity"),
+        ("users", "0019_deletionrequest"),
     ]
 
     operations = [
