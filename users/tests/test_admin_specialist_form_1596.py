@@ -175,6 +175,12 @@ def test_master_created_through_the_form_reaches_the_client_feed(client):
             "specialist_profiles-INITIAL_FORMS": "0",
             "specialist_profiles-MIN_NUM_FORMS": "0",
             "specialist_profiles-MAX_NUM_FORMS": "1000",
+            # L1 DRF-1687: у салона появился второй вложенный блок — места
+            # оказания услуг; браузер шлёт его management-форму всегда.
+            "locations-TOTAL_FORMS": "0",
+            "locations-INITIAL_FORMS": "0",
+            "locations-MIN_NUM_FORMS": "0",
+            "locations-MAX_NUM_FORMS": "1000",
         },
     )
     assert resp.status_code == 302, resp.status_code
