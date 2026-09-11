@@ -60,6 +60,7 @@ class _CreateDeletionRequestSerializer(serializers.Serializer):
 
 class _DeletionRequestResponseSerializer(serializers.Serializer):
     request_id = serializers.UUIDField()
+    created = serializers.BooleanField(required=False)
     status = serializers.CharField()
     requested_at = serializers.DateTimeField()
     deadline_at = serializers.DateTimeField()
@@ -135,8 +136,10 @@ class InternalDeletionRequestCreateView(APIView):
             ensured.request.deadline_at.isoformat(),
             getattr(request, "request_id", "-"),
         )
+        # ``created`` и в теле, не только кодом: клиент бота отдаёт наверх
+        # JSON без статуса, а человеку «принято» и «уже принято» — разное.
         return success_response(
-            as_payload(ensured.request),
+            {**as_payload(ensured.request), "created": ensured.created},
             status_code=status.HTTP_201_CREATED if ensured.created else status.HTTP_200_OK,
         )
 
