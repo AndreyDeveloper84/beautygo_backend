@@ -14,6 +14,10 @@ from users.internal_personal_context_api import (
     InternalPersonalContextView,
     InternalSkipView,
 )
+from users.deletion_request_api import (
+    InternalDeletionRequestCreateView,
+    InternalDeletionRequestDetailView,
+)
 from users.internal_users_api import (
     InternalBindExternalIdentityView,
     InternalUserProfileView,
@@ -72,6 +76,18 @@ urlpatterns = [
         "<uuid:ayla_user_id>/personal-context/skip/",
         InternalSkipView.as_view(),
         name="internal-personal-context-skip",
+    ),
+    # DRF-1699 (§7 свода) — заявка на удаление аккаунта. Заводится ботом
+    # ДО любого стирания; стирание — исполнитель (D3), не эти ручки.
+    path(
+        "<uuid:user_id>/deletion-requests/",
+        InternalDeletionRequestCreateView.as_view(),
+        name="internal-deletion-request-create",
+    ),
+    path(
+        "<uuid:user_id>/deletion-requests/<uuid:request_id>/",
+        InternalDeletionRequestDetailView.as_view(),
+        name="internal-deletion-request-detail",
     ),
     # C5 (152-ФЗ) — before the plain <uuid:user_id>/ route so the
     # longer path wins by declaration order (it would anyway — Django
