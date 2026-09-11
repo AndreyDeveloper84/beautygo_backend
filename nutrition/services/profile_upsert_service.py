@@ -5,13 +5,17 @@ Sits between the views and ``NutritionProfile``/``compute_norms``. Owns:
 - PATCH-semantics upsert: only fields present in the request mutate
 - ``_skipped_fields``-driven flag flips (``weight_skipped``, etc.)
 - Idempotency-Key 24h replay cache via ``ProfileIdempotencyKey``
-- Recompute & persist post-override norms on every write
+- Recompute & persist post-override norms — ТОЛЬКО с основанием
+  (``targets_recompute_gate.recompute_permitted``, §103 N-b); без него
+  отказ пишется в ``last_overrides_applied`` и в лог, ориентиры не
+  трогаются
 - Lifecycle markers (``onboarded_at`` first-flip on ``complete=true``)
 - Wire response builder shared with GET
 """
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta, timezone as dt_tz
 from typing import Any
 
@@ -25,7 +29,13 @@ from nutrition.services.nutrition_profile_service import (
     compute_norms,
 )
 from nutrition.services.outbox_service import enqueue_profile_updated
+from nutrition.services.targets_recompute_gate import (
+    RECOMPUTE_REFUSED_NO_CONSENT,
+    recompute_permitted,
+    refusal_record,
+)
 
+logger = logging.getLogger(__name__)
 
 IDEMPOTENCY_TTL_HOURS = 24
 
@@ -95,7 +105,13 @@ def upsert_profile(
             defaults={"activity_coefficient": DEFAULT_ACTIVITY},
         )
         _apply_patch(profile, payload)
-        _recompute_and_persist(profile)
+        # §103 N-b: пересчёт — только с основанием. Довод и три сценария
+        # — в докстринге ``targets_recompute_gate``. Здесь важно одно:
+        # запрет стоит В КОДЕ, а не в очерёдности запусков команд.
+        if recompute_permitted(profile, payload):
+            _recompute_and_persist(profile)
+        else:
+            _refuse_recompute(profile)
         _flip_lifecycle_markers(profile, payload)
         profile.save()
 
@@ -162,11 +178,11 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
     profile.daily_fat_g = norms.daily_fat_g
     profile.daily_carbs_g = norms.daily_carbs_g
     # ``profile.daily_water_ml`` здесь БОЛЬШЕ НЕ ПИШЕТСЯ: формула
-    # 30 мл × вес снята (§82, §85). Столбец остаётся в схеме со своим
-    # ``default=0`` — миграция данных существующих клиентов это
-    # отдельный срез, и подставлять в неё нынешние числа как «выбор
-    # клиента» нельзя. Новых фиктивных значений с этой правки не
-    # появляется ни у кого.
+    # 30 мл × вес снята (§82, §85). Столбец nullable (§103, миграция
+    # 0018) и у новых строк ``NULL``; выход снятой формулы у старых
+    # строк стирает команда ``clear_targets_without_provenance``, а не
+    # этот пересчёт: команда печатает значения до записи и запускается
+    # тем, кем решено, — пересчёт на POST этого не умеет.
     # DRF-265: micronutrient RDA — recomputed on every upsert.
     profile.daily_vitamin_d_iu = norms.daily_vitamin_d_iu
     profile.daily_vitamin_b12_mcg = norms.daily_vitamin_b12_mcg
@@ -213,6 +229,39 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
         profile.targets_method_versions = {}
         profile.targets_input_snapshot = {}
         profile.targets_computed_at = None
+
+
+def _refuse_recompute(profile: NutritionProfile) -> None:
+    """Пересчёта не было — и это ВИДНО, а не подразумевается.
+
+    Ориентиры, происхождение, снимок и версии остаются как лежат:
+    ``none`` остаётся ``none`` с ``NULL``, ``unknown_legacy`` остаётся
+    ``unknown_legacy`` со своими старыми числами до команды очистки.
+    Ни то, ни другое не превращается в ``ayla_calculated`` — это и есть
+    третье окно, которое сторож закрывает.
+
+    Запись об отказе ДОБАВЛЯЕТСЯ в ``last_overrides_applied``, а не
+    заменяет его: у ``unknown_legacy`` там лежит след прежней лестницы
+    переопределений, и это аудит, который команда очистки тоже не
+    трогает. Повторный отказ запись не дублирует — один отказ, одна
+    строка. Прежняя запись отказа снимается тем же путём при следующем
+    состоявшемся пересчёте: ``_recompute_and_persist`` пишет список
+    заново.
+
+    Лог — одна строка ``warning``: молчаливый отказ дал бы профиль,
+    который выглядит обработанным.
+    """
+    audit = [
+        e for e in (profile.last_overrides_applied or [])
+        if not (isinstance(e, dict) and e.get("reason") == RECOMPUTE_REFUSED_NO_CONSENT)
+    ]
+    audit.append(refusal_record(profile))
+    profile.last_overrides_applied = audit
+    logger.warning(
+        "nutrition.targets.recompute_refused user=%s source=%s",
+        profile.user_id,
+        profile.targets_source,
+    )
 
 
 def _flip_lifecycle_markers(profile: NutritionProfile, payload: dict) -> None:

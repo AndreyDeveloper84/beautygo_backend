@@ -56,6 +56,9 @@ def progressive_user(db):
         user=user, gender="female", age=40, height_cm=165,
         weight_kg=70.0, goal="lose", pace="moderate",
         daily_kcal=1500, daily_protein_g=110,
+        # §103: блок цели гейтится по происхождению, как и ``norms``
+        # профиля; число без происхождения не показывается.
+        targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,
     )
     return user
 

@@ -424,25 +424,55 @@ class NutritionProfile(models.Model):
     # Health flags + skipped markers + allergies
     health_flags = models.JSONField(default=dict, blank=True)
 
-    # Computed norms (post-override)
-    bmr = models.PositiveIntegerField(default=0)
-    daily_kcal = models.PositiveIntegerField(default=0)
-    daily_protein_g = models.PositiveSmallIntegerField(default=0)
-    daily_fat_g = models.PositiveSmallIntegerField(default=0)
-    daily_carbs_g = models.PositiveSmallIntegerField(default=0)
-    daily_water_ml = models.PositiveIntegerField(default=0)
+    # ── Ориентиры (post-override) — NULL, когда ориентира нет ──────────
+    #
+    # §103 (OD-NUT-5), вариант A, решение владельца 11.09.2026: «значение
+    # NULL, источник none». До этого столбцы были ``default=0`` и ноль
+    # читался как «расчёта не было» по уговору внутри модуля. Уговор
+    # держался на том, что дневная норма ноль килокалорий физически
+    # невозможна, — но снаружи ноль всё равно ЧИСЛО: он попадает в
+    # арифметику, в JSON и на экран как «0 из 0 · 0 %». Отсутствие
+    # доезжает отсутствием (§65, §82): NULL нельзя ни сложить, ни
+    # показать, не заметив.
+    #
+    # Миграция ``0018`` ТОЛЬКО схемная: значения существующих строк она не
+    # трогает. Стирать данные живых людей в момент слияния нельзя —
+    # довод в докстринге ``purge_unconsented_body_parameters``. Очистка
+    # старых ориентиров — отдельная команда
+    # ``clear_targets_without_provenance`` (§103, N-b), запускаемая тем и
+    # тогда, кем решено.
+    bmr = models.PositiveIntegerField(null=True, blank=True, default=None)
+    daily_kcal = models.PositiveIntegerField(null=True, blank=True, default=None)
+    daily_protein_g = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_fat_g = models.PositiveSmallIntegerField(null=True, blank=True, default=None)
+    daily_carbs_g = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_water_ml = models.PositiveIntegerField(null=True, blank=True, default=None)
 
     # DRF-265: micronutrient RDA targets — recomputed on every upsert from
     # gender/age + health_flags via nutrition_profile_service.compute_rda.
     # Pattern engine (Track E) compares per-day intake against these.
-    daily_vitamin_d_iu = models.PositiveSmallIntegerField(default=0)
-    daily_vitamin_b12_mcg = models.FloatField(default=0.0)
-    daily_vitamin_c_mg = models.PositiveSmallIntegerField(default=0)
-    daily_iron_mg = models.FloatField(default=0.0)
-    daily_calcium_mg = models.PositiveSmallIntegerField(default=0)
-    daily_magnesium_mg = models.PositiveSmallIntegerField(default=0)
-    daily_omega3_g = models.FloatField(default=0.0)
-    daily_fiber_g = models.PositiveSmallIntegerField(default=0)
+    daily_vitamin_d_iu = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_vitamin_b12_mcg = models.FloatField(null=True, blank=True, default=None)
+    daily_vitamin_c_mg = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_iron_mg = models.FloatField(null=True, blank=True, default=None)
+    daily_calcium_mg = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_magnesium_mg = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
+    daily_omega3_g = models.FloatField(null=True, blank=True, default=None)
+    daily_fiber_g = models.PositiveSmallIntegerField(
+        null=True, blank=True, default=None,
+    )
 
     # ── Происхождение ориентира (DRF-1623, срез N-d) ────────────────────
     #

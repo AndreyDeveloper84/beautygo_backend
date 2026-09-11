@@ -53,6 +53,11 @@ from nutrition.serializers import (
     WaterTodayResponseSerializer,
     WaterTodayResponseSerializerV3,
 )
+from nutrition.services.personal_calculation_consent import (
+    PERSONAL_CALCULATION,
+    PersonalCalculationConsentRequired,
+    require_consent,
+)
 from nutrition.services.pattern_detection_service import detect_patterns
 from nutrition.services.returning_success_service import detect_returning_success
 from nutrition.services.profile_upsert_service import (
@@ -866,6 +871,31 @@ class InternalProfileView(APIView):
                 "VALIDATION_ERROR",
                 "Невалидные данные",
                 details=serializer.errors,
+            )
+
+        # §92, срез N-a2: параметры тела принимаются только с
+        # утверждением о согласии. Сторож стоит ПОСЛЕ валидации и ДО
+        # кэша идемпотентности — оба порядка намеренны.
+        #
+        # После валидации: отказ по согласию не должен подменяться
+        # отказом по формату, иначе вызывающий чинит не то.
+        #
+        # До кэша: иначе первый запрос без утверждения, попавший в кэш
+        # ДО этой правки, повторно отдавался бы как успешный — гейт
+        # обходился бы собственной историей.
+        try:
+            require_consent(serializer.validated_data)
+        except PersonalCalculationConsentRequired as exc:
+            logger.info(
+                "nutrition.profile.consent_refused external_user_id=%s fields=%s",
+                external_user_id,
+                exc.fields,
+            )
+            return error_response(
+                exc.code,
+                str(exc),
+                details={"fields": exc.fields, "consent_type": PERSONAL_CALCULATION},
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             )
 
         idem = request.META.get("HTTP_IDEMPOTENCY_KEY") or None

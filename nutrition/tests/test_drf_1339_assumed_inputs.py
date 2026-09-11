@@ -47,6 +47,13 @@ pytestmark = pytest.mark.django_db
 SERVICE_TOKEN = "test-token-DRF-1339"
 URL = "/api/v1/nutrition/internal/profile/"
 
+#: §92 / срез N-a2: параметры тела принимаются только с утверждением о
+#: согласии. Предмет этих тестов — расчёт, идемпотентность и
+#: PATCH-семантика; утверждение здесь часть ВАЛИДНОГО запроса, а не
+#: предмет проверки. Сам сторож проверяется в
+#: ``test_personal_calculation_consent.py``.
+CONSENT = {"type": "personal_calculation", "document_version": "v1"}
+
 
 @pytest.fixture(autouse=True)
 def _set_service_token(settings):
@@ -81,6 +88,7 @@ class TestAssumedInputsMarker:
     ):
         c = APIClient()
         resp = c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165,
             "goal": "maintain", "pace": "moderate",
         }, format="json", **headers)
@@ -92,9 +100,9 @@ class TestAssumedInputsMarker:
         assert body["weight_kg"] is None
         profile = NutritionProfile.objects.get(user=proxy_user)
         assert profile.weight_kg is None
-        # Норм НЕТ — вместо чисел от чужого тела ноль, и у отказа имя.
-        assert profile.daily_kcal == 0
-        assert profile.bmr == 0
+        # Норм НЕТ — вместо чисел от чужого тела NULL (§103), и у отказа имя.
+        assert profile.daily_kcal is None
+        assert profile.bmr is None
         assert {
             "reason": "insufficient_inputs", "fields": ["weight_kg"],
         } in profile.last_overrides_applied
@@ -114,6 +122,7 @@ class TestAssumedInputsMarker:
     def test_with_weight_marker_empty(self, proxy_user, headers):
         c = APIClient()
         resp = c.post(URL, {
+            "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165,
             "weight_kg": 70.0, "goal": "maintain", "pace": "moderate",
         }, format="json", **headers)
@@ -139,6 +148,7 @@ class TestAssumedInputsMarker:
         """
         c = APIClient()
         payload = {
+            "consent": CONSENT,
             "gender": "female", "age": 70, "height_cm": 150,
             "activity_coefficient": 1.0, "goal": "lose", "pace": "moderate",
         }
@@ -425,9 +435,10 @@ class TestComputedNormsSnapshot:
         же — чужой.
         """
         norms = compute_norms(_SNAPSHOT[case]["inputs"])
-        assert norms.bmr == 0
-        assert norms.daily_kcal == 0
-        assert norms.daily_protein_g == 0
+        # ``None``, не ноль (§103): отказ — отсутствие, а не число.
+        assert norms.bmr is None
+        assert norms.daily_kcal is None
+        assert norms.daily_protein_g is None
         assert [o.get("reason") for o in norms.overrides_applied] == [
             "insufficient_inputs",
         ]
