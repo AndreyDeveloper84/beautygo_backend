@@ -541,6 +541,27 @@ class SpecialistTimeOff(models.Model):
     end_at = models.DateTimeField()
     reason = models.CharField(max_length=200, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
+    # §142 (DRF-1240): «сохранить автора и время». Время было, автора — нет:
+    # до этой колонки закрытие графика приписывалось человеку только в
+    # аудите Ayla через заголовок, а сама строка молчала.
+    #
+    # FK, а не строка внешнего id: строку нельзя ни проверить, ни соединить
+    # с правами. Колонка решена ДО варианта авторизации, чтобы между
+    # вариантами не мигрировать (реестр решений §150).
+    #
+    # NULL имеет смысл и он один: автор не был аутентифицированным
+    # Ayla-пользователем в момент записи. Сегодня так пишет ровно один
+    # писатель — внутренний маршрут бота под сервисным токеном
+    # (users/internal_schedule_api.py); он заполнит колонку в срезе Б-б1,
+    # когда администратор салона будет привязан к Ayla-пользователю. Pro App
+    # (мастер за себя, администратор с решениями по записям) пишет автора
+    # уже сейчас.
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='time_offs_created',
+    )
 
     class Meta:
         ordering = ['-start_at']

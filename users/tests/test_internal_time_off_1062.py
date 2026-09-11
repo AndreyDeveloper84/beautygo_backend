@@ -205,3 +205,30 @@ class TestLiveBookingsStillProtected:
         assert resp.status_code == 409
         assert resp.data["error"]["code"] == "HAS_ACTIVE_APPOINTMENTS"
         assert not SpecialistTimeOff.objects.exists()
+
+
+class TestTheBotsBlockHasNoAuthorUntil_B_b1:
+    """ОТРИЦАТЕЛЬНЫЙ ЭТАЛОН. Обязан покраснеть в срезе Б-б1 (реестр §150).
+
+    Внутренний маршрут идёт под сервисным токеном: за ``X-External-User-ID``
+    может не стоять Ayla-пользователя, и ``created_by`` здесь честно NULL —
+    «автор не был аутентифицированным пользователем в момент записи». Это
+    единственный писатель, который так пишет (§142 замер, 11.09.2026).
+
+    Тест пинит это НЕ как желаемое, а как известное. В день, когда
+    администратор салона будет привязан к Ayla-пользователю и маршрут
+    начнёт его разрешать, эта проверка должна упасть — и её надо перевернуть
+    с датой, а не удалить.
+    """
+
+    def test_created_by_is_null_for_the_service_token_route(
+        self, bearer, master, salon, window,
+    ):
+        resp = bearer.post(_url(master.id), _body(salon, window), format="json")
+        assert resp.status_code == 201
+
+        # Присутствие впереди отсутствия: строка записана, и у неё есть все
+        # остальные поля — иначе «автора нет» значило бы «строки нет».
+        time_off = SpecialistTimeOff.objects.get(specialist=master)
+        assert time_off.reason == "выходной по заявке"
+        assert time_off.created_by_id is None

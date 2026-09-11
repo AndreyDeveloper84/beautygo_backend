@@ -380,3 +380,58 @@ class TestCancellationVocabularyForTheBot:
         assert data["service_id"] == str(service.id)
         assert data["duration_minutes"] == 60
         assert data["specialist_id"] == str(master.id)
+
+
+class TestTheAbsenceNamesItsAuthor:
+    """§142 (DRF-1240): у отсутствия и у решений по записям ОДИН автор.
+
+    ``apply_absence_with_resolutions`` уже подписывал отмены actor-ом; строка
+    отсутствия при этом автора не хранила — узнать, кто закрыл время, можно
+    было только по соседним отменам, а при пустом окне — ниоткуда.
+    """
+
+    def test_created_by_is_the_administrator_who_decided(
+        self, admin, master, service, salon, sick_day,
+    ):
+        start, end = sick_day
+        _booking(master, service, start + timedelta(hours=2), "abs_author_1")
+        preview = _client_as(admin, salon).get(_impact_url(master, start, end)).data["data"]
+
+        resp = _client_as(admin, salon).post(
+            _time_off_url(master),
+            {
+                "start_at": start.isoformat(),
+                "end_at": end.isoformat(),
+                "reason": "болезнь",
+                "impact_token": preview["impact_token"],
+                "resolutions": [
+                    {"appointment_id": b["appointment_id"], "action": "cancel"}
+                    for b in preview["bookings"]
+                ],
+            },
+            format="json",
+        )
+        assert resp.status_code == 201
+
+        time_off = SpecialistTimeOff.objects.get(specialist=master)
+        assert time_off.created_by_id == admin.pk
+
+    def test_an_empty_window_still_names_the_author(self, admin, master, salon, sick_day):
+        # Раньше при пустом окне автора было не узнать НИОТКУДА: отмен нет,
+        # строка молчит. Теперь строка говорит сама.
+        start, end = sick_day
+        preview = _client_as(admin, salon).get(_impact_url(master, start, end)).data["data"]
+
+        resp = _client_as(admin, salon).post(
+            _time_off_url(master),
+            {
+                "start_at": start.isoformat(),
+                "end_at": end.isoformat(),
+                "reason": "болезнь",
+                "impact_token": preview["impact_token"],
+                "resolutions": [],
+            },
+            format="json",
+        )
+        assert resp.status_code == 201
+        assert SpecialistTimeOff.objects.get(specialist=master).created_by_id == admin.pk

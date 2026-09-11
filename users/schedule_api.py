@@ -436,6 +436,8 @@ class TimeOffListView(APIView):
             start_at=start_at,
             end_at=end_at,
             reason=serializer.validated_data.get('reason', ''),
+            # Мастер закрывает своё время сам — автор известен по построению.
+            created_by=request.user,
         )
 
         _invalidate_slots(specialist.id, start_at.date(), end_at.date())
