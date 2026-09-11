@@ -30,6 +30,14 @@ from users.permissions import IsBotServiceWithVerifiedClient
 from users.response import error_response, success_response
 
 from . import anketa
+from .lifecycle import (
+    GOAL_ANOTHER_ACTIVE,
+    GOAL_TRANSITION_NOT_ALLOWED,
+    REQUESTABLE_STATES,
+    GoalTransitionRefused,
+    supersede_active,
+    transition,
+)
 from .decision_context import (
     INTENT_NEED_GUIDANCE,
     INTENT_START_ANKETA,
@@ -104,6 +112,20 @@ class GoalSelectSerializer(serializers.Serializer):
         return attrs
 
 
+class GoalStateSerializer(serializers.Serializer):
+    """POST /internal/me/goals/state/ — перевести цель в состояние (DRF-1660).
+
+    ``goal_id`` обязателен: документ состояния отдаёт ``known.goals`` с
+    id и состоянием каждой открытой цели, так что вызывающему есть что
+    назвать. «Та, что активна» здесь не подразумевается — у человека
+    может быть одна ACTIVE и несколько PAUSED, и тап «снять с паузы»
+    обязан указывать, которую.
+    """
+
+    goal_id = serializers.UUIDField(required=True)
+    state = serializers.ChoiceField(choices=sorted(REQUESTABLE_STATES), required=True)
+
+
 def _emit_goal_selected(*, client, goal: ClientGoal) -> None:
     """Событие воронки goal_selected. Эмиссия серверная: клиентских
     client_event_id у нас нет — генерируем; повторная запись той же цели
@@ -141,9 +163,10 @@ def _create_goal(
     рано или поздно начинает влиять.
     """
     with transaction.atomic():
-        ClientGoal.objects.filter(client=client, is_active=True).update(
-            is_active=False
-        )
+        # DRF-1660: прежняя ACTIVE цель закрывается как SUPERSEDED — это
+        # факт «человек выбрал новую», а не догадка ARCHIVED. Цели на
+        # паузе остаются на паузе.
+        supersede_active(client)
         return ClientGoal.objects.create(
             client=client,
             goal_key=goal_key or None,
@@ -363,3 +386,70 @@ class GoalSelectView(APIView):
             client.id, run.id, goal.goal_key,
         )
         return success_response(build_decision_context(client))
+
+
+class GoalStateView(APIView):
+    """POST /api/v1/internal/me/goals/state/ (DRF-1660).
+
+    Отдельный вход «поставить на паузу / снять / завершить / в архив»
+    без замещающей цели — §97 OD-GOAL-B: «Текущий API такого входа не
+    имеет и противоречит модели». Возвращает обновлённый документ
+    состояния, как и ``select``: вызывающий видит, что цель ушла из
+    ``known.goal`` (пауза) или вернулась (снятие с паузы).
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(
+        tags=["internal"],
+        request=GoalStateSerializer,
+        responses={
+            200: OpenApiResponse(description="Updated decision context document"),
+            400: OpenApiResponse(description="Validation error"),
+            403: OpenApiResponse(description="Bearer / external id invalid"),
+            404: OpenApiResponse(description="Goal not found for this client"),
+            409: OpenApiResponse(
+                description="GOAL_TRANSITION_NOT_ALLOWED | GOAL_ANOTHER_ACTIVE"
+            ),
+        },
+    )
+    def post(self, request: Request) -> Response:
+        serializer = GoalStateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        # Только цели ЭТОГО клиента: чужой id — «не найдено», а не отказ
+        # перехода, чтобы по коду нельзя было проверить существование
+        # чужой цели.
+        goal = ClientGoal.objects.filter(client=request.user, pk=data["goal_id"]).first()
+        if goal is None:
+            return error_response(
+                ErrorCode.NOT_FOUND, "Goal not found.", status_code=404,
+            )
+
+        try:
+            transition(goal, data["state"])
+        except GoalTransitionRefused as exc:
+            logger.info(
+                "goals.state_refused user_id=%s goal_id=%s %s->%s code=%s",
+                request.user.id, goal.id, exc.from_state, exc.to_state, exc.code,
+            )
+            return error_response(
+                exc.code,
+                _REFUSAL_MESSAGES[exc.code],
+                details={"from_state": exc.from_state, "to_state": exc.to_state},
+                status_code=409,
+            )
+
+        logger.info(
+            "goals.state_changed user_id=%s goal_id=%s state=%s",
+            request.user.id, goal.id, goal.state,
+        )
+        return success_response(build_decision_context(request.user))
+
+
+_REFUSAL_MESSAGES = {
+    GOAL_TRANSITION_NOT_ALLOWED: "Transition is not allowed from the goal's current state.",
+    GOAL_ANOTHER_ACTIVE: "Another goal is active; pause or archive it first.",
+}

@@ -62,6 +62,11 @@ urlpatterns = [
         'api/v1/internal/me/goals/select/',
         include('goals.select_urls'),
     ),
+    # DRF-1660 — переход состояния цели без замещающей (§97 OD-GOAL-B).
+    path(
+        'api/v1/internal/me/goals/state/',
+        include('goals.state_urls'),
+    ),
     # DRF-1344 — wellness-context read для решающего слоя бота: только
     # коды состояний (никогда значения наблюдений), fail-closed через
     # гейты wellness/services.py. Аддитивная поверхность.

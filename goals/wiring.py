@@ -129,7 +129,7 @@ def _log_unresolved(client) -> None:
     второе — незакураированная связь, то есть подсказка, которая
     клиенту показана, а выдачу не меняет.
     """
-    has_goal = ClientGoal.objects.filter(client=client, is_active=True).exists()
+    has_goal = ClientGoal.objects.filter(client=client, state=ClientGoal.State.ACTIVE).exists()
     if has_goal:
         logger.warning(
             "goal.unresolved client_id=%s — активная цель есть, но категорий "

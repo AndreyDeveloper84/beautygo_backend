@@ -568,7 +568,7 @@ def _saved_goal_key(client) -> str | None:
     if goal_category_ids_for(client) is None:
         return None
     goal = (
-        ClientGoal.objects.filter(client=client, is_active=True)
+        ClientGoal.objects.filter(client=client, state=ClientGoal.State.ACTIVE)
         .order_by("-selected_at")
         .first()
     )

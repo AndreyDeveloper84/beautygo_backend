@@ -105,8 +105,9 @@ class TestClientGoalModel:
         first = ClientGoal.objects.create(
             client=customer, goal_key="relax", source_channel="bot",
         )
-        first.is_active = False
-        first.save()
+        # DRF-1660: закрыть — значит назвать состояние, а не снять флаг.
+        first.state = ClientGoal.State.ARCHIVED
+        first.save(update_fields=["state"])
         ClientGoal.objects.create(
             client=customer, goal_text="хочу отдохнуть", source_channel="miniapp",
         )
@@ -225,7 +226,7 @@ class TestGoalSelect:
             format="json",
         )
         assert r.status_code == 200
-        goal = ClientGoal.objects.get(client=customer, is_active=True)
+        goal = ClientGoal.objects.get(client=customer, state=ClientGoal.State.ACTIVE)
         assert goal.goal_key == "relax"
         assert goal.source_channel == "miniapp"
         doc = r.json()["data"]
@@ -239,7 +240,7 @@ class TestGoalSelect:
             format="json",
         )
         assert r.status_code == 200
-        goal = ClientGoal.objects.get(client=customer, is_active=True)
+        goal = ClientGoal.objects.get(client=customer, state=ClientGoal.State.ACTIVE)
         # OD-2: дословно (trim — только края, без нормализации).
         assert goal.goal_text == "хочу похудеть к отпуску"
         assert goal.goal_key is None
@@ -256,8 +257,10 @@ class TestGoalSelect:
         )
         goals = list(ClientGoal.objects.filter(client=customer).order_by("selected_at"))
         assert len(goals) == 2
-        assert goals[0].is_active is False
-        assert goals[1].is_active is True
+        # DRF-1660: прежняя закрыта выбором новой — SUPERSEDED, не ARCHIVED:
+        # человек не говорил, что старую вести не хочет, он назвал новую.
+        assert goals[0].state == ClientGoal.State.SUPERSEDED
+        assert goals[1].state == ClientGoal.State.ACTIVE
 
     def test_need_guidance_creates_no_goal_no_event(
         self, token, customer, goal_option,
