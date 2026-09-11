@@ -611,6 +611,13 @@ jobs:
             # config changes are an operator action, on purpose.
             docker compose up -d --no-recreate db redis minio
 
+            # DRF-1664: снимок базы ДО того, как что-либо тронет схему.
+            # entrypoint web делает `migrate` при старте, так что схему меняет
+            # `up -d --force-recreate web` ниже — снимок обязан стоять перед
+            # ним. db уже поднят строкой выше (иначе дампить нечего). Падение
+            # снимка останавливает выкладку: без точки отката схему не менять.
+            bash scripts/pg_snapshot_before_deploy.sh
+
             # Application tier. `--no-deps` is why this cannot reach the
             # storage tier: without it, compose walks web's `depends_on`
             # (db, redis, minio) and pulls them into the recreate.

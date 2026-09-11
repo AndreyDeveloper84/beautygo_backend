@@ -6,7 +6,11 @@
 * ``deploy.sh`` (руками, runbook §1.1) — ``docker compose up -d``, а entrypoint
   web-контейнера сам делает ``migrate`` при старте;
 * ``.github/workflows/smoke-on-dev.yml`` (каждое утро 04:00 UTC) — явный
-  ``migrate`` после ``git reset --hard origin/dev``.
+  ``migrate`` после ``git reset --hard origin/dev``;
+* job ``deploy`` внутри ``.github/workflows/ci.yml`` (push в dev, DRF-1363) —
+  ``up -d --force-recreate web`` в шаге 3/4, и entrypoint мигрирует при старте.
+  Первый замер этот путь пропустил: искал ``deploy*.yml``, а выкладка живёт
+  job-ом в ``ci.yml`` — ноль по одному написанию.
 
 Что держат эти тесты: снимок зовётся в ОБОИХ и стоит ДО шага, меняющего
 схему; сам скрипт отказывает на пустом дампе, не пишет внутрь дерева,
@@ -71,6 +75,30 @@ def test_the_smoke_workflow_snapshots_before_migrate() -> None:
     migrate = _index(lines, "manage.py migrate")
     assert migrate != -1, "шаг перестал мигрировать — проверять нечего"
     assert snap < migrate, f"снимок ({snap}) стоит ПОСЛЕ migrate ({migrate})"
+
+
+CI = REPO / ".github" / "workflows" / "ci.yml"
+
+
+def test_the_ci_deploy_job_snapshots_before_web_is_recreated() -> None:
+    """Выкладка по слиянию — job ``deploy`` в ``ci.yml``, а не отдельный файл.
+
+    Схему меняет ``up -d --force-recreate … web`` (entrypoint мигрирует при
+    старте). Снимок стоит между подъёмом db и пересозданием web: раньше —
+    дампить нечего, позже — схема уже другая.
+    """
+    doc = yaml.safe_load(CI.read_text(encoding="utf-8"))
+    assert "deploy" in doc["jobs"], "job deploy в ci.yml исчез — выкладка каталога переехала, сторож смотрит не туда"
+    steps = doc["jobs"]["deploy"]["steps"]
+    host = next((s for s in steps if "pg_snapshot_before_deploy.sh" in str(s.get("with", {}))), None)
+    assert host is not None, "job deploy не делает снимок — up -d мигрирует схему без точки отката"
+
+    lines = _code(host["with"]["script"])
+    db_up = _index(lines, "--no-recreate db")
+    snap = _index(lines, "pg_snapshot_before_deploy.sh")
+    web_up = next((i for i, ln in enumerate(lines) if "up -d" in ln and "web" in ln and "--force-recreate" in ln), -1)
+    assert db_up != -1 and web_up != -1, "шаг 3/4 перестал поднимать db/web — проверять нечего"
+    assert db_up < snap < web_up, f"порядок: db up ({db_up}) < снимок ({snap}) < web recreate ({web_up})"
 
 
 class TestTheScriptItself:
