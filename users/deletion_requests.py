@@ -96,6 +96,46 @@ def get_deletion_request(user: User, request_id: UUID) -> DeletionRequest | None
     return DeletionRequest.objects.filter(pk=request_id, user=user).first()
 
 
+# ---------------------------------------------------------------------------
+# D2 — стоп персонализации по живой заявке
+# ---------------------------------------------------------------------------
+
+#: Имя причины отказа — одно на все три класса читателей.
+DELETION_REQUESTED = "deletion_requested"
+
+
+def deletion_block_for(user: User) -> DeletionRequest | None:
+    """Открытая заявка человека, если персонализацию надо остановить.
+
+    §7: «персонализация и новая обработка данных прекращаются сразу» — с
+    момента приёма, не с момента исполнения. Читатели памяти, рекомендаций
+    и проактива спрашивают ЭТУ функцию, а не таблицу: единственный писатель
+    заявки — приём (D1), единственный читатель состояния — здесь, и
+    расхождения «кто считает заявку живой» не бывает.
+
+    Возвращает саму заявку, а не ``bool``: отказ обязан назвать
+    ``request_id``, чтобы человек на любом экране видел тот же номер.
+    """
+    return open_request_for(user)
+
+
+def deletion_refusal(req: DeletionRequest):
+    """Один ответ 423 на все три класса — см. ``ErrorCode.DELETION_IN_PROGRESS``."""
+    from users.response import error_response
+
+    return error_response(
+        "DELETION_IN_PROGRESS",
+        "Персонализация остановлена: принята заявка на удаление аккаунта.",
+        details={
+            "reason": DELETION_REQUESTED,
+            "request_id": str(req.pk),
+            "status": req.status,
+            "deadline_at": req.deadline_at.isoformat(),
+        },
+        status_code=423,
+    )
+
+
 def as_payload(req: DeletionRequest) -> dict:
     """Форма ответа наружу — одна на POST и GET, чтобы экран читал одно и то же."""
     return {

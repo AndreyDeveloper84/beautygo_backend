@@ -33,6 +33,7 @@ from rest_framework.views import APIView
 from core.errors import ErrorCode
 from users.permissions import IsBotServiceWithVerifiedClient
 from users.response import error_response, success_response
+from users.deletion_requests import deletion_block_for, deletion_refusal
 
 from ._serializers import ResolveRequestSerializer, ResolveResponseSerializer, decision_to_payload
 from ._source_binding import CandidateSourceNotConfigured, get_candidate_source
@@ -59,6 +60,12 @@ class RecommendationResolveView(APIView):
         },
     )
     def post(self, request: Request) -> Response:
+        # D2 (§7): живая заявка на удаление — рекомендации не считаются.
+        # Проверка ДО разбора тела: отказ по воле человека не зависит от
+        # формы запроса, и ошибку формы он получать не должен.
+        blocked = deletion_block_for(request.user)
+        if blocked is not None:
+            return deletion_refusal(blocked)
         serializer = ResolveRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
