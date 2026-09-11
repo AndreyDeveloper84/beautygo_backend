@@ -226,6 +226,26 @@ class SpecialistProfile(models.Model):
         blank=True,
         related_name="specialist_profiles",
     )
+    # §9 (DRF-1687, L2): «Master → works_at → ServiceLocation». Место, до
+    # которого считается расстояние до предложения этого мастера. NULL —
+    # место не назначено: расстояние DISTANCE_UNKNOWN (§8), а не адрес
+    # мастера ниже. Поля address / location_lat / location_lng остаются
+    # до нуля читателей (L5–L8) и после §9 авторитетными не являются.
+    #
+    # PROTECT: место с мастерами нельзя удалить — его переводят в
+    # INACTIVE. Удаление молча снимало бы мастеров с карты.
+    works_at = models.ForeignKey(
+        "tenants.ServiceLocation",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="masters",
+        help_text=(
+            "Место оказания услуг (§9). Для мастера салона — место этого "
+            "салона; для самостоятельного — его собственная точка. Пусто — "
+            "расстояние до мастера неизвестно, не ноль."
+        ),
+    )
     display_name = models.CharField(max_length=255)
     avatar = models.ImageField(
         upload_to='specialists/avatars/', blank=True, null=True,
@@ -339,6 +359,28 @@ class SpecialistProfile(models.Model):
 
     def __str__(self):
         return f"{self.display_name} ({self.get_status_display()})"
+
+    def clean(self) -> None:
+        """Место салона — только у мастера этого салона.
+
+        `works_at.tenant` либо пуст (точка самостоятельного мастера), либо
+        равен `self.tenant`: мастер салона А, приписанный к месту салона Б,
+        получил бы расстояние до чужой двери. Ограничение живёт здесь, а
+        не в схеме: CheckConstraint не смотрит в соседнюю таблицу. Это
+        названный предел — `update()` мимо clean() его обойдёт.
+        """
+        from django.core.exceptions import ValidationError
+
+        super().clean()
+        place = self.works_at
+        if place is not None and place.tenant_id is not None and place.tenant_id != self.tenant_id:
+            raise ValidationError({
+                "works_at": (
+                    "Это место принадлежит другому салону. Мастер салона может "
+                    "работать только в месте своего салона; самостоятельный — "
+                    "в месте без салона."
+                ),
+            })
 
 
 class SpecialistPortfolio(models.Model):
