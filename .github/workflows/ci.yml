@@ -399,6 +399,14 @@ jobs:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           SENTRY_ENVIRONMENT: development
           SENTRY_RELEASE: ${{ github.sha }}
+          # B-5 (5.2): на хост ставится ЭТОТ коммит, а не голова dev в момент
+          # выполнения. 11.09.2026 прогон #330 (push d40d4af8, test зелёный)
+          # простоял в очереди раннеров 40 минут и запустил deploy в 15:49; к
+          # тому времени голова dev была 683e76fb с двумя листьями миграций
+          # 0018, `git reset --hard origin/dev` поставил её, entrypoint
+          # упал на migrate — crashloop web, admin 502. Зелёный test был у
+          # d40d4af8; выложен был другой коммит.
+          DEPLOY_SHA: ${{ github.sha }}
           # DJANGO_ENV gates prod.py fail-fast strictness. dev VPS uses prod
           # settings (HSTS, S3 storage, JSON logs) but doesn't yet have all
           # OAuth / YooKassa creds provisioned, so "staging" downgrades the
@@ -419,7 +427,7 @@ jobs:
           # egress to github.com). 10m is headroom for that, and a
           # timeout here is a clean no-op.
           command_timeout: 10m
-          envs: SENTRY_DSN,SENTRY_ENVIRONMENT,SENTRY_RELEASE,DJANGO_ENV,FIREBASE_CREDENTIALS_JSON
+          envs: SENTRY_DSN,SENTRY_ENVIRONMENT,SENTRY_RELEASE,DJANGO_ENV,FIREBASE_CREDENTIALS_JSON,DEPLOY_SHA
           script: |
             set -eo pipefail
             cd /home/taximeter/beautygo/dev
@@ -427,9 +435,34 @@ jobs:
             # Configure git auth via deploy token (HTTPS)
             git remote set-url origin https://${{ secrets.GH_DEPLOY_TOKEN }}@github.com/AndreyDeveloper84/beautygo_backend.git
 
+            # Проверенный SHA обязан быть 40 hex: пустой дал бы `reset --hard ''`.
+            if ! printf '%s' "$DEPLOY_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error::DEPLOY_SHA не определён (got '$DEPLOY_SHA') — выкладка отказана"
+              exit 1
+            fi
             git fetch origin dev
-            git reset --hard origin/dev
-            echo "checkout now at $(git rev-parse --short HEAD)"
+            # Проверенный коммит обязан лежать на dev: иначе dev переписан, и
+            # выкладывать проверенное некуда.
+            if ! git merge-base --is-ancestor "$DEPLOY_SHA" origin/dev; then
+              echo "::error::проверенный $DEPLOY_SHA не лежит на origin/dev — dev переписан; выкладка отказана"
+              exit 1
+            fi
+            # Дерево — на ПРОВЕРЕННОМ коммите, не на голове dev. Голова могла
+            # уйти вперёд без своей зелени, пока этот прогон стоял в очереди.
+            git reset --hard "$DEPLOY_SHA"
+            TREE_HEAD=$(git rev-parse HEAD)
+            DEV_HEAD=$(git rev-parse origin/dev)
+            # Три SHA в одной строке: дерево, проверенный, голова dev. Первые
+            # два совпадают всегда; третий отличается ровно тогда, когда в dev
+            # успело влиться что-то после старта этого прогона.
+            echo "::notice::в дереве $TREE_HEAD, проверенный $DEPLOY_SHA, голова dev $DEV_HEAD"
+            [ "$TREE_HEAD" = "$DEPLOY_SHA" ] || { echo "::error::дерево не на проверенном коммите"; exit 1; }
+            if [ "$DEV_HEAD" != "$DEPLOY_SHA" ]; then
+              # Не отказ: этот коммит проверен, ушедший вперёд придёт своей
+              # выкладкой, когда пройдёт свой test. Отказ держал бы пилот на
+              # старом коде в те часы, когда dev двигается быстрее CI.
+              echo "::warning::голова dev ушла на $(git rev-list --count "$DEPLOY_SHA"..origin/dev) коммит(ов) вперёд без своей зелени — выкладывается проверенный $DEPLOY_SHA, не голова"
+            fi
 
             # Refresh CI-managed env vars in .env without disturbing the rest.
             # Idempotent: drop any existing line for these keys, then append
