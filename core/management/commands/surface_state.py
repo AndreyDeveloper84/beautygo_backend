@@ -335,11 +335,23 @@ class Command(BaseCommand):
         return out
 
     def _goals(self) -> list[str]:
+        # DRF-1660 (#345): у цели больше нет is_active — есть state с шестью
+        # значениями. «Закрытых» — всё, что не active, и рядом распределение
+        # по состояниям: счётчик «не active» без него читался бы как одно
+        # состояние, а их пять, и у них разная семантика (ACHIEVED — слово
+        # человека, LEGACY_* — неизвестно).
         Goal = apps.get_model("goals.ClientGoal")
         qs = Goal._base_manager.all()
+        active = qs.filter(state="active").count()
         out = ["цели"]
-        out.append(_row("активных", qs.filter(is_active=True).count(), "goals.ClientGoal.is_active = true"))
-        out.append(_row("закрытых", qs.filter(is_active=False).count(), "goals.ClientGoal.is_active = false"))
+        out.append(_row("активных", active, "goals.ClientGoal.state = active"))
+        out.append(_row("закрытых", qs.exclude(state="active").count(), "goals.ClientGoal.state != active"))
+        for state, _label in Goal.State.choices:
+            if state == "active":
+                continue
+            out.append(_row(
+                f"  {state}", qs.filter(state=state).count(), f"goals.ClientGoal.state = {state}",
+            ))
         out.append(_row(
             "людей с целью", qs.values("client_id").distinct().count(),
             "goals.ClientGoal.client_id (distinct, активные и закрытые)",
