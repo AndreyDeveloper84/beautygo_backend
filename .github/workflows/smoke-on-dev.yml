@@ -147,6 +147,10 @@ jobs:
             echo
 
             echo "=== run any pending migrations ==="
+            # DRF-1664: снимок ДО migrate — этот шаг меняет схему пилота
+            # каждое утро, и до сегодня делал это без точки отката.
+            echo "=== snapshot before migrate ==="
+            bash scripts/pg_snapshot_before_deploy.sh
             docker compose exec -T web python manage.py migrate --noinput
             echo
 
