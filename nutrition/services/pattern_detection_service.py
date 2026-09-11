@@ -34,6 +34,7 @@ from django.conf import settings
 from django.core.cache import cache
 
 from nutrition.models import Beverage, FoodLog, NutritionProfile, WaterEntry
+from nutrition.services.targets_state import targets_confirmed
 
 logger = logging.getLogger(__name__)
 
@@ -578,7 +579,10 @@ def _rda(profile: NutritionProfile | None, key: str) -> float:
         "calcium_mg": "NUTRITION_DEFAULT_CALCIUM_MG",
         "b12_mcg": "NUTRITION_DEFAULT_B12_MCG",
     }
-    if profile is not None:
+    # §5.1: RDA из профиля читается только при действующем ориентире;
+    # предложение (``ayla_proposed``) сюда не попадает. Откат на
+    # настройки/справочник ниже — прежнее поведение, здесь не трогается.
+    if targets_confirmed(profile):
         attr = profile_attr_map[key]
         val = getattr(profile, attr, 0)
         if val:
@@ -826,7 +830,9 @@ def _force_severity(pattern: DetectedPattern, severity: str) -> DetectedPattern:
 
 
 def _profile_goal_protein(profile: NutritionProfile | None) -> float:
-    if profile and profile.daily_protein_g:
+    # §5.1: предложенный (не подтверждённый) ориентир в паттернах не
+    # участвует — спрашиваем происхождение, а не число.
+    if targets_confirmed(profile) and profile.daily_protein_g:
         return float(profile.daily_protein_g)
     return 0.0
 
@@ -849,7 +855,7 @@ def _profile_goal_water(profile: NutritionProfile | None) -> float:
 
 
 def _profile_goal_kcal(profile: NutritionProfile | None) -> float:
-    if profile and profile.daily_kcal:
+    if targets_confirmed(profile) and profile.daily_kcal:
         return float(profile.daily_kcal)
     return 0.0
 

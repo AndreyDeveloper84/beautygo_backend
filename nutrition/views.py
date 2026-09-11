@@ -61,6 +61,8 @@ from nutrition.services.personal_calculation_consent import (
 from nutrition.services.pattern_detection_service import detect_patterns
 from nutrition.services.returning_success_service import detect_returning_success
 from nutrition.services.profile_upsert_service import (
+    NothingToConfirm,
+    confirm_targets,
     get_profile_response,
     upsert_profile,
 )
@@ -906,6 +908,71 @@ class InternalProfileView(APIView):
             idempotency_key=idem,
         )
         return success_response(response, status_code=status.HTTP_200_OK)
+
+
+class InternalProfileTargetsConfirmView(APIView):
+    """POST /api/v1/nutrition/internal/profile/targets/confirm/ (§5.1).
+
+    Человек подтверждает предложенный ориентир: ``ayla_proposed`` →
+    ``ayla_calculated``, ``targets_confirmed_at`` — момент подтверждения.
+    Тела нет: подтверждается ровно то, что предложено, — число, которое
+    человек видел. Отдаёт конверт профиля и ``confirmation.outcome``:
+    ``confirmed`` либо ``already_confirmed`` (повтор кнопки — не ошибка
+    и не новое событие).
+
+    Подтверждать нечего (``none`` / ``unknown_legacy`` / ``user_entered``,
+    профиля нет) — ``409 NOTHING_TO_CONFIRM`` с текущим источником в
+    ``details``: вызывающему нужно отличить «ещё не считали» от
+    «поставлено рукой», это разные ответы человеку.
+
+    Кэша идемпотентности нет намеренно: повтор и так безопасен, а
+    кэшированный ответ скрыл бы пересчёт, случившийся между нажатиями.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+    serializer_class = NutritionProfileResponseSerializer
+
+    @extend_schema(
+        tags=["internal"],
+        request=None,
+        responses={
+            200: NutritionProfileResponseSerializer,
+            409: OpenApiResponse(description="Подтверждать нечего"),
+        },
+    )
+    def post(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+        try:
+            body, outcome = confirm_targets(user=user, external_user_id=external_user_id)
+        except NothingToConfirm as exc:
+            logger.info(
+                "nutrition.targets.confirm_refused external_user_id=%s source=%s",
+                external_user_id,
+                exc.source,
+            )
+            return error_response(
+                exc.code,
+                str(exc),
+                details={"targets_source": exc.source},
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        logger.info(
+            "nutrition.targets.confirm external_user_id=%s outcome=%s",
+            external_user_id,
+            outcome,
+        )
+        body = dict(body)
+        body["confirmation"] = {"outcome": outcome}
+        return success_response(body, status_code=status.HTTP_200_OK)
 
 
 class InternalWaterCreateView(APIView):
