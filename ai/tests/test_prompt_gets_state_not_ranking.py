@@ -44,6 +44,7 @@ from decimal import Decimal
 import pytest
 
 from ai.application.services.specialist_context_builder import (
+    OrderProvenance,
     SpecialistCandidate as LocalCandidate,
     SpecialistContext as LocalContext,
 )
@@ -63,6 +64,8 @@ def _local(names: list[str]) -> LocalContext:
     случайно.
     """
     return LocalContext(
+        # Вход — порядок движка, как он и приходит на деле.
+        order_provenance=OrderProvenance.LEGACY_ENGINE,
         candidates=[
             LocalCandidate(
                 id=uuid.uuid5(uuid.NAMESPACE_DNS, name),
