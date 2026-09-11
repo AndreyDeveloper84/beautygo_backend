@@ -805,3 +805,89 @@ class TenantUserRelationship(models.Model):
     def __str__(self) -> str:
         flag = "active" if self.is_active else "revoked"
         return f"TUR({self.user_id}, {self.tenant_id}, {self.role}, {flag})"
+
+
+class DeletionRequest(models.Model):
+    """Заявка на удаление аккаунта и личных данных (§7 свода владельца, DRF-1699).
+
+    До этой модели удаление было синхронным каскадом «нажал → стёрто → 200»:
+    ни следа заявки, ни ``request_id``, ни срока, и ошибка на середине
+    каскада читалась как «частично сделано» — обратное тому, что требует
+    §7 («ошибка обязана явно говорить, что удаление не началось»).
+
+    Заявка — устойчивая запись, которая создаётся **до** любого стирания и
+    до показа успеха человеку. Именно она и есть то, что человек видит на
+    экране «принято»: ``id`` — его ``request_id``, ``deadline_at`` — точная
+    крайняя дата, ``status`` — текущее состояние.
+
+    Одна открытая заявка на человека (частичный уникальный индекс): второе
+    нажатие возвращает ту же, а не заводит вторую — отменить удаление после
+    начала нельзя, и вторая заявка ничего не добавила бы.
+
+    Исполнитель (срез D3) переводит REQUESTED → PROCESSING → COMPLETED и
+    пишет в ``steps`` состав сделанного: что удалено, что обезличено, что
+    сохранено по обязательному основанию. ``FAILED`` — исполнитель упал;
+    заявка остаётся открытой, повтор исполнения идёт по ней же.
+    """
+
+    #: Верхняя граница срока по §7: «не позднее 30 дней».
+    DEADLINE_DAYS = 30
+
+    class Status(models.TextChoices):
+        REQUESTED = "DELETION_REQUESTED", "Запрошено"
+        PROCESSING = "DELETION_PROCESSING", "Выполняется"
+        COMPLETED = "DELETION_COMPLETED", "Завершено"
+        FAILED = "DELETION_FAILED", "Сбой исполнителя"
+
+    #: Открытые состояния — те, при которых новая заявка не заводится и
+    #: персонализация обязана быть остановлена (срез D2).
+    OPEN_STATUSES = (Status.REQUESTED, Status.PROCESSING, Status.FAILED)
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # PROTECT: заявка — юридический след; строка пользователя мягко
+    # удаляется (``deleted_at``), физически — никогда, и заявка обязана
+    # пережить её содержимое.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="deletion_requests",
+    )
+    status = models.CharField(
+        max_length=32, choices=Status.choices, default=Status.REQUESTED,
+    )
+    requested_at = models.DateTimeField(default=timezone.now, editable=False)
+    deadline_at = models.DateTimeField(editable=False)
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    #: Кто завёл: ``bot`` (Mini App через внутреннюю ручку), ``app``,
+    #: ``admin``. Не свободный текст для человека, а имя пути.
+    initiator = models.CharField(max_length=32)
+    #: Состав сделанного исполнителем: {"deleted": [...], "anonymised":
+    #: [...], "retained": {"<модель>": "<основание>"}}. Пусто до исполнения.
+    steps = models.JSONField(default=dict, blank=True)
+    failure_reason = models.CharField(max_length=500, blank=True, default="")
+
+    class Meta:
+        verbose_name = "Заявка на удаление"
+        verbose_name_plural = "Заявки на удаление"
+        ordering = ["-requested_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user"],
+                condition=models.Q(
+                    status__in=(
+                        "DELETION_REQUESTED",
+                        "DELETION_PROCESSING",
+                        "DELETION_FAILED",
+                    )
+                ),
+                name="deletionrequest_one_open_per_user",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"DeletionRequest({self.pk}, {self.user_id}, {self.status})"
+
+    @property
+    def is_open(self) -> bool:
+        return self.status in self.OPEN_STATUSES
