@@ -42,26 +42,25 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# OPTIONAL build-time credential for the ayla-ai-core dep.
+# DRF-979 — токена в сборке больше нет: ни build-аргумента, ни url-rewrite.
 #
-# ayla-ai-core is PUBLIC (owner's decision 04.09.2026, recorded in
-# OPEN_DECISIONS.md §22 in the workspace root, outside this repo), so this
-# build needs no token: with the ARG empty the `if` below is skipped and
-# pip clones the pinned SHA anonymously. Verified 04.09.2026 by an
-# unauthenticated fetch of the pin.
+# Здесь стоял необязательный build-аргумент с токеном и RUN-строка, которая
+# писала его в /root/.gitconfig через `url.<…>.insteadOf`, с комментарием
+# «consumed at build time only and NOT baked into the final image». Оба
+# утверждения неверны, и проверено это на собранном образе 11.09.2026:
+#   * значение аргумента попадает в команду RUN, а команда RUN — в
+#     `docker history --no-trunc` каждого слоя, который её исполнил;
+#   * `git config --global` пишет /root/.gitconfig В СЛОЙ, и файл едет в
+#     финальный образ — не user-facing, но он там.
+# То есть каждый образ, собранный на пилоте с токеном в .env, нёс его в двух
+# местах. Комментарий говорил одно, слой — другое.
 #
-# The token path is kept for the day the visibility is closed again (the
-# decision says public "for now"): pass via
-# `docker compose build --build-arg GH_DEPLOY_TOKEN=...` or set it in
-# compose under web.build.args, and the URL-rewrite makes pip's git clone
-# authenticate transparently. Consumed at build time only and NOT baked
-# into the final image (no COPY of secret files; the .gitconfig that
-# `git config --global` writes lives in /root/.gitconfig but is not
-# user-facing at runtime).
-ARG GH_DEPLOY_TOKEN=""
-RUN if [ -n "$GH_DEPLOY_TOKEN" ]; then \
-      git config --global url."https://${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"; \
-    fi
+# ayla-ai-core публичен (решение владельца 04.09.2026, OPEN_DECISIONS §22),
+# pip клонирует закреплённый SHA анонимно — так было и до этой правки, аргумент
+# был пуст. Если видимость когда-нибудь закроют, единственная форма, которая
+# НЕ оставляет секрет в слое, — BuildKit-секрет, не аргумент сборки:
+#     RUN --mount=type=secret,id=gh_token #         git config --global url."https://$(cat /run/secrets/gh_token)@github.com/".insteadOf "https://github.com/" #      && pip install --no-cache-dir -r requirements.txt #      && rm -f /root/.gitconfig
+# — и даже так .gitconfig снимается в той же RUN-строке, иначе он ляжет в слой.
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
