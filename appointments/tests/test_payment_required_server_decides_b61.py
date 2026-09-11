@@ -52,14 +52,14 @@ def _future(hour: int = 11, weeks_ahead: int = 2) -> datetime:
     )
 
 
-def _dto(client_user, specialist, service, **kwargs):
+def _dto(client_user, specialist, bookable_service, **kwargs):
     """Only the fields under test are named here; everything else keeps
     the DTO's own defaults, so the test cannot quietly re-state the
     contract it is checking."""
     return CreateBookingDTO(
         client_id=client_user.id,
         specialist_id=specialist.id,
-        service_id=service.id,
+        service_id=bookable_service.id,
         start_at=kwargs.pop("start_at", _future()),
         idempotency_key=str(uuid4()),
         **kwargs,
@@ -89,7 +89,7 @@ def _refusals(caplog) -> list[logging.LogRecord]:
 
 class TestStaffRecordedBookingCannotBePrepaid:
     def test_a_staff_caller_asking_for_prepayment_gets_none(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         """The whole defect in one call: staff path, ``payment_required``
         asserted by the caller. Before the server owned the decision this
@@ -97,7 +97,7 @@ class TestStaffRecordedBookingCannotBePrepaid:
         booking in AWAITING_PAYMENT — money nobody would ever be asked
         for, on a booking the customer never made."""
         result = CreateBookingService().execute(_dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             payment_required=True,
             actor_role="specialist",
         ))
@@ -107,14 +107,14 @@ class TestStaffRecordedBookingCannotBePrepaid:
         assert booking.status == Appointment.Status.CONFIRMED
 
     def test_the_salon_front_desk_is_staff_too(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         """DRF-1064's ``salon`` actor records a booking on the customer's
         behalf — same off-platform settlement, same refusal. The rule
         keys off "is this the client acting for themselves", not off the
         one endpoint that happened to exist first."""
         result = CreateBookingService().execute(_dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             payment_required=True,
             actor_role="salon",
         ))
@@ -126,11 +126,11 @@ class TestStaffRecordedBookingCannotBePrepaid:
 
 class TestTheRefusalIsNamedAndCountedApart:
     def test_the_refusal_names_itself_and_says_what_was_asked(
-        self, client_user, specialist, service, caplog,
+        self, client_user, specialist, bookable_service, caplog,
     ):
         with _capturing_the_service_log(caplog):
             CreateBookingService().execute(_dto(
-                client_user, specialist, service,
+                client_user, specialist, bookable_service,
                 payment_required=True,
                 actor_role="specialist",
             ))
@@ -143,7 +143,7 @@ class TestTheRefusalIsNamedAndCountedApart:
         assert "applied=False" in message
 
     def test_a_caller_who_wanted_no_payment_is_not_counted_as_refused(
-        self, client_user, specialist, service, caplog,
+        self, client_user, specialist, bookable_service, caplog,
     ):
         """The separate counter earns its keep here. This booking and the
         refused one above end up as the same row — CONFIRMED, no Payment.
@@ -151,7 +151,7 @@ class TestTheRefusalIsNamedAndCountedApart:
         inflate it."""
         with _capturing_the_service_log(caplog):
             CreateBookingService().execute(_dto(
-                client_user, specialist, service,
+                client_user, specialist, bookable_service,
                 payment_required=False,
                 confirm_immediately=True,
                 actor_role="specialist",
@@ -160,10 +160,10 @@ class TestTheRefusalIsNamedAndCountedApart:
         assert _refusals(caplog) == []
 
     def test_the_created_event_carries_the_coarse_name_only_when_refused(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         CreateBookingService().execute(_dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             payment_required=True,
             actor_role="specialist",
         ))
@@ -172,10 +172,10 @@ class TestTheRefusalIsNamedAndCountedApart:
         assert event.data["payment_required_refused"] is True
 
     def test_an_ordinary_booking_payload_stays_byte_identical(
-        self, client_user, specialist, service,
+        self, client_user, specialist, bookable_service,
     ):
         CreateBookingService().execute(_dto(
-            client_user, specialist, service,
+            client_user, specialist, bookable_service,
             payment_required=False,
             confirm_immediately=True,
             actor_role="specialist",
@@ -187,13 +187,13 @@ class TestTheRefusalIsNamedAndCountedApart:
 
 class TestTheClientPathIsUntouched:
     def test_a_client_asking_for_prepayment_still_gets_it(
-        self, client_user, specialist, service, caplog,
+        self, client_user, specialist, bookable_service, caplog,
     ):
         """Inertness pin. The customer contract is the one thing this
         change must not move: Payment row, AWAITING_PAYMENT, no refusal."""
         with _capturing_the_service_log(caplog):
             result = CreateBookingService().execute(_dto(
-                client_user, specialist, service,
+                client_user, specialist, bookable_service,
                 payment_required=True,
                 actor_role="user",
             ))
@@ -205,7 +205,7 @@ class TestTheClientPathIsUntouched:
         assert _refusals(caplog) == []
 
     def test_the_pilot_no_prepayment_client_booking_is_not_promoted(
-        self, client_user, specialist, service, caplog,
+        self, client_user, specialist, bookable_service, caplog,
     ):
         """The bot's pilot baseline: the customer books without
         prepayment. The server owns the decision now, but it owns no
@@ -213,7 +213,7 @@ class TestTheClientPathIsUntouched:
         must not invent one."""
         with _capturing_the_service_log(caplog):
             result = CreateBookingService().execute(_dto(
-                client_user, specialist, service,
+                client_user, specialist, bookable_service,
                 payment_required=False,
                 confirm_immediately=True,
                 actor_role="user",

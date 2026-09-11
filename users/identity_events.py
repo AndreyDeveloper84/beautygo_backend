@@ -32,9 +32,17 @@ Payload contract (safe-by-design):
 - ``reason`` — coarse, safe category (no free-form error text);
 - ``initiator`` — which trusted caller ran the operation
   (``identity_provisioning`` for the s2s endpoint,
-  ``e2e_fixture_bootstrap`` for the provisioning command);
+  ``e2e_fixture_bootstrap`` for the provisioning command,
+  ``admin_link_solo_master`` for the operator's admin action);
 - ``request_id`` — correlation id stamped by RequestIDMiddleware when
-  the call came over HTTP.
+  the call came over HTTP;
+- ``initiator_user_id`` / ``initiator_role`` — the HUMAN who ran the
+  operation, present ONLY when a human did (the admin action, §143:
+  "actor_id + role" for a person). The s2s / bootstrap rows do not
+  carry these keys at all — their author is the named service plus
+  ``request_id``, which §143 treats as authorship of its own kind, and
+  an empty ``initiator_user_id: null`` on every s2s row would read as
+  "author unknown", the exact false completeness §143 forbids.
 
 NEVER write secrets here: no bearer tokens, no Authorization header,
 no raw request bodies.
@@ -118,6 +126,8 @@ def emit_identity_binding(
     request_id: str | None = None,
     operation: str = "bind_external_identity",
     strict: bool = False,
+    initiator_user_id=None,
+    initiator_role: str | None = None,
 ) -> None:
     """Write the durable audit row for one binding operation.
 
@@ -174,6 +184,25 @@ def emit_identity_binding(
             client_event_id=dedup_key,
         ).exists():
             return
+    payload = {
+        "operation": operation,
+        "external_user_id": external_user_id,
+        "proxy_user_id": (
+            str(proxy_user_id) if proxy_user_id else None
+        ),
+        "target_user_id": (
+            str(target_user_id) if target_user_id else None
+        ),
+        "result": result,
+        "reason": reason,
+        "initiator": initiator,
+        "request_id": request_id,
+    }
+    if initiator_user_id is not None:
+        # Human author (§143). Keys are added, never left null: see the
+        # module docstring on why an s2s row must not carry them.
+        payload["initiator_user_id"] = str(initiator_user_id)
+        payload["initiator_role"] = initiator_role
     try:
         # Savepoint: a duplicate-key IntegrityError must not break an
         # enclosing transaction (strict callers run inside one).
@@ -181,20 +210,7 @@ def emit_identity_binding(
             AnalyticsEvent.objects.create(
                 actor=actor,
                 event_name=event_catalogue.EXTERNAL_IDENTITY_BOUND,
-                payload={
-                    "operation": operation,
-                    "external_user_id": external_user_id,
-                    "proxy_user_id": (
-                        str(proxy_user_id) if proxy_user_id else None
-                    ),
-                    "target_user_id": (
-                        str(target_user_id) if target_user_id else None
-                    ),
-                    "result": result,
-                    "reason": reason,
-                    "initiator": initiator,
-                    "request_id": request_id,
-                },
+                payload=payload,
                 app_type=AnalyticsEvent.AppType.CLIENT,
                 client_event_id=dedup_key,
             )

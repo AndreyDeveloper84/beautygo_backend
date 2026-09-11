@@ -69,6 +69,11 @@ INSTALLED_APPS = [
     # (OD §53, RECOMMENDATION_RESOLVER_CONTRACT_v1.0). Приложение без моделей:
     # решение резолвером не сохраняется, персистенция — авторитет домена (§6.1).
     'recommendation',
+    # Общие модули без моделей (ошибки, пагинация, предмет замера). В
+    # INSTALLED_APPS — ради `core/management/commands/`: Django ищет
+    # команды только в установленных приложениях, и `surface_state`
+    # (DRF-1661) иначе не существует для manage.py.
+    'core',
 ]
 
 # Порт к доменной правде для резолвера рекомендаций. Путь к ФАБРИКЕ, а не
@@ -747,6 +752,19 @@ NUTRITION_SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN", "")
 # this token authenticates the calling service. Empty value disables
 # internal endpoints (IsBotServiceWithVerifiedClient fails closed). Rotate
 # quarterly; treat as production secret.
+# B-R (DRF-1617) — accounts `reset_test_account` may free. Entries are either
+# `channel:channel_user_id` (a bot proxy, e.g. max:83146139) or the bare UUID
+# of a real account. A proxy being listed does NOT list the real account it
+# is bound to: that one has to be listed by its own UUID, or the command
+# refuses and names it. Empty means the command refuses every account —
+# there is no confirmation flag, because a confirmation protects against
+# inattention and this list protects against a wrong identifier. Getting
+# onto it is a deliberate, separate act on the host. The pilot's list is
+# empty.
+ACCOUNT_RESET_ALLOWLIST = [
+    p.strip() for p in os.environ.get("ACCOUNT_RESET_ALLOWLIST", "").split(",") if p.strip()
+]
+
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
 # Provisioning-only Bearer for POST /api/v1/internal/users/bind-external/

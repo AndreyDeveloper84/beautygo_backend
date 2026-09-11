@@ -127,6 +127,27 @@ class ErrorCode(str, Enum):
     CANCELLATION_NOT_ALLOWED = "CANCELLATION_NOT_ALLOWED"
     SPECIALIST_NOT_ACTIVE = "SPECIALIST_NOT_ACTIVE"
     SERVICE_NOT_ACTIVE = "SERVICE_NOT_ACTIVE"
+    # --- Медицинский скрининг (§89, решение владельца (c) 10.09.2026) ---
+    # Два кода, а не один, и не общий BOOKING_ERROR. Наружу поверхность
+    # вправе показать одну спокойную фразу — человеку наша таксономия не
+    # нужна. Внутрь они обязаны расходиться: очередь разметки услуг
+    # строится на счётчике UNKNOWN, и слитый с REQUIRED он перестаёт
+    # говорить, сколько отказов вызвано нашими же недостающими данными.
+    # На пилоте 10.09.2026 это 96 рёбер из 387 против одного REQUIRED.
+    HEALTH_CHECK_REQUIRED = "HEALTH_CHECK_REQUIRED"
+    HEALTH_CHECK_UNKNOWN = "HEALTH_CHECK_UNKNOWN"
+    # Третье состояние, а не разновидность UNKNOWN: у устаревшего пути
+    # маркетплейса нет колонки, куда мог бы лечь ответ. За UNKNOWN
+    # стоит работа (спросить салон), за этим — не стоит ничего.
+    HEALTH_CHECK_NOT_APPLICABLE = "HEALTH_CHECK_NOT_APPLICABLE"
+
+    # --- Согласие на обработку личных данных (§92, срез N-a2) ---
+    # Свой код, а не общий VALIDATION_ERROR: вызывающему нужно отличить
+    # «данные невалидны» (чинится телом запроса) от «нет основания их
+    # принимать» (чинится согласием человека). По статусу причину
+    # восстановить нельзя — 422 в этом репозитории носят несколько
+    # разных отказов.
+    CONSENT_REQUIRED = "CONSENT_REQUIRED"
     BOOKING_ERROR = "BOOKING_ERROR"
 
     # --- Reviews (spec §Отзывы) ---
@@ -171,12 +192,23 @@ class ErrorCode(str, Enum):
     # --- Resource ---
     NOT_FOUND = "NOT_FOUND"
     CONFLICT = "CONFLICT"
+    # DRF-1525 — «салон по slug» для экрана бота: slug занят салоном с
+    # другим названием. Не общий CONFLICT: оператору нужно имя занявшего,
+    # а боту — отличить «опечатка в названии» от «Ayla недоступна».
+    TENANT_SLUG_TAKEN = "TENANT_SLUG_TAKEN"
 
     # --- Goal anketa (DRF-1451; project — not in spec) ---
     # Ответ на шаг анкеты разошёлся с тем шагом, который ждёт сервер:
     # документ на экране протух. Клиенту сюда — перечитать документ,
     # а не повторять тот же запрос.
     ANKETA_STEP_MISMATCH = "ANKETA_STEP_MISMATCH"
+
+    # --- Goal lifecycle (DRF-1660; §97 OD-GOAL-B) ---
+    # Два разных «нельзя» с разными адресами починки: первое — перехода
+    # нет в таблице (выбрать другое действие), второе — снять с паузы
+    # мешает другая ACTIVE цель (сначала поставить на паузу её).
+    GOAL_TRANSITION_NOT_ALLOWED = "GOAL_TRANSITION_NOT_ALLOWED"
+    GOAL_ANOTHER_ACTIVE = "GOAL_ANOTHER_ACTIVE"
 
     # --- Rate limiting ---
     THROTTLED = "THROTTLED"

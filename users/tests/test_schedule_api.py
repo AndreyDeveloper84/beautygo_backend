@@ -393,3 +393,24 @@ class TestTimeOffDelete:
         client = APIClient()
         resp = client.delete(f'{TIME_OFF_URL}{uuid.uuid4()}/')
         assert resp.status_code in (401, 403)
+
+
+@pytest.mark.django_db
+class TestTimeOffAuthor:
+    """§142 (DRF-1240): «сохранить автора и время». Время было, автора — нет.
+
+    До этой колонки закрытие графика приписывалось человеку только в аудите
+    Ayla через заголовок, а сама строка молчала. Мастер, закрывающий своё
+    время из Pro App, — автор, известный по построению.
+    """
+
+    def test_the_masters_own_block_names_the_master(self, pro_client, specialist_profile):
+        resp = pro_client.post(TIME_OFF_URL, {
+            'start_at': '2026-09-01T00:00:00Z',
+            'end_at': '2026-09-02T00:00:00Z',
+            'reason': 'учёба',
+        }, format='json')
+        assert resp.status_code == 201
+
+        time_off = SpecialistTimeOff.objects.get(specialist=specialist_profile)
+        assert time_off.created_by_id == specialist_profile.user_id
