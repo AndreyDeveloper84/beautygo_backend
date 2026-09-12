@@ -154,7 +154,10 @@ class TestProvenanceIsStoredAndLeavesTheService:
         # §5.1 (11.09.2026): свежий расчёт — предложение до подтверждения.
         assert provenance["source"] == "ayla_proposed"
         assert provenance["confirmed_at"] is None
-        assert provenance["method_versions"] == {"calories": CALORIES_METHOD_VERSION}
+        assert provenance["method_versions"] == {
+            "calories": CALORIES_METHOD_VERSION,
+            "fluids": FLUIDS_METHOD_VERSION,
+        }
         assert provenance["computed_at"] is not None
 
         # Снимок входов уезжает владельцу данных (решение владельца
