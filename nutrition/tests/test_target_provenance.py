@@ -24,6 +24,7 @@ import pytest
 
 from nutrition.services.nutrition_profile_service import (
     CALORIES_METHOD_VERSION,
+    FLUIDS_METHOD_VERSION,
     SNAPSHOT_INPUTS,
     ProfileInputs,
     compute_norms,
@@ -59,7 +60,10 @@ class TestTheCalculationCarriesItsOwnProvenance:
         assert norms.daily_kcal > 0
         assert norms.computed is True
 
-        assert norms.method_versions == {"calories": CALORIES_METHOD_VERSION}
+        assert norms.method_versions == {
+            "calories": CALORIES_METHOD_VERSION,
+            "fluids": FLUIDS_METHOD_VERSION,
+        }
         # Снимок собран по объявленному списку, а не по случайному набору
         # полей: разъехавшись, они разошлись бы молча.
         assert set(norms.input_snapshot) == set(SNAPSHOT_INPUTS)

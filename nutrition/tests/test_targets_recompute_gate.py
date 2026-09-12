@@ -351,7 +351,10 @@ class TestGuardLetsGroundedRecomputeThrough:
         assert p.bmr == 1906
         assert p.daily_kcal == 2669
         assert p.targets_input_snapshot["weight_kg"] == 95.0
-        assert p.targets_method_versions == {"calories": "mifflin_st_jeor_v1"}
+        assert p.targets_method_versions == {
+            "calories": "mifflin_st_jeor_v1",
+            "fluids": "adult_beverages_reference_v1",
+        }
         assert p.targets_computed_at is not None
         assert _refusals(p) == []
         assert resp.json()["data"]["norms"]["daily_kcal"] == 2669
