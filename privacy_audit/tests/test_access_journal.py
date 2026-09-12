@@ -351,9 +351,17 @@ class TestServedOperationsDoNotStopTheProduct:
         assert "spool" not in names
         assert not hasattr(services, "record_or_queue")
         assert not hasattr(services, "enqueue")
-        # No management commands at all today; the day one appears, it must
-        # not be a drain of anything.
-        assert "management" not in names, "a management package appeared — check it is not a spool drain"
+        # The management package appeared 12.09.2026 (DRF-1782) and carries
+        # exactly one command — retention pruning, which reads the journal
+        # table itself and drains nothing. Anything else here is a question.
+        from privacy_audit.management import commands as commands_pkg
+
+        command_names = {m.name for m in pkgutil.iter_modules(commands_pkg.__path__)}
+        assert command_names == {"prune_privacy_audit"}, command_names
+        from privacy_audit.management.commands import prune_privacy_audit
+
+        assert not hasattr(prune_privacy_audit, "spool")
+        assert "spool" not in (prune_privacy_audit.__doc__ or "").lower()
 
 
 # ---------------------------------------------------------------------------
@@ -654,14 +662,25 @@ class TestRetentionIsNamedAsProvisional:
     later reads as a bug.
     """
 
-    def test_no_retention_job_exists_yet(self):
+    def test_the_deletion_path_is_one_and_named(self):
+        """Перевёрнут 12.09.2026 (DRF-1782): путь удаления появился — ровно
+        один, и он назван: ``privacy_audit.prune_expired`` →
+        ``PersonalDataAccessLogQuerySet.prune_before``. Период — параметр с
+        умолчанием (365, всё ещё временное решение §96), не число в коде."""
         import privacy_audit
+        from privacy_audit import retention
+        from privacy_audit.models import PersonalDataAccessLogQuerySet
 
-        assert not hasattr(privacy_audit, "prune_expired"), (
-            "A pruning path appeared. It is the only code allowed to delete "
-            "audit rows — make sure the retention period it enforces is the "
-            "settled one and not the provisional year, then update this test."
-        )
+        assert hasattr(privacy_audit, "prune_expired")
+        assert privacy_audit.prune_expired.__module__ == "privacy_audit"
+        assert retention.DEFAULT_RETENTION_DAYS == 365
+        assert retention.RETENTION_SETTING == "PRIVACY_AUDIT_RETENTION_DAYS"
+        # Дыры в append-only ровно одна — и это она.
+        own = {
+            name for name, fn in vars(PersonalDataAccessLogQuerySet).items()
+            if callable(fn) and not name.startswith("__")
+        }
+        assert own == {"delete", "prune_before"}, own
 
     def test_the_provisional_year_is_documented_where_it_is_implemented(self):
         from privacy_audit import models

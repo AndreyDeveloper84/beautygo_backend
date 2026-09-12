@@ -44,9 +44,12 @@ not that one — and a bare "365" a year from now reads as a researched number
 instead of a placeholder. When legal review lands, this docstring and
 whatever enforces the period change together.
 
-Nothing prunes the table yet. That is deliberate: a retention job that
-deletes rows is the one piece of code allowed to remove audit records, and
-it should be written against a settled period, not against a placeholder.
+Pruning has exactly one named path (DRF-1782): ``privacy_audit.prune_expired``
+→ :meth:`PersonalDataAccessLogQuerySet.prune_before`, driven by the
+``PRIVACY_AUDIT_RETENTION_DAYS`` setting (default 365 — the same TEMPORARY
+year). The period is a parameter with a default, not a decision taken in
+code: when legal review lands, the setting (or its default in
+``privacy_audit/retention.py``) changes, and the deletion code does not.
 
 ### What is not yet real, named so it is not mistaken for real
 
@@ -70,9 +73,19 @@ class PersonalDataAccessLogQuerySet(models.QuerySet):
     def delete(self):  # noqa: D102 — see class docstring
         raise NotImplementedError(
             "PersonalDataAccessLog is append-only: the access journal cannot "
-            "be deleted through the application. Retention pruning, when the "
-            "period is settled, gets its own explicitly named path."
+            "be deleted through the application. Retention pruning has its "
+            "own explicitly named path: privacy_audit.prune_expired."
         )
+
+    def prune_before(self, cutoff) -> int:
+        """The ONE deletion path (DRF-1782): rows with ``occurred_at`` before
+        ``cutoff``. Explicitly narrows to the cutoff itself — a caller cannot
+        widen it into ``delete()`` by passing a far-future date on an
+        unfiltered set: the cutoff is applied here, not trusted from outside.
+        Returns the number of journal rows removed."""
+        narrowed = self.filter(occurred_at__lt=cutoff)
+        deleted, per_model = models.QuerySet.delete(narrowed)
+        return per_model.get(PersonalDataAccessLog._meta.label, 0)
 
 
 class PersonalDataAccessLogManager(models.Manager.from_queryset(
