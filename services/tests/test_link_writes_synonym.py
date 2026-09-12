@@ -180,10 +180,16 @@ def test_no_trace_for_a_refusal(tenant, category, canon, human):
 
 
 def test_no_trace_without_a_template(tenant, category, human):
-    """Внетаксономическая услуга (D2) канона не имеет по устройству."""
+    """Внетаксономическая услуга (D2) канона не имеет по устройству.
+
+    DRF-1668: `VERIFIED` без шаблона схема больше не пропускает —
+    решённое состояние строки без канона это `NOT_RECOMMENDABLE`
+    («решено, что связи не будет»). Предмет теста тот же: решение без
+    шаблона синонима не пишет.
+    """
     _save_through_admin(_service(
         tenant, category, name="Своя авторская программа",
-        mapping_status=S.VERIFIED,
+        mapping_status=S.NOT_RECOMMENDABLE,
         mapping_confirmed_by=human,
         mapping_confirmed_at=timezone.now(),
         mapping_source_ref="разбор 56 услуг, строка 55",

@@ -35,7 +35,7 @@ from decimal import Decimal
 import pytest
 from django.db import IntegrityError, transaction
 
-from services.models import SalonService, ServiceCategory
+from services.models import SalonService, ServiceCategory, ServiceTemplate
 from tenants.models import Tenant
 from users.models import User
 
@@ -66,6 +66,14 @@ def _service(tenant, category, name="Услуга", **overrides):
     )
     fields.update(overrides)
     return SalonService.objects.create(**fields)
+
+
+def _template(category, name="Канон для VERIFIED"):
+    """DRF-1668: `VERIFIED` ⇒ `template` (схема) — подтверждение это связь
+    С ЧЕМ-ТО; строки, проверяющие провенанс `VERIFIED`, несут шаблон."""
+    return ServiceTemplate.objects.create(
+        category=category, name=name, name_short=name[:20], duration_default=60,
+    )
 
 
 def test_who_and_rule_together_are_refused_by_the_database(tenant, category, human):
@@ -116,6 +124,7 @@ def test_who_alone_is_accepted(tenant, category, human):
     """Подтверждение человеком по-прежнему проходит."""
     service = _service(
         tenant, category, name="Только человек",
+        template=_template(category),
         mapping_status=S.VERIFIED,
         mapping_confirmed_by=human,
         mapping_confirmed_at="2026-09-10T12:00:00Z",
@@ -128,6 +137,7 @@ def test_rule_alone_is_accepted(tenant, category):
     """Подтверждение правилом с версией — тоже."""
     service = _service(
         tenant, category, name="Только правило",
+        template=_template(category, "Канон для правила"),
         mapping_status=S.VERIFIED,
         mapping_confirmed_rule="exact_name_match",
         mapping_rule_version="v1",
