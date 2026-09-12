@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 from django import forms
-from django.contrib import admin
+from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
 
+from services.mapping.store import StoredReport
+from services.mapping.types import Decision
+from services.mapping_review import confirm_single_candidate, evidence_text, mark_canon_gap
 from services.normalization import normalize_service_name
 
 from .models import (
@@ -161,6 +165,30 @@ class SpecialistServiceInline(admin.TabularInline):
     show_change_link = True
 
 
+class ResolverDecisionFilter(admin.SimpleListFilter):
+    """Фильтр «что ждёт владельца» — по отчётам dry-run всех салонов (файлы)."""
+
+    title = 'исход резолвера'
+    parameter_name = 'resolver'
+
+    def lookups(self, request, model_admin):
+        return [(d.value, d.value) for d in Decision] + [('NONE', 'нет прогона / нет в отчёте')]
+
+    def queryset(self, request, queryset):
+        value = self.value()
+        if not value:
+            return queryset
+        by_decision: dict[str, set[str]] = {}
+        seen: set[str] = set()
+        for report in StoredReport.load_all().values():
+            for sid, row in report.rows.items():
+                seen.add(sid)
+                by_decision.setdefault(row['decision'], set()).add(sid)
+        if value == 'NONE':
+            return queryset.exclude(pk__in=seen)
+        return queryset.filter(pk__in=by_decision.get(value, set()))
+
+
 class SalonServiceAdminForm(forms.ModelForm):
     """Форма услуги салона: объясняет отказ вместо имени ограничения.
 
@@ -290,18 +318,119 @@ class SalonServiceAdmin(admin.ModelAdmin):
         'name', 'mapping_status', 'mapping_confirmed_at',
         'tenant', 'template', 'category',
         'duration_minutes', 'requires_health_check', 'is_active', 'source',
+        # MAP-AUTO-05: исход резолвера из ОТЧЁТА последнего dry-run (файл),
+        # не из базы — база статуса сверх SKIP_DECIDED не читает.
+        'resolver_outcome', 'resolver_candidates', 'resolver_flags',
     )
     # Фильтр по статусу — рабочий инструмент очереди проверки: «покажи
     # всё, что ждёт подтверждения». Индекс `(tenant, mapping_status)` в
     # модели заведён под эту выборку и до сих пор был никем не спрошен.
     list_filter = (
-        'mapping_status', 'is_active', 'source', 'requires_health_check', 'tenant',
+        'mapping_status', ResolverDecisionFilter, 'is_active', 'source', 'requires_health_check', 'tenant',
     )
     search_fields = ('name', 'tenant__slug', 'template__name')
     raw_id_fields = ('template', 'category')
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'resolver_evidence')
     ordering = ('tenant', 'name')
     inlines = [SpecialistServiceInline]
+    actions = ('recompute_resolver_dry_run', 'confirm_single_resolver_candidate', 'mark_canon_gap')
+
+    # ------------------------------------------------------------------
+    # MAP-AUTO-05 — review-поверхность владельца поверх отчёта dry-run.
+    # Отчёт — файл последнего прогона (`services/mapping/store.py`), один на
+    # салон; колонки и блок на форме — только чтение; действия — решение
+    # человека через ту же форму §76 (`services/mapping_review.py`),
+    # `confirmed_by` = тот, кто нажал. Кнопки «применить всё» нет:
+    # действие отказывает строке, где кандидатов не ровно один или стоят
+    # флаги состава/здоровья, — и говорит почему.
+    # ------------------------------------------------------------------
+
+    def _report_row(self, obj):
+        report = StoredReport.load(obj.tenant.slug)
+        return report, (report.row(obj.pk) if report else None)
+
+    @admin.display(description='Резолвер (dry-run)')
+    def resolver_outcome(self, obj) -> str:
+        report, row = self._report_row(obj)
+        if report is None:
+            return '— нет прогона'
+        if row is None:
+            return '— нет в отчёте'
+        return f"{row['decision']} / {row['reason']}"
+
+    @admin.display(description='Кандидаты')
+    def resolver_candidates(self, obj) -> str:
+        _, row = self._report_row(obj)
+        if not row:
+            return ''
+        return '; '.join(
+            f"{c.get('canonical_code') or '—'} {c['name']}" + (f" ←{c['rule']}" if c.get('rule') else '')
+            for c in row.get('candidates', [])
+        )
+
+    @admin.display(description='Флаги')
+    def resolver_flags(self, obj) -> str:
+        _, row = self._report_row(obj)
+        return ', '.join(row.get('flags', [])) if row else ''
+
+    @admin.display(description='Резолвер: доказательства последнего dry-run')
+    def resolver_evidence(self, obj) -> str:
+        if obj.pk is None:
+            return '—'
+        report, row = self._report_row(obj)
+        return evidence_text(row, report)
+
+    def get_fieldsets(self, request, obj=None):
+        fieldsets = list(super().get_fieldsets(request, obj))
+        # Блок доказательств — отдельным разделом, чтобы оператор видел
+        # его рядом с полями решения, а не терял в конце формы.
+        fieldsets.append(('Резолвер (только чтение)', {'fields': ('resolver_evidence',)}))
+        return fieldsets
+
+    @admin.action(description='Пересчитать резолвером (dry-run, в файл отчёта; базу не трогает)')
+    def recompute_resolver_dry_run(self, request, queryset):
+        from services.mapping import RulesEnabled, resolve_tenant
+        from services.mapping.schema import SchemaNotReady
+        from services.mapping.store import store_report
+
+        tenants = {s.tenant for s in queryset.select_related('tenant')}
+        for tenant in sorted(tenants, key=lambda t: t.slug):
+            try:
+                rows = resolve_tenant(tenant, RulesEnabled(), report_ref=f'admin:{tenant.slug}')
+            except SchemaNotReady as exc:
+                self.message_user(request, f'{tenant.slug}: {exc}', level=messages.ERROR)
+                continue
+            path = store_report(rows, tenant.slug, rules='')
+            self.message_user(
+                request, f'{tenant.slug}: {len(rows)} строк → {path.name} (правила выключены: AUTO_NOT_ENABLED)',
+            )
+
+    def _run_review_action(self, request, queryset, fn, verb: str):
+        written = refused = 0
+        for service in queryset.select_related('tenant').order_by('name'):
+            try:
+                outcome = fn(service, request.user)
+            except ValidationError as exc:
+                refused += 1
+                self.message_user(
+                    request, f'«{service.name}»: форма §76 отказала — {exc.message}', level=messages.ERROR,
+                )
+                continue
+            if outcome.written:
+                written += 1
+                self.message_user(request, f'«{outcome.name}»: {outcome.message}', level=messages.SUCCESS)
+            else:
+                refused += 1
+                self.message_user(request, f'«{outcome.name}»: отказ — {outcome.message}', level=messages.WARNING)
+        self.message_user(request, f'{verb}: записано {written}, отказано {refused}')
+
+    @admin.action(description='Подтвердить связь с ЕДИНСТВЕННЫМ кандидатом резолвера (VERIFIED, я — подтверждающий)')
+    def confirm_single_resolver_candidate(self, request, queryset):
+        self._run_review_action(request, queryset, confirm_single_candidate, 'подтверждение')
+
+    @admin.action(description='Отметить разрыв канона (NOT_RECOMMENDABLE с пометкой CANON_GAP, я — решающий)')
+    def mark_canon_gap(self, request, queryset):
+        self._run_review_action(request, queryset, mark_canon_gap, 'разрыв канона')
 
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)

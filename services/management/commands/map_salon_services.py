@@ -19,6 +19,7 @@ from django.core.management.base import BaseCommand, CommandError
 from services.mapping import ApplyNotAuthorized, RulesEnabled, authorize_apply, resolve_tenant
 from services.mapping.report import row_lines, summary_lines, write_json
 from services.mapping.schema import SchemaNotReady, describe_subject
+from services.mapping.store import store_report
 from services.mapping.types import RULE_VERSION
 from tenants.models import Tenant
 
@@ -36,6 +37,11 @@ class Command(BaseCommand):
             "--dry-run", action="store_true", default=True, help="единственный режим; принимается для явности",
         )
         parser.add_argument("--apply", action="store_true", help="отказывает с названной причиной (OD-NEW-7)")
+        parser.add_argument(
+            "--store", action="store_true",
+            help=("сохранить отчёт как «последний прогон» салона "
+                  "(файл MAPPING_REPORT_DIR/<slug>.json) — его читает админка"),
+        )
 
     def handle(self, *args, **options):
         try:
@@ -75,3 +81,6 @@ class Command(BaseCommand):
         if options["out"]:
             write_json(rows, Path(options["out"]))
             w(f"JSON: {options['out']}")
+        if options["store"]:
+            path = store_report(rows, tenant.slug, rules=options["rules"] or "")
+            w(f"отчёт последнего прогона (для админки): {path}")
