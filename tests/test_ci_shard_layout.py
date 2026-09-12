@@ -112,8 +112,7 @@ def test_the_layout_covers_every_top_level_app_that_has_tests() -> None:
 def test_the_gate_keeps_the_required_name_and_deploy_needs_it() -> None:
     jobs = _workflow()["jobs"]
     assert "lint" in jobs and "test" in jobs, "branch protection требует job'ы lint и test"
-    needs = jobs["test"]["needs"]
-    assert set(needs) == {"test-shard", "checks"}, needs
+    assert list(jobs["test"]["needs"]) == ["test-shard"], jobs["test"]["needs"]
     assert jobs["test"].get("if") == "always()", "gate обязан дойти до суммы и при красном шарде"
     assert jobs["deploy"]["needs"] == "test"
 
@@ -139,13 +138,26 @@ def test_the_gate_sums_with_the_tested_script_over_all_shard_junits() -> None:
     assert dl["pattern"] == "*-${{ github.sha }}" and dl.get("merge-multiple") is True
 
 
-def test_the_census_runs_unsharded_in_checks() -> None:
-    names = [s.get("name") for s in _workflow()["jobs"]["checks"]["steps"]]
-    assert "collection census (sentinel for the shard layout)" in names
-    assert "Upload collection census" in names
-    assert "collection census (sentinel for the shard layout)" not in [
-        s.get("name") for s in _workflow()["jobs"]["test-shard"]["steps"]
-    ], "перепись внутри шарда считала бы только его часть"
+def test_the_census_runs_once_over_the_whole_suite_inside_the_rest_shard() -> None:
+    """Перепись — в шарде 4 (вычитание, существует всегда), без путей шарда,
+    и при красном pytest тоже: иначе gate не сможет назвать сумму."""
+    steps = {s.get("name"): s for s in _workflow()["jobs"]["test-shard"]["steps"]}
+    census = steps["collection census (sentinel for the shard layout)"]
+    assert census.get("if") == "always() && matrix.shard.id == 4", census.get("if")
+    assert "matrix.shard.paths" not in census["run"], "перепись с путями шарда считала бы только его часть"
+    assert "pytest --collect-only -q" in census["run"]
+    assert steps["Upload collection census"].get("if") == "always() && matrix.shard.id == 4"
+    assert steps["Django system checks"].get("if") == "matrix.shard.id == 4"
+    rest_ids = [sh["id"] for sh in _shards(_workflow()) if IGNORE in str(sh["paths"])]
+    assert rest_ids == [4], rest_ids
+
+
+def test_the_token_forwarding_step_is_still_the_only_one() -> None:
+    """Первый прогон #387: job `checks` дублировал установку зависимостей, и
+    сторож tests/test_ai_core_fetch_auth_optional.py упал — «если шаг
+    раздвоился, раздвоится и поведение». Здесь — та же граница, у шардов."""
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert text.count("GH_DEPLOY_TOKEN: ${{") == 1
 
 
 # ─── положительный контроль ─────────────────────────────────────────────────

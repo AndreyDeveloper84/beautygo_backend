@@ -304,104 +304,15 @@ jobs:
           path: junit-catalog-${{ matrix.shard.id }}.xml
           retention-days: 14
 
-      # Перепись собранных тестов — сентинел для будущей раскладки по шардам
-      # (сумма junit'ов шардов обязана совпасть с этим числом, иначе тест,
-      # выпавший из всех селекторов сразу, исчезнет молча). Сегодня шард один,
-      # и число просто записывается; парсер вынесен в файл и сам под тестом
-      # (`tests/test_census_parser.py`), потому что он — сторож, и сторож,
-      # который неверно читает, хуже отсутствующего.
-
-  # ---------------------------------------------------------------------------
-  # checks — the collection census (#352) and Django system checks. The
-  # census is the sentinel the `test` gate sums the four shard junits
-  # against; it runs on the same checkout, unsharded, so it counts what the
-  # shards were supposed to run.
-  # ---------------------------------------------------------------------------
-  checks:
-    needs: lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    services:
-      postgres:
-        # POSTGRES_DB=beautygo matches settings.dev/test defaults so
-        # pytest-django creates test_beautygo via Django's default
-        # `test_<NAME>` convention. POSTGRES_USER=postgres is the
-        # superuser (has CREATEDB) so the per-test schema build works.
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: beautygo
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-
-      - name: Cache pip packages
-        uses: actions/cache@v6
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: ${{ runner.os }}-pip-
-
-      - name: Configure git auth for the ayla-ai-core dep (token optional)
-        # requirements.txt pulls ayla-ai-core from a sibling repo
-        # (AndreyDeveloper84/ayla-ai-core) that is PUBLIC — owner's
-        # decision of 04.09.2026, recorded in OPEN_DECISIONS.md §22 (that
-        # register lives in the workspace root, outside this repo), re-checked
-        # anonymously the same day (`"private": false`). The pinned SHA
-        # therefore fetches with no credential at all; Dependabot PRs
-        # #282-284 went green on this job with an EMPTY token.
-        #
-        # So the rewrite is now CONDITIONAL. It used to run
-        # unconditionally, which with an empty secret wrote
-        # `https://@github.com/` — an empty-userinfo URL — into the global
-        # git config. That happens to work against a public repo, but it
-        # is a rewrite built out of a value the step never looked at, and
-        # against a private repo it degrades into a credential prompt
-        # rather than an honest error. Check the value, then use it.
-        #
-        # The token path is kept for the day the visibility is closed
-        # again (the decision says public "for now"): non-empty secret ->
-        # pip's git clone authenticates transparently. A missing token is
-        # a notice, never a failure — see DRF-1466.
-        env:
-          GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
-        run: |
-          if [ -n "$GH_DEPLOY_TOKEN" ]; then
-            git config --global url."https://${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"
-            echo "GH_DEPLOY_TOKEN present — ayla-ai-core will be fetched with auth."
-          else
-            echo "::notice::GH_DEPLOY_TOKEN not set — fetching ayla-ai-core anonymously (the repo is public, DRF-1466). Expected on Dependabot runs."
-          fi
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-
+      # Перепись и системные проверки живут в ЭТОМ job'е, а не в своём: у
+      # них та же установка зависимостей, а сторож
+      # tests/test_ai_core_fetch_auth_optional.py требует, чтобы шаг с
+      # GH_DEPLOY_TOKEN в ci.yml был ровно один — «если шаг раздвоился,
+      # раздвоится и поведение». Первый прогон #387 это и показал. Идут в
+      # шарде 4 — он существует всегда (вычитание) и по оценке самый
+      # короткий по pytest. Перепись без путей шарда: считает ВСЮ сюиту.
       - name: collection census (sentinel for the shard layout)
+        if: always() && matrix.shard.id == 4
         env:
           DJANGO_SETTINGS_MODULE: djangoProject.settings.test
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
@@ -420,7 +331,7 @@ jobs:
           python3 .github/scripts/census_count.py census-raw.txt catalog-census.txt
 
       - name: Upload collection census
-        if: always()
+        if: always() && matrix.shard.id == 4
         uses: actions/upload-artifact@v4
         with:
           name: catalog-census-${{ github.sha }}
@@ -428,6 +339,7 @@ jobs:
           retention-days: 14
 
       - name: Django system checks
+        if: matrix.shard.id == 4
         env:
           DJANGO_SETTINGS_MODULE: djangoProject.settings.test
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
@@ -440,6 +352,12 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: python manage.py check
 
+      # Перепись собранных тестов — сентинел для будущей раскладки по шардам
+      # (сумма junit'ов шардов обязана совпасть с этим числом, иначе тест,
+      # выпавший из всех селекторов сразу, исчезнет молча). Сегодня шард один,
+      # и число просто записывается; парсер вынесен в файл и сам под тестом
+      # (`tests/test_census_parser.py`), потому что он — сторож, и сторож,
+      # который неверно читает, хуже отсутствующего.
 
   # ---------------------------------------------------------------------------
   # test — the GATE. This is the job name branch protection requires (with
@@ -453,7 +371,7 @@ jobs:
   # a guard has to be under test itself (tests/test_shard_sum.py).
   # ---------------------------------------------------------------------------
   test:
-    needs: [test-shard, checks]
+    needs: [test-shard]
     # `always()` so a red shard still reaches the sum and the log names
     # WHICH shard ran how many tests; the gate then fails on the shard
     # result anyway.
@@ -473,12 +391,11 @@ jobs:
       - name: Sum shard junits against the census
         env:
           SHARD_RESULT: ${{ needs.test-shard.result }}
-          CHECKS_RESULT: ${{ needs.checks.result }}
         run: |
           ls -la artifacts
           python3 .github/scripts/shard_sum.py artifacts/catalog-census.txt artifacts/junit-catalog-*.xml
-          if [ "$SHARD_RESULT" != "success" ] || [ "$CHECKS_RESULT" != "success" ]; then
-            echo "::error::shards=$SHARD_RESULT checks=$CHECKS_RESULT - the gate is red because a needed job is not green"
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "::error::shards=$SHARD_RESULT - the gate is red because a shard is not green"
             exit 1
           fi
 
