@@ -24,6 +24,26 @@ p7:  tenant golden-p7 · категория · 3 мастера ACTIVE / availab
 полке появляется кандидат. Тест, который не умеет краснеть, ничего не
 доказывает; этим флагом его учат.
 
+### Сценарий ``p1`` — прямая услуга → бронь
+
+Один мастер с **подтверждённой** связью, одна услуга, расписание на все
+семь дней — чтобы слот нашёлся в любую дату. Клиент не сеется (proxy).
+
+Два числа длительности посеяны **намеренно разными**:
+
+```
+SalonService.duration_minutes      = 45   ← бронь берёт ЭТО (service_resolver, AMD-019)
+SpecialistService.duration_minutes = 60   ← бот ПОКАЗЫВАЕТ это (specialist-services)
+SpecialistService.price            = 1500 ← и бронь, и показ — из ребра
+```
+
+Матрица готовности зовёт P1 PARTIAL с формулировкой «цена/длительность
+подменяются молча». Golden не чинит это — он делает видимым, **какое**
+число и **из какого слоя** ушло в бронь. Одинаковые значения спрятали бы
+расхождение источников за совпадением чисел; разные — называют источник
+по самому числу. Tenant создаётся с фиксированным UUID: бот зовёт каталог
+услуг с ``?tenant=<id>``, и его собственный tenant обязан носить тот же.
+
 ### Почему отказывается писать не в стендовую базу
 
 Команда создаёт выдуманных мастеров. На пилоте это было бы загрязнением
@@ -40,10 +60,13 @@ p7:  tenant golden-p7 · категория · 3 мастера ACTIVE / availab
 Usage:
     python manage.py seed_golden --scenario p7
     python manage.py seed_golden --scenario p7 --verify-one
+    python manage.py seed_golden --scenario p1
 """
 
 from __future__ import annotations
 
+import uuid
+from datetime import time
 from decimal import Decimal
 
 from django.conf import settings
@@ -51,13 +74,24 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
 
-from services.models import SalonService, ServiceCategory, SpecialistService
+from appointments.models import SpecialistWorkingHours
+from services.models import SalonService, ServiceCategory, ServiceTemplate, SpecialistService
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
 
 TENANT_SLUG = "golden-p7"
 CATEGORY_SLUG = "golden-manicure"
 MASTER_COUNT = 3
+
+#: P1. UUID фиксирован: бот сеет свой Tenant с тем же id, иначе его вызов
+#: ``catalog/salon-services/?tenant=<id>`` увидит пустой каталог.
+P1_TENANT_ID = uuid.UUID("00000000-0000-4000-8000-0000000000a1")
+P1_TENANT_SLUG = "golden-p1"
+P1_CATEGORY_SLUG = "golden-manicure-p1"
+P1_SERVICE_NAME = "Golden manicure P1"
+P1_SALON_DURATION_MIN = 45
+P1_EDGE_DURATION_MIN = 60
+P1_EDGE_PRICE = Decimal("1500.00")
 
 
 def _db_is_a_stand() -> bool:
@@ -75,7 +109,7 @@ class Command(BaseCommand):
     help = "Посеять каталог под cross-boundary golden бота. Пишет только в базу с «golden» в имени."
 
     def add_arguments(self, parser):
-        parser.add_argument("--scenario", choices=["p7"], required=True)
+        parser.add_argument("--scenario", choices=["p7", "p1"], required=True)
         parser.add_argument(
             "--verify-one",
             action="store_true",
@@ -97,6 +131,8 @@ class Command(BaseCommand):
 
         if options["scenario"] == "p7":
             self._seed_p7(verify_one=options["verify_one"])
+        elif options["scenario"] == "p1":
+            self._seed_p1()
 
     @transaction.atomic
     def _seed_p7(self, *, verify_one: bool) -> None:
@@ -170,5 +206,99 @@ class Command(BaseCommand):
                 "ожидание бота: layer_2.reason_codes ∋ "
                 + ("ELIG_EXCLUDED_NOT_RECOMMENDABLE (P7-b)" if not verified and statuses.get("verified", 0) == 0
                    else "кандидат на полке — golden P7 ОБЯЗАН покраснеть")
+            )
+        )
+
+    @transaction.atomic
+    def _seed_p1(self) -> None:
+        tenant, t_new = Tenant.objects.get_or_create(
+            id=P1_TENANT_ID, defaults={"slug": P1_TENANT_SLUG, "name": "Golden P1 Salon"}
+        )
+        category, _ = ServiceCategory.objects.get_or_create(
+            slug=P1_CATEGORY_SLUG, defaults={"name": "Маникюр (golden P1)"}
+        )
+        username = "golden_p1_master"
+        user = User.objects.filter(username=username).first()
+        created = 0
+        if user is None:
+            user = User.objects.create_user(
+                username=username, password=None, role="specialist", phone="+79990000201"
+            )
+            created = 1
+        profile = SpecialistProfile.objects.get(user=user)
+        profile.display_name = "Golden Master P1"
+        profile.tenant = tenant
+        profile.status = SpecialistProfile.ProfileStatus.ACTIVE
+        profile.is_available = True
+        profile.is_booking_enabled = True
+        profile.timezone = "Europe/Moscow"
+        profile.save()
+
+        # Канонический шаблон с requires_health_check=False. Без шаблона
+        # каскад отвечает None («не знаем»), и путь записи уводит бронь в
+        # handoff HEALTH_CHECK_UNKNOWN (§98) — первый прогон стенда именно
+        # так и кончился. P1 — прямая услуга БЕЗ медицинского вопроса,
+        # значит ответ на вопрос обязан быть дан, а не отсутствовать.
+        template, _ = ServiceTemplate.objects.get_or_create(
+            category=category,
+            name="Golden manicure template P1",
+            defaults={
+                "name_short": "Golden P1",
+                "duration_default": P1_SALON_DURATION_MIN,
+                "requires_health_check": False,
+            },
+        )
+        salon, _ = SalonService.objects.get_or_create(
+            tenant=tenant,
+            category=category,
+            name=P1_SERVICE_NAME,
+            defaults={
+                "template": template,
+                "duration_minutes": P1_SALON_DURATION_MIN,
+                "requires_health_check": False,
+                "mapping_status": SalonService.MappingStatus.VERIFIED,
+                "mapping_confirmed_rule": "golden_stand",
+                "mapping_rule_version": "1.0.0",
+                "mapping_confirmed_at": timezone.now(),
+                "mapping_source_ref": "seed_golden:p1",
+            },
+        )
+        if salon.template_id != template.id or salon.requires_health_check is not False:
+            salon.template = template
+            salon.requires_health_check = False
+            salon.save(update_fields=["template", "requires_health_check"])
+        edge, _ = SpecialistService.objects.get_or_create(
+            salon_service=salon,
+            specialist=profile,
+            defaults={
+                "price": P1_EDGE_PRICE,
+                "duration_minutes": P1_EDGE_DURATION_MIN,
+                "is_active": True,
+            },
+        )
+        # Расписание на все семь дней: слот найдётся в любую дату, и golden
+        # не зависит от того, в какой день недели его запустили.
+        for day in SpecialistWorkingHours.DayOfWeek.values:
+            SpecialistWorkingHours.objects.get_or_create(
+                specialist=profile,
+                day_of_week=day,
+                defaults={
+                    "is_working_day": True,
+                    "start_time": time(9, 0),
+                    "end_time": time(18, 0),
+                },
+            )
+
+        self.stdout.write(
+            f"seed_golden p1: tenant={'создан' if t_new else 'был'} id={tenant.id} "
+            f"мастер={'создан' if created else 'был'} specialist_id={profile.id} "
+            f"salon_service_id={salon.id} edge_id={edge.id}"
+        )
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"два числа длительности НАМЕРЕННО разные: "
+                f"SalonService={salon.duration_minutes} (бронь), "
+                f"SpecialistService={edge.duration_minutes} (показ); "
+                f"цена ребра={edge.price} (и бронь, и показ)"
             )
         )

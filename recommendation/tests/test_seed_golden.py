@@ -96,3 +96,64 @@ class TestItRefusesToSeedANonStandDatabase:
         settings.DATABASES["default"] = {**settings.DATABASES["default"], "NAME": "beautygo"}
         out = _seed("--allow-any-db")
         assert "мастеров создано=3" in out
+
+
+class TestTheP1SeedIsBookableAndDeliberatelyDisagreesOnDuration:
+    """``--scenario p1``: мастер VERIFIED, расписание на все дни, и два числа
+    длительности намеренно разные — чтобы golden бота по числу видел, какой
+    слой ушёл в бронь (матрица P1 PARTIAL: «подменяются молча»)."""
+
+    def test_seed_shape(self) -> None:
+        from appointments.models import SpecialistWorkingHours
+        from services.models import SpecialistService
+
+        out = StringIO()
+        call_command("seed_golden", "--scenario", "p1", stdout=out)
+        text = out.getvalue()
+
+        edge = SpecialistService.objects.get(salon_service__name="Golden manicure P1")
+        assert edge.salon_service.mapping_status == SalonService.MappingStatus.VERIFIED
+        assert edge.salon_service.duration_minutes == 45
+        assert edge.duration_minutes == 60
+        assert str(edge.price) == "1500.00"
+        # Медицинский вопрос ОТВЕЧЕН (False), не отсутствует: без шаблона
+        # каскад даёт None, и бронь уходит в handoff HEALTH_CHECK_UNKNOWN.
+        assert edge.resolved_requires_health_check() is False
+        assert SpecialistWorkingHours.objects.filter(specialist=edge.specialist).count() == 7
+        assert "НАМЕРЕННО разные" in text
+
+    def test_booking_records_the_salon_duration_not_the_edge(self, settings) -> None:
+        """Тот же факт, что нашёл golden бота, — здесь его держит каталог:
+        бронь берёт SalonService.duration_minutes (45), показ — ребро (60).
+        Изменится resolver — покраснеет здесь, а не только на стенде бота."""
+        from datetime import date, timedelta
+
+        from services.models import SpecialistService
+
+        call_command("seed_golden", "--scenario", "p1")
+        edge = SpecialistService.objects.get(salon_service__name="Golden manicure P1")
+        settings.AYLA_INTERNAL_API_TOKEN = TOKEN
+        client = APIClient()
+        headers = {"HTTP_AUTHORIZATION": f"Bearer {TOKEN}", "HTTP_X_EXTERNAL_USER_ID": "bot:golden-p1"}
+        ident = client.get("/api/v1/internal/me/identity/", **headers).json()["data"]
+        day = (date.today() + timedelta(days=3)).isoformat()
+        start = f"{day}T12:00:00+03:00"
+        body = {
+            "client_id": ident["ayla_user_id"],
+            "specialist_id": str(edge.specialist_id),
+            "service_id": str(edge.salon_service_id),
+            "start_datetime": start,
+        }
+        r1 = client.post(
+            "/api/v1/internal/appointments/", body, format="json",
+            HTTP_X_IDEMPOTENCY_KEY="golden-p1-test", **headers,
+        )
+        assert r1.status_code in (200, 201), r1.content[:300]
+        created = r1.json()["data"]
+        assert created["snapshot_duration_minutes"] == 45, "бронь взяла не SalonService.duration"
+        assert created["snapshot_price"] == "1500.00"
+        r2 = client.post(
+            "/api/v1/internal/appointments/", body, format="json",
+            HTTP_X_IDEMPOTENCY_KEY="golden-p1-test", **headers,
+        )
+        assert r2.json()["data"]["id"] == created["id"], "тот же ключ — та же бронь"
