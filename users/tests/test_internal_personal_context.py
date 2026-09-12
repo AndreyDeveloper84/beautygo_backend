@@ -78,7 +78,7 @@ class TestGet:
         # чужой живой и чужой мнимый отвечают одинаково.
         resp = _api().get(_url(uuid.uuid4()))
         assert resp.status_code == 403
-        assert resp.data["error"]["code"] == "USER_NOT_FOUND"
+        assert resp.data["error"]["code"] == "PERMISSION_DENIED"
 
 
 class TestPatch:

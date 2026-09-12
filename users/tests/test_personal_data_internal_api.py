@@ -105,7 +105,7 @@ class TestAuth:
         resp = api.generic("GET" if "export" in url else "DELETE",
                            url.format(user_id=uuid4()))
         assert resp.status_code == 403
-        assert resp.json()["error"]["code"] == "NOT_FOUND"
+        assert resp.json()["error"]["code"] == "PERMISSION_DENIED"
 
     def test_soft_deleted_user_cannot_be_exported(self, api, user):
         """Export stays strict: a deleted account has nothing to hand out."""
