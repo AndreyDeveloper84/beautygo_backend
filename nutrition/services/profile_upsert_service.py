@@ -312,7 +312,7 @@ def _norms_block(profile: NutritionProfile) -> dict[str, Any]:
     """
     if profile.targets_source == NutritionProfile.TargetsSource.NONE:
         return {}
-    return {
+    block: dict[str, Any] = {
         "bmr": profile.bmr,
         "daily_kcal": profile.daily_kcal,
         "daily_protein_g": profile.daily_protein_g,
@@ -328,6 +328,28 @@ def _norms_block(profile: NutritionProfile) -> dict[str, Any]:
         "daily_omega3_g": profile.daily_omega3_g,
         "daily_fiber_g": profile.daily_fiber_g,
     }
+    # ``daily_water_ml`` едет ТОЛЬКО при ``user_entered`` (§5.1): это
+    # единственный источник, при котором в столбце лежит число человека, а
+    # не выход снятой формулы 30 × вес. У остальных источников столбец либо
+    # NULL (новые строки, очищенные), либо остаток формулы до команды
+    # очистки — его отдать значило бы выдать снятую методику за живую.
+    if (
+        profile.targets_source == NutritionProfile.TargetsSource.USER_ENTERED
+        and profile.daily_water_ml is not None
+    ):
+        block["daily_water_ml"] = profile.daily_water_ml
+    # Ручная норма несёт только то, что человек назвал: ключи со значением
+    # ``None`` (макросы, RDA, bmr — стёрты при замене расчёта) не уезжают,
+    # иначе потребитель прочитал бы «белок: null» как «белок неизвестен»
+    # там, где белка просто нет.
+    if profile.targets_source == NutritionProfile.TargetsSource.USER_ENTERED:
+        return {k: v for k, v in block.items() if v is not None}
+    return block
+
+
+def serialize_profile(profile: NutritionProfile, external_user_id: str) -> dict:
+    """Конверт профиля для ручек, пишущих в него вне ``upsert_profile``."""
+    return _serialize(profile, external_user_id, exists=True)
 
 
 def _serialize(

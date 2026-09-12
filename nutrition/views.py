@@ -32,6 +32,7 @@ from users.services import InvalidExternalUserIDError, resolve_external_user
 
 from nutrition.models import Beverage, FoodScan, WaterLog
 from nutrition.serializers import (
+    ManualTargetsSerializer,
     BeverageCatalogItemSerializer,
     CrossDomainConvertRequestSerializer,
     CrossDomainDismissRequestSerializer,
@@ -60,10 +61,17 @@ from nutrition.services.personal_calculation_consent import (
 )
 from nutrition.services.pattern_detection_service import detect_patterns
 from nutrition.services.returning_success_service import detect_returning_success
+from nutrition.services.manual_targets_service import (
+    CaloriesBelowFloor,
+    ConfirmationRequired,
+    NothingToSet,
+    set_manual_targets,
+)
 from nutrition.services.profile_upsert_service import (
     NothingToConfirm,
     confirm_targets,
     get_profile_response,
+    serialize_profile,
     upsert_profile,
 )
 from nutrition.services.food_log_service import (
@@ -972,6 +980,93 @@ class InternalProfileTargetsConfirmView(APIView):
         )
         body = dict(body)
         body["confirmation"] = {"outcome": outcome}
+        return success_response(body, status_code=status.HTTP_200_OK)
+
+
+class InternalProfileTargetsManualView(APIView):
+    """POST /api/v1/nutrition/internal/profile/targets/manual/ (§5.1).
+
+    Человек задаёт норму сам — калории и/или воду. Единственный писатель
+    источника ``user_entered``. Посчитанное (макросы, RDA, bmr) стирается:
+    набор одного происхождения. Пороги §85 — в сервисе:
+
+    * калории ``< 1000`` — ``422 CALORIES_BELOW_FLOOR``, не сохраняется;
+    * калории ``1000–1199`` — сохраняется, ``warnings: ["calories_low"]``;
+    * отклонение от поддержания ``> 30 %`` (поддержание — от снимка
+      состоявшегося расчёта; нет снимка — ``deviation_check: "unavailable"``)
+      — ``409 CONFIRMATION_REQUIRED`` (``kind: calories_deviation``) без
+      ``confirm_deviation=true``;
+    * вода вне ``1000–5000`` — ``409 CONFIRMATION_REQUIRED``
+      (``kind: water_out_of_range``) без ``confirm_water_out_of_range=true``,
+      с ним — сохраняется с предупреждением.
+
+    Ответ: конверт профиля + ``manual_targets: {set, warnings, deviation}``.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+    serializer_class = NutritionProfileResponseSerializer
+
+    @extend_schema(
+        tags=["internal"],
+        request=ManualTargetsSerializer,
+        responses={
+            200: NutritionProfileResponseSerializer,
+            400: OpenApiResponse(description="Validation error"),
+            409: OpenApiResponse(description="Нужно подтверждение"),
+            422: OpenApiResponse(description="Ниже порога — не сохраняется"),
+        },
+    )
+    def post(self, request: Request) -> Response:
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            user = resolve_external_user(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR",
+                f"X-External-User-ID невалиден: {exc}",
+            )
+        serializer = ManualTargetsSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Невалидные данные", details=serializer.errors,
+            )
+        data = serializer.validated_data
+        try:
+            profile, report = set_manual_targets(
+                user=user,
+                calories_kcal=data.get("calories_kcal"),
+                water_ml=data.get("water_ml"),
+                confirm_deviation=bool(data.get("confirm_deviation")),
+                confirm_water_out_of_range=bool(data.get("confirm_water_out_of_range")),
+            )
+        except NothingToSet as exc:
+            return error_response(exc.code, str(exc), details=exc.details)
+        except CaloriesBelowFloor as exc:
+            logger.info(
+                "nutrition.targets.manual_refused external_user_id=%s code=%s",
+                external_user_id, exc.code,
+            )
+            return error_response(
+                exc.code, str(exc), details=exc.details,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        except ConfirmationRequired as exc:
+            logger.info(
+                "nutrition.targets.manual_confirmation_required external_user_id=%s kind=%s",
+                external_user_id, exc.kind,
+            )
+            return error_response(
+                exc.code, str(exc), details=exc.details,
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        logger.info(
+            "nutrition.targets.manual external_user_id=%s set=%s warnings=%s",
+            external_user_id, report["set"], report["warnings"],
+        )
+        body = dict(serialize_profile(profile, external_user_id))
+        body["manual_targets"] = report
         return success_response(body, status_code=status.HTTP_200_OK)
 
 
