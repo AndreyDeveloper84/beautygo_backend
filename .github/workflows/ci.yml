@@ -76,9 +76,66 @@ jobs:
             | grep -vE '^(\.secrets\.baseline|.*\.lock)$' \
             | xargs detect-secrets-hook --baseline .secrets.baseline
 
-  test:
+  # ---------------------------------------------------------------------------
+  # DRF-1704 — `pytest`, split four ways BY MEASURED TIME (second half of #352).
+  #
+  # WHERE THE SPLIT COMES FROM. From the junit artefact of dev run
+  # 34659054414 (8529547, 12.09.2026): 4174 testcases, each with its own
+  # `time`, 1265.0s of test time in a 22.5 min job (junit = 94% of the job;
+  # the rest is pip/services/test-DB/census). Summed per top-level app it is
+  # not uniform: users 244.6s, appointments 243.7s, tenants 210.4s, then
+  # services 126.3s and a long tail under 80s. `users/` as one directory is
+  # the floor: no directory-level split gets a shard under ~245s.
+  #
+  #   shard  selector                                tests  test-time  share
+  #   -----  --------------------------------------  -----  ---------  -----
+  #     1    users + goals                             973     306.7s  24.2%
+  #     2    appointments + notifications + billing    716     313.4s  24.8%
+  #     3    tenants + ai + core                       752     311.9s  24.6%
+  #     4    everything else (`.` minus the above)    1733     333.5s  26.4%
+  #   -----  --------------------------------------  -----  ---------  -----
+  #                                                   4174    1265.0s
+  #
+  # 4174 in, 4174 out — replayed against that junit: every testcase matched
+  # exactly one shard. Estimated wall per shard: ~90s of job overhead +
+  # 1.07 x shard test-time (the 22.5 min / 21.1 min calibration of that one
+  # run) = 7.0-7.4 min against 22.5. Five shards would save ~40s more for a
+  # fifth runner; four is where the returns stop. Check the first real runs
+  # against ~7.5 min, do not believe the model.
+  #
+  # Shard 4 is written as a SUBTRACTION (`.` with `--ignore=` of exactly the
+  # explicit paths) so a new top-level app lands in it automatically and is
+  # TESTED, instead of falling through four explicit lists and being
+  # skipped forever. Moving a directory between shards must leave one
+  # selector and enter the other in the same edit — the guard
+  # tests/test_ci_shard_layout.py refuses overlap and a stale ignore list,
+  # and the `test` gate below refuses a shard sum that differs from the
+  # collection census.
+  #
+  # Each shard is its own job with its own postgres/redis services.
+  # ---------------------------------------------------------------------------
+  test-shard:
+    name: test shard ${{ matrix.shard.id }}
     needs: lint
     runs-on: ubuntu-latest
+    # ~7.5 min estimated; 25 is >3x that. If any shard is cancelled at this
+    # ceiling within the next 20 runs, this number is wrong — refit it.
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - id: 1
+            paths: users goals
+          - id: 2
+            paths: appointments notifications billing
+          - id: 3
+            paths: tenants ai core
+          - id: 4
+            paths: >-
+              . --ignore=users --ignore=goals
+              --ignore=appointments --ignore=notifications --ignore=billing
+              --ignore=tenants --ignore=ai --ignore=core
 
     services:
       postgres:
@@ -193,12 +250,12 @@ jobs:
         # `tests= failures= errors=` вместо обрезанного лога. Сентинел ниже
         # отказывает на «файла нет» и на «tests=0» — оба не есть «ноль
         # падений».
-        run: pytest --tb=short -q --junitxml=junit-catalog.xml
+        run: pytest --tb=short -q --junitxml=junit-catalog-${{ matrix.shard.id }}.xml ${{ matrix.shard.paths }}
 
       - name: pytest test counts (junit sentinel)
         if: always()
         env:
-          JUNIT_FILE: junit-catalog.xml
+          JUNIT_FILE: junit-catalog-${{ matrix.shard.id }}.xml
         run: |
           python3 - <<'PY'
           import os
@@ -243,17 +300,19 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junit-catalog-${{ github.sha }}
-          path: junit-catalog.xml
+          name: junit-catalog-${{ matrix.shard.id }}-${{ github.sha }}
+          path: junit-catalog-${{ matrix.shard.id }}.xml
           retention-days: 14
 
-      # Перепись собранных тестов — сентинел для будущей раскладки по шардам
-      # (сумма junit'ов шардов обязана совпасть с этим числом, иначе тест,
-      # выпавший из всех селекторов сразу, исчезнет молча). Сегодня шард один,
-      # и число просто записывается; парсер вынесен в файл и сам под тестом
-      # (`tests/test_census_parser.py`), потому что он — сторож, и сторож,
-      # который неверно читает, хуже отсутствующего.
+      # Перепись и системные проверки живут в ЭТОМ job'е, а не в своём: у
+      # них та же установка зависимостей, а сторож
+      # tests/test_ai_core_fetch_auth_optional.py требует, чтобы шаг с
+      # GH_DEPLOY_TOKEN в ci.yml был ровно один — «если шаг раздвоился,
+      # раздвоится и поведение». Первый прогон #387 это и показал. Идут в
+      # шарде 4 — он существует всегда (вычитание) и по оценке самый
+      # короткий по pytest. Перепись без путей шарда: считает ВСЮ сюиту.
       - name: collection census (sentinel for the shard layout)
+        if: always() && matrix.shard.id == 4
         env:
           DJANGO_SETTINGS_MODULE: djangoProject.settings.test
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
@@ -272,7 +331,7 @@ jobs:
           python3 .github/scripts/census_count.py census-raw.txt catalog-census.txt
 
       - name: Upload collection census
-        if: always()
+        if: always() && matrix.shard.id == 4
         uses: actions/upload-artifact@v4
         with:
           name: catalog-census-${{ github.sha }}
@@ -280,6 +339,7 @@ jobs:
           retention-days: 14
 
       - name: Django system checks
+        if: matrix.shard.id == 4
         env:
           DJANGO_SETTINGS_MODULE: djangoProject.settings.test
           DJANGO_SECRET_KEY: ci-test-secret-key-not-for-production
@@ -291,6 +351,53 @@ jobs:
           SENTRY_DSN: ''
           REDIS_URL: redis://localhost:6379
         run: python manage.py check
+
+      # Перепись собранных тестов — сентинел для будущей раскладки по шардам
+      # (сумма junit'ов шардов обязана совпасть с этим числом, иначе тест,
+      # выпавший из всех селекторов сразу, исчезнет молча). Сегодня шард один,
+      # и число просто записывается; парсер вынесен в файл и сам под тестом
+      # (`tests/test_census_parser.py`), потому что он — сторож, и сторож,
+      # который неверно читает, хуже отсутствующего.
+
+  # ---------------------------------------------------------------------------
+  # test — the GATE. This is the job name branch protection requires (with
+  # `lint`), and the one `deploy` needs, so it keeps its name and moves its
+  # meaning: green only if every shard is green AND the shards together ran
+  # exactly the number of tests the census collected. Each shard already
+  # refuses `tests == 0` on its own junit; that catches a shard that lost
+  # ALL of its tests, not one that lost half, and not a path that fell out
+  # of every selector at once. The sum against the census catches both.
+  # The summing script is a file, not a heredoc, because it is a guard and
+  # a guard has to be under test itself (tests/test_shard_sum.py).
+  # ---------------------------------------------------------------------------
+  test:
+    needs: [test-shard]
+    # `always()` so a red shard still reaches the sum and the log names
+    # WHICH shard ran how many tests; the gate then fails on the shard
+    # result anyway.
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download shard junits and the census
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-${{ github.sha }}'
+          path: artifacts
+          merge-multiple: true
+
+      - name: Sum shard junits against the census
+        env:
+          SHARD_RESULT: ${{ needs.test-shard.result }}
+        run: |
+          ls -la artifacts
+          python3 .github/scripts/shard_sum.py artifacts/catalog-census.txt artifacts/junit-catalog-*.xml
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "::error::shards=$SHARD_RESULT - the gate is red because a shard is not green"
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------------
   # deploy — DRF-1363. Rebuilt so that an abort can never take the pilot's
