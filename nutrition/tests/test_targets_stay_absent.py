@@ -21,7 +21,15 @@
 2. чтение ``NutritionProfile.daily_water_ml`` — столбца, в котором у
    существующих клиентов лежит выход снятой формулы 30 мл × вес. Пока
    значение там, любое чтение эту формулу применяет, как бы место ни
-   называлось;
+   называлось. **Исключение с 11.09.2026 (§5.1, писатель ``user_entered``):**
+   в тот же столбец пишется норма, названная человеком, и читать её
+   можно — но ТОЛЬКО под условием происхождения. Сторож пропускает
+   чтение, стоящее внутри ``if``, чей предикат называет ``USER_ENTERED``;
+   чтение под любым другим условием или без него — по-прежнему нарушение.
+   Признак — происхождение, а не значение: по числу 2100 не отличить
+   «человек сказал» от «70 × 30». Запись в столбец (``= …``) и загрузка
+   его в ``.only(...)`` чтением не считаются — читать значит использовать
+   значение;
 3. возврат самих имён ``WATER_ML_PER_KG`` и ``_water_target``.
 
 Чего сторож НЕ ловит, и это надо знать
@@ -155,24 +163,70 @@ def _substitutions(source: str) -> list[str]:
     return found
 
 
+#: Имя источника, под условием которого чтение столбца разрешено (§5.1).
+PROVENANCE_GATE_NAME = "USER_ENTERED"
+
+#: Вызовы ORM, в которых строка-имя столбца означает ЧТЕНИЕ его значения.
+_ORM_VALUE_READERS = frozenset({"values", "values_list", "annotate", "aggregate", "F"})
+
+
+def _guarded_by_provenance(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    """Стоит ли узел внутри ``if``, чей предикат называет ``USER_ENTERED``.
+
+    Проверяется ТОЛЬКО ветка ``body`` условия: чтение в ``else`` того же
+    ``if`` — это чтение под противоположным условием, и оно нарушение.
+    """
+    child = node
+    parent = parents.get(id(node))
+    while parent is not None:
+        # Чтение внутри самого предиката (``… and profile.daily_water_ml``)
+        # — часть гейта: значение здесь проверяется, а не используется.
+        if isinstance(parent, ast.If) and (child in parent.body or child is parent.test):
+            if any(
+                isinstance(n, ast.Attribute) and n.attr == PROVENANCE_GATE_NAME
+                for n in ast.walk(parent.test)
+            ):
+                return True
+        child, parent = parent, parents.get(id(parent))
+    return False
+
+
 def _stale_column_reads(source: str) -> list[str]:
     """Чтения ``daily_water_ml`` — столбца со снятой формулой.
 
-    Считается ЛЮБОЕ обращение: атрибут (``profile.daily_water_ml``) и
-    строка внутри вызова ORM (``.only("daily_water_ml")``,
-    ``.values_list(..., "daily_water_ml")``). Строки в комментариях и
-    докстрингах не считаются — ими как раз объясняют, почему чтения
-    больше нет.
+    Считается ЛЮБОЕ чтение значения: атрибут (``profile.daily_water_ml``)
+    и строка внутри вызова ORM, отдающего значения (``.values_list(...,
+    "daily_water_ml")``). Строки в комментариях и докстрингах не
+    считаются — ими как раз объясняют, почему чтения больше нет.
+
+    НЕ считаются (§5.1, 11.09.2026): запись (``profile.daily_water_ml =
+    …`` — ctx Store), загрузка столбца ``.only("daily_water_ml")`` без
+    чтения значения, и чтение под ``if … USER_ENTERED …`` — единственный
+    источник, при котором в столбце число человека, а не формулы.
     """
     found: list[str] = []
     tree = ast.parse(source)
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == STALE_COLUMN:
+            if isinstance(node.ctx, ast.Store):
+                continue
+            if _guarded_by_provenance(node, parents):
+                continue
             found.append(f"атрибут {ast.unparse(node)}")
         elif isinstance(node, ast.Call):
+            func_name = ast.unparse(node.func)
+            # Строка-имя столбца считается чтением только в вызовах ORM,
+            # ОТДАЮЩИХ значения. ``.only``/``.defer`` лишь грузят столбец;
+            # ``list.append("daily_water_ml")`` — имя в аудите, не число.
+            if func_name.rsplit(".", 1)[-1] not in _ORM_VALUE_READERS:
+                continue
             for arg in node.args:
                 if isinstance(arg, ast.Constant) and arg.value == STALE_COLUMN:
-                    found.append(f"ORM-строка в {ast.unparse(node.func)}(...)")
+                    found.append(f"ORM-строка в {func_name}(...)")
     return found
 
 
@@ -195,8 +249,25 @@ def summary(profile):
     calories_goal = 2000
     agg = WaterAggregate(water_ml=0, water_goal_ml=2000)
     norm = profile.daily_water_ml or 2000
-    row = NutritionProfile.objects.only("daily_water_ml").first()
-    return calories_goal, agg, norm, row
+    rows = NutritionProfile.objects.values_list("daily_water_ml", flat=True)
+    return calories_goal, agg, norm, rows
+'''
+
+#: Чтения под условием происхождения — разрешённые (§5.1) — и рядом два
+#: чтения, которые сторож обязан ловить: под чужим условием и в ``else``.
+_A_PROVENANCE_GATED_READ_LOOKS_LIKE_THIS = '''
+from nutrition.models import NutritionProfile
+
+
+def load(profile):
+    profile.daily_water_ml = 2200  # запись — не чтение
+    if profile.targets_source == NutritionProfile.TargetsSource.USER_ENTERED and profile.daily_water_ml:
+        allowed = profile.daily_water_ml
+    else:
+        forbidden_else = profile.daily_water_ml
+    if profile.goal == "lose":
+        forbidden_other_if = profile.daily_water_ml
+    return allowed, forbidden_else, forbidden_other_if
 '''
 
 
@@ -250,3 +321,17 @@ class TestTargetsStayAbsent:
         reads = _stale_column_reads(_A_SUBSTITUTION_LOOKS_LIKE_THIS)
         assert any("атрибут" in r for r in reads), reads
         assert any("ORM-строка" in r for r in reads), reads
+
+    def test_the_scanner_tells_a_provenance_gated_read_from_the_rest(self) -> None:
+        """§5.1: чтение под ``USER_ENTERED`` разрешено; под другим условием,
+        в ``else`` того же ``if`` и запись — нет/да соответственно.
+
+        Стража парная: разрешённое место НЕ в списке (иначе исключение
+        не работает), два запрещённых — в списке (иначе исключение
+        проглотило всё), записи в списке нет.
+        """
+        reads = _stale_column_reads(_A_PROVENANCE_GATED_READ_LOOKS_LIKE_THIS)
+        assert reads == [
+            "атрибут profile.daily_water_ml",  # forbidden_else
+            "атрибут profile.daily_water_ml",  # forbidden_other_if
+        ], reads
