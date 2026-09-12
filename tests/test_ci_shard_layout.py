@@ -99,9 +99,11 @@ def test_the_layout_covers_every_top_level_app_that_has_tests() -> None:
     }
     assert with_tests, "ни одного каталога с тестами — измерялся не тот корень"
     assert named <= with_tests, sorted(named - with_tests)
-    # всё, что не названо, покрыто вычитанием по построению: `.` минус named
-    (ignores,) = rest.values()
-    assert ignores == named
+    # Всё, что не названо, покрыто вычитанием по построению (`.` минус
+    # явные). Равенство ignore-списка явным стережёт ОДИН тест —
+    # test_shards_partition_without_overlap_or_gaps, — не этот: два сторожа
+    # на одно условие ловят подмену друг друга, и проба перестаёт считаться.
+    assert len(rest) == 1
 
 
 # ─── форма job'ов ───────────────────────────────────────────────────────────
