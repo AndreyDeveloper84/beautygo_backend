@@ -10,6 +10,7 @@ import uuid
 import pytest
 from rest_framework.test import APIClient
 
+from .conftest import name_subject
 from users.models import User, UserPersonalContext
 
 pytestmark = pytest.mark.django_db
@@ -22,17 +23,26 @@ def _set_token(settings):
     settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
 
 
+_ACTOR: dict[str, str] = {}
+
+
 @pytest.fixture
 def user() -> User:
-    return User.objects.create_user(
+    u = User.objects.create_user(
         username="pc_bot_owner", password="x", role="client", phone="+79995550001",
     )
+    # Субъект в URL обязан совпадать с субъектом X-External-User-ID (DRF-1617).
+    _ACTOR["id"] = name_subject(u)
+    return u
 
 
-def _api(*, bearer: str | None = VALID_TOKEN) -> APIClient:
+def _api(*, bearer: str | None = VALID_TOKEN, actor: str | None = "") -> APIClient:
     c = APIClient()
     if bearer is not None:
         c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {bearer}"
+    actor = _ACTOR.get("id") if actor == "" else actor
+    if actor:
+        c.defaults["HTTP_X_EXTERNAL_USER_ID"] = actor
     return c
 
 
@@ -61,10 +71,14 @@ class TestGet:
         # lazy-create — строка появилась.
         assert UserPersonalContext.objects.filter(user=user).exists()
 
-    def test_unknown_user_404(self):
+    def test_unknown_user_is_refused_as_foreign(self):
+        # DRF-1617: субъект проверяется ДО поиска строки. Зовущий, назвавший
+        # себя и попросивший чужой (пусть и несуществующий) UUID, получает
+        # 403, а не 404 — и существование UUID при этом не раскрывается:
+        # чужой живой и чужой мнимый отвечают одинаково.
         resp = _api().get(_url(uuid.uuid4()))
-        assert resp.status_code == 404
-        assert resp.data["error"]["code"] == "USER_NOT_FOUND"
+        assert resp.status_code == 403
+        assert resp.data["error"]["code"] == "PERMISSION_DENIED"
 
 
 class TestPatch:

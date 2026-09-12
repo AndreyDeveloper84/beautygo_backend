@@ -3,7 +3,7 @@
 Контракт: ai-bot-platform/docs/plans/2026-07-03-PERSONAL_CONTEXT_INTERNAL_API_SPEC.md
 
 Ayla — единственный владелец памяти. Бот ходит сюда по служебному Bearer-токену
-(``IsInternalBearer``, как #1016 catalog), резолвит человека по ``ayla_user_id``:
+(``IsInternalBearerForSubject``, как #1016 catalog), резолвит человека по ``ayla_user_id``:
 
     GET    /api/v1/internal/users/{ayla_user_id}/personal-context/
     PATCH  /api/v1/internal/users/{ayla_user_id}/personal-context/
@@ -46,12 +46,12 @@ from rest_framework.views import APIView
 
 from users import personalization_engine as engine
 from users.models import User, UserPersonalContext
-from users.permissions import IsInternalBearer
 from users.deletion_requests import (
     DELETION_REQUESTED,
     deletion_block_for,
     deletion_refusal,
 )
+from users.permissions import IsInternalBearerForSubject
 from users.personal_context_erasure import erase_personal_context
 from users.personal_context_views import _GREEN_ZONE_FIELDS
 from users.response import error_response, success_response
@@ -127,7 +127,8 @@ class InternalPersonalContextView(APIView):
     """GET / PATCH персонального контекста по ``ayla_user_id`` (Bearer)."""
 
     authentication_classes: list = []
-    permission_classes = [IsInternalBearer]
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "ayla_user_id"
 
     def get(self, request: Request, ayla_user_id: str) -> Response:
         user = _resolve_user(ayla_user_id)
@@ -213,7 +214,8 @@ class InternalAskEligibilityView(APIView):
     """Обёртка над 8 правилами: какое ОДНО поле спросить (или нельзя)."""
 
     authentication_classes: list = []
-    permission_classes = [IsInternalBearer]
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "ayla_user_id"
 
     def get(self, request: Request, ayla_user_id: str) -> Response:
         user = _resolve_user(ayla_user_id)
@@ -258,7 +260,8 @@ class InternalMarkAskedView(APIView):
     """POST — отметить, что вопрос по полю ЗАДАН (24ч cooldown)."""
 
     authentication_classes: list = []
-    permission_classes = [IsInternalBearer]
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "ayla_user_id"
 
     def post(self, request: Request, ayla_user_id: str) -> Response:
         user = _resolve_user(ayla_user_id)
@@ -277,7 +280,8 @@ class InternalSkipView(APIView):
     """POST — пользователь пропустил вопрос (anti-spam, skip x2 → пауза)."""
 
     authentication_classes: list = []
-    permission_classes = [IsInternalBearer]
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "ayla_user_id"
 
     def post(self, request: Request, ayla_user_id: str) -> Response:
         user = _resolve_user(ayla_user_id)

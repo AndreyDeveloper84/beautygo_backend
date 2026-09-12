@@ -22,6 +22,7 @@ from rest_framework.test import APIClient
 
 from appointments.models import Appointment
 from services.models import Service, ServiceCategory
+from .conftest import name_subject
 from users.models import SpecialistProfile, UserPersonalContext
 from users.personal_context_erasure import (
     ERASED,
@@ -66,11 +67,19 @@ def _set_token(settings):
     settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
 
 
+#: Кого называет ``_internal()`` в X-External-User-ID. Ставится фикстурой
+#: ``user``: субъект в URL и субъект заголовка обязаны совпадать (DRF-1617),
+#: и 27 вызовов ниже не должны знать об этом по одному.
+_ACTOR: dict[str, str] = {}
+
+
 @pytest.fixture
 def user():
-    return User.objects.create_user(
+    u = User.objects.create_user(
         username="erasure_owner", password="x", role="client", phone="+79995559001",
     )
+    _ACTOR["id"] = name_subject(u)
+    return u
 
 
 @pytest.fixture
@@ -80,10 +89,14 @@ def ctx(user):
     return row
 
 
-def _internal(*, bearer: str | None = VALID_TOKEN) -> APIClient:
+def _internal(*, bearer: str | None = VALID_TOKEN, actor: str | None = "") -> APIClient:
     c = APIClient()
     if bearer is not None:
         c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {bearer}"
+    # "" — взять актора фикстуры ``user``; None — нарочно не называть.
+    actor = _ACTOR.get("id") if actor == "" else actor
+    if actor:
+        c.defaults["HTTP_X_EXTERNAL_USER_ID"] = actor
     return c
 
 

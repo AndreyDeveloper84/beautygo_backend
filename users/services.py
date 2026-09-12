@@ -137,14 +137,67 @@ def resolve_external_user(external_user_id: str) -> User:
             "identity.proxy_created user_id=%s external_user_id=%s",
             user.id, external_user_id,
         )
+    return _follow_binding(user)
+
+
+def _follow_binding(user: User, *, for_authorization: bool = False) -> User:
+    """Return the bound REAL account for a proxy row, else the row itself.
+
+    Extracted so ``resolve_external_user`` (creating) and
+    ``resolve_external_user_readonly`` (not creating) cannot drift on the
+    question "which subject does this external identity mean".
+
+    The two callers differ in exactly one clause, and it is named here rather
+    than duplicated in two places:
+
+    * **acting** (default): a binding to a deactivated / soft-deleted account
+      is void — fall back to the isolated proxy (a controlled empty result)
+      rather than act AS an anonymized identity;
+    * **authorising** (``for_authorization=True``): the pointer is followed
+      regardless. The question is "is this header the same person as the
+      UUID in the URL", and a deleted account is still that person. Whether
+      a deleted subject may be read or erased is the VIEW's decision (export
+      404s, erasure is idempotent per C5.2) — hiding the link here would make
+      erasure of an already-deleted account impossible through the bot,
+      which is the one case erasure must keep working for.
+    """
     if user.is_proxy and user.linked_user_id is not None:
         linked = user.linked_user
-        # Fail-closed: a binding to a deactivated / soft-deleted account
-        # is void — fall back to the isolated proxy (controlled empty
-        # result) rather than resolving an anonymized identity.
-        if linked.is_active and linked.deleted_at is None:
+        if for_authorization or (linked.is_active and linked.deleted_at is None):
             return linked
     return user
+
+
+def resolve_external_user_readonly(external_user_id: str) -> User | None:
+    """Resolve ``<source>:<id>[…]`` to a ``User`` **without creating one**.
+
+    The authorising twin of :func:`resolve_external_user` (DRF-1617, B-2.1).
+    Both answer "which Ayla subject does this header mean" and both follow
+    the same binding via :func:`_follow_binding`. They differ in one thing,
+    and that difference is the point:
+
+    * ``resolve_external_user`` serves endpoints that **act for** the caller,
+      so provisioning an unseen subject is part of the job;
+    * this one serves endpoints that **authorise** a caller against a subject
+      named elsewhere (a UUID in the URL). An authorisation check that
+      provisions rows would let anyone holding the service token mint
+      accounts by guessing headers — and an export that creates a row is an
+      export that CREATES data about a person.
+
+    Returns ``None`` for a malformed id and for an id nobody has ever used.
+    ``None`` is a denial input, never a "fall back to something".
+    """
+    if not is_valid_external_user_id(external_user_id):
+        return None
+    user = (
+        User.objects
+        .select_related("linked_user")
+        .filter(username=external_user_id)
+        .first()
+    )
+    if user is None:
+        return None
+    return _follow_binding(user, for_authorization=True)
 
 
 class IdentityBindingError(ValueError):

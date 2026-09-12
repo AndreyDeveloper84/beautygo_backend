@@ -16,8 +16,11 @@ Pilot scope (C5.2): personal context only. Transactional records
 (bookings, payments) follow statutory retention; anonymization is
 post-pilot and explicitly out of this contract.
 
-Auth: service-to-service Bearer (``IsInternalBearer``), same pattern as
-``users/internal_users_api.py`` — JWT off, no X-External-User-ID.
+Auth: service-to-service Bearer **restricted to the caller's own subject**
+(``IsInternalBearerForSubject``, DRF-1617 / B-2.1): ``X-External-User-ID`` is
+required and must resolve — without creating a row — to the ``user_id`` in
+the URL. Until 12.09.2026 the plain ``IsInternalBearer`` let any holder of the
+runtime token export or erase ANY person by UUID.
 """
 from __future__ import annotations
 
@@ -32,7 +35,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from users.models import Profile, User, UserPersonalContext
-from users.permissions import IsInternalBearer
+from users.permissions import IsInternalBearerForSubject
 from users.personal_context_erasure import erase_personal_context
 from users.personal_context_views import UserPersonalContextSerializer
 from users.response import error_response, success_response
@@ -76,7 +79,8 @@ class InternalPersonalDataExportView(APIView):
     """GET …/personal-data/export/ — C5.1 synchronous JSON export."""
 
     authentication_classes: list = []
-    permission_classes = [IsInternalBearer]
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "user_id"
 
     @extend_schema(
         operation_id="internal_personal_data_export",
@@ -137,7 +141,8 @@ class InternalPersonalDataDeleteView(APIView):
     """DELETE …/personal-data/ — C5.2/AMD-006 idempotent wipe + audit."""
 
     authentication_classes: list = []
-    permission_classes = [IsInternalBearer]
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "user_id"
 
     @extend_schema(
         operation_id="internal_personal_data_delete",

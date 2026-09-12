@@ -20,6 +20,8 @@ from rest_framework.test import APIClient
 
 from users.models import User
 
+from .conftest import name_subject
+
 pytestmark = pytest.mark.django_db
 
 TOKEN = "details-contract-token"
@@ -40,6 +42,8 @@ def user() -> User:
 def _patch(user: User, updates: list) -> tuple[int, dict]:
     c = APIClient()
     c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {TOKEN}"
+    # DRF-1617: субъект в URL обязан совпадать с X-External-User-ID.
+    c.defaults["HTTP_X_EXTERNAL_USER_ID"] = name_subject(user)
     resp = c.patch(
         f"/api/v1/internal/users/{user.id}/personal-context/",
         {"updates": updates},
@@ -88,6 +92,8 @@ def test_a_single_serializer_error_keeps_its_field_keyed_shape(user):
     from a single (non-list) serializer stays field-keyed."""
     c = APIClient()
     c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {TOKEN}"
+    # DRF-1617: субъект в URL обязан совпадать с X-External-User-ID.
+    c.defaults["HTTP_X_EXTERNAL_USER_ID"] = name_subject(user)
     resp = c.patch(
         f"/api/v1/internal/users/{user.id}/personal-context/",
         {"updates": "not-a-list"},
