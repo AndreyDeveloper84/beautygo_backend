@@ -154,6 +154,10 @@ RETAIN: dict[str, str] = {
     "services.SalonService.mapping_confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "services.DraftSalonService.confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "tenants.ServiceLocation.confirmed_by": "провенанс подтверждения адреса, актор — сотрудник",
+    "privacy_audit.PersonalDataAccessLog.actor": (
+        "журнал доступа к ПДн (§96, D1, #407) — append-only доказательство того, кто и к чему "
+        "обращался; строка User остаётся обезличенной, указатель не снимается"
+    ),
 }
 
 
@@ -599,9 +603,10 @@ def _residue(user) -> dict[str, int]:
         "users.Profile.avatar": Profile.objects.filter(user=user).exclude(
             Q(avatar="") | Q(avatar__isnull=True)
         ),
+        # Координаты мастера — не фильтром (DRF-1687: фильтр по ним
+        # разрешён только замеру состояния), а чтением строки ниже.
         "users.SpecialistProfile.pii": SpecialistProfile.objects.filter(user=user).exclude(
             display_name=ERASED_NAME, bio="", address="",
-            location_lat=None, location_lng=None,
         ),
         "users.SpecialistProfile.avatar": SpecialistProfile.objects.filter(user=user).exclude(
             Q(avatar="") | Q(avatar__isnull=True)
@@ -613,7 +618,11 @@ def _residue(user) -> dict[str, int]:
         "users.User.groups": user.groups.all(),
         "users.User.user_permissions": user.user_permissions.all(),
     }
-    return {k: n for k, qs in checks.items() if (n := qs.count())}
+    residue = {k: n for k, qs in checks.items() if (n := qs.count())}
+    sp = SpecialistProfile.objects.filter(user=user).first()
+    if sp is not None and (sp.location_lat is not None or sp.location_lng is not None):
+        residue["users.SpecialistProfile.coordinates"] = 1
+    return residue
 
 
 def _delete_file(fieldfile) -> int:
