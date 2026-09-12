@@ -161,6 +161,7 @@ def known_anketa_answers(run: GoalAnketaRun | None) -> list[dict[str, Any]]:
             step,
             option_key=by_step[step.key].option_key,
             text=by_step[step.key].answer_text,
+            option_keys=list(by_step[step.key].option_keys or []),
         )
         for step in anketa.ANKETA_STEPS
         if step.key in by_step

@@ -247,6 +247,13 @@ class GoalAnketaAnswer(models.Model):
         blank=True,
         help_text="Дословный свободный ввод; не нормализуется",
     )
+    # DRF-1746 — ответ шага в режиме ``multi``: ключи отмеченных вариантов
+    # в порядке вариантов шага. Пустой список у остальных режимов.
+    option_keys = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Ключи отмеченных вариантов (режим multi); [] у остальных",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -256,6 +263,7 @@ class GoalAnketaAnswer(models.Model):
                 check=(
                     models.Q(option_key__isnull=False)
                     | models.Q(answer_text__isnull=False)
+                    | ~models.Q(option_keys=[])
                 ),
                 name="goalanketaanswer_option_or_text_present",
             ),

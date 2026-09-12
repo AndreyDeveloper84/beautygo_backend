@@ -100,6 +100,9 @@ class TestKnownAnketa:
             "label": AREA.options[1][1],
             "options": [{"key": k, "label": lbl} for k, lbl in AREA.options],
             "revisable": True,
+            # DRF-1746 — тип ответа и массив для multi (пустой у single).
+            "mode": anketa.MODE_SINGLE,
+            "option_keys": [],
         }
         # Голый вопрос, без пометки о влиянии: блок говорит «что ты
         # сказал», не «зачем спросили».
