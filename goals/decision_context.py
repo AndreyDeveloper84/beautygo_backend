@@ -59,7 +59,7 @@ from services.models import GoalOption
 
 from . import anketa
 from .lifecycle import OPEN_STATES
-from .models import ClientGoal, GoalAnketaRun
+from .models import ClientGoal, GoalAnketaAnswer, GoalAnketaRun
 from .service_match import match_named_service
 
 if TYPE_CHECKING:
@@ -168,6 +168,45 @@ def known_anketa_answers(run: GoalAnketaRun | None) -> list[dict[str, Any]]:
     ]
 
 
+def previous_answers(client: User) -> dict[str, GoalAnketaAnswer]:
+    """Последний ответ человека на каждый сужающий шаг из ЗАВЕРШЁННЫХ
+    проходов — то, что можно подтвердить вместо переспроса (DRF-1745).
+
+    Только завершённые: открытый проход — это текущие вопросы, не прошлое.
+    «Не знаю» (DRF-1747) известным не считается — шаг задаётся заново
+    обычным вопросом. Незнакомые серверу шаги не показываются: их нечем
+    ни подтвердить, ни изменить.
+    """
+    latest: dict[str, GoalAnketaAnswer] = {}
+    rows = (
+        GoalAnketaAnswer.objects.filter(run__client=client, run__completed_at__isnull=False)
+        .order_by("-created_at")
+    )
+    for row in rows:
+        if row.step_key in latest or anketa.narrowing_step(row.step_key) is None:
+            continue
+        if row.option_key == anketa.UNKNOWN_OPTION_KEY:
+            continue
+        latest[row.step_key] = row
+    return latest
+
+
+def known_value_of(step: anketa.AnketaStep, row: GoalAnketaAnswer) -> dict[str, Any]:
+    """Прошлый ответ шага в форме ``known_value`` документа."""
+    known = anketa.as_known_answer(
+        step,
+        option_key=row.option_key,
+        text=row.answer_text,
+        option_keys=list(row.option_keys or []),
+    )
+    return {
+        "option_key": row.option_key,
+        "option_keys": known["option_keys"],
+        "text": row.answer_text,
+        "label": known["label"],
+    }
+
+
 def answered_step_keys(run: GoalAnketaRun | None) -> set[str]:
     """Ключи отвеченных шагов прохода; без прохода — пусто."""
     if run is None:
@@ -274,8 +313,15 @@ def build_decision_context(
         step = next_anketa_step(run)
         if step is not None:
             run_goal_key = run.goal.goal_key if run is not None and run.goal_id else None
+            # DRF-1745 — повторный проход: сужающий шаг, на который человек
+            # уже отвечал, приходит подтверждением, а не переспросом.
+            # Первый проход без прошлого — как раньше.
+            previous = previous_answers(client).get(step.key) if run is not None else None
             missing.append(anketa.as_missing_item(
-                step, answered_keys=answered_step_keys(run), goal_key=run_goal_key,
+                step,
+                answered_keys=answered_step_keys(run),
+                goal_key=run_goal_key,
+                known_value=known_value_of(step, previous) if previous is not None else None,
             ))
     elif active_goal is None:
         missing.append({"kind": MISSING_GOAL, "prompt": PROMPT_GOAL_MISSING})
