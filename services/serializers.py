@@ -4,6 +4,8 @@ from typing import Any
 
 from rest_framework import serializers
 
+from tenants.wire import OfferAddressField, OfferLatitudeField, OfferLongitudeField
+
 from .goal_resolution import build_category_goal_index
 from .models import (
     SalonService,
@@ -53,19 +55,12 @@ class ServicePublicListSerializer(serializers.ModelSerializer):
 
 
 class ServicePublicDetailSerializer(ServicePublicListSerializer):
-    """Detailed service view — includes specialist address."""
-    specialist_address = serializers.CharField(
-        source='specialist.address',
-        default='',
-    )
-    specialist_location_lat = serializers.DecimalField(
-        source='specialist.location_lat',
-        max_digits=9, decimal_places=6, default=None,
-    )
-    specialist_location_lng = serializers.DecimalField(
-        source='specialist.location_lng',
-        max_digits=9, decimal_places=6, default=None,
-    )
+    """Detailed service view — includes the address of the place of service."""
+    # L6 (§9): адрес и координаты — места предложения (``works_at``),
+    # не профиля мастера. Имена на проводе прежние.
+    specialist_address = OfferAddressField(source='specialist')
+    specialist_location_lat = OfferLatitudeField(source='specialist')
+    specialist_location_lng = OfferLongitudeField(source='specialist')
 
     class Meta(ServicePublicListSerializer.Meta):
         fields = ServicePublicListSerializer.Meta.fields + [

@@ -539,10 +539,14 @@ class MasterMeView(APIView):
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        # L6 (§9): адрес мастер больше не вводит — его несёт место
+        # (``works_at``), которое назначает оператор. Условие «анкета
+        # заполнена» осталось без адреса: имя есть → на верификацию.
+        # (До L6 здесь стояло ``and profile.address``; с закрытым входом
+        # переход был бы мёртв.)
         if (
             profile.status == SpecialistProfile.ProfileStatus.DRAFT
             and profile.display_name
-            and profile.address
         ):
             profile.status = SpecialistProfile.ProfileStatus.PENDING
             profile.save(update_fields=['status'])

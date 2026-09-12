@@ -148,18 +148,31 @@ class TestOutboundContract:
         assert row["tenant_address"] == SALON_ADDRESS
         assert row["tenant_city"] == SALON_CITY
 
-    def test_master_address_keeps_its_own_meaning(self, salon):
-        """Аддитивно: поле мастера на месте и означает то же, что означало.
+    def test_master_address_is_the_place_not_the_profile(self, salon):
+        """Поле ``address`` на месте, но означает место оказания услуг (§9, L6).
 
-        Старшинство салона над мастером решается в DRF-1589 — здесь ни
-        одно существующее поле не меняет имя, тип и смысл.
+        DRF-1587 оставлял ``SpecialistProfile.address`` нетронутым и
+        откладывал старшинство салона над мастером на DRF-1589. Владелец
+        решил его §9 (DRF-1687): «все старые адреса перестают быть
+        авторитетными». С L6 ``address`` в строке мастера — адрес его
+        подтверждённого места (``works_at``), а собственный адрес профиля
+        клиенту и зеркалу бота не уезжает: без места — пусто, с местом —
+        адрес места. ``tenant_address`` при этом по-прежнему адрес салона.
+        Этот тест сторожит §9; сняться может только вместе с полем (L8).
         """
+        from tenants.tests.places import place_specialist_at
+
         spec = _make_specialist(
             tenant=salon, username="drf1587_c", phone="+79991587003",
             name="Мастер со своим адресом", address="Пенза, ул. Кирова, 7",
         )
         row = _row_for(_api().get(f"{INTERNAL_URL}?tenant={salon.id}"), spec)
-        assert row["address"] == "Пенза, ул. Кирова, 7"
+        assert row["address"] == ""                      # свой адрес профиля не уезжает
+        assert row["tenant_address"] == SALON_ADDRESS
+
+        place_specialist_at(spec, 53.195878, 45.018316, label="Пенза, ул. Московская, 1")
+        row = _row_for(_api().get(f"{INTERNAL_URL}?tenant={salon.id}"), spec)
+        assert row["address"] == "Пенза, ул. Московская, 1"
         assert row["tenant_address"] == SALON_ADDRESS
 
 

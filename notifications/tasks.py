@@ -18,6 +18,8 @@ from datetime import timedelta
 from celery import shared_task
 from django.utils import timezone
 
+from tenants.distance import offer_address
+
 from .models import Notification
 
 logger = logging.getLogger(__name__)
@@ -91,7 +93,7 @@ def dispatch_appointment_reminders() -> dict:
         status=Appointment.Status.CONFIRMED,
         start_datetime__gte=window_start,
         start_datetime__lte=window_end,
-    ).select_related("client", "specialist", "service")
+    ).select_related("client", "specialist", "specialist__works_at", "service")
 
     queued = 0
     skipped = 0
@@ -112,7 +114,8 @@ def dispatch_appointment_reminders() -> dict:
                 "specialist_name": appointment.specialist.display_name,
                 "service_name": appointment.service.name,
                 "date_time": appointment.start_datetime.strftime("%H:%M %d.%m"),
-                "address": appointment.specialist.address or "",
+                # L6 (§9): адрес подтверждённого места, не профиля мастера
+                "address": offer_address(appointment.specialist),
                 "appointment_id": str(appointment.id),
             },
         )

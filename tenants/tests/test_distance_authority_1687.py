@@ -39,15 +39,23 @@ MASTER_COORDS = {"location_lat", "location_lng"}
 #: Список закрыт: расширение — осознанный шаг с причиной, не молчаливый импорт.
 ALLOWED_READERS = {
     "users/models.py": "определение полей; снимаются в L8, когда читателей 0",
-    "users/admin.py": "форма мастера показывает старые поля до L8, подсказка говорит «не заполнять»",
+    "users/admin.py": "форма мастера показывает старые поля ТОЛЬКО ДЛЯ ЧТЕНИЯ до L8 (readonly_fields)",
     "core/management/commands/surface_state.py": "замер состояния: считает, сколько старых координат осталось",
-    "ai/management/commands/check_distance_readiness.py": "замер готовности; переключается на ServiceLocation в L6",
-    "services/serializers.py": "публичный сериализатор мастера — L6",
-    "users/serializers.py": "сериализаторы профиля — L6",
-    "search/views.py": "поле в fields сериализатора поиска — L6 (расстояние там УЖЕ по месту)",
-    "users/specialists_api.py": "поле в fields сериализаторов — L6 (расстояние и bbox УЖЕ по месту)",
     "ai/views.py": "одноимённое поле контекста чата — координата КЛИЕНТА (§8), не мастера",
     "ai/application/services/chat_service.py": "то же одноимённое поле контекста чата — координата клиента",
+}
+
+#: L6 снял с провода четыре сериализатора: имена ``address`` /
+#: ``location_lat`` / ``location_lng`` остались, но это объявленные поля
+#: класса (``tenants.wire``), читающие ``works_at``. Строка в ``Meta.fields``,
+#: затенённая объявленным полем того же имени, — не чтение модели.
+WIRE_FIELD_CLASSES = {"OfferAddressField", "OfferLatitudeField", "OfferLongitudeField"}
+WIRE_SITES = {
+    "services/serializers.py": ("ServicePublicDetailSerializer",
+                                ("specialist_address", "specialist_location_lat", "specialist_location_lng")),
+    "users/serializers.py": ("SpecialistProfileDetailSerializer", ("address", "location_lat", "location_lng")),
+    "search/views.py": ("SearchSpecialistSerializer", ("address", "location_lat", "location_lng")),
+    "users/specialists_api.py": ("SpecialistListSerializer", ("address", "location_lat", "location_lng")),
 }
 
 #: Фильтровать ORM по старым координатам вправе только замер состояния.
@@ -57,7 +65,6 @@ FILTER_ALLOWED = {"core/management/commands/surface_state.py"}
 LOCAL_HAVERSINE_ALLOWED = {
     "tenants/distance.py",                                   # единственная формула
     "ai/application/services/recommendation_engine.py",     # делегирует
-    "ai/management/commands/check_distance_readiness.py",   # своя обёртка над формулой движка
 }
 
 
@@ -71,14 +78,54 @@ def _py_files():
         yield rel, path
 
 
+def _shadowed_wire_names(tree: ast.AST) -> set[int]:
+    """id() узлов, которые не чтение колонки: объявления полей класса и
+    строки в ``Meta.fields``, затенённые таким объявлением.
+
+    ``class S(ModelSerializer): location_lat = OfferLatitudeField(...)`` и
+    ``Meta.fields = [..., 'location_lat']`` — имя на проводе, источник —
+    объявленное поле, не колонка модели. Только этот случай; строка
+    ``'location_lat'`` где угодно ещё — чтение.
+    """
+    shadowed: set[int] = set()
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        # Только поля из ``tenants.wire``: ``models.DecimalField(...)`` в
+        # ``users/models.py`` — то же по форме, но это и есть колонка.
+        targets = [
+            t for st in cls.body
+            if isinstance(st, ast.Assign) and isinstance(st.value, ast.Call)
+            and ast.unparse(st.value.func).split(".")[-1] in WIRE_FIELD_CLASSES
+            for t in st.targets if isinstance(t, ast.Name)
+        ]
+        declared = {t.id for t in targets}
+        # само объявление ``location_lat = OfferLatitudeField(...)`` — запись
+        # имени класса, не чтение колонки
+        shadowed.update(id(t) for t in targets)
+        for meta in cls.body:
+            if not (isinstance(meta, ast.ClassDef) and meta.name == "Meta"):
+                continue
+            for st in meta.body:
+                if not (isinstance(st, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "fields" for t in st.targets
+                )):
+                    continue
+                for n in ast.walk(st.value):
+                    if isinstance(n, ast.Constant) and n.value in declared:
+                        shadowed.add(id(n))
+    return shadowed
+
+
 def _mentions_in_code(tree: ast.AST) -> bool:
     """Имя поля встречается как идентификатор, атрибут, ключ-строка или kwarg."""
+    shadowed = _shadowed_wire_names(tree)
     for n in ast.walk(tree):
         if isinstance(n, ast.Attribute) and n.attr in MASTER_COORDS:
             return True
-        if isinstance(n, ast.Name) and n.id in MASTER_COORDS:
+        if isinstance(n, ast.Name) and n.id in MASTER_COORDS and id(n) not in shadowed:
             return True
-        if isinstance(n, ast.Constant) and isinstance(n.value, str) and (
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in shadowed and (
             n.value in MASTER_COORDS
             or any(n.value.endswith("." + c) for c in MASTER_COORDS)  # DRF source='specialist.location_lat'
         ):
@@ -130,6 +177,32 @@ def test_readers_of_master_coordinates_are_a_closed_named_set():
     # и наоборот: список не должен держать мёртвые записи
     stale = set(ALLOWED_READERS) - readers
     assert not stale, "в ALLOWED_READERS есть модули, которые уже не читают: " + ", ".join(sorted(stale))
+
+
+def test_wire_names_are_declared_place_fields_not_model_columns():
+    """Положительный контроль на затенение: в каждом из четырёх мест L6 имя
+    на проводе объявлено полем из ``tenants.wire``. Без этого правило
+    «строка в Meta.fields затенена» зеленело бы и на классе, где объявлено
+    что-то другое с тем же именем."""
+    import importlib
+
+    from tenants.wire import OfferAddressField, OfferLatitudeField, OfferLongitudeField
+
+    expected = (OfferAddressField, OfferLatitudeField, OfferLongitudeField)
+    for rel, (cls_name, names) in WIRE_SITES.items():
+        module = importlib.import_module(rel[:-3].replace("/", "."))
+        fields = getattr(module, cls_name)().fields
+        for name, field_cls in zip(names, expected):
+            assert isinstance(fields[name], field_cls), f"{rel}::{cls_name}.{name} — {type(fields[name]).__name__}"
+    # и второй сериализатор users/specialists_api.py — тем же классом полей
+    from users.specialists_api import SpecialistDetailSerializer
+
+    for name, field_cls in zip(("address", "location_lat", "location_lng"), expected):
+        assert isinstance(SpecialistDetailSerializer().fields[name], field_cls)
+    # обновляемый сериализатор профиля старые входы не принимает
+    from users.serializers import SpecialistProfileUpdateSerializer
+
+    assert not ({"address"} | MASTER_COORDS) & set(SpecialistProfileUpdateSerializer().fields)
 
 
 def test_local_haversine_definitions_are_only_delegates():
