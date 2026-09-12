@@ -77,9 +77,12 @@ GOAL_STEP_KEY = "goal"
 # не этот контракт; сегодняшние ``ANKETA_STEPS`` остаются ``single``.
 MODE_SINGLE = "single"
 MODE_MULTI = "multi"
-#: Подтверждение известного — компонент DRF-1745; в контракте место
-#: зарезервировано, чтобы экран знал имя заранее и рисовал его как
-#: ``single`` до появления компонента.
+#: Подтверждение известного (DRF-1745, макет C03.3): шаг, на который
+#: человек уже отвечал в прошлом проходе, приходит с ``known_value`` и
+#: вопросом «Всё ещё так?» вместо переспроса. Ответ «Да» —
+#: ``{answer: {step, confirm: true}}`` — копирует прошлое значение в новый
+#: проход; «Изменилось» — обычный ответ шага (``answer_mode`` говорит,
+#: каким компонентом); «Не знаю» — по DRF-1747, если шаг его предлагает.
 MODE_CONFIRM = "confirm"
 MODE_SCALE = "scale"
 MODE_TEXT = "text"
@@ -437,8 +440,18 @@ def is_last_step(step: AnketaStep, answered_keys: set[str]) -> bool:
     return next_step(answered_keys | {step.key}) is None
 
 
+def confirm_prompt(step: AnketaStep, known_label: str, goal_key: str | None = None) -> str:
+    """Вопрос подтверждения (макет C03.3): «Раньше ты выбирала «X». Всё
+    ещё так?». Без пометки о влиянии — она стоит в ``question``."""
+    return f"Раньше ты выбирала «{known_label}». Всё ещё так?"
+
+
 def as_missing_item(
-    step: AnketaStep, *, answered_keys: set[str], goal_key: str | None = None,
+    step: AnketaStep,
+    *,
+    answered_keys: set[str],
+    goal_key: str | None = None,
+    known_value: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Шаг → элемент ``missing``, готовый к отрисовке как есть.
 
@@ -464,4 +477,14 @@ def as_missing_item(
         item["scale"] = {"low_label": step.scale_ends[0], "high_label": step.scale_ends[1]}
     if step.mode == MODE_TEXT:
         item["text_limit"] = TEXT_ANSWER_LIMIT
+    if known_value is not None:
+        # DRF-1745 — подтверждение вместо переспроса: ``prompt`` —
+        # вопрос подтверждения, ``question`` — обычный вопрос шага (для
+        # «Изменилось»), ``answer_mode`` — каким компонентом на него
+        # отвечать. ``options`` — как у обычного шага.
+        item["mode"] = MODE_CONFIRM
+        item["answer_mode"] = step.mode
+        item["question"] = item["prompt"]
+        item["prompt"] = confirm_prompt(step, str(known_value.get("label") or ""), goal_key)
+        item["known_value"] = known_value
     return item

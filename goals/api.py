@@ -39,6 +39,7 @@ from .lifecycle import (
     transition,
 )
 from .decision_context import (
+    previous_answers,
     INTENT_NEED_GUIDANCE,
     INTENT_START_ANKETA,
     build_decision_context,
@@ -113,15 +114,22 @@ class AnketaAnswerSerializer(serializers.Serializer):
     # ответ на любой шаг»: 409 на ответ не по порядку остаётся защитой
     # от протухшего документа, пересмотр — отдельное, названное намерение.
     revise = serializers.BooleanField(required=False, default=False)
+    # DRF-1745: «Да, всё так» на шаге подтверждения — прошлое значение
+    # копируется в новый проход; экран значение не пересылает.
+    confirm = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
         given = [
-            name for name in ("option_key", "text", "option_keys") if attrs.get(name)
+            name
+            for name in ("option_key", "text", "option_keys", "confirm")
+            if attrs.get(name)
         ]
         if len(given) != 1:
             raise serializers.ValidationError(
-                "Provide exactly one of: option_key, text, option_keys."
+                "Provide exactly one of: option_key, text, option_keys, confirm."
             )
+        if attrs.get("confirm") and attrs.get("revise"):
+            raise serializers.ValidationError({"confirm": "Nothing to confirm on a revise."})
         if not anketa.is_answerable_step(attrs["step"]):
             raise serializers.ValidationError({"step": "Unknown anketa step."})
         if attrs.get("revise") and anketa.narrowing_step(attrs["step"]) is None:
@@ -445,8 +453,22 @@ class GoalSelectView(APIView):
 
         option_key = answer.get("option_key")
         text = (answer.get("text") or "").strip() or None
-        option_keys = _validated_answer_shape(expected, answer)
-        if option_key:
+        option_keys: list[str] = []
+        if answer.get("confirm"):
+            # DRF-1745 — подтверждение известного: значение берётся из
+            # прошлого прохода сервером, не из запроса. Подтверждать
+            # нечего (первый проход, «не знаю», шаг цели) — 400, не запись.
+            previous = previous_answers(client).get(expected.key)
+            if previous is None or expected.key == anketa.GOAL_STEP_KEY:
+                raise serializers.ValidationError(
+                    {"answer": {"confirm": "Nothing to confirm for this step."}}
+                )
+            option_key = previous.option_key
+            text = previous.answer_text
+            option_keys = list(previous.option_keys or [])
+        else:
+            option_keys = _validated_answer_shape(expected, answer)
+        if option_key and not answer.get("confirm"):
             # Без `and expected.options`: на салоне без активных
             # GoalOption список финального шага пуст, и прежний вид
             # проверки пропускал ЛЮБОЙ слаг прямо в ClientGoal.goal_key.
