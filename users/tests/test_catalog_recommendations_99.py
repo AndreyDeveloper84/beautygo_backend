@@ -201,7 +201,11 @@ def _provenance_for(mapping_status) -> dict:
     Подставлять сюда человека было бы хуже — тест утверждал бы, что
     связь подтвердил кто-то, кого не существует.
     """
-    if mapping_status != SalonService.MappingStatus.VERIFIED:
+    # Отказ (NOT_RECOMMENDABLE, §93) требует того же провенанса, что и
+    # подтверждение: у решения есть автор, дата и основание.
+    if mapping_status not in (
+        SalonService.MappingStatus.VERIFIED, SalonService.MappingStatus.NOT_RECOMMENDABLE,
+    ):
         return {}
     return {
         "mapping_confirmed_rule": "test_fixture",
@@ -499,10 +503,9 @@ class TestFailClosedStates:
 
     @pytest.mark.parametrize(
         "status",
-        [
-            SalonService.MappingStatus.REVIEW_REQUIRED,
-            SalonService.MappingStatus.UNMAPPED,
-        ],
+        # C2: все статусы модели, кроме VERIFIED, — включая NOT_RECOMMENDABLE
+        # (§93) и любой будущий; список из перечисления, не руками.
+        [s for s in SalonService.MappingStatus if s != SalonService.MappingStatus.VERIFIED],
     )
     def test_only_verified_reaches_the_shelf(
         self, customer, tenant_new, manicure_category, status,
