@@ -19,7 +19,7 @@ from services.catalog_reads import (
     catalog_services_prefetch,
 )
 from services.models import Service
-from tenants.distance import bbox_q, distance_km_to
+from tenants.distance import bbox_q, distance_km_to, distance_meters
 from .models import SpecialistProfile
 
 logger = logging.getLogger(__name__)
@@ -39,9 +39,15 @@ _ACTIVE_CANONICAL = Q(
 class DistanceMixin:
     """Mixin for serializers that need distance calculation from request lat/lon."""
 
+    def get_distance_meters(self, obj: SpecialistProfile) -> int | None:
+        """Каноническое поле (OD-PILOT-9): метры целым, ``null`` = неизвестно.
+        Производится из километров, не считается второй раз."""
+        return distance_meters(self.get_distance_km(obj))
+
     def get_distance_km(self, obj: SpecialistProfile) -> float | None:
         """До места предложения (``works_at``), не до человека (§9, L5).
-        ``None`` = DISTANCE_UNKNOWN (§8)."""
+        ``None`` = DISTANCE_UNKNOWN (§8). Дубль на один релиз — канон
+        ``distance_meters``."""
         request = self.context.get('request')
         if not request:
             return None
@@ -85,6 +91,7 @@ class SpecialistListSerializer(DistanceMixin, serializers.ModelSerializer):
     services_preview = serializers.SerializerMethodField()
     services_count = serializers.SerializerMethodField()
     distance_km = serializers.SerializerMethodField()
+    distance_meters = serializers.SerializerMethodField()
 
     class Meta:
         model = SpecialistProfile
@@ -93,7 +100,7 @@ class SpecialistListSerializer(DistanceMixin, serializers.ModelSerializer):
             'experience_years', 'address',
             'location_lat', 'location_lng',
             'status', 'rating', 'reviews_count', 'is_available',
-            'services_preview', 'services_count', 'distance_km',
+            'services_preview', 'services_count', 'distance_km', 'distance_meters',
         ]
 
     def get_services_preview(self, obj: SpecialistProfile) -> list[dict[str, Any]]:
@@ -149,6 +156,7 @@ class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
     services = serializers.SerializerMethodField()
     services_count = serializers.SerializerMethodField()
     distance_km = serializers.SerializerMethodField()
+    distance_meters = serializers.SerializerMethodField()
     reviews_summary = serializers.SerializerMethodField()
     recent_reviews = serializers.SerializerMethodField()
     working_hours = serializers.SerializerMethodField()
@@ -161,7 +169,7 @@ class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
             'experience_years', 'address',
             'location_lat', 'location_lng',
             'rating', 'reviews_count', 'is_available',
-            'services', 'services_count', 'distance_km',
+            'services', 'services_count', 'distance_km', 'distance_meters',
             'reviews_summary', 'recent_reviews', 'working_hours',
             'portfolio', 'created_at',
         ]
