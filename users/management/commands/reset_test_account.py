@@ -16,6 +16,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand, CommandError
 
 from users import account_reset as reset
+from users.identity_card import mask_name
 
 
 class Command(BaseCommand):
@@ -89,8 +90,12 @@ class Command(BaseCommand):
         self.stdout.write("субъекты (каждый обязан быть в allowlist под своим именем):")
         for s in p.subjects:
             mark = "  " if s not in p.unlisted else "НЕ В СПИСКЕ"
+            # A proxy's username is the id the operator typed; a real
+            # account's username is a personal value and is masked the way
+            # the §12 card masks it (found by the first pilot dry-run, 12.09).
+            shown = s.user.username if s.user.is_proxy else mask_name(s.user.username)
             self.stdout.write(
-                f"  {s.kind:14} {str(s.user.id):38} username={s.user.username!r:32} "
+                f"  {s.kind:14} {str(s.user.id):38} username={shown!r:32} "
                 f"role={s.user.role:11} listed_as={s.listed_as}  {mark}"
             )
         self.stdout.write("")

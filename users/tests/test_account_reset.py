@@ -152,6 +152,23 @@ class TestTheAllowlistIsAWallNotAPrompt:
             reset.apply(ACCOUNT, "client-onboarding")
         assert User.objects.filter(id=proxy.id).exists()
 
+    def test_the_real_accounts_username_is_masked_in_the_plan(self, settings):
+        """Found by the first pilot dry-run: the plan printed a real account's
+        username whole. The proxy's name IS the id the operator typed and
+        stays; the real one is a personal value and is masked as on the card."""
+        proxy = _proxy_with_history()
+        _bound_to_real(proxy)
+        settings.ACCOUNT_RESET_ALLOWLIST = [ACCOUNT]
+        out = io.StringIO()
+        with pytest.raises(CommandError):
+            call_command(
+                "reset_test_account", "--account", ACCOUNT, "--mode", "client-onboarding", "--apply", stdout=out,
+            )
+        text = out.getvalue()
+        assert PROXY in text
+        assert "r… (16)" in text
+        assert "real-test-person" not in text
+
     def test_the_command_says_why_and_exits_non_zero(self, settings):
         settings.ACCOUNT_RESET_ALLOWLIST = []
         _proxy_with_history()
