@@ -570,7 +570,13 @@ class DeletionRequestAdmin(admin.ModelAdmin):
     админки сделала бы «завершено» без стирания, то есть ложный успех —
     ровно то, что §7 запрещает. Заводить заявку отсюда тоже нельзя: она
     заводится от имени человека его подтверждением.
+
+    Единственное действие — «Исполнить сейчас» (D3, DRF-1725): ставит
+    открытую заявку в очередь исполнителя, не дожидаясь тика. Это
+    запуск того же исполнителя, а не правка статуса рукой.
     """
+
+    actions = ("execute_now",)
 
     list_display = ("id", "user", "status", "requested_at", "deadline_at", "completed_at", "initiator")
     list_filter = ("status", "initiator")
@@ -589,6 +595,16 @@ class DeletionRequestAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+    @admin.action(description="Исполнить сейчас (открытые заявки)")
+    def execute_now(self, request, queryset):
+        from users.tasks import execute_deletion_request
+
+        queued = 0
+        for req in queryset.filter(status__in=DeletionRequest.OPEN_STATUSES):
+            execute_deletion_request.delay(str(req.pk))
+            queued += 1
+        self.message_user(request, f"Поставлено в очередь исполнителя: {queued}.")
 
 
 # Действие «Связать с Ayla» для внешних личностей без связи (DRF-1509, §148):

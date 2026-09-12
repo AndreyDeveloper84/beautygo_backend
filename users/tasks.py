@@ -59,3 +59,46 @@ def infer_user_patterns_for_one(user_id: str) -> dict:
         "busy_inferred": len(outcome.busy_days_added),
         "skipped_explicit": outcome.skipped_explicit,
     }
+
+
+# ---------------------------------------------------------------------------
+# D3 — исполнитель удаления аккаунта (§7, DRF-1725)
+# ---------------------------------------------------------------------------
+
+
+@shared_task(name="users.execute_deletion_requests")
+def execute_deletion_requests(limit: int = 20) -> dict[str, int]:
+    """Тик исполнителя: взять открытые заявки (REQUESTED / PROCESSING /
+    FAILED — повтор по той же записи) и исполнить по одной.
+
+    Идемпотентно: заявка, у которой каталог уже стёрт, а бот не подтвердил,
+    снова спросит только бота. Сбой одной заявки не останавливает остальные.
+    """
+    from users.deletion_executor import execute, open_requests_due
+
+    counters = {"scanned": 0, "completed": 0, "open": 0}
+    for req in open_requests_due()[:limit]:
+        counters["scanned"] += 1
+        try:
+            outcome = execute(req)
+        except Exception:  # noqa: BLE001 — одна заявка не валит тик
+            logger.exception("users.execute_deletion_requests.crashed request=%s", req.pk)
+            counters["open"] += 1
+            continue
+        counters["completed" if outcome.completed else "open"] += 1
+    logger.info("users.execute_deletion_requests.tick %s", counters)
+    return counters
+
+
+@shared_task(name="users.execute_deletion_request")
+def execute_deletion_request(request_id: str) -> dict:
+    """Одна заявка по номеру — для admin-действия «исполнить сейчас»."""
+    from users.deletion_executor import execute
+    from users.models import DeletionRequest
+
+    req = DeletionRequest.objects.filter(pk=request_id).first()
+    if req is None:
+        return {"error": "request_missing"}
+    outcome = execute(req)
+    return {"request_id": outcome.request_id, "status": outcome.status,
+            "failure_reason": outcome.failure_reason}
