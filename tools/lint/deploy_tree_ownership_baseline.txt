@@ -1,0 +1,39 @@
+# Objects in the catalog deploy tree NOT owned by the deploy user (DRF-1677,
+# class DRF-1646).
+#
+# ─── WHICH BOX ──────────────────────────────────────────────────────────────
+#
+#   host       ruvds-o1mqo / 176.119.159.141
+#   tree       /home/taximeter/beautygo/dev
+#   owner      taximeter, uid 1000
+#   measured   2026-09-12T02:20Z at HEAD 8529547, by ssh as taximeter,
+#              read-only: 2367 objects walked, 4 foreign, 0 foreign
+#              directories
+#
+# The host is named because the same path exists on the abandoned twin
+# (ruvds-l2wyz / 194.87.99.126). The path is not an address.
+#
+# ─── HOW 197 BECAME 4 ───────────────────────────────────────────────────────
+#
+# 2026-09-11 13:46 UTC the audit counted 197 root-owned objects, all in
+# staticfiles/, written by collectstatic from a root container. #354 put
+# `user: 1000:1000` on web; the next deploy's collectstatic rewrote every
+# file it copied as the tree owner — replacement is the DIRECTORY's right,
+# and staticfiles/ is taximeter 755. What is left are the files it saw as
+# unmodified and did not touch:
+#
+#   staticfiles/unfold/css/simplebar/simplebar.css   root  2026-09-04
+#   staticfiles/unfold/css/simplebar/LICENSE         root  2026-09-04
+#   staticfiles/unfold/js/simplebar/simplebar.js     root  2026-09-04
+#   staticfiles/unfold/js/simplebar/LICENSE          root  2026-09-04
+#
+# They go away on their own the day upstream `unfold` changes them, or by a
+# one-off chown by the owner. Either way: lower the ratchet by hand after.
+#
+# ─── THE NUMBERS ────────────────────────────────────────────────────────────
+
+.git/ = 0
+staticfiles/ = 4
+media/ = 0
+__pycache__/ = 0
+other = 0
