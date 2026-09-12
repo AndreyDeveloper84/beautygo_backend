@@ -4,6 +4,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from services.models import Service, ServiceCategory
+from tenants.tests.places import place_specialist_at
 from users.models import SpecialistProfile, User
 
 
@@ -30,9 +31,9 @@ def specialist(specialist_user):
     profile.bio = 'Мастер маникюра и педикюра'
     profile.status = SpecialistProfile.ProfileStatus.ACTIVE
     profile.is_available = True
-    profile.location_lat = 55.7558
-    profile.location_lng = 49.1130
     profile.save()
+    # L5: расстояние — до места (works_at), не до координат профиля
+    place_specialist_at(profile, 55.7558, 49.1130)
     return profile
 
 

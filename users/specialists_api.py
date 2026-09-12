@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from datetime import date, datetime
 from typing import Any
 
@@ -20,6 +19,7 @@ from services.catalog_reads import (
     catalog_services_prefetch,
 )
 from services.models import Service
+from tenants.distance import bbox_q, distance_km_to
 from .models import SpecialistProfile
 
 logger = logging.getLogger(__name__)
@@ -40,18 +40,17 @@ class DistanceMixin:
     """Mixin for serializers that need distance calculation from request lat/lon."""
 
     def get_distance_km(self, obj: SpecialistProfile) -> float | None:
+        """До места предложения (``works_at``), не до человека (§9, L5).
+        ``None`` = DISTANCE_UNKNOWN (§8)."""
         request = self.context.get('request')
         if not request:
             return None
         lat = request.query_params.get('lat')
         lon = request.query_params.get('lon')
-        if not lat or not lon or not obj.location_lat or not obj.location_lng:
+        if not lat or not lon:
             return None
         try:
-            return _haversine(
-                float(lat), float(lon),
-                float(obj.location_lat), float(obj.location_lng),
-            )
+            return distance_km_to(obj, float(lat), float(lon))
         except (ValueError, TypeError):
             return None
 
@@ -224,21 +223,6 @@ class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
             }
             for wh in hours
         ]
-
-
-def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculate distance in km between two points using Haversine formula."""
-    R = 6371  # Earth radius in km
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dlon / 2) ** 2
-    )
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return round(R * c, 1)
 
 
 def compute_specialist_day_slots(
@@ -518,7 +502,7 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
                 is_available=True,
                 user__is_active=True,
             )
-            .select_related('user')
+            .select_related('user', 'works_at')
             .prefetch_related(
                 *catalog_services_prefetch(), 'portfolio', 'working_hours',
             )
@@ -534,20 +518,11 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
 
         if lat and lon and radius:
             try:
-                lat_f = float(lat)
-                lon_f = float(lon)
-                radius_f = float(radius)
-                # Approximate bounding box filter (fast)
-                lat_delta = radius_f / 111.0
-                lon_delta = radius_f / (
-                    111.0 * math.cos(math.radians(lat_f))
-                )
-                qs = qs.filter(
-                    location_lat__gte=lat_f - lat_delta,
-                    location_lat__lte=lat_f + lat_delta,
-                    location_lng__gte=lon_f - lon_delta,
-                    location_lng__lte=lon_f + lon_delta,
-                )
+                # Грубый прямоугольник по МЕСТУ предложения (§9, L5) и только
+                # по участвующим местам: мастер без подтверждённого
+                # геокодированного места — не «далеко», а «неизвестно где»,
+                # и в радиус не попадает по построению (§8).
+                qs = qs.filter(bbox_q(float(lat), float(lon), float(radius)))
             except (ValueError, TypeError):
                 pass
 

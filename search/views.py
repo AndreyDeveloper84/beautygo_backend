@@ -29,7 +29,6 @@ S3-EMPTY (2026-08-30) — поиск читает ОБА слоя каталог
 from __future__ import annotations
 
 import logging
-import math
 
 from django.db import connection
 from django.db.models import Q, QuerySet
@@ -46,6 +45,7 @@ from services.catalog_reads import (
     specialist_service_text_q,
 )
 from services.models import Service
+from tenants.distance import distance_km_to
 from users.models import SpecialistProfile
 from users.response import success_response
 
@@ -79,18 +79,18 @@ class SearchSpecialistSerializer(serializers.ModelSerializer):
         ]
 
     def get_distance_km(self, obj: SpecialistProfile) -> float | None:
+        """До места предложения (``works_at``), не до человека (§9, L5).
+        ``None`` = DISTANCE_UNKNOWN — и когда нет координаты клиента, и когда
+        у мастера нет подтверждённого геокодированного места."""
         request = self.context.get('request')
         if not request:
             return None
         lat = request.query_params.get('lat')
         lon = request.query_params.get('lon')
-        if not lat or not lon or not obj.location_lat or not obj.location_lng:
+        if not lat or not lon:
             return None
         try:
-            return _haversine(
-                float(lat), float(lon),
-                float(obj.location_lat), float(obj.location_lng),
-            )
+            return distance_km_to(obj, float(lat), float(lon))
         except (ValueError, TypeError):
             return None
 
@@ -185,7 +185,7 @@ class GlobalSearchView(APIView):
                 is_available=True,
                 user__is_active=True,
             )
-            .select_related('user')
+            .select_related('user', 'works_at')
             # Превью услуг читает оба слоя каталога — без prefetch это
             # два запроса на каждую строку выдачи.
             .prefetch_related(*catalog_services_prefetch())
@@ -220,11 +220,15 @@ class GlobalSearchView(APIView):
             try:
                 lat_f, lon_f = float(lat), float(lon)
                 specialists = list(qs[:limit * 3])  # overfetch for sorting
+                # DISTANCE_UNKNOWN — в конец, а не «далеко» (§8): порядок
+                # среди неизвестных остаётся прежним (sort стабилен).
+                # До L5 здесь стояло ``float(s.location_lat or 0)`` — ноль в
+                # Гвинейском заливе, прикрытый условием рядом.
                 specialists.sort(
-                    key=lambda s: _haversine(
-                        lat_f, lon_f,
-                        float(s.location_lat or 0), float(s.location_lng or 0),
-                    ) if s.location_lat else float('inf')
+                    key=lambda s: (
+                        (d := distance_km_to(s, lat_f, lon_f)) is None,
+                        d if d is not None else 0.0,
+                    )
                 )
                 return specialists[:limit]
             except (ValueError, TypeError):
@@ -401,18 +405,3 @@ class GlobalSearchView(APIView):
             .annotate(rank=SearchRank(vector, query))
             .order_by('-rank')
         )
-
-
-def _haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculate distance in km between two points."""
-    R = 6371
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(math.radians(lat1))
-        * math.cos(math.radians(lat2))
-        * math.sin(dlon / 2) ** 2
-    )
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return round(R * c, 1)

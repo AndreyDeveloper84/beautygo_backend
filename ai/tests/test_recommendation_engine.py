@@ -14,9 +14,9 @@ from ai.application.services.recommendation_engine import (
     WEIGHT_RATING,
     WEIGHT_SERVICE_MATCH,
 )
+from tenants.tests.places import place_specialist_at
 from ai.tests.factories import make_specialist, make_user
 from services.models import Service, ServiceCategory
-from users.models import SpecialistProfile
 
 
 pytestmark = pytest.mark.django_db
@@ -108,9 +108,24 @@ class TestDistanceScore:
         engine = RecommendationEngine(max_distance_km=20.0)
         assert engine._score_distance(10.0) == pytest.approx(0.5)
 
-    def test_none_distance_neutral_half(self):
+    def test_none_distance_is_unknown_not_a_number(self):
+        """§8: отсутствие координат — DISTANCE_UNKNOWN, не ноль и не средний балл.
+
+        Здесь стояло ``== 0.5``. 0.5 — середина шкалы, а не нейтраль:
+        геокодированный мастер дальше 12.5 км проигрывал тому, про кого не
+        известно ничего (замер 11.09, §3). Теперь компонент выбывает из
+        composite с перенормировкой весов (L5, DRF-1687).
+        """
         engine = RecommendationEngine()
-        assert engine._score_distance(None) == 0.5
+        assert engine._score_distance(None) is None
+
+    def test_composite_renormalises_without_distance(self):
+        """Неизвестное расстояние не притворяется числом: сумма — по известным."""
+        from ai.application.services.recommendation_engine import ScoreBreakdown
+        known = ScoreBreakdown(rating=1.0, distance=1.0, service_match=1.0, history=1.0)
+        unknown = ScoreBreakdown(rating=1.0, distance=None, service_match=1.0, history=1.0)
+        assert known.composite == pytest.approx(1.0)
+        assert unknown.composite == pytest.approx(1.0)  # не 0.6875 и не 0.84375 (0.5)
 
 
 class TestServiceMatchScore:
@@ -198,20 +213,11 @@ class TestRecommendEnd2End:
         assert len(ids) == 1
 
     def test_distance_affects_ranking(self, db):
-        from decimal import Decimal as D
-
-        # Both 5★ — distance breaks tie.
+        # Both 5★ — distance breaks tie. L5: расстояние — до МЕСТА (works_at).
         near = make_specialist(display_name="Near", rating=4.9, reviews_count=50)
         far = make_specialist(display_name="Far", rating=4.9, reviews_count=50)
-
-        # Penza coords
-        near.location_lat = D("53.2007")
-        near.location_lng = D("45.0046")
-        near.save()
-        # ~30km from Penza
-        far.location_lat = D("53.5")
-        far.location_lng = D("45.0046")
-        far.save()
+        place_specialist_at(near, "53.2007", "45.0046")  # Penza
+        place_specialist_at(far, "53.5", "45.0046")      # ~30km from Penza
 
         engine = RecommendationEngine(max_distance_km=50.0)
         result = engine.recommend(
@@ -501,22 +507,16 @@ class TestUnratedSpecialistIsNotCutOff:
         остальные дальше 25 км (``DEFAULT_MAX_DISTANCE_KM``). Дойди он
         до скоринга — он первый.
         """
-        from decimal import Decimal as D
-
         client_lat, client_lon = 53.2007, 45.0046
         for i in range(7):
             far = make_specialist(
                 display_name=f"Дальний {i}", rating=4.0, reviews_count=100,
             )
-            SpecialistProfile.objects.filter(id=far.id).update(
-                location_lat=D("54.0"), location_lng=D("45.0046"),
-            )
+            place_specialist_at(far, "54.0", "45.0046")
         newcomer = make_specialist(
             display_name="Новичок", rating=0.0, reviews_count=0,
         )
-        SpecialistProfile.objects.filter(id=newcomer.id).update(
-            location_lat=D(str(client_lat)), location_lng=D(str(client_lon)),
-        )
+        place_specialist_at(newcomer, client_lat, client_lon)
 
         result = RecommendationEngine().recommend(
             RecommendationQuery(

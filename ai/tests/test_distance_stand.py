@@ -28,7 +28,6 @@
 """
 from __future__ import annotations
 
-from decimal import Decimal as D
 
 import pytest
 
@@ -37,6 +36,7 @@ from ai.application.services.recommendation_engine import (
     RecommendationQuery,
 )
 from ai.tests.factories import make_specialist
+from tenants.tests.places import place_specialist_at
 
 pytestmark = pytest.mark.django_db
 
@@ -58,9 +58,8 @@ def _at_km(km: float, *, name: str, rating: float = 4.8):
     же километраж, но проверять пришлось бы арифметику фикстуры.
     """
     s = make_specialist(display_name=name, rating=rating, reviews_count=50)
-    s.location_lat = D(str(CLIENT_LAT + km * DEG_PER_KM))
-    s.location_lng = D(str(CLIENT_LON))
-    s.save()
+    # L5 (§9): точка — МЕСТО предложения (works_at), не координаты профиля.
+    place_specialist_at(s, CLIENT_LAT + km * DEG_PER_KM, CLIENT_LON)
     return s
 
 
@@ -171,24 +170,35 @@ def test_without_coordinates_distance_does_not_differentiate():
     assert _order(engine) == ["Дальний по факту", "Ближний по факту"]
 
 
-def test_a_single_geocoded_master_is_compared_against_neutrals():
-    """Частичная геокодировка сравнивает с серединой шкалы, а не с равными.
+def test_a_master_without_a_place_is_ranked_without_distance_not_at_the_middle():
+    """§8: DISTANCE_UNKNOWN — не число. Последствие названо, а не спрятано.
 
-    Главная находка замера, закреплённая проверкой: нейтральное
-    значение `0.5` — **середина**, поэтому геокодированный мастер
-    дальше 12.5 км проигрывает мастеру, про которого не известно
-    ничего.
+    До L5 неизвестное расстояние давало 0.5 — середину шкалы, и известный
+    далёкий мастер проигрывал тому, про кого не известно ничего (замер
+    11.09, §3 — «частичная геокодировка хуже никакой»). Теперь компонент
+    расстояния у неизвестного ВЫБЫВАЕТ с перенормировкой весов.
 
-    Рейтинги подобраны так, чтобы решало расстояние: у «известно
-    далеко» он ВЫШЕ, и он всё равно проигрывает.
-
-    Тест существует не как требование, а как **зафиксированное
-    последствие**: он покраснеет, если кто-то изменит нейтральное
-    значение, и тогда вывод замера придётся пересматривать вместе с
-    ним.
+    Остаточный перекос остаётся и назван в ``ScoreBreakdown.composite``:
+    мастер без места не платит штраф за расстояние, который платит
+    геокодированный далёкий — поэтому «Неизвестно где» здесь по-прежнему
+    выше. Это честнее 0.5 (тот штраф платили ВСЕ дальше 12.5 км), но не
+    нейтрально; нейтральным было бы не ранжировать их вместе — решение
+    поверхности, не движка. Тест покраснеет, если перекос изменится в
+    любую сторону, и тогда его причину надо будет назвать заново.
     """
     _at_km(20, name="Известно далеко", rating=4.9)
     make_specialist(display_name="Неизвестно где", rating=4.8, reviews_count=50)
 
     engine = RecommendationEngine(max_distance_km=25.0)
-    assert _order(engine) == ["Неизвестно где", "Известно далеко"]
+    result = engine.recommend(
+        RecommendationQuery(client_lat=CLIENT_LAT, client_lon=CLIENT_LON, limit=10),
+        use_cache=False,
+    )
+    by_name = {c.display_name: c for c in result.candidates}
+    assert by_name["Неизвестно где"].distance_km is None       # DISTANCE_UNKNOWN, не 0.5-эквивалент
+    # Компонент ВЫБЫЛ, а не получил 0.5: в разбивке балла его нет.
+    # Порядок в этом тесте одинаков при 0.5 и при выбывании — различает только это.
+    assert by_name["Неизвестно где"].breakdown.distance is None
+    assert by_name["Известно далеко"].breakdown.distance == pytest.approx(0.2, abs=0.02)
+    assert by_name["Известно далеко"].distance_km == pytest.approx(20, abs=0.5)
+    assert [c.display_name for c in result.candidates] == ["Неизвестно где", "Известно далеко"]
