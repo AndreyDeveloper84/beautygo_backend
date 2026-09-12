@@ -25,15 +25,15 @@
 канон по коду, что у него ``requires_health_check`` и совпал ли он с
 ожиданием таблицы, что стоит сейчас и что станет.
 
-Почему код канона резолвится через seed-файл
---------------------------------------------
+Как резолвится код канона
+-------------------------
 
-У ``ServiceTemplate`` **нет поля с кодом**: ``1.3.24`` живёт только в
-``services/seeds/canonical_catalog_2026-07.json``, а строка справочника
-опознаётся парой (подкатегория, название) — так её пишет
-``seed_canonical_catalog``. Поэтому команда берёт код → пару из seed'а →
-строку в базе, и печатает оба шага: «код не найден в seed» и «пара не
-найдена в базе» — разные новости.
+По ``ServiceTemplate.canonical_code`` (MAP-AUTO-01, OD-MAP-05) — стабильной
+логической идентичности строки справочника; коды в базу ставит bootstrap
+``0023`` из seed. Пары (подкатегория, название) команда **не использует**:
+после bootstrap пара — не идентичность (MAP-AUTO-03). «Код не найден в
+базе» значит одно из двух — bootstrap на этой базе не прошёл или код не из
+эталонного списка; команда печатает это и останавливает строку.
 
 Почему провенанс — «кто», а не «правило»
 ----------------------------------------
@@ -113,23 +113,18 @@ def load_seed(path: Path = SEED) -> dict[str, dict]:
     return {row["code"]: row for row in json.loads(path.read_text(encoding="utf-8"))}
 
 
-def template_for_code(code: str, seed: dict[str, dict]) -> tuple[ServiceTemplate | None, str]:
-    """Канон по коду: seed даёт пару (подкатегория, название), база — строку.
+def template_for_code(code: str) -> tuple[ServiceTemplate | None, str]:
+    """Канон по ``canonical_code`` — единственной логической идентичности.
 
-    Возвращает (шаблон | None, причина). Причины различают «кода нет в
-    seed», «пары нет в базе» и «пара неоднозначна» — это разные действия
-    для владельца.
+    Уникальность кода держит частичный ``UniqueConstraint``, поэтому
+    ``>1`` невозможно; ``0`` — bootstrap 0023 на этой базе не прошёл либо
+    код не из эталонного списка.
     """
-    row = seed.get(code)
-    if row is None:
-        return None, f"код {code} не найден в {SEED.name}"
-    category_name = row.get("subcategory") or row["category"]
-    found = list(ServiceTemplate.objects.filter(category__name=category_name, name=row["service"]))
-    if not found:
-        return None, f"канон «{row['service']}» ({category_name}) по коду {code} не найден в базе"
-    if len(found) > 1:
-        return None, f"канон по коду {code} неоднозначен в базе: {len(found)} строк"
-    return found[0], ""
+    tpl = ServiceTemplate.objects.filter(canonical_code=code).select_related("category").first()
+    if tpl is None:
+        return None, (f"канон с canonical_code={code} не найден в базе "
+                      "(bootstrap 0023 не прошёл или код не из справочника)")
+    return tpl, ""
 
 
 def salon_service_by_name(tenant: Tenant, name: str) -> tuple[SalonService | None, str]:
@@ -169,9 +164,6 @@ class Command(BaseCommand):
             tenant = Tenant.objects.get(slug=options["tenant"])
         except Tenant.DoesNotExist:
             raise CommandError(f"салон «{options['tenant']}» не найден")
-        if not SEED.exists():
-            raise CommandError(f"нет seed-файла {SEED} — коды канона резолвить нечем")
-        seed = load_seed()
         apply = options["apply"]
         include_disputed = options["include_disputed"]
 
@@ -188,7 +180,7 @@ class Command(BaseCommand):
 
         counts = {"applied": 0, "would_apply": 0, "done": 0, "disputed": 0, "blocked": 0}
         for action in ACTIONS:
-            outcome = self._one(action, tenant, who, seed, apply=apply, include_disputed=include_disputed)
+            outcome = self._one(action, tenant, who, apply=apply, include_disputed=include_disputed)
             counts[outcome] += 1
 
         w("")
@@ -203,7 +195,7 @@ class Command(BaseCommand):
 
     # ------------------------------------------------------------------
 
-    def _one(self, a: Action, tenant, who, seed, *, apply: bool, include_disputed: bool) -> str:
+    def _one(self, a: Action, tenant, who, *, apply: bool, include_disputed: bool) -> str:
         w = self.stdout.write
         head = f"#{a.n:>2} {a.service_name} → {a.code} (строка slice {a.slice_row})"
 
@@ -211,14 +203,14 @@ class Command(BaseCommand):
         if service is None:
             w(self.style.ERROR(f"{head}\n     СТОП: {why}"))
             return "blocked"
-        template, why = template_for_code(a.code, seed)
+        template, why = template_for_code(a.code)
         if template is None:
             w(self.style.ERROR(f"{head}\n     услуга: {service.pk}\n     СТОП: {why}"))
             return "blocked"
 
         w(f"{head}\n     услуга: {service.pk} · сейчас mapping_status={service.mapping_status}, "
           f"template={service.template.name if service.template_id else '—'}")
-        w(f"     канон: «{template.name}» ({template.category.name}) · "
+        w(f"     канон: {template.canonical_code} «{template.name}» ({template.category.name}) · "
           f"requires_health_check={template.requires_health_check}")
         if template.requires_health_check != a.expected_rhc:
             w(self.style.ERROR(

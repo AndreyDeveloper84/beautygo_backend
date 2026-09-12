@@ -9,6 +9,7 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.text import slugify
 
+from services.canonical_code import validate_canonical_code
 from services.normalization import normalize_service_name
 
 
@@ -126,6 +127,22 @@ class ServiceTemplate(models.Model):
         related_name='templates',
     )
     name = models.CharField(max_length=100)
+    # OD-MAP-05 (MAP-AUTO-01): стабильная ЛОГИЧЕСКАЯ идентичность строки
+    # эталонного справочника владельца — «1.3.24». `id` — технический PK и
+    # идентичностью между базами не является. Контракт целиком —
+    # `services/canonical_code.py`: формат N.N.N; уникален среди непустых;
+    # NULL = «канон не из эталонного списка» (40 строк seed_service_templates
+    # DRF-196 и PROVISIONAL-каноны оператора — без кода навсегда);
+    # неизменяем после установки (clean() и save() ниже); из имени или
+    # категории НЕ выводится — источник только seed (bootstrap 0023).
+    canonical_code = models.CharField(
+        max_length=16, null=True, blank=True,
+        validators=[validate_canonical_code],
+        help_text=(
+            "Код эталонного справочника (N.N.N). Пусто — канон не из эталонного списка. "
+            "После установки не меняется."
+        ),
+    )
     name_short = models.CharField(
         max_length=40,
         help_text="Короткое имя для чипов/списков",
@@ -195,6 +212,12 @@ class ServiceTemplate(models.Model):
             models.Index(fields=['lifecycle'], name='svctpl_lifecycle_idx'),
         ]
         constraints = [
+            # MAP-AUTO-01: код уникален среди непустых; NULL — сколько угодно.
+            models.UniqueConstraint(
+                fields=["canonical_code"],
+                condition=models.Q(canonical_code__isnull=False),
+                name="servicetemplate_canonical_code_uniq",
+            ),
             # Одобрение — решение, и провенанс ему нужен по той же
             # причине, что и подтверждению связи: без автора оно через
             # месяц неотличимо от умолчания. Форма условия намеренно
@@ -229,7 +252,30 @@ class ServiceTemplate(models.Model):
             ),
         ]
 
+    def _assert_canonical_code_immutable(self) -> None:
+        """Непустой код не меняется: смена кода — другая строка справочника.
+
+        Сравнение с базой, а не с `__init__`-снимком: снимок обходится
+        `refresh_from_db()`/повторным присваиванием, база — нет. Пустой
+        код заполнить можно (bootstrap 0023, MAP-AUTO-03), снять или
+        заменить — нельзя.
+        """
+        if self._state.adding:
+            return
+        stored = (
+            type(self)._default_manager.filter(pk=self.pk)
+            .values_list("canonical_code", flat=True).first()
+        )
+        if stored and (self.canonical_code or None) != stored:
+            raise ValidationError({
+                "canonical_code": (
+                    f"canonical_code неизменяем: стоит {stored}, попытка записать "
+                    f"{self.canonical_code!r}. Другой код — другая строка справочника."
+                ),
+            })
+
     def clean(self) -> None:
+        self._assert_canonical_code_immutable()
         # Durations may be null on canonical rows that are not yet timed;
         # only cross-validate when the pair is present.
         if (
@@ -248,6 +294,15 @@ class ServiceTemplate(models.Model):
             raise ValidationError(
                 {'duration_max': 'duration_max must be >= duration_default.'}
             )
+
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        # Неизменяемость — не только для формы: ORM-запись тоже её держит.
+        # `update()` она не ловит — это известный предел, как у всех
+        # правил уровня модели; сторож на схеме — уникальность.
+        self._assert_canonical_code_immutable()
+        if self.canonical_code == "":
+            self.canonical_code = None
+        super().save(*args, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.name} ({self.category.name})"
