@@ -1,0 +1,13 @@
+# pii_guard: пути, освобождённые от проверки, с причиной. Список только сокращается.
+# Формат: <путь-префикс>  # причина (задача)
+.secrets.baseline  # артефакт detect-secrets
+ai/tests/test_redaction.py  # тест маскирования: адресу нужна реалистичная форма, локальная часть — тестовое слово (DRF-1269)
+# Идентификатор внутренней учётной записи как фикстура в коде и тестах — вопрос владельцу
+# (DRF-1269, вписан главным окном 12.09.2026). Снять строки после его решения.
+djangoProject/settings/base.py  # DRF-1269: фикстурный id внутренней учётки в комментарии
+users/account_reset.py  # DRF-1269: то же
+users/management/commands/reset_test_account.py  # DRF-1269: то же
+users/tests/test_account_reset.py  # DRF-1269: фикстура
+tenants/tests/test_salon_manual_ops_1063.py  # DRF-1269: фикстура
+services/seeds/canonical_catalog_2026-07.csv  # сид канонического каталога услуг: организации и услуги, людей нет (проверено 12.09, DRF-1269)
+users/management/commands/identity_card.py  # DRF-1269: фикстурный id внутренней учётки в примере --help (каталожная половина §12, #360)

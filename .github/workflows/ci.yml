@@ -63,6 +63,15 @@ jobs:
         # would not flag them. Paths only — never reads file contents.
         run: python scripts/sensitive_file_guard.py --all
 
+      - name: PII guard (phones, e-mails, channel ids, dumps)
+        # DRF-1269: the measurement of 12.09.2026 found a real-looking
+        # e-mail in a test fixture and a registrar account address in
+        # docs on the head of `dev` — past detect-secrets, which only
+        # knows secrets. Whole-tree scan of every tracked file; positive
+        # proof in tests/test_pii_guard.py; allowlist with reasons in
+        # scripts/pii_guard_allow.txt (it only shrinks).
+        run: python scripts/pii_guard.py --all
+
       - name: detect-secrets (baseline audit)
         # detect-secrets-hook is the gating entry point: it exits
         # non-zero on any scanned secret not recorded in the baseline
