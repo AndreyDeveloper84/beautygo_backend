@@ -106,7 +106,9 @@ class TestDocumentShape:
 
         item = doc["missing"][0]
         assert item["step"] == anketa.ANKETA_STEPS[0].key
-        assert item["progress"] == {"index": 1, "total": anketa.TOTAL_STEPS}
+        assert item["progress"] == {
+            "index": 1, "total": anketa.TOTAL_STEPS, "is_last": False,
+        }
         assert [o["key"] for o in item["options"]] == [
             key for key, _ in anketa.ANKETA_STEPS[0].options
         ]
@@ -115,15 +117,17 @@ class TestDocumentShape:
         """Инвариант Ответа 3, распространённый на шаг анкеты.
 
         Ни одного поля, из которого экран мог бы вычислить ДРУГОЕ
-        содержимое: нет ни списка оставшихся шагов, ни признака
-        «последний», ни следующего вопроса. Есть ровно то, что рисуется.
+        содержимое: нет ни списка оставшихся шагов, ни следующего
+        вопроса. Есть ровно то, что рисуется. ``is_last`` (DRF-1743) —
+        рисуемый факт («Ещё один короткий вопрос»), а не материал для
+        вычислений: экран не выводит из него ни порядок, ни число.
         """
         settings.GOAL_ANKETA_ENABLED = True
         item = build_decision_context(customer)["missing"][0]
         assert set(item) == {
             "kind", "prompt", "step", "options", "allow_free_text", "progress",
         }
-        assert set(item["progress"]) == {"index", "total"}
+        assert set(item["progress"]) == {"index", "total", "is_last"}
         for option in item["options"]:
             assert set(option) == {"key", "label"}
 
@@ -656,3 +660,58 @@ class TestRepeatPass:
         assert GoalAnketaRun.objects.filter(
             client=customer, completed_at__isnull=True,
         ).count() == 1
+
+
+# ---------------------------------------------------------------------------
+# «Это последний вопрос» — гарантия сервера, не арифметика экрана (DRF-1743)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestIsLastIsAGuarantee:
+    """Доктрина 12.09: счётчик «Вопрос N из M» — не показывать; фразу
+    «Ещё один короткий вопрос» — только когда сервер уверен, что вопрос
+    последний. ``is_last`` истинен ровно для шага, после которого
+    ``next_step`` никогда не находит следующего.
+    """
+
+    def test_narrowing_steps_are_never_last(self):
+        answered: set[str] = set()
+        for step in anketa.ANKETA_STEPS:
+            assert anketa.is_last_step(step) is False
+            answered.add(step.key)
+            # После этого шага сервер ещё что-то спросит — значит, он не
+            # последний, что бы ни говорили числа.
+            assert anketa.next_step(answered) is not None
+
+    def test_final_step_is_last(self, goal_options):
+        final = anketa.next_step({step.key for step in anketa.ANKETA_STEPS})
+        assert final.key == anketa.FINAL_STEP_KEY
+        assert anketa.is_last_step(final) is True
+
+    def test_is_last_is_not_index_equals_total(self):
+        """Равенство чисел — совпадение. Признак держится на ключе шага:
+        шаг с номером ``total``, не являющийся финальным, не последний."""
+        impostor = anketa.AnketaStep(
+            key="impostor", prompt="?", options=(("a", "A"),),
+        )
+        assert anketa.step_index(impostor.key) == anketa.TOTAL_STEPS
+        assert anketa.is_last_step(impostor) is False
+
+    def test_document_carries_is_last_only_on_the_final_step(
+        self, customer, token, goal_options,
+    ):
+        api = _api()
+        doc = api.get(CTX_URL).json()["data"]
+        seen: list[tuple[str, bool]] = []
+        for step in anketa.ANKETA_STEPS:
+            item = doc["missing"][0]
+            seen.append((item["step"], item["progress"]["is_last"]))
+            doc = _answer(api, step.key, option_key=step.options[0][0]).json()["data"]
+        final = doc["missing"][0]
+        seen.append((final["step"], final["progress"]["is_last"]))
+
+        assert seen == [
+            *[(step.key, False) for step in anketa.ANKETA_STEPS],
+            (anketa.FINAL_STEP_KEY, True),
+        ]
