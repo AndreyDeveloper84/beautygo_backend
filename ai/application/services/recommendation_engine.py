@@ -56,7 +56,7 @@ from services.catalog_reads import (
     catalog_services_for,
     catalog_services_prefetch,
 )
-from tenants.distance import distance_km_to, haversine_km
+from tenants.distance import distance_km_to, haversine_km, offer_address
 from users.models import SpecialistProfile
 
 logger = logging.getLogger(__name__)
@@ -690,7 +690,7 @@ class RecommendationEngine:
             display_name=s.display_name,
             rating=s.rating,
             reviews_count=s.reviews_count,
-            address=s.address,
+            address=offer_address(s),  # L6: адрес места, не профиля (§9)
             distance_km=distance_km,
             services_preview=services,
             score=breakdown.composite,
