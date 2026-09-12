@@ -36,3 +36,17 @@ repos:
         # must run on every commit.
         pass_filenames: false
         always_run: true
+
+      # PII guard (DRF-1269). detect-secrets looks for secrets; a person's
+      # phone number and e-mail addresses sat on the head of `dev` and
+      # passed it, because none of them is high-entropy. Refuses phones
+      # outside the test ranges, e-mails outside reserved/own domains, six
+      # known channel ids (held as SHA-256, never as values), unmasked
+      # `max:<digits>` in docs/, and dump/log extensions outright. Runs on
+      # the staged files it is given; CI runs the same script over every
+      # tracked file. Allowlist with reasons: scripts/pii_guard_allow.txt.
+      - id: pii-guard
+        name: PII guard (phones, e-mails, channel ids, dumps)
+        entry: python scripts/pii_guard.py
+        language: system
+        pass_filenames: true
