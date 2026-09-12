@@ -95,20 +95,31 @@ class TestTheGuardRefusesByName:
         assert r.status_code == 403, r.content
         assert Tenant.all_objects.filter(slug=SLUG).count() == 0
 
-    def test_transition_identity_secret_opens_tenants_only_while_tenant_secret_is_empty(
+    def test_an_empty_tenant_secret_closes_the_route_to_the_identity_secret_too(
         self, settings
     ):
-        """Одна выкладка: пока новый секрет не задан, форма владельца живёт на
-        старом; как задан — старый закрыт (положительная стража к тесту выше)."""
+        """DRF-1828 (M27, A3): переходное правило DRF-1695 снято.
+
+        Пока ``AYLA_TENANT_PROVISIONING_TOKEN`` не задан, ручка закрыта ВСЕМ —
+        identity-токен её больше не открывает: тот же сторож вот-вот начнёт
+        заводить ``User(specialist)``, и identity-полномочие не имеет права
+        быть provisioning-полномочием даже «на одну выкладку». Положительная
+        стража на тех же данных: с заданным tenant-секретом ручка заводит.
+        """
         settings.AYLA_TENANT_PROVISIONING_TOKEN = ""
         settings.AYLA_IDENTITY_PROVISIONING_TOKEN = IDENTITY
         settings.AYLA_INTERNAL_API_TOKEN = GENERAL
         c = APIClient()
         c.credentials(HTTP_AUTHORIZATION=f"Bearer {IDENTITY}")
 
-        assert c.post(URL, _body(), format="json").status_code == 201
+        assert c.post(URL, _body(), format="json").status_code == 403
+        assert Tenant.all_objects.filter(slug=SLUG).count() == 0
 
         settings.AYLA_TENANT_PROVISIONING_TOKEN = PROVISIONING
+        c.credentials(HTTP_AUTHORIZATION=f"Bearer {PROVISIONING}")
+        assert c.post(URL, _body(), format="json").status_code == 201
+        # И identity-токен по-прежнему чужой — как и до снятия правила.
+        c.credentials(HTTP_AUTHORIZATION=f"Bearer {IDENTITY}")
         assert c.post(URL, _body(slug="vtoroy-1525"), format="json").status_code == 403
 
     def test_equal_secrets_fail_closed_per_request(self, settings):
