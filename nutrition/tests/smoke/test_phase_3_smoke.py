@@ -477,6 +477,7 @@ class TestSection3Water:
         NutritionProfile.objects.create(
             user=proxy_user, daily_kcal=2000, daily_water_ml=2000,
             daily_protein_g=100, health_flags={"pregnant": True},
+            targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,  # §5.1
         )
         # Faithful to checklist 3.12: 600 ml espresso × 180 mg/100ml = 1080 mg
         # — well over the 200 mg pregnancy threshold.
@@ -494,6 +495,7 @@ class TestSection3Water:
         NutritionProfile.objects.create(
             user=proxy_user, daily_kcal=2000, daily_water_ml=2000,
             daily_protein_g=100, health_flags={"eating_disorder": True},
+            targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,  # §5.1
         )
         resp = client_api.post(
             URL_WATER,
@@ -1297,6 +1299,7 @@ class TestSection8CrossFeature:
         NutritionProfile.objects.create(
             user=proxy_user, timezone="Europe/Moscow",
             daily_water_ml=2000, daily_kcal=2000, daily_protein_g=100,
+            targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,  # §5.1
         )
         from nutrition.services.water_entry_service import _load_nutrition_context
         ctx = _load_nutrition_context(proxy_user.id)

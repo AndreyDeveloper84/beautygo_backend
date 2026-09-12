@@ -48,7 +48,13 @@ def user(db):
 
 @pytest.fixture
 def profile(user):
-    return NutritionProfile.objects.create(user=user, daily_kcal=2000)
+    # §5.1 (11.09.2026): число участвует в инсайте только у действующего
+    # ориентира — фикстура объявляет предусловие, а не полагается на
+    # истинность числа.
+    return NutritionProfile.objects.create(
+        user=user, daily_kcal=2000,
+        targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,
+    )
 
 
 @pytest.fixture
@@ -187,6 +193,7 @@ class TestEatingDisorderMode:
         NutritionProfile.objects.create(
             user=user, daily_kcal=2000,
             health_flags={"eating_disorder": True},
+            targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,  # §5.1
         )
         # Set up a real returning success — must still return false.
         for i in (4, 3, 2):

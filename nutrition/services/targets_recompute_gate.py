@@ -21,7 +21,7 @@
 PERSONAL_CALCULATION`` и непустая строка ``document_version``. Человек
 только что назвал основание; считать можно.
 
-(б) ``profile.targets_source == AYLA_CALCULATED``. Расчёт уже состоялся
+(б) ``profile.targets_source`` ∈ {``AYLA_CALCULATED``, ``AYLA_PROPOSED``}. Расчёт уже состоялся
 с утверждением, и пересчёт от тех же входов — например, при смене
 ``health_flags`` — оставляет происхождение тем же. Требовать утверждение
 заново значило бы требовать его при каждом изменении флага здоровья,
@@ -108,7 +108,13 @@ def recompute_permitted(profile: NutritionProfile, payload: dict[str, Any]) -> b
     """
     if carries_attestation(payload):
         return True
-    return profile.targets_source == NutritionProfile.TargetsSource.AYLA_CALCULATED
+    # (б) — и для ``ayla_proposed``: основание у предложения то же, что у
+    # подтверждённого расчёта (утверждение в запросе, который его
+    # породил); пересчёт даёт новое предложение, не подтверждение.
+    return profile.targets_source in (
+        NutritionProfile.TargetsSource.AYLA_CALCULATED,
+        NutritionProfile.TargetsSource.AYLA_PROPOSED,
+    )
 
 
 def refusal_record(profile: NutritionProfile) -> dict[str, Any]:

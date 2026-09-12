@@ -159,6 +159,9 @@ def make_profile(proxy_user):
             "daily_kcal": 2000,
             "daily_protein_g": 100,
             "daily_water_ml": 2000,
+            # §5.1 (11.09.2026): смоук строит профиль с ДЕЙСТВУЮЩИМ
+            # ориентиром; предложение (ayla_proposed) в оценки не входит.
+            "targets_source": NutritionProfile.TargetsSource.AYLA_CALCULATED,
         }
         defaults.update(overrides)
         return NutritionProfile.objects.create(**defaults)

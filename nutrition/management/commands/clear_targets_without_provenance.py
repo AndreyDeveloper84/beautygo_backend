@@ -143,8 +143,11 @@ UNTOUCHED_FIELDS: tuple[str, ...] = (
     "timezone",
 )
 
-#: Строки с этим происхождением не трогаются целиком.
+#: Строки с этим происхождением не трогаются целиком. ``ayla_proposed``
+#: (§5.1) — тоже: предложение посчитано с основанием, его судьба —
+#: подтверждение человеком или пересчёт, а не команда очистки.
 PRESERVED_SOURCES: tuple[str, ...] = (
+    NutritionProfile.TargetsSource.AYLA_PROPOSED,
     NutritionProfile.TargetsSource.AYLA_CALCULATED,
     NutritionProfile.TargetsSource.USER_ENTERED,
 )
@@ -233,7 +236,7 @@ class Command(BaseCommand):
             f"Профилей всего: {len(rows)}. "
             f"unknown_legacy (очистка): {len(legacy)}. "
             f"none с остатками (нормализация): {len(residual)}. "
-            f"ayla_calculated/user_entered (не трогаются): {len(preserved)}."
+            f"ayla_proposed/ayla_calculated/user_entered (не трогаются): {len(preserved)}."
         )
         if not legacy and not residual:
             self.stdout.write(self.style.SUCCESS("Стирать нечего."))
@@ -352,7 +355,7 @@ class Command(BaseCommand):
 
     def _print_footer(self, preserved: list[NutritionProfile]) -> None:
         self.stdout.write(
-            f"Нетронуто (ayla_calculated/user_entered): {len(preserved)}."
+            f"Нетронуто (ayla_proposed/ayla_calculated/user_entered): {len(preserved)}."
         )
         self.stdout.write(
             "Входы (§120/§144) НЕ тронуты — это следующая команда "

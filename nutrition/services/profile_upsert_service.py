@@ -219,16 +219,26 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
     # СТИРАЕТСЯ намеренно: значения обнулены строкой выше, и оставить
     # рядом с нулями объяснение прошлого расчёта значило бы объяснить
     # число, которого больше нет.
+    #
+    # Состоявшийся расчёт — ПРЕДЛОЖЕНИЕ, а не действующий ориентир
+    # (§5.1, 11.09.2026): ``ayla_proposed`` до тех пор, пока человек не
+    # подтвердит его через ``confirm_targets``. Каждый новый расчёт —
+    # новое предложение: прежнее подтверждение относилось к прежним
+    # числам, и переносить его на новые значило бы подтвердить за
+    # человека то, чего он не видел. Поэтому ``targets_confirmed_at``
+    # стирается вместе с пересчётом, а не только при отказе.
     if norms.computed:
-        profile.targets_source = NutritionProfile.TargetsSource.AYLA_CALCULATED
+        profile.targets_source = NutritionProfile.TargetsSource.AYLA_PROPOSED
         profile.targets_method_versions = dict(norms.method_versions)
         profile.targets_input_snapshot = dict(norms.input_snapshot)
         profile.targets_computed_at = datetime.now(dt_tz.utc)
+        profile.targets_confirmed_at = None
     else:
         profile.targets_source = NutritionProfile.TargetsSource.NONE
         profile.targets_method_versions = {}
         profile.targets_input_snapshot = {}
         profile.targets_computed_at = None
+        profile.targets_confirmed_at = None
 
 
 def _refuse_recompute(profile: NutritionProfile) -> None:
@@ -384,6 +394,10 @@ def _serialize(
             "source": profile.targets_source,
             "method_versions": profile.targets_method_versions or {},
             "computed_at": _strip_microseconds(profile.targets_computed_at),
+            # §5.1: подтверждение — часть происхождения. ``None`` при
+            # ``ayla_proposed`` (ещё не подтверждено), при ``none`` и у
+            # строк, поставленных до введения подтверждения.
+            "confirmed_at": _strip_microseconds(profile.targets_confirmed_at),
             "input_snapshot": dict(profile.targets_input_snapshot or {}),
         },
         "disclaimer_acked": profile.disclaimer_acked,
@@ -413,3 +427,61 @@ def _strip_microseconds(value):
     base = value.replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
     suffix = f".{ms:03d}Z" if value.tzinfo else f".{ms:03d}"
     return base + suffix
+
+
+# ---------------------------------------------------------------------------
+# Подтверждение предложенного ориентира (§5.1, 11.09.2026)
+# ---------------------------------------------------------------------------
+
+
+class NothingToConfirm(Exception):
+    """Подтверждать нечего: ориентир не в состоянии ``ayla_proposed``.
+
+    Несёт текущий источник, чтобы вызывающий отличил «ещё не считали»
+    (``none``) от «поставлено рукой» (``user_entered``) и от строк без
+    происхождения (``unknown_legacy``) — три разных ответа человеку.
+    """
+
+    code = "NOTHING_TO_CONFIRM"
+
+    def __init__(self, source: str) -> None:
+        self.source = source
+        super().__init__(
+            f"Подтверждать нечего: ориентир в состоянии {source!r}, "
+            "а не 'ayla_proposed'."
+        )
+
+
+def confirm_targets(*, user, external_user_id: str) -> tuple[dict, str]:
+    """Человек подтверждает предложенный ориентир: ``ayla_proposed`` → ``ayla_calculated``.
+
+    Возвращает ``(ответ профиля, исход)``, где исход — ``"confirmed"``
+    либо ``"already_confirmed"``. Второй — на повтор подтверждения уже
+    подтверждённого: это не ошибка (кнопку нажали дважды), но и не новое
+    событие — ``targets_confirmed_at`` не переписывается, иначе повтор
+    выглядел бы как более позднее решение.
+
+    Подтверждается ТО, что предложено: значения не пересчитываются, снимок
+    и версия остаются теми же — человек подтверждает число, которое видел,
+    а не то, что получилось бы сейчас. Если входы изменились, пересчёт
+    уже перевёл строку обратно в ``ayla_proposed`` (см.
+    ``_recompute_and_persist``), и подтверждать нужно заново.
+
+    ``none`` / ``unknown_legacy`` / ``user_entered`` — отказ с именем
+    (:class:`NothingToConfirm`): подтвердить можно только предложение.
+    """
+    with transaction.atomic():
+        profile = (
+            NutritionProfile.objects.select_for_update().filter(user=user).first()
+        )
+        if profile is None:
+            raise NothingToConfirm(NutritionProfile.TargetsSource.NONE)
+        source = profile.targets_source
+        if source == NutritionProfile.TargetsSource.AYLA_CALCULATED:
+            return _serialize(profile, external_user_id, exists=True), "already_confirmed"
+        if source != NutritionProfile.TargetsSource.AYLA_PROPOSED:
+            raise NothingToConfirm(source)
+        profile.targets_source = NutritionProfile.TargetsSource.AYLA_CALCULATED
+        profile.targets_confirmed_at = datetime.now(dt_tz.utc)
+        profile.save(update_fields=["targets_source", "targets_confirmed_at", "updated_at"])
+    return _serialize(profile, external_user_id, exists=True), "confirmed"
