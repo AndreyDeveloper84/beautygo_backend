@@ -49,12 +49,16 @@ def ensure_tenant_user_relationship(sender, instance, **kwargs):
     # Revoke is an admin-gated action — bypassing via a side-effect of
     # `user.save()` would be a security hole. Re-grant requires
     # explicit `TUR.objects.create(...)` or an admin endpoint.
-    has_revoked = TenantUserRelationship.objects.filter(
-        user=instance,
-        tenant_id=instance.tenant_id,
-        is_active=False,
-    ).exists()
-    if has_revoked:
+    # DRF-1248 (owner OD-6): «revoked» = a retired row and NO active one.
+    # A retired row next to an active one is a role change, not a ban —
+    # the same rule as create_booking_service, so «отозван» means one
+    # thing on both sides.
+    rows = TenantUserRelationship.objects.filter(
+        user=instance, tenant_id=instance.tenant_id,
+    ).values_list("is_active", flat=True)
+    has_active = any(rows)
+    has_revoked = any(not active for active in rows)
+    if has_revoked and not has_active:
         import logging
         logging.getLogger(__name__).warning(
             "User.tenant bridge skipped: revoked TUR exists for "
