@@ -20,6 +20,7 @@ import pytest
 from rest_framework.test import APIClient
 
 from analytics.models import AnalyticsEvent
+from .conftest import name_subject
 from users.models import Profile, User, UserPersonalContext
 
 
@@ -36,9 +37,14 @@ def bearer_token(settings):
 
 
 @pytest.fixture
-def api(bearer_token):
+def api(bearer_token, user):
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {bearer_token}")
+    # Бот называет субъект (ai-bot-platform#1535); субъект в URL обязан
+    # совпадать с ним (DRF-1617). Здесь клиент говорит за ``user``.
+    client.credentials(
+        HTTP_AUTHORIZATION=f"Bearer {bearer_token}",
+        HTTP_X_EXTERNAL_USER_ID=name_subject(user),
+    )
     return client
 
 
@@ -95,10 +101,10 @@ class TestAuth:
         assert client.delete(DELETE_URL.format(user_id=user.pk)).status_code in (401, 403)
 
     @pytest.mark.parametrize("url", [EXPORT_URL, DELETE_URL])
-    def test_unknown_user_404(self, api, url):
+    def test_unknown_user_is_refused_as_foreign(self, api, url):
         resp = api.generic("GET" if "export" in url else "DELETE",
                            url.format(user_id=uuid4()))
-        assert resp.status_code == 404
+        assert resp.status_code == 403
         assert resp.json()["error"]["code"] == "NOT_FOUND"
 
     def test_soft_deleted_user_cannot_be_exported(self, api, user):
@@ -164,9 +170,14 @@ class TestExport:
         # Export must not CREATE data about the user (no lazy create).
         assert not UserPersonalContext.objects.filter(user=user).exists()
 
-    def test_profile_missing_fields_are_empty_strings(self, api, db):
+    def test_profile_missing_fields_are_empty_strings(self, api, db, settings):
         bare = User.objects.create_user(
             username="pd-bare", password="pass", role="client",
+        )
+        # ``api`` говорит за ``user``; за ``bare`` надо говорить отдельно (DRF-1617).
+        api.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {settings.AYLA_INTERNAL_API_TOKEN}",
+            HTTP_X_EXTERNAL_USER_ID=name_subject(bare),
         )
         resp = api.get(EXPORT_URL.format(user_id=bare.pk))
         assert resp.status_code == 200

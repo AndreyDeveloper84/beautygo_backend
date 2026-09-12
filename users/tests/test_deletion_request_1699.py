@@ -19,6 +19,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from users.deletion_requests import ensure_deletion_request
+from .conftest import name_subject
 from users.models import DeletionRequest, User, UserPersonalContext
 
 pytestmark = pytest.mark.django_db
@@ -31,9 +32,13 @@ def bearer_token(settings):
 
 
 @pytest.fixture
-def api(bearer_token):
+def api(bearer_token, user):
     client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f"Bearer {bearer_token}")
+    # Субъект в URL обязан совпадать с X-External-User-ID (DRF-1617).
+    client.credentials(
+        HTTP_AUTHORIZATION=f"Bearer {bearer_token}",
+        HTTP_X_EXTERNAL_USER_ID=name_subject(user),
+    )
     return client
 
 
@@ -163,9 +168,9 @@ class TestTheGuardAndTheShape:
         assert r.status_code in (401, 403), r.content
         assert DeletionRequest.objects.filter(user=user).count() == 0
 
-    def test_unknown_user_is_404(self, api):
+    def test_unknown_user_is_refused_as_foreign(self, api):
         r = api.post(_url(uuid4()), {"initiator": "bot"}, format="json")
-        assert r.status_code == 404, r.content
+        assert r.status_code == 403, r.content
 
     def test_unknown_initiator_is_400(self, api, user):
         r = api.post(_url(user.pk), {"initiator": "телефон"}, format="json")

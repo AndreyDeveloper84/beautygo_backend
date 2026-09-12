@@ -1,10 +1,13 @@
 """Custom permission classes for BeautyGO API."""
 
+import logging
 from hmac import compare_digest
 from typing import Any
 
 from django.conf import settings
 from rest_framework import permissions
+
+logger = logging.getLogger(__name__)
 
 
 class IsClientApp(permissions.BasePermission):
@@ -484,3 +487,145 @@ class IsTenantAdminOrPlatformAdmin(permissions.BasePermission):
             role=TenantUserRelationship.Role.ADMIN,
             is_active=True,
         ).exists()
+
+
+# ---------------------------------------------------------------------------
+# DRF-1617 / B-2.1 — the internal token stops meaning "any subject".
+# ---------------------------------------------------------------------------
+
+
+class _CredentialPurpose:
+    """Which credential the caller presented, by the purpose it was issued for."""
+
+    NONE = "none"
+    INTERNAL = "internal"          # AYLA_INTERNAL_API_TOKEN — runtime bot credential
+    PROVISIONING = "provisioning"  # AYLA_IDENTITY_PROVISIONING_TOKEN — ops only
+    UNKNOWN = "unknown"            # a bearer that matches nothing we issued
+
+
+def _bearer(request: Any) -> str:
+    auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+    prefix = "Bearer "
+    if not auth_header.startswith(prefix):
+        return ""
+    return auth_header[len(prefix):].strip()
+
+
+def _credential_purpose(request: Any) -> str:
+    """Classify the presented credential by PURPOSE, not by validity.
+
+    ``IsInternalBearer`` folds every non-runtime outcome into one ``False``.
+    Enough to keep the door shut, not enough to say what knocked. Here the
+    provisioning credential is recognised explicitly: presenting an ops-only
+    secret to a runtime surface is a misdirected purpose, not an invalid
+    token — opposite fixes, identical from outside.
+
+    Constant-time comparison; an unset setting is skipped, never compared.
+    """
+    provided = _bearer(request)
+    if not provided:
+        return _CredentialPurpose.NONE
+    internal = getattr(settings, "AYLA_INTERNAL_API_TOKEN", "") or ""
+    if internal and compare_digest(provided, internal):
+        return _CredentialPurpose.INTERNAL
+    provisioning = getattr(settings, "AYLA_IDENTITY_PROVISIONING_TOKEN", "") or ""
+    if provisioning and compare_digest(provided, provisioning):
+        return _CredentialPurpose.PROVISIONING
+    return _CredentialPurpose.UNKNOWN
+
+
+class IsInternalBearerForSubject(permissions.BasePermission):
+    """Runtime internal bearer, restricted to the caller's OWN subject.
+
+    Attach to any internal view whose URL names a person, and declare which
+    kwarg holds that person::
+
+        class InternalPersonalDataExportView(APIView):
+            permission_classes = [IsInternalBearerForSubject]
+            subject_url_kwarg = "user_id"
+
+    A view that forgets ``subject_url_kwarg`` is refused, loudly (ERROR).
+    Silence would be the one failure this class exists to prevent: an
+    unguarded surface that looks guarded because the class name is in the
+    list.
+
+    ### What is checked, in order
+
+    1. **Purpose.** Only the runtime credential passes. The provisioning
+       credential is recognised and refused *as such*.
+    2. **Named.** ``X-External-User-ID`` is required. Since ai-bot-platform
+       #1535 (11.09.2026) every personal-data / personal-context /
+       deletion-request call from the bot names its subject; an unnamed
+       caller on this surface is therefore not a legitimate caller.
+    3. **Subject.** The header is resolved WITHOUT creating a row
+       (:func:`users.services.resolve_external_user_readonly`) and must
+       equal the UUID in the URL.
+
+    Why not ``has_object_permission``: the subject here is a URL kwarg, not
+    a fetched object — the check must run before the view touches the row,
+    and a view that 404s on a foreign subject would already have looked.
+    Same technique as ``_check_user_scope`` in ``payments/views.py`` (C7.6),
+    lifted into a permission so it cannot be forgotten per method.
+
+    ``request.user`` is NOT replaced: the views on this surface resolve the
+    subject from the URL themselves, and the permission's job is only to
+    say whether the caller may name that subject at all.
+    """
+
+    message = "Internal service auth required"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        from users.services import resolve_external_user_readonly
+
+        purpose = _credential_purpose(request)
+        if purpose != _CredentialPurpose.INTERNAL:
+            if purpose == _CredentialPurpose.PROVISIONING:
+                logger.warning(
+                    "internal.subject_authz.wrong_purpose path=%s",
+                    request.path,
+                )
+            return False
+
+        subject_kwarg = getattr(view, "subject_url_kwarg", None)
+        if not subject_kwarg or subject_kwarg not in getattr(view, "kwargs", {}):
+            # Not a caller error — ours. Fail closed and say so: a route
+            # reaching this branch is a route nobody is guarding.
+            logger.error(
+                "internal.subject_authz.view_misconfigured path=%s view=%s "
+                "subject_url_kwarg=%r",
+                request.path, type(view).__name__, subject_kwarg,
+            )
+            return False
+        subject_id = str(view.kwargs[subject_kwarg])
+
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        if not external_user_id:
+            logger.warning(
+                "internal.subject_authz.unnamed_actor path=%s subject=%s",
+                request.path, subject_id,
+            )
+            self.message = "X-External-User-ID is required on this surface"
+            return False
+
+        actor = resolve_external_user_readonly(external_user_id)
+        if actor is None:
+            # Malformed, or an identity Ayla has never seen. "Not resolved"
+            # is not "resolve it for them": provisioning is a different
+            # purpose with a different credential.
+            logger.warning(
+                "internal.subject_authz.unknown_actor path=%s subject=%s",
+                request.path, subject_id,
+            )
+            self.message = "acting subject is unknown"
+            return False
+
+        if str(actor.pk) != subject_id:
+            # No PII: two UUIDs and a path.
+            logger.warning(
+                "internal.subject_authz.subject_mismatch path=%s subject=%s actor=%s",
+                request.path, subject_id, actor.pk,
+            )
+            self.message = "path subject does not match the acting subject"
+            return False
+
+        return True
