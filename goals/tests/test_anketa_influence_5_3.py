@@ -57,10 +57,27 @@ class TestNoInfluenceNoteIsShown:
     @pytest.mark.django_db
     def test_note_reaches_the_document_prompt(self, customer, settings):
         """То, что рисует экран, — ``prompt`` элемента ``missing``; пометка в нём."""
+        from goals.models import ClientGoal, GoalAnketaAnswer, GoalAnketaRun
+
         settings.GOAL_ANKETA_ENABLED = True
+        # DRF-1764: первый шаг — цель; сужающий шаг приходит после неё.
+        goal = ClientGoal.objects.create(client=customer, goal_key="relax", source_channel="miniapp")
+        run = GoalAnketaRun.objects.create(client=customer, goal=goal)
+        GoalAnketaAnswer.objects.create(run=run, step_key=anketa.GOAL_STEP_KEY, option_key="relax")
         item = build_decision_context(customer)["missing"][0]
         assert item["step"] == anketa.ANKETA_STEPS[0].key
         assert NO_INFLUENCE_NOTE in item["prompt"]
+
+    @pytest.mark.parametrize("step", anketa.ANKETA_STEPS, ids=lambda s: s.key)
+    def test_prompt_under_a_goal_keeps_the_note(self, step):
+        """Формулировка под цель (DRF-1764) — тот же шаг, та же честность."""
+        for goal_key, phrased in step.prompt_by_goal:
+            shown = shown_prompt(step, goal_key)
+            assert shown.startswith(phrased)
+            assert NO_INFLUENCE_NOTE in shown
+        # Незнакомая цель и свободная цель — общий вопрос.
+        assert shown_prompt(step, "no-such-goal").startswith(step.prompt)
+        assert shown_prompt(step, None).startswith(step.prompt)
 
     @pytest.mark.django_db
     def test_wire_shape_is_unchanged(self, customer, settings):
@@ -72,18 +89,18 @@ class TestNoInfluenceNoteIsShown:
         }
 
     @pytest.mark.django_db
-    def test_final_step_influences_and_says_nothing_of_the_kind(self):
+    def test_goal_step_influences_and_says_nothing_of_the_kind(self):
         """Цель — единственный ответ, который доезжает до выдачи.
 
         Положительная стража: без неё пометка могла бы стоять на ВСЕХ
         шагах, и тест на area/feeling зеленел бы на анкете, которая врёт
         про цель в обратную сторону.
         """
-        final = anketa.next_step({s.key for s in anketa.ANKETA_STEPS})
-        assert final.key == anketa.FINAL_STEP_KEY
-        assert final.rule_ids == ("goal.category_match",)
-        assert NO_INFLUENCE_NOTE not in shown_prompt(final)
-        assert shown_prompt(final) == anketa.FINAL_STEP_PROMPT
+        goal = anketa.next_step(set())
+        assert goal.key == anketa.GOAL_STEP_KEY
+        assert goal.rule_ids == ("goal.category_match",)
+        assert NO_INFLUENCE_NOTE not in shown_prompt(goal)
+        assert shown_prompt(goal) == anketa.GOAL_STEP_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -94,9 +111,9 @@ class TestNoInfluenceNoteIsShown:
 class TestInfluenceDeclarationGuard:
     @pytest.mark.django_db
     def test_real_steps_are_clean(self):
-        """Сам сторож на живых шагах — включая финальный."""
-        final = anketa.next_step({s.key for s in anketa.ANKETA_STEPS})
-        assert influence_declaration_errors((*anketa.ANKETA_STEPS, final)) == []
+        """Сам сторож на живых шагах — включая шаг цели."""
+        goal = anketa.next_step(set())
+        assert influence_declaration_errors((*anketa.ANKETA_STEPS, goal)) == []
 
     def test_every_declared_reader_is_importable_and_callable(self):
         """RULE_READERS не должен ссылаться в пустоту — даже для правил, которые

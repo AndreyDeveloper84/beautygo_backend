@@ -182,12 +182,24 @@ class TestDecisionContext:
         doc = build_decision_context(customer, guidance=True)
         assert [m["kind"] for m in doc["missing"]] == [MISSING_GOAL_GUIDANCE]
 
-    def test_suggestions_only_active(self, customer, goal_option):
+    def test_suggestions_only_active(self, customer, goal_option, settings):
+        # DRF-1764: с включённой анкетой первый шаг — цель, и он несёт
+        # курируемые цели сам (suggestions пусты намеренно, чтобы не было
+        # двух одинаковых рядов чипов). Подсказки как отдельная секция —
+        # прежний документ DRF-1190 под выключенной анкетой.
+        settings.GOAL_ANKETA_ENABLED = False
         GoalOption.objects.create(key="off", label="Скрытая", is_active=False)
         doc = build_decision_context(customer)
         assert doc["suggestions"] == [
             {"key": "relax", "label": "Расслабиться и восстановиться"},
         ]
+
+    def test_goal_step_carries_only_active_options(self, customer, goal_option):
+        """Та же фильтрация на шаге цели (DRF-1764): скрытая цель не предлагается."""
+        GoalOption.objects.create(key="off", label="Скрытая", is_active=False)
+        doc = build_decision_context(customer)
+        assert doc["suggestions"] == []
+        assert [o["key"] for o in doc["missing"][0]["options"]] == ["relax"]
 
     def test_document_shape_screen_computes_nothing(self, customer, goal_option, settings):
         """Инвариант Ответа 3: документ содержит только отображаемое —

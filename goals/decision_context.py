@@ -167,12 +167,17 @@ def known_anketa_answers(run: GoalAnketaRun | None) -> list[dict[str, Any]]:
     ]
 
 
-def next_anketa_step(run: GoalAnketaRun | None) -> anketa.AnketaStep:
-    """Какой шаг задавать сейчас. ``None`` — проход ещё не начат."""
-    answered: set[str] = set()
-    if run is not None:
-        answered = set(run.answers.values_list("step_key", flat=True))
-    return anketa.next_step(answered)
+def answered_step_keys(run: GoalAnketaRun | None) -> set[str]:
+    """Ключи отвеченных шагов прохода; без прохода — пусто."""
+    if run is None:
+        return set()
+    return set(run.answers.values_list("step_key", flat=True))
+
+
+def next_anketa_step(run: GoalAnketaRun | None) -> anketa.AnketaStep | None:
+    """Какой шаг задавать сейчас. ``run is None`` — проход ещё не начат;
+    результат ``None`` — спрашивать больше нечего."""
+    return anketa.next_step(answered_step_keys(run))
 
 
 def _goal_is_resolved(goal: ClientGoal, *, service_match: bool = True) -> bool:
@@ -260,9 +265,17 @@ def build_decision_context(
     elif anketa_on and (run is not None or active_goal is None):
         # DRF-1451. Открытый проход ведём до конца независимо от того,
         # есть ли уже цель: повторный проход (C-4) начинается именно так.
-        # Прохода нет и цели нет — задаём первый вопрос; строка прохода
-        # появится на первом ответе, потому что GET не пишет в БД.
-        missing.append(anketa.as_missing_item(next_anketa_step(run)))
+        # Прохода нет и цели нет — задаём первый вопрос (с DRF-1764 это
+        # цель); строка прохода появится на первом ответе, потому что GET
+        # не пишет в БД. Формулировка сужающего шага — под цель прохода
+        # (``run.goal``), а не под любую активную: цель прохода и есть та,
+        # под которую задаются вопросы.
+        step = next_anketa_step(run)
+        if step is not None:
+            run_goal_key = run.goal.goal_key if run is not None and run.goal_id else None
+            missing.append(anketa.as_missing_item(
+                step, answered_keys=answered_step_keys(run), goal_key=run_goal_key,
+            ))
     elif active_goal is None:
         missing.append({"kind": MISSING_GOAL, "prompt": PROMPT_GOAL_MISSING})
     elif not _goal_is_resolved(active_goal, service_match=anketa_on):
@@ -310,19 +323,19 @@ def build_decision_context(
         "label": NEXT_BROWSE_CATALOG_LABEL,
     }
 
-    # На финальном шаге сам шаг УЖЕ несёт курируемые цели своими
-    # options — из того же queryset, что и suggestions. Оставить обе
-    # секции значило бы нарисовать человеку два одинаковых ряда чипов
-    # с одинаковыми подписями, отправляющих разные тела с одинаковым
+    # На шаге цели сам шаг УЖЕ несёт курируемые цели своими options —
+    # из того же queryset, что и suggestions. Оставить обе секции
+    # значило бы нарисовать человеку два одинаковых ряда чипов с
+    # одинаковыми подписями, отправляющих разные тела с одинаковым
     # исходом. Выход при этом не теряется: чипы шага создают цель ровно
-    # так же, и свободный ввод на финальном шаге открыт.
-    on_final_step = bool(missing) and missing[0].get("step") == anketa.FINAL_STEP_KEY
+    # так же, и свободный ввод на шаге цели открыт.
+    on_goal_step = bool(missing) and missing[0].get("step") == anketa.GOAL_STEP_KEY
 
     return {
         "version": 2,
         "known": known,
         "missing": missing,
-        "suggestions": [] if on_final_step else _suggestions(),
+        "suggestions": [] if on_goal_step else _suggestions(),
         "intents": intents,
         "next": next_step_hint,
     }

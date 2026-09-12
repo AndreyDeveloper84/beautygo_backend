@@ -2,8 +2,9 @@
 
 Что здесь заперто:
 
-- анкета доходит до конца и по завершении цель СФОРМИРОВАНА
-  (``known.goal`` заполнен, ``missing`` пуст);
+- цель — ПЕРВЫЙ шаг (DRF-1764, OD-C02-ORDER): ответ на него создаёт
+  ``ClientGoal`` сразу, сужающие шаги идут под неё, проход завершается
+  последним из них (``missing`` пуст);
 - последовательность серверная: пропустить шаг из клиента нельзя;
 - **анкета не ворота** — путь «назвал услугу → попал к подбору»
   проходится, НЕ ответив ни на один вопрос (условие C-2 поправки A-1
@@ -89,6 +90,21 @@ def _kinds(doc) -> list[str]:
     return [m["kind"] for m in doc["missing"]]
 
 
+def _answer_goal(api, option_key: str = "relax"):
+    """Первый шаг — цель (DRF-1764)."""
+    return _answer(api, anketa.GOAL_STEP_KEY, option_key=option_key)
+
+
+def _answer_narrowing(api):
+    """Все сужающие шаги по порядку сервера."""
+    doc = None
+    for step in anketa.ANKETA_STEPS:
+        resp = _answer(api, step.key, option_key=step.options[0][0])
+        assert resp.status_code == 200, resp.content
+        doc = resp.json()["data"]
+    return doc
+
+
 # ---------------------------------------------------------------------------
 # Форма документа
 # ---------------------------------------------------------------------------
@@ -104,14 +120,13 @@ class TestDocumentShape:
         assert doc["known"]["goal"] is None
         assert _kinds(doc) == [anketa.MISSING_GOAL_ANKETA]
 
+        # DRF-1764: первый шаг — цель.
         item = doc["missing"][0]
-        assert item["step"] == anketa.ANKETA_STEPS[0].key
+        assert item["step"] == anketa.GOAL_STEP_KEY
         assert item["progress"] == {
             "index": 1, "total": anketa.TOTAL_STEPS, "is_last": False,
         }
-        assert [o["key"] for o in item["options"]] == [
-            key for key, _ in anketa.ANKETA_STEPS[0].options
-        ]
+        assert item["allow_free_text"] is True
 
     def test_step_item_carries_only_renderable_fields(self, customer, settings):
         """Инвариант Ответа 3, распространённый на шаг анкеты.
@@ -166,20 +181,23 @@ class TestAnketaFormsAGoal:
         doc = api.get(CTX_URL).json()["data"]
         assert doc["known"]["goal"] is None
 
+        # Первый шаг — цель: варианты пришли из GoalOption (DRF-1764).
+        first = doc["missing"][0]
+        assert first["step"] == anketa.GOAL_STEP_KEY
+        assert first["allow_free_text"] is True
+        assert [o["key"] for o in first["options"]] == ["relax", "glow"]
+
+        doc = _answer_goal(api, "relax").json()["data"]
+        # Цель есть СРАЗУ, проход продолжается сужающими шагами под неё.
+        assert doc["known"]["goal"]["goal_key"] == "relax"
+        assert GoalAnketaRun.objects.get(client=customer).completed_at is None
+
         for step in anketa.ANKETA_STEPS:
             item = doc["missing"][0]
             assert item["step"] == step.key
             resp = _answer(api, step.key, option_key=step.options[0][0])
             assert resp.status_code == 200, resp.content
             doc = resp.json()["data"]
-
-        # Финальный шаг — сама цель: варианты пришли из GoalOption.
-        final = doc["missing"][0]
-        assert final["step"] == anketa.FINAL_STEP_KEY
-        assert final["allow_free_text"] is True
-        assert [o["key"] for o in final["options"]] == ["relax", "glow"]
-
-        doc = _answer(api, anketa.FINAL_STEP_KEY, option_key="relax").json()["data"]
 
         assert doc["known"]["goal"]["goal_key"] == "relax"
         assert doc["missing"] == []
@@ -191,7 +209,7 @@ class TestAnketaFormsAGoal:
         # Ответы на сужающие шаги сохранены — корпус OD-2.
         assert set(
             GoalAnketaAnswer.objects.filter(run=run).values_list("step_key", flat=True)
-        ) == {step.key for step in anketa.ANKETA_STEPS} | {anketa.FINAL_STEP_KEY}
+        ) == {step.key for step in anketa.ANKETA_STEPS} | {anketa.GOAL_STEP_KEY}
 
     def test_step_echo_must_match_the_expected_step(self, customer, token):
         """Пропустить вопрос из клиента нельзя — последовательность серверная."""
@@ -202,28 +220,34 @@ class TestAnketaFormsAGoal:
         )
         assert resp.status_code == 409
         assert resp.json()["error"]["code"] == "ANKETA_STEP_MISMATCH"
-        assert resp.json()["error"]["details"]["expected_step"] == (
-            anketa.ANKETA_STEPS[0].key
-        )
+        assert resp.json()["error"]["details"]["expected_step"] == anketa.GOAL_STEP_KEY
         assert GoalAnketaAnswer.objects.count() == 0
         # Отклонённый ответ не должен оставлять после себя проход.
         # Раньше оставлял — и человек с целью получал анкету при каждом
         # открытии приложения, навсегда.
         assert GoalAnketaRun.objects.count() == 0
 
-    def test_unknown_option_is_rejected(self, customer, token):
+    def test_unknown_option_is_rejected(self, customer, token, goal_options):
         api = _api()
+        _answer_goal(api)
         resp = _answer(api, anketa.ANKETA_STEPS[0].key, option_key="not-an-option")
         assert resp.status_code == 400
-        assert GoalAnketaAnswer.objects.count() == 0
-        assert GoalAnketaRun.objects.count() == 0
+        assert not GoalAnketaAnswer.objects.filter(step_key=anketa.ANKETA_STEPS[0].key).exists()
 
-    def test_free_text_is_refused_on_a_closed_step(self, customer, token):
+    def test_unknown_goal_option_leaves_no_run(self, customer, token, goal_options):
         api = _api()
-        resp = _answer(api, anketa.ANKETA_STEPS[0].key, text="что-нибудь своё")
+        resp = _answer_goal(api, "not-an-option")
         assert resp.status_code == 400
         assert GoalAnketaAnswer.objects.count() == 0
         assert GoalAnketaRun.objects.count() == 0
+        assert ClientGoal.objects.count() == 0
+
+    def test_free_text_is_refused_on_a_closed_step(self, customer, token, goal_options):
+        api = _api()
+        _answer_goal(api)
+        resp = _answer(api, anketa.ANKETA_STEPS[0].key, text="что-нибудь своё")
+        assert resp.status_code == 400
+        assert not GoalAnketaAnswer.objects.filter(step_key=anketa.ANKETA_STEPS[0].key).exists()
 
     def test_stale_answer_from_a_client_with_a_goal_leaves_no_open_run(
         self, customer, token, goal_options,
@@ -243,7 +267,8 @@ class TestAnketaFormsAGoal:
             client=customer, goal_key="relax", source_channel="bot",
         )
         api = _api()
-        resp = _answer(api, anketa.FINAL_STEP_KEY, option_key="relax")
+        first = anketa.ANKETA_STEPS[0]
+        resp = _answer(api, first.key, option_key=first.options[0][0])
         assert resp.status_code == 409
 
         assert GoalAnketaRun.objects.count() == 0
@@ -269,28 +294,37 @@ class TestAnketaFormsAGoal:
         где молча не находил ничего.
         """
         api = _api()
-        for step in anketa.ANKETA_STEPS:
-            _answer(api, step.key, option_key=step.options[0][0])
         assert not GoalOption.objects.filter(is_active=True).exists()
 
         # Латиницей: SlugField кириллицу отвергает сам, и тест прошёл бы
         # по чужой причине, ничего не проверив.
-        resp = _answer(api, anketa.FINAL_STEP_KEY, option_key="anything-at-all")
+        resp = _answer_goal(api, "anything-at-all")
         assert resp.status_code == 400
         assert ClientGoal.objects.count() == 0
 
-    def test_final_step_accepts_free_text_and_forms_the_goal(
+    def test_goal_step_accepts_free_text_and_a_named_service_skips_the_rest(
         self, customer, token, goal_options, catalog,
     ):
         api = _api()
-        for step in anketa.ANKETA_STEPS:
-            _answer(api, step.key, option_key=step.options[0][0])
-        doc = _answer(api, anketa.FINAL_STEP_KEY, text="Маникюр").json()["data"]
+        doc = _answer(api, anketa.GOAL_STEP_KEY, text="Маникюр").json()["data"]
 
         goal = ClientGoal.objects.get(client=customer, state=ClientGoal.State.ACTIVE)
         assert goal.goal_key is None
         assert goal.goal_text == "Маникюр"  # дословно, OD-2
-        assert doc["missing"] == []  # названа услуга — уточнять нечего
+        # Названа услуга — уточнять область и ощущение нечего: проход
+        # закрыт, человек уходит к подбору (C-2).
+        assert doc["missing"] == []
+        assert GoalAnketaRun.objects.get(client=customer).completed_at is not None
+
+    def test_goal_step_free_text_without_a_service_continues_the_pass(
+        self, customer, token, goal_options, catalog,
+    ):
+        """Свободная цель без названной услуги — сужающие вопросы задаются."""
+        api = _api()
+        doc = _answer(api, anketa.GOAL_STEP_KEY, text="хочу что-то для себя").json()["data"]
+        assert doc["known"]["goal"]["goal_text"] == "хочу что-то для себя"
+        assert doc["missing"][0]["step"] == anketa.ANKETA_STEPS[0].key
+        assert GoalAnketaRun.objects.get(client=customer).completed_at is None
 
     def test_get_does_not_start_a_run(self, customer, token):
         """GET не пишет: первый вопрос виден, строки прохода ещё нет."""
@@ -357,7 +391,7 @@ class TestAnketaIsNotAGate:
         assert GoalAnketaAnswer.objects.count() == 0
 
     def test_leaving_mid_anketa_closes_the_run_instead_of_dragging_back(
-        self, customer, token, catalog,
+        self, customer, token, catalog, goal_options,
     ):
         """Назвал услугу на втором вопросе — и не вернулся в вопросы.
 
@@ -365,6 +399,7 @@ class TestAnketaIsNotAGate:
         снова показать вопрос: анкета стала бы воротами с отсрочкой.
         """
         api = _api()
+        _answer_goal(api)
         first = anketa.ANKETA_STEPS[0]
         _answer(api, first.key, option_key=first.options[0][0])
         assert build_decision_context(customer)["missing"][0]["step"] == (
@@ -380,7 +415,8 @@ class TestAnketaIsNotAGate:
         assert build_decision_context(customer)["missing"] == []
         run = GoalAnketaRun.objects.get(client=customer)
         assert run.completed_at is not None
-        assert run.goal is not None
+        # Прямой выбор закрыл проход ЕГО целью, а не целью прохода.
+        assert run.goal is not None and run.goal.goal_text == "Маникюр"
 
     def test_unrecognised_free_text_still_asks_for_clarification(
         self, customer, token,
@@ -399,7 +435,9 @@ class TestAnketaIsNotAGate:
         ).json()["data"]
         assert _kinds(doc) == [MISSING_GOAL_CLARIFICATION]
 
-    def test_a_way_out_exists_on_every_single_state(self, customer, token, catalog):
+    def test_a_way_out_exists_on_every_single_state(
+        self, customer, token, catalog, goal_options,
+    ):
         """`next` есть ВСЕГДА — иначе анкета ворота, и не в теории.
 
         Поверхность цели монтируется на корне. Кнопки «назад» там нет
@@ -429,7 +467,10 @@ class TestAnketaIsNotAGate:
         assert doc["missing"], "предусловие: вопрос на экране есть"
         assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
 
-        # 2. Середина анкеты.
+        # 2. Середина анкеты (цель уже выбрана, идут сужающие вопросы).
+        doc = _answer_goal(api).json()["data"]
+        assert doc["missing"]
+        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
         first = anketa.ANKETA_STEPS[0]
         doc = _answer(api, first.key, option_key=first.options[0][0]).json()["data"]
         assert doc["missing"]
@@ -465,22 +506,20 @@ class TestAnketaIsNotAGate:
         assert _kinds(doc) == ["goal_guidance"]
         assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
 
-    def test_final_step_does_not_duplicate_its_own_chips_as_suggestions(
+    def test_goal_step_does_not_duplicate_its_own_chips_as_suggestions(
         self, customer, token, goal_options,
     ):
-        """Финальный шаг сам несёт курируемые цели — второй ряд лишний.
+        """Шаг цели сам несёт курируемые цели — второй ряд лишний.
 
         `suggestions` строятся из того же queryset. Оставить обе секции
         значило нарисовать два одинаковых ряда чипов с одинаковыми
         подписями. Выход при этом не теряется: чипы шага создают цель
-        так же, и свободный ввод на финальном шаге открыт.
+        так же, и свободный ввод на шаге цели открыт.
         """
         api = _api()
-        for step in anketa.ANKETA_STEPS:
-            _answer(api, step.key, option_key=step.options[0][0])
         doc = api.get(CTX_URL).json()["data"]
 
-        assert doc["missing"][0]["step"] == anketa.FINAL_STEP_KEY
+        assert doc["missing"][0]["step"] == anketa.GOAL_STEP_KEY
         assert [o["key"] for o in doc["missing"][0]["options"]] == ["relax", "glow"]
         assert doc["suggestions"] == []
         assert doc["missing"][0]["allow_free_text"] is True
@@ -571,6 +610,12 @@ class TestOldPathsSurvive:
     ):
         api = _api()
         doc = api.get(CTX_URL).json()["data"]
+        # Шаг цели несёт чипы целей сам (suggestions пусты намеренно);
+        # намерения и выход — на месте.
+        ids = [i["id"] for i in doc["intents"]]
+        assert {"choose_suggested", "formulate_own", "need_guidance"} <= set(ids)
+        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG, "выход обязан быть всегда"
+        doc = _answer_goal(api).json()["data"]
         for _ in anketa.ANKETA_STEPS:
             ids = [i["id"] for i in doc["intents"]]
             assert {"choose_suggested", "formulate_own", "need_guidance"} <= set(ids)
@@ -623,7 +668,8 @@ class TestRepeatPass:
             format="json",
         ).json()["data"]
 
-        assert doc["missing"][0]["step"] == anketa.ANKETA_STEPS[0].key
+        # Повторный проход тоже начинается с цели (DRF-1764).
+        assert doc["missing"][0]["step"] == anketa.GOAL_STEP_KEY
         # Начатый заново проход НЕ отменяет действующую цель: бросить
         # анкету на середине не значит остаться без цели.
         assert doc["known"]["goal"]["goal_key"] == "relax"
@@ -638,12 +684,10 @@ class TestRepeatPass:
                 {"intent": INTENT_START_ANKETA, "source_channel": "miniapp"},
                 format="json",
             )
-            for step in anketa.ANKETA_STEPS:
-                _answer(api, step.key, option_key=step.options[0][0])
-            doc = _answer(
-                api, anketa.FINAL_STEP_KEY, option_key=expected_key,
-            ).json()["data"]
+            _answer_goal(api, expected_key)
+            doc = _answer_narrowing(api)
             assert doc["known"]["goal"]["goal_key"] == expected_key
+            assert doc["missing"] == []
 
         assert GoalAnketaRun.objects.filter(client=customer).count() == 3
         assert ClientGoal.objects.filter(client=customer, state=ClientGoal.State.ACTIVE).count() == 1
@@ -675,43 +719,65 @@ class TestIsLastIsAGuarantee:
     ``next_step`` никогда не находит следующего.
     """
 
-    def test_narrowing_steps_are_never_last(self):
-        answered: set[str] = set()
+    def test_goal_step_is_never_last(self, goal_options):
+        goal = anketa.next_step(set())
+        assert goal.key == anketa.GOAL_STEP_KEY
+        assert anketa.is_last_step(goal, set()) is False
+
+    def test_only_the_step_after_which_nothing_is_asked_is_last(self, goal_options):
+        answered: set[str] = {anketa.GOAL_STEP_KEY}
         for step in anketa.ANKETA_STEPS:
-            assert anketa.is_last_step(step) is False
+            # Последний — ровно тот, после ответа на который next_step пуст.
+            expected = anketa.next_step(answered | {step.key}) is None
+            assert anketa.is_last_step(step, answered) is expected
             answered.add(step.key)
-            # После этого шага сервер ещё что-то спросит — значит, он не
-            # последний, что бы ни говорили числа.
-            assert anketa.next_step(answered) is not None
+        assert anketa.is_last_step(anketa.ANKETA_STEPS[-1], answered) is True
 
-    def test_final_step_is_last(self, goal_options):
-        final = anketa.next_step({step.key for step in anketa.ANKETA_STEPS})
-        assert final.key == anketa.FINAL_STEP_KEY
-        assert anketa.is_last_step(final) is True
-
-    def test_is_last_is_not_index_equals_total(self):
-        """Равенство чисел — совпадение. Признак держится на ключе шага:
-        шаг с номером ``total``, не являющийся финальным, не последний."""
+    def test_is_last_is_not_index_equals_total(self, goal_options):
+        """Равенство чисел — совпадение. Признак держится на next_step, не
+        на номере: шаг с номером ``total``, которого проход не знает,
+        не последний — после него сервер всё ещё спросит цель."""
         impostor = anketa.AnketaStep(
             key="impostor", prompt="?", options=(("a", "A"),),
         )
         assert anketa.step_index(impostor.key) == anketa.TOTAL_STEPS
-        assert anketa.is_last_step(impostor) is False
+        assert anketa.is_last_step(impostor, set()) is False
 
-    def test_document_carries_is_last_only_on_the_final_step(
+    def test_document_carries_is_last_only_on_the_last_narrowing_step(
         self, customer, token, goal_options,
     ):
         api = _api()
         doc = api.get(CTX_URL).json()["data"]
         seen: list[tuple[str, bool]] = []
+        item = doc["missing"][0]
+        seen.append((item["step"], item["progress"]["is_last"]))
+        doc = _answer_goal(api).json()["data"]
         for step in anketa.ANKETA_STEPS:
             item = doc["missing"][0]
             seen.append((item["step"], item["progress"]["is_last"]))
             doc = _answer(api, step.key, option_key=step.options[0][0]).json()["data"]
-        final = doc["missing"][0]
-        seen.append((final["step"], final["progress"]["is_last"]))
 
         assert seen == [
-            *[(step.key, False) for step in anketa.ANKETA_STEPS],
-            (anketa.FINAL_STEP_KEY, True),
+            (anketa.GOAL_STEP_KEY, False),
+            *[(step.key, False) for step in anketa.ANKETA_STEPS[:-1]],
+            (anketa.ANKETA_STEPS[-1].key, True),
         ]
+
+    def test_legacy_pass_started_before_goal_first_ends_on_the_goal(
+        self, customer, token, goal_options,
+    ):
+        """Проход, начатый до DRF-1764 (сужающие отвечены, цели нет), не
+        мигрируется: он получает вопрос о цели, и цель его закрывает."""
+        run = GoalAnketaRun.objects.create(client=customer)
+        for step in anketa.ANKETA_STEPS:
+            GoalAnketaAnswer.objects.create(run=run, step_key=step.key, option_key=step.options[0][0])
+        api = _api()
+        doc = api.get(CTX_URL).json()["data"]
+        assert doc["missing"][0]["step"] == anketa.GOAL_STEP_KEY
+        assert doc["missing"][0]["progress"]["is_last"] is True
+
+        doc = _answer_goal(api).json()["data"]
+        assert doc["known"]["goal"]["goal_key"] == "relax"
+        assert doc["missing"] == []
+        run.refresh_from_db()
+        assert run.completed_at is not None and run.goal.goal_key == "relax"

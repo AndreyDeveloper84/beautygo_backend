@@ -68,6 +68,13 @@ def _answer(api, step: str, *, revise: bool = False, **kwargs):
     return api.post(SELECT_URL, body, format="json")
 
 
+def _answer_goal(api):
+    """Первый шаг — цель (DRF-1764); сужающие идут после."""
+    resp = _answer(api, anketa.GOAL_STEP_KEY, option_key="relax")
+    assert resp.status_code == 200, resp.content
+    return resp
+
+
 @pytest.mark.django_db
 class TestKnownAnketa:
     def test_empty_before_the_first_answer(self, customer, token):
@@ -75,14 +82,16 @@ class TestKnownAnketa:
         assert doc["known"]["anketa"] == []
 
     def test_each_answer_becomes_a_renderable_row_in_step_order(
-        self, customer, token,
+        self, customer, token, goal_options,
     ):
         api = _api()
-        _answer(api, AREA.key, option_key=AREA.options[1][0])
-        doc = _answer(api, FEELING.key, option_key=FEELING.options[0][0]).json()["data"]
+        _answer_goal(api)
+        doc = _answer(api, AREA.key, option_key=AREA.options[1][0]).json()["data"]
 
         rows = doc["known"]["anketa"]
-        assert [r["step"] for r in rows] == [AREA.key, FEELING.key]
+        # Цель — не строка анкеты: она живёт в known.goal.
+        assert [r["step"] for r in rows] == [AREA.key]
+        assert doc["known"]["goal"]["goal_key"] == "relax"
         area_row = rows[0]
         assert area_row == {
             "step": AREA.key,
@@ -113,9 +122,10 @@ class TestKnownAnketa:
 
     def test_completed_run_shows_nothing(self, customer, token, goal_options):
         api = _api()
+        _answer_goal(api)
+        doc = None
         for step in anketa.ANKETA_STEPS:
-            _answer(api, step.key, option_key=step.options[0][0])
-        doc = _answer(api, anketa.FINAL_STEP_KEY, option_key="relax").json()["data"]
+            doc = _answer(api, step.key, option_key=step.options[0][0]).json()["data"]
         assert doc["known"]["goal"]["goal_key"] == "relax"
         assert doc["known"]["anketa"] == []
 
@@ -123,9 +133,10 @@ class TestKnownAnketa:
 @pytest.mark.django_db
 class TestRevise:
     def test_revise_changes_the_answer_and_keeps_the_pass_where_it_was(
-        self, customer, token,
+        self, customer, token, goal_options,
     ):
         api = _api()
+        _answer_goal(api)
         _answer(api, AREA.key, option_key=AREA.options[0][0])
         before = api.get(CTX_URL).json()["data"]
         assert before["missing"][0]["step"] == FEELING.key
@@ -141,10 +152,11 @@ class TestRevise:
         assert GoalAnketaAnswer.objects.filter(step_key=AREA.key).count() == 1
 
     def test_revising_an_unanswered_step_is_the_same_409_as_before(
-        self, customer, token,
+        self, customer, token, goal_options,
     ):
         """Положительная стража: пересмотр не ослабляет защиту порядка."""
         api = _api()
+        _answer_goal(api)
         _answer(api, AREA.key, option_key=AREA.options[0][0])
         resp = _answer(api, FEELING.key, revise=True, option_key=FEELING.options[0][0])
         assert resp.status_code == 409, resp.content
@@ -166,27 +178,28 @@ class TestRevise:
         assert GoalAnketaRun.objects.count() == 0
         assert GoalAnketaAnswer.objects.count() == 0
 
-    def test_final_step_cannot_be_revised(self, customer, token, goal_options):
+    def test_goal_step_cannot_be_revised(self, customer, token, goal_options):
         """Цель меняют выбором цели, не пересмотром ответа: 400, не 409."""
         api = _api()
-        for step in anketa.ANKETA_STEPS:
-            _answer(api, step.key, option_key=step.options[0][0])
-        resp = _answer(api, anketa.FINAL_STEP_KEY, revise=True, option_key="relax")
+        _answer_goal(api)
+        resp = _answer(api, anketa.GOAL_STEP_KEY, revise=True, option_key="relax")
         assert resp.status_code == 400, resp.content
         assert resp.json()["error"]["code"] == "VALIDATION_ERROR"
 
-    def test_unknown_option_on_revise_is_validation_error(self, customer, token):
+    def test_unknown_option_on_revise_is_validation_error(self, customer, token, goal_options):
         api = _api()
+        _answer_goal(api)
         _answer(api, AREA.key, option_key=AREA.options[0][0])
         resp = _answer(api, AREA.key, revise=True, option_key="nope")
         assert resp.status_code == 400, resp.content
         assert GoalAnketaAnswer.objects.get(step_key=AREA.key).option_key == AREA.options[0][0]
 
     def test_plain_answer_without_revise_still_refuses_out_of_order(
-        self, customer, token,
+        self, customer, token, goal_options,
     ):
         """Старый путь не изменился: без флага ответ не по порядку — 409."""
         api = _api()
+        _answer_goal(api)
         _answer(api, AREA.key, option_key=AREA.options[0][0])
         resp = _answer(api, AREA.key, option_key=AREA.options[1][0])
         assert resp.status_code == 409

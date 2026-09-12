@@ -28,16 +28,25 @@ PR.
 conversational implementation»), а его исполнение: анкета — проекция
 серверного механизма ``missing``, а не клиентский мастер.
 
-Устройство прохода
-------------------
+Устройство прохода (DRF-1764, решение владельца OD-C02-ORDER 12.09)
+--------------------------------------------------------------------
+
+Цель — ПЕРВЫЙ шаг (``GOAL_STEP_KEY``): варианты берутся из курируемых
+``GoalOption``, свободный ввод разрешён. Ответ на него создаёт
+``ClientGoal`` сразу — «Твоя цель» на следующих кадрах уже есть, и
+сужающие вопросы задаются ПОД неё (макет C02: «Что именно хочется
+изменить?» для «Лучше выглядеть»). До DRF-1764 цель была последним
+шагом (DRF-1451: «завершение анкеты и есть выбор цели»); владелец
+пересмотрел это (DRF-1349, 12.09 04:49, вариант A — цель первой).
 
 Сужающие шаги (``ANKETA_STEPS``) — с закрытым списком вариантов; ответы
-на них durable, это будущий корпус формулировок (OD-2).
+на них durable, это будущий корпус формулировок (OD-2). Формулировка
+шага может зависеть от выбранной цели (``prompt_by_goal``); без
+подходящей — общий ``prompt``.
 
-Финальный шаг (``FINAL_STEP_KEY``) — сама цель: варианты берутся из
-курируемых ``GoalOption``, свободный ввод разрешён. Ответ на него и
-создаёт ``ClientGoal``; отдельной «кнопки завершить» нет, потому что
-завершение анкеты и есть выбор цели.
+Проход завершается ответом на последний сужающий шаг; отдельной
+«кнопки завершить» нет. «Это последний вопрос» сервер вычисляет
+(:func:`is_last_step`), а не выводит из номера.
 
 Чего здесь НЕТ
 --------------
@@ -56,7 +65,7 @@ from services.models import GoalOption
 
 MISSING_GOAL_ANKETA = "goal_anketa"
 
-FINAL_STEP_KEY = "goal"
+GOAL_STEP_KEY = "goal"
 
 
 @dataclass(frozen=True)
@@ -76,6 +85,10 @@ class AnketaStep:
     options: tuple[tuple[str, str], ...] = ()
     allow_free_text: bool = False
     rule_ids: tuple[str, ...] = ()
+    #: Формулировка под цель: ``GoalOption.key`` → вопрос (DRF-1764, макет
+    #: C02 «формулировку адаптируем под выбранную цель»). Пары, а не dict,
+    #: чтобы шаг оставался hashable/frozen. Нет пары — общий ``prompt``.
+    prompt_by_goal: tuple[tuple[str, str], ...] = ()
 
 
 # ─── влияние ответа на решение (§5.3) ─────────────────────────────────────
@@ -101,16 +114,22 @@ RULE_READERS: dict[str, str] = {
 }
 
 
-def shown_prompt(step: AnketaStep) -> str:
+def prompt_for(step: AnketaStep, goal_key: str | None = None) -> str:
+    """Голый вопрос шага под цель ``goal_key`` (DRF-1764); без пары — общий."""
+    return dict(step.prompt_by_goal).get(goal_key or "", step.prompt)
+
+
+def shown_prompt(step: AnketaStep, goal_key: str | None = None) -> str:
     """Текст шага, каким его увидит человек.
 
     Без правил — вопрос плюс пометка; с правилами — вопрос как есть.
     Пометка приходит с сервера в самом ``prompt`` (условие C-1: экран
     рисует, не решает), поэтому мини-приложению для неё правка не нужна.
     """
+    prompt = prompt_for(step, goal_key)
     if step.rule_ids:
-        return step.prompt
-    return f"{step.prompt} {NO_INFLUENCE_NOTE}"
+        return prompt
+    return f"{prompt} {NO_INFLUENCE_NOTE}"
 
 
 def influence_declaration_errors(steps: tuple[AnketaStep, ...]) -> list[str]:
@@ -125,12 +144,18 @@ def influence_declaration_errors(steps: tuple[AnketaStep, ...]) -> list[str]:
 
     errors: list[str] = []
     for step in steps:
-        prompt = shown_prompt(step)
+        # Все формулировки шага — общая и под каждую цель: пометка обязана
+        # стоять в каждой, иначе «не влияет» говорилось бы не всем.
+        prompts = [shown_prompt(step)] + [
+            shown_prompt(step, goal_key) for goal_key, _ in step.prompt_by_goal
+        ]
         if not step.rule_ids:
-            if NO_INFLUENCE_NOTE not in prompt:
-                errors.append(f"{step.key}: нет правил и нет пометки")
+            for prompt in prompts:
+                if NO_INFLUENCE_NOTE not in prompt:
+                    errors.append(f"{step.key}: нет правил и нет пометки")
+                    break
             continue
-        if NO_INFLUENCE_NOTE in prompt:
+        if any(NO_INFLUENCE_NOTE in prompt for prompt in prompts):
             errors.append(f"{step.key}: есть правила, но текст говорит «не влияет»")
         for rule_id in step.rule_ids:
             path = RULE_READERS.get(rule_id)
@@ -155,6 +180,17 @@ ANKETA_STEPS: tuple[AnketaStep, ...] = (
     AnketaStep(
         key="area",
         prompt="Что сейчас хочется привести в порядок?",
+        # Макет C02: «Что именно хочется изменить?» для целей про внешность,
+        # «Что хочется наладить в первую очередь?» для «привести себя в
+        # порядок». Ключи — из services/seeds/goal_options_2026-08.json;
+        # свободная цель (goal_key NULL) получает общий вопрос.
+        prompt_by_goal=(
+            ("new_look", "Что именно хочется изменить?"),
+            ("skin_care", "Что именно хочется изменить?"),
+            ("body_shape", "Что именно хочется изменить?"),
+            ("self_care", "Что хочется наладить в первую очередь?"),
+            ("event", "Что важно привести в порядок к событию?"),
+        ),
         options=(
             ("face", "Лицо и кожа"),
             ("body", "Тело и вес"),
@@ -166,6 +202,12 @@ ANKETA_STEPS: tuple[AnketaStep, ...] = (
     AnketaStep(
         key="feeling",
         prompt="Как хочешь себя чувствовать после?",
+        # Макет C02: «Что сейчас хочется почувствовать по-другому?» для
+        # «Расслабиться и восстановиться».
+        prompt_by_goal=(
+            ("relax", "Что сейчас хочется почувствовать по-другому?"),
+            ("recharge", "Что сейчас хочется почувствовать по-другому?"),
+        ),
         options=(
             ("rested", "Отдохнувшей"),
             ("confident", "Увереннее"),
@@ -176,14 +218,14 @@ ANKETA_STEPS: tuple[AnketaStep, ...] = (
     ),
 )
 
-FINAL_STEP_PROMPT = "Выбери цель — или напиши своими словами, чего хочешь."
+GOAL_STEP_PROMPT = "Выбери цель — или напиши своими словами, чего хочешь."
 
-# Полное число шагов прохода: сужающие + финальный.
-TOTAL_STEPS = len(ANKETA_STEPS) + 1
+# Полное число шагов прохода: цель + сужающие.
+TOTAL_STEPS = 1 + len(ANKETA_STEPS)
 
 _STEP_BY_KEY = {step.key: step for step in ANKETA_STEPS}
 
-_ANSWERABLE_KEYS = frozenset({*_STEP_BY_KEY, FINAL_STEP_KEY})
+_ANSWERABLE_KEYS = frozenset({*_STEP_BY_KEY, GOAL_STEP_KEY})
 
 
 def is_answerable_step(step_key: str) -> bool:
@@ -192,7 +234,7 @@ def is_answerable_step(step_key: str) -> bool:
 
 
 def narrowing_step(step_key: str) -> AnketaStep | None:
-    """Сужающий шаг по ключу; финальный и незнакомые — ``None``."""
+    """Сужающий шаг по ключу; шаг цели и незнакомые — ``None``."""
     return _STEP_BY_KEY.get(step_key)
 
 
@@ -220,15 +262,15 @@ def as_known_answer(
     }
 
 
-def _final_step() -> AnketaStep:
-    """Финальный шаг: варианты — курируемые цели, свободный ввод открыт."""
+def goal_step() -> AnketaStep:
+    """Шаг цели: варианты — курируемые цели, свободный ввод открыт."""
     options = tuple(
         (option.key, option.label)
         for option in GoalOption.objects.filter(is_active=True)
     )
     return AnketaStep(
-        key=FINAL_STEP_KEY,
-        prompt=FINAL_STEP_PROMPT,
+        key=GOAL_STEP_KEY,
+        prompt=GOAL_STEP_PROMPT,
         options=options,
         allow_free_text=True,
         # Единственный шаг, ответ на который доезжает до выдачи:
@@ -237,39 +279,46 @@ def _final_step() -> AnketaStep:
     )
 
 
-def next_step(answered_keys: set[str]) -> AnketaStep:
-    """Какой шаг задавать при уже отвеченных ``answered_keys``.
+def next_step(answered_keys: set[str]) -> AnketaStep | None:
+    """Какой шаг задавать при уже отвеченных ``answered_keys``; ``None`` —
+    спрашивать больше нечего, проход завершён.
 
     Порядок — единственный источник правды о последовательности, и он
-    целиком здесь. Финальный шаг возвращается, когда сужающие
-    закончились: анкета всегда завершается выбором цели.
+    целиком здесь: цель первой, затем сужающие по списку. Проход,
+    начатый до DRF-1764 (сужающие отвечены, цели нет), не мигрируется —
+    он просто получает вопрос о цели и завершается штатно.
     """
+    if GOAL_STEP_KEY not in answered_keys:
+        return goal_step()
     for step in ANKETA_STEPS:
         if step.key not in answered_keys:
             return step
-    return _final_step()
+    return None
 
 
 def step_index(step_key: str) -> int:
-    """Человеческий номер шага, 1-based. Финальный — последний."""
-    for index, step in enumerate(ANKETA_STEPS, start=1):
+    """Человеческий номер шага, 1-based. Цель — первая."""
+    if step_key == GOAL_STEP_KEY:
+        return 1
+    for index, step in enumerate(ANKETA_STEPS, start=2):
         if step.key == step_key:
             return index
     return TOTAL_STEPS
 
 
-def is_last_step(step: AnketaStep) -> bool:
+def is_last_step(step: AnketaStep, answered_keys: set[str]) -> bool:
     """Гарантирует ли сервер, что после этого шага вопросов не будет.
 
-    Истина ровно для финального шага: ответ на него создаёт цель и
-    закрывает проход (``api._answer_anketa``), а ``next_step`` после
-    любого сужающего шага всегда находит следующий. Не «index == total»:
-    равенство чисел — совпадение, а не гарантия.
+    Вычисляется тем же :func:`next_step`, что ведёт проход: последний —
+    тот, после ответа на который спрашивать нечего. Не «index == total»:
+    равенство чисел — совпадение, а не гарантия (DRF-1743).
     """
-    return step.key == FINAL_STEP_KEY
+    return next_step(answered_keys | {step.key}) is None
 
 
-def as_missing_item(step: AnketaStep) -> dict[str, Any]:
+def as_missing_item(
+    step: AnketaStep, *, answered_keys: set[str], goal_key: str | None = None,
+) -> dict[str, Any]:
     """Шаг → элемент ``missing``, готовый к отрисовке как есть.
 
     Форма расширяет DRF-1190, а не ломает его: ``kind`` и ``prompt`` на
@@ -278,13 +327,13 @@ def as_missing_item(step: AnketaStep) -> dict[str, Any]:
     """
     return {
         "kind": MISSING_GOAL_ANKETA,
-        "prompt": shown_prompt(step),
+        "prompt": shown_prompt(step, goal_key),
         "step": step.key,
         "options": [{"key": key, "label": label} for key, label in step.options],
         "allow_free_text": step.allow_free_text,
         "progress": {
             "index": step_index(step.key),
             "total": TOTAL_STEPS,
-            "is_last": is_last_step(step),
+            "is_last": is_last_step(step, answered_keys),
         },
     }

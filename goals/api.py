@@ -46,6 +46,7 @@ from .decision_context import (
     open_anketa_run,
 )
 from .models import ClientGoal, GoalAnketaAnswer, GoalAnketaRun
+from .service_match import match_named_service
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ class AnketaAnswerSerializer(serializers.Serializer):
         if not anketa.is_answerable_step(attrs["step"]):
             raise serializers.ValidationError({"step": "Unknown anketa step."})
         if attrs.get("revise") and anketa.narrowing_step(attrs["step"]) is None:
-            # Финальный шаг — это сама цель: её меняют выбором цели, а не
+            # Шаг цели — это сама цель: её меняют выбором цели, а не
             # пересмотром ответа.
             raise serializers.ValidationError(
                 {"revise": "Only narrowing steps can be revised."}
@@ -318,10 +319,11 @@ class GoalSelectView(APIView):
             run.answers.filter(step_key=step.key).first() if run is not None else None
         )
         if existing is None:
+            expected = next_anketa_step(run)
             return error_response(
                 ErrorCode.ANKETA_STEP_MISMATCH,
                 "Nothing to revise: this step has no answer in the open run.",
-                details={"expected_step": next_anketa_step(run).key},
+                details={"expected_step": expected.key if expected else None},
                 status_code=409,
             )
         option_key = answer.get("option_key")
@@ -382,11 +384,11 @@ class GoalSelectView(APIView):
 
         # Сверки — ДО любой записи.
         expected = next_anketa_step(run)
-        if answer["step"] != expected.key:
+        if expected is None or answer["step"] != expected.key:
             return error_response(
                 ErrorCode.ANKETA_STEP_MISMATCH,
                 "Answer does not match the expected step.",
-                details={"expected_step": expected.key},
+                details={"expected_step": expected.key if expected else None},
                 status_code=409,
             )
 
@@ -410,37 +412,57 @@ class GoalSelectView(APIView):
         if run is None:
             run, _ = GoalAnketaRun.objects.get_or_create(client=client, completed_at=None)
 
-        if expected.key != anketa.FINAL_STEP_KEY:
-            GoalAnketaAnswer.objects.update_or_create(
-                run=run,
-                step_key=expected.key,
-                defaults={"option_key": option_key, "answer_text": text},
-            )
-            logger.info(
-                "goals.anketa_answered user_id=%s run_id=%s step=%s",
-                client.id, run.id, expected.key,
-            )
-            return success_response(build_decision_context(client))
-
-        # Финальный шаг. Завершение анкеты И ЕСТЬ выбор цели — отдельной
-        # кнопки «готово» нет, потому что нечего было бы подтверждать.
-        goal = _create_goal(
-            client=client,
-            goal_key=option_key,
-            goal_text=text,
-            source_channel=source_channel,
-        )
         GoalAnketaAnswer.objects.update_or_create(
             run=run,
             step_key=expected.key,
             defaults={"option_key": option_key, "answer_text": text},
         )
-        _close_open_run(client, goal=goal)
-        _emit_goal_selected(client=client, goal=goal)
-        logger.info(
-            "goals.anketa_completed user_id=%s run_id=%s goal_key=%r",
-            client.id, run.id, goal.goal_key,
-        )
+
+        if expected.key == anketa.GOAL_STEP_KEY:
+            # DRF-1764: цель — первый шаг, и она создаётся СРАЗУ: на
+            # следующих кадрах уже есть «Твоя цель», и сужающие вопросы
+            # задаются под неё. Проход при этом остаётся открытым — его
+            # завершает последний сужающий шаг.
+            goal = _create_goal(
+                client=client,
+                goal_key=option_key,
+                goal_text=text,
+                source_channel=source_channel,
+            )
+            run.goal = goal
+            run.save(update_fields=["goal"])
+            _emit_goal_selected(client=client, goal=goal)
+            logger.info(
+                "goals.anketa_goal_chosen user_id=%s run_id=%s goal_key=%r",
+                client.id, run.id, goal.goal_key,
+            )
+            if text and match_named_service(text) is not None:
+                # Названа услуга — уточнять область и ощущение нечего:
+                # человек знает, чего хочет, и уходит к подбору (C-2,
+                # «не заставляем проходить экран только потому, что он
+                # существует в схеме»). Проход закрывается здесь же.
+                _close_open_run(client, goal=goal)
+                logger.info(
+                    "goals.anketa_skipped_named_service user_id=%s run_id=%s",
+                    client.id, run.id,
+                )
+                return success_response(build_decision_context(client))
+        else:
+            logger.info(
+                "goals.anketa_answered user_id=%s run_id=%s step=%s",
+                client.id, run.id, expected.key,
+            )
+
+        # Спрашивать больше нечего — проход закрыт. Одним и тем же
+        # правилом для любого шага: проход, начатый до DRF-1764 (сужающие
+        # отвечены раньше цели), закрывается ответом на цель.
+        if next_anketa_step(run) is None:
+            run.completed_at = timezone.now()
+            run.save(update_fields=["completed_at"])
+            logger.info(
+                "goals.anketa_completed user_id=%s run_id=%s goal_key=%r",
+                client.id, run.id, run.goal.goal_key if run.goal_id else None,
+            )
         return success_response(build_decision_context(client))
 
 
