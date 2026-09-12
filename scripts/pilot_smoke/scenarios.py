@@ -244,24 +244,24 @@ def s2_memory_ask(cfg: SmokeConfig, http: SmokeHttp, probes: Probes, ctx: Ctx, a
         return
     base = f"/api/v1/internal/users/{client_id}/personal-context"
 
-    elig = http.ayla("GET", f"{base}/ask-eligibility/")
+    elig = http.ayla("GET", f"{base}/ask-eligibility/", external_user=_ext_user())
     eb = elig.json_body if isinstance(elig.json_body, dict) else {}
     add(Check(S, "ask-eligibility shape",
               PASS if elig.ok and "should_ask" in eb else FAIL,
               f"HTTP {elig.status}: should_ask={eb.get('should_ask')} field={eb.get('field') or eb.get('blocked_by')}"))
 
-    before = http.ayla("GET", f"{base}/")
+    before = http.ayla("GET", f"{base}/", external_user=_ext_user())
     original = None
     if before.ok and isinstance(before.json_body, dict):
         original = (unwrap_data(before) or {}).get("price_range_max")
 
-    patch = http.ayla("PATCH", f"{base}/",
+    patch = http.ayla("PATCH", f"{base}/", external_user=_ext_user(),
                       json_body={"updates": [{"field": "price_range_max", "value": 2500,
                                               "source": "explicit"}]})
     if not patch.ok:
         add(Check(S, "PATCH green-поле", FAIL, f"HTTP {patch.status}: {patch.text[:300]}"))
         return
-    after = http.ayla("GET", f"{base}/")
+    after = http.ayla("GET", f"{base}/", external_user=_ext_user())
     val = str((unwrap_data(after) or {}).get("price_range_max") or "")
     add(Check(S, "PATCH→GET: факт сохранён",
               PASS if after.ok and val.startswith("2500") else FAIL,
@@ -269,11 +269,11 @@ def s2_memory_ask(cfg: SmokeConfig, http: SmokeHttp, probes: Probes, ctx: Ctx, a
 
     # cleanup: вернуть исходное значение, либо полное wipe (C5) для синтетики
     if original is not None:
-        http.ayla("PATCH", f"{base}/",
+        http.ayla("PATCH", f"{base}/", external_user=_ext_user(),
                   json_body={"updates": [{"field": "price_range_max", "value": original,
                                           "source": "explicit"}]})
     else:
-        http.ayla("DELETE", f"/api/v1/internal/users/{client_id}/personal-data/")
+        http.ayla("DELETE", f"/api/v1/internal/users/{client_id}/personal-data/", external_user=_ext_user())
     add(Check(S, "cleanup контекста", PASS,
               "исходное значение восстановлено" if original is not None else "personal-data wipe"))
 
@@ -406,10 +406,10 @@ def s5_dual_delete(cfg: SmokeConfig, http: SmokeHttp, probes: Probes, ctx: Ctx, 
         return
     base = f"/api/v1/internal/users/{client_id}/personal-data"
 
-    http.ayla("PATCH", f"/api/v1/internal/users/{client_id}/personal-context/",
+    http.ayla("PATCH", f"/api/v1/internal/users/{client_id}/personal-context/", external_user=_ext_user(),
               json_body={"updates": [{"field": "price_range_max", "value": 2500,
                                       "source": "explicit"}]})
-    exp = http.ayla("GET", f"{base}/export/")
+    exp = http.ayla("GET", f"{base}/export/", external_user=_ext_user())
     edata = exp.json_body if isinstance(exp.json_body, dict) else {}
     pctx = edata.get("personal_context")
     has_fact = bool(pctx) and str(pctx.get("price_range_max") or "").startswith("2500")
@@ -440,12 +440,12 @@ def s5_dual_delete(cfg: SmokeConfig, http: SmokeHttp, probes: Probes, ctx: Ctx, 
         add(Check(S, "bot delete идемпотентен (повтор → 200)",
                   PASS if dele2.ok else FAIL, f"HTTP {dele2.status}"))
     else:
-        dele = http.ayla("DELETE", f"{base}/")
+        dele = http.ayla("DELETE", f"{base}/", external_user=_ext_user())
         add(Check(S, "Ayla delete идемпотентен",
                   PASS if dele.ok else FAIL, f"HTTP {dele.status}: {dele.text[:200]}"))
-        http.ayla("DELETE", f"{base}/")
+        http.ayla("DELETE", f"{base}/", external_user=_ext_user())
 
-    aexp = http.ayla("GET", f"{base}/export/")
+    aexp = http.ayla("GET", f"{base}/export/", external_user=_ext_user())
     apctx = (aexp.json_body or {}).get("personal_context") if isinstance(aexp.json_body, dict) else "?"
     add(Check(S, "Ayla: контекст отсутствует после delete (dual-system)",
               PASS if aexp.ok and apctx is None else FAIL,

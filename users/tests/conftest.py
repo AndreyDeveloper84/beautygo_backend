@@ -50,3 +50,21 @@ def pro_api_client():
 def authenticated_specialist(pro_api_client, specialist_user):
     pro_api_client.force_authenticate(user=specialist_user)
     return pro_api_client
+
+
+def name_subject(user):
+    """Внешняя личность, привязанная к ``user``, — то, что бот кладёт в
+    ``X-External-User-ID`` (DRF-1617 / B-2.1).
+
+    Тесты внутренних ручек с субъектом в URL представляют бота, а бот с
+    ai-bot-platform#1535 называет субъект на каждом вызове. Без заголовка
+    такой вызов теперь отказывается — верно для бота, верно и для теста.
+    Привязка собрана руками (proxy → linked_user), как в бою после
+    ``bind_external_identity``.
+    """
+    external_id = f"bot:test:{user.pk.hex[:12]}"
+    User.objects.get_or_create(
+        username=external_id,
+        defaults={"role": "client", "is_proxy": True, "is_guest": False, "linked_user": user},
+    )
+    return external_id

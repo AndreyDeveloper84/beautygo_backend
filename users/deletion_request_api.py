@@ -8,7 +8,7 @@
 * ``GET  /api/v1/internal/users/{ayla_user_id}/deletion-requests/{request_id}/``
   — состояние одной заявки по номеру.
 
-Сторож — ``IsInternalBearer``: тот же, что у ``…/personal-data/`` (C5.2).
+Сторож — ``IsInternalBearerForSubject``: тот же, что у ``…/personal-data/`` (C5.2).
 Заявка заводится ботом от имени человека, которого бот уже проверил
 (``DELETE_CONFIRMATION_TOKEN`` на его стороне); это не провижининг.
 
@@ -46,7 +46,7 @@ from users.deletion_requests import (
     get_deletion_request,
 )
 from users.models import User
-from users.permissions import IsInternalBearer
+from users.permissions import IsInternalBearerForSubject
 from users.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,8 @@ class InternalDeletionRequestCreateView(APIView):
     """См. докстринг модуля."""
 
     authentication_classes: list = []
-    permission_classes = [IsInternalBearer]
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "user_id"
     serializer_class = _CreateDeletionRequestSerializer
 
     @extend_schema(
@@ -148,7 +149,8 @@ class InternalDeletionRequestDetailView(APIView):
     """GET — состояние одной заявки; чужая или несуществующая — 404."""
 
     authentication_classes: list = []
-    permission_classes = [IsInternalBearer]
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "user_id"
 
     @extend_schema(
         operation_id="internal_deletion_request_detail",
