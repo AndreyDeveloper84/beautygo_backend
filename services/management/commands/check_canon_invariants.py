@@ -78,7 +78,7 @@ class Command(BaseCommand):
         # MAP-AUTO-01: сколько канонов без логической идентичности. Не
         # нарушение само по себе — 40 строк DRF-196 и PROVISIONAL-каноны
         # кода не имеют законно; число нужно, чтобы видеть, дошёл ли
-        # bootstrap 0023 до этой базы (после него у seed-строк код есть).
+        # bootstrap 0024 до этой базы (после него у seed-строк код есть).
         templates_without_canonical_code = ServiceTemplate.objects.filter(
             canonical_code__isnull=True,
         ).count()

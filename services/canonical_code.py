@@ -21,9 +21,9 @@
   формой, ни ``save()`` — только пустой можно заполнить. Смена кода = другая
   строка справочника, а не правка этой;
 * код **не выводится** из имени или категории в ``save()`` — его источник
-  только seed (bootstrap ``0023``, далее MAP-AUTO-03).
+  только seed (bootstrap ``0024``, далее MAP-AUTO-03).
 
-Bootstrap (``0023``, WP-02 (a)): ключ ``(category.name, name)`` → ``code`` из
+Bootstrap (``0024``, WP-02 (a)): ключ ``(category.name, name)`` → ``code`` из
 seed-файла, **только** для строк с пустым кодом, **fail-closed**: любая
 неоднозначность — отказ без единой записи и список причин. Функция ниже —
 общая для миграции и тестов: миграция передаёт исторические модели через
@@ -169,6 +169,6 @@ def bootstrap_canonical_codes(
 
 
 def unbootstrap_canonical_codes(ServiceTemplate, *, seed_path: Path = SEED_PATH) -> int:
-    """Обратный ход ``0023``: обнулить **только** коды из seed — не «все»."""
+    """Обратный ход ``0024``: обнулить **только** коды из seed — не «все»."""
     codes = set(seed_pairs(seed_path).values())
     return ServiceTemplate.objects.filter(canonical_code__in=codes).update(canonical_code=None)

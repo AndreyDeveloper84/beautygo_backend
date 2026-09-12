@@ -14,7 +14,7 @@
   ``BootstrapRefused`` и ни одна другая строка не тронута; seed с дублем
   кода/пары — отказ до чтения базы;
 * обратный ход снимает только коды из seed — чужой код остаётся;
-* сама миграция ``0023`` ссылается на эти функции (а не дублирует логику).
+* сама миграция ``0024`` ссылается на эти функции (а не дублирует логику).
 """
 from __future__ import annotations
 
@@ -194,8 +194,8 @@ def test_unbootstrap_removes_only_seed_codes():
     assert left == ["7.7.7"]
 
 
-def test_migration_0023_delegates_to_the_shared_functions():
-    mig = Path(__file__).resolve().parents[1] / "migrations" / "0023_canonical_code_bootstrap.py"
+def test_migration_0024_delegates_to_the_shared_functions():
+    mig = Path(__file__).resolve().parents[1] / "migrations" / "0024_canonical_code_bootstrap.py"
     src = mig.read_text(encoding="utf-8")
     tree = ast.parse(src)
     calls = {ast.unparse(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
