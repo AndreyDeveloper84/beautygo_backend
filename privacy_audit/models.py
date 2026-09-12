@@ -108,6 +108,8 @@ class PersonalDataAccessLog(models.Model):
         # — начало разрушения, её чтение — статус без персональных значений.
         DELETION_REQUEST_CREATE = "deletion_request_create", "Заявка на удаление аккаунта"
         DELETION_REQUEST_READ = "deletion_request_read", "Чтение заявки на удаление"
+        # DRF-1709 (B-2.2): карточка display_name+avatar_url для зеркала бота.
+        READ_PROFILE = "read_profile", "Чтение карточки пользователя"
 
     class ObjectCategory(models.TextChoices):
         PERSONAL_DATA = "personal_data", "Персональные данные"

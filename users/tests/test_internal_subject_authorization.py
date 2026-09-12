@@ -109,10 +109,12 @@ CTX_ASKED = ("post", "/api/v1/internal/users/{subject}/personal-context/mark-ask
 CTX_SKIP = ("post", "/api/v1/internal/users/{subject}/personal-context/skip/")
 DEL_REQ_GET = ("get", "/api/v1/internal/users/{subject}/deletion-requests/")
 DEL_REQ_POST = ("post", "/api/v1/internal/users/{subject}/deletion-requests/")
+# DRF-1709 (12.09.2026): последняя дыра B-2.1 закрыта — карточка под субъектом.
+PROFILE = ("get", "/api/v1/internal/users/{subject}/")
 
 ALL_ROUTES = [
     EXPORT, DELETE, CTX_GET, CTX_PATCH, CTX_DELETE, CTX_ELIG, CTX_ASKED, CTX_SKIP,
-    DEL_REQ_GET, DEL_REQ_POST,
+    DEL_REQ_GET, DEL_REQ_POST, PROFILE,
 ]
 
 _BODIES = {
@@ -318,11 +320,6 @@ GUARDED_OTHERWISE: dict[str, str] = {
     "internal-cards-setup": "IsBotServiceWithVerifiedClient + _check_user_scope в виде (C7.6)",
     "internal-cards-list": "IsBotServiceWithVerifiedClient + _check_user_scope в виде (C7.6)",
     "internal-cards-delete": "IsBotServiceWithVerifiedClient + _check_user_scope в виде (C7.6)",
-    "internal-user-profile": (
-        "НЕ ОХРАНЯЕТСЯ по субъекту: отдаёт display_name+avatar любого UUID под "
-        "общим токеном; бот не называет субъект намеренно (profile_client.py). "
-        "Названная дыра, а не исключение — задача DRF-1709 (ребёнок DRF-1617)"
-    ),
 }
 
 
