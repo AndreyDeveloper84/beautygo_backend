@@ -129,13 +129,31 @@ class TestQuoteMatchesOrIsAbsent:
         assert Appointment.objects.count() == 1
 
     def test_price_compared_by_value_not_by_spelling(self, customer, specialist, service):
-        """«1500» и «1500.00» — одна цена; формат строки на клиенте не расхождение."""
-        r = _api().post(
-            INTERNAL_CREATE_URL,
-            _body(customer, specialist, service, quoted_price="1500"),
-            format="json",
+        """«1500» и «1500.00» — одна цена; формат строки на клиенте не расхождение.
+
+        Через сервис, не через ручку: сериализатор сам нормализует «1500» в
+        Decimal("1500.00"), и проба на ручке зеленела бы даже при сравнении
+        строк в сервисе. Здесь сервис получает Decimal("1500") напрямую.
+        """
+        from datetime import datetime, timedelta, timezone as tz
+        from uuid import uuid4
+
+        from appointments.application.dto import CreateBookingDTO
+        from appointments.application.services.create_booking_service import CreateBookingService
+
+        dto = CreateBookingDTO(
+            client_id=customer.id,
+            specialist_id=specialist.id,
+            service_id=service.id,
+            start_at=(datetime.now(tz=tz.utc) + timedelta(hours=3)).replace(second=0, microsecond=0),
+            idempotency_key=str(uuid4()),
+            payment_required=False,
+            confirm_immediately=True,
+            quoted_price=Decimal("1500"),
         )
-        assert r.status_code == 201, r.content
+        result = CreateBookingService().execute(dto)
+        assert result.booking_id is not None
+        assert Appointment.objects.count() == 1
 
 
 @pytest.mark.django_db
