@@ -23,19 +23,19 @@ def forwards(apps, schema_editor):
     ServiceTemplate = apps.get_model("services", "ServiceTemplate")
     report = bootstrap_canonical_codes(ServiceTemplate)   # BootstrapRefused → миграция падает, транзакция откатывается
     for line in report.lines():
-        print(f"  0023 canonical_code bootstrap: {line}")
+        print(f"  0024 canonical_code bootstrap: {line}")
 
 
 def backwards(apps, schema_editor):
     ServiceTemplate = apps.get_model("services", "ServiceTemplate")
     n = unbootstrap_canonical_codes(ServiceTemplate)
-    print(f"  0023 canonical_code bootstrap: снято кодов из seed — {n}")
+    print(f"  0024 canonical_code bootstrap: снято кодов из seed — {n}")
 
 
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("services", "0022_servicetemplate_canonical_code"),
+        ("services", "0023_servicetemplate_canonical_code"),
     ]
 
     operations = [

@@ -134,7 +134,7 @@ class ServiceTemplate(models.Model):
     # NULL = «канон не из эталонного списка» (40 строк seed_service_templates
     # DRF-196 и PROVISIONAL-каноны оператора — без кода навсегда);
     # неизменяем после установки (clean() и save() ниже); из имени или
-    # категории НЕ выводится — источник только seed (bootstrap 0023).
+    # категории НЕ выводится — источник только seed (bootstrap 0024).
     canonical_code = models.CharField(
         max_length=16, null=True, blank=True,
         validators=[validate_canonical_code],
@@ -257,7 +257,7 @@ class ServiceTemplate(models.Model):
 
         Сравнение с базой, а не с `__init__`-снимком: снимок обходится
         `refresh_from_db()`/повторным присваиванием, база — нет. Пустой
-        код заполнить можно (bootstrap 0023, MAP-AUTO-03), снять или
+        код заполнить можно (bootstrap 0024, MAP-AUTO-03), снять или
         заменить — нельзя.
         """
         if self._state.adding:

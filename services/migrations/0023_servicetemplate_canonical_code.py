@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("services", "0021_template_lifecycle"),
+        ("services", "0022_salonservice_verified_requires_template"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
