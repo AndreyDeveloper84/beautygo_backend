@@ -209,7 +209,20 @@ class SpecialistProfileDetailSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.IntegerField())
     def get_services_count(self, obj):
-        return obj.services.count()
+        """Честное число (DRF-1805, M13): оба слоя каталога, только активные.
+
+        До этого считались только legacy ``Service`` — на пилоте канон
+        наполнен, легаси пуст, и мастер с назначенными ``SpecialistService``
+        видел «0 услуг». Определение одно с витриной
+        (:func:`services.catalog_reads.annotate_catalog_services_count`):
+        активная legacy-услуга + активная каноническая связка с активной
+        ``SalonService``. Второго определения «сколько у мастера услуг» нет.
+        """
+        legacy = obj.services.filter(is_active=True).count()
+        canonical = obj.specialist_services.filter(
+            is_active=True, salon_service__is_active=True,
+        ).count()
+        return legacy + canonical
 
 
 # --- Auth v2 serializers (DRF-173) ---
