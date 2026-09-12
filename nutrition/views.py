@@ -1506,3 +1506,59 @@ class InternalCrossDomainHistoryView(APIView):
             },
             status_code=status.HTTP_200_OK,
         )
+
+
+class InternalBodyParametersEraseView(InternalProfileView):
+    """DELETE /api/v1/nutrition/internal/profile/body-parameters/ (DRF-1698).
+
+    Отзыв согласия на персональный расчёт (пакет владельца 12.09 §2):
+    шесть параметров стираются, ориентиры инвалидируются, история дневника
+    остаётся — см. ``personal_calculation_withdrawal``. Идемпотентно:
+    повтор и «профиля не было» — тот же 200, в теле сказано, что стёрто.
+
+    Наследует резолв субъекта и сторож ``IsServiceAccount`` у профиля:
+    это та же поверхность, тот же актор (бот от имени проверенного
+    клиента), только глагол обратный.
+    """
+
+    http_method_names = ["delete"]
+
+    @extend_schema(
+        operation_id="internal_nutrition_body_parameters_erase",
+        tags=["internal"],
+        request=None,
+        responses={
+            200: OpenApiResponse(description="Erased (idempotent; also when no profile)"),
+            400: OpenApiResponse(description="X-External-User-ID invalid"),
+        },
+    )
+    def delete(self, request: Request) -> Response:
+        from nutrition.services.personal_calculation_withdrawal import (
+            IncompleteErasure,
+            erase_personal_calculation_inputs,
+        )
+
+        user, err, external_user_id = self._resolve(request)
+        if err is not None:
+            return err
+        try:
+            outcome = erase_personal_calculation_inputs(user)
+        except IncompleteErasure as exc:
+            # Откачено целиком; 500, а не 200 — «удалено» сказать нельзя.
+            logger.error(
+                "nutrition.body_parameters.erase_incomplete user=%s detail=%s",
+                user.pk, exc,
+            )
+            return error_response(
+                "INTERNAL_ERROR", "Erasure incomplete; rolled back.", status_code=500,
+            )
+        logger.info(
+            "nutrition.body_parameters.erased user=%s existed=%s targets_cleared=%s request_id=%s",
+            user.pk, outcome.profile_existed, outcome.targets_cleared,
+            getattr(request, "request_id", "-"),
+        )
+        return success_response({
+            "erased": list(outcome.erased),
+            "targets_cleared": outcome.targets_cleared,
+            "profile_existed": outcome.profile_existed,
+        })
