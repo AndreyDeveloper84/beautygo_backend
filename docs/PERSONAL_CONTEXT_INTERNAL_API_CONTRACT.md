@@ -58,6 +58,13 @@ Ayla доверяет internal-Bearer вызову; серверный backstop 
 Успех: `{ "data": <payload>, "meta"?: {...} }`
 Ошибка: `{ "error": { "code": "<CODE>", "message": "<текст>", "details"?: {...} } }`
 
+`details` — всегда объект. Для валидации **списка** (`PATCH … updates[]`) ключ — индекс элемента
+строкой, только элементы с ошибками; прошедшие элементы отсутствуют:
+`"details": {"1": {"field": ["Значения nope нет среди допустимых вариантов."]}}`.
+Форма не зависит от версии DRF — её держит `djangoProject/exception_handler.py`
+(`_normalize_validation_details`, DRF-1715) и golden-тест
+`users/tests/test_personal_context_details_contract.py`.
+
 Коды ошибок (this contract): `USER_NOT_FOUND` (404), `VALIDATION_ERROR` (400),
 `TOO_MANY_FIELDS` (400).
 
