@@ -51,6 +51,14 @@ def _service(tenant, category, name="Услуга", **overrides):
     return SalonService.objects.create(**fields)
 
 
+def _template(category, name="Канон для VERIFIED"):
+    """DRF-1668: `VERIFIED` ⇒ `template` (схема) — подтверждение это связь
+    С ЧЕМ-ТО; строки, проверяющие провенанс `VERIFIED`, несут шаблон."""
+    return ServiceTemplate.objects.create(
+        category=category, name=name, name_short=name[:20], duration_default=60,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Умолчание
 # ---------------------------------------------------------------------------
@@ -124,6 +132,7 @@ def test_verified_with_human_provenance_is_allowed(tenant, category, human):
     """
     service = _service(
         tenant, category, name="Подтверждена человеком",
+        template=_template(category),
         mapping_status=S.VERIFIED,
         mapping_confirmed_by=human,
         mapping_confirmed_at=timezone.now(),
@@ -158,6 +167,7 @@ def test_rule_confirmation_with_a_version_is_allowed(tenant, category):
     """
     service = _service(
         tenant, category, name="Правило с версией",
+        template=_template(category, "Канон для правила"),
         mapping_status=S.VERIFIED,
         mapping_confirmed_rule="canonical_exact_name",
         mapping_rule_version="1.0.0",

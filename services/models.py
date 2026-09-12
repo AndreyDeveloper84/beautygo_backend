@@ -801,6 +801,22 @@ class SalonService(models.Model):
                 ),
                 name="salonservice_provenance_is_who_xor_rule",
             ),
+            # «Подтверждена» — связь с ЧЕМ? `VERIFIED` без `template` — это
+            # подтверждение пустоты (DRF-1668, план automapping C-9): до
+            # этого ограничения повторный confirm YClients-драфта
+            # переписывал `template` (и в NULL) у решённой строки,
+            # `mapping_status` не трогая, — разметка владельца стиралась
+            # без следа, а гейт подбора продолжал читать «проверено».
+            #
+            # Только `verified`: `not_recommendable` — «решено, что связи
+            # НЕ БУДЕТ», у него шаблона может и не быть по смыслу.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(mapping_status="verified")
+                    | models.Q(template__isnull=False)
+                ),
+                name="salonservice_verified_requires_template",
+            ),
         ]
         indexes = [
             models.Index(

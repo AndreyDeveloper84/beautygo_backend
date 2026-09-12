@@ -10,6 +10,12 @@ The human-in-the-loop step of intake: a pending draft becomes a real
 
 Rules:
 - A rejected draft is never confirmed.
+- A DECIDED SalonService (``mapping_status`` VERIFIED / NOT_RECOMMENDABLE)
+  never has its ``template`` rewritten by a re-confirm (DRF-1668): the
+  decision carries an owner's provenance, and a YClients re-import must not
+  erase it silently. Different (or missing) ``suggested_template`` → named
+  refusal ``decided_template_remap``, ERROR log, counter; the draft stays
+  pending. Same template → the usual idempotent update of the other fields.
 - Off-taxonomy drafts (no ``suggested_template``) need a fallback category —
   ``SalonService.clean()`` requires template OR category.
 - A bookable SpecialistService needs a price; a draft without
@@ -38,7 +44,31 @@ logger = logging.getLogger("services.integrations.intake")
 
 
 class DraftNotConfirmable(Exception):
-    """The draft cannot be confirmed (rejected, or missing taxonomy)."""
+    """The draft cannot be confirmed (rejected, missing taxonomy, or it would
+    remap a decided service)."""
+
+
+class _Counter:
+    """Process-local counter — enough for a test and a log line; no metrics
+    backend in this repo to register with."""
+
+    def __init__(self) -> None:
+        self.value = 0
+
+    def inc(self) -> None:
+        self.value += 1
+
+
+#: Re-confirms refused because they would rewrite ``template`` of a decided
+#: SalonService (DRF-1668). Name of the refusal: ``decided_template_remap``.
+REMAP_REFUSED = _Counter()
+
+#: Statuses behind which stands a DECISION with provenance — the ones a
+#: re-import must not overwrite. Same set as ``SalonServiceAdminForm.DECIDED_STATUSES``.
+DECIDED_STATUSES = frozenset({
+    SalonService.MappingStatus.VERIFIED,
+    SalonService.MappingStatus.NOT_RECOMMENDABLE,
+})
 
 
 @dataclass
@@ -80,6 +110,23 @@ def _get_or_create_salon_service(draft, fallback_category):
 
     if mapping is not None:
         salon = mapping.salon_service
+        if salon.mapping_status in DECIDED_STATUSES and salon.template_id != getattr(
+            template, "pk", None
+        ):
+            REMAP_REFUSED.inc()
+            logger.error(
+                "intake.confirm.decided_template_remap refused: draft=%s salon_service=%s "
+                "mapping_status=%s current_template=%s suggested_template=%s",
+                draft.pk, salon.pk, salon.mapping_status, salon.template_id,
+                getattr(template, "pk", None),
+            )
+            raise DraftNotConfirmable(
+                f"decided_template_remap: SalonService {salon.pk} is "
+                f"{salon.mapping_status} with template={salon.template_id}; draft "
+                f"{draft.pk} suggests template={getattr(template, 'pk', None)}. A decided "
+                "mapping is not rewritten by a re-import — change it through the "
+                "mapping decision (admin form / verify_pilot_slice), not through confirm."
+            )
         salon.name = draft.external_name
         salon.template = template
         salon.category = category

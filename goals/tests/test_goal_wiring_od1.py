@@ -127,6 +127,13 @@ def relax_option(db, goal_root):
 
 def _canonical(profile, tenant, *, name, category=None, template=None):
     """Каноническая связка: SalonService + бронируемый SpecialistService."""
+    # DRF-1668: `VERIFIED` ⇒ `template` (схема) — подтверждение это связь
+    # С ЧЕМ-ТО. Фикстуре, дававшей только категорию, шаблон заводится в той
+    # же категории; категория услуги остаётся такой, как передана.
+    if template is None:
+        template = ServiceTemplate.objects.create(
+            category=category, name=f"{name} (канон)", name_short=name[:20], duration_default=60,
+        )
     salon = SalonService.objects.create(
         tenant=tenant, category=category, template=template, name=name,
         mapping_status=SalonService.MappingStatus.VERIFIED,

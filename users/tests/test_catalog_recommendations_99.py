@@ -17,6 +17,8 @@ rating» здесь больше нет: этих механизмов не су
 """
 from __future__ import annotations
 
+import uuid
+
 from decimal import Decimal
 
 import pytest
@@ -24,7 +26,7 @@ from rest_framework.test import APIClient
 
 from django.utils import timezone
 
-from services.models import SalonService, ServiceCategory, SpecialistService
+from services.models import SalonService, ServiceCategory, ServiceTemplate, SpecialistService
 from tenants.models import Tenant
 from users.catalog_recommendations_api import RecommendationsRequestSerializer
 from users.models import SpecialistProfile, TenantUserRelationship, User
@@ -148,9 +150,19 @@ def _make_service(
     про него не собрать, — поэтому салон услуги называется отдельно
     от салона мастера. Умолчание берёт салон мастера, как и раньше.
     """
+    # DRF-1668: `VERIFIED` ⇒ `template` (схема) — подтверждение это связь
+    # С ЧЕМ-ТО. Фикстуре, дававшей только категорию, шаблон заводится в той
+    # же категории; категория услуги остаётся такой, как передана.
+    template = None
+    if mapping_status == SalonService.MappingStatus.VERIFIED:
+        template = ServiceTemplate.objects.create(
+            category=category, name=f"{name} (канон) {uuid.uuid4().hex[:6]}",
+            name_short=name[:20], duration_default=60,
+        )
     salon = SalonService.objects.create(
         tenant=tenant or specialist.tenant,
         category=category,
+        template=template,
         name=name,
         duration_minutes=60,
         mapping_status=mapping_status,

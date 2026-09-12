@@ -57,7 +57,7 @@ import pytest
 from django.contrib import admin as django_admin
 from django.test import RequestFactory
 
-from services.models import SalonService, ServiceCategory
+from services.models import SalonService, ServiceCategory, ServiceTemplate
 from tenants.models import Tenant
 from users.models import User
 
@@ -282,10 +282,19 @@ def test_both_who_and_rule_is_refused(tenant, category, human):
 # ---------------------------------------------------------------------------
 
 
+def _template(category, name="Канон для формы"):
+    """DRF-1668: `VERIFIED` ⇒ `template` — подтверждение это связь С ЧЕМ-ТО;
+    тесты, где форма принимает `VERIFIED`, передают шаблон."""
+    return str(ServiceTemplate.objects.create(
+        category=category, name=name, name_short=name[:20], duration_default=60,
+    ).pk)
+
+
 def test_verified_with_human_provenance_passes(tenant, category, human):
     """Правильно заполненное подтверждение человеком форма пропускает."""
     form = _bound_form(
         tenant, category,
+        template=_template(category, "Канон для формы"),
         mapping_status=S.VERIFIED,
         mapping_confirmed_by=str(human.pk),
         mapping_source_ref="разбор 56 услуг, строка 12",
@@ -298,6 +307,7 @@ def test_verified_with_rule_provenance_passes(tenant, category):
     """И подтверждение детерминированным правилом с версией — тоже."""
     form = _bound_form(
         tenant, category,
+        template=_template(category, "Канон для правила"),
         mapping_status=S.VERIFIED,
         mapping_confirmed_rule="exact_name_match",
         mapping_rule_version="v1",
@@ -327,6 +337,7 @@ def test_saved_row_reaches_the_database(tenant, category, human):
     """
     form = _bound_form(
         tenant, category,
+        template=_template(category, "Канон для базы"),
         mapping_status=S.VERIFIED,
         mapping_confirmed_by=str(human.pk),
         mapping_source_ref="разбор 56 услуг, строка 12",

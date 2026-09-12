@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+import uuid
+
 from decimal import Decimal
 
 import pytest
@@ -87,6 +89,14 @@ def _offer(
         "mapping_confirmed_at": timezone.now(),
         "mapping_source_ref": "fixture:test_recommendation_source",
     }
+    # DRF-1668: `VERIFIED` ⇒ `template` (схема) — подтверждение это связь
+    # С ЧЕМ-ТО. Фикстуре, дававшей только категорию, шаблон заводится в той
+    # же категории; категория услуги остаётся такой, как передана.
+    if template is None and mapping_status == SalonService.MappingStatus.VERIFIED:
+        template = ServiceTemplate.objects.create(
+            category=category, name=f"{name} (канон) {uuid.uuid4().hex[:6]}",
+            name_short=name[:20], duration_default=60,
+        )
     salon_service = SalonService.objects.create(
         tenant=tenant, name=name, category=category, template=template,
         duration_minutes=60, is_active=True,

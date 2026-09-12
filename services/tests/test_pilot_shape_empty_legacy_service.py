@@ -107,7 +107,19 @@ def manicure_category(db):
 
 def _canonical(profile, tenant, *, name, category=None, template=None,
                price=Decimal("2000"), duration=60):
-    """Каноническая связка: SalonService + бронируемый SpecialistService."""
+    """Каноническая связка: SalonService + бронируемый SpecialistService.
+
+    DRF-1668: `VERIFIED` ⇒ `template` (схема) — «каноническая» без канона
+    не бывает. Фикстуре, которая давала только категорию, шаблон
+    заводится здесь же в той же категории: категория услуги остаётся
+    такой, как передана (тесты про «своя категория против шаблонной»
+    передают обе явно).
+    """
+    if template is None:
+        template = ServiceTemplate.objects.create(
+            category=category, name=f"{name} (канон)", name_short=name[:20],
+            duration_default=duration,
+        )
     salon = SalonService.objects.create(
         tenant=tenant, category=category, template=template, name=name,
         duration_minutes=duration,

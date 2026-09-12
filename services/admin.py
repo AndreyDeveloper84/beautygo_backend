@@ -251,6 +251,21 @@ class SalonServiceAdminForm(forms.ModelForm):
                 code='rule_requires_version',
             ))
 
+        if (
+            cleaned.get('mapping_status') == SalonService.MappingStatus.VERIFIED
+            and cleaned.get('template') is None
+        ):
+            # База: `salonservice_verified_requires_template` (DRF-1668).
+            # Здесь — по полю: «проверено» отвечает на вопрос «с чем
+            # связана», и без шаблона ответа нет.
+            self.add_error('template', forms.ValidationError(
+                'Статус «проверено» подтверждает связь с канонической '
+                'услугой — выберите шаблон. Если канона для этой услуги '
+                'нет, это не «проверено», а «не подлежит рекомендациям» '
+                'или разрыв канона (решение владельца).',
+                code='verified_requires_template',
+            ))
+
         return cleaned
 
 
