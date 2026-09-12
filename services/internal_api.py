@@ -12,11 +12,13 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets
 
 from users.permissions import IsInternalBearer
+from users.response import success_response
 
 from .goal_resolution import build_category_goal_index
-from .models import SalonService, SpecialistService
+from .models import SalonService, ServiceCategory, SpecialistService
 from .serializers import (
     SalonServiceInternalSerializer,
+    ServiceDirectionSerializer,
     SpecialistServiceInternalSerializer,
 )
 from .views import ServiceCategoryViewSet, ServicePublicViewSet
@@ -36,6 +38,35 @@ class InternalServiceCategoryViewSet(ServiceCategoryViewSet):
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearer]
+
+
+class InternalServiceDirectionViewSet(viewsets.ReadOnlyModelViewSet):
+    """GET /api/v1/internal/services/directions/ — направления для онбординга мастера (DRF-1798).
+
+    Источник истины — корни глобальной таксономии: ``ServiceCategory`` с
+    ``parent IS NULL``, ``tenant IS NULL``, ``is_active``. Салонные корни
+    (``tenant`` задан) сюда не попадают: экран «Чем вы занимаетесь?» показывает
+    канон, а не чью-то кураторскую копию. Шесть названий макета не
+    зашиты — рантайм читает каталог (слово владельца 12.09: канон
+    первичен); расхождение макета с каноном записано в карте отдельно.
+
+    Без пагинации: корней в каноне 22, и экран показывает их все.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearer]
+    serializer_class = ServiceDirectionSerializer
+    pagination_class = None
+    queryset = (
+        ServiceCategory.objects
+        .filter(parent__isnull=True, tenant__isnull=True, is_active=True)
+        .order_by('sort_order', 'name')
+    )
+
+    def list(self, request, *args, **kwargs):  # type: ignore[override]
+        """Конверт ``{"data": [...]}`` — как у остальных внутренних маршрутов."""
+        serializer = self.get_serializer(self.get_queryset(), many=True)
+        return success_response(serializer.data)
 
 
 # --- S3A canonical catalog mirror (#1044 / #200) ---

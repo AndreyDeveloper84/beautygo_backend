@@ -18,7 +18,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from users.permissions import IsProApp
+from users.permissions import IsInternalBearer, IsProApp
 from users.response import error_response, success_response
 
 from .models import RegionalPricing, ServiceCategory, ServiceTemplate
@@ -235,3 +235,20 @@ class SupportedRegionsView(APIView):
                 'name': 'Другой город',
             })
         return success_response(payload)
+
+
+class InternalServiceTemplatesListView(ServiceTemplatesListView):
+    """GET /api/v1/internal/services/templates/?category_id= — тот же ответ под внутренним Bearer (DRF-1798).
+
+    Экран выбора услуг мастера в Mini App ходит через бота, а у бота нет
+    ни JWT Pro-приложения, ни ``X-App-Type``; второй несовместимый payload
+    заводить нельзя — наследуется всё: ``_build_payload``,
+    ``_serialize_template``, кэш на час, регион по ``?region=`` (бот
+    передаёт город тенанта). Черновые шаблоны (``PROVISIONAL``) отдаются,
+    как и Pro-маршруту (§130: показывать можно, в подбор — нет).
+    """
+
+    # Bearer бота — не JWT: пустой список аутентификаторов, как у
+    # ``InternalSpecialistViewSet``.
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearer]
