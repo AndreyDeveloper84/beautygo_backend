@@ -852,6 +852,13 @@ YCLIENTS_HTTP_TIMEOUT = float(os.environ.get("YCLIENTS_HTTP_TIMEOUT", "10"))
 AYLA_INTERNAL_BASE_URL = os.environ.get("AYLA_INTERNAL_BASE_URL", "")
 AYLA_PUBLIC_BASE_URL = os.environ.get("AYLA_PUBLIC_BASE_URL", "")
 
+# §96 / DRF-1782 — ретенция журнала доступа к персданным (privacy_audit).
+# Число дней — параметр с умолчанием, НЕ решение: год — временное
+# продуктовое решение владельца до юридической проверки. Кривое значение
+# (не число, < 1) — команда prune_privacy_audit отказывает и ничего не
+# удаляет (разбор и проверка — в privacy_audit.retention, не при старте).
+PRIVACY_AUDIT_RETENTION_DAYS = os.environ.get("PRIVACY_AUDIT_RETENTION_DAYS", "365")
+
 # Block C → C2 — bot-platform ingest endpoint for cross-service events.
 # Empty default means the publisher will no-op (raises RuntimeError on
 # the first delivery attempt, but the beat task swallows the message
