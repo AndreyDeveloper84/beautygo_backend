@@ -18,6 +18,7 @@ from django.utils import timezone
 from recommendation.models import (
     ACTIONABILITY_TTL,
     RECORD_SCHEMA_VERSION,
+    ExecutionMode,
     Recommendation,
     RecommendationEvent,
     RecommendationSet,
@@ -70,6 +71,10 @@ class RecommendationSetInput:
     primary: RecommendationInput
     alternatives: tuple[RecommendationInput, ...] = ()
     semantic_resolution_ref: str = ""
+    #: C1: SHADOW по умолчанию — живым набор называет вызывающий явно.
+    execution_mode: str = ExecutionMode.SHADOW
+    #: {conversation_id, trace_id} — ход диалога (DRF-1754); пусто допустимо (внедиалоговый расчёт).
+    conversation_ref: dict[str, Any] = field(default_factory=dict)
 
 
 _SNAPSHOT_KEYS = {"snapshot_id", "snapshot_version", "content_digest"}
@@ -91,6 +96,14 @@ def _check_record(inp: RecommendationInput, label: str) -> None:
     need(isinstance(inp.reason_codes, list) and len(inp.reason_codes) > 0,
          "reason_codes пуст — каждое решение несёт reason codes (канон v1.1 §8)")
     need(isinstance(inp.evidence_refs, list), "evidence_refs — список")
+    for j, ev in enumerate(inp.evidence_refs):
+        # Форма элемента типизирована: {source, ref, said_at?}. Словарь `source`
+        # (user_stated/confirmed_memory/policy/safety/journey — контракт §12;
+        # conversation/anketa/operator/catalog — мозг, #417) здесь НЕ замыкается:
+        # свести два словаря — дело контракта, не хранилища. Пустые — отказ.
+        need(isinstance(ev, dict) and str(ev.get("source", "")).strip() != "" and str(ev.get("ref", "")).strip() != "",
+             f"evidence_refs[{j}] — {{source, ref, said_at?}} с непустыми source и ref "
+             "(§105/§145: reason без evidence не печатается)")
     need(isinstance(inp.explanation.get("displayable"), bool), "explanation.displayable обязателен (owner 2026-07-29)")
     need(_SAFETY_KEYS <= set(inp.safety_evaluation_ref),
          f"safety_evaluation_ref без {_SAFETY_KEYS - set(inp.safety_evaluation_ref)}")
@@ -141,6 +154,10 @@ def persist(inp: RecommendationSetInput, *, now: datetime | None = None) -> Reco
         raise RecordInvalid("primary.role должен быть primary")
     if len(inp.alternatives) > 2:
         raise RecordInvalid(f"alternatives: {len(inp.alternatives)} > 2 (Killer PRD §5.1; контракт §10)")
+    if inp.execution_mode not in ExecutionMode.values:
+        raise RecordInvalid(f"execution_mode {inp.execution_mode!r} не из SHADOW|LIVE (C1)")
+    if inp.conversation_ref and not {"conversation_id", "trace_id"} <= set(inp.conversation_ref):
+        raise RecordInvalid("conversation_ref — {conversation_id, trace_id} либо пусто")
     _check_record(inp.primary, "primary")
     for i, alt in enumerate(inp.alternatives, start=1):
         if alt.role != Recommendation.Role.ALTERNATIVE:
@@ -151,6 +168,7 @@ def persist(inp: RecommendationSetInput, *, now: datetime | None = None) -> Reco
         rset = RecommendationSet(
             subject_ref=inp.subject_ref, intent_id=inp.intent_id,
             semantic_resolution_ref=inp.semantic_resolution_ref, created_at=now,
+            execution_mode=inp.execution_mode, conversation_ref=dict(inp.conversation_ref),
         )
         rset.save()
         primary = _build(inp.primary, rset, inp.versions, now, parent=None)
