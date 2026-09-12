@@ -27,6 +27,7 @@ from appointments.application.services.availability_query_service import (
     AvailabilityQueryService,
 )
 from appointments.models import Appointment
+from tenants.distance import distance_meters
 from users.models import SpecialistProfile
 
 from ai.application.services.specialist_context_builder import (
@@ -179,6 +180,7 @@ def handle_show_specialists(
                 "reviews_count": c.reviews_count,
                 "address": c.address,
                 "distance_km": c.distance_km,
+                "distance_meters": distance_meters(c.distance_km),
                 "services_preview": c.services_preview,
             },
             # Ключи сохранены ради потребителей, значения — пусты.

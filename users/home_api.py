@@ -45,6 +45,7 @@ from rest_framework.views import APIView
 from appointments.models import Appointment
 from services.catalog_reads import category_specialist_counts
 from services.models import ServiceCategory
+from tenants.distance import distance_meters
 from users.permissions import IsClient, IsClientApp
 from users.response import success_response
 
@@ -266,6 +267,8 @@ class HomeView(APIView):
                 "reviews_count": s.reviews_count,
                 "address": s.address,
                 "distance_km": s.distance_km,
+                # OD-PILOT-9: канон — метры целым; км остаётся дублем на один релиз
+                "distance_meters": distance_meters(s.distance_km),
                 "services_preview": s.services_preview,
                 "match_reasons": s.match_reasons,
             }

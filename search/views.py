@@ -45,7 +45,7 @@ from services.catalog_reads import (
     specialist_service_text_q,
 )
 from services.models import Service
-from tenants.distance import distance_km_to
+from tenants.distance import distance_km_to, distance_meters
 from users.models import SpecialistProfile
 from users.response import success_response
 
@@ -61,6 +61,7 @@ class SearchSpecialistSerializer(serializers.ModelSerializer):
     user_id = serializers.UUIDField(source='user.id')
     services_preview = serializers.SerializerMethodField()
     distance_km = serializers.SerializerMethodField()
+    distance_meters = serializers.SerializerMethodField()
 
     class Meta:
         model = SpecialistProfile
@@ -68,7 +69,7 @@ class SearchSpecialistSerializer(serializers.ModelSerializer):
             'id', 'user_id', 'display_name', 'avatar', 'bio',
             'rating', 'reviews_count', 'address',
             'location_lat', 'location_lng',
-            'services_preview', 'distance_km',
+            'services_preview', 'distance_km', 'distance_meters',
         ]
 
     def get_services_preview(self, obj: SpecialistProfile) -> list[dict]:
@@ -77,6 +78,10 @@ class SearchSpecialistSerializer(serializers.ModelSerializer):
             {'id': s.id, 'name': s.name, 'price': str(s.price)}
             for s in catalog_services_for(obj)[:3]
         ]
+
+    def get_distance_meters(self, obj: SpecialistProfile) -> int | None:
+        """Каноническое поле (OD-PILOT-9): метры целым, ``null`` = неизвестно."""
+        return distance_meters(self.get_distance_km(obj))
 
     def get_distance_km(self, obj: SpecialistProfile) -> float | None:
         """До места предложения (``works_at``), не до человека (§9, L5).
