@@ -360,19 +360,40 @@ class TestGuardLetsGroundedRecomputeThrough:
         self, proxy_user, headers,
     ):
         """Сценарий (б): расчёт состоялся с утверждением; смена флага
-        здоровья пересчитывает от тех же входов, происхождение остаётся."""
+        здоровья пересчитывает БЕЗ нового утверждения — и с §5.1 (N-g)
+        результат пересчёта при health-факторе — ОТКАЗ с именем, не
+        поправка. Сторож пропустил, расчёт отказал: два разных решения,
+        и оба видны в аудите."""
         _post({"consent": CONSENT, **FULL_INPUTS}, headers)
         p = NutritionProfile.objects.get(user=proxy_user)
-        first_at = p.targets_computed_at
         assert p.daily_iron_mg == 8.0
 
         resp = _post({"health_flags": {"pregnant": True}}, headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
 
         p.refresh_from_db()
+        assert p.targets_source == Source.NONE  # §5.1: health-фактор — отказ
+        assert p.daily_kcal is None and p.daily_iron_mg is None
+        assert [o["reason"] for o in p.last_overrides_applied] == ["health_factor_pregnant"]
+        assert _refusals(p) == []  # это отказ РАСЧЁТА, не отказ сторожа
+
+    def test_pace_change_on_a_grounded_row_recomputes_without_attestation(
+        self, proxy_user, headers,
+    ):
+        """Сценарий (б), положительная сторона: открытое поле пересчитывает."""
+        _post({"consent": CONSENT, **FULL_INPUTS}, headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+        first_at = p.targets_computed_at
+        assert p.targets_input_snapshot["pace"] == "moderate"
+
+        resp = _post({"pace": "gentle"}, headers)
+        assert resp.status_code == status.HTTP_200_OK, resp.json()
+
+        p.refresh_from_db()
         assert p.targets_source == Source.AYLA_PROPOSED  # §5.1: расчёт — предложение
-        assert p.daily_iron_mg == 27.0  # RDA беременности — пересчёт состоялся
-        assert p.daily_kcal == 2869  # 2668.75 + 200
+        # Пересчёт состоялся: снимок несёт новый темп (при goal=maintain
+        # само число от темпа не зависит — свидетель здесь снимок, не ккал).
+        assert p.targets_input_snapshot["pace"] == "gentle"
         assert p.targets_computed_at >= first_at
         assert _refusals(p) == []
 

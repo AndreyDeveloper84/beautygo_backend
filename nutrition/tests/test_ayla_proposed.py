@@ -109,14 +109,16 @@ class TestComputationIsAProposal:
         assert p.targets_source == Source.AYLA_CALCULATED
         assert p.targets_confirmed_at is not None
 
-        # Смена флага здоровья — сценарий (б) сторожа, пересчёт без
-        # утверждения разрешён; результат — НОВОЕ предложение.
-        resp = _post({"health_flags": {"pregnant": True}}, headers)
+        # Смена темпа (открытое поле, сценарий (б) сторожа — пересчёт без
+        # утверждения разрешён); результат — НОВОЕ предложение.
+        kcal_before = p.daily_kcal
+        resp = _post({"pace": "gentle"}, headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
         p.refresh_from_db()
         assert p.targets_source == Source.AYLA_PROPOSED
         assert p.targets_confirmed_at is None
-        assert p.goal_overridden_by == "pregnancy"  # пересчёт состоялся
+        assert p.daily_kcal != kcal_before  # пересчёт состоялся
+        assert p.targets_input_snapshot["pace"] == "gentle"
 
     def test_a_refusal_clears_confirmation_too(self, proxy_user, headers):
         """Расчёт снят (входа не хватило) — подтверждение снято вместе с ним."""
@@ -139,12 +141,12 @@ class TestComputationIsAProposal:
         self, proxy_user, headers,
     ):
         """(б) сторожа распространяется на ayla_proposed: основание то же."""
-        _compute(proxy_user, headers)
-        resp = _post({"health_flags": {"pregnant": True}}, headers)
+        p0 = _compute(proxy_user, headers)
+        resp = _post({"pace": "gentle"}, headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
         p = NutritionProfile.objects.get(user=proxy_user)
         assert p.targets_source == Source.AYLA_PROPOSED
-        assert p.goal_overridden_by == "pregnancy"
+        assert p.daily_kcal != p0.daily_kcal
 
 
 # ===========================================================================

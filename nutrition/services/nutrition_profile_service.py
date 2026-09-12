@@ -7,12 +7,15 @@ water), and the override ladder that coerces unsafe goals into safe
 ones. No LLM, no external API, deterministic — every input maps to one
 output and the override audit is fully reproducible.
 
-Override priority (highest first):
-  1. ``eating_disorder=True`` → goal=maintain unconditionally (we never
-     show numeric deficits to ED users; the bot strips them downstream)
-  2. ``pregnant`` or ``breastfeeding`` → goal=maintain + extra kcal
-     and protein (200/400 + 25g)
-  3. BMR floor ladder — if computed daily_kcal < BMR + 100:
+Health-факторы — ОТКАЗ, не поправка (§5.1, решение владельца 11.09.2026:
+«При health-факторах Ayla не рассчитывает индивидуальную норму»):
+  ``pregnant`` / ``breastfeeding`` / ``eating_disorder`` / несовершеннолетний
+  возраст (§85, раздел 7) → ориентиров нет, в аудите ``health_factor_<имя>``
+  на КАЖДЫЙ фактор. Прежняя лестница «беременность → maintain + 200/400 ккал»,
+  «РПП → maintain» снята: она считала число там, где считать нельзя.
+
+Override priority (highest first) — что осталось:
+  1. BMR floor ladder — if computed daily_kcal < BMR + 100:
      - first try pace=gentle (smaller deficit)
      - if still under floor, fall back to goal=maintain
 
@@ -119,10 +122,22 @@ PACE_FACTORS = {
     "moderate": 1.00,
 }
 
-# Pregnancy / breastfeeding kcal & protein deltas (spec §1.2).
-PREGNANCY_KCAL_BONUS = 200
-BREASTFEEDING_KCAL_BONUS = 400
-PREGNANCY_PROTEIN_BONUS_G = 25
+# Health-факторы (§5.1, 11.09.2026): при любом из них расчёт ОТКАЗЫВАЕТ
+# с именем — норма не считается, предложение не создаётся. Состав —
+# решение главного окна 11.09 по §5.1/§85: три флага профиля плюс
+# несовершеннолетие. «Заболевания» свободным текстом и темп > 0.9 кг/нед
+# сюда не входят: первое — не флаг профиля, второе — ограничение
+# параметра расчёта, а не health-фактор.
+#
+# Прежние поправки PREGNANCY_KCAL_BONUS / BREASTFEEDING_KCAL_BONUS /
+# PREGNANCY_PROTEIN_BONUS_G сняты вместе с лестницей: они были числом,
+# посчитанным там, где владелец запретил считать.
+HEALTH_FACTOR_FLAGS: tuple[str, ...] = ("pregnant", "breastfeeding", "eating_disorder")
+#: Порог совершеннолетия для расчёта (§85 раздел 7: несовершеннолетние —
+#: стоп-сценарий). Анкета принимает возраст с 16 (сериализатор), расчёт —
+#: с 18: приём данных и расчёт по ним — разные гейты.
+ADULT_AGE = 18
+HEALTH_FACTOR_MINOR = "minor"
 
 # Ориентира по жидкости здесь БОЛЬШЕ НЕТ, и это решение владельца от
 # 09.09.2026 (§82, §85; `docs/decisions/AYLA_NUTRITION_TARGETS_
@@ -267,6 +282,36 @@ def _input_snapshot(inputs: ProfileInputs, *, goal: str, pace: str) -> dict[str,
     return snapshot
 
 
+def _health_factors(inputs: ProfileInputs) -> list[str]:
+    """Health-факторы, при которых расчёт запрещён, — по именам.
+
+    Флаги читаются по истинности (``{"pregnant": True}``), возраст — по
+    порогу ``ADULT_AGE``; неизвестный возраст здесь не фактор (это
+    ``insufficient_inputs``). Порядок стабильный: имена в аудите —
+    часть контракта.
+    """
+    flags = inputs.health_flags or {}
+    found = [name for name in HEALTH_FACTOR_FLAGS if flags.get(name)]
+    if inputs.age is not None and inputs.age < ADULT_AGE:
+        found.append(HEALTH_FACTOR_MINOR)
+    return found
+
+
+def _refusal(inputs: ProfileInputs, overrides_applied: list[dict]) -> ComputedNorms:
+    """Отказ: все ориентиры ``None``, имя причины — в аудите."""
+    return ComputedNorms(
+        bmr=None,
+        daily_kcal=None,
+        daily_protein_g=None,
+        daily_fat_g=None,
+        daily_carbs_g=None,
+        goal=inputs.goal or "maintain",
+        pace=inputs.pace or "moderate",
+        goal_overridden_by="",
+        overrides_applied=overrides_applied,
+    )
+
+
 def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
     """Pure deterministic computation — или ОТКАЗ, если входов не хватает.
 
@@ -282,25 +327,25 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
     ноль калорий невозможна»), а уговор — это то, что первый читатель вне
     модуля не знает: снаружи ноль всё равно число.
     """
+    # Health-факторы проверяются ПЕРВЫМИ — Safety выше остального (§4
+    # владельца: приоритет правил — Safety, затем всё прочее). Отказ с
+    # именем на КАЖДЫЙ фактор: «не считаю» без причины читалось бы как
+    # «не хватило данных», и человек пошёл бы дополнять анкету.
+    factors = _health_factors(inputs)
+    if factors:
+        return _refusal(inputs, [
+            {"reason": f"health_factor_{name}"} for name in factors
+        ])
+
     missing = _missing_inputs(inputs)
     if missing:
-        return ComputedNorms(
-            bmr=None,
-            daily_kcal=None,
-            daily_protein_g=None,
-            daily_fat_g=None,
-            daily_carbs_g=None,
-            goal=inputs.goal or "maintain",
-            pace=inputs.pace or "moderate",
-            goal_overridden_by="",
-            # У пропуска есть ИМЯ и перечень. Молчаливая пустота — отказ
-            # без имени: потребитель видит нули и не может отличить «не
-            # спросили» от «посчитали и вышло ноль».
-            overrides_applied=[{
-                "reason": "insufficient_inputs",
-                "fields": missing,
-            }],
-        )
+        # У пропуска есть ИМЯ и перечень. Молчаливая пустота — отказ
+        # без имени: потребитель видит нули и не может отличить «не
+        # спросили» от «посчитали и вышло ноль».
+        return _refusal(inputs, [{
+            "reason": "insufficient_inputs",
+            "fields": missing,
+        }])
 
     gender = inputs.gender
     age = inputs.age
@@ -312,44 +357,16 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
     activity = inputs.activity_coefficient or DEFAULT_ACTIVITY
     goal = inputs.goal or "maintain"
     pace = inputs.pace or "moderate"
-    flags = inputs.health_flags or {}
-
     overrides: list[dict] = []
     overridden_by = ""
-    bonus_kcal = 0
-    bonus_protein_g = 0
 
-    # 1) eating disorder — strongest override
-    if flags.get("eating_disorder"):
-        if goal != "maintain":
-            overrides.append({
-                "reason": "eating_disorder",
-                "from": {"goal": goal},
-                "to": {"goal": "maintain"},
-            })
-            goal = "maintain"
-        overridden_by = "eating_disorder"
+    # Лестницы «РПП → maintain» и «беременность → maintain + бонус» здесь
+    # больше нет: при этих флагах расчёт отказал выше (§5.1). Осталась
+    # только нижняя ступень — пол BMR, и это не health-фактор, а граница
+    # самого расчёта.
 
-    # 2) pregnancy / breastfeeding — only fires if ED didn't already pin.
-    elif flags.get("pregnant") or flags.get("breastfeeding"):
-        reason = "pregnancy" if flags.get("pregnant") else "breastfeeding"
-        if goal == "lose":
-            overrides.append({
-                "reason": reason,
-                "from": {"goal": "lose"},
-                "to": {"goal": "maintain"},
-            })
-            goal = "maintain"
-        bonus_kcal = (
-            BREASTFEEDING_KCAL_BONUS
-            if flags.get("breastfeeding")
-            else PREGNANCY_KCAL_BONUS
-        )
-        bonus_protein_g = PREGNANCY_PROTEIN_BONUS_G
-        overridden_by = reason
-
-    # 3) BMR floor ladder — only when goal=lose and we'd undercut BMR
-    daily_kcal = _kcal_from_goal(bmr, activity, goal, pace) + bonus_kcal
+    # BMR floor ladder — only when goal=lose and we'd undercut BMR
+    daily_kcal = _kcal_from_goal(bmr, activity, goal, pace)
 
     if goal == "lose" and daily_kcal < bmr + BMR_FLOOR_MARGIN_KCAL:
         if pace == "moderate":
@@ -359,7 +376,7 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
                 "to": {"pace": "gentle"},
             })
             pace = "gentle"
-            daily_kcal = _kcal_from_goal(bmr, activity, goal, pace) + bonus_kcal
+            daily_kcal = _kcal_from_goal(bmr, activity, goal, pace)
 
         if daily_kcal < bmr + BMR_FLOOR_MARGIN_KCAL:
             overrides.append({
@@ -369,15 +386,17 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
             })
             goal = "maintain"
             overridden_by = overridden_by or "bmr_floor"
-            daily_kcal = _kcal_from_goal(bmr, activity, goal, pace) + bonus_kcal
+            daily_kcal = _kcal_from_goal(bmr, activity, goal, pace)
 
     protein_g, fat_g, carbs_g = _macros_split(daily_kcal, weight_kg, goal)
-    protein_g += bonus_protein_g
 
+    # RDA: ветки беременности/кормления внутри ``compute_rda`` до этой точки
+    # не доходят — расчёт при этих флагах отказал выше. Флаги передаются как
+    # есть, чтобы функция осталась чистой и проверяемой отдельно.
     rda = compute_rda(
         gender=gender,
         age=age,
-        health_flags=flags,
+        health_flags=inputs.health_flags or {},
     )
 
     return ComputedNorms(

@@ -125,56 +125,39 @@ class TestSkippedFieldsCancelTheCalculation:
 # ===========================================================================
 
 
-class TestEatingDisorderOverride:
-    def test_lose_coerced_to_maintain(self):
+class TestHealthFactorsRefuse:
+    """§5.1 (11.09.2026): при health-факторах Ayla НЕ рассчитывает норму.
+
+    Прежде здесь стояли `TestEatingDisorderOverride` и
+    `TestPregnancyOverride` — лестница поправок (maintain, +200/+400 ккал,
+    +25 г белка). Она считала число там, где владелец запретил считать.
+    Теперь — отказ с именем на каждый фактор; числа нет ни одного.
+    """
+
+    @pytest.mark.parametrize("flag", ["eating_disorder", "pregnant", "breastfeeding"])
+    def test_each_flag_refuses_by_name(self, flag):
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=65.0,
             goal="lose", pace="moderate",
-            health_flags={"eating_disorder": True},
+            health_flags={flag: True},
         ))
-        assert norms.goal == "maintain"
-        assert norms.goal_overridden_by == "eating_disorder"
-        assert any(o["reason"] == "eating_disorder" for o in norms.overrides_applied)
+        assert norms.computed is False
+        assert norms.daily_kcal is None and norms.bmr is None
+        assert norms.daily_iron_mg is None  # RDA тоже не считается
+        assert norms.goal_overridden_by == ""
+        assert [o["reason"] for o in norms.overrides_applied] == [f"health_factor_{flag}"]
 
-    def test_eating_disorder_beats_pregnancy(self):
+    def test_two_flags_are_two_names_not_one_winner(self):
+        """Раньше РПП «побеждал» беременность; теперь оба названы."""
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=65.0,
             goal="lose", pace="moderate",
             health_flags={"eating_disorder": True, "pregnant": True},
         ))
-        assert norms.goal_overridden_by == "eating_disorder"
-
-
-class TestPregnancyOverride:
-    def test_pregnant_lose_to_maintain_plus_kcal_and_protein(self):
-        norms = compute_norms(ProfileInputs(
-            gender="female", age=30, height_cm=165, weight_kg=65.0,
-            goal="lose", pace="moderate",
-            health_flags={"pregnant": True},
-        ))
-        baseline = compute_norms(ProfileInputs(
-            gender="female", age=30, height_cm=165, weight_kg=65.0,
-            goal="maintain", pace="moderate",
-        ))
-        assert norms.goal == "maintain"
-        assert norms.goal_overridden_by == "pregnancy"
-        # +200 kcal pregnancy bonus
-        assert norms.daily_kcal == baseline.daily_kcal + 200
-        # +25g protein bonus
-        assert norms.daily_protein_g == baseline.daily_protein_g + 25
-
-    def test_breastfeeding_adds_400_kcal(self):
-        norms = compute_norms(ProfileInputs(
-            gender="female", age=30, height_cm=165, weight_kg=65.0,
-            goal="maintain", pace="moderate",
-            health_flags={"breastfeeding": True},
-        ))
-        baseline = compute_norms(ProfileInputs(
-            gender="female", age=30, height_cm=165, weight_kg=65.0,
-            goal="maintain", pace="moderate",
-        ))
-        assert norms.daily_kcal == baseline.daily_kcal + 400
-        assert norms.goal_overridden_by == "breastfeeding"
+        assert norms.daily_kcal is None
+        assert [o["reason"] for o in norms.overrides_applied] == [
+            "health_factor_pregnant", "health_factor_eating_disorder",
+        ]
 
 
 class TestBmrFloorLadder:
@@ -334,7 +317,8 @@ class TestPostProfileUpsert:
         r2 = c.post(URL, {"complete": True}, format="json", **headers)
         assert r2.json()["data"]["onboarded_at"] == first_ts
 
-    def test_pregnant_returns_overrides_applied(self, proxy_user, headers):
+    def test_pregnant_returns_a_named_refusal_not_a_number(self, proxy_user, headers):
+        """§5.1: health-фактор — отказ по имени, нормы нет, цель не тронута."""
         c = APIClient()
         resp = c.post(URL, {
             "consent": CONSENT,
@@ -343,10 +327,12 @@ class TestPostProfileUpsert:
             "health_flags": {"pregnant": True},
         }, format="json", **headers)
         body = resp.json()["data"]
-        assert body["goal"] == "maintain"
-        assert body["goal_overridden_by"] == "pregnancy"
-        reasons = {o["reason"] for o in body["overrides_applied"]}
-        assert "pregnancy" in reasons
+        assert body["goal"] == "lose"  # лестница не переписала цель
+        assert body["goal_overridden_by"] is None
+        assert body["norms"] == {}
+        assert body["targets_provenance"]["source"] == "none"
+        reasons = [o["reason"] for o in body["overrides_applied"]]
+        assert reasons == ["health_factor_pregnant"]
 
 
 class TestIdempotencyKey:

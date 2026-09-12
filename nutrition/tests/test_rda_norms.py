@@ -30,6 +30,7 @@ from nutrition.models import NutritionProfile
 from nutrition.services.nutrition_profile_service import (
     ProfileInputs,
     compute_norms,
+    compute_rda,
 )
 
 #: §92 / срез N-a2: параметры тела принимаются только с утверждением о
@@ -100,31 +101,40 @@ class TestRDAPregnancy:
     """Pregnancy: iron 27, calcium 1000, omega-3 1.4, fibre 28."""
 
     def test_pregnancy_overrides(self):
+        # §5.1: через compute_norms беременность — отказ, RDA не считается.
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=70.0,
             health_flags={"pregnant": True},
         ))
-        assert norms.daily_iron_mg == 27
-        assert norms.daily_calcium_mg == 1000
+        assert norms.daily_iron_mg is None
+        assert [o["reason"] for o in norms.overrides_applied] == ["health_factor_pregnant"]
+        # Слой RDA как чистая функция остаётся проверяемым отдельно.
+        rda = compute_rda(gender="female", age=30, health_flags={"pregnant": True})
+        assert rda["iron_mg"] == 27
+        assert rda["calcium_mg"] == 1000
         # Pregnancy bumps omega-3 (DHA matters for fetal neurodevelopment).
-        assert norms.daily_omega3_g == 1.4
+        assert rda["omega3_g"] == 1.4
         # Fibre creeps up too (pregnancy-related GI sluggishness).
-        assert norms.daily_fiber_g == 28
+        assert rda["fiber_g"] == 28
 
 
 class TestRDABreastfeeding:
     """Breastfeeding: calcium 1000, vit C 120, omega-3 1.3, iron *down* to 9."""
 
     def test_breastfeeding_overrides(self):
+        # §5.1: через compute_norms кормление — отказ, RDA не считается.
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=70.0,
             health_flags={"breastfeeding": True},
         ))
-        assert norms.daily_calcium_mg == 1000
-        assert norms.daily_vitamin_c_mg == 120
-        assert norms.daily_omega3_g == 1.3
+        assert norms.daily_calcium_mg is None
+        assert [o["reason"] for o in norms.overrides_applied] == ["health_factor_breastfeeding"]
+        rda = compute_rda(gender="female", age=30, health_flags={"breastfeeding": True})
+        assert rda["calcium_mg"] == 1000
+        assert rda["vitamin_c_mg"] == 120
+        assert rda["omega3_g"] == 1.3
         # Iron requirement DROPS during breastfeeding (no menses).
-        assert norms.daily_iron_mg == 9
+        assert rda["iron_mg"] == 9
 
 
 class TestRDAVegan:
@@ -159,21 +169,29 @@ class TestRDAVegan:
 
 
 class TestRDAAdolescent:
-    """Age 14-18 women: calcium 1300, iron 15, vitamin D 600."""
+    """Age 14-18 women: calcium 1300, iron 15, vitamin D 600.
+
+    §5.1 (11.09.2026, N-g): через ``compute_norms`` несовершеннолетний —
+    отказ ``health_factor_minor``, ни одной нормы. Слой RDA как чистая
+    функция остаётся проверяемым через ``compute_rda``.
+    """
+
+    def test_minor_is_refused_through_compute_norms(self):
+        norms = compute_norms(ProfileInputs(
+            gender="female", age=16, height_cm=165, weight_kg=55.0,
+        ))
+        assert norms.daily_calcium_mg is None and norms.daily_iron_mg is None
+        assert [o["reason"] for o in norms.overrides_applied] == ["health_factor_minor"]
 
     def test_adolescent_calcium_higher(self):
-        norms = compute_norms(ProfileInputs(
-            gender="female", age=16, height_cm=165, weight_kg=55.0,
-        ))
+        rda = compute_rda(gender="female", age=16, health_flags={})
         # Bone development demands more calcium during adolescence.
-        assert norms.daily_calcium_mg == 1300
+        assert rda["calcium_mg"] == 1300
 
     def test_adolescent_iron_15(self):
-        norms = compute_norms(ProfileInputs(
-            gender="female", age=16, height_cm=165, weight_kg=55.0,
-        ))
+        rda = compute_rda(gender="female", age=16, health_flags={})
         # 14-18 girls: 15 mg iron (vs 18 for 19-50, 8 for adolescent boys).
-        assert norms.daily_iron_mg == 15
+        assert rda["iron_mg"] == 15
 
 
 class TestRDASenior:

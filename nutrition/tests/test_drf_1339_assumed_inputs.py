@@ -388,10 +388,15 @@ _REFUSED_CASES = (
     "unknown_weight_lose_bmr_floor",
     "unknown_weight_lose_ok",
     "unknown_weight_all_defaults",
-    "unknown_weight_pregnant",
-    "unknown_weight_ed",
     "unknown_weight_gain",
 )
+
+#: §5.1 (11.09.2026): health-фактор проверяется ПЕРВЫМ — Safety выше
+#: нехватки входов. У этих двух отказ назван фактором, а не пропуском.
+_HEALTH_REFUSED_CASES = {
+    "unknown_weight_pregnant": "health_factor_pregnant",
+    "unknown_weight_ed": "health_factor_eating_disorder",
+}
 
 
 class TestComputedNormsSnapshot:
@@ -413,8 +418,16 @@ class TestComputedNormsSnapshot:
     ``30 мл × вес``, которая его считала.
     """
 
+    @pytest.mark.parametrize("case,reason", sorted(_HEALTH_REFUSED_CASES.items()))
+    def test_a_health_factor_refuses_before_missing_inputs(self, case, reason):
+        """Safety раньше полноты входов: имя отказа — фактор, не пропуск."""
+        norms = compute_norms(_SNAPSHOT[case]["inputs"])
+        assert norms.bmr is None and norms.daily_kcal is None
+        assert [o.get("reason") for o in norms.overrides_applied] == [reason]
+
     @pytest.mark.parametrize(
-        "case", sorted(set(_SNAPSHOT) - set(_REFUSED_CASES)),
+        "case",
+        sorted(set(_SNAPSHOT) - set(_REFUSED_CASES) - set(_HEALTH_REFUSED_CASES)),
     )
     def test_known_inputs_still_compute_the_same_numbers(self, case):
         """Правка НЕ сдвинула расчёт там, где входы названы."""

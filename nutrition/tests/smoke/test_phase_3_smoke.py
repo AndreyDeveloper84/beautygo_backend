@@ -216,18 +216,15 @@ class TestSection2Profile:
         )
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
 
-    def test_2_6_pregnancy_override_lose_to_maintain_with_bonuses(
+    def test_2_6_pregnancy_refuses_the_calculation_by_name(
         self, client_api, headers, proxy_user,
     ):
-        """2.6 — pregnancy: goal lose→maintain, +200 ккал, +25г белка."""
-        baseline_resp = client_api.post(URL_PROFILE, {
-            "consent": CONSENT,
-            "gender": "female", "age": 30, "height_cm": 165, "weight_kg": 65.0,
-            "goal": "maintain",
-        }, format="json", **headers)
-        baseline = baseline_resp.json()["data"]["norms"]
-        # Reset profile by deleting and re-creating with pregnancy
-        NutritionProfile.objects.all().delete()
+        """2.6 — pregnancy: §5.1 (11.09.2026) — норма НЕ считается, отказ назван.
+
+        Прежняя редакция чек-листа ждала «lose→maintain, +200 ккал, +25 г
+        белка» — число там, где владелец запретил число. Теперь: нормы
+        нет, цель не переписана, в аудите ``health_factor_pregnant``.
+        """
         resp = client_api.post(URL_PROFILE, {
             "consent": CONSENT,
             "gender": "female", "age": 30, "height_cm": 165, "weight_kg": 65.0,
@@ -235,17 +232,16 @@ class TestSection2Profile:
             "health_flags": {"pregnant": True},
         }, format="json", **headers)
         body = resp.json()["data"]
-        assert body["goal"] == "maintain"
-        assert body["goal_overridden_by"] == "pregnancy"
-        assert body["norms"]["daily_kcal"] == baseline["daily_kcal"] + 200
-        assert body["norms"]["daily_protein_g"] == baseline["daily_protein_g"] + 25
-        reasons = {o["reason"] for o in body["overrides_applied"]}
-        assert "pregnancy" in reasons
+        assert body["goal"] == "lose"
+        assert body["goal_overridden_by"] is None
+        assert body["norms"] == {}
+        assert body["targets_provenance"]["source"] == "none"
+        assert [o["reason"] for o in body["overrides_applied"]] == ["health_factor_pregnant"]
 
-    def test_2_7_eating_disorder_pins_goal_to_maintain(
+    def test_2_7_eating_disorder_refuses_the_calculation_by_name(
         self, client_api, headers, proxy_user,
     ):
-        """2.7 — eating_disorder=true → goal=maintain unconditionally."""
+        """2.7 — eating_disorder=true → отказ ``health_factor_eating_disorder`` (§5.1)."""
         resp = client_api.post(URL_PROFILE, {
             "consent": CONSENT,
             "gender": "female", "age": 30, "height_cm": 165, "weight_kg": 60.0,
@@ -253,8 +249,10 @@ class TestSection2Profile:
             "health_flags": {"eating_disorder": True},
         }, format="json", **headers)
         body = resp.json()["data"]
-        assert body["goal"] == "maintain"
-        assert body["goal_overridden_by"] == "eating_disorder"
+        assert body["goal"] == "lose"
+        assert body["goal_overridden_by"] is None
+        assert body["norms"] == {}
+        assert [o["reason"] for o in body["overrides_applied"]] == ["health_factor_eating_disorder"]
 
     def test_2_8_bmr_floor_ladder_softens_pace_or_flips_goal(
         self, client_api, headers, proxy_user,
