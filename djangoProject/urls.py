@@ -13,6 +13,7 @@ from payments.views import InternalPaymentStatusView, InternalPayoutPreviewView
 from users.internal_schedule_api import (
     InternalSpecialistScheduleView,
     InternalSpecialistTimeOffView,
+    InternalSpecialistWorkingHoursView,
 )
 
 
@@ -123,6 +124,15 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/schedule/',
         InternalSpecialistScheduleView.as_view(),
         name='internal-specialist-schedule',
+    ),
+    # DRF-1815 (M23) — мастер пишет свой недельный шаблон часов из
+    # кабинета: тот же сериализатор и усадочная защита, что у Pro-JWT
+    # двери, под субъектом (ruling D1). Same "explicit route BEFORE the
+    # include" reason as the three above.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/working-hours/',
+        InternalSpecialistWorkingHoursView.as_view(),
+        name='internal-specialist-working-hours',
     ),
     path(
         'api/v1/internal/specialists/',

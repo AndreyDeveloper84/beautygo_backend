@@ -570,9 +570,21 @@ class IsInternalBearerForSubject(permissions.BasePermission):
     ``request.user`` is NOT replaced: the views on this surface resolve the
     subject from the URL themselves, and the permission's job is only to
     say whether the caller may name that subject at all.
+
+    ``subject_of`` (DRF-1815) — what the URL names on this surface: the
+    actor's own ``User`` UUID by default. A surface whose URL names the
+    actor's *specialist profile* instead overrides it (see
+    :class:`IsInternalBearerForSpecialistSubject`); the checks above it
+    are the same, only the last comparison changes. ``None`` means the
+    actor has no such subject at all — refused with its own reason, so a
+    proxy that has never been linked reads as «no subject», not as «wrong
+    subject».
     """
 
     message = "Internal service auth required"
+
+    def subject_of(self, actor: Any) -> str | None:
+        return str(actor.pk)
 
     def has_permission(self, request: Any, view: Any) -> bool:
         from users.services import resolve_external_user_readonly
@@ -640,7 +652,20 @@ class IsInternalBearerForSubject(permissions.BasePermission):
             )
             return False
 
-        if str(actor.pk) != subject_id:
+        actor_subject = self.subject_of(actor)
+        if actor_subject is None:
+            logger.warning(
+                "internal.subject_authz.subject_unresolved path=%s subject=%s actor=%s",
+                request.path, subject_id, actor.pk,
+            )
+            self.message = "acting subject has no such profile"
+            _publish_verdict(
+                request, purpose=purpose, actor=actor, actor_named=True,
+                allowed=False, reason="subject_unresolved",
+            )
+            return False
+
+        if actor_subject != subject_id:
             # No PII: two UUIDs and a path.
             logger.warning(
                 "internal.subject_authz.subject_mismatch path=%s subject=%s actor=%s",
@@ -655,6 +680,23 @@ class IsInternalBearerForSubject(permissions.BasePermission):
 
         _publish_verdict(request, purpose=purpose, actor=actor, actor_named=True, allowed=True)
         return True
+
+
+class IsInternalBearerForSpecialistSubject(IsInternalBearerForSubject):
+    """Same gate, URL names the actor's ``SpecialistProfile`` (DRF-1815).
+
+    For ``/internal/specialists/{specialist_id}/…`` writes the master makes
+    about their own workspace (working hours first). The actor is resolved
+    exactly as above — runtime bearer, named, followed through the LINKED
+    binding — and the profile compared is the one hanging off that actor.
+    A proxy that has never been linked has no profile and is refused as
+    ``subject_unresolved``: until the pre-LINKED principal (M28) exists
+    there is nowhere to write, and this class must not pretend otherwise.
+    """
+
+    def subject_of(self, actor: Any) -> str | None:
+        profile = getattr(actor, "specialist_profile", None)
+        return str(profile.pk) if profile is not None else None
 
 
 def _publish_verdict(

@@ -59,13 +59,16 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from appointments.models import SpecialistTimeOff
+from appointments.application.services.schedule_impact_service import (
+    ScheduleShrinkConflict,
+)
+from appointments.models import SpecialistTimeOff, SpecialistWorkingHours
 
-from .permissions import IsInternalBearer
+from .permissions import IsInternalBearer, IsInternalBearerForSpecialistSubject
 from .response import error_response, success_response
 from .schedule_api import (
-    _WORKING_HOURS_RESPONSE_FIELDS, _invalidate_slots, _to_to_dict,
-    _wh_to_dict,
+    _WORKING_HOURS_RESPONSE_FIELDS, SchedulePutSerializer, _invalidate_slots,
+    _to_to_dict, _wh_to_dict, replace_weekly_schedule,
 )
 
 logger = logging.getLogger(__name__)
@@ -509,3 +512,117 @@ class InternalSpecialistScheduleView(APIView):
                 status_code=400,
             )
         return from_date, to_date
+
+
+class InternalSpecialistWorkingHoursView(APIView):
+    """GET/PUT /api/v1/internal/specialists/{specialist_id}/working-hours/
+
+    Недельный шаблон часов мастера, который мастер пишет САМ из кабинета
+    (DRF-1815, M23; макет 7.1–7.5). До этого у каталога была одна дверь
+    записи часов — Pro-JWT ``/specialists/me/schedule/`` — а у бота ни
+    одного метода записи: экран показывал дефолт «10:00–19:00», которого
+    в каталоге не было.
+
+    **Тот же сериализатор, та же усадочная защита.** ``SchedulePutSerializer``
+    (все 7 дней, перерыв внутри смены) и :func:`replace_weekly_schedule`
+    (DRF-1297 B-4: сокращение поверх живых записей — 409) — общие с двумя
+    другими дверями; здесь только субъект и форма ответа.
+
+    **Субъект, не тенант.** Сторож — :class:`IsInternalBearerForSpecialistSubject`
+    (ruling D1): runtime-Bearer, названный ``X-External-User-ID``, связь
+    LINKED, и профиль в URL — профиль этого актора. Прокси без связи —
+    403 ``subject_unresolved``: до pre-LINKED-принципала (M28) писать
+    некуда, и вид этого не скрывает. Чужой профиль — 403
+    ``subject_mismatch`` (UUID в URL актору всё равно уже известен —
+    это его собственный, гадать нечего).
+
+    Часовой пояс — ``SpecialistProfile.timezone`` (у каталожного Tenant его
+    нет): отдаётся в ответе, чтобы экран рисовал время в нём.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearerForSpecialistSubject]
+    subject_url_kwarg = "specialist_id"
+    serializer_class = SchedulePutSerializer
+
+    @staticmethod
+    def _profile(specialist_id: UUID):
+        from users.models import SpecialistProfile
+
+        return SpecialistProfile.objects.filter(pk=specialist_id).first()
+
+    @staticmethod
+    def _weekly(profile) -> list[dict]:
+        hours = (
+            SpecialistWorkingHours.objects
+            .filter(specialist=profile)
+            .order_by("day_of_week")
+        )
+        existing = {wh.day_of_week: wh for wh in hours}
+        day_names = dict(SpecialistWorkingHours.DayOfWeek.choices)
+        return [
+            _wh_to_dict(existing[day]) if day in existing else {
+                "day_of_week": day,
+                "day_name": day_names[day],
+                "is_working_day": False,
+                "start_time": None,
+                "end_time": None,
+                "break_start": None,
+                "break_end": None,
+            }
+            for day in range(7)
+        ]
+
+    def _payload(self, profile) -> dict:
+        return {
+            "specialist_id": str(profile.pk),
+            "timezone": profile.timezone,
+            "schedule": self._weekly(profile),
+        }
+
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(description="specialist_id, timezone, schedule[7]"),
+            403: OpenApiResponse(description="Not the acting subject"),
+            404: OpenApiResponse(description="No such specialist"),
+        },
+    )
+    def get(self, request: Request, specialist_id: UUID) -> Response:
+        profile = self._profile(specialist_id)
+        if profile is None:
+            return error_response("NOT_FOUND", "Specialist profile not found.", status_code=404)
+        return success_response(self._payload(profile))
+
+    @extend_schema(
+        tags=["internal"],
+        request=SchedulePutSerializer,
+        responses={
+            200: OpenApiResponse(description="Saved schedule"),
+            400: OpenApiResponse(description="Validation error"),
+            403: OpenApiResponse(description="Not the acting subject"),
+            404: OpenApiResponse(description="No such specialist"),
+            409: OpenApiResponse(description="HAS_ACTIVE_APPOINTMENTS"),
+        },
+    )
+    def put(self, request: Request, specialist_id: UUID) -> Response:
+        profile = self._profile(specialist_id)
+        if profile is None:
+            return error_response("NOT_FOUND", "Specialist profile not found.", status_code=404)
+        serializer = SchedulePutSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            replace_weekly_schedule(profile, serializer.validated_data["schedule"])
+        except ScheduleShrinkConflict as conflict:
+            return error_response(
+                "HAS_ACTIVE_APPOINTMENTS",
+                f"Cannot shrink this schedule: {conflict.stranded} active "
+                "appointment(s) would be left outside working hours.",
+                status_code=409,
+            )
+        logger.info(
+            "internal.working_hours.saved specialist=%s working_days=%s",
+            profile.pk,
+            sum(1 for d in serializer.validated_data["schedule"] if d["is_working_day"]),
+        )
+        return success_response(self._payload(profile))
