@@ -19,6 +19,7 @@ from nutrition.views import (
     InternalFoodLogView,
     InternalFoodScanView,
     InternalPatternsView,
+    InternalBodyParametersEraseView,
     InternalProfileTargetsConfirmView,
     InternalProfileView,
     InternalReturningSuccessView,
@@ -85,6 +86,13 @@ urlpatterns = [
         "internal/profile/targets/confirm/",
         InternalProfileTargetsConfirmView.as_view(),
         name="internal-nutrition-profile-targets-confirm",
+    ),
+    # DRF-1698 (владелец 12.09 §2) — отзыв согласия на персональный расчёт:
+    # стереть шесть параметров и ориентиры одного человека, дневник оставить.
+    path(
+        "internal/profile/body-parameters/",
+        InternalBodyParametersEraseView.as_view(),
+        name="internal-nutrition-body-parameters-erase",
     ),
     # Phase 3.3 pattern detection (DRF-304)
     path(
