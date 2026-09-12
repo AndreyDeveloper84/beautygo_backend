@@ -47,6 +47,11 @@ from rest_framework.views import APIView
 from users import personalization_engine as engine
 from users.models import User, UserPersonalContext
 from users.permissions import IsInternalBearer
+from users.deletion_requests import (
+    DELETION_REQUESTED,
+    deletion_block_for,
+    deletion_refusal,
+)
 from users.personal_context_erasure import erase_personal_context
 from users.personal_context_views import _GREEN_ZONE_FIELDS
 from users.response import error_response, success_response
@@ -128,6 +133,12 @@ class InternalPersonalContextView(APIView):
         user = _resolve_user(ayla_user_id)
         if user is None:
             return error_response("USER_NOT_FOUND", "User not found.", status_code=404)
+        # D2 (§7): живая заявка на удаление — контекст не отдаётся и не
+        # дописывается. Отказ с именем и номером, не пустой объект: пустота
+        # читалась бы как «новый человек» и включила бы сбор заново.
+        blocked = deletion_block_for(user)
+        if blocked is not None:
+            return deletion_refusal(blocked)
         # Пустой контекст → 200 + пустой объект (lazy-create). Бот не обрабатывает
         # 404 как особый кейс — новый пользователь = нормальное пустое состояние.
         ctx, _ = UserPersonalContext.objects.get_or_create(user=user)
@@ -146,6 +157,9 @@ class InternalPersonalContextView(APIView):
         user = _resolve_user(ayla_user_id)
         if user is None:
             return error_response("USER_NOT_FOUND", "User not found.", status_code=404)
+        blocked = deletion_block_for(user)
+        if blocked is not None:
+            return deletion_refusal(blocked)
 
         updates = request.data.get("updates")
         if not isinstance(updates, list) or not updates:
@@ -205,6 +219,16 @@ class InternalAskEligibilityView(APIView):
         user = _resolve_user(ayla_user_id)
         if user is None:
             return error_response("USER_NOT_FOUND", "User not found.", status_code=404)
+        # D2 (§7): спрашивать человека, который попросил его удалить, нельзя —
+        # это и есть «новая обработка данных». Форма ответа та же, что у
+        # остальных блоков (should_ask False + blocked_by), причина названа.
+        blocked = deletion_block_for(user)
+        if blocked is not None:
+            return success_response({
+                "should_ask": False,
+                "blocked_by": DELETION_REQUESTED,
+                "request_id": str(blocked.pk),
+            })
 
         blocked_reason = "no_candidate"
         for field, hint in _ASK_CANDIDATES:
@@ -240,6 +264,9 @@ class InternalMarkAskedView(APIView):
         user = _resolve_user(ayla_user_id)
         if user is None:
             return error_response("USER_NOT_FOUND", "User not found.", status_code=404)
+        blocked = deletion_block_for(user)
+        if blocked is not None:
+            return deletion_refusal(blocked)
         body = _FieldBodySerializer(data=request.data)
         body.is_valid(raise_exception=True)
         engine.mark_asked(user, body.validated_data["field"])
@@ -256,6 +283,9 @@ class InternalSkipView(APIView):
         user = _resolve_user(ayla_user_id)
         if user is None:
             return error_response("USER_NOT_FOUND", "User not found.", status_code=404)
+        blocked = deletion_block_for(user)
+        if blocked is not None:
+            return deletion_refusal(blocked)
         body = _FieldBodySerializer(data=request.data)
         body.is_valid(raise_exception=True)
         count = engine.mark_skipped(user, body.validated_data["field"])
