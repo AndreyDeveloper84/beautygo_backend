@@ -103,6 +103,9 @@ class TestKnownAnketa:
             # DRF-1746 — тип ответа и массив для multi (пустой у single).
             "mode": anketa.MODE_SINGLE,
             "option_keys": [],
+            # DRF-1747 — «не знаю» и происхождение факта.
+            "unknown": False,
+            "origin": anketa.ORIGIN_ANKETA,
         }
         # Голый вопрос, без пометки о влиянии: блок говорит «что ты
         # сказал», не «зачем спросили».

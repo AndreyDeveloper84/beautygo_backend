@@ -61,6 +61,10 @@ def _validated_answer_shape(step: anketa.AnketaStep, answer: dict) -> list[str]:
     вариантов — порядок тапов не факт.
     """
     option_keys = list(answer.get("option_keys") or [])
+    if step.escape and answer.get("option_key") == anketa.UNKNOWN_OPTION_KEY:
+        # DRF-1747 — «Не знаю» отвечает одним ключом на шаге любого режима:
+        # на multi он не отмечается вместе с вариантами, а заменяет их.
+        return []
     if step.mode == anketa.MODE_MULTI:
         if not option_keys:
             raise serializers.ValidationError(
@@ -374,7 +378,7 @@ class GoalSelectView(APIView):
         option_key = answer.get("option_key")
         text = (answer.get("text") or "").strip() or None
         option_keys = _validated_answer_shape(step, answer)
-        if option_key and option_key not in {key for key, _ in step.options}:
+        if option_key and option_key not in anketa.answerable_option_keys(step):
             raise serializers.ValidationError(
                 {"answer": {"option_key": "Unknown option for this step."}}
             )
@@ -446,7 +450,7 @@ class GoalSelectView(APIView):
             # Без `and expected.options`: на салоне без активных
             # GoalOption список финального шага пуст, и прежний вид
             # проверки пропускал ЛЮБОЙ слаг прямо в ClientGoal.goal_key.
-            allowed = {key for key, _ in expected.options}
+            allowed = anketa.answerable_option_keys(expected)
             if option_key not in allowed:
                 raise serializers.ValidationError(
                     {"answer": {"option_key": "Unknown option for this step."}}
