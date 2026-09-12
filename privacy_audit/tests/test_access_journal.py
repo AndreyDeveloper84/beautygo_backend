@@ -334,6 +334,7 @@ class TestServedOperationsDoNotStopTheProduct:
             assert policy.stops_when_unauditable(stopped)
         for served in (
             op.READ_CONTEXT, op.WRITE_CONTEXT, op.ASK_METADATA, op.DELETION_REQUEST_READ,
+            op.READ_PROFILE,
         ):
             assert not policy.stops_when_unauditable(served)
 
@@ -708,6 +709,7 @@ class TestGuardCoversTheWholeSurface:
         "/api/v1/internal/users/{subject}/personal-context/skip/",
         DELREQ_URL,
         DELREQ_URL + "{request_id}/",
+        "/api/v1/internal/users/{subject}/",  # DRF-1709
     ]
 
     def test_the_list_above_is_every_guarded_view_not_a_hand_picked_subset(self):
@@ -722,7 +724,12 @@ class TestGuardCoversTheWholeSurface:
             for t in self.ROUTES
         }
         guarded = set()
-        for module in ("personal_data_api", "internal_personal_context_api", "deletion_request_api"):
+        for module in (
+            "personal_data_api",
+            "internal_personal_context_api",
+            "deletion_request_api",
+            "internal_users_api",  # DRF-1709 — the profile card joined the surface
+        ):
             mod = __import__(f"users.{module}", fromlist=["x"])
             for obj in vars(mod).values():
                 if isinstance(obj, type) and IsInternalBearerForSubject in getattr(
@@ -734,7 +741,7 @@ class TestGuardCoversTheWholeSurface:
             "guarded_not_listed": sorted(c.__name__ for c in guarded - listed),
             "listed_not_guarded": sorted(c.__name__ for c in listed - guarded),
         }
-        assert len(guarded) == 8
+        assert len(guarded) == 9
 
     @pytest.mark.parametrize("template", ROUTES)
     def test_route_is_audited(self, template):
