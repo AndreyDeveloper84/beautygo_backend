@@ -35,6 +35,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from users.models import Profile, User, UserPersonalContext
+from privacy_audit.mixins import AuditedPersonalDataAccess
+from privacy_audit.models import PersonalDataAccessLog
 from users.permissions import IsInternalBearerForSubject
 from users.personal_context_erasure import erase_personal_context
 from users.personal_context_views import UserPersonalContextSerializer
@@ -75,12 +77,14 @@ def _not_found(request: Request, user_id: UUID) -> Response:
     return error_response("NOT_FOUND", "User not found.", status_code=404)
 
 
-class InternalPersonalDataExportView(APIView):
+class InternalPersonalDataExportView(AuditedPersonalDataAccess, APIView):
     """GET …/personal-data/export/ — C5.1 synchronous JSON export."""
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "user_id"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.PERSONAL_DATA
+    audit_operations = {"GET": PersonalDataAccessLog.Operation.EXPORT}
 
     @extend_schema(
         operation_id="internal_personal_data_export",
@@ -137,12 +141,14 @@ class InternalPersonalDataExportView(APIView):
         })
 
 
-class InternalPersonalDataDeleteView(APIView):
+class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
     """DELETE …/personal-data/ — C5.2/AMD-006 idempotent wipe + audit."""
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "user_id"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.PERSONAL_DATA
+    audit_operations = {"DELETE": PersonalDataAccessLog.Operation.DELETE}
 
     @extend_schema(
         operation_id="internal_personal_data_delete",
