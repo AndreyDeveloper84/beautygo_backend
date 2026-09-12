@@ -23,6 +23,7 @@ the mobile path. Booking domain errors propagate to
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from drf_spectacular.utils import (
@@ -128,6 +129,14 @@ class InternalBookingCreateSerializer(serializers.Serializer):
     # booking.confirmed is emitted (R1). Additive contract change
     # (#1016, MINOR) — omitted field behaves exactly as before.
     payment_required = serializers.BooleanField(required=False, default=True)
+    # DRF-1708 (B-6.2) — что человек видел на подтверждении. Аддитивно и
+    # необязательно: без полей поведение прежнее. С полями сервис сверяет
+    # их со снимком внутри транзакции и отвечает 409 QUOTE_CHANGED при
+    # расхождении — запись не создаётся.
+    quoted_price = serializers.DecimalField(
+        required=False, max_digits=10, decimal_places=2, min_value=Decimal("0"),
+    )
+    quoted_duration_minutes = serializers.IntegerField(required=False, min_value=1)
 
 
 class _InternalAuthMixin:
@@ -153,7 +162,10 @@ class InternalBookingCreateView(_InternalAuthMixin, APIView):
                 description="body.client_id does not match resolved actor",
             ),
             404: OpenApiResponse(description="Specialist not found / revoked"),
-            409: OpenApiResponse(description="Slot not available"),
+            409: OpenApiResponse(
+                description="Slot not available | QUOTE_CHANGED (quoted price/"
+                "duration differ from what would apply; details.field)",
+            ),
             422: OpenApiResponse(description="Specialist/service not bookable"),
         },
     )
@@ -189,6 +201,10 @@ class InternalBookingCreateView(_InternalAuthMixin, APIView):
             payment_required=serializer.validated_data['payment_required'],
             confirm_immediately=(
                 not serializer.validated_data['payment_required']
+            ),
+            quoted_price=serializer.validated_data.get('quoted_price'),
+            quoted_duration_minutes=serializer.validated_data.get(
+                'quoted_duration_minutes'
             ),
         )
 
