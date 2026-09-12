@@ -40,6 +40,33 @@ def _envelope(
     return Response(body, status=status_code)
 
 
+def _normalize_validation_details(detail: Any) -> Any:
+    """Canonical ``details`` for a list-serializer failure — the same shape
+    on every DRF version.
+
+    DRF ≤ 3.16 renders ``many=True`` errors as a positional list with ``{}``
+    for the items that passed; DRF ≥ 3.17 renders a dict keyed by the item
+    index as a string, omitting the items that passed. The public contract
+    (``docs/PERSONAL_CONTEXT_INTERNAL_API_CONTRACT.md`` — ``details?: {...}``)
+    promises an object, so the dict form is canonical and the list form is
+    translated into it here, at the single place the envelope is built.
+
+    Recorded on both versions before this existed —
+    ``Ayla/docs/DRF_318_GATE_2026-09-12.md`` (DRF-1714): the only production
+    ``many=True`` validation in the catalog is
+    ``users/internal_personal_context_api.py`` ``_UpdateItemSerializer``.
+    Anything that is not a list (a plain dict from a single serializer, a
+    list of strings from ``non_field_errors``) is returned untouched.
+    """
+    if not isinstance(detail, list):
+        return detail
+    if not all(isinstance(item, dict) for item in detail):
+        # ``["message", ...]`` — a field-level list of messages, not a list of
+        # per-item error dicts. Leave it alone: it is not the many=True shape.
+        return detail
+    return {str(index): item for index, item in enumerate(detail) if item}
+
+
 def api_exception_handler(exc, context):
     """Central DRF exception handler — see module docstring.
 
@@ -78,7 +105,7 @@ def api_exception_handler(exc, context):
         return _envelope(
             ErrorCode.VALIDATION_ERROR.value,
             "Invalid input",
-            details=exc.detail,
+            details=_normalize_validation_details(exc.detail),
             status_code=400,
         )
     if isinstance(exc, drf_exceptions.NotAuthenticated):
