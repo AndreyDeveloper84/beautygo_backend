@@ -51,6 +51,41 @@ from .service_match import match_named_service
 logger = logging.getLogger(__name__)
 
 
+def _validated_answer_shape(step: anketa.AnketaStep, answer: dict) -> list[str]:
+    """Форма ответа под режим шага (DRF-1746); возвращает ключи для multi.
+
+    ``multi`` отвечает только массивом — ни одиночный ключ, ни текст ему
+    не подходят: иначе «Продолжить» над отмеченным можно было бы обойти
+    тапом, и ответ шага хранился бы в двух графах. Остальные режимы массив
+    не принимают. Ключи сверяются с вариантами шага и приводятся к порядку
+    вариантов — порядок тапов не факт.
+    """
+    option_keys = list(answer.get("option_keys") or [])
+    if step.mode == anketa.MODE_MULTI:
+        if not option_keys:
+            raise serializers.ValidationError(
+                {"answer": {"option_keys": "This step is answered with option_keys."}}
+            )
+        allowed = [key for key, _ in step.options]
+        unknown = sorted(set(option_keys) - set(allowed))
+        if unknown:
+            raise serializers.ValidationError(
+                {"answer": {"option_keys": f"Unknown options for this step: {unknown}."}}
+            )
+        return [key for key in allowed if key in set(option_keys)]
+    if option_keys:
+        raise serializers.ValidationError(
+            {"answer": {"option_keys": "This step takes a single answer."}}
+        )
+    if step.mode == anketa.MODE_TEXT:
+        text = (answer.get("text") or "").strip()
+        if len(text) > anketa.TEXT_ANSWER_LIMIT:
+            raise serializers.ValidationError(
+                {"answer": {"text": f"At most {anketa.TEXT_ANSWER_LIMIT} characters."}}
+            )
+    return []
+
+
 class AnketaAnswerSerializer(serializers.Serializer):
     """Ответ на один шаг анкеты: ``{step, option_key}`` или ``{step, text}``.
 
@@ -62,6 +97,13 @@ class AnketaAnswerSerializer(serializers.Serializer):
 
     step = serializers.SlugField(max_length=32)
     option_key = serializers.SlugField(max_length=64, required=False)
+    # DRF-1746 — режим multi: массив ключей одним ответом (не по тапу).
+    option_keys = serializers.ListField(
+        child=serializers.SlugField(max_length=64),
+        required=False,
+        allow_empty=False,
+        max_length=32,
+    )
     text = serializers.CharField(max_length=1000, required=False, allow_blank=False)
     # DRF-1744: «Изменить» в блоке «Уже учла». Явный флаг, а не «любой
     # ответ на любой шаг»: 409 на ответ не по порядку остаётся защитой
@@ -69,9 +111,12 @@ class AnketaAnswerSerializer(serializers.Serializer):
     revise = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
-        if bool(attrs.get("option_key")) == bool(attrs.get("text")):
+        given = [
+            name for name in ("option_key", "text", "option_keys") if attrs.get(name)
+        ]
+        if len(given) != 1:
             raise serializers.ValidationError(
-                "Provide exactly one of: option_key, text."
+                "Provide exactly one of: option_key, text, option_keys."
             )
         if not anketa.is_answerable_step(attrs["step"]):
             raise serializers.ValidationError({"step": "Unknown anketa step."})
@@ -328,6 +373,7 @@ class GoalSelectView(APIView):
             )
         option_key = answer.get("option_key")
         text = (answer.get("text") or "").strip() or None
+        option_keys = _validated_answer_shape(step, answer)
         if option_key and option_key not in {key for key, _ in step.options}:
             raise serializers.ValidationError(
                 {"answer": {"option_key": "Unknown option for this step."}}
@@ -338,7 +384,8 @@ class GoalSelectView(APIView):
             )
         existing.option_key = option_key
         existing.answer_text = text
-        existing.save(update_fields=["option_key", "answer_text"])
+        existing.option_keys = option_keys
+        existing.save(update_fields=["option_key", "answer_text", "option_keys"])
         logger.info(
             "goals.anketa_revised user_id=%s run_id=%s step=%s",
             client.id, run.id, step.key,
@@ -394,6 +441,7 @@ class GoalSelectView(APIView):
 
         option_key = answer.get("option_key")
         text = (answer.get("text") or "").strip() or None
+        option_keys = _validated_answer_shape(expected, answer)
         if option_key:
             # Без `and expected.options`: на салоне без активных
             # GoalOption список финального шага пуст, и прежний вид
@@ -415,7 +463,11 @@ class GoalSelectView(APIView):
         GoalAnketaAnswer.objects.update_or_create(
             run=run,
             step_key=expected.key,
-            defaults={"option_key": option_key, "answer_text": text},
+            defaults={
+                "option_key": option_key,
+                "answer_text": text,
+                "option_keys": option_keys,
+            },
         )
 
         if expected.key == anketa.GOAL_STEP_KEY:

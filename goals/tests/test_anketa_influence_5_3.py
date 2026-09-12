@@ -85,7 +85,7 @@ class TestNoInfluenceNoteIsShown:
         settings.GOAL_ANKETA_ENABLED = True
         item = build_decision_context(customer)["missing"][0]
         assert set(item) == {
-            "kind", "prompt", "step", "options", "allow_free_text", "progress",
+            "kind", "prompt", "step", "options", "allow_free_text", "progress", "mode",
         }
 
     @pytest.mark.django_db

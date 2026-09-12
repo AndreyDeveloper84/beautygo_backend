@@ -67,6 +67,29 @@ MISSING_GOAL_ANKETA = "goal_anketa"
 
 GOAL_STEP_KEY = "goal"
 
+# ─── типы ответа по смыслу (DRF-1746, макет C03 P11) ───────────────────────
+#
+# «C03 не должен выглядеть как серия одинаковых экранов с radio-кнопками».
+# Режим — свойство шага и едет в ``missing`` данными (условие C-1): экран
+# рисует компонент по ``mode`` и ничего не выводит. Отсутствие поля в
+# документе = ``single`` — старый потребитель и старый документ совпадают.
+# Какой вопрос каким режимом — содержание анкеты/каталога вопросов движка,
+# не этот контракт; сегодняшние ``ANKETA_STEPS`` остаются ``single``.
+MODE_SINGLE = "single"
+MODE_MULTI = "multi"
+#: Подтверждение известного — компонент DRF-1745; в контракте место
+#: зарезервировано, чтобы экран знал имя заранее и рисовал его как
+#: ``single`` до появления компонента.
+MODE_CONFIRM = "confirm"
+MODE_SCALE = "scale"
+MODE_TEXT = "text"
+ANSWER_MODES = frozenset({MODE_SINGLE, MODE_MULTI, MODE_CONFIRM, MODE_SCALE, MODE_TEXT})
+
+#: Лимит короткого свободного ответа (режим ``text``). Едет в документе
+#: как ``text_limit``, чтобы поле на экране и проверка на сервере были
+#: одним числом.
+TEXT_ANSWER_LIMIT = 120
+
 
 @dataclass(frozen=True)
 class AnketaStep:
@@ -89,6 +112,35 @@ class AnketaStep:
     #: C02 «формулировку адаптируем под выбранную цель»). Пары, а не dict,
     #: чтобы шаг оставался hashable/frozen. Нет пары — общий ``prompt``.
     prompt_by_goal: tuple[tuple[str, str], ...] = ()
+    #: Тип ответа (DRF-1746): один из :data:`ANSWER_MODES`.
+    mode: str = MODE_SINGLE
+    #: Подписи концов шкалы (режим ``scale``): (низ, верх). Порядок
+    #: делений — порядок ``options``.
+    scale_ends: tuple[str, str] | None = None
+
+
+def step_contract_errors(steps: tuple[AnketaStep, ...]) -> list[str]:
+    """Сторож формы шага под его режим (DRF-1746). Пусто — чисто.
+
+    Режим обещает экрану компонент, и у компонента есть входы: ``text``
+    без свободного ввода — поле, которое сервер отвергнет; ``scale`` без
+    подписей концов — шкала без смысла делений; ``multi`` без вариантов
+    — «Продолжить» над пустотой. Ловится здесь, а не на экране.
+    """
+    errors: list[str] = []
+    for step in steps:
+        if step.mode not in ANSWER_MODES:
+            errors.append(f"{step.key}: неизвестный mode {step.mode!r}")
+            continue
+        if step.mode == MODE_TEXT and (step.options or not step.allow_free_text):
+            errors.append(f"{step.key}: text — без вариантов и со свободным вводом")
+        if step.mode == MODE_SCALE and (len(step.options) < 2 or not step.scale_ends):
+            errors.append(f"{step.key}: scale — не меньше двух делений и подписи концов")
+        if step.mode in (MODE_MULTI, MODE_SINGLE, MODE_CONFIRM) and step.scale_ends:
+            errors.append(f"{step.key}: подписи концов только у scale")
+        if step.mode == MODE_MULTI and not step.options:
+            errors.append(f"{step.key}: multi — без вариантов нечего отмечать")
+    return errors
 
 
 # ─── влияние ответа на решение (§5.3) ─────────────────────────────────────
@@ -239,7 +291,11 @@ def narrowing_step(step_key: str) -> AnketaStep | None:
 
 
 def as_known_answer(
-    step: AnketaStep, *, option_key: str | None, text: str | None,
+    step: AnketaStep,
+    *,
+    option_key: str | None,
+    text: str | None,
+    option_keys: list[str] | None = None,
 ) -> dict[str, Any]:
     """Ответ на шаг → строка блока «Уже учла» (DRF-1744), готовая к отрисовке.
 
@@ -252,12 +308,21 @@ def as_known_answer(
     спросили». ``revisable`` — решение сервера, экран его не выводит.
     """
     labels = dict(step.options)
+    chosen = list(option_keys or [])
+    if chosen:
+        # DRF-1746 — multi: одна строка «Уже учла» на шаг, подписи через
+        # запятую в порядке вариантов шага, не в порядке тапов.
+        label = ", ".join(labels[key] for key, _ in step.options if key in chosen)
+    else:
+        label = labels.get(option_key or "", text or option_key or "")
     return {
         "step": step.key,
         "prompt": step.prompt,
         "option_key": option_key,
-        "label": labels.get(option_key or "", text or option_key or ""),
+        "option_keys": chosen,
+        "label": label,
         "options": [{"key": key, "label": label} for key, label in step.options],
+        "mode": step.mode,
         "revisable": True,
     }
 
@@ -325,15 +390,22 @@ def as_missing_item(
     прежних местах, поэтому потребитель, читающий только их
     (``GoalInviteCard``), продолжает работать без правки.
     """
-    return {
+    item: dict[str, Any] = {
         "kind": MISSING_GOAL_ANKETA,
         "prompt": shown_prompt(step, goal_key),
         "step": step.key,
         "options": [{"key": key, "label": label} for key, label in step.options],
         "allow_free_text": step.allow_free_text,
+        # DRF-1746 — тип ответа; экран рисует компонент по нему.
+        "mode": step.mode,
         "progress": {
             "index": step_index(step.key),
             "total": TOTAL_STEPS,
             "is_last": is_last_step(step, answered_keys),
         },
     }
+    if step.mode == MODE_SCALE and step.scale_ends:
+        item["scale"] = {"low_label": step.scale_ends[0], "high_label": step.scale_ends[1]}
+    if step.mode == MODE_TEXT:
+        item["text_limit"] = TEXT_ANSWER_LIMIT
+    return item
