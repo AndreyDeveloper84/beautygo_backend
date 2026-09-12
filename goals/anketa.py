@@ -152,6 +152,63 @@ def answerable_option_keys(step: AnketaStep) -> set[str]:
     return keys
 
 
+# ─── граница C03: чего здесь не спрашиваем (DRF-1751, макет C03 P23) ────────
+#
+# «На C03 не спрашиваем: бюджет, район, время, мастера, салон, акции,
+# оплату». Анкета границу держит по построению — шаги area/feeling/goal
+# ничего из этого не спрашивают, — но добавление шага «district» прошло бы
+# молча. Сторож ниже читает ключи шагов, ключи опций и слова подписей.
+# Ключ — точное совпадение, подпись — по основам слов (регистр не важен).
+C03_FORBIDDEN_STEP_KEYS = frozenset({
+    "budget", "price", "district", "distance", "time", "date", "master",
+    "rating", "salon", "discount", "promo", "payment",
+})
+#: Основы слов запрещённых тем в подписях — по НАЧАЛУ слова («акци» не
+#: ловит «реакция»); «цен» здесь нет — оно ловило бы «центр». Коротких и двусмысленных
+#: здесь нет намеренно («утром» — проявление, не расписание; «окно» — не
+#: слот): сторож обязан молчать на настоящих вопросах C03.
+C03_FORBIDDEN_STEMS: tuple[str, ...] = (
+    "бюджет", "цена", "цену", "цены", "ценой", "ценам", "ценник", "ценов", "стоим", "рубл",
+    "₽", "дешев", "дорог", "подешев", "подорож",
+    "район", "далеко", "рядом с", "метро", "адрес",
+    "расписан", "дата", "слот", "запис",
+    "мастер", "специалист", "рейтинг", "отзыв",
+    "салон", "студи",
+    "скидк", "акци", "промо",
+    "оплат", "платеж", "картой", "рассрочк",
+)
+
+
+def c03_boundary_violations(steps: tuple[AnketaStep, ...]) -> list[str]:
+    """Сторож границы C03 (DRF-1751). Пусто — чисто; иначе все нарушения
+    разом, чтобы тест печатал каждое, а не первое."""
+    errors: list[str] = []
+    for step in steps:
+        if step.key in C03_FORBIDDEN_STEP_KEYS:
+            errors.append(f"{step.key}: ключ шага из запрещённого списка C03")
+        for key, _ in step.options:
+            if key in C03_FORBIDDEN_STEP_KEYS:
+                errors.append(f"{step.key}: опция {key!r} из запрещённого списка C03")
+        texts = [step.prompt, *(p for _, p in step.prompt_by_goal), *(lbl for _, lbl in step.options)]
+        for text in texts:
+            hit = _forbidden_stem_in(text)
+            if hit is not None:
+                errors.append(f"{step.key}: «{text}» — слово из запрещённой темы ({hit!r})")
+    return errors
+
+
+def _forbidden_stem_in(text: str) -> str | None:
+    """Первая основа из :data:`C03_FORBIDDEN_STEMS`, с которой начинается
+    какое-нибудь слово текста; ``None`` — чисто."""
+    import re
+
+    words = re.findall(r"[а-яёa-z₽]+", text.casefold())
+    for stem in C03_FORBIDDEN_STEMS:
+        if any(word.startswith(stem) for word in words):
+            return stem
+    return None
+
+
 def step_contract_errors(steps: tuple[AnketaStep, ...]) -> list[str]:
     """Сторож формы шага под его режим (DRF-1746). Пусто — чисто.
 
