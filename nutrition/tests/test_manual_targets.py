@@ -138,15 +138,39 @@ class TestWriter:
         # Наружу — только названное человеком, без «белок: null».
         assert resp.json()["data"]["norms"] == {"daily_kcal": 1900, "daily_water_ml": 2000}
 
-    def test_legacy_water_column_is_not_read_without_user_entered(self, proxy_user):
-        """Остаток формулы 30 × вес в столбце — не ориентир ни при каком другом источнике."""
-        for source in (Source.UNKNOWN_LEGACY, Source.AYLA_CALCULATED, Source.NONE):
+    def test_water_in_the_column_acts_only_for_a_confirmed_source(self, proxy_user):
+        """Число в столбце действует только у действующего источника.
+
+        ``unknown_legacy`` — остаток формулы 30 × вес; ``none`` — не бывает
+        числа; ``ayla_proposed`` — предложение, не действует. Действуют
+        ``user_entered`` и ``ayla_calculated`` (справочник, подтверждённый).
+        """
+        for source in (Source.UNKNOWN_LEGACY, Source.NONE, Source.AYLA_PROPOSED):
             NutritionProfile.objects.update_or_create(
                 user=proxy_user, defaults={"targets_source": source, "daily_water_ml": 2100},
             )
             assert _load_nutrition_context(proxy_user.id).fluid_target_ml is None, source
-        NutritionProfile.objects.filter(user=proxy_user).update(targets_source=Source.USER_ENTERED)
-        assert _load_nutrition_context(proxy_user.id).fluid_target_ml == 2100  # POSITIVE
+        for source in (Source.USER_ENTERED, Source.AYLA_CALCULATED):  # POSITIVE
+            NutritionProfile.objects.filter(user=proxy_user).update(targets_source=source)
+            assert _load_nutrition_context(proxy_user.id).fluid_target_ml == 2100, source
+
+    def test_manual_calories_alone_drop_the_reference_water(self, proxy_user, headers):
+        """Справочная вода расчёта под именем user_entered — число, которого
+        человек не называл; при ручных калориях без воды она снимается."""
+        _compute(headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+        assert p.daily_water_ml == 2200  # POSITIVE: справочник записан
+        resp = _manual({"calories_kcal": 1800, "confirm_deviation": True}, headers)
+        assert resp.status_code == status.HTTP_200_OK, resp.json()
+        p.refresh_from_db()
+        assert p.daily_water_ml is None
+        assert resp.json()["data"]["norms"] == {"daily_kcal": 1800}
+
+    def test_manual_calories_keep_own_earlier_manual_water(self, proxy_user, headers):
+        _manual({"water_ml": 2500}, headers)
+        resp = _manual({"calories_kcal": 1800}, headers)
+        assert resp.status_code == status.HTTP_200_OK, resp.json()
+        assert resp.json()["data"]["norms"] == {"daily_kcal": 1800, "daily_water_ml": 2500}
 
     def test_nothing_to_set_is_a_400(self, proxy_user, headers):
         resp = _manual({}, headers)

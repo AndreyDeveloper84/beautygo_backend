@@ -234,6 +234,11 @@ def set_manual_targets(
         if water_ml is not None:
             profile.daily_water_ml = water_ml
             set_fields.append("daily_water_ml")
+        elif profile.targets_source != NutritionProfile.TargetsSource.USER_ENTERED:
+            # Справочная вода состоявшегося расчёта (раздел 4) под именем
+            # ``user_entered`` стала бы «числом человека», которого он не
+            # называл. Своя прежняя ручная вода — остаётся.
+            profile.daily_water_ml = None
         for name in COMPUTED_FIELDS:
             setattr(profile, name, None)
 
