@@ -22,6 +22,10 @@ from users.internal_users_api import (
     InternalBindExternalIdentityView,
     InternalUserProfileView,
 )
+from recommendation.record_api import (
+    InternalRecommendationEventView,
+    InternalRecommendationSetView,
+)
 from users.personal_data_api import (
     InternalPersonalDataDeleteView,
     InternalPersonalDataExportView,
@@ -29,6 +33,19 @@ from users.personal_data_api import (
 
 
 urlpatterns = [
+    # DRF-1666 — запись Recommendation для C04.1: чтение набора и события
+    # взаимодействия, оба под субъектом (DRF-1617). Здесь, а не в
+    # recommendation/urls.py: та ручка — граница резолвера и остаётся одна.
+    path(
+        "<uuid:user_id>/recommendations/<uuid:set_id>/",
+        InternalRecommendationSetView.as_view(),
+        name="internal-recommendation-set",
+    ),
+    path(
+        "<uuid:user_id>/recommendations/<uuid:recommendation_id>/events/",
+        InternalRecommendationEventView.as_view(),
+        name="internal-recommendation-events",
+    ),
     # E2E-BOT-02B — identity binding. Static segment, declared before the
     # <uuid:...> routes so it can never be swallowed by a uuid converter
     # (it wouldn't anyway — "bind-external" is not a uuid — explicit
