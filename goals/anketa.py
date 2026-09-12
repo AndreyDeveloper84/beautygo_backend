@@ -191,6 +191,35 @@ def is_answerable_step(step_key: str) -> bool:
     return step_key in _ANSWERABLE_KEYS
 
 
+def narrowing_step(step_key: str) -> AnketaStep | None:
+    """Сужающий шаг по ключу; финальный и незнакомые — ``None``."""
+    return _STEP_BY_KEY.get(step_key)
+
+
+def as_known_answer(
+    step: AnketaStep, *, option_key: str | None, text: str | None,
+) -> dict[str, Any]:
+    """Ответ на шаг → строка блока «Уже учла» (DRF-1744), готовая к отрисовке.
+
+    Макет C03 (DRF-1178): человек видит, что его услышали, и любой
+    показанный факт может исправить. Поэтому строка несёт не только
+    подпись выбранного, но и ``options`` шага: чтобы «Изменить» было
+    чем ответить, экрану не нужен ни список вопросов, ни порядок —
+    только этот шаг. ``prompt`` — голый вопрос, без пометки о влиянии
+    (:func:`shown_prompt`): блок говорит «что ты сказал», не «зачем
+    спросили». ``revisable`` — решение сервера, экран его не выводит.
+    """
+    labels = dict(step.options)
+    return {
+        "step": step.key,
+        "prompt": step.prompt,
+        "option_key": option_key,
+        "label": labels.get(option_key or "", text or option_key or ""),
+        "options": [{"key": key, "label": label} for key, label in step.options],
+        "revisable": True,
+    }
+
+
 def _final_step() -> AnketaStep:
     """Финальный шаг: варианты — курируемые цели, свободный ввод открыт."""
     options = tuple(

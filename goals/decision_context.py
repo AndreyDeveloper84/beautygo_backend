@@ -25,6 +25,10 @@ DRF-1451 — версия 2: анкета
 
 Что версия 2 добавила к документу:
 
+- ``known.anketa`` — ответы открытого прохода, блок «Уже учла»
+  (DRF-1744): каждая строка несёт ``options`` шага и ``revisable``,
+  чтобы «Изменить» отвечалось тем же ``POST /goals/select`` с
+  ``answer.revise = true``;
 - ``missing[].kind == "goal_anketa"`` — шаг анкеты; у него, помимо
   прежних ``kind``/``prompt``, есть ``step``, ``options``,
   ``allow_free_text`` и ``progress``. Старые kind'ы не тронуты, поэтому
@@ -135,6 +139,34 @@ def open_anketa_run(client: User) -> GoalAnketaRun | None:
     )
 
 
+def known_anketa_answers(run: GoalAnketaRun | None) -> list[dict[str, Any]]:
+    """Ответы открытого прохода в порядке шагов — блок «Уже учла» (DRF-1744).
+
+    Только открытый проход: пока идёт C03, человек видит, что уже
+    сказал, и может поправить. Завершённый проход — уже цель, она
+    живёт в ``known.goal``. Порядок — порядок ``ANKETA_STEPS``, не
+    порядок записи: экран порядок не вычисляет. Ответы на неизвестные
+    серверу шаги (снятые из ``ANKETA_STEPS``) не показываются — их
+    нечем исправить.
+    """
+    if run is None:
+        return []
+    by_step = {
+        answer.step_key: answer
+        for answer in run.answers.all()
+        if anketa.narrowing_step(answer.step_key) is not None
+    }
+    return [
+        anketa.as_known_answer(
+            step,
+            option_key=by_step[step.key].option_key,
+            text=by_step[step.key].answer_text,
+        )
+        for step in anketa.ANKETA_STEPS
+        if step.key in by_step
+    ]
+
+
 def next_anketa_step(run: GoalAnketaRun | None) -> anketa.AnketaStep:
     """Какой шаг задавать сейчас. ``None`` — проход ещё не начат."""
     answered: set[str] = set()
@@ -212,13 +244,15 @@ def build_decision_context(
         .order_by("-selected_at")
     )
 
+    anketa_on = _anketa_enabled()
+    run = open_anketa_run(client) if anketa_on else None
+
     known: dict[str, Any] = {
         "goal": _goal_payload(active_goal) if active_goal else None,
         "goals": [_goal_payload(goal) for goal in open_goals],
+        # DRF-1744: что человек уже сказал в этом проходе — аддитивно.
+        "anketa": known_anketa_answers(run),
     }
-
-    anketa_on = _anketa_enabled()
-    run = open_anketa_run(client) if anketa_on else None
 
     missing: list[dict[str, Any]] = []
     if guidance:
