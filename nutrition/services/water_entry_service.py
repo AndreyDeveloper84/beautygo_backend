@@ -104,6 +104,7 @@ def _load_nutrition_context(user_id: int) -> NutritionContext:
     любое его чтение эту формулу применяет.
     """
     from nutrition.models import NutritionProfile  # local import to avoid cycle
+    from nutrition.services.targets_state import targets_confirmed
 
     try:
         profile = NutritionProfile.objects.only(
@@ -121,17 +122,16 @@ def _load_nutrition_context(user_id: int) -> NutritionContext:
             tz = dt_tz.utc
 
     flags = profile.health_flags or {}
-    # ``daily_water_ml`` читается ТОЛЬКО при ``user_entered`` (§5.1,
-    # 11.09.2026): это единственный источник, при котором число в столбце
-    # назвал человек. У остальных источников столбец либо NULL, либо
-    # остаток снятой формулы 30 × вес до команды очистки — прочитать его
-    # значило бы применить снятую методику. Признак — происхождение, не
-    # значение: по числу 2100 не отличить «человек сказал» от «70 × 30».
+    # ``daily_water_ml`` читается только у ДЕЙСТВУЮЩЕГО ориентира
+    # (``targets_confirmed``: ``user_entered`` — назвал человек, §5.1;
+    # ``ayla_calculated`` — справочник по полу, подтверждённый человеком,
+    # раздел 4). ``ayla_proposed`` показывается как предложение и не
+    # действует; у ``unknown_legacy`` в столбце остаток снятой формулы
+    # 30 × вес до команды очистки — прочитать его значило бы применить
+    # снятую методику. Признак — происхождение, не значение: по числу
+    # 2100 не отличить «человек сказал» от «70 × 30».
     fluid_target: int | None = None
-    if (
-        profile.targets_source == NutritionProfile.TargetsSource.USER_ENTERED
-        and profile.daily_water_ml
-    ):
+    if targets_confirmed(profile) and profile.daily_water_ml:
         fluid_target = int(profile.daily_water_ml)
     return NutritionContext(
         timezone=tz,

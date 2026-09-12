@@ -177,12 +177,12 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
     profile.daily_protein_g = norms.daily_protein_g
     profile.daily_fat_g = norms.daily_fat_g
     profile.daily_carbs_g = norms.daily_carbs_g
-    # ``profile.daily_water_ml`` здесь БОЛЬШЕ НЕ ПИШЕТСЯ: формула
-    # 30 мл × вес снята (§82, §85). Столбец nullable (§103, миграция
-    # 0018) и у новых строк ``NULL``; выход снятой формулы у старых
-    # строк стирает команда ``clear_targets_without_provenance``, а не
-    # этот пересчёт: команда печатает значения до записи и запускается
-    # тем, кем решено, — пересчёт на POST этого не умеет.
+    # Ориентир по жидкости — справочный по полу (раздел 4 решения 09.09,
+    # ``FLUIDS_REFERENCE_ML``), пишется тем же расчётом и с той же судьбой:
+    # предложение до подтверждения, ``None`` при отказе. Формулы 30 × вес
+    # здесь нет — её остатки у старых строк стирает команда
+    # ``clear_targets_without_provenance``.
+    profile.daily_water_ml = norms.daily_water_ml
     # DRF-265: micronutrient RDA — recomputed on every upsert.
     profile.daily_vitamin_d_iu = norms.daily_vitamin_d_iu
     profile.daily_vitamin_b12_mcg = norms.daily_vitamin_b12_mcg
@@ -279,6 +279,15 @@ def _flip_lifecycle_markers(profile: NutritionProfile, payload: dict) -> None:
         profile.onboarded_at = datetime.now(dt_tz.utc)
 
 
+#: Источники, при которых число в ``daily_water_ml`` — не выход снятой
+#: формулы: назвал человек либо справочник по полу состоявшегося расчёта.
+_WATER_SOURCES = (
+    NutritionProfile.TargetsSource.USER_ENTERED,
+    NutritionProfile.TargetsSource.AYLA_PROPOSED,
+    NutritionProfile.TargetsSource.AYLA_CALCULATED,
+)
+
+
 def _norms_block(profile: NutritionProfile) -> dict[str, Any]:
     """Посчитанные ориентиры — или ПУСТОЙ словарь, если расчёта не было.
 
@@ -328,13 +337,14 @@ def _norms_block(profile: NutritionProfile) -> dict[str, Any]:
         "daily_omega3_g": profile.daily_omega3_g,
         "daily_fiber_g": profile.daily_fiber_g,
     }
-    # ``daily_water_ml`` едет ТОЛЬКО при ``user_entered`` (§5.1): это
-    # единственный источник, при котором в столбце лежит число человека, а
-    # не выход снятой формулы 30 × вес. У остальных источников столбец либо
-    # NULL (новые строки, очищенные), либо остаток формулы до команды
-    # очистки — его отдать значило бы выдать снятую методику за живую.
+    # ``daily_water_ml`` едет только при ИЗВЕСТНОМ происхождении числа:
+    # ``user_entered`` (назвал человек, §5.1) и ``ayla_proposed`` /
+    # ``ayla_calculated`` (справочник по полу, раздел 4). У
+    # ``unknown_legacy`` в столбце остаток снятой формулы 30 × вес до
+    # команды очистки — его отдать значило бы выдать снятую методику за
+    # живую; сюда он не проходит по источнику, а не по значению.
     if (
-        profile.targets_source == NutritionProfile.TargetsSource.USER_ENTERED
+        profile.targets_source in _WATER_SOURCES
         and profile.daily_water_ml is not None
     ):
         block["daily_water_ml"] = profile.daily_water_ml
