@@ -10,3 +10,4 @@ users/management/commands/reset_test_account.py  # DRF-1269: то же
 users/tests/test_account_reset.py  # DRF-1269: фикстура
 tenants/tests/test_salon_manual_ops_1063.py  # DRF-1269: фикстура
 services/seeds/canonical_catalog_2026-07.csv  # сид канонического каталога услуг: организации и услуги, людей нет (проверено 12.09, DRF-1269)
+users/management/commands/identity_card.py  # DRF-1269: фикстурный id внутренней учётки в примере --help (каталожная половина §12, #360)
