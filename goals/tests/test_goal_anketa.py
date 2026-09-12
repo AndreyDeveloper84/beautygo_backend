@@ -139,8 +139,10 @@ class TestDocumentShape:
         """
         settings.GOAL_ANKETA_ENABLED = True
         item = build_decision_context(customer)["missing"][0]
+        # ``mode`` (DRF-1746) — рисуемое: выбор компонента, не материал
+        # для вычислений.
         assert set(item) == {
-            "kind", "prompt", "step", "options", "allow_free_text", "progress",
+            "kind", "prompt", "step", "options", "allow_free_text", "progress", "mode",
         }
         assert set(item["progress"]) == {"index", "total", "is_last"}
         for option in item["options"]:
