@@ -37,7 +37,7 @@
   IP `194.87.99.126`, Docker 28.1.1. CPU=2 — подтверждённый лимит: staging-профиль
   урезанный (без ChromaDB на старте, gunicorn/celery с ограниченной concurrency).
 - SSH: доступ есть (ключи на месте, taximeter@194.87.99.126).
-- DNS: панель reg.ru (аккаунт tikhonov-a-s@yandex.ru), 3 домена, `gobeauty.site`
+- DNS: панель reg.ru (аккаунт <имя>@example.org (замаскировано DRF-1269)), 3 домена, `gobeauty.site`
   до 28.02.2027. **Новые записи не нужны** — существующие поддомены покрывают всё:
   `dev` → Ayla backend (жив), `api-dev` → bot backend (502, поднять),
   `miniapp-dev` → Mini App (старый билд есть, обновить до dev).

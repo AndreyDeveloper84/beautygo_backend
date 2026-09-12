@@ -150,7 +150,7 @@ class TestSocialAuthGoogle:
     def test_new_user_with_email(self, client_app):
         mock_google = MagicMock(return_value=make_social_info(
             provider="google", uid="google_001",
-            email="new@gmail.com",
+            email="social.user1@example.org",
             first_name="Jane", last_name="Doe",
         ))
         verifiers = mock_verifiers(google=mock_google)
@@ -164,7 +164,7 @@ class TestSocialAuthGoogle:
             social_accounts__provider='google',
             social_accounts__provider_uid='google_001',
         )
-        assert user.email == 'new@gmail.com'
+        assert user.email == 'social.user1@example.org'
         assert user.first_name == 'Jane'
 
 
@@ -516,7 +516,7 @@ class TestSocialAuthContainment:
         """Google is NOT in the default denylist — verifier is reached."""
         mock_google = MagicMock(return_value=make_social_info(
             provider="google", uid="google_containment",
-            email="containment@gmail.com",
+            email="social.user2@example.org",
         ))
         verifiers = mock_verifiers(google=mock_google)
         with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
