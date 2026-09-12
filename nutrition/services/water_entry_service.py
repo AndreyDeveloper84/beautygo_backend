@@ -107,7 +107,7 @@ def _load_nutrition_context(user_id: int) -> NutritionContext:
 
     try:
         profile = NutritionProfile.objects.only(
-            "timezone", "health_flags",
+            "timezone", "health_flags", "targets_source", "daily_water_ml",
         ).get(user_id=user_id)
     except NutritionProfile.DoesNotExist:
         return NutritionContext()
@@ -121,12 +121,21 @@ def _load_nutrition_context(user_id: int) -> NutritionContext:
             tz = dt_tz.utc
 
     flags = profile.health_flags or {}
+    # ``daily_water_ml`` читается ТОЛЬКО при ``user_entered`` (§5.1,
+    # 11.09.2026): это единственный источник, при котором число в столбце
+    # назвал человек. У остальных источников столбец либо NULL, либо
+    # остаток снятой формулы 30 × вес до команды очистки — прочитать его
+    # значило бы применить снятую методику. Признак — происхождение, не
+    # значение: по числу 2100 не отличить «человек сказал» от «70 × 30».
+    fluid_target: int | None = None
+    if (
+        profile.targets_source == NutritionProfile.TargetsSource.USER_ENTERED
+        and profile.daily_water_ml
+    ):
+        fluid_target = int(profile.daily_water_ml)
     return NutritionContext(
         timezone=tz,
-        # ``profile.daily_water_ml`` здесь БОЛЬШЕ НЕ ЧИТАЕТСЯ. У
-        # существующих строк в нём ещё лежит 30 × вес — выход снятой
-        # формулы; прочитать его значит применить снятую методику.
-        # Миграция самих данных — отдельный срез (§85, замечание 1).
+        fluid_target_ml=fluid_target,
         pregnant=bool(flags.get("pregnant")),
         eating_disorder=bool(flags.get("eating_disorder")),
     )

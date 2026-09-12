@@ -485,6 +485,22 @@ class DisclaimerAckSerializer(serializers.Serializer):
     screen = serializers.CharField(max_length=64)
 
 
+class ManualTargetsSerializer(serializers.Serializer):
+    """POST /internal/profile/targets/manual/ — норма, заданная человеком (§5.1).
+
+    Оба числа необязательны по отдельности, но хотя бы одно обязано быть —
+    это проверяет сервис (``NothingToSet``), а не сериализатор: ему видно
+    поле, а не смысл. Нижние границы здесь — только «положительное число»;
+    пороги §85 (1000 / 1200 / ±30 % / 1000–5000 мл) — в сервисе, где они
+    и названы решением, а не валидацией формата.
+    """
+
+    calories_kcal = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    water_ml = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    confirm_deviation = serializers.BooleanField(required=False, default=False)
+    confirm_water_out_of_range = serializers.BooleanField(required=False, default=False)
+
+
 class ConsentAttestationSerializer(serializers.Serializer):
     """Чьё согласие и под какой версией текста получено (§92).
 

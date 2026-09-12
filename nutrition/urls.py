@@ -20,6 +20,7 @@ from nutrition.views import (
     InternalFoodScanView,
     InternalPatternsView,
     InternalProfileTargetsConfirmView,
+    InternalProfileTargetsManualView,
     InternalProfileView,
     InternalReturningSuccessView,
     InternalSummaryView,
@@ -85,6 +86,12 @@ urlpatterns = [
         "internal/profile/targets/confirm/",
         InternalProfileTargetsConfirmView.as_view(),
         name="internal-nutrition-profile-targets-confirm",
+    ),
+    # §5.1 (11.09.2026): норма, заданная человеком сам — писатель user_entered.
+    path(
+        "internal/profile/targets/manual/",
+        InternalProfileTargetsManualView.as_view(),
+        name="internal-nutrition-profile-targets-manual",
     ),
     # Phase 3.3 pattern detection (DRF-304)
     path(
