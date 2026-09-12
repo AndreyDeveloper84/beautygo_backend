@@ -863,6 +863,13 @@ BOT_PLATFORM_BASE_URL = os.environ.get("BOT_PLATFORM_BASE_URL", "")
 BOT_PLATFORM_INGEST_PATH = os.environ.get(
     "BOT_PLATFORM_INGEST_PATH", "/api/v1/internal/events/ingest",
 )
+# §7 / DRF-1725 (D3) — внутренняя ручка бота, которой исполнитель
+# удаления просит бот-половину (privacy.delete_personal_data +
+# clear_deletion_flag) и ждёт подтверждения до COMPLETED. Тот же хост и
+# тот же HMAC-секрет, что у издателя событий; отдельный путь.
+BOT_PLATFORM_DELETION_PATH = os.environ.get(
+    "BOT_PLATFORM_DELETION_PATH", "/api/v1/internal/privacy/account-deletion/",
+)
 
 # Block C → C3 — HMAC-SHA256 signing secret for cross-service event
 # delivery. Shared with bot-platform; bot-side env var is
@@ -1082,6 +1089,15 @@ CELERY_BEAT_SCHEDULE = {
     "reconcile-captures": {
         "task": "payments.tasks.reconcile_captures",
         "schedule": 300.0,
+    },
+    # §7 / DRF-1725 (D3) — исполнитель удаления аккаунта: открытые заявки
+    # (REQUESTED / PROCESSING / FAILED) исполняются по одной, повтор — по
+    # той же записи. Срок §7 — 30 дней; 15 минут между тиками — чтобы
+    # человек, нажавший «удалить», увидел COMPLETED в тот же час, а не
+    # «в течение месяца».
+    "execute-deletion-requests": {
+        "task": "users.execute_deletion_requests",
+        "schedule": 900.0,
     },
     # W2 billing (P2): monthly recurrent charge — subscription + accrued
     # BookingFee for the period (AYLA-DEC-0007). 04:30 UTC = 07:30 MSK,
