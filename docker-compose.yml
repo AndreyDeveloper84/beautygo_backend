@@ -135,12 +135,33 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=djangoProject.settings.prod
       - REDIS_URL=redis://redis:6379
-    # Default PersistentScheduler reads CELERY_BEAT_SCHEDULE from settings.
-    # State is kept in /tmp/celerybeat-schedule (lost on container recreate
-    # but harmless — beat recomputes fire times on start).
-    command: celery -A djangoProject beat --loglevel=info
+    # Default PersistentScheduler reads CELERY_BEAT_SCHEDULE from settings
+    # and keeps last-run state in a shelve file. Its DEFAULT path is
+    # ./celerybeat-schedule — то есть /app, каталог образа, владелец root.
+    # Комментарий здесь до 12.09.2026 утверждал «/tmp/celerybeat-schedule»,
+    # а команда флага --schedule не несла: под root это было незаметно,
+    # под `user:` (#354, DRF-1677) beat падал сразу после «db →
+    # celerybeat-schedule» — 67 рестартов за ночь, ни одной периодической
+    # задачи каталога (dispatch-outbox 10 с, publish-to-bot 30 с, purge).
+    #
+    # Файл состояния — на tmpfs, объявленном ЗДЕСЬ, с режимом 1777. Режим
+    # обязателен и замерен (12.09, python:3.12-slim под 1000:1000): tmpfs
+    # без mode docker поднял как 755 root — «Permission denied», тот же
+    # класс; `mode: 1777` compose читает как ДЕСЯТИЧНОЕ 1777 (= 0o3361) —
+    # тоже denied; работает восьмеричная запись 01777 (= 1023), и её
+    # одинаково читают compose (yaml 1.2) и PyYAML сторожа (yaml 1.1).
+    # Потеря состояния на пересоздании безвредна — интервальные задачи
+    # стартуют сразу, crontab считаются от «сейчас».
+    # Не /app/media: nginx отдаёт /media/ наружу. Не именованный volume:
+    # его корень docker создаёт от root, и класс повторился бы.
+    # Сторож: tests/test_compose_startup_writes_land_on_mounts.py.
+    command: celery -A djangoProject beat --loglevel=info --schedule /app/celerybeat-state/celerybeat-schedule
     volumes:
       - ./firebase-admin.json:/app/firebase-admin.json:ro
+      - type: tmpfs
+        target: /app/celerybeat-state
+        tmpfs:
+          mode: 01777
     depends_on:
       db:
         condition: service_healthy
