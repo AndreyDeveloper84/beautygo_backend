@@ -584,6 +584,15 @@ class IsInternalBearerForSubject(permissions.BasePermission):
                     "internal.subject_authz.wrong_purpose path=%s",
                     request.path,
                 )
+            _publish_verdict(
+                request, purpose=purpose, actor=None, actor_named=False,
+                allowed=False,
+                reason={
+                    _CredentialPurpose.PROVISIONING: "wrong_purpose",
+                    _CredentialPurpose.NONE: "no_credential",
+                    _CredentialPurpose.UNKNOWN: "unknown_credential",
+                }[purpose],
+            )
             return False
 
         subject_kwarg = getattr(view, "subject_url_kwarg", None)
@@ -595,6 +604,10 @@ class IsInternalBearerForSubject(permissions.BasePermission):
                 "subject_url_kwarg=%r",
                 request.path, type(view).__name__, subject_kwarg,
             )
+            _publish_verdict(
+                request, purpose=purpose, actor=None, actor_named=False,
+                allowed=False, reason="view_misconfigured",
+            )
             return False
         subject_id = str(view.kwargs[subject_kwarg])
 
@@ -605,6 +618,10 @@ class IsInternalBearerForSubject(permissions.BasePermission):
                 request.path, subject_id,
             )
             self.message = "X-External-User-ID is required on this surface"
+            _publish_verdict(
+                request, purpose=purpose, actor=None, actor_named=False,
+                allowed=False, reason="unnamed_actor",
+            )
             return False
 
         actor = resolve_external_user_readonly(external_user_id)
@@ -617,6 +634,10 @@ class IsInternalBearerForSubject(permissions.BasePermission):
                 request.path, subject_id,
             )
             self.message = "acting subject is unknown"
+            _publish_verdict(
+                request, purpose=purpose, actor=None, actor_named=True,
+                allowed=False, reason="unknown_actor",
+            )
             return False
 
         if str(actor.pk) != subject_id:
@@ -626,6 +647,42 @@ class IsInternalBearerForSubject(permissions.BasePermission):
                 request.path, subject_id, actor.pk,
             )
             self.message = "path subject does not match the acting subject"
+            _publish_verdict(
+                request, purpose=purpose, actor=actor, actor_named=True,
+                allowed=False, reason="subject_mismatch",
+            )
             return False
 
+        _publish_verdict(request, purpose=purpose, actor=actor, actor_named=True, allowed=True)
         return True
+
+
+def _publish_verdict(
+    request: Any, *, purpose: str, actor: Any, actor_named: bool,
+    allowed: bool, reason: str = "",
+) -> None:
+    """Hand the verdict to the audit mixin (DRF-1753, owner §96).
+
+    The durable row is written by
+    ``privacy_audit.mixins.AuditedPersonalDataAccess`` — a permission is the
+    wrong place for a DB write, and more concretely: on an allowed request
+    the row must be written in the same transaction as the effect, which
+    only the view layer can arrange. The log lines above stay as the fast
+    path for an operator; neither they nor the verdict carry the credential,
+    the external identity, or any personal value.
+
+    ``auditable`` is False exactly when there is no authenticated caller to
+    describe: no bearer at all, or one we never issued. Recording a durable
+    row for every anonymous knock would hand an unauthenticated caller a way
+    to grow our storage (see ``privacy_audit.outcome``).
+    """
+    from privacy_audit.outcome import SubjectAuthzOutcome, attach
+
+    attach(request, SubjectAuthzOutcome(
+        caller_purpose=str(purpose),
+        actor=actor,
+        actor_named=actor_named,
+        allowed=allowed,
+        auditable=purpose in (_CredentialPurpose.INTERNAL, _CredentialPurpose.PROVISIONING),
+        reason=reason,
+    ))
