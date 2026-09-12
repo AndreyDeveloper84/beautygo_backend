@@ -19,10 +19,13 @@ Hard rules
   language / role / tenant / city / coordinates. The serializer is
   a closed-shape DTO; adding a field requires an explicit code
   change here, not a backend serializer drift.
-* **Bearer-only auth (IsInternalBearer)**: the call is service-to-
-  service. ``request.user`` stays Anonymous. No JWT path. A leaked
-  bearer can enumerate every user — but is bounded to the two safe
-  fields, so the blast radius is minimised by the response shape.
+* **Bearer + subject (IsInternalBearerForSubject, since DRF-1709,
+  12.09.2026)**: the call is service-to-service, ``request.user`` stays
+  Anonymous, no JWT path — and the caller names the person it acts for
+  in ``X-External-User-ID``, which must resolve to ``{user_id}``. Until
+  that day the route was Bearer-only, and a leaked bearer could
+  enumerate every user's two safe fields; the response shape still
+  bounds the blast radius, the subject check bounds the enumeration.
 * **No write surface**: GET only. The bot mirrors fields locally; if
   it ever needs to change Ayla's profile, the existing JWT-auth
   ``PATCH /users/me/`` is the path (the user is involved).
@@ -44,7 +47,9 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from users.models import Profile, SpecialistProfile, User
-from users.permissions import IsIdentityProvisioningBearer, IsInternalBearer
+from privacy_audit.mixins import AuditedPersonalDataAccess
+from privacy_audit.models import PersonalDataAccessLog
+from users.permissions import IsIdentityProvisioningBearer, IsInternalBearerForSubject
 from users.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
@@ -102,21 +107,29 @@ def _resolve_profile(user: User) -> tuple[str, str]:
     return "", ""
 
 
-class InternalUserProfileView(APIView):
-    """GET /api/v1/internal/users/{user_id}/ — codex P1-3.
+class InternalUserProfileView(AuditedPersonalDataAccess, APIView):
+    """GET /api/v1/internal/users/{user_id}/ — codex P1-3, DRF-1709 (B-2.2).
 
     Returns the PII §7 subset (display_name + avatar_url) for the
-    given user. Bearer-only auth via IsInternalBearer; no
-    X-External-User-ID required (catalog-shaped lookup, not
-    on-behalf-of-user write).
+    given user — **to a caller acting for that user**. Until 12.09.2026
+    this was Bearer-only («catalog-shaped lookup, not on-behalf-of-user»):
+    any UUID under the shared internal token, the one route on this surface
+    left out of B-2.1 and named as a hole (``GUARDED_OTHERWISE``). The
+    reading was reversed together with the bot (ai-bot-platform #1681): the
+    ``user.profile.updated`` consumer refreshes the card of the person the
+    notification is about, in that person's own mirror — the actor is the
+    subject, and it names them in ``X-External-User-ID``. So the route takes
+    the same guard as its neighbours, and the same journal (§96).
     """
 
     # JWT auth is OFF — bot is the caller, identity comes from the
-    # service bearer. Same pattern as the records / masters /
-    # payments internal endpoints (Block A A5 wiring): no
-    # AllowAny mixin, IsInternalBearer alone gates.
+    # service bearer plus the named subject. Same pattern as the other
+    # subject-bound internal endpoints (B-2.1): no AllowAny mixin.
     authentication_classes: list = []
-    permission_classes = [IsInternalBearer]
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "user_id"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.PERSONAL_DATA
+    audit_operations = {"GET": PersonalDataAccessLog.Operation.READ_PROFILE}
     serializer_class = _InternalUserProfileSerializer
 
     @extend_schema(
@@ -132,10 +145,14 @@ class InternalUserProfileView(APIView):
                 ),
             ),
             401: OpenApiResponse(description="Missing / invalid bearer token"),
+            403: OpenApiResponse(
+                description="X-External-User-ID missing, unknown, or not the user in the URL"
+            ),
         },
         description=(
             "Internal service-to-service fetch of a single user's "
-            "approved PII subset (display_name + avatar_url). Bot's "
+            "approved PII subset (display_name + avatar_url), on behalf of "
+            "that user (X-External-User-ID must resolve to {user_id}). Bot's "
             "user.profile.updated consumer calls this after an Ayla "
             "emit to refresh the local BotUser mirror. No phone / "
             "email / birthday / language exposed by design."
