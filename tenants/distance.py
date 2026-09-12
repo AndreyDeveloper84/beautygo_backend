@@ -107,3 +107,16 @@ def bbox_q(lat: float, lon: float, radius_km: float, prefix: str = "works_at") -
         f"{p}__longitude__gte": lon - lon_delta,
         f"{p}__longitude__lte": lon + lon_delta,
     })
+
+
+def distance_meters(km: float | None) -> int | None:
+    """Каноническое поле провода — ``distance_meters: integer | null`` (OD-PILOT-9).
+
+    Метры целым числом, ``null`` = DISTANCE_UNKNOWN — та же семантика, что у
+    ``distance_km``, и производится ИЗ него, а не считается второй раз: два
+    расчёта одного расстояния через месяц разойдутся. ``distance_km`` остаётся
+    дублем на один релиз и снимается после переключения читателей.
+    """
+    if km is None:
+        return None
+    return int(round(km * 1000))
