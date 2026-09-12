@@ -794,6 +794,32 @@ jobs:
       #     состояние.
       # Файл не появился — шаг красный. Это не «предупреждение»: состояние
       # поверхности, которого нет, читается как вчерашнее.
+      # DRF-1677 (класс DRF-1646), 2б. Храповик чужих владельцев в дереве
+      # выкладки: после smoke считаем объекты не под uid владельца дерева,
+      # по корзинам, против tools/lint/deploy_tree_ownership_baseline.txt.
+      # Растёт корзина — шаг красный; уменьшилась — опустить храповик
+      # руками. Идёт на хосте python3 из системы (только stdlib), из
+      # дерева, которое шаг 1/4 уже переставил на выкладываемый SHA, —
+      # то есть baseline и инструмент те, что в ЭТОМ коммите. uid — у
+      # дерева (stat), не у зовущего. Шаг после выкладки: его краснота —
+      # «приложение выложено, упал шаг после», не «выкладка упала».
+      - name: Deploy-tree ownership ratchet (catalog)
+        id: ownership_ratchet
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT }}
+          timeout: 120s
+          command_timeout: 3m
+          script: |
+            set -eo pipefail
+            cd /home/taximeter/beautygo/dev
+            echo "::notice::шаг идёт от uid=$(id -u) gid=$(id -g)"
+            TREE_UID=$(stat -c %u .)
+            python3 tools/lint/deploy_tree_ownership.py . --expected-uid "$TREE_UID"
+
       - name: Publish surface state (catalog) into the deploy tree
         id: publish_surface_state
         uses: appleboy/ssh-action@v1
