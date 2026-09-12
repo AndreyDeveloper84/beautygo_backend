@@ -28,6 +28,7 @@ from django.db.models import Sum
 from django.db.models.functions import TruncDate
 
 from nutrition.models import FoodLog, NutritionProfile
+from nutrition.services.targets_state import targets_confirmed
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,9 @@ def _resolve_goal(profile: NutritionProfile | None) -> int:
     ловит и ``None``, и ноль у строк, не прошедших очистку командой.
     Наружу число не уезжает — только ``detected=False``.
     """
-    if profile and profile.daily_kcal:
+    # §5.1: предложение (``ayla_proposed``) — не цель человека, пока он
+    # его не подтвердил; для инсайта это отсутствие.
+    if targets_confirmed(profile) and profile.daily_kcal:
         return profile.daily_kcal
     return 0
 

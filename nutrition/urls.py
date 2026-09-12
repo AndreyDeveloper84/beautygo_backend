@@ -19,6 +19,7 @@ from nutrition.views import (
     InternalFoodLogView,
     InternalFoodScanView,
     InternalPatternsView,
+    InternalProfileTargetsConfirmView,
     InternalProfileView,
     InternalReturningSuccessView,
     InternalSummaryView,
@@ -78,6 +79,12 @@ urlpatterns = [
         "internal/profile/",
         InternalProfileView.as_view(),
         name="internal-nutrition-profile",
+    ),
+    # §5.1 (11.09.2026): подтверждение предложенного ориентира.
+    path(
+        "internal/profile/targets/confirm/",
+        InternalProfileTargetsConfirmView.as_view(),
+        name="internal-nutrition-profile-targets-confirm",
     ),
     # Phase 3.3 pattern detection (DRF-304)
     path(

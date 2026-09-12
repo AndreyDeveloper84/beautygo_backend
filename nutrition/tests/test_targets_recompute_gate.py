@@ -9,7 +9,8 @@
   бы их ``ayla_calculated`` — закрыто сторожем
   ``targets_recompute_gate.recompute_permitted`` (часть 4);
 * положительная сторона того же сторожа: с утверждением считает, у
-  ``ayla_calculated`` считает без утверждения (сценарий б).
+  ``ayla_calculated`` и ``ayla_proposed`` считает без утверждения (сценарий б);
+  свежий расчёт ложится предложением ``ayla_proposed`` (§5.1, 11.09.2026).
 """
 
 from __future__ import annotations
@@ -173,8 +174,11 @@ class TestPredicate:
         p = NutritionProfile(targets_source=source)
         assert recompute_permitted(p, {"consent": CONSENT}) is True
 
-    def test_ayla_calculated_passes_without_attestation(self):
-        p = NutritionProfile(targets_source=Source.AYLA_CALCULATED)
+    @pytest.mark.parametrize("source", [Source.AYLA_CALCULATED, Source.AYLA_PROPOSED])
+    def test_grounded_sources_pass_without_attestation(self, source):
+        """(б): основание есть и у подтверждённого, и у предложенного —
+        оба родились от запроса с утверждением."""
+        p = NutritionProfile(targets_source=source)
         assert recompute_permitted(p, {"health_flags": {"pregnant": True}}) is True
 
 
@@ -260,7 +264,9 @@ class TestThirdWindowIsClosed:
             _post({"diet_preference": "vegetarian"}, headers)
 
         p.refresh_from_db()
-        assert p.targets_source == Source.AYLA_CALCULATED
+        # Отмытое число приходит ПРЕДЛОЖЕНИЕМ (§5.1) — но приходит: окно
+        # открыто. Сторож закрывает именно это.
+        assert p.targets_source == Source.AYLA_PROPOSED
         assert p.daily_kcal == 2669
 
     def test_unknown_legacy_is_not_laundered_into_ayla_calculated(
@@ -297,7 +303,7 @@ class TestThirdWindowIsClosed:
         ):
             _post({"diet_preference": "vegetarian"}, headers)
         p.refresh_from_db()
-        assert p.targets_source == Source.AYLA_CALCULATED
+        assert p.targets_source == Source.AYLA_PROPOSED
 
 
 # ===========================================================================
@@ -341,7 +347,7 @@ class TestGuardLetsGroundedRecomputeThrough:
         assert resp.status_code == status.HTTP_200_OK, resp.json()
 
         p = NutritionProfile.objects.get(user=proxy_user)
-        assert p.targets_source == Source.AYLA_CALCULATED
+        assert p.targets_source == Source.AYLA_PROPOSED  # §5.1: расчёт — предложение
         assert p.bmr == 1906
         assert p.daily_kcal == 2669
         assert p.targets_input_snapshot["weight_kg"] == 95.0
@@ -364,7 +370,7 @@ class TestGuardLetsGroundedRecomputeThrough:
         assert resp.status_code == status.HTTP_200_OK, resp.json()
 
         p.refresh_from_db()
-        assert p.targets_source == Source.AYLA_CALCULATED
+        assert p.targets_source == Source.AYLA_PROPOSED  # §5.1: расчёт — предложение
         assert p.daily_iron_mg == 27.0  # RDA беременности — пересчёт состоялся
         assert p.daily_kcal == 2869  # 2668.75 + 200
         assert p.targets_computed_at >= first_at
@@ -387,7 +393,9 @@ class TestGuardLetsGroundedRecomputeThrough:
         resp = _post({"consent": CONSENT, "goal": "maintain"}, headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
         p.refresh_from_db()
-        assert p.targets_source == Source.AYLA_CALCULATED
+        # Отмытое число приходит ПРЕДЛОЖЕНИЕМ (§5.1) — но приходит: окно
+        # открыто. Сторож закрывает именно это.
+        assert p.targets_source == Source.AYLA_PROPOSED
         assert p.daily_kcal == 2669
         # Состоявшийся пересчёт пишет аудит заново — отказа в нём нет.
         assert _refusals(p) == []

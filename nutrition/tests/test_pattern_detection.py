@@ -59,11 +59,14 @@ def user(db):
 
 @pytest.fixture
 def profile(user):
+    # §5.1 (11.09.2026): паттерны читают ориентир только у действующего
+    # источника; фикстура объявляет предусловие явно.
     return NutritionProfile.objects.create(
         user=user,
         daily_kcal=2000,
         daily_protein_g=100,
         daily_water_ml=2000,
+        targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,
     )
 
 
@@ -374,6 +377,7 @@ class TestHealthFlagSuppression:
             daily_protein_g=100,
             daily_water_ml=2000,
             health_flags={"eating_disorder": True},
+            targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,  # §5.1
         )
         today = _today()
         # set up frequent alcohol (history + 2 days)
@@ -414,6 +418,7 @@ class TestHealthFlagSuppression:
             daily_protein_g=100,
             daily_water_ml=2000,
             health_flags={"pregnant": True},
+            targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,  # §5.1
         )
         today = _today()
         anchor_ts = datetime.combine(

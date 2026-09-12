@@ -143,7 +143,9 @@ class TestProvenanceIsStoredAndLeavesTheService:
 
         assert body["norms"]["daily_kcal"] > 0, "стража: ориентир действительно посчитан"
         provenance = body["targets_provenance"]
-        assert provenance["source"] == "ayla_calculated"
+        # §5.1 (11.09.2026): свежий расчёт — предложение до подтверждения.
+        assert provenance["source"] == "ayla_proposed"
+        assert provenance["confirmed_at"] is None
         assert provenance["method_versions"] == {"calories": CALORIES_METHOD_VERSION}
         assert provenance["computed_at"] is not None
 
@@ -185,7 +187,7 @@ class TestProvenanceIsStoredAndLeavesTheService:
                 "goal": "maintain",
             },
         )
-        assert first["targets_provenance"]["source"] == "ayla_calculated"
+        assert first["targets_provenance"]["source"] == "ayla_proposed"
 
         second = self._upsert(user, {"consent": CONSENT, "weight_kg": None})
 

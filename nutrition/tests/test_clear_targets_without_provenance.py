@@ -172,7 +172,7 @@ class TestDryRun:
         out = _run()
 
         assert "Стирать нечего." in out
-        assert "Нетронуто (ayla_calculated/user_entered): 1." in out
+        assert "Нетронуто (ayla_proposed/ayla_calculated/user_entered): 1." in out
 
 
 # ===========================================================================
@@ -241,7 +241,7 @@ class TestApply:
 
         assert "Очищено (unknown_legacy): 2." in out
         assert "Нормализовано (none, остатки): 0." in out
-        assert "Нетронуто (ayla_calculated/user_entered): 2." in out
+        assert "Нетронуто (ayla_proposed/ayla_calculated/user_entered): 2." in out
         assert (
             "Входы (§120/§144) НЕ тронуты — это следующая команда "
             "`purge_unconsented_body_parameters`." in out
