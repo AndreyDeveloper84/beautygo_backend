@@ -90,6 +90,27 @@ ANSWER_MODES = frozenset({MODE_SINGLE, MODE_MULTI, MODE_CONFIRM, MODE_SCALE, MOD
 #: одним числом.
 TEXT_ANSWER_LIMIT = 120
 
+# ─── «Не знаю» — полноценный ответ (DRF-1747, макет C03 P12) ────────────────
+#
+# «Не заставляем придумывать информацию ради прохождения. После „Не знаю“
+# Ayla либо продолжает без факта, либо, только если действительно
+# необходимо, задаёт более простой вопрос». Поэтому «Не знаю» — не пропуск
+# и не отсутствие строки, а durable-ответ шага с ключом ``unknown``: шаг в
+# этом проходе не задаётся повторно. Это UNKNOWN, не FLEXIBLE («не важно»):
+# «не важно» снимает вопрос, «не знаю» оставляет факт неизвестным.
+#
+# На каких шагах стоит «Не знаю» — ``AnketaStep.escape``; по умолчанию там,
+# где макет его показывает (вопросы о самочувствии/проявлениях), не на
+# выборе цели. Окончательно решает дизайнер в ревью.
+UNKNOWN_OPTION_KEY = "unknown"
+UNKNOWN_OPTION_LABEL = "Не знаю"
+#: Роль опции в контракте: экран рисует такую опцию тихо и отдельно от
+#: вариантов. У обычных вариантов роли нет (аддитивно).
+OPTION_ROLE_ESCAPE = "escape"
+#: Происхождение факта — общий словарь с памятью сказанного бота
+#: (согласовано с окном мозга 12.09): conversation / anketa / operator.
+ORIGIN_ANKETA = "anketa"
+
 
 @dataclass(frozen=True)
 class AnketaStep:
@@ -117,6 +138,18 @@ class AnketaStep:
     #: Подписи концов шкалы (режим ``scale``): (низ, верх). Порядок
     #: делений — порядок ``options``.
     scale_ends: tuple[str, str] | None = None
+    #: «Не знаю» на этом шаге (DRF-1747): опция с ролью ``escape``.
+    escape: bool = False
+
+
+def answerable_option_keys(step: AnketaStep) -> set[str]:
+    """Ключи, которыми на шаг можно ответить: варианты плюс ``unknown``
+    там, где шаг его предлагает. Единственный источник для проверки
+    ответа — экран ключ не выдумывает, сервер его не угадывает."""
+    keys = {key for key, _ in step.options}
+    if step.escape:
+        keys.add(UNKNOWN_OPTION_KEY)
+    return keys
 
 
 def step_contract_errors(steps: tuple[AnketaStep, ...]) -> list[str]:
@@ -140,6 +173,10 @@ def step_contract_errors(steps: tuple[AnketaStep, ...]) -> list[str]:
             errors.append(f"{step.key}: подписи концов только у scale")
         if step.mode == MODE_MULTI and not step.options:
             errors.append(f"{step.key}: multi — без вариантов нечего отмечать")
+        if any(key == UNKNOWN_OPTION_KEY for key, _ in step.options):
+            errors.append(f"{step.key}: {UNKNOWN_OPTION_KEY!r} — зарезервированный ключ escape")
+        if step.key == GOAL_STEP_KEY and step.escape:
+            errors.append(f"{step.key}: на выборе цели «Не знаю» не ставится")
     return errors
 
 
@@ -267,6 +304,8 @@ ANKETA_STEPS: tuple[AnketaStep, ...] = (
             ("lighter", "Легче и бодрее"),
             ("calmer", "Спокойнее"),
         ),
+        # DRF-1747 — вопрос о самочувствии: здесь человек может не знать.
+        escape=True,
     ),
 )
 
@@ -308,6 +347,8 @@ def as_known_answer(
     спросили». ``revisable`` — решение сервера, экран его не выводит.
     """
     labels = dict(step.options)
+    if step.escape:
+        labels[UNKNOWN_OPTION_KEY] = UNKNOWN_OPTION_LABEL
     chosen = list(option_keys or [])
     if chosen:
         # DRF-1746 — multi: одна строка «Уже учла» на шаг, подписи через
@@ -321,10 +362,25 @@ def as_known_answer(
         "option_key": option_key,
         "option_keys": chosen,
         "label": label,
-        "options": [{"key": key, "label": label} for key, label in step.options],
+        "options": _wire_options(step),
         "mode": step.mode,
         "revisable": True,
+        # DRF-1747 — «не знаю» показывается как сказанное, но известным
+        # фактом не считается: при повторном проходе шаг задаётся заново
+        # обычным вопросом, а не подтверждением.
+        "unknown": option_key == UNKNOWN_OPTION_KEY,
+        "origin": ORIGIN_ANKETA,
     }
+
+
+def _wire_options(step: AnketaStep) -> list[dict[str, str]]:
+    """Варианты шага для документа; ``unknown`` — последним и с ролью."""
+    options = [{"key": key, "label": label} for key, label in step.options]
+    if step.escape:
+        options.append(
+            {"key": UNKNOWN_OPTION_KEY, "label": UNKNOWN_OPTION_LABEL, "role": OPTION_ROLE_ESCAPE}
+        )
+    return options
 
 
 def goal_step() -> AnketaStep:
@@ -394,7 +450,7 @@ def as_missing_item(
         "kind": MISSING_GOAL_ANKETA,
         "prompt": shown_prompt(step, goal_key),
         "step": step.key,
-        "options": [{"key": key, "label": label} for key, label in step.options],
+        "options": _wire_options(step),
         "allow_free_text": step.allow_free_text,
         # DRF-1746 — тип ответа; экран рисует компонент по нему.
         "mode": step.mode,
