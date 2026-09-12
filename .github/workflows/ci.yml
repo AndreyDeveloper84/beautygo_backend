@@ -391,6 +391,7 @@ jobs:
       # recreated here, so any failure — including the 4-minute `git fetch`
       # blowing its budget — leaves the running contour untouched.
       - name: 1/4 Sync source + CI-managed env on the dev VPS
+        id: sync
         uses: appleboy/ssh-action@v1
         env:
           # Sentry config managed by CI, not by hand-editing .env on the box.
@@ -543,6 +544,7 @@ jobs:
       # last one is the old behaviour. And this step still touches no
       # container, so a failure at any point leaves the pilot as it was.
       - name: 2/4 Build application images (running contour untouched)
+        id: build
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -646,6 +648,7 @@ jobs:
       # The only step that stops anything, now scoped to the application
       # tier and fast because the images already exist.
       - name: 3/4 Restart application containers only
+        id: restart
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -687,6 +690,7 @@ jobs:
       # Live request through the real serving stack. This is the step that
       # tells "deployed" apart from "working".
       - name: 4/4 Smoke — live readiness request against the pilot
+        id: smoke
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -791,6 +795,7 @@ jobs:
       # Файл не появился — шаг красный. Это не «предупреждение»: состояние
       # поверхности, которого нет, читается как вчерашнее.
       - name: Publish surface state (catalog) into the deploy tree
+        id: publish_surface_state
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -806,9 +811,23 @@ jobs:
             TREE_UID=$(stat -c %u .)
             TREE_GID=$(stat -c %g .)
             OUT=docs/generated/SURFACE_STATE.md
+            # DRF-1661, второй лист (run 34659054414, 00:28 12.09): исходники
+            # каталога ЗАПЕЧЕНЫ в образ, с хоста смонтированы только
+            # staticfiles/, media/ и firebase-admin.json — не как у бота,
+            # где ./:/app. Без монтирования запись шла в /app/docs/generated
+            # ВНУТРИ образа: каталог root, процесс от uid дерева → EACCES;
+            # а даже удавшись, файл остался бы в контейнере, и проверка
+            # ниже сказала бы «не появился». Поэтому каталог вывода
+            # монтируется в этот один прогон. media/ не годится: nginx
+            # отдаёт его наружу.
+            #
+            # mkdir — ДО run и от ssh-пользователя: несуществующий источник
+            # bind-mount docker создаёт сам, от root, и uid дерева в него
+            # не запишет.
             mkdir -p docs/generated
             rm -f "$OUT"
             docker compose run --rm --no-deps --user "$TREE_UID:$TREE_GID" \
+              -v "$PWD/docs/generated:/app/docs/generated" \
               web python manage.py surface_state --write "$OUT" >/dev/null
             if [ ! -s "$OUT" ]; then
               echo "::error::surface_state (catalog): $OUT не появился или пуст — состояние поверхности НЕ снято, в дереве оно устарело или отсутствует"
@@ -854,25 +873,67 @@ jobs:
         # same reason smoke-on-dev.yml alerts from the runner. Skips
         # silently when either secret is unset, so an unconfigured repo
         # gets no false alarms.
+        #
+        # DRF-1661 (12.09.2026, run 34659054414): два исхода вместо одного.
+        # Выкладка — шаги 1/4..4/4; всё после smoke — публикация. Если smoke
+        # зелёный, приложение ВЫЛОЖЕНО, и «dev deploy failed» — ложь, на
+        # которую владелец бежит ночью. Исход и текст выбираются по
+        # `steps.<id>.outcome`, а не по failure() job'а. Job остаётся
+        # красным — это правильно, шаг упал; но сообщение обязано сказать,
+        # ЧТО упало. Классификация вынесена в самостоятельный shell-блок
+        # до проверки секретов: tests/test_deploy_notify_semantics.py
+        # прогоняет его bash'ем с подставленными исходами шагов и читает
+        # строку `outcome=`.
         if: failure()
         env:
           TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_SHA: ${{ github.sha }}
+          STEP_SYNC: ${{ steps.sync.outcome }}
+          STEP_BUILD: ${{ steps.build.outcome }}
+          STEP_RESTART: ${{ steps.restart.outcome }}
+          STEP_SMOKE: ${{ steps.smoke.outcome }}
+          STEP_PUBLISH_SURFACE_STATE: ${{ steps.publish_surface_state.outcome }}
         run: |
           set -eu
+          SHA_SHORT="${GITHUB_SHA:0:7}"
+          RUN_URL="https://github.com/${GITHUB_REPOSITORY:-}/actions/runs/${GITHUB_RUN_ID:-}"
+          # --- классификация: выложено или нет — по smoke, не по job ---
+          FAILED_DEPLOY_STEP=""
+          for pair in "1/4 sync:${STEP_SYNC:-}" "2/4 build:${STEP_BUILD:-}" \
+                      "3/4 restart:${STEP_RESTART:-}" "4/4 smoke:${STEP_SMOKE:-}"; do
+            if [ "${pair#*:}" = "failure" ] && [ -z "$FAILED_DEPLOY_STEP" ]; then
+              FAILED_DEPLOY_STEP="${pair%%:*}"
+            fi
+          done
+          if [ "${STEP_SMOKE:-}" = "success" ]; then
+            OUTCOME=POST_DEPLOY_PUBLICATION_FAILED
+            if [ "${STEP_PUBLISH_SURFACE_STATE:-}" = "failure" ]; then
+              FAILED_STEP="Publish surface state (catalog)"
+            else
+              FAILED_STEP="шаг после выкладки (не surface_state)"
+            fi
+            MSG=$'\xe2\x9a\xa0\xef\xb8\x8f <b>dev: приложение выложено, упал шаг публикации</b>\n'
+            MSG+="Commit: <code>${SHA_SHORT}</code> — smoke зелёный, контейнеры пересозданы."$'\n'
+            MSG+="Упал: ${FAILED_STEP}. Пилот работает; состояние поверхности в дереве НЕ обновлено."$'\n'
+          else
+            OUTCOME=DEPLOYMENT_FAILED
+            MSG=$'\xf0\x9f\x94\xa5 <b>dev deploy failed</b>\n'
+            MSG+="Commit: <code>${SHA_SHORT}</code>"$'\n'
+            MSG+="Упал: ${FAILED_DEPLOY_STEP:-шаг выкладки (не классифицирован)}."$'\n'
+            MSG+='Storage tier untouched — db/redis/minio are never recreated by a deploy.'$'\n'
+          fi
+          MSG+="<a href=\"${RUN_URL}\">Open run</a>"
+          echo "outcome=${OUTCOME} failed_step=${FAILED_STEP:-${FAILED_DEPLOY_STEP:-}}"
+          echo "::notice::deploy outcome=${OUTCOME}"
+          # --- отправка ---
           if [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ]; then
             echo "No TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID secret — skipping alert."
             echo "Configure both secrets at repo level to enable deploy-failure pings."
+            printf '%s\n' "--- message (not sent) ---" "${MSG}"
             exit 0
           fi
-          SHA_SHORT="${GITHUB_SHA:0:7}"
-          RUN_URL="https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          MSG=$'\xf0\x9f\x94\xa5 <b>dev deploy failed</b>\n'
-          MSG+="Commit: <code>${SHA_SHORT}</code>"$'\n'
-          MSG+='Storage tier untouched — db/redis/minio are never recreated by a deploy.'$'\n'
-          MSG+="<a href=\"${RUN_URL}\">Open run</a>"
           curl -sS --max-time 10 -o /tmp/tg_resp.json -X POST \
             "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             -d "chat_id=${TG_CHAT_ID}" \

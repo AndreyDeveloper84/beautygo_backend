@@ -142,3 +142,103 @@ def test_the_exec_guard_would_catch_a_bare_exec() -> None:
     assert _bare_exec_lines(bad) == [bad.strip()]
     assert _bare_exec_lines(good) == []
     assert _bare_exec_lines("# exec -T web в комментарии\n") == []
+
+
+# ─── путь записи в контейнере обязан быть смонтирован с хоста ───────────────
+#
+# Второй лист DRF-1661 (run 34659054414, 00:28 12.09.2026): исходники каталога
+# запечены в образ, с хоста смонтированы только staticfiles/ и media/. Без
+# монтирования `--write docs/generated/…` шёл в каталог root ВНУТРИ образа
+# → EACCES под uid дерева; а даже удавшись, файл не появился бы на хосте.
+# Инвариант: контейнерный путь, куда пишет команда, host-backed — либо
+# `-v` на самом run, либо compose монтирует /app (как у бота) или сам этот
+# каталог. Стережётся по трём файлам: ci.yml, Dockerfile (WORKDIR), compose.
+
+COMPOSE = REPO / "docker-compose.yml"
+DOCKERFILE = REPO / "Dockerfile"
+
+
+def _workdir() -> str:
+    lines = [ln.split()[1] for ln in DOCKERFILE.read_text(encoding="utf-8").splitlines() if ln.startswith("WORKDIR ")]
+    assert lines, "в Dockerfile нет WORKDIR — контейнерный путь записи неизвестен"
+    return lines[-1].rstrip("/")
+
+
+def _run_line(script: str) -> str:
+    """Строка `docker compose run …` со склеенными продолжениями обратной косой."""
+    code = _code_lines(script)
+    joined: list[str] = []
+    for ln in code:
+        if joined and joined[-1].endswith("\\"):
+            joined[-1] = joined[-1][:-1] + " " + ln.strip()
+        else:
+            joined.append(ln.strip())
+    found = [ln for ln in joined if ln.startswith("docker compose run")]
+    assert len(found) == 1, found
+    return found[0]
+
+
+def _run_bind_mounts(run_line: str) -> dict[str, str]:
+    """{контейнерный путь: хостовый} из `-v`/`--volume` на строке run."""
+    return {
+        cont.rstrip("/"): host
+        for host, cont in re.findall(r'(?:-v|--volume)\s+"?([^:\s"]+):([^:\s"]+)', run_line)
+    }
+
+
+def _compose_web_mounts() -> dict[str, str]:
+    data = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    out: dict[str, str] = {}
+    for vol in data["services"]["web"].get("volumes") or []:
+        if isinstance(vol, str) and ":" in vol:
+            host, cont = vol.split(":")[:2]
+            out[cont.rstrip("/")] = host
+    return out
+
+
+def _write_dir_is_host_backed(run_line: str, compose_mounts: dict[str, str], workdir: str) -> bool:
+    cont_dir = f"{workdir}/{OUT_PATH.rsplit('/', 1)[0]}"
+    mounts = {**compose_mounts, **_run_bind_mounts(run_line)}
+    return any(cont_dir == m or cont_dir.startswith(m + "/") for m in mounts)
+
+
+def test_the_container_write_dir_is_bind_mounted_from_the_tree(step: dict) -> None:
+    run_line = _run_line(_script(step))
+    assert _write_dir_is_host_backed(run_line, _compose_web_mounts(), _workdir()), (
+        f"{_workdir()}/{OUT_PATH} пишется ВНУТРЬ образа: ни -v на run, ни монтирование в compose. "
+        "Под uid дерева это EACCES, а под root файл остался бы в контейнере."
+    )
+
+
+def test_the_run_mount_points_at_the_tree_not_elsewhere(step: dict) -> None:
+    """Хостовая сторона `-v` — каталог вывода в дереве (`$PWD/…`), не media/ (nginx отдаёт его наружу)."""
+    mounts = _run_bind_mounts(_run_line(_script(step)))
+    out_dir = OUT_PATH.rsplit("/", 1)[0]
+    host = mounts.get(f"{_workdir()}/{out_dir}")
+    assert host == f"$PWD/{out_dir}", mounts
+    assert "/media" not in host
+
+
+def test_the_host_dir_is_created_by_the_ssh_user_before_the_run(step: dict) -> None:
+    """Несуществующий источник bind-mount docker создаёт сам — от root; uid дерева туда не запишет."""
+    code = _code_lines(_script(step))
+    out_dir = OUT_PATH.rsplit("/", 1)[0]
+    mk = next((i for i, ln in enumerate(code) if ln.strip() == f"mkdir -p {out_dir}"), None)
+    run = next((i for i, ln in enumerate(code) if ln.strip().startswith("docker compose run")), None)
+    assert mk is not None and run is not None and mk < run, (code[:12], mk, run)
+
+
+def test_the_mount_guard_would_notice_an_unmounted_write() -> None:
+    """Положительный контроль: та форма шага, что упала 00:28, обязана быть поймана."""
+    bare = (
+        'docker compose run --rm --no-deps --user "$TREE_UID:$TREE_GID" '
+        'web python manage.py surface_state --write "$OUT"'
+    )
+    only_static = {"/app/staticfiles": "/x/staticfiles", "/app/media": "/x/media"}
+    assert not _write_dir_is_host_backed(bare, only_static, "/app")
+    with_v = bare.replace("web python", '-v "$PWD/docs/generated:/app/docs/generated" web python')
+    assert _write_dir_is_host_backed(with_v, only_static, "/app")
+    # как у бота: compose монтирует всё дерево — -v не нужен
+    assert _write_dir_is_host_backed(bare, {"/app": "./"}, "/app")
+    # смонтирован соседний каталог — не считается
+    assert not _write_dir_is_host_backed(bare, {"/app/docs/other": "./docs/other"}, "/app")
