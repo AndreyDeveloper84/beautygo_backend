@@ -62,6 +62,10 @@ class AnketaAnswerSerializer(serializers.Serializer):
     step = serializers.SlugField(max_length=32)
     option_key = serializers.SlugField(max_length=64, required=False)
     text = serializers.CharField(max_length=1000, required=False, allow_blank=False)
+    # DRF-1744: «Изменить» в блоке «Уже учла». Явный флаг, а не «любой
+    # ответ на любой шаг»: 409 на ответ не по порядку остаётся защитой
+    # от протухшего документа, пересмотр — отдельное, названное намерение.
+    revise = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
         if bool(attrs.get("option_key")) == bool(attrs.get("text")):
@@ -70,6 +74,12 @@ class AnketaAnswerSerializer(serializers.Serializer):
             )
         if not anketa.is_answerable_step(attrs["step"]):
             raise serializers.ValidationError({"step": "Unknown anketa step."})
+        if attrs.get("revise") and anketa.narrowing_step(attrs["step"]) is None:
+            # Финальный шаг — это сама цель: её меняют выбором цели, а не
+            # пересмотром ответа.
+            raise serializers.ValidationError(
+                {"revise": "Only narrowing steps can be revised."}
+            )
         return attrs
 
 
@@ -290,6 +300,49 @@ class GoalSelectView(APIView):
             logger.info("goals.anketa_started user_id=%s run_id=%s", client.id, run.id)
         return build_decision_context(client)
 
+    @staticmethod
+    def _revise_answer(client, *, run, answer: dict) -> Response:
+        """Пересмотреть УЖЕ данный ответ открытого прохода (DRF-1744).
+
+        «Изменить» в блоке «Уже учла». Пересматривается только то, что
+        человек уже сказал в этом проходе: шаг без ответа — это вопрос,
+        а не факт, и на него отвечают по порядку (иначе 409 — тот же
+        отказ, что и на протухший документ, с тем же ``expected_step``).
+        Проход не меняет положения: следующий вопрос остаётся тем же,
+        потому что ``next_step`` ищет первый неотвеченный, а
+        пересмотренный шаг отвеченным и остался.
+        """
+        step = anketa.narrowing_step(answer["step"])
+        assert step is not None  # сериализатор не пропускает иное
+        existing = (
+            run.answers.filter(step_key=step.key).first() if run is not None else None
+        )
+        if existing is None:
+            return error_response(
+                ErrorCode.ANKETA_STEP_MISMATCH,
+                "Nothing to revise: this step has no answer in the open run.",
+                details={"expected_step": next_anketa_step(run).key},
+                status_code=409,
+            )
+        option_key = answer.get("option_key")
+        text = (answer.get("text") or "").strip() or None
+        if option_key and option_key not in {key for key, _ in step.options}:
+            raise serializers.ValidationError(
+                {"answer": {"option_key": "Unknown option for this step."}}
+            )
+        if text and not step.allow_free_text:
+            raise serializers.ValidationError(
+                {"answer": {"text": "This step does not accept free text."}}
+            )
+        existing.option_key = option_key
+        existing.answer_text = text
+        existing.save(update_fields=["option_key", "answer_text"])
+        logger.info(
+            "goals.anketa_revised user_id=%s run_id=%s step=%s",
+            client.id, run.id, step.key,
+        )
+        return success_response(build_decision_context(client))
+
     @transaction.atomic
     def _answer_anketa(
         self,
@@ -323,6 +376,9 @@ class GoalSelectView(APIView):
         снова тянуло бы в вопросы.
         """
         run = open_anketa_run(client)
+
+        if answer.get("revise"):
+            return self._revise_answer(client, run=run, answer=answer)
 
         # Сверки — ДО любой записи.
         expected = next_anketa_step(run)
