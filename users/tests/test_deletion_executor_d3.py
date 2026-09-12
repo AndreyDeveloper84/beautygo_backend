@@ -593,11 +593,78 @@ class TestBotClientWire:
 # ---------------------------------------------------------------------------
 
 
+def _age(req, days):
+    """Заявке ``days`` дней: ``requested_at`` не auto_now, но фикстура
+    ставит «сейчас» — состариваем по pk."""
+    DeletionRequest.objects.filter(pk=req.pk).update(
+        requested_at=timezone.now() - timedelta(days=days)
+    )
+    req.refresh_from_db()
+    return req
+
+
+class TestGraceWindow:
+    """§7: крайняя дата — через 30 дней; нажатие ≠ стирание через 15 минут."""
+
+    def test_a_fresh_request_is_not_due(self, person):
+        from users.deletion_executor import open_requests_due
+        from users.tasks import execute_deletion_requests
+
+        req = ensure_deletion_request(person, initiator="bot").request
+        assert req.is_open  # положительная пара: заявка живая
+        assert list(open_requests_due()) == []
+        with patch("users.deletion_executor.BotDeletionClient", _BotOk):
+            counters = execute_deletion_requests()
+        assert counters == {"scanned": 0, "completed": 0, "open": 0}
+        req.refresh_from_db()
+        person.refresh_from_db()
+        assert req.status == DeletionRequest.Status.REQUESTED and person.phone == PHONE
+
+    def test_a_request_past_the_window_is_due_and_executed(self, person):
+        from users.deletion_executor import open_requests_due
+        from users.tasks import execute_deletion_requests
+
+        req = _age(ensure_deletion_request(person, initiator="bot").request, 30)
+        assert [r.pk for r in open_requests_due()] == [req.pk]
+        with patch("users.deletion_executor.BotDeletionClient", _BotOk):
+            counters = execute_deletion_requests()
+        assert counters == {"scanned": 1, "completed": 1, "open": 0}
+        req.refresh_from_db()
+        assert req.status == DeletionRequest.Status.COMPLETED
+
+    def test_window_is_a_setting_with_a_default_of_30(self, person, settings):
+        from users.deletion_executor import deletion_grace, open_requests_due
+
+        delattr(settings, "DELETION_GRACE_DAYS")
+        assert deletion_grace() == timedelta(days=30)
+        req = _age(ensure_deletion_request(person, initiator="bot").request, 29)
+        assert list(open_requests_due()) == []
+        settings.DELETION_GRACE_DAYS = "7"
+        assert [r.pk for r in open_requests_due()] == [req.pk]
+        settings.DELETION_GRACE_DAYS = 0
+        assert [r.pk for r in open_requests_due()] == [req.pk]
+
+    @pytest.mark.parametrize("bad", ["", "месяц", -1, None])
+    def test_misconfigured_window_takes_nobody(self, person, settings, bad):
+        from users.deletion_executor import GraceMisconfigured, open_requests_due
+        from users.tasks import execute_deletion_requests
+
+        _age(ensure_deletion_request(person, initiator="bot").request, 400)
+        settings.DELETION_GRACE_DAYS = bad
+        with pytest.raises(GraceMisconfigured):
+            list(open_requests_due())
+        with patch("users.deletion_executor.BotDeletionClient", _BotOk):
+            counters = execute_deletion_requests()
+        assert counters == {"scanned": 0, "completed": 0, "open": 0}
+        person.refresh_from_db()
+        assert person.phone == PHONE
+
+
 class TestTick:
     def test_tick_executes_open_requests_and_counts(self, person):
         from users.tasks import execute_deletion_requests
 
-        req = ensure_deletion_request(person, initiator="bot").request
+        req = _age(ensure_deletion_request(person, initiator="bot").request, 31)
         with patch("users.deletion_executor.BotDeletionClient", _BotOk):
             counters = execute_deletion_requests()
         assert counters == {"scanned": 1, "completed": 1, "open": 0}
@@ -610,8 +677,8 @@ class TestTick:
         other = User.objects.create_user(
             username="d3_other", password="pass", role="client",  # pragma: allowlist secret
         )
-        ensure_deletion_request(person, initiator="bot")
-        ensure_deletion_request(other, initiator="bot")
+        _age(ensure_deletion_request(person, initiator="bot").request, 31)
+        _age(ensure_deletion_request(other, initiator="bot").request, 31)
 
         real_execute = execute
         calls = []

@@ -61,6 +61,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 import httpx
 from django.apps import apps
@@ -772,9 +773,46 @@ def _confirm_with_bot(request: DeletionRequest, user, *, client=None) -> BotConf
 # ---------------------------------------------------------------------------
 
 
-def open_requests_due():
-    """Заявки, которые исполнителю пора брать: все открытые. Порядок — по
-    сроку, чтобы ближайший дедлайн §7 шёл первым."""
-    return DeletionRequest.objects.filter(
-        status__in=DeletionRequest.OPEN_STATUSES
-    ).order_by("deadline_at")
+#: Окно между приёмом заявки и её исполнением, дней. §7 называет только
+#: верхнюю границу («срок завершения — не позднее 30 дней») и «после
+#: начала удаления действие нельзя отменить» — числа для окна в §7 нет,
+#: поэтому это ПАРАМЕТР с умолчанием, а не решение (вопрос владельцу в
+#: OWNER_QUESTIONS). До этого окна тик брал заявку сразу: нажатие в Mini
+#: App = стирание через ≤15 минут, а человек на экране видел «крайнюю
+#: дату» через месяц.
+DELETION_GRACE_SETTING = "DELETION_GRACE_DAYS"
+DEFAULT_DELETION_GRACE_DAYS = 30
+
+
+class GraceMisconfigured(ValueError):
+    """Окно задано так, что по нему нельзя решать, кого исполнять."""
+
+
+def deletion_grace() -> timedelta:
+    """Окно из настройки; кривое значение — отказ, а не «ноль дней»."""
+    raw = getattr(settings, DELETION_GRACE_SETTING, DEFAULT_DELETION_GRACE_DAYS)
+    try:
+        days = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise GraceMisconfigured(f"{DELETION_GRACE_SETTING}={raw!r}: не число") from exc
+    if days < 0:
+        raise GraceMisconfigured(f"{DELETION_GRACE_SETTING}={days}: отрицательное")
+    return timedelta(days=days)
+
+
+def open_requests_due(now=None):
+    """Заявки, которые исполнителю пора брать: открытые, у которых прошло
+    окно :func:`deletion_grace` с момента приёма. Порядок — по сроку, чтобы
+    ближайший дедлайн §7 шёл первым.
+
+    Повтор по ``PROCESSING``/``FAILED`` — тоже только после окна: до него
+    каталог ничего не начинал, и начинать не должен.
+    """
+    now = now or timezone.now()
+    return (
+        DeletionRequest.objects.filter(
+            status__in=DeletionRequest.OPEN_STATUSES,
+            requested_at__lte=now - deletion_grace(),
+        )
+        .order_by("deadline_at")
+    )
