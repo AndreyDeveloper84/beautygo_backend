@@ -45,7 +45,6 @@ import json
 import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
-from math import asin, cos, radians, sin, sqrt
 from typing import Iterable
 from uuid import UUID
 
@@ -57,6 +56,7 @@ from services.catalog_reads import (
     catalog_services_for,
     catalog_services_prefetch,
 )
+from tenants.distance import distance_km_to, haversine_km
 from users.models import SpecialistProfile
 
 logger = logging.getLogger(__name__)
@@ -176,18 +176,39 @@ class ScoreBreakdown:
     so the LLM can quote reasons (`match_reasons`) honestly."""
 
     rating: float
-    distance: float
+    #: ``None`` = DISTANCE_UNKNOWN (§8): у предложения нет подтверждённого
+    #: геокодированного места либо у клиента нет координаты. Не 0.5 и не
+    #: 0 — компонент выбывает из суммы, веса остальных перенормируются.
+    distance: float | None
     service_match: float
     history: float
 
     @property
     def composite(self) -> float:
-        return (
-            WEIGHT_RATING * self.rating
-            + WEIGHT_DISTANCE * self.distance
-            + WEIGHT_SERVICE_MATCH * self.service_match
-            + WEIGHT_HISTORY * self.history
-        )
+        """Взвешенная сумма ИЗВЕСТНЫХ компонентов.
+
+        До L5 неизвестное расстояние давало 0.5 — «нейтраль», которая на
+        деле середина шкалы: геокодированный мастер дальше 12.5 км проигрывал
+        тому, про кого не известно ничего (замер 11.09, §3). §8 запрещает и
+        ноль, и средний балл. Выбывание с перенормировкой — та же форма,
+        что снятая фикция доступности (#326): компонент без входа не
+        притворяется числом.
+
+        Остаточный перекос назван, а не спрятан: мастер без места не платит
+        штраф за расстояние, который платит геокодированный далёкий. Это
+        честнее 0.5 (тот штраф платили ВСЕ геокодированные дальше 12.5 км),
+        но не нейтрально; нейтрально было бы не ранжировать вместе — а это
+        решение поверхности, не движка.
+        """
+        parts = [
+            (WEIGHT_RATING, self.rating),
+            (WEIGHT_SERVICE_MATCH, self.service_match),
+            (WEIGHT_HISTORY, self.history),
+        ]
+        if self.distance is not None:
+            parts.append((WEIGHT_DISTANCE, self.distance))
+        total_weight = sum(w for w, _ in parts)
+        return sum(w * v for w, v in parts) / total_weight
 
     def top_reasons(self) -> list[str]:
         """Крупнейшие вкладчики в балл. **Диагностика, не WHY.**
@@ -199,7 +220,7 @@ class ScoreBreakdown:
         """
         items = [
             ("Высокий рейтинг", self.rating * WEIGHT_RATING),
-            ("Близко", self.distance * WEIGHT_DISTANCE),
+            ("Близко", (self.distance or 0.0) * WEIGHT_DISTANCE),
             ("Подходящие услуги", self.service_match * WEIGHT_SERVICE_MATCH),
             ("Уже записывались", self.history * WEIGHT_HISTORY),
         ]
@@ -461,6 +482,9 @@ class RecommendationEngine:
         впереди останется мастер с подтверждёнными отзывами.
         """
         prefetch = catalog_services_prefetch()
+        # ``works_at`` читается для каждого кандидата в ``_distance_to`` —
+        # без select_related это N+1 по местам.
+        qs = qs.select_related("works_at")
         reviewed = (
             qs.filter(reviews_count__gt=0, rating__gte=min_rating)
             .order_by("-rating", "-reviews_count", "id")[: limit * 3]
@@ -531,15 +555,15 @@ class RecommendationEngine:
         )
         return pure * saturation
 
-    def _score_distance(self, distance_km: float | None) -> float:
+    def _score_distance(self, distance_km: float | None) -> float | None:
         """Linear decay from 1.0 at 0km to 0.0 at max_distance_km.
 
-        ``None`` (no client geo OR no specialist geo) → 0.5 — neutral
-        contribution; we don't penalise specialists for missing
-        location data because client without geo can't punish either.
+        ``None`` → ``None``: DISTANCE_UNKNOWN не получает числа (§8). Компонент
+        выбывает из ``composite``, см. ``ScoreBreakdown``. Прежнее 0.5 было
+        серединой шкалы, а не нейтралью.
         """
         if distance_km is None:
-            return 0.5
+            return None
         if distance_km >= self._max_distance_km:
             return 0.0
         return 1.0 - (distance_km / self._max_distance_km)
@@ -642,15 +666,10 @@ class RecommendationEngine:
     def _distance_to(
         s: SpecialistProfile, query: RecommendationQuery,
     ) -> float | None:
-        if (
-            query.client_lat is None or query.client_lon is None
-            or s.location_lat is None or s.location_lng is None
-        ):
-            return None
-        return _haversine_km(
-            query.client_lat, query.client_lon,
-            float(s.location_lat), float(s.location_lng),
-        )
+        # §9 / L5: до места предложения (``works_at``), не до человека.
+        # Неизвестная сторона — ``None``, без подстановок. Формула и условие
+        # участия живут в одном месте — ``tenants.distance``.
+        return distance_km_to(s, query.client_lat, query.client_lon)
 
     @staticmethod
     def _to_scored(
@@ -696,15 +715,8 @@ class RecommendationEngine:
 def _haversine_km(
     lat1: float, lon1: float, lat2: float, lon2: float,
 ) -> float:
-    """Great-circle distance in km."""
-    r = 6371.0
-    dlat = radians(lat2 - lat1)
-    dlon = radians(lon2 - lon1)
-    a = (
-        sin(dlat / 2) ** 2
-        + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
-    )
-    return 2 * r * asin(sqrt(a))
+    """Great-circle distance in km — делегирует единственной формуле каталога."""
+    return haversine_km(lat1, lon1, lat2, lon2)
 
 
 def _iter_active_services(

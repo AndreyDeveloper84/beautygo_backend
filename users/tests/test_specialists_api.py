@@ -8,6 +8,7 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from services.models import Service, ServiceCategory
+from tenants.tests.places import place_specialist_at
 from users.models import User
 
 logger = logging.getLogger(__name__)
@@ -41,9 +42,9 @@ def active_specialist(db):
     profile.rating = Decimal('4.8')
     profile.reviews_count = 25
     profile.address = 'Казань, ул. Баумана 1'
-    profile.location_lat = Decimal('55.796127')
-    profile.location_lng = Decimal('49.106405')
     profile.save()
+    # L5: расстояние и радиус — по месту (works_at), не по координатам профиля
+    place_specialist_at(profile, '55.796127', '49.106405')
 
     Service.objects.create(
         specialist=profile, name='Маникюр',
