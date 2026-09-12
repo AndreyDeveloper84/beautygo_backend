@@ -21,6 +21,7 @@ from rest_framework import status
 from nutrition.models import (
     Beverage,
     FoodLog,
+    FoodScan,
     NutritionOutboxEvent,
     NutritionProfile,
     WaterEntry,
@@ -1377,12 +1378,19 @@ class TestSection8CrossFeature:
         patch_openai_client.chat.completions.create.return_value = MagicMock(
             choices=[choice],
         )
-        client_api.post(
+        # SimpleUploadedFile, не кортеж: кортеж APIClient отдаёт как строку,
+        # и ручка отвечала 400 «не является корректным файлом» — а тест шёл
+        # дальше и зеленел на summary без единого скана (DRF-1663, проба #341).
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        image = SimpleUploadedFile("test.png", _png_bytes(), content_type="image/png")
+        scan_resp = client_api.post(
             URL_SCAN,
-            {"image": ("test.png", _png_bytes(), "image/png"),
-             "caption": "не наелась"},
+            {"image": image, "caption": "не наелась"},
             format="multipart", **headers,
         )
+        # POSITIVE: скан состоялся — иначе summary ниже подводит итог пустоте.
+        assert scan_resp.status_code == status.HTTP_200_OK, scan_resp.content
+        assert FoodScan.objects.filter(user=proxy_user).count() == 1
         # The summary AI-comment uses a separate LLM client factory.
         comment_client = MagicMock()
         comment_msg = MagicMock()
