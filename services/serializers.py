@@ -75,6 +75,21 @@ class ServicePublicDetailSerializer(ServicePublicListSerializer):
         ]
 
 
+class ServiceDirectionSerializer(serializers.ModelSerializer):
+    """Направление для онбординга мастера — корень глобальной таксономии (DRF-1798).
+
+    Нарочно без ``specialists_count`` и без детей: число мастеров считает
+    legacy-слой (на пилоте ноль у каждого — ``users/specialists_api.py``),
+    и на экране выбора направления оно было бы выдуманным числом; дети
+    придут шаблонами по ``category_id``.
+    """
+
+    class Meta:
+        model = ServiceCategory
+        fields = ['id', 'name', 'slug', 'icon', 'sort_order']
+        read_only_fields = fields
+
+
 class ServiceCategorySerializer(serializers.ModelSerializer):
     """Category with nested children and specialists count."""
     children = serializers.SerializerMethodField()
