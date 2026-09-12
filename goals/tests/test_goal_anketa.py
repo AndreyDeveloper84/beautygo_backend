@@ -715,4 +715,3 @@ class TestIsLastIsAGuarantee:
             *[(step.key, False) for step in anketa.ANKETA_STEPS],
             (anketa.FINAL_STEP_KEY, True),
         ]
-
