@@ -70,7 +70,13 @@ def full_profile(api, proxy_user, headers):
     assert resp.status_code in (200, 201), resp.content
     p = NutritionProfile.objects.get(user=proxy_user)
     assert p.daily_kcal is not None, "фикстура обязана дать ориентир — иначе тест инвалидации пуст"
-    assert p.targets_source == NutritionProfile.TargetsSource.AYLA_CALCULATED
+    # После §5.1 (#369/#372) свежий расчёт — «предложен», до подтверждения
+    # человеком; для отзыва разницы нет: и предложенное, и подтверждённое
+    # обязано исчезнуть.
+    assert p.targets_source in (
+        NutritionProfile.TargetsSource.AYLA_CALCULATED,
+        NutritionProfile.TargetsSource.AYLA_PROPOSED,
+    )
     return p
 
 
