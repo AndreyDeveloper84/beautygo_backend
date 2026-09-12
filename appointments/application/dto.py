@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
@@ -64,6 +65,12 @@ class CreateBookingDTO:
     # legacy call sites never identified the actor; carried into the
     # override audit trail when the override is used.
     actor_id: Optional[UUID] = None
+    # DRF-1708 (B-6.2) — что человек видел на подтверждении. Оба
+    # необязательны: старые вызывающие ничего не шлют и получают прежнее
+    # поведение. Присланное сравнивается со снимком внутри транзакции
+    # создания; расхождение — ``QuoteChangedError``, записи нет.
+    quoted_price: Optional[Decimal] = None
+    quoted_duration_minutes: Optional[int] = None
 
 
 @dataclass(frozen=True)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone as _dt_timezone
+from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction
@@ -19,6 +20,7 @@ from appointments.application.dto import CreateBookingDTO, BookingResultDTO
 from appointments.domain.exceptions import (
     BookingWindowError,
     ExternalSlotTakenError,
+    QuoteChangedError,
     SlotNotAvailableError,
     SpecialistNotActiveError,
     ServiceNotActiveError,
@@ -73,6 +75,22 @@ PAYMENT_REQUIRED_REFUSED = "payment_required_refused"
 # the same fact: counted together, "the client asked for prepayment and
 # never got it" leaves no trace at all.
 REFUSAL_STAFF_RECORDED = "staff_recorded"
+
+
+def _refuse_if_quote_changed(dto, applied_price, applied_duration) -> None:
+    """Отказать, если показанное на подтверждении разошлось с применяемым.
+
+    Сравнение по значению, не по представлению: цена приходит ``Decimal``
+    и сравнивается с ``Decimal`` снимка (``1500`` == ``1500.00``), чтобы
+    формат строки на клиенте не читался как изменение цены. Первым
+    проверяется цена — из двух расхождений человеку важнее деньги.
+    """
+    quoted_price = getattr(dto, "quoted_price", None)
+    if quoted_price is not None and Decimal(quoted_price) != Decimal(applied_price):
+        raise QuoteChangedError("price", str(quoted_price), str(applied_price))
+    quoted_duration = getattr(dto, "quoted_duration_minutes", None)
+    if quoted_duration is not None and int(quoted_duration) != int(applied_duration):
+        raise QuoteChangedError("duration_minutes", int(quoted_duration), int(applied_duration))
 
 
 def _resolve_payment_required(dto) -> tuple[bool, str | None]:
@@ -486,6 +504,15 @@ class CreateBookingService:
             snapshot_duration = service.duration_minutes
             snapshot_price = service.price
             snapshot_buffer = getattr(service, "buffer_after_minutes", 0)
+
+        # DRF-1708 (B-6.2) — то, что человек видел на подтверждении, сверяется
+        # с тем, что применится, ЗДЕСЬ: внутри транзакции и до первой записи.
+        # Сверка в представлении оставляла бы окно между «сравнили» и
+        # «записали», в которое цена успевает измениться ещё раз — тот же
+        # класс, что impact_token у отсутствий. Присланное отсутствует —
+        # прежнее поведение: старые вызывающие ничего не сверяют.
+        _refuse_if_quote_changed(dto, snapshot_price, snapshot_duration)
+
         platform_fee = self._commission_policy.get_platform_fee(snapshot_price)
         snapshot = BookingSnapshot.create(
             service_name=snapshot_name,

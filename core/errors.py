@@ -105,6 +105,12 @@ class ErrorCode(str, Enum):
     # apply decisions to a set that no longer exists.
     IMPACT_CHANGED = "IMPACT_CHANGED"
     UNSUPPORTED_RESOLUTION = "UNSUPPORTED_RESOLUTION"
+    # DRF-1708 (B-6.2) — цена или длительность, которые человек видел на
+    # подтверждении, разошлись с теми, что применились бы при создании.
+    # Один код на оба поля: клиенту в любом случае показать обе пары и
+    # переспросить; какое поле — в details.field. Родственник
+    # IMPACT_CHANGED: «пока решали, изменилось» — не ошибка ввода.
+    QUOTE_CHANGED = "QUOTE_CHANGED"
     WORKING_DAY_OFF = "WORKING_DAY_OFF"
 
     # --- Booking domain (spec §Записи) ---
