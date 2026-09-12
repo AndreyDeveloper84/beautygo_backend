@@ -69,15 +69,23 @@ def infer_user_patterns_for_one(user_id: str) -> dict:
 @shared_task(name="users.execute_deletion_requests")
 def execute_deletion_requests(limit: int = 20) -> dict[str, int]:
     """Тик исполнителя: взять открытые заявки (REQUESTED / PROCESSING /
-    FAILED — повтор по той же записи) и исполнить по одной.
+    FAILED — повтор по той же записи), у которых прошло окно
+    ``DELETION_GRACE_DAYS`` с приёма, и исполнить по одной.
 
     Идемпотентно: заявка, у которой каталог уже стёрт, а бот не подтвердил,
     снова спросит только бота. Сбой одной заявки не останавливает остальные.
     """
-    from users.deletion_executor import execute, open_requests_due
+    from users.deletion_executor import GraceMisconfigured, execute, open_requests_due
 
     counters = {"scanned": 0, "completed": 0, "open": 0}
-    for req in open_requests_due()[:limit]:
+    try:
+        due = list(open_requests_due()[:limit])
+    except GraceMisconfigured:
+        # Кривое окно — не «исполнить всё сразу»: тик не берёт никого и
+        # говорит об этом громко.
+        logger.exception("users.execute_deletion_requests.grace_misconfigured — nothing taken")
+        return counters
+    for req in due:
         counters["scanned"] += 1
         try:
             outcome = execute(req)
