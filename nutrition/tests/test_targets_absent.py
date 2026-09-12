@@ -128,24 +128,32 @@ def auth_client(anketa_user):
 
 
 class TestTheWaterFormulaIsGone:
-    def test_compute_norms_produces_no_water_target(self) -> None:
-        """``compute_norms`` не возвращает ориентир по жидкости вовсе.
+    def test_compute_norms_water_is_the_reference_by_sex_not_the_formula(self) -> None:
+        """Ориентир по жидкости — справочник по полу (раздел 4), не 30 × вес.
 
-        Не ноль и не ``None`` в поле — поля НЕТ. Пустое поле пережило бы
-        правку и через неделю снова получило бы число «по умолчанию»;
-        отсутствующее поле придётся заводить заново и объяснять зачем.
+        Поле ``daily_water_ml`` в ``ComputedNorms`` вернулось ВМЕСТЕ с
+        версией методики ``adult_beverages_reference_v1`` — это и есть
+        «отдельно утверждённая методика», без которой §82 запрещал
+        любое число. Сторож на форму: число не зависит от веса (тот же
+        пол, разный вес — то же число) и не совпадает с 30 × вес.
         """
         from nutrition.services.nutrition_profile_service import (
-            ProfileInputs, compute_norms,
+            FLUIDS_METHOD_VERSION, ProfileInputs, compute_norms,
         )
 
-        norms = compute_norms(ProfileInputs(
-            gender="female", age=30, height_cm=170, weight_kg=70.0,
+        light = compute_norms(ProfileInputs(
+            gender="female", age=30, height_cm=170, weight_kg=50.0,
         ))
-        assert not hasattr(norms, "daily_water_ml"), (
-            "ориентир по жидкости вернулся в ComputedNorms: "
-            f"{getattr(norms, 'daily_water_ml', None)!r}"
-        )
+        heavy = compute_norms(ProfileInputs(
+            gender="female", age=30, height_cm=170, weight_kg=90.0,
+        ))
+        male = compute_norms(ProfileInputs(
+            gender="male", age=30, height_cm=180, weight_kg=80.0,
+        ))
+        assert light.daily_water_ml == heavy.daily_water_ml == 2200
+        assert male.daily_water_ml == 3000
+        assert light.daily_water_ml != 30 * 50 and heavy.daily_water_ml != 30 * 90
+        assert light.method_versions["fluids"] == FLUIDS_METHOD_VERSION == "adult_beverages_reference_v1"
 
     def test_the_per_kg_constant_is_gone(self) -> None:
         """``WATER_ML_PER_KG`` и ``_water_target`` сняты из модуля.
@@ -173,22 +181,25 @@ class TestTheWaterFormulaIsGone:
                 gender="female", age=30, height_cm=170, weight_kg=70.0,
                 health_flags={flag: True},
             ))
-            assert not hasattr(norms, "daily_water_ml"), flag
+            # N-g: health-фактор — отказ; воды нет вместе со всем, и
+            # версии методики жидкости у отказа нет.
+            assert norms.daily_water_ml is None, flag
+            assert "fluids" not in norms.method_versions, flag
 
-    def test_profile_row_is_not_written_with_a_target(
+    def test_profile_row_carries_the_reference_as_a_proposal(
         self, anketa_profile,
     ) -> None:
-        """Штатный upsert не записывает ориентир в строку профиля.
+        """Штатный upsert пишет справочник по полу — как ПРЕДЛОЖЕНИЕ.
 
-        Столбец ``daily_water_ml`` nullable (§103, миграция 0018): у
-        новой строки ``NULL``, и штатный пересчёт его не заполняет.
-        Выход снятой формулы у старых строк стирает команда
-        ``clear_targets_without_provenance``.
+        Не 30 × вес (анкета в фикстуре — 70 кг: формула дала бы 2100,
+        справочник даёт 2200 женщине), и не действующий ориентир: строка
+        в ``ayla_proposed`` до подтверждения. Остаток снятой формулы у
+        старых строк стирает команда ``clear_targets_without_provenance``.
         """
-        assert anketa_profile.daily_water_ml is None, (
-            "формула снова записала ориентир в профиль: "
-            f"{anketa_profile.daily_water_ml}"
-        )
+        assert anketa_profile.daily_water_ml == 2200, anketa_profile.daily_water_ml
+        assert anketa_profile.daily_water_ml != 30 * 70
+        assert anketa_profile.targets_source == "ayla_proposed"
+        assert anketa_profile.targets_method_versions["fluids"] == "adult_beverages_reference_v1"
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ import pytest
 
 from nutrition.services.nutrition_profile_service import (
     CALORIES_METHOD_VERSION,
+    FLUIDS_METHOD_VERSION,
     SNAPSHOT_INPUTS,
     ProfileInputs,
     compute_norms,
@@ -59,7 +60,10 @@ class TestTheCalculationCarriesItsOwnProvenance:
         assert norms.daily_kcal > 0
         assert norms.computed is True
 
-        assert norms.method_versions == {"calories": CALORIES_METHOD_VERSION}
+        assert norms.method_versions == {
+            "calories": CALORIES_METHOD_VERSION,
+            "fluids": FLUIDS_METHOD_VERSION,
+        }
         # Снимок собран по объявленному списку, а не по случайному набору
         # полей: разъехавшись, они разошлись бы молча.
         assert set(norms.input_snapshot) == set(SNAPSHOT_INPUTS)
@@ -150,7 +154,10 @@ class TestProvenanceIsStoredAndLeavesTheService:
         # §5.1 (11.09.2026): свежий расчёт — предложение до подтверждения.
         assert provenance["source"] == "ayla_proposed"
         assert provenance["confirmed_at"] is None
-        assert provenance["method_versions"] == {"calories": CALORIES_METHOD_VERSION}
+        assert provenance["method_versions"] == {
+            "calories": CALORIES_METHOD_VERSION,
+            "fluids": FLUIDS_METHOD_VERSION,
+        }
         assert provenance["computed_at"] is not None
 
         # Снимок входов уезжает владельцу данных (решение владельца

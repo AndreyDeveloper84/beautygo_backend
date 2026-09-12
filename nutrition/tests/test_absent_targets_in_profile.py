@@ -76,15 +76,17 @@ class TestAbsentTargetsLeaveNoZeroBehind:
         assert body["norms"]["daily_kcal"] > 0
         assert body["norms"]["bmr"] > 0
 
-    def test_water_is_absent_in_both_branches(self, django_user_model) -> None:
-        """Снятая методика не возвращается ни при каком исходе.
+    def test_water_is_the_reference_when_computed_and_absent_when_refused(self, django_user_model) -> None:
+        """Снятая формула не возвращается; вода — справочник по полу (раздел 4).
 
-        В столбце у существующих строк ещё лежит старое ``30 × вес``;
-        отдать его — выдать снятую методику за живую.
+        Отказ — без воды вовсе. Состоявшийся расчёт — 2200 женщине по
+        ``adult_beverages_reference_v1``, не ``30 × 62 = 1860``: число от
+        веса не зависит, и версия методики едет рядом с ним.
         """
         user = django_user_model.objects.create(username="absent-water")
 
         refused = self._upsert(user, {"consent": CONSENT, "gender": "female"})
+        assert refused["norms"] == {}
         assert "daily_water_ml" not in refused["norms"]
 
         computed = self._upsert(
@@ -95,7 +97,9 @@ class TestAbsentTargetsLeaveNoZeroBehind:
             },
         )
         assert computed["norms"]["daily_kcal"] > 0, "стража: расчёт состоялся"
-        assert "daily_water_ml" not in computed["norms"]
+        assert computed["norms"]["daily_water_ml"] == 2200
+        assert computed["norms"]["daily_water_ml"] != 30 * 62
+        assert computed["targets_provenance"]["method_versions"]["fluids"] == "adult_beverages_reference_v1"
 
 
 @pytest.mark.django_db

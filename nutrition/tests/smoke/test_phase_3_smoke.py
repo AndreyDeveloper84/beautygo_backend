@@ -337,8 +337,22 @@ class TestSection2Profile:
 
 @pytest.fixture
 def profile_default(make_profile):
-    """Provide the implicit profile §3 expects (norm 2000)."""
-    return make_profile()
+    """Профиль БЕЗ ориентира по жидкости — предусловие §3 «без цели».
+
+    Раньше фикстура несла ``daily_water_ml=2000`` (докстринг так и
+    говорил: «norm 2000»), а тесты §3 утверждали «нормы нет» — и были
+    зелены только потому, что столбец никто не читал. С разделом 4
+    (справочник по полу) норма действующего профиля ЧИТАЕТСЯ, и
+    предусловие «нормы нет» надо называть явно, а не получать по удаче.
+    """
+    return make_profile(daily_water_ml=None)
+
+
+@pytest.fixture
+def profile_with_water_norm(make_profile):
+    """Действующий (``ayla_calculated``) профиль с нормой воды 2000 —
+    предусловие для положительных проверок процента и вех."""
+    return make_profile(daily_water_ml=2000)
 
 
 class TestSection3Water:
@@ -361,6 +375,24 @@ class TestSection3Water:
         assert body["kcal"] == 0
         assert "today_progress_pct" not in body
         assert "today_norm_water_ml" not in body
+
+    def test_3_1b_confirmed_water_norm_gives_percent_and_norm(
+        self, client_api, headers, profile_with_water_norm, seed_beverages,
+    ):
+        """3.1b — ПАРА к 3.1: у действующего ориентира процент и норма есть.
+
+        Раздел 4 (справочник по полу) и §5.1 (ручная норма): число в
+        столбце у ``ayla_calculated`` / ``user_entered`` — не выход снятой
+        формулы, а действующий ориентир. Без этой пары 3.1 доказывала бы
+        только, что ключей нет, — и у сломанного чтения тоже.
+        """
+        resp = client_api.post(
+            URL_WATER, {"ml": 250}, format="json", **headers,
+        )
+        assert resp.status_code == status.HTTP_201_CREATED
+        body = resp.json()["data"]
+        assert body["today_norm_water_ml"] == 2000
+        assert body["today_progress_pct"] == 12
 
     def test_3_2_coffee_beverage_macros_and_caffeine(
         self, client_api, headers, profile_default, seed_beverages,
@@ -446,6 +478,21 @@ class TestSection3Water:
         # POSITIVE: записи не потерялись — снимается ориентир, не факт.
         assert last is not None
         assert last.json()["data"]["today_total_water_ml"] == sum(volumes)
+
+    def test_3_7b_milestones_fire_for_a_confirmed_norm(
+        self, client_api, headers, profile_with_water_norm, seed_beverages,
+    ):
+        """3.7b — ПАРА к 3.7–3.10: у действующей нормы вехи срабатывают.
+
+        Порог — производная ориентира; ориентир есть (2000, действующий)
+        — значит 50 % на 1000 мл обязан сработать. Иначе «вех нет» выше
+        доказывало бы сломанный расчёт вех, а не отсутствие нормы.
+        """
+        texts = []
+        for ml in (500, 500):
+            resp = client_api.post(URL_WATER, {"ml": ml}, format="json", **headers)
+            texts.append(resp.json()["data"].get("milestone_text") or "")
+        assert any(texts), texts
 
     def test_3_10_undo_still_works(
         self, client_api, headers, profile_default, seed_beverages,
@@ -1310,22 +1357,15 @@ class TestSection8CrossFeature:
     def test_8_2_profile_change_updates_water_norm(
         self, client_api, headers, proxy_user, seed_beverages,
     ):
-        """8.2 — смена веса больше НЕ меняет ориентир по жидкости.
+        """8.2 — смена веса НЕ меняет ориентир по жидкости: он справочный по полу.
 
         Тест назывался ``test_8_2_profile_change_updates_water_norm`` и
-        доказывал, что загрузчик перечитывает профиль, а не кеширует
-        норму. Разделительной чертой был вес: норма считалась как
-        ``WATER_ML_PER_KG × weight_kg + надбавки``, поэтому 70 → 80 кг
-        давало 2100 → 2400.
-
-        Ровно это владелец и снял (§82): норма, меняющаяся от веса,
-        НАЗЫВАЕТ вес — а §35 п.10 запрещает выводить его на экран.
-        Число, делящееся на 30 нацело, называло ещё и состояние: +300
-        при беременности, +700 при кормлении.
-
-        Утверждение перевёрнуто: ни до, ни после смены веса ориентира
-        нет. Пересчёт профиля при этом ЖИВ — контроль присутствия ниже
-        смотрит на калории, которые от веса зависеть не перестали.
+        доказывал, что 70 → 80 кг даёт 2100 → 2400 (``30 × вес``). Формулу
+        владелец снял (§82): норма от веса НАЗЫВАЕТ вес (§35 п.10). Вторая
+        редакция утверждала «ориентира нет ни до, ни после». Третья —
+        раздел 4: ориентир ЕСТЬ, 2200 женщине, и он один и тот же при
+        70 и при 80 кг. Пересчёт профиля при этом ЖИВ — контроль
+        присутствия смотрит на калории, которые от веса зависят.
         """
         client_api.post(URL_PROFILE, {
             "consent": CONSENT,
@@ -1335,7 +1375,7 @@ class TestSection8CrossFeature:
         row_before = NutritionProfile.objects.get(user=proxy_user)
         before_water = row_before.daily_water_ml
         before_kcal = row_before.daily_kcal
-        assert before_water is None  # §103: ориентира нет — NULL, не ноль
+        assert before_water == 2200  # раздел 4: справочник, не 30 × 70 = 2100
         # POSITIVE: пересчёт на POST состоялся — калории посчитаны.
         assert before_kcal > 0
 
@@ -1345,14 +1385,17 @@ class TestSection8CrossFeature:
             format="json", **headers,
         )
         row_after = NutritionProfile.objects.get(user=proxy_user)
-        # NEGATIVE: ориентира по жидкости нет ни до, ни после.
-        assert row_after.daily_water_ml is None
+        # Ориентир по жидкости тот же: от веса не зависит.
+        assert row_after.daily_water_ml == before_water == 2200
+        assert row_after.daily_water_ml != 30 * 80
         # POSITIVE: загрузчик профиль ПЕРЕЧИТАЛ — калории сдвинулись
-        # вслед за весом. Без этой половины отрицание выше прошло бы и
+        # вслед за весом. Без этой половины равенство выше прошло бы и
         # у сломанного пересчёта.
         assert row_after.daily_kcal != before_kcal
 
-        # Ручка воды тоже не показывает ориентира — ни ключа, ни нуля.
+        # Ручка воды ориентира НЕ показывает: расчёт — предложение
+        # (``ayla_proposed``), а действует только подтверждённый.
+        assert row_after.targets_source == "ayla_proposed"
         water_resp = client_api.post(
             URL_WATER, {"ml": 250}, format="json", **headers,
         )

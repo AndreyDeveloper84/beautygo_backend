@@ -489,8 +489,6 @@ class TestReproducibility:
         third = compute_norms(ProfileInputs(**snapshot))
 
         for f in cmd.TARGET_FIELDS:
-            if f == "daily_water_ml":
-                continue  # ориентира по жидкости нет ни у кого (§82)
             assert getattr(again, f) == getattr(first, f), f
             assert getattr(third, f) == getattr(first, f), f
         assert again.method_versions == first.method_versions

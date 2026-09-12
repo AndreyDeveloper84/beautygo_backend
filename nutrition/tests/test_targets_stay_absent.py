@@ -163,15 +163,24 @@ def _substitutions(source: str) -> list[str]:
     return found
 
 
-#: Имя источника, под условием которого чтение столбца разрешено (§5.1).
-PROVENANCE_GATE_NAME = "USER_ENTERED"
+#: Имена, под условием которых чтение столбца разрешено: источники с
+#: известным происхождением числа (§5.1 — назвал человек; раздел 4 —
+#: справочник по полу состоявшегося расчёта) и предикат ``targets_confirmed``.
+PROVENANCE_GATE_NAMES = frozenset({
+    "USER_ENTERED", "AYLA_PROPOSED", "AYLA_CALCULATED", "_WATER_SOURCES", "targets_confirmed",
+})
+
+#: Имя переменной с результатом ``compute_norms`` в сервисе записи: её
+#: ``.daily_water_ml`` — выход методики, не столбец.
+COMPUTED_RESULT_NAME = "norms"
 
 #: Вызовы ORM, в которых строка-имя столбца означает ЧТЕНИЕ его значения.
 _ORM_VALUE_READERS = frozenset({"values", "values_list", "annotate", "aggregate", "F"})
 
 
 def _guarded_by_provenance(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
-    """Стоит ли узел внутри ``if``, чей предикат называет ``USER_ENTERED``.
+    """Стоит ли узел внутри ``if``, чей предикат называет источник или предикат
+    происхождения (``PROVENANCE_GATE_NAMES``).
 
     Проверяется ТОЛЬКО ветка ``body`` условия: чтение в ``else`` того же
     ``if`` — это чтение под противоположным условием, и оно нарушение.
@@ -183,7 +192,8 @@ def _guarded_by_provenance(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
         # — часть гейта: значение здесь проверяется, а не используется.
         if isinstance(parent, ast.If) and (child in parent.body or child is parent.test):
             if any(
-                isinstance(n, ast.Attribute) and n.attr == PROVENANCE_GATE_NAME
+                (isinstance(n, ast.Attribute) and n.attr in PROVENANCE_GATE_NAMES)
+                or (isinstance(n, ast.Name) and n.id in PROVENANCE_GATE_NAMES)
                 for n in ast.walk(parent.test)
             ):
                 return True
@@ -213,6 +223,13 @@ def _stale_column_reads(source: str) -> list[str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr == STALE_COLUMN:
             if isinstance(node.ctx, ast.Store):
+                continue
+            # ``norms.daily_water_ml`` — поле ``ComputedNorms``, выход
+            # утверждённой методики (раздел 4), а не столбец профиля;
+            # сторож стережёт СТОЛБЕЦ. Имя ``norms`` — по договорённости в
+            # ``profile_upsert_service``; переименуют — сторож начнёт
+            # ловить, и это лучше, чем пропускать.
+            if isinstance(node.value, ast.Name) and node.value.id == COMPUTED_RESULT_NAME:
                 continue
             if _guarded_by_provenance(node, parents):
                 continue
@@ -259,8 +276,9 @@ _A_PROVENANCE_GATED_READ_LOOKS_LIKE_THIS = '''
 from nutrition.models import NutritionProfile
 
 
-def load(profile):
+def load(profile, norms):
     profile.daily_water_ml = 2200  # запись — не чтение
+    profile.daily_water_ml = norms.daily_water_ml  # выход методики — не столбец
     if profile.targets_source == NutritionProfile.TargetsSource.USER_ENTERED and profile.daily_water_ml:
         allowed = profile.daily_water_ml
     else:
