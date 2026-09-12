@@ -115,6 +115,30 @@ class BillingEligibilityError(BookingDomainError):
         super().__init__(reason)
 
 
+class QuoteChangedError(BookingDomainError):
+    """Показанное человеку значение разошлось с тем, что применилось бы.
+
+    DRF-1708 (B-6.2): подтверждение записи показывает цену и длительность,
+    и до этой проверки они применялись молча — сервис брал текущие
+    значения услуги, а то, что человек видел и на что нажимал
+    «Записаться», нигде не сверялось. Поднимается ВНУТРИ транзакции
+    создания, до записи: между сравнением и INSERT значение не успеет
+    измениться ещё раз (тот же приём, что ``IMPACT_CHANGED`` у
+    отсутствий).
+
+    ``field`` — ``"price"`` | ``"duration_minutes"``; ``quoted`` — что
+    видел человек; ``applied`` — что применилось бы сейчас.
+    """
+
+    def __init__(self, field: str, quoted, applied) -> None:
+        self.field = field
+        self.quoted = quoted
+        self.applied = applied
+        super().__init__(
+            f"{field} changed since it was quoted: quoted={quoted}, applied={applied}"
+        )
+
+
 class HealthScreeningRequiredError(BookingDomainError):
     """The booking cannot be created without a human health screening.
 

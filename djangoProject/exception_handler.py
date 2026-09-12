@@ -186,6 +186,7 @@ def _handle_booking_domain(exc: Exception) -> Optional[Response]:
             CancellationNotAllowedError,
             HealthScreeningRequiredError,
             InvalidStateTransitionError,
+            QuoteChangedError,
             RescheduleNotAllowedError,
             ServiceNotActiveError,
             SlotNotAvailableError,
@@ -194,6 +195,15 @@ def _handle_booking_domain(exc: Exception) -> Optional[Response]:
     except ImportError:  # pragma: no cover
         return None
 
+    if isinstance(exc, QuoteChangedError):
+        # DRF-1708: 409 — не ошибка ввода, а расхождение во времени; клиент
+        # показывает обе пары и переспрашивает.
+        return _envelope(
+            ErrorCode.QUOTE_CHANGED.value,
+            str(exc),
+            details={"field": exc.field, "quoted": exc.quoted, "applied": exc.applied},
+            status_code=409,
+        )
     if isinstance(exc, SlotNotAvailableError):
         return _envelope(
             ErrorCode.SLOT_NOT_AVAILABLE.value, str(exc), status_code=409,
