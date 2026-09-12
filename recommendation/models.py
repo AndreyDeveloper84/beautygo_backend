@@ -107,6 +107,11 @@ class _ImmutableModel(models.Model):
         raise ImmutableRecordError(f"{type(self).__name__} {self.pk}: delete() запрещён (expires ≠ delete, B13)")
 
 
+class ExecutionMode(models.TextChoices):
+    SHADOW = "SHADOW", "SHADOW"   #: посчитано, человеку не показано (C1)
+    LIVE = "LIVE", "LIVE"         #: показано / может быть показано человеку
+
+
 class RecommendationSet(_ImmutableModel):
     """Одна выдача: primary + ≤2 alternatives (OQ-R1; контракт v1.0 §3)."""
 
@@ -117,6 +122,13 @@ class RecommendationSet(_ImmutableModel):
     intent_id = models.CharField(max_length=64)
     #: SemanticResolutionResult — A1 (WD §11.2); может отсутствовать (INSUFFICIENT/DISCOVERY).
     semantic_resolution_ref = models.CharField(max_length=128, blank=True, default="")
+    #: C1 владельца: DecisionReadiness на пилоте в теневом режиме — записи, которых
+    #: человек не видел, обязаны быть отличимы от живых (замер порогов, attribution).
+    #: Умолчание SHADOW — fail-closed: живой только тот набор, что назван живым.
+    execution_mode = models.CharField(max_length=8, choices=ExecutionMode.choices, default=ExecutionMode.SHADOW)
+    #: Ход диалога, не содержимое: {conversation_id, trace_id} — связь с dialog_transcript
+    #: (DRF-1754) и ConversationState (2 ч, B13). Снимок контекста этого не заменяет.
+    conversation_ref = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField()
 
     objects = _ImmutableManager()

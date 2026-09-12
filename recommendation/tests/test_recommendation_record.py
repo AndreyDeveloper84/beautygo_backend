@@ -54,7 +54,8 @@ def _rec(role="primary", **over) -> RecommendationInput:
     base = dict(
         role=role, direction_code="REDUCE_MUSCLE_TENSION_BACK", family="ADDRESS",
         target_outcomes=["REDUCE(MUSCLE_TENSION)"], result_status="CLEAR_PRIMARY", readiness_state="READY",
-        reason_codes=["ELIG_CAPABILITY_VERIFIED"], evidence_refs=[{"kind": "user_stated", "ref": "msg-1"}],
+        reason_codes=["ELIG_CAPABILITY_VERIFIED"],
+        evidence_refs=[{"source": "conversation", "ref": "msg-1", "said_at": "2026-09-12T10:00:00Z"}],
         explanation={"displayable": True, "user_visible_reasons": ["ты сказала, что ноет спина"], "internal_only": []},
         safety_evaluation_ref=SAFETY, context_snapshot_ref=SNAPSHOT,
     )
@@ -86,6 +87,18 @@ def test_persist_writes_set_primary_alternatives_and_created_events():
     assert list(RecommendationEvent.objects.values_list("kind", flat=True)) == ["recommendation.created"] * 2
 
 
+def test_set_is_shadow_by_default_and_live_only_when_declared_with_conversation_ref():
+    """C1: теневые записи отличимы от живых; LIVE — только явно."""
+    shadow = persist(_set())
+    assert shadow.execution_mode == "SHADOW" and shadow.conversation_ref == {}
+    live = persist(_set(execution_mode="LIVE", conversation_ref={"conversation_id": "c-1", "trace_id": "t-1"}))
+    assert live.execution_mode == "LIVE" and live.conversation_ref["trace_id"] == "t-1"
+    with pytest.raises(RecordInvalid, match="execution_mode"):
+        persist(_set(execution_mode="REAL"))
+    with pytest.raises(RecordInvalid, match="conversation_ref"):
+        persist(_set(conversation_ref={"conversation_id": "c-1"}))
+
+
 def test_no_action_is_a_valid_recorded_result():
     primary = _rec(result_status="NO_ACTION", family="OBSERVE", readiness_state="INSUFFICIENT_EVIDENCE")
     rset = persist(_set(primary=primary))
@@ -102,6 +115,7 @@ def test_no_action_is_a_valid_recorded_result():
     ({"memory_snapshot_ref": {"entries": ["copied value"]}}, "memory_snapshot_ref"),
     ({"result_status": "ACCEPTED"}, "result_status"),
     ({"readiness_state": "MAYBE"}, "readiness_state"),
+    ({"evidence_refs": [{"kind": "user_stated"}]}, r"evidence_refs\[0\]"),
 ])
 def test_incomplete_decision_is_refused_by_field_name(bad, match):
     with pytest.raises(RecordInvalid, match=match):
