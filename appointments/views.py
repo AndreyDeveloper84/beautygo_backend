@@ -8,7 +8,6 @@ from uuid import uuid4
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
 from django.db.models import QuerySet
-from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
@@ -44,15 +43,14 @@ from .domain.exceptions import (
     StaleVersionError,
     TenantMismatchError,
 )
-from .domain.value_objects import cancelled_by_for, envelope_actor_for
+from .application.services.completion import mark_booking_no_show
 from .infrastructure.idempotency import (
     IdempotencyConflict,
     IdempotencyInFlight,
     lookup_or_open_idempotency,
     record_response,
 )
-from .infrastructure.outbox import emit_outbox_event, safe_tenant_id
-from .models import Appointment, OutboxEvent
+from .models import Appointment
 from .serializers import (
     AppointmentCancelSerializer,
     AppointmentCompleteSerializer,
@@ -625,67 +623,12 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         f"{appointment.version}.",
                         status_code=409,
                     )
-                appointment.mark_no_show(marked_by=actor)
-                # Internal no-show signal — kept for in-process handlers
-                # (#511 reliability scoring, revenue-loss tracking). This
-                # topic is NOT in the cross-service taxonomy, so it stays
-                # internal-delivery only; the bot mirror is fed by the
-                # booking.cancelled emit below.
-                emit_outbox_event(
-                    topic=OutboxEvent.Topic.BOOKING_NO_SHOW,
-                    data={
-                        "appointment_id": str(appointment.id),
-                        "client_id": str(appointment.client_id),
-                        "specialist_id": str(appointment.specialist_id),
-                        # Attribution counterpart of completed_by. The
-                        # Domain Event Registry already reserves an
-                        # optional `marked_by` on appointment.no_show;
-                        # this is the value behind it. Internal topic —
-                        # no cross-service versioning consequence.
-                        "no_show_marked_by": actor,
-                    },
-                    # The affected user is the customer, not the operator
-                    # — same §2.2 rule corrected in `complete` above. The
-                    # booking.cancelled emit below already got this right.
-                    user_id=appointment.client_id,
-                    tenant_id=safe_tenant_id(
-                        appointment, context="booking.no_show",
-                    ),
-                    actor=envelope_actor_for(actor),
-                )
-                # Cross-service representation of a no-show. The bot's
-                # ingest taxonomy has no "booking.no_show" name (it would
-                # dead-letter); event-contract.md §3.2 models a no-show
-                # as booking.cancelled + reason_code="user_no_show". The
-                # consumer flips its RemoteBookingProxy to cancelled and
-                # cancels pending reminders — the correct mirror state for
-                # a client who didn't show. user_id is the customer (whose
-                # booking this is), not the specialist who marked it.
-                tenant_id = safe_tenant_id(
-                    appointment, context="booking.cancelled",
-                )
-                emit_outbox_event(
-                    topic=OutboxEvent.Topic.BOOKING_CANCELLED,
-                    data={
-                        "appointment_id": str(appointment.id),
-                        "specialist_id": str(appointment.specialist_id),
-                        "start_at": appointment.start_datetime.isoformat(),
-                        # §3.2 vocabulary {user, admin, master, system}.
-                        # `admin` has been in that closed set since the
-                        # contract was written and no Ayla call site
-                        # produced it until now — a front-desk no-show is
-                        # the first. The bot consumer already branches on
-                        # it (§3.2 step 3: notify the customer when
-                        # cancelled_by ∈ {admin, master, system}), so this
-                        # needs no bot-side change.
-                        "cancelled_by": cancelled_by_for(actor),
-                        "reason_code": "user_no_show",
-                        "cancelled_at": timezone.now().isoformat(),
-                    },
-                    user_id=appointment.client_id,
-                    tenant_id=tenant_id,
-                    actor=envelope_actor_for(actor),
-                )
+                # DRF-1851 — one implementation for both doors (mobile and
+                # the salon surface the bot reaches): state flip + the two
+                # outbox rows (`booking.no_show` internal, `booking.cancelled`
+                # + reason_code="user_no_show" cross-service) live in
+                # ``completion.mark_booking_no_show``, next to ``close_booking``.
+                mark_booking_no_show(appointment, marked_by=actor)
         except DjangoValidationError as e:
             return error_response(
                 "INVALID_STATUS", str(e.message), status_code=422,

@@ -24,6 +24,7 @@ from .appointments_api import (
     SalonBookingCancelView,
     SalonBookingCompleteView,
     SalonBookingCreateView,
+    SalonBookingNoShowView,
     SalonBookingRescheduleView,
     SalonCustomerLookupView,
 )
@@ -76,6 +77,13 @@ urlpatterns = [
         "me/appointments/<uuid:appointment_id>/complete/",
         SalonBookingCompleteView.as_view(),
         name="tenants-booking-complete",
+    ),
+    # DRF-1851 — «не пришёл» с той же поверхности: та же функция домена,
+    # что у мобильного пути (completion.mark_booking_no_show).
+    path(
+        "me/appointments/<uuid:appointment_id>/no-show/",
+        SalonBookingNoShowView.as_view(),
+        name="tenants-booking-no-show",
     ),
     # DRF-1062 — schedule of any master in this tenant. The pro-app
     # routes under /specialists/me/ stay untouched; these are the same
