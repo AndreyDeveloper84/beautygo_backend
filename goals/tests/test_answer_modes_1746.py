@@ -114,9 +114,12 @@ def _current(doc) -> dict:
 # Контракт документа                                                          #
 # --------------------------------------------------------------------------- #
 class TestContract:
-    def test_todays_steps_are_single_and_pass_the_guard(self):
+    def test_todays_step_modes_pass_the_guard(self):
         assert anketa.step_contract_errors(anketa.ANKETA_STEPS) == []
-        assert {s.mode for s in anketa.ANKETA_STEPS} == {anketa.MODE_SINGLE}
+        # DRF-1759: результат (feeling) — мультивыбор, область (area) — один ответ.
+        assert {s.key: s.mode for s in anketa.ANKETA_STEPS} == {
+            "area": anketa.MODE_SINGLE, "feeling": anketa.MODE_MULTI,
+        }
 
     def test_single_item_carries_mode_and_nothing_scale_or_text(self):
         item = anketa.as_missing_item(anketa.ANKETA_STEPS[0], answered_keys={"goal"})
