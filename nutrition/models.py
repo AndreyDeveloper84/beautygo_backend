@@ -120,6 +120,27 @@ class FoodLog(models.Model):
         LUNCH = "lunch", "Обед"
         DINNER = "dinner", "Ужин"
         SNACK = "snack", "Перекус"
+        # DRF-1837: приём, тип которого человек не называл. Бот шлёт
+        # ``meal_type="other"`` с фото-пути с мая (#86, «P1 doesn't show
+        # meal-type buttons»), а выбора здесь не было — запись из карточки
+        # скана получала 400 VALIDATION_ERROR, и бот отвечал «сервис
+        # недоступен». Угадывать завтрак/обед по часам — число, которого
+        # человек не называл (§109); честное значение — «не указан».
+        OTHER = "other", "Не указан"
+
+    class EntryOrigin(models.TextChoices):
+        """Чем получено число записи — §136 владельца (11.09.2026), дословно.
+
+        Канал (фото/текст/голос) и происхождение — разные оси: голос
+        после расшифровки идёт как текст. Значение пишет только вызывающий,
+        показавший человеку оценку и получивший подтверждение (§109 шаг 6);
+        ``NULL`` — строки до §136 и вызовы, не знающие происхождения.
+        """
+
+        TEXT_ESTIMATED_CONFIRMED = "text_estimated_confirmed", "Оценка по тексту, подтверждена"
+        TEXT_USER_CORRECTED = "text_user_corrected", "Оценка по тексту, исправлена клиентом"
+        PHOTO_ESTIMATED_CONFIRMED = "photo_estimated_confirmed", "Распознано по фото, подтверждено"
+        PHOTO_USER_CORRECTED = "photo_user_corrected", "Распознано по фото, исправлено клиентом"
 
     class MicronutrientSource(models.TextChoices):
         # Track E (DRF-260): which source filled the row's vitamins/minerals.
@@ -179,6 +200,13 @@ class FoodLog(models.Model):
     )
 
     meal_type = models.CharField(max_length=16, choices=MealType.choices)
+    entry_origin = models.CharField(
+        max_length=32,
+        choices=EntryOrigin.choices,
+        null=True,
+        blank=True,
+        help_text="§136: чем получено число записи. NULL — до §136 или происхождение не передано.",
+    )
     logged_at = models.DateTimeField()
 
     # Mobile retries on flaky network can double-POST the same meal —
