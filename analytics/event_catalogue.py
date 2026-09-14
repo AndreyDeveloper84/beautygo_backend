@@ -102,6 +102,13 @@ GOAL_SELECTED = "goal_selected"
 RECOMMENDATION_SHOWN = "recommendation_shown"
 
 
+# food_photo_purge_run: server-side, one per daily run of
+# nutrition.purge_expired_food_photos (DRF-1843, §134). Payload is counts
+# only — enabled, ttl_days, expired_before, expired_after («не удалено в
+# срок»), deleted, object_absent, no_image, refused. No ids, no names.
+FOOD_PHOTO_PURGE_RUN = "food_photo_purge_run"
+
+
 EVENT_NAMES: frozenset[str] = frozenset({
     BOOKING_VIEWED, BOOKING_CREATED, BOOKING_CANCELLED,
     BOOKING_RESCHEDULED, BOOKING_COMPLETED,
@@ -122,4 +129,5 @@ EVENT_NAMES: frozenset[str] = frozenset({
     PERSONAL_DATA_DELETED,
     EXTERNAL_IDENTITY_BOUND,
     GOAL_SELECTED, RECOMMENDATION_SHOWN,
+    FOOD_PHOTO_PURGE_RUN,
 })
