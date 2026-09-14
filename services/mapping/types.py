@@ -6,7 +6,9 @@ from enum import StrEnum
 from uuid import UUID
 
 #: Версия правил резолвера. Меняется при любом изменении семантики R*/маркеров.
-RULE_VERSION = "map-salon-services/0.1.0-dry-run"
+#: 0.2.0 (MAP-AUTO-06): семантика R1/R2 и маркеров не менялась; суффикс «-dry-run»
+#: снят, потому что версия уезжает в mapping_rule_version записанных строк.
+RULE_VERSION = "map-salon-services/0.2.0"
 
 
 class Rule(StrEnum):
