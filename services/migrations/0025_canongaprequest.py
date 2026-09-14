@@ -9,7 +9,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("services", "0022_salonservice_verified_requires_template"),
+        ("services", "0024_canonical_code_bootstrap"),
         ("tenants", "0006_service_location"),
         ("users", "0020_specialistprofile_works_at"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
