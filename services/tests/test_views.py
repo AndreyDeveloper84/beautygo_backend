@@ -162,15 +162,31 @@ class TestServicePublicViewSet:
     def test_detail_includes_address(
         self, authenticated_client, specialist_user,
     ):
-        """Detail view includes specialist address and location."""
+        """Detail view shows the address of the PLACE of service (§9, L6).
+
+        Профиль мастера в фикстуре несёт свой адрес и координаты — их клиент
+        больше не видит: до назначения места поля пусты, после — адрес и
+        координаты места, а не человека.
+        """
+        from tenants.tests.places import place_specialist_at
+
         svc = Service.objects.create(
             specialist=specialist_user.specialist_profile, name='Стрижка',
             price='800', duration_minutes=45,
         )
         response = authenticated_client.get(f'{self.URL}{svc.pk}/')
         assert response.status_code == status.HTTP_200_OK
-        assert response.data['specialist_address'] == 'Казань, ул. Баумана 1'
-        assert response.data['specialist_location_lat'] is not None
+        assert response.data['specialist_address'] == ''
+        assert response.data['specialist_location_lat'] is None
+
+        place_specialist_at(
+            specialist_user.specialist_profile, 55.796127, 49.106405,
+            label='Казань, ул. Кремлёвская 2',
+        )
+        response = authenticated_client.get(f'{self.URL}{svc.pk}/')
+        assert response.data['specialist_address'] == 'Казань, ул. Кремлёвская 2'
+        assert response.data['specialist_location_lat'] == '55.796127'
+        assert response.data['specialist_location_lng'] == '49.106405'
 
     def test_filter_by_category(
         self, authenticated_client, specialist_user,

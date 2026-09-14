@@ -81,14 +81,17 @@ def participating_place_q(prefix: str = "works_at") -> Q:
     выборки: подтверждено, геокодировано, обе координаты есть и не (0, 0).
     Копия условия неизбежна — свойство в SQL не вызвать, — поэтому тест
     держит обе стороны рядом: строка, которая проходит одно, проходит другое.
+
+    ``prefix=""`` — то же условие на самой ``ServiceLocation`` (L6: замер
+    готовности считает участвующие места напрямую).
     """
-    p = prefix
+    p = f"{prefix}__" if prefix else ""
     return (
-        Q(**{f"{p}__status": LocationStatus.CONFIRMED})
-        & Q(**{f"{p}__geocode_status__in": _GEOCODED})
-        & Q(**{f"{p}__latitude__isnull": False})
-        & Q(**{f"{p}__longitude__isnull": False})
-        & ~(Q(**{f"{p}__latitude": 0}) & Q(**{f"{p}__longitude": 0}))
+        Q(**{f"{p}status": LocationStatus.CONFIRMED})
+        & Q(**{f"{p}geocode_status__in": _GEOCODED})
+        & Q(**{f"{p}latitude__isnull": False})
+        & Q(**{f"{p}longitude__isnull": False})
+        & ~(Q(**{f"{p}latitude": 0}) & Q(**{f"{p}longitude": 0}))
     )
 
 
@@ -100,12 +103,12 @@ def bbox_q(lat: float, lon: float, radius_km: float, prefix: str = "works_at") -
     """
     lat_delta = radius_km / 111.0
     lon_delta = radius_km / (111.0 * max(cos(radians(lat)), 1e-6))
-    p = prefix
+    p = f"{prefix}__" if prefix else ""
     return participating_place_q(prefix) & Q(**{
-        f"{p}__latitude__gte": lat - lat_delta,
-        f"{p}__latitude__lte": lat + lat_delta,
-        f"{p}__longitude__gte": lon - lon_delta,
-        f"{p}__longitude__lte": lon + lon_delta,
+        f"{p}latitude__gte": lat - lat_delta,
+        f"{p}latitude__lte": lat + lat_delta,
+        f"{p}longitude__gte": lon - lon_delta,
+        f"{p}longitude__lte": lon + lon_delta,
     })
 
 
@@ -120,3 +123,18 @@ def distance_meters(km: float | None) -> int | None:
     if km is None:
         return None
     return int(round(km * 1000))
+
+
+def offer_address(specialist: "SpecialistProfile") -> str:
+    """Адрес места предложения для показа человеку — либо пустая строка.
+
+    L6 (§9): «все старые адреса перестают быть авторитетными». Показывается
+    только адрес ПОДТВЕРЖДЁННОГО места (``status == CONFIRMED``): адрес с
+    неизвестным происхождением или недействительный клиенту не называем.
+    Геокодирование здесь не требуется — адрес текстом есть до координат.
+    Пустая строка = «адрес не подтверждён», не «адреса нет».
+    """
+    place = specialist.works_at
+    if place is None or place.status != LocationStatus.CONFIRMED:
+        return ""
+    return place.address
