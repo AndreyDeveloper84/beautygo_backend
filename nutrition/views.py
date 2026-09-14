@@ -39,6 +39,7 @@ from nutrition.serializers import (
     CrossDomainHistoryResponseSerializer,
     FoodLogCreateSerializer,
     FoodLogEntrySerializer,
+    FoodEstimateRequestSerializer,
     FoodScanResponseSerializer,
     NutritionProfileResponseSerializer,
     NutritionProfileUpsertSerializer,
@@ -79,6 +80,7 @@ from nutrition.services.food_log_service import (
     DishNotRecognizedError,
     FoodLogService,
     InvalidInputError,
+    MANUAL_DISH_BASELINE_G,
     ScanNotOwnedError,
 )
 from nutrition.services.food_scanner_router import (
@@ -357,6 +359,7 @@ def _create_food_log_for(user, serializer_data: dict, request: Request) -> Respo
             dish_name=serializer_data.get("dish_name"),
             logged_at=serializer_data.get("logged_at"),
             idempotency_key=idempotency_key,
+            entry_origin=serializer_data.get("entry_origin"),
         ))
     except InvalidInputError as exc:
         return error_response("VALIDATION_ERROR", str(exc))
@@ -409,6 +412,69 @@ class FoodLogCreateView(APIView):
                 details=serializer.errors,
             )
         return _create_food_log_for(request.user, serializer.validated_data, request)
+
+
+class InternalFoodEstimateView(APIView):
+    """POST /api/v1/nutrition/internal/food-estimate/ — оценка блюда без записи.
+
+    DRF-1837, §109 шаги 2–3: «Ayla распознаёт блюдо и оценивает состав и
+    порцию → показывает экран „Я распознала так“», а в дневник — только
+    после подтверждения (шаг 6). Ручная запись по ``dish_name`` уже была
+    (``internal/food-log/``), но она ПИШЕТ сразу; предъявить оценку до
+    записи было нечем. Эта ручка — та же ``NutritionLookup``, что у
+    ручной записи, на те же граммы, и ни одной строки в базе: ни
+    ``FoodLog``, ни ``FoodScan``, ни прокси-пользователя (актор здесь не
+    нужен — число не принадлежит никому, пока его не подтвердили).
+
+    Ответ несёт ``portion_estimated``: ``true``, когда граммов человек не
+    называл и оценка взята на базовые 100 г, — бот обязан показать это
+    словом «примерно»/«оценка» (§109 шаг 4).
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+    serializer_class = FoodEstimateRequestSerializer
+
+    @extend_schema(
+        tags=["internal"],
+        request=FoodEstimateRequestSerializer,
+        responses={
+            200: OpenApiResponse(description="Оценка блюда (без записи)"),
+            400: OpenApiResponse(description="Validation error or food not recognised"),
+        },
+    )
+    def post(self, request: Request) -> Response:
+        serializer = FoodEstimateRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR",
+                "Невалидные данные",
+                details=serializer.errors,
+            )
+        dish_name = serializer.validated_data["dish_name"]
+        named_portion = serializer.validated_data.get("portion_g")
+        portion_g = named_portion if named_portion is not None else MANUAL_DISH_BASELINE_G
+        facts = NutritionLookup().lookup(dish_name, portion_g=portion_g)
+        if facts is None or facts.kcal is None:
+            return error_response(
+                "FOOD_NOT_RECOGNIZED",
+                "Не удалось определить макросы блюда",
+            )
+        return success_response(
+            {
+                "matched_dish": facts.matched_dish,
+                "source": facts.source,
+                "portion_g": portion_g,
+                "portion_estimated": named_portion is None,
+                "kcal": facts.kcal,
+                "protein_g": facts.protein_g,
+                "fat_g": facts.fat_g,
+                "carbs_g": facts.carbs_g,
+                "kcal_per_100g": facts.kcal_per_100g,
+            },
+            status_code=status.HTTP_200_OK,
+        )
 
 
 class InternalFoodLogView(APIView):

@@ -443,4 +443,9 @@ class TestGuardCoversItsSubject:
         tested = {t for _, t in ALL_ROUTES}
         # detail-маршрут заявки требует существующей заявки; покрыт классом, не вызовом.
         tested.add("/api/v1/internal/users/{subject}/deletion-requests/<uuid:request_id>/")
+        # DRF-1666 — запись Recommendation: маршруты требуют существующего набора/записи
+        # субъекта; отрицательные тесты (чужой субъект → 404 после проверки, несовпадение /
+        # без заголовка / чужой bearer → 403) — recommendation/tests/test_record_api.py.
+        tested.add("/api/v1/internal/users/{subject}/recommendations/<uuid:set_id>/")
+        tested.add("/api/v1/internal/users/{subject}/recommendations/<uuid:recommendation_id>/events/")
         assert guarded <= tested, f"маршруты без отрицательного теста: {sorted(guarded - tested)}"

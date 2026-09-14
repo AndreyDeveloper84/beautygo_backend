@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from decimal import Decimal as D
 from io import StringIO
 
 import pytest
@@ -18,7 +17,8 @@ from django.utils import timezone
 from ai.models import Conversation, Message
 from ai.tests.factories import make_specialist, make_user
 from core.measurement_subject import PULSE_ANCHORS, gather_pulse
-from users.models import User
+from tenants.tests.places import place_specialist_at
+from users.models import SpecialistProfile, User
 
 pytestmark = pytest.mark.django_db
 
@@ -32,10 +32,9 @@ def _run(**kwargs) -> str:
 
 
 def _at(lat_offset: float, name: str):
+    """Мастер в подтверждённом геокодированном месте (§9 / L6: не профиль)."""
     s = make_specialist(display_name=name)
-    s.location_lat = D(str(CENTER_LAT + lat_offset))
-    s.location_lng = D(str(CENTER_LON))
-    s.save()
+    place_specialist_at(s, CENTER_LAT + lat_offset, CENTER_LON, label=name)
     return s
 
 
@@ -52,9 +51,14 @@ def test_empty_table_is_not_reported_as_a_result():
 
 
 def test_no_coordinates_is_named_and_counted():
-    """Сегодняшнее состояние пилота: мастера есть, координат нет."""
+    """Сегодняшнее состояние пилота: мастера есть, координат нет.
+
+    Координаты в СТАРЫХ полях профиля с L6 координатами не считаются:
+    мастер с ``location_lat/lng`` и без места — «без координат».
+    """
     make_specialist(display_name="Без координат 1")
-    make_specialist(display_name="Без координат 2")
+    old = make_specialist(display_name="Старые поля профиля")
+    SpecialistProfile.objects.filter(pk=old.pk).update(location_lat=CENTER_LAT, location_lng=CENTER_LON)
 
     report = _run()
     assert "специалистов всего          : 2" in report

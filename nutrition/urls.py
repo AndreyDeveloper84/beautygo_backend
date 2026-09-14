@@ -16,6 +16,7 @@ from nutrition.views import (
     InternalCrossDomainSeenView,
     InternalCrossDomainView,
     InternalDeficitsView,
+    InternalFoodEstimateView,
     InternalFoodLogView,
     InternalFoodScanView,
     InternalPatternsView,
@@ -55,6 +56,11 @@ urlpatterns = [
         "internal/scan/",
         InternalFoodScanView.as_view(),
         name="internal-food-scan",
+    ),
+    path(
+        "internal/food-estimate/",
+        InternalFoodEstimateView.as_view(),
+        name="internal-food-estimate",
     ),
     path(
         "internal/food-log/",
