@@ -222,6 +222,22 @@ class TestTheClockAndTheDryRun:
         assert FoodScan.objects.filter(pk=scan.pk).exists()
         assert scan.image.storage.exists(name), "сухой прогон не трогает хранилище"
 
+    def test_dry_run_counts_every_overdue_row_as_not_deleted(self, user) -> None:
+        """DRF-1887. Замер пилота 15.09: сухой прогон, 15 строк старше срока,
+        без сирот — а «НЕ УДАЛЕНО В СРОК (§134)» печатало 0: число считало
+        только отказы и сирот, а отказов без ``--apply`` не бывает. В сухом
+        прогоне не удалено НИЧЕГО, поэтому не удалена в срок каждая
+        просроченная строка.
+        """
+        _scan(user, age_days=40)
+        _scan(user, age_days=10)  # молодая — не в счёт
+
+        output = _run()
+
+        assert "Строк под удаление: 1" in output  # POSITIVE: прогон увидел строку
+        assert "НЕ УДАЛЕНО В СРОК (§134, сухой прогон): 1" in output
+        assert "НЕ УДАЛЕНО В СРОК (§134): 0" not in output
+
     def test_created_at_does_not_move_on_save(self, user) -> None:
         """§134 запрещает продлевать срок при повторном просмотре.
 
