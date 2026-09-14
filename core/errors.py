@@ -195,6 +195,12 @@ class ErrorCode(str, Enum):
     # --- Analytics (project — not in spec, mobile-side codegen target) ---
     UNKNOWN_EVENT_NAME = "UNKNOWN_EVENT_NAME"
 
+    # --- Recommendation record (DRF-1666; контракт v1.0 §15, пакет 2 B8) ---
+    # Бот прислал событие, которого в таксономии нет (accepted/declined).
+    # Не VALIDATION_ERROR: это не опечатка в поле, а имя, которое владелец
+    # запретил вводить, — боту нужно отличить одно от другого одним except.
+    EVENT_NOT_IN_TAXONOMY = "EVENT_NOT_IN_TAXONOMY"
+
     # --- Resource ---
     NOT_FOUND = "NOT_FOUND"
     CONFLICT = "CONFLICT"
