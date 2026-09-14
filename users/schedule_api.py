@@ -184,6 +184,48 @@ def _to_to_dict(to: SpecialistTimeOff) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Shared write: full weekly replacement
+# ---------------------------------------------------------------------------
+
+def replace_weekly_schedule(specialist, schedule_data: list[dict]) -> list[dict]:
+    """Заменить недельный шаблон целиком — одним правилом для всех дверей.
+
+    Дверей три: своя у мастера (``/specialists/me/schedule/``), салонная
+    (``AdminScheduleView``) и внутренняя под субъектом
+    (``/internal/specialists/{id}/working-hours/``, DRF-1815). Усадочная
+    защита DRF-1297 B-4 и атомарная замена живут здесь, чтобы ни одна
+    дверь не осталась без сторожа. Бросает :class:`ScheduleShrinkConflict`
+    — вызывающий переводит его в свой отказ. Возвращает сохранённые дни.
+    """
+    with transaction.atomic():
+        with refuse_if_the_change_strands_bookings(specialist):
+            SpecialistWorkingHours.objects.filter(specialist=specialist).delete()
+            SpecialistWorkingHours.objects.bulk_create([
+                SpecialistWorkingHours(
+                    specialist=specialist,
+                    day_of_week=item['day_of_week'],
+                    is_working_day=item['is_working_day'],
+                    start_time=item.get('start_time'),
+                    end_time=item.get('end_time'),
+                    break_start=item.get('break_start'),
+                    break_end=item.get('break_end'),
+                )
+                for item in schedule_data
+            ])
+
+    max_ahead = getattr(settings, 'BOOKING_MAX_AHEAD_DAYS', 60)
+    today = date.today()
+    _invalidate_slots(specialist.id, today, today + timedelta(days=max_ahead))
+
+    hours = (
+        SpecialistWorkingHours.objects
+        .filter(specialist=specialist)
+        .order_by('day_of_week')
+    )
+    return [_wh_to_dict(wh) for wh in hours]
+
+
+# ---------------------------------------------------------------------------
 # Working Hours Views (DRF-131)
 # ---------------------------------------------------------------------------
 
@@ -277,22 +319,7 @@ class ScheduleView(APIView):
         # (``AdminScheduleView``, зовёт этот же ``super().put()``), — и
         # сторож на одной оставил бы вторую открытой.
         try:
-            with transaction.atomic():
-                with refuse_if_the_change_strands_bookings(specialist):
-                    # Atomic replace: delete all + recreate
-                    SpecialistWorkingHours.objects.filter(specialist=specialist).delete()
-                    SpecialistWorkingHours.objects.bulk_create([
-                        SpecialistWorkingHours(
-                            specialist=specialist,
-                            day_of_week=item['day_of_week'],
-                            is_working_day=item['is_working_day'],
-                            start_time=item.get('start_time'),
-                            end_time=item.get('end_time'),
-                            break_start=item.get('break_start'),
-                            break_end=item.get('break_end'),
-                        )
-                        for item in schedule_data
-                    ])
+            saved = replace_weekly_schedule(specialist, schedule_data)
         except ScheduleShrinkConflict as conflict:
             # Тот же код и та же форма, что у соседнего отказа по датам:
             # клиенту есть одна вещь на весь этот контур, которую рисовать
@@ -303,17 +330,7 @@ class ScheduleView(APIView):
                 "appointment(s) would be left outside working hours.",
                 status_code=409,
             )
-
-        max_ahead = getattr(settings, 'BOOKING_MAX_AHEAD_DAYS', 60)
-        today = date.today()
-        _invalidate_slots(specialist.id, today, today + timedelta(days=max_ahead))
-
-        hours = (
-            SpecialistWorkingHours.objects
-            .filter(specialist=specialist)
-            .order_by('day_of_week')
-        )
-        return success_response([_wh_to_dict(wh) for wh in hours])
+        return success_response(saved)
 
     @extend_schema(
         request=SchedulePatchSerializer,

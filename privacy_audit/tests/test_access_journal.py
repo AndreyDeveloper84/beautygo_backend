@@ -723,18 +723,34 @@ class TestGuardCoversTheWholeSurface:
             resolve(t.format(subject=uuid.uuid4(), request_id=uuid.uuid4())).func.cls
             for t in self.ROUTES
         }
+        # DRF-1815 — a subject-guarded view that is NOT on the personal-data
+        # surface, with the reason written down: the master's working hours
+        # are workspace setup, not personal data about the subject; the §96
+        # journal does not apply. Anything else the scan finds here that this
+        # list does not name is a guarded-but-unaudited route.
+        not_personal_data = {
+            "InternalSpecialistWorkingHoursView": (
+                "часы работы — настройка workspace мастера, не персданные субъекта"
+            ),
+        }
         guarded = set()
         for module in (
             "personal_data_api",
             "internal_personal_context_api",
             "deletion_request_api",
             "internal_users_api",  # DRF-1709 — the profile card joined the surface
+            "internal_schedule_api",  # DRF-1815 — working hours under the subject
         ):
             mod = __import__(f"users.{module}", fromlist=["x"])
             for obj in vars(mod).values():
-                if isinstance(obj, type) and IsInternalBearerForSubject in getattr(
-                    obj, "permission_classes", []
+                # Subclasses are the same guard (DRF-1815 ``subject_of`` hook).
+                if isinstance(obj, type) and any(
+                    isinstance(p, type) and issubclass(p, IsInternalBearerForSubject)
+                    for p in getattr(obj, "permission_classes", [])
                 ):
+                    if obj.__name__ in not_personal_data:
+                        assert not_personal_data[obj.__name__].strip()
+                        continue
                     guarded.add(obj)
         assert guarded, "the scan found no guarded view — the quantifier below would be vacuous"
         assert guarded == listed, {

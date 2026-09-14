@@ -177,7 +177,8 @@ class PersonalDataAccessLog(models.Model):
         help_text=(
             "Раздельные внутренние причины отказа при одном грубом имени "
             "наружу: subject_mismatch, wrong_purpose, unknown_actor, "
-            "unnamed_actor, view_misconfigured."
+            "unnamed_actor, view_misconfigured, subject_unresolved "
+            "(у актора нет профиля, который называет URL — DRF-1815)."
         ),
     )
     actor_named = models.BooleanField(

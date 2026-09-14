@@ -555,16 +555,27 @@ class CreateBookingService:
                     tenant_id=specialist.tenant_id,
                 )
             )
+            has_active = any(row.is_active for row in existing)
             has_revoked = any(not row.is_active for row in existing)
-            if has_revoked:
+            if has_revoked and not has_active:
                 # F2 defense (PR #152): a revoked relationship refuses
                 # silently — re-grant requires explicit admin action.
-                # Preserved verbatim under the generalised rule, so a
-                # banned customer cannot silently re-book via ANY
-                # channel, same-tenant or cross-tenant.
+                # Preserved under the generalised rule, so a banned
+                # customer cannot silently re-book via ANY channel,
+                # same-tenant or cross-tenant.
+                #
+                # DRF-1248 (owner OD-6, 21.08): «revoked» means a
+                # retired row WITHOUT an active one. ``tur_unique_active``
+                # allows one active role per (user, tenant), so a role
+                # change (customer → admin) is two rows — the old one
+                # retired, the new one active — and the retired row alone
+                # used to read as a ban: the salon's owner, promoted to
+                # admin, could no longer book in her own salon and was
+                # told the specialist does not exist. An active row IS the
+                # explicit admin action this comment demands: only an
+                # admin can create it.
                 from rest_framework.exceptions import NotFound
                 raise NotFound("Specialist not found.")
-            has_active = any(row.is_active for row in existing)
             if not has_active:
                 # TOCTOU note: the select_for_update above locks only
                 # rows that ALREADY exist. On a true first booking there
