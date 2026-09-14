@@ -139,7 +139,7 @@ class TestSecondPassConfirms:
         nxt = _current(resp.json()["data"])
         assert nxt["step"] == FEELING.key
         assert nxt["mode"] == anketa.MODE_CONFIRM
-        assert nxt["known_value"]["option_key"] == "calmer"
+        assert nxt["known_value"]["option_keys"] == ["calmer"]  # DRF-1759: feeling multi
         # «Уже учла» в новом проходе — подтверждённое, известным считается.
         known = build_decision_context(customer)["known"]["anketa"]
         assert [(r["step"], r["option_key"], r["unknown"]) for r in known] == [
