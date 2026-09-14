@@ -75,6 +75,14 @@ class Command(BaseCommand):
             approval_source_ref="",
         ).count()
 
+        # MAP-AUTO-01: сколько канонов без логической идентичности. Не
+        # нарушение само по себе — 40 строк DRF-196 и PROVISIONAL-каноны
+        # кода не имеют законно; число нужно, чтобы видеть, дошёл ли
+        # bootstrap 0024 до этой базы (после него у seed-строк код есть).
+        templates_without_canonical_code = ServiceTemplate.objects.filter(
+            canonical_code__isnull=True,
+        ).count()
+
         # Предмет печатается рядом с результатом: без него «ноль»
         # неотличим от «посчитали не то». Всего строк — чтобы было
         # видно, что счётчик смотрел на непустую таблицу.
@@ -86,6 +94,7 @@ class Command(BaseCommand):
         self.stdout.write(f"verified_on_provisional : {verified_on_provisional}")
         self.stdout.write(f"provisional_templates   : {provisional_templates}")
         self.stdout.write(f"approved_without_basis  : {approved_without_basis}")
+        self.stdout.write(f"templates_without_canonical_code : {templates_without_canonical_code}")
 
         violations = verified_on_provisional + approved_without_basis
         if violations:

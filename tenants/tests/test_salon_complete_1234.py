@@ -331,20 +331,16 @@ class TestAuth:
 
 
 @pytest.mark.django_db(transaction=True)
-class TestNoShowIsNotHere:
-    def test_the_no_show_route_does_not_exist_on_this_surface(
-        self, salon, admin_user, booking
-    ):
-        """Deliberate, not forgotten.
-
-        Its mobile implementation shapes two outbox events inline, and a
-        copy would be two paths obliged to agree forever. Extracting a
-        sibling of `close_booking` first is its own task — this test
-        fails the day somebody adds the route without doing that, which
-        is the moment to re-read the reasoning.
-        """
+class TestNoShowIsHereNow:
+    def test_the_no_show_route_exists_on_this_surface(self, salon, admin_user, booking):
+        """DRF-1851 перевернул прежний сторож «маршрута нет — намеренно»:
+        событийная часть извлечена в `completion.mark_booking_no_show`
+        (сосед `close_booking`), и салонный маршрут стал тем же тонким
+        обёртывающим видом, что и `complete`. Полный набор —
+        `test_salon_no_show_1851.py`; здесь только факт маршрута, чтобы
+        этот файл не утверждал обратное."""
         resp = _api(admin_user, tenant_slug=salon.slug).post(
-            f"/api/v1/tenants/me/appointments/{booking.id}/no_show/",
-            {}, format="json",
+            f"/api/v1/tenants/me/appointments/{booking.id}/no-show/",
+            {"expected_version": booking.version}, format="json",
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 200, resp.data

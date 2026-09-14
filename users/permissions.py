@@ -326,12 +326,16 @@ class IsTenantProvisioningBearer(permissions.BasePermission):
     setting fails closed; a value equal to the general Bearer or to the
     identity secret is refused per request as well as at boot.
 
-    Transition (one deploy, DRF-1695 step 1→3): while the tenant secret is
-    still EMPTY, the identity secret is accepted here so the form the owner
-    is using today keeps working until ops provisions the new value. The
-    moment ``AYLA_TENANT_PROVISIONING_TOKEN`` is set, the identity secret
-    stops opening this route — no flag to forget, the cut-over is the
-    presence of the new value.
+    The transition rule of DRF-1695 (identity secret opening this route
+    while the tenant secret was still empty) is GONE — DRF-1828 (M27, owner
+    ruling G1/A3 12.09): the same secret is about to provision a solo
+    workspace (``User(specialist)`` + ``SpecialistProfile(DRAFT)``), and an
+    identity credential must not be a provisioning credential, transitional
+    or not. Nobody living used the rule: the bot never holds the identity
+    secret (its settings forbid it), ``ensure_tenant`` calls with the tenant
+    secret only, and on the pilot the identity secret is unset. Until ops
+    sets ``AYLA_TENANT_PROVISIONING_TOKEN`` this route is closed to everyone
+    — that is the expected state, not an outage (OWNER_QUESTIONS A3).
     """
 
     message = "Tenant provisioning auth required"
@@ -341,10 +345,8 @@ class IsTenantProvisioningBearer(permissions.BasePermission):
         identity = getattr(settings, "AYLA_IDENTITY_PROVISIONING_TOKEN", "") or ""
         expected = getattr(settings, "AYLA_TENANT_PROVISIONING_TOKEN", "") or ""
         if not expected:
-            # Transition only: identity secret opens tenants until the
-            # dedicated one is provisioned. Still never the general Bearer.
-            expected = identity
-        if not expected:
+            # Empty tenant secret = closed route. No fallback to the
+            # identity secret (DRF-1828): provisioning ≠ identity.
             return False
         if general and compare_digest(expected, general):
             return False
