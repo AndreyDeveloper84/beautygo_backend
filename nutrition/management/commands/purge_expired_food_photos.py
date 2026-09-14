@@ -185,6 +185,38 @@ def find_orphans(storage) -> list[str]:
     return sorted(found)
 
 
+def purge_one(scan: FoodScan) -> tuple[str, str]:
+    """Объект, затем строка. Порядок — предмет, а не стиль.
+
+    Обратный порядок оставляет объект в бакете без ссылки на него:
+    строки больше нет, найти файл по базе невозможно. Семь таких
+    объектов на пилоте уже лежат.
+    """
+    name = scan.image.name
+    if not name:
+        # Пятый исход. Строка без фотографии — удалять было НЕЧЕГО, и
+        # это не то же самое, что «имя есть, объекта нет»: там
+        # фотография была и куда-то делась, здесь её не было никогда.
+        # Слив их, отчёт сообщал бы об исчезновении фотографий, которых
+        # не существовало.
+        scan.delete()
+        return "no_image", ""
+
+    try:
+        existed = scan.image.storage.exists(name)
+        if existed:
+            scan.image.delete(save=False)
+    except Exception as exc:  # noqa: BLE001 — причина обязана быть названа
+        # Строка НЕ трогается: потерять ссылку на живой файл хуже,
+        # чем оставить просроченную строку до следующего запуска.
+        return "refused", f"{type(exc).__name__}: {exc}"[:200]
+
+    # Сырой ответ уходит вместе со строкой — §135. Отдельно стирать
+    # его не нужно: он поле этой же строки.
+    scan.delete()
+    return ("deleted" if existed else "object_absent"), ""
+
+
 class Command(BaseCommand):
     help = (
         "Удалить фотографии еды и сырые ответы старше 30 суток (§134/§135). "
@@ -286,35 +318,11 @@ class Command(BaseCommand):
         self._report(tally, apply, expired, options["scan_orphans"])
 
     def _purge_one(self, scan: FoodScan) -> tuple[str, str]:
-        """Объект, затем строка. Порядок — предмет, а не стиль.
-
-        Обратный порядок оставляет объект в бакете без ссылки на него:
-        строки больше нет, найти файл по базе невозможно. Семь таких
-        объектов на пилоте уже лежат.
-        """
-        name = scan.image.name
-        if not name:
-            # Пятый исход. Строка без фотографии — удалять было НЕЧЕГО, и
-            # это не то же самое, что «имя есть, объекта нет»: там
-            # фотография была и куда-то делась, здесь её не было никогда.
-            # Слив их, отчёт сообщал бы об исчезновении фотографий, которых
-            # не существовало.
-            scan.delete()
-            return "no_image", ""
-
-        try:
-            existed = scan.image.storage.exists(name)
-            if existed:
-                scan.image.delete(save=False)
-        except Exception as exc:  # noqa: BLE001 — причина обязана быть названа
-            # Строка НЕ трогается: потерять ссылку на живой файл хуже,
-            # чем оставить просроченную строку до следующего запуска.
-            return "refused", f"{type(exc).__name__}: {exc}"[:200]
-
-        # Сырой ответ уходит вместе со строкой — §135. Отдельно стирать
-        # его не нужно: он поле этой же строки.
-        scan.delete()
-        return ("deleted" if existed else "object_absent"), ""
+        # DRF-1843: одна реализация на команду и задачу beat
+        # (``nutrition.tasks.purge_expired_food_photos_task``) — два
+        # удаления одного и того же разошлись бы в порядке «объект, затем
+        # строка», а это и есть главная ловушка задачи.
+        return purge_one(scan)
 
     def _report(self, tally: Tally, apply: bool, expired: list, scanned: bool) -> None:
         self.stdout.write("")
@@ -373,8 +381,19 @@ class Command(BaseCommand):
         # Число §134 печатается последним и отдельно: «выявлять не
         # удалившиеся в срок» — требование о втором счётчике, и счётчик
         # удалённого его не заменяет.
-        style = self.style.ERROR if tally.not_deleted else self.style.SUCCESS
+        #
+        # DRF-1887: в СУХОМ прогоне не удалено ничего, значит не удалена в
+        # срок каждая просроченная строка. ``tally.not_deleted`` считает
+        # отказы и сирот — отказов без ``--apply`` не бывает, и строка
+        # печатала 0 при пятнадцати просроченных (замер пилота 15.09).
+        # Режим назван в самой строке: два числа с одной подписью читались
+        # бы как одно.
+        if apply:
+            not_deleted = tally.not_deleted
+            label = "НЕ УДАЛЕНО В СРОК (§134)"
+        else:
+            not_deleted = len(expired) + len(tally.orphans)
+            label = "НЕ УДАЛЕНО В СРОК (§134, сухой прогон)"
+        style = self.style.ERROR if not_deleted else self.style.SUCCESS
         self.stdout.write("")
-        self.stdout.write(
-            style(f"НЕ УДАЛЕНО В СРОК (§134): {tally.not_deleted}")
-        )
+        self.stdout.write(style(f"{label}: {not_deleted}"))

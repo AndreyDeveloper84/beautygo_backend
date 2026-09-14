@@ -131,7 +131,10 @@ class TestKnownAnketa:
         _answer_goal(api)
         doc = None
         for step in anketa.ANKETA_STEPS:
-            doc = _answer(api, step.key, option_key=step.options[0][0]).json()["data"]
+            # DRF-1759 — ответ по режиму шага: multi — массивом.
+            key = step.options[0][0]
+            shape = {"option_keys": [key]} if step.mode == anketa.MODE_MULTI else {"option_key": key}
+            doc = _answer(api, step.key, **shape).json()["data"]
         assert doc["known"]["goal"]["goal_key"] == "relax"
         assert doc["known"]["anketa"] == []
 
