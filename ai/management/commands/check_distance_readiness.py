@@ -16,8 +16,10 @@
 ----------------------------------------------
 
 Замер 11.09.2026 (`docs/MEASURE_DISTANCE_FILTERING.md`): на пилоте
-**31 мастер, 0 с координатами**, значит `_score_distance` возвращает
-`0.5` всем и расстояние не различает никого — при весе в четверть балла.
+**31 мастер, 0 с координатами**, значит расстояние не различает никого.
+После L5 «нет координат» — это `DISTANCE_UNKNOWN` (`None`), а не `0.5`;
+после L6 (§9) координаты берутся у **места оказания услуг**
+(`works_at`), не у профиля мастера — тем же критерием, что у движка.
 
 ```
 сегодня          с координатами 0    различных баллов 1
@@ -30,12 +32,12 @@
 Предупреждение, которое стоит в замере первой строкой и повторено здесь
 ----------------------------------------------------------------------
 
-**Геокодировать всех или никого.** Нейтральное значение `0.5` — середина
-шкалы, а не край: геокодированный мастер дальше половины порога
-проигрывает мастеру, про которого не известно ничего. Частичный прогон
-создаёт направленную ложь там, где её сейчас нет. Поэтому команда
-печатает **и всего, и с координатами** — разрыв между ними и есть мера
-опасности.
+**Геокодировать всех или никого.** Мастер без места получает композит
+без расстояния (L5), и его балл несравним с баллом мастера, у которого
+место есть: список для клиента перемешивается по признаку, которого у
+половины нет. Частичный прогон создаёт направленную ложь там, где её
+сейчас нет. Поэтому команда печатает **и всего, и с координатами** —
+разрыв между ними и есть мера опасности.
 
 Почему команда начинается с того, КТО ей ответил
 ------------------------------------------------
@@ -73,6 +75,8 @@ from django.utils import timezone
 
 from ai.application.services.recommendation_engine import RecommendationEngine
 from core.measurement_subject import fresh, gather_pulse, newest, subject_lines
+from tenants.distance import haversine_km, offer_point, participating_place_q
+from tenants.models import ServiceLocation
 from users.models import SpecialistProfile
 
 
@@ -133,13 +137,13 @@ class Command(BaseCommand):
         # `all_tenants` не нужен: профили специалистов глобальны. Если это
         # изменится, счёт молча схлопнется до одного салона — и строка
         # «предмет» ниже это покажет числом `всего`.
-        rows = list(
-            SpecialistProfile.objects.values_list("location_lat", "location_lng")
-        )
+        # L6 (§9): предмет — место предложения (``works_at``), не координаты
+        # профиля. «С координатами» = есть подтверждённое геокодированное
+        # место, тем же критерием, которым движок решает, есть ли расстояние.
+        specialists = list(SpecialistProfile.objects.select_related("works_at"))
+        rows = [offer_point(s) for s in specialists]
         total = len(rows)
-        with_coords = sum(
-            1 for lat, lng in rows if lat is not None and lng is not None
-        )
+        with_coords = sum(1 for point in rows if point is not None)
 
         # Предмет рядом с результатом: ноль без предмета неотличим от
         # «посчитали не то». Пустая таблица даёт те же нули, что и
@@ -150,6 +154,11 @@ class Command(BaseCommand):
         )
         self.stdout.write(f"специалистов всего          : {total}")
         self.stdout.write(f"из них с координатами       : {with_coords}")
+        self.stdout.write(
+            f"мест оказания услуг         : {ServiceLocation.objects.count()} "
+            f"(участвуют в расстоянии: "
+            f"{ServiceLocation.objects.filter(participating_place_q('')).count()})"
+        )
 
         if total == 0:
             self.stdout.write(self.style.WARNING(
@@ -170,9 +179,9 @@ class Command(BaseCommand):
         elif with_coords < total:
             self.stdout.write(self.style.ERROR(
                 f"ЧАСТИЧНАЯ ГЕОКОДИРОВКА: {with_coords} из {total}. "
-                "Это хуже её отсутствия — нейтральное значение 0.5 есть середина "
-                "шкалы, и негеокодированные получают преимущество или штраф по "
-                "признаку, которого у них нет. Геокодировать всех или никого."
+                "Мастера без места получают DISTANCE_UNKNOWN и композит без "
+                "расстояния (L5) — их балл несравним с баллом тех, у кого место "
+                "есть: клиент видит перемешанный список. Геокодировать всех или никого."
             ))
         else:
             self.stdout.write(self.style.SUCCESS(
@@ -252,7 +261,7 @@ class Command(BaseCommand):
         смотреть, — и выдумывать эту точку нельзя: «центр города»,
         подставленный молча, дал бы правдоподобное число ни о чём.
         """
-        has_any = any(lat is not None and lng is not None for lat, lng in rows)
+        has_any = any(point is not None for point in rows)
         if not has_any:
             return "1 (не зависит от точки отсчёта: координат нет ни у кого)"
 
@@ -263,25 +272,12 @@ class Command(BaseCommand):
                 "получилось бы правдоподобным и ни о чём."
             )
 
+        # Та же формула и то же условие «неизвестно», что у движка:
+        # ``distance_km_to`` — единственное место, где считается расстояние.
         scores = {
             engine._score_distance(
-                _haversine_or_none(from_lat, from_lon, lat, lng)
+                None if point is None else haversine_km(from_lat, from_lon, *point)
             )
-            for lat, lng in rows
+            for point in rows
         }
         return str(len(scores))
-
-
-def _haversine_or_none(from_lat, from_lon, lat, lng):
-    """Расстояние или `None` — той же логикой, что и у движка.
-
-    Дубль условия намеренный и узкий: `_distance_to` принимает
-    `SpecialistProfile` и `RecommendationQuery`, а здесь на руках две
-    пары чисел. Дублируется **условие про `None`**, а сам расчёт берётся
-    у движка, чтобы формула осталась одна.
-    """
-    if lat is None or lng is None:
-        return None
-    from ai.application.services.recommendation_engine import _haversine_km
-
-    return _haversine_km(from_lat, from_lon, float(lat), float(lng))

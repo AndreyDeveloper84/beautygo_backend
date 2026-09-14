@@ -195,6 +195,12 @@ class ErrorCode(str, Enum):
     # --- Analytics (project — not in spec, mobile-side codegen target) ---
     UNKNOWN_EVENT_NAME = "UNKNOWN_EVENT_NAME"
 
+    # --- Recommendation record (DRF-1666; контракт v1.0 §15, пакет 2 B8) ---
+    # Бот прислал событие, которого в таксономии нет (accepted/declined).
+    # Не VALIDATION_ERROR: это не опечатка в поле, а имя, которое владелец
+    # запретил вводить, — боту нужно отличить одно от другого одним except.
+    EVENT_NOT_IN_TAXONOMY = "EVENT_NOT_IN_TAXONOMY"
+
     # --- Resource ---
     NOT_FOUND = "NOT_FOUND"
     CONFLICT = "CONFLICT"
@@ -202,6 +208,10 @@ class ErrorCode(str, Enum):
     # другим названием. Не общий CONFLICT: оператору нужно имя занявшего,
     # а боту — отличить «опечатка в названии» от «Ayla недоступна».
     TENANT_SLUG_TAKEN = "TENANT_SLUG_TAKEN"
+    # DRF-1828 — provisioning solo-workspace отказал: slug/UUID занят
+    # другим тенантом или claim заведён под другим workspace. Причина —
+    # в details.reason машинным именем; ничего не создано.
+    SOLO_PROVISIONING_REFUSED = "SOLO_PROVISIONING_REFUSED"
     # DRF-1699 D2 (§7 свода) — у человека живая заявка на удаление:
     # персонализация и новая обработка данных прекращены. Один код на все
     # три класса читателей (память, рекомендации, проактив), чтобы бот ловил
