@@ -27,7 +27,7 @@ from appointments.application.services.availability_query_service import (
     AvailabilityQueryService,
 )
 from appointments.models import Appointment
-from tenants.distance import distance_meters
+from tenants.distance import distance_meters, offer_address
 from users.models import SpecialistProfile
 
 from ai.application.services.specialist_context_builder import (
@@ -290,7 +290,7 @@ def handle_confirm_booking(args: dict[str, Any]) -> ToolResult:
     except (ValueError, TypeError):
         return _fallback_clarification("confirm_booking_invalid_datetime")
 
-    specialist = SpecialistProfile.objects.filter(id=specialist_id).first()
+    specialist = SpecialistProfile.objects.select_related("works_at").filter(id=specialist_id).first()
     if specialist is None:
         return _fallback_clarification("confirm_booking_specialist_or_service_missing")
     # Тот же общий резолвер, что и в show_slots — иначе карточка
@@ -309,7 +309,9 @@ def handle_confirm_booking(args: dict[str, Any]) -> ToolResult:
             "service_name": resolved.name,
             "datetime": slot_dt.isoformat(),
             "price": str(resolved.price),
-            "address": specialist.address,
+            # L8a (§9): адрес места предложения, не профиля — модель
+            # вправе озвучить поле карточки, а старый адрес принадлежит человеку.
+            "address": offer_address(specialist),
             "duration_minutes": resolved.duration_minutes,
         },
     )
