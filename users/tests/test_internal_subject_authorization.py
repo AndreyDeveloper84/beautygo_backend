@@ -109,10 +109,12 @@ CTX_ASKED = ("post", "/api/v1/internal/users/{subject}/personal-context/mark-ask
 CTX_SKIP = ("post", "/api/v1/internal/users/{subject}/personal-context/skip/")
 DEL_REQ_GET = ("get", "/api/v1/internal/users/{subject}/deletion-requests/")
 DEL_REQ_POST = ("post", "/api/v1/internal/users/{subject}/deletion-requests/")
+# DRF-1709 (12.09.2026): последняя дыра B-2.1 закрыта — карточка под субъектом.
+PROFILE = ("get", "/api/v1/internal/users/{subject}/")
 
 ALL_ROUTES = [
     EXPORT, DELETE, CTX_GET, CTX_PATCH, CTX_DELETE, CTX_ELIG, CTX_ASKED, CTX_SKIP,
-    DEL_REQ_GET, DEL_REQ_POST,
+    DEL_REQ_GET, DEL_REQ_POST, PROFILE,
 ]
 
 _BODIES = {
@@ -311,6 +313,9 @@ class TestAuthorizationCreatesNothing:
 # ---------------------------------------------------------------------------
 
 URLS = Path(__file__).resolve().parents[1] / "internal_users_urls.py"
+#: DRF-1815 — маршруты с профилем мастера в URL живут в корневом urls:
+#: ``/internal/specialists/<uuid:specialist_id>/…``. Тот же сторож состава.
+ROOT_URLS = Path(__file__).resolve().parents[2] / "djangoProject" / "urls.py"
 
 #: Маршруты с субъектом в URL, охраняемые ИНЫМ механизмом — с названной причиной.
 #: Пустая причина не принимается: это список долгов, а не исключений.
@@ -318,11 +323,6 @@ GUARDED_OTHERWISE: dict[str, str] = {
     "internal-cards-setup": "IsBotServiceWithVerifiedClient + _check_user_scope в виде (C7.6)",
     "internal-cards-list": "IsBotServiceWithVerifiedClient + _check_user_scope в виде (C7.6)",
     "internal-cards-delete": "IsBotServiceWithVerifiedClient + _check_user_scope в виде (C7.6)",
-    "internal-user-profile": (
-        "НЕ ОХРАНЯЕТСЯ по субъекту: отдаёт display_name+avatar любого UUID под "
-        "общим токеном; бот не называет субъект намеренно (profile_client.py). "
-        "Названная дыра, а не исключение — задача DRF-1709 (ребёнок DRF-1617)"
-    ),
 }
 
 
@@ -337,6 +337,51 @@ def _subject_routes() -> list[tuple[str, str, str]]:
         template, kwarg, name = m.group(1), m.group(2), m.group(3)
         out.append((name, kwarg, template))
     return out
+
+
+#: Маршруты ``/internal/specialists/<uuid:specialist_id>/…`` (корневой urls),
+#: охраняемые иначе — с названной причиной. Профиль мастера в URL здесь —
+#: не субъект, а ресурс салона: сторож — Bearer + заявленный ``tenant_id``,
+#: чужой тенант отвечает 404 (DRF-1036: UUID не подтверждается).
+GUARDED_OTHERWISE_SPECIALIST: dict[str, str] = {
+    "internal-payout-preview": "IsInternalBearer + tenant_id как заявка, 404 на чужой (C3)",
+    "internal-specialist-time-off": (
+        "IsInternalBearer + tenant_id как заявка, 404 на чужой (DRF-1062)"
+    ),
+    "internal-specialist-schedule": (
+        "IsInternalBearer + tenant_id как заявка, 404 на чужой (DRF-1126)"
+    ),
+}
+
+#: Subject-маршруты мастера, чьи отрицательные тесты живут в своём наборе.
+SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
+    "internal-specialist-working-hours": (
+        "users/tests/test_internal_working_hours_1815.py::TestSubject"
+    ),
+}
+
+_SPECIALIST_ROUTE_RE = re.compile(
+    r"path\(\s*'(api/v1/internal/specialists/<uuid:(specialist_id)>/[^']*)',.*?name='([^']+)'",
+    re.S,
+)
+
+
+def _specialist_subject_routes() -> list[tuple[str, str, str]]:
+    """(name, kwarg, template) для корневых маршрутов с ``<uuid:specialist_id>``
+    под ``api/v1/internal/specialists/``."""
+    text = ROOT_URLS.read_text(encoding="utf-8")
+    return [
+        (m.group(3), m.group(2), m.group(1)) for m in _SPECIALIST_ROUTE_RE.finditer(text)
+    ]
+
+
+def _has_subject_guard(view_cls) -> bool:
+    """Подкласс — тот же сторож (DRF-1815: ``subject_of`` меняет только,
+    ЧТО сравнивать); проверка по идентичности класса пропустила бы его."""
+    return any(
+        isinstance(p, type) and issubclass(p, IsInternalBearerForSubject)
+        for p in view_cls.permission_classes
+    )
 
 
 class TestGuardCoversItsSubject:
@@ -355,12 +400,35 @@ class TestGuardCoversItsSubject:
         sample = re.sub(r"<uuid:\w+>", "22222222-2222-2222-2222-222222222222", sample)
         match = resolve("/api/v1/internal/users/" + sample)
         view_cls = match.func.view_class
-        assert IsInternalBearerForSubject in view_cls.permission_classes, (
+        assert _has_subject_guard(view_cls), (
             f"{name}: субъект в URL, а проверки субъекта нет"
         )
         assert getattr(view_cls, "subject_url_kwarg", None) == kwarg, (
             f"{name}: subject_url_kwarg={getattr(view_cls, 'subject_url_kwarg', None)!r}, "
             f"а в URL {kwarg!r} — проверка сравнивала бы не то"
+        )
+
+    def test_specialist_routes_are_enumerated(self):
+        names = {n for n, _, _ in _specialist_subject_routes()}
+        assert {"internal-specialist-schedule", "internal-specialist-working-hours"} <= names, names
+
+    @pytest.mark.parametrize("route", _specialist_subject_routes(), ids=lambda r: r[0])
+    def test_every_specialist_route_carries_the_check_or_a_named_reason(self, route):
+        """DRF-1815 — профиль мастера в URL: либо субъектный сторож
+        (подкласс ``IsInternalBearerForSubject`` c ``subject_url_kwarg``),
+        либо названная причина, почему иначе."""
+        name, kwarg, template = route
+        if name in GUARDED_OTHERWISE_SPECIALIST:
+            assert GUARDED_OTHERWISE_SPECIALIST[name].strip(), f"{name}: причина пустая"
+            return
+        sample = template.replace(f"<uuid:{kwarg}>", "11111111-1111-1111-1111-111111111111")
+        view_cls = resolve("/" + sample).func.view_class
+        assert _has_subject_guard(view_cls), f"{name}: профиль в URL, а проверки субъекта нет"
+        assert getattr(view_cls, "subject_url_kwarg", None) == kwarg, (
+            f"{name}: subject_url_kwarg={getattr(view_cls, 'subject_url_kwarg', None)!r}"
+        )
+        assert name in SPECIALIST_ROUTES_TESTED_ELSEWHERE, (
+            f"{name}: субъектный маршрут без отрицательных тестов"
         )
 
     def test_the_route_list_here_is_the_whole_guarded_surface(self):

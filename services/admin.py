@@ -72,7 +72,7 @@ class ServiceTemplateSynonymInline(admin.TabularInline):
 @admin.register(ServiceTemplate)
 class ServiceTemplateAdmin(admin.ModelAdmin):
     list_display = (
-        'name', 'lifecycle', 'category', 'duration_default',
+        'name', 'canonical_code', 'lifecycle', 'category', 'duration_default',
         'is_popular', 'sort_order',
     )
     # `lifecycle` первым фильтром: очередь одобрения канонов — рабочий
@@ -86,10 +86,19 @@ class ServiceTemplateAdmin(admin.ModelAdmin):
     # канон находимым словами салона — в том числе во всплывающем окне
     # выбора шаблона на форме услуги салона, потому что оно ищет этим же
     # набором полей.
-    search_fields = ('name', 'name_short', 'category__name', 'synonyms__text')
+    search_fields = ('name', 'name_short', 'category__name', 'synonyms__text', 'canonical_code')
     list_editable = ('is_popular', 'sort_order')
     ordering = ('category', '-is_popular', 'sort_order', 'name')
     inlines = [RegionalPricingInline, ServiceTemplateSynonymInline]
+
+    def get_readonly_fields(self, request, obj=None):
+        # MAP-AUTO-01: код, однажды поставленный, на форме не редактируется.
+        # Пустой — можно заполнить (канон, заведённый оператором, получает
+        # код только если владелец добавил его в эталонный список).
+        base = tuple(super().get_readonly_fields(request, obj))
+        if obj is not None and obj.canonical_code:
+            return base + ('canonical_code',)
+        return base
 
 
 @admin.register(ServiceTemplateSynonym)
@@ -249,6 +258,21 @@ class SalonServiceAdminForm(forms.ModelForm):
                 'Правило без версии — «подтверждено какой-то из версий». '
                 'Правила меняются, поэтому версия обязательна.',
                 code='rule_requires_version',
+            ))
+
+        if (
+            cleaned.get('mapping_status') == SalonService.MappingStatus.VERIFIED
+            and cleaned.get('template') is None
+        ):
+            # База: `salonservice_verified_requires_template` (DRF-1668).
+            # Здесь — по полю: «проверено» отвечает на вопрос «с чем
+            # связана», и без шаблона ответа нет.
+            self.add_error('template', forms.ValidationError(
+                'Статус «проверено» подтверждает связь с канонической '
+                'услугой — выберите шаблон. Если канона для этой услуги '
+                'нет, это не «проверено», а «не подлежит рекомендациям» '
+                'или разрыв канона (решение владельца).',
+                code='verified_requires_template',
             ))
 
         return cleaned

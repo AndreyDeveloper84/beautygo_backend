@@ -160,11 +160,25 @@ class Command(BaseCommand):
             profile.timezone = "Europe/Moscow"
             profile.save()
 
+            # «Связь ЕСТЬ, но не подтверждена» — значит у строки есть
+            # шаблон (DRF-1668: VERIFIED ⇒ template, и --verify-one ниже
+            # переводит одну из этих строк в VERIFIED). Без шаблона это
+            # была бы не REVIEW_REQUIRED, а UNMAPPED с чужим именем.
+            p7_template, _ = ServiceTemplate.objects.get_or_create(
+                category=category,
+                name="Golden manicure template P7",
+                defaults={
+                    "name_short": "Golden P7",
+                    "duration_default": 60,
+                    "requires_health_check": False,
+                },
+            )
             salon, _ = SalonService.objects.get_or_create(
                 tenant=tenant,
                 category=category,
                 name=f"Golden manicure {i}",
                 defaults={
+                    "template": p7_template,
                     "duration_minutes": 60,
                     # Связь ЕСТЬ, но не подтверждена — это и есть P7 пилота.
                     "mapping_status": SalonService.MappingStatus.REVIEW_REQUIRED,

@@ -67,6 +67,53 @@ MISSING_GOAL_ANKETA = "goal_anketa"
 
 GOAL_STEP_KEY = "goal"
 
+# ─── типы ответа по смыслу (DRF-1746, макет C03 P11) ───────────────────────
+#
+# «C03 не должен выглядеть как серия одинаковых экранов с radio-кнопками».
+# Режим — свойство шага и едет в ``missing`` данными (условие C-1): экран
+# рисует компонент по ``mode`` и ничего не выводит. Отсутствие поля в
+# документе = ``single`` — старый потребитель и старый документ совпадают.
+# Какой вопрос каким режимом — содержание анкеты/каталога вопросов движка,
+# не этот контракт; сегодняшние ``ANKETA_STEPS`` остаются ``single``.
+MODE_SINGLE = "single"
+MODE_MULTI = "multi"
+#: Подтверждение известного (DRF-1745, макет C03.3): шаг, на который
+#: человек уже отвечал в прошлом проходе, приходит с ``known_value`` и
+#: вопросом «Всё ещё так?» вместо переспроса. Ответ «Да» —
+#: ``{answer: {step, confirm: true}}`` — копирует прошлое значение в новый
+#: проход; «Изменилось» — обычный ответ шага (``answer_mode`` говорит,
+#: каким компонентом); «Не знаю» — по DRF-1747, если шаг его предлагает.
+MODE_CONFIRM = "confirm"
+MODE_SCALE = "scale"
+MODE_TEXT = "text"
+ANSWER_MODES = frozenset({MODE_SINGLE, MODE_MULTI, MODE_CONFIRM, MODE_SCALE, MODE_TEXT})
+
+#: Лимит короткого свободного ответа (режим ``text``). Едет в документе
+#: как ``text_limit``, чтобы поле на экране и проверка на сервере были
+#: одним числом.
+TEXT_ANSWER_LIMIT = 120
+
+# ─── «Не знаю» — полноценный ответ (DRF-1747, макет C03 P12) ────────────────
+#
+# «Не заставляем придумывать информацию ради прохождения. После „Не знаю“
+# Ayla либо продолжает без факта, либо, только если действительно
+# необходимо, задаёт более простой вопрос». Поэтому «Не знаю» — не пропуск
+# и не отсутствие строки, а durable-ответ шага с ключом ``unknown``: шаг в
+# этом проходе не задаётся повторно. Это UNKNOWN, не FLEXIBLE («не важно»):
+# «не важно» снимает вопрос, «не знаю» оставляет факт неизвестным.
+#
+# На каких шагах стоит «Не знаю» — ``AnketaStep.escape``; по умолчанию там,
+# где макет его показывает (вопросы о самочувствии/проявлениях), не на
+# выборе цели. Окончательно решает дизайнер в ревью.
+UNKNOWN_OPTION_KEY = "unknown"
+UNKNOWN_OPTION_LABEL = "Не знаю"
+#: Роль опции в контракте: экран рисует такую опцию тихо и отдельно от
+#: вариантов. У обычных вариантов роли нет (аддитивно).
+OPTION_ROLE_ESCAPE = "escape"
+#: Происхождение факта — общий словарь с памятью сказанного бота
+#: (согласовано с окном мозга 12.09): conversation / anketa / operator.
+ORIGIN_ANKETA = "anketa"
+
 
 @dataclass(frozen=True)
 class AnketaStep:
@@ -89,6 +136,108 @@ class AnketaStep:
     #: C02 «формулировку адаптируем под выбранную цель»). Пары, а не dict,
     #: чтобы шаг оставался hashable/frozen. Нет пары — общий ``prompt``.
     prompt_by_goal: tuple[tuple[str, str], ...] = ()
+    #: Тип ответа (DRF-1746): один из :data:`ANSWER_MODES`.
+    mode: str = MODE_SINGLE
+    #: Подписи концов шкалы (режим ``scale``): (низ, верх). Порядок
+    #: делений — порядок ``options``.
+    scale_ends: tuple[str, str] | None = None
+    #: «Не знаю» на этом шаге (DRF-1747): опция с ролью ``escape``.
+    escape: bool = False
+
+
+def answerable_option_keys(step: AnketaStep) -> set[str]:
+    """Ключи, которыми на шаг можно ответить: варианты плюс ``unknown``
+    там, где шаг его предлагает. Единственный источник для проверки
+    ответа — экран ключ не выдумывает, сервер его не угадывает."""
+    keys = {key for key, _ in step.options}
+    if step.escape:
+        keys.add(UNKNOWN_OPTION_KEY)
+    return keys
+
+
+# ─── граница C03: чего здесь не спрашиваем (DRF-1751, макет C03 P23) ────────
+#
+# «На C03 не спрашиваем: бюджет, район, время, мастера, салон, акции,
+# оплату». Анкета границу держит по построению — шаги area/feeling/goal
+# ничего из этого не спрашивают, — но добавление шага «district» прошло бы
+# молча. Сторож ниже читает ключи шагов, ключи опций и слова подписей.
+# Ключ — точное совпадение, подпись — по основам слов (регистр не важен).
+C03_FORBIDDEN_STEP_KEYS = frozenset({
+    "budget", "price", "district", "distance", "time", "date", "master",
+    "rating", "salon", "discount", "promo", "payment",
+})
+#: Основы слов запрещённых тем в подписях — по НАЧАЛУ слова («акци» не
+#: ловит «реакция»); «цен» здесь нет — оно ловило бы «центр». Коротких и двусмысленных
+#: здесь нет намеренно («утром» — проявление, не расписание; «окно» — не
+#: слот): сторож обязан молчать на настоящих вопросах C03.
+C03_FORBIDDEN_STEMS: tuple[str, ...] = (
+    "бюджет", "цена", "цену", "цены", "ценой", "ценам", "ценник", "ценов", "стоим", "рубл",
+    "₽", "дешев", "дорог", "подешев", "подорож",
+    "район", "далеко", "рядом с", "метро", "адрес",
+    "расписан", "дата", "слот", "запис",
+    "мастер", "специалист", "рейтинг", "отзыв",
+    "салон", "студи",
+    "скидк", "акци", "промо",
+    "оплат", "платеж", "картой", "рассрочк",
+)
+
+
+def c03_boundary_violations(steps: tuple[AnketaStep, ...]) -> list[str]:
+    """Сторож границы C03 (DRF-1751). Пусто — чисто; иначе все нарушения
+    разом, чтобы тест печатал каждое, а не первое."""
+    errors: list[str] = []
+    for step in steps:
+        if step.key in C03_FORBIDDEN_STEP_KEYS:
+            errors.append(f"{step.key}: ключ шага из запрещённого списка C03")
+        for key, _ in step.options:
+            if key in C03_FORBIDDEN_STEP_KEYS:
+                errors.append(f"{step.key}: опция {key!r} из запрещённого списка C03")
+        texts = [step.prompt, *(p for _, p in step.prompt_by_goal), *(lbl for _, lbl in step.options)]
+        for text in texts:
+            hit = _forbidden_stem_in(text)
+            if hit is not None:
+                errors.append(f"{step.key}: «{text}» — слово из запрещённой темы ({hit!r})")
+    return errors
+
+
+def _forbidden_stem_in(text: str) -> str | None:
+    """Первая основа из :data:`C03_FORBIDDEN_STEMS`, с которой начинается
+    какое-нибудь слово текста; ``None`` — чисто."""
+    import re
+
+    words = re.findall(r"[а-яёa-z₽]+", text.casefold())
+    for stem in C03_FORBIDDEN_STEMS:
+        if any(word.startswith(stem) for word in words):
+            return stem
+    return None
+
+
+def step_contract_errors(steps: tuple[AnketaStep, ...]) -> list[str]:
+    """Сторож формы шага под его режим (DRF-1746). Пусто — чисто.
+
+    Режим обещает экрану компонент, и у компонента есть входы: ``text``
+    без свободного ввода — поле, которое сервер отвергнет; ``scale`` без
+    подписей концов — шкала без смысла делений; ``multi`` без вариантов
+    — «Продолжить» над пустотой. Ловится здесь, а не на экране.
+    """
+    errors: list[str] = []
+    for step in steps:
+        if step.mode not in ANSWER_MODES:
+            errors.append(f"{step.key}: неизвестный mode {step.mode!r}")
+            continue
+        if step.mode == MODE_TEXT and (step.options or not step.allow_free_text):
+            errors.append(f"{step.key}: text — без вариантов и со свободным вводом")
+        if step.mode == MODE_SCALE and (len(step.options) < 2 or not step.scale_ends):
+            errors.append(f"{step.key}: scale — не меньше двух делений и подписи концов")
+        if step.mode in (MODE_MULTI, MODE_SINGLE, MODE_CONFIRM) and step.scale_ends:
+            errors.append(f"{step.key}: подписи концов только у scale")
+        if step.mode == MODE_MULTI and not step.options:
+            errors.append(f"{step.key}: multi — без вариантов нечего отмечать")
+        if any(key == UNKNOWN_OPTION_KEY for key, _ in step.options):
+            errors.append(f"{step.key}: {UNKNOWN_OPTION_KEY!r} — зарезервированный ключ escape")
+        if step.key == GOAL_STEP_KEY and step.escape:
+            errors.append(f"{step.key}: на выборе цели «Не знаю» не ставится")
+    return errors
 
 
 # ─── влияние ответа на решение (§5.3) ─────────────────────────────────────
@@ -215,6 +364,8 @@ ANKETA_STEPS: tuple[AnketaStep, ...] = (
             ("lighter", "Легче и бодрее"),
             ("calmer", "Спокойнее"),
         ),
+        # DRF-1747 — вопрос о самочувствии: здесь человек может не знать.
+        escape=True,
     ),
 )
 
@@ -239,7 +390,11 @@ def narrowing_step(step_key: str) -> AnketaStep | None:
 
 
 def as_known_answer(
-    step: AnketaStep, *, option_key: str | None, text: str | None,
+    step: AnketaStep,
+    *,
+    option_key: str | None,
+    text: str | None,
+    option_keys: list[str] | None = None,
 ) -> dict[str, Any]:
     """Ответ на шаг → строка блока «Уже учла» (DRF-1744), готовая к отрисовке.
 
@@ -252,14 +407,40 @@ def as_known_answer(
     спросили». ``revisable`` — решение сервера, экран его не выводит.
     """
     labels = dict(step.options)
+    if step.escape:
+        labels[UNKNOWN_OPTION_KEY] = UNKNOWN_OPTION_LABEL
+    chosen = list(option_keys or [])
+    if chosen:
+        # DRF-1746 — multi: одна строка «Уже учла» на шаг, подписи через
+        # запятую в порядке вариантов шага, не в порядке тапов.
+        label = ", ".join(labels[key] for key, _ in step.options if key in chosen)
+    else:
+        label = labels.get(option_key or "", text or option_key or "")
     return {
         "step": step.key,
         "prompt": step.prompt,
         "option_key": option_key,
-        "label": labels.get(option_key or "", text or option_key or ""),
-        "options": [{"key": key, "label": label} for key, label in step.options],
+        "option_keys": chosen,
+        "label": label,
+        "options": _wire_options(step),
+        "mode": step.mode,
         "revisable": True,
+        # DRF-1747 — «не знаю» показывается как сказанное, но известным
+        # фактом не считается: при повторном проходе шаг задаётся заново
+        # обычным вопросом, а не подтверждением.
+        "unknown": option_key == UNKNOWN_OPTION_KEY,
+        "origin": ORIGIN_ANKETA,
     }
+
+
+def _wire_options(step: AnketaStep) -> list[dict[str, str]]:
+    """Варианты шага для документа; ``unknown`` — последним и с ролью."""
+    options = [{"key": key, "label": label} for key, label in step.options]
+    if step.escape:
+        options.append(
+            {"key": UNKNOWN_OPTION_KEY, "label": UNKNOWN_OPTION_LABEL, "role": OPTION_ROLE_ESCAPE}
+        )
+    return options
 
 
 def goal_step() -> AnketaStep:
@@ -316,8 +497,18 @@ def is_last_step(step: AnketaStep, answered_keys: set[str]) -> bool:
     return next_step(answered_keys | {step.key}) is None
 
 
+def confirm_prompt(step: AnketaStep, known_label: str, goal_key: str | None = None) -> str:
+    """Вопрос подтверждения (макет C03.3): «Раньше ты выбирала «X». Всё
+    ещё так?». Без пометки о влиянии — она стоит в ``question``."""
+    return f"Раньше ты выбирала «{known_label}». Всё ещё так?"
+
+
 def as_missing_item(
-    step: AnketaStep, *, answered_keys: set[str], goal_key: str | None = None,
+    step: AnketaStep,
+    *,
+    answered_keys: set[str],
+    goal_key: str | None = None,
+    known_value: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Шаг → элемент ``missing``, готовый к отрисовке как есть.
 
@@ -325,15 +516,32 @@ def as_missing_item(
     прежних местах, поэтому потребитель, читающий только их
     (``GoalInviteCard``), продолжает работать без правки.
     """
-    return {
+    item: dict[str, Any] = {
         "kind": MISSING_GOAL_ANKETA,
         "prompt": shown_prompt(step, goal_key),
         "step": step.key,
-        "options": [{"key": key, "label": label} for key, label in step.options],
+        "options": _wire_options(step),
         "allow_free_text": step.allow_free_text,
+        # DRF-1746 — тип ответа; экран рисует компонент по нему.
+        "mode": step.mode,
         "progress": {
             "index": step_index(step.key),
             "total": TOTAL_STEPS,
             "is_last": is_last_step(step, answered_keys),
         },
     }
+    if step.mode == MODE_SCALE and step.scale_ends:
+        item["scale"] = {"low_label": step.scale_ends[0], "high_label": step.scale_ends[1]}
+    if step.mode == MODE_TEXT:
+        item["text_limit"] = TEXT_ANSWER_LIMIT
+    if known_value is not None:
+        # DRF-1745 — подтверждение вместо переспроса: ``prompt`` —
+        # вопрос подтверждения, ``question`` — обычный вопрос шага (для
+        # «Изменилось»), ``answer_mode`` — каким компонентом на него
+        # отвечать. ``options`` — как у обычного шага.
+        item["mode"] = MODE_CONFIRM
+        item["answer_mode"] = step.mode
+        item["question"] = item["prompt"]
+        item["prompt"] = confirm_prompt(step, str(known_value.get("label") or ""), goal_key)
+        item["known_value"] = known_value
+    return item

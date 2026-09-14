@@ -39,6 +39,7 @@ from .lifecycle import (
     transition,
 )
 from .decision_context import (
+    previous_answers,
     INTENT_NEED_GUIDANCE,
     INTENT_START_ANKETA,
     build_decision_context,
@@ -49,6 +50,45 @@ from .models import ClientGoal, GoalAnketaAnswer, GoalAnketaRun
 from .service_match import match_named_service
 
 logger = logging.getLogger(__name__)
+
+
+def _validated_answer_shape(step: anketa.AnketaStep, answer: dict) -> list[str]:
+    """Форма ответа под режим шага (DRF-1746); возвращает ключи для multi.
+
+    ``multi`` отвечает только массивом — ни одиночный ключ, ни текст ему
+    не подходят: иначе «Продолжить» над отмеченным можно было бы обойти
+    тапом, и ответ шага хранился бы в двух графах. Остальные режимы массив
+    не принимают. Ключи сверяются с вариантами шага и приводятся к порядку
+    вариантов — порядок тапов не факт.
+    """
+    option_keys = list(answer.get("option_keys") or [])
+    if step.escape and answer.get("option_key") == anketa.UNKNOWN_OPTION_KEY:
+        # DRF-1747 — «Не знаю» отвечает одним ключом на шаге любого режима:
+        # на multi он не отмечается вместе с вариантами, а заменяет их.
+        return []
+    if step.mode == anketa.MODE_MULTI:
+        if not option_keys:
+            raise serializers.ValidationError(
+                {"answer": {"option_keys": "This step is answered with option_keys."}}
+            )
+        allowed = [key for key, _ in step.options]
+        unknown = sorted(set(option_keys) - set(allowed))
+        if unknown:
+            raise serializers.ValidationError(
+                {"answer": {"option_keys": f"Unknown options for this step: {unknown}."}}
+            )
+        return [key for key in allowed if key in set(option_keys)]
+    if option_keys:
+        raise serializers.ValidationError(
+            {"answer": {"option_keys": "This step takes a single answer."}}
+        )
+    if step.mode == anketa.MODE_TEXT:
+        text = (answer.get("text") or "").strip()
+        if len(text) > anketa.TEXT_ANSWER_LIMIT:
+            raise serializers.ValidationError(
+                {"answer": {"text": f"At most {anketa.TEXT_ANSWER_LIMIT} characters."}}
+            )
+    return []
 
 
 class AnketaAnswerSerializer(serializers.Serializer):
@@ -62,17 +102,34 @@ class AnketaAnswerSerializer(serializers.Serializer):
 
     step = serializers.SlugField(max_length=32)
     option_key = serializers.SlugField(max_length=64, required=False)
+    # DRF-1746 — режим multi: массив ключей одним ответом (не по тапу).
+    option_keys = serializers.ListField(
+        child=serializers.SlugField(max_length=64),
+        required=False,
+        allow_empty=False,
+        max_length=32,
+    )
     text = serializers.CharField(max_length=1000, required=False, allow_blank=False)
     # DRF-1744: «Изменить» в блоке «Уже учла». Явный флаг, а не «любой
     # ответ на любой шаг»: 409 на ответ не по порядку остаётся защитой
     # от протухшего документа, пересмотр — отдельное, названное намерение.
     revise = serializers.BooleanField(required=False, default=False)
+    # DRF-1745: «Да, всё так» на шаге подтверждения — прошлое значение
+    # копируется в новый проход; экран значение не пересылает.
+    confirm = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
-        if bool(attrs.get("option_key")) == bool(attrs.get("text")):
+        given = [
+            name
+            for name in ("option_key", "text", "option_keys", "confirm")
+            if attrs.get(name)
+        ]
+        if len(given) != 1:
             raise serializers.ValidationError(
-                "Provide exactly one of: option_key, text."
+                "Provide exactly one of: option_key, text, option_keys, confirm."
             )
+        if attrs.get("confirm") and attrs.get("revise"):
+            raise serializers.ValidationError({"confirm": "Nothing to confirm on a revise."})
         if not anketa.is_answerable_step(attrs["step"]):
             raise serializers.ValidationError({"step": "Unknown anketa step."})
         if attrs.get("revise") and anketa.narrowing_step(attrs["step"]) is None:
@@ -328,7 +385,8 @@ class GoalSelectView(APIView):
             )
         option_key = answer.get("option_key")
         text = (answer.get("text") or "").strip() or None
-        if option_key and option_key not in {key for key, _ in step.options}:
+        option_keys = _validated_answer_shape(step, answer)
+        if option_key and option_key not in anketa.answerable_option_keys(step):
             raise serializers.ValidationError(
                 {"answer": {"option_key": "Unknown option for this step."}}
             )
@@ -338,7 +396,8 @@ class GoalSelectView(APIView):
             )
         existing.option_key = option_key
         existing.answer_text = text
-        existing.save(update_fields=["option_key", "answer_text"])
+        existing.option_keys = option_keys
+        existing.save(update_fields=["option_key", "answer_text", "option_keys"])
         logger.info(
             "goals.anketa_revised user_id=%s run_id=%s step=%s",
             client.id, run.id, step.key,
@@ -394,11 +453,26 @@ class GoalSelectView(APIView):
 
         option_key = answer.get("option_key")
         text = (answer.get("text") or "").strip() or None
-        if option_key:
+        option_keys: list[str] = []
+        if answer.get("confirm"):
+            # DRF-1745 — подтверждение известного: значение берётся из
+            # прошлого прохода сервером, не из запроса. Подтверждать
+            # нечего (первый проход, «не знаю», шаг цели) — 400, не запись.
+            previous = previous_answers(client).get(expected.key)
+            if previous is None or expected.key == anketa.GOAL_STEP_KEY:
+                raise serializers.ValidationError(
+                    {"answer": {"confirm": "Nothing to confirm for this step."}}
+                )
+            option_key = previous.option_key
+            text = previous.answer_text
+            option_keys = list(previous.option_keys or [])
+        else:
+            option_keys = _validated_answer_shape(expected, answer)
+        if option_key and not answer.get("confirm"):
             # Без `and expected.options`: на салоне без активных
             # GoalOption список финального шага пуст, и прежний вид
             # проверки пропускал ЛЮБОЙ слаг прямо в ClientGoal.goal_key.
-            allowed = {key for key, _ in expected.options}
+            allowed = anketa.answerable_option_keys(expected)
             if option_key not in allowed:
                 raise serializers.ValidationError(
                     {"answer": {"option_key": "Unknown option for this step."}}
@@ -415,7 +489,11 @@ class GoalSelectView(APIView):
         GoalAnketaAnswer.objects.update_or_create(
             run=run,
             step_key=expected.key,
-            defaults={"option_key": option_key, "answer_text": text},
+            defaults={
+                "option_key": option_key,
+                "answer_text": text,
+                "option_keys": option_keys,
+            },
         )
 
         if expected.key == anketa.GOAL_STEP_KEY:

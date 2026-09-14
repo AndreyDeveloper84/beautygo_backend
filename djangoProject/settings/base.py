@@ -63,6 +63,11 @@ INSTALLED_APPS = [
     'nutrition',
     'tenants',
     'analytics',
+    # Журнал доступа к персданным (152-ФЗ, решение владельца §96; DRF-1753).
+    # Своё приложение, а не таблица в users и не строка в analytics:
+    # аналитика агрегируется и чистится, лог переживает ротацию, а сам
+    # журнал — чувствительные данные со своим правом на чтение.
+    'privacy_audit',
     'goals',
     'wellness',
     # Recommendation Resolver — единственный авторитет RecommendationDecision
@@ -847,6 +852,20 @@ YCLIENTS_HTTP_TIMEOUT = float(os.environ.get("YCLIENTS_HTTP_TIMEOUT", "10"))
 AYLA_INTERNAL_BASE_URL = os.environ.get("AYLA_INTERNAL_BASE_URL", "")
 AYLA_PUBLIC_BASE_URL = os.environ.get("AYLA_PUBLIC_BASE_URL", "")
 
+# §96 / DRF-1782 — ретенция журнала доступа к персданным (privacy_audit).
+# Число дней — параметр с умолчанием, НЕ решение: год — временное
+# продуктовое решение владельца до юридической проверки. Кривое значение
+# (не число, < 1) — команда prune_privacy_audit отказывает и ничего не
+# удаляет (разбор и проверка — в privacy_audit.retention, не при старте).
+PRIVACY_AUDIT_RETENTION_DAYS = os.environ.get("PRIVACY_AUDIT_RETENTION_DAYS", "365")
+
+# §7 / DRF-1699 — окно между приёмом заявки на удаление и её исполнением,
+# дней. §7 даёт только верхнюю границу (не позднее 30 дней); число для
+# окна — параметр с умолчанием, не решение (вопрос владельцу). Кривое
+# значение — тик исполнителя никого не берёт (разбор в
+# users.deletion_executor.deletion_grace, не при старте).
+DELETION_GRACE_DAYS = os.environ.get("DELETION_GRACE_DAYS", "30")
+
 # Block C → C2 — bot-platform ingest endpoint for cross-service events.
 # Empty default means the publisher will no-op (raises RuntimeError on
 # the first delivery attempt, but the beat task swallows the message
@@ -857,6 +876,13 @@ AYLA_PUBLIC_BASE_URL = os.environ.get("AYLA_PUBLIC_BASE_URL", "")
 BOT_PLATFORM_BASE_URL = os.environ.get("BOT_PLATFORM_BASE_URL", "")
 BOT_PLATFORM_INGEST_PATH = os.environ.get(
     "BOT_PLATFORM_INGEST_PATH", "/api/v1/internal/events/ingest",
+)
+# §7 / DRF-1725 (D3) — внутренняя ручка бота, которой исполнитель
+# удаления просит бот-половину (privacy.delete_personal_data +
+# clear_deletion_flag) и ждёт подтверждения до COMPLETED. Тот же хост и
+# тот же HMAC-секрет, что у издателя событий; отдельный путь.
+BOT_PLATFORM_DELETION_PATH = os.environ.get(
+    "BOT_PLATFORM_DELETION_PATH", "/api/v1/internal/privacy/account-deletion/",
 )
 
 # Block C → C3 — HMAC-SHA256 signing secret for cross-service event
@@ -1077,6 +1103,15 @@ CELERY_BEAT_SCHEDULE = {
     "reconcile-captures": {
         "task": "payments.tasks.reconcile_captures",
         "schedule": 300.0,
+    },
+    # §7 / DRF-1725 (D3) — исполнитель удаления аккаунта: открытые заявки
+    # (REQUESTED / PROCESSING / FAILED) исполняются по одной, повтор — по
+    # той же записи. Срок §7 — 30 дней; 15 минут между тиками — чтобы
+    # человек, нажавший «удалить», увидел COMPLETED в тот же час, а не
+    # «в течение месяца».
+    "execute-deletion-requests": {
+        "task": "users.execute_deletion_requests",
+        "schedule": 900.0,
     },
     # W2 billing (P2): monthly recurrent charge — subscription + accrued
     # BookingFee for the period (AYLA-DEC-0007). 04:30 UTC = 07:30 MSK,

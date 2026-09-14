@@ -209,7 +209,9 @@ def test_unmapped_catalog_is_not_recommendable():
 
 @pytest.mark.parametrize(
     "status",
-    [MappingStatus.UNMAPPED, MappingStatus.REVIEW_REQUIRED, MappingStatus.UNKNOWN],
+    # C2: по перечислению, а не по списку — `NOT_RECOMMENDABLE` (§93) и любой
+    # будущий статус попадают сюда сами; забыть его здесь нельзя.
+    [s for s in MappingStatus if s is not MappingStatus.VERIFIED],
 )
 @override_settings(RECOMMENDATION_PILOT_MAPPING_OVERRIDE=True)
 def test_nothing_but_verified_is_admitted_whatever_the_settings_say(status):

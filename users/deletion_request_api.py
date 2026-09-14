@@ -46,6 +46,8 @@ from users.deletion_requests import (
     get_deletion_request,
 )
 from users.models import User
+from privacy_audit.mixins import AuditedPersonalDataAccess
+from privacy_audit.models import PersonalDataAccessLog
 from users.permissions import IsInternalBearerForSubject
 from users.response import error_response, success_response
 
@@ -72,12 +74,17 @@ def _user_or_none(user_id: UUID) -> User | None:
     return User.objects.filter(pk=user_id).first()
 
 
-class InternalDeletionRequestCreateView(APIView):
+class InternalDeletionRequestCreateView(AuditedPersonalDataAccess, APIView):
     """См. докстринг модуля."""
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "user_id"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.DELETION_REQUEST
+    audit_operations = {
+        "GET": PersonalDataAccessLog.Operation.DELETION_REQUEST_READ,
+        "POST": PersonalDataAccessLog.Operation.DELETION_REQUEST_CREATE,
+    }
     serializer_class = _CreateDeletionRequestSerializer
 
     @extend_schema(
@@ -145,12 +152,14 @@ class InternalDeletionRequestCreateView(APIView):
         )
 
 
-class InternalDeletionRequestDetailView(APIView):
+class InternalDeletionRequestDetailView(AuditedPersonalDataAccess, APIView):
     """GET — состояние одной заявки; чужая или несуществующая — 404."""
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "user_id"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.DELETION_REQUEST
+    audit_operations = {"GET": PersonalDataAccessLog.Operation.DELETION_REQUEST_READ}
 
     @extend_schema(
         operation_id="internal_deletion_request_detail",

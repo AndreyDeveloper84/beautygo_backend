@@ -30,6 +30,7 @@ from uuid import uuid4
 import pytest
 from rest_framework.test import APIClient
 
+from users.tests.conftest import name_subject
 from users.models import Profile, User
 
 
@@ -45,10 +46,23 @@ def bearer_token(settings):
 @pytest.fixture
 def api(bearer_token):
     """Pre-authed client with the bearer header. No X-App-Type —
-    internal endpoints are excluded from the AppType middleware."""
+    internal endpoints are excluded from the AppType middleware.
+
+    Since DRF-1709 the route also requires the caller to name the subject
+    (``X-External-User-ID``) — tests do it per user via :func:`_as`.
+    """
     client = APIClient()
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {bearer_token}")
     return client
+
+
+def _as(api: APIClient, user, bearer_token: str = "test-bearer") -> APIClient:
+    """The bot calling on behalf of ``user`` — the only caller the route serves now."""
+    api.credentials(
+        HTTP_AUTHORIZATION=f"Bearer {bearer_token}",
+        HTTP_X_EXTERNAL_USER_ID=name_subject(user),
+    )
+    return api
 
 
 @pytest.fixture
@@ -142,7 +156,7 @@ class TestProfileResolution:
         self, api, specialist_user,
     ):
         url = URL_TMPL.format(user_id=specialist_user.id)
-        response = api.get(url)
+        response = _as(api, specialist_user).get(url)
         assert response.status_code == 200
         assert response.data["display_name"] == "Мастер Лера"
         # No avatar uploaded → empty string per closed-shape contract.
@@ -152,7 +166,7 @@ class TestProfileResolution:
         self, api, client_user_with_profile,
     ):
         url = URL_TMPL.format(user_id=client_user_with_profile.id)
-        response = api.get(url)
+        response = _as(api, client_user_with_profile).get(url)
         assert response.status_code == 200
         assert response.data["display_name"] == "Анна Клиентская"
         assert response.data["avatar_url"] == ""
@@ -163,16 +177,35 @@ class TestProfileResolution:
         # (malformed) from "empty string" (Ayla cleared the field) —
         # we MUST always return both keys.
         url = URL_TMPL.format(user_id=bare_user.id)
-        response = api.get(url)
+        response = _as(api, bare_user).get(url)
         assert response.status_code == 200
         assert response.data["display_name"] == ""
         assert response.data["avatar_url"] == ""
 
-    def test_unknown_user_returns_404(self, api):
+    def test_unknown_user_is_refused_as_foreign(self, api, bare_user):
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1709): раньше 404 «нет такого».
+
+        Теперь субъект в URL сверяется с тем, кого назвал зовущий, ДО
+        поиска строки: случайный UUID — чужой субъект, 403, и о том, есть ли
+        такой пользователь, ответ не говорит.
+        """
         random_id = uuid4()
         url = URL_TMPL.format(user_id=random_id)
+        response = _as(api, bare_user).get(url)
+        assert response.status_code == 403
+        assert response.data["error"]["code"] == "PERMISSION_DENIED"
+
+    def test_another_persons_card_is_refused(self, api, specialist_user, bare_user):
+        """Отрицательный тест DRF-1709: чужая карточка под общим токеном — 403."""
+        url = URL_TMPL.format(user_id=specialist_user.id)
+        response = _as(api, bare_user).get(url)
+        assert response.status_code == 403
+
+    def test_an_unnamed_caller_is_refused(self, api, specialist_user):
+        """Bearer без X-External-User-ID — то, что до 12.09 отдавало карточку любого."""
+        url = URL_TMPL.format(user_id=specialist_user.id)
         response = api.get(url)
-        assert response.status_code == 404
+        assert response.status_code == 403
 
     def test_avatar_url_is_resolved_when_image_present(self, api, specialist_user):
         # CR FOLLOW_UP gap — happy-path tests above had avatar=None,
@@ -189,7 +222,7 @@ class TestProfileResolution:
         sp.save()
 
         url = URL_TMPL.format(user_id=specialist_user.id)
-        response = api.get(url)
+        response = _as(api, specialist_user).get(url)
         assert response.status_code == 200
         avatar_url = response.data["avatar_url"]
         assert avatar_url, "avatar_url must be non-empty when avatar file is set"
@@ -207,6 +240,6 @@ class TestPIIGuard:
         # phone / email / role / tenant / city / coords MUST fail
         # this assertion. Single source of truth for the wire shape.
         url = URL_TMPL.format(user_id=specialist_user.id)
-        response = api.get(url)
+        response = _as(api, specialist_user).get(url)
         assert response.status_code == 200
         assert set(response.data.keys()) == {"display_name", "avatar_url"}
