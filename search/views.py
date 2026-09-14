@@ -46,6 +46,7 @@ from services.catalog_reads import (
 )
 from services.models import Service
 from tenants.distance import distance_km_to, distance_meters
+from tenants.wire import OfferAddressField, OfferLatitudeField, OfferLongitudeField
 from users.models import SpecialistProfile
 from users.response import success_response
 
@@ -62,6 +63,10 @@ class SearchSpecialistSerializer(serializers.ModelSerializer):
     services_preview = serializers.SerializerMethodField()
     distance_km = serializers.SerializerMethodField()
     distance_meters = serializers.SerializerMethodField()
+    # L6 (§9): имена прежние, источник — подтверждённое место (``works_at``).
+    address = OfferAddressField(source='*')
+    location_lat = OfferLatitudeField(source='*')
+    location_lng = OfferLongitudeField(source='*')
 
     class Meta:
         model = SpecialistProfile
