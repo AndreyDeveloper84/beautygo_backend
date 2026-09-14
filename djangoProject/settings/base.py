@@ -1048,6 +1048,15 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
+# DRF-1843, §134/§135 — ежедневная очистка фотографий еды старше 30 суток.
+# Задача beat стоит всегда и КАЖДЫЙ день пишет событие прогона
+# ``food_photo_purge_run`` с числом «не удалено в срок» — §134 требует,
+# чтобы система выявляла не удалившиеся в срок. Само удаление необратимо и
+# идёт только при ``FOOD_PHOTO_PURGE_ENABLED=true``: включение — решение
+# владельца на пилоте, не побочный эффект выкладки.
+FOOD_PHOTO_PURGE_ENABLED = (
+    os.environ.get("FOOD_PHOTO_PURGE_ENABLED", "false").lower() == "true"
+)
 # Default PersistentScheduler reads ``CELERY_BEAT_SCHEDULE`` directly
 # from settings, so the outbox dispatcher activates with zero
 # DB-side bootstrap. DatabaseScheduler from django_celery_beat would
@@ -1151,6 +1160,13 @@ CELERY_BEAT_SCHEDULE = {
     "purge-deleted-water-entries": {
         "task": "nutrition.purge_deleted_water_entries",
         "schedule": crontab(hour=3, minute=0),
+    },
+    # DRF-1843, §134 — фотографии еды старше 30 суток. 02:45 UTC = 05:45 MSK,
+    # до утренней записи еды. Без FOOD_PHOTO_PURGE_ENABLED только считает и
+    # пишет событие прогона.
+    "purge-expired-food-photos": {
+        "task": "nutrition.purge_expired_food_photos",
+        "schedule": crontab(hour=2, minute=45),
     },
     # DRF-306: webhook delivery for the nutrition outbox.
     # Same 10s cadence as the appointments outbox dispatcher — keeps
