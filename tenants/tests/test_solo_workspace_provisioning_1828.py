@@ -223,6 +223,10 @@ class TestTheClaimIsNotASecondIdentityGraph:
     ALLOWED_READERS = {
         "tenants/solo_provisioning.py",
         "users/models.py",  # определение поля
+        # DRF-1829 (M28): pre-LINKED принципал — единственный разрешённый
+        # читатель claim вне provisioning; условие «прокси не связан» и DRAFT
+        # стережёт users/tests/test_pre_linked_workspace_authority_1829.py.
+        "users/permissions.py",
     }
 
     def test_only_the_provisioning_service_reads_the_claim(self):
