@@ -316,6 +316,7 @@ class GlobalSearchView(APIView):
         категория салона побеждает (``services.catalog_reads``).
         """
         from services.models import SpecialistService
+        from users.sellable import sellable_q
 
         category_match = (
             Q(salon_service__category__name__icontains=q)
