@@ -3,6 +3,8 @@ import re
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+from tenants.wire import OfferAddressField, OfferLatitudeField, OfferLongitudeField
+
 from .models import Profile, SpecialistProfile, User
 
 
@@ -161,13 +163,17 @@ class SpecialistProfileCreateSerializer(serializers.ModelSerializer):
 
 
 class SpecialistProfileUpdateSerializer(serializers.ModelSerializer):
-    """Step 2+: update profile (address, location, bio, etc)."""
+    """Step 2+: update profile (bio, experience, availability).
+
+    L6 (§9): ``address`` / ``location_lat`` / ``location_lng`` профиля с
+    провода сняты — место оказания услуг заводится как ``ServiceLocation``
+    и подтверждается оператором, а не вводится мастером в профиль.
+    """
 
     class Meta:
         model = SpecialistProfile
         fields = [
             'display_name', 'avatar', 'bio', 'experience_years',
-            'address', 'location_lat', 'location_lng',
             'is_available',
         ]
 
@@ -193,6 +199,10 @@ class SpecialistProfileUpdateSerializer(serializers.ModelSerializer):
 class SpecialistProfileDetailSerializer(serializers.ModelSerializer):
     """Full profile for GET /masters/me."""
     services_count = serializers.SerializerMethodField()
+    # L6 (§9): имена прежние, источник — подтверждённое место (``works_at``).
+    address = OfferAddressField(source='*')
+    location_lat = OfferLatitudeField(source='*')
+    location_lng = OfferLongitudeField(source='*')
 
     class Meta:
         model = SpecialistProfile

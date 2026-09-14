@@ -20,6 +20,7 @@ from services.catalog_reads import (
 )
 from services.models import Service
 from tenants.distance import bbox_q, distance_km_to, distance_meters
+from tenants.wire import OfferAddressField, OfferLatitudeField, OfferLongitudeField
 from .models import SpecialistProfile
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,10 @@ class ServicePreviewSerializer(serializers.Serializer):
 class SpecialistListSerializer(DistanceMixin, serializers.ModelSerializer):
     """Specialist card for catalog listing."""
     user_id = serializers.UUIDField(source='user.id')
+    # L6 (§9): имена прежние, источник — подтверждённое место (``works_at``).
+    address = OfferAddressField(source='*')
+    location_lat = OfferLatitudeField(source='*')
+    location_lng = OfferLongitudeField(source='*')
     services_preview = serializers.SerializerMethodField()
     services_count = serializers.SerializerMethodField()
     distance_km = serializers.SerializerMethodField()
@@ -153,6 +158,10 @@ class ServiceFullSerializer(serializers.Serializer):
 class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
     """Full specialist profile for detail/card view."""
     user_id = serializers.UUIDField(source='user.id')
+    # L6 (§9): имена прежние, источник — подтверждённое место (``works_at``).
+    address = OfferAddressField(source='*')
+    location_lat = OfferLatitudeField(source='*')
+    location_lng = OfferLongitudeField(source='*')
     services = serializers.SerializerMethodField()
     services_count = serializers.SerializerMethodField()
     distance_km = serializers.SerializerMethodField()

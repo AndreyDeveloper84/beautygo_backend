@@ -173,6 +173,7 @@ class ServicePublicViewSet(viewsets.ReadOnlyModelViewSet):
                 'category',
                 'specialist',
                 'specialist__user',
+                'specialist__works_at',  # L6: адрес/координаты места в detail
             )
         )
 

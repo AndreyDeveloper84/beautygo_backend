@@ -479,7 +479,17 @@ class TestMasterProfile:
         assert 'status' in data
         assert data['status'] == 'draft'
 
-    def test_update_profile_address(self, authenticated_specialist):
+    def test_update_profile_address_is_ignored_and_place_is_shown(
+        self, authenticated_specialist, specialist_user,
+    ):
+        """L6 (§9): адрес мастер в профиль не вводит — его несёт место.
+
+        Старые входы принимаются молча (клиенты старых версий их шлют),
+        но в базу не пишутся и на проводе не появляются; ``address`` и
+        координаты на проводе — подтверждённого места ``works_at``.
+        """
+        from tenants.tests.places import place_specialist_at
+
         response = authenticated_specialist.patch(
             self.PROFILE_URL,
             {
@@ -492,18 +502,26 @@ class TestMasterProfile:
         logger.info("PATCH address → %s", response.status_code)
         assert response.status_code == status.HTTP_200_OK
         data = response.data['data']
-        assert data['address'] == 'ул. Баумана, 1, Казань'
+        assert data['address'] == ''
+        assert data['location_lat'] is None
+        profile = SpecialistProfile.objects.get(user=specialist_user)
+        assert profile.address == '' and profile.location_lat is None
+
+        place_specialist_at(profile, 55.796127, 49.106405, label='Казань, ул. Кремлёвская 2')
+        data = authenticated_specialist.get(self.ME_URL).data['data']
+        assert data['address'] == 'Казань, ул. Кремлёвская 2'
         assert data['location_lat'] == '55.796127'
 
-    def test_update_name_and_address_moves_to_pending(
+    def test_update_name_moves_to_pending(
         self, authenticated_specialist, specialist_user,
     ):
+        """L6: адрес из условия «анкета заполнена» ушёл вместе с входом."""
         profile = SpecialistProfile.objects.get(user=specialist_user)
-        profile.display_name = 'Елена'
+        profile.display_name = ''
         profile.save()
         response = authenticated_specialist.patch(
             self.PROFILE_URL,
-            {'address': 'ул. Пушкина, 10'},
+            {'display_name': 'Елена'},
             format='json',
         )
         assert response.status_code == status.HTTP_200_OK

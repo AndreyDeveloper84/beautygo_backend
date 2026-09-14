@@ -72,8 +72,8 @@ LOCATION_HELP = (
     "Для мастера салона выберите место этого салона, для самостоятельного — "
     "его собственную точку (заводится в «Места оказания услуг»). Пусто — "
     "расстояние неизвестно, не ноль. Адрес и координаты ниже — старые поля "
-    "мастера: после §9 они не авторитетны, читатели переводятся на место, "
-    "заполнять их не нужно."
+    "мастера: после §9 они не авторитетны, клиенту не показываются (L6) "
+    "и только читаются здесь до снятия в L8."
 )
 
 STATS_HELP = (
@@ -476,7 +476,12 @@ class SpecialistProfileAdmin(admin.ModelAdmin):
         'display_name', 'user__phone', 'user__username', 'address',
         'tenant__name', 'tenant__slug',
     )
-    readonly_fields = ('rating', 'reviews_count', 'created_at', 'updated_at')
+    # L6 (§9): старые адрес и координаты профиля — только чтение. Ни один
+    # читатель их больше не показывает клиенту; снимаются в L8.
+    readonly_fields = (
+        'rating', 'reviews_count', 'created_at', 'updated_at',
+        'address', 'location_lat', 'location_lng',
+    )
     ordering = ('-created_at',)
     raw_id_fields = ('user', 'works_at')
 
