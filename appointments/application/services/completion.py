@@ -77,6 +77,77 @@ def close_booking(appointment, *, completed_by: str) -> None:
     emit_booking_completed(appointment, completed_by=completed_by)
 
 
+def emit_booking_no_show(appointment, *, marked_by: str):
+    """Write the two outbox rows a no-show produces (DRF-1851, K8).
+
+    Call AFTER ``Appointment.mark_no_show()``. Two rows, on purpose:
+
+    * ``booking.no_show`` — internal-delivery only (#511 reliability
+      scoring, revenue-loss tracking); the topic is not in the
+      cross-service taxonomy and would dead-letter at the bot;
+    * ``booking.cancelled`` + ``reason_code="user_no_show"`` — the
+      cross-service representation (event-contract §3.2): the bot's
+      consumer flips its mirror to cancelled/no-show and cancels pending
+      reminders. ``user_id`` is the customer whose booking this is, not
+      the operator who marked it (§2.2).
+
+    Lives here — next to ``emit_booking_completed`` — so the mobile action
+    and the salon surface produce byte-identical facts; before this the
+    payload was built inline in the mobile view and the salon route was
+    deliberately left without no-show rather than copy sixty lines.
+    """
+    from django.utils import timezone
+
+    from appointments.domain.value_objects import cancelled_by_for
+    from appointments.infrastructure.outbox import (
+        emit_outbox_event, safe_tenant_id,
+    )
+    from appointments.models import OutboxEvent
+
+    emit_outbox_event(
+        topic=OutboxEvent.Topic.BOOKING_NO_SHOW,
+        data={
+            "appointment_id": str(appointment.id),
+            "client_id": str(appointment.client_id),
+            "specialist_id": str(appointment.specialist_id),
+            # Attribution counterpart of completed_by; the Domain Event
+            # Registry reserves an optional `marked_by` on
+            # appointment.no_show — this is the value behind it.
+            "no_show_marked_by": marked_by,
+        },
+        user_id=appointment.client_id,
+        tenant_id=safe_tenant_id(appointment, context="booking.no_show"),
+        actor=envelope_actor_for(marked_by),
+    )
+    return emit_outbox_event(
+        topic=OutboxEvent.Topic.BOOKING_CANCELLED,
+        data={
+            "appointment_id": str(appointment.id),
+            "specialist_id": str(appointment.specialist_id),
+            "start_at": appointment.start_datetime.isoformat(),
+            # §3.2 vocabulary {user, admin, master, system}.
+            "cancelled_by": cancelled_by_for(marked_by),
+            "reason_code": "user_no_show",
+            "cancelled_at": timezone.now().isoformat(),
+        },
+        user_id=appointment.client_id,
+        tenant_id=safe_tenant_id(appointment, context="booking.cancelled"),
+        actor=envelope_actor_for(marked_by),
+    )
+
+
+def mark_booking_no_show(appointment, *, marked_by: str) -> None:
+    """Transition a locked booking to ``no_show`` and emit the facts.
+
+    Sibling of :func:`close_booking`: ``Appointment.mark_no_show()``
+    re-checks the state machine against the locked row, so a booking a
+    racing transaction already settled raises ``ValidationError`` here
+    rather than producing a second pair of events.
+    """
+    appointment.mark_no_show(marked_by=marked_by)
+    emit_booking_no_show(appointment, marked_by=marked_by)
+
+
 def schedule_capture_safely(appointment) -> None:
     """Kick off the two-stage payment capture for a closed booking.
 
