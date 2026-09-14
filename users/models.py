@@ -234,6 +234,23 @@ class SpecialistProfile(models.Model):
     #
     # PROTECT: место с мастерами нельзя удалить — его переводят в
     # INACTIVE. Удаление молча снимало бы мастеров с карты.
+    # DRF-1828 (G1): claim провижининга — какой внешней личности бота
+    # (``bot:max:<id>``) этот DRAFT-профиль заведён solo-provisioning'ом.
+    # НЕ личность и не ребро связи: ``resolve_external_user`` /
+    # ``_follow_binding`` его не читают (сторож
+    # ``users/tests/test_solo_workspace_provisioning_1828.py``); связь
+    # личности по-прежнему одна — ``User.linked_user`` у прокси, которое
+    # оператор ставит при LINKED. Роль claim — идемпотентность ручки,
+    # pre-LINKED setup authority (M28) и подсказка оператору, какой
+    # профиль связывать.
+    provisioned_external_user_id = models.CharField(
+        max_length=200,
+        unique=True,
+        null=True,
+        blank=True,
+        help_text="Внешний id бота, для которого заведён DRAFT-профиль "
+                  "(solo provisioning). Провенанс, не личность.",
+    )
     works_at = models.ForeignKey(
         "tenants.ServiceLocation",
         on_delete=models.PROTECT,

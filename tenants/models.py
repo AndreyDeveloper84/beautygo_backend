@@ -176,6 +176,28 @@ class Tenant(models.Model):
             "строка."
         ),
     )
+
+    class Kind(models.TextChoices):
+        """Чем является тенант — салон или workspace соло-мастера (DRF-1828, G4).
+
+        До этого «соло» в каталоге выводилось из ``tenant=NULL`` у профиля
+        и мест (модель, которую решение владельца G4 отменяет) или из
+        префикса slug — а имя производной не доказывает происхождение.
+        Признак пишет только provisioning solo-workspace; всё, что заведено
+        раньше, — салон по умолчанию.
+        """
+
+        SALON = "salon", "Салон"
+        SOLO = "solo", "Соло-мастер"
+
+    kind = models.CharField(
+        max_length=8,
+        choices=Kind.choices,
+        default=Kind.SALON,
+        db_index=True,
+        help_text="salon — салон; solo — рабочее пространство соло-мастера "
+                  "(тот же UUID, что у тенанта бота).",
+    )
     city = models.CharField(
         max_length=120,
         blank=True,

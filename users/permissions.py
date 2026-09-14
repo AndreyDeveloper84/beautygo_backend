@@ -588,6 +588,35 @@ class IsInternalBearerForSubject(permissions.BasePermission):
     def subject_of(self, actor: Any) -> str | None:
         return str(actor.pk)
 
+    def provisioned_workspace_owner(
+        self, external_user_id: str, subject_id: str, actor: Any,
+    ) -> Any | None:
+        """Pre-LINKED principal (DRF-1829, M28): the owner of a provisioned DRAFT workspace.
+
+        The base class has none — a person-shaped surface (personal data,
+        personal context, deletion) is reachable only by the linked subject.
+        :class:`IsInternalBearerForSpecialistSubject` overrides this for the
+        master's own workspace writes. Returns the ``User`` to record as the
+        actor, or ``None``.
+        """
+        return None
+
+    def _allow_provisioned_workspace(
+        self, request: Any, *, purpose: str, external_user_id: str,
+        subject_id: str, actor: Any,
+    ) -> bool:
+        owner = self.provisioned_workspace_owner(external_user_id, subject_id, actor)
+        if owner is None:
+            return False
+        logger.info(
+            "internal.subject_authz.provisioned_workspace path=%s subject=%s",
+            request.path, subject_id,
+        )
+        _publish_verdict(
+            request, purpose=purpose, actor=owner, actor_named=True, allowed=True,
+        )
+        return True
+
     def has_permission(self, request: Any, view: Any) -> bool:
         from users.services import resolve_external_user_readonly
 
@@ -640,6 +669,14 @@ class IsInternalBearerForSubject(permissions.BasePermission):
 
         actor = resolve_external_user_readonly(external_user_id)
         if actor is None:
+            # DRF-1829: an identity Ayla has not seen yet may still own a
+            # provisioned DRAFT workspace (provisioning does not create the
+            # proxy row). Only then — and only for that workspace.
+            if self._allow_provisioned_workspace(
+                request, purpose=purpose, external_user_id=external_user_id,
+                subject_id=subject_id, actor=None,
+            ):
+                return True
             # Malformed, or an identity Ayla has never seen. "Not resolved"
             # is not "resolve it for them": provisioning is a different
             # purpose with a different credential.
@@ -656,6 +693,11 @@ class IsInternalBearerForSubject(permissions.BasePermission):
 
         actor_subject = self.subject_of(actor)
         if actor_subject is None:
+            if self._allow_provisioned_workspace(
+                request, purpose=purpose, external_user_id=external_user_id,
+                subject_id=subject_id, actor=actor,
+            ):
+                return True
             logger.warning(
                 "internal.subject_authz.subject_unresolved path=%s subject=%s actor=%s",
                 request.path, subject_id, actor.pk,
@@ -691,14 +733,53 @@ class IsInternalBearerForSpecialistSubject(IsInternalBearerForSubject):
     about their own workspace (working hours first). The actor is resolved
     exactly as above — runtime bearer, named, followed through the LINKED
     binding — and the profile compared is the one hanging off that actor.
-    A proxy that has never been linked has no profile and is refused as
-    ``subject_unresolved``: until the pre-LINKED principal (M28) exists
-    there is nowhere to write, and this class must not pretend otherwise.
+    A proxy that has never been linked has no profile of its own and is
+    refused as ``subject_unresolved`` — UNLESS it owns the provisioned DRAFT
+    workspace named in the URL (DRF-1829, M28, owner ruling G1): see
+    :meth:`provisioned_workspace_owner`.
     """
 
     def subject_of(self, actor: Any) -> str | None:
         profile = getattr(actor, "specialist_profile", None)
         return str(profile.pk) if profile is not None else None
+
+    def provisioned_workspace_owner(
+        self, external_user_id: str, subject_id: str, actor: Any,
+    ) -> Any | None:
+        """The pre-LINKED principal of owner ruling G1 (12.09): workspace setup, NOT identity.
+
+        Allowed only when ALL hold:
+
+        * the header's identity has **no linked real account** — no proxy row
+          yet (``actor is None``) or an unlinked proxy. A header already
+          linked to someone goes through the subject path above and never
+          reaches here: a linked identity elsewhere is not overruled by a
+          claim;
+        * the profile in the URL was provisioned **for this very header**
+          (``SpecialistProfile.provisioned_external_user_id``) — another
+          master's workspace, a salon master's profile, a guessed UUID: no;
+        * the profile is still **DRAFT** — setup, not a published workspace.
+          After LINKED the same request passes as the subject; after
+          publication the claim opens nothing.
+
+        The claim is provenance, not identity: nothing here resolves a
+        person, and the actor recorded is the workspace's own ``User``.
+        """
+        if actor is not None and not getattr(actor, "is_proxy", False):
+            return None
+        from users.models import SpecialistProfile
+
+        profile = (
+            SpecialistProfile.objects
+            .select_related("user")
+            .filter(
+                pk=subject_id,
+                provisioned_external_user_id=external_user_id,
+                status=SpecialistProfile.ProfileStatus.DRAFT,
+            )
+            .first()
+        )
+        return profile.user if profile is not None else None
 
 
 def _publish_verdict(
