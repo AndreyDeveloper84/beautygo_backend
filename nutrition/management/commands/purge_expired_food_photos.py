@@ -373,8 +373,19 @@ class Command(BaseCommand):
         # Число §134 печатается последним и отдельно: «выявлять не
         # удалившиеся в срок» — требование о втором счётчике, и счётчик
         # удалённого его не заменяет.
-        style = self.style.ERROR if tally.not_deleted else self.style.SUCCESS
+        #
+        # DRF-1887: в СУХОМ прогоне не удалено ничего, значит не удалена в
+        # срок каждая просроченная строка. ``tally.not_deleted`` считает
+        # отказы и сирот — отказов без ``--apply`` не бывает, и строка
+        # печатала 0 при пятнадцати просроченных (замер пилота 15.09).
+        # Режим назван в самой строке: два числа с одной подписью читались
+        # бы как одно.
+        if apply:
+            not_deleted = tally.not_deleted
+            label = "НЕ УДАЛЕНО В СРОК (§134)"
+        else:
+            not_deleted = len(expired) + len(tally.orphans)
+            label = "НЕ УДАЛЕНО В СРОК (§134, сухой прогон)"
+        style = self.style.ERROR if not_deleted else self.style.SUCCESS
         self.stdout.write("")
-        self.stdout.write(
-            style(f"НЕ УДАЛЕНО В СРОК (§134): {tally.not_deleted}")
-        )
+        self.stdout.write(style(f"{label}: {not_deleted}"))
