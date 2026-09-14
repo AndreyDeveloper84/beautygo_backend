@@ -683,13 +683,11 @@ class SalonBookingCompleteView(_SalonBookingBase):
     every consumer, which is the property that would have been lost by
     copying the logic instead of calling it.
 
-    ``no_show`` is deliberately NOT here. Its mobile implementation
-    shapes two outbox events inline (including the fact that the ingest
-    taxonomy has no ``booking.no_show``, so it travels as
-    ``booking.cancelled`` + ``reason_code``), and duplicating sixty lines
-    of event construction creates two paths that must agree forever.
-    Extracting it into a sibling of ``close_booking`` is its own task,
-    because it touches the live mobile path.
+    ``no_show`` used to be deliberately absent here because its mobile
+    implementation shaped two outbox events inline; DRF-1851 extracted
+    that into ``completion.mark_booking_no_show`` (a sibling of
+    ``close_booking``), and :class:`SalonBookingNoShowView` below is the
+    same thin wrapper over it.
     """
 
     serializer_class = SalonCompleteSerializer
@@ -774,6 +772,85 @@ class SalonBookingCompleteView(_SalonBookingBase):
 
         logger.info(
             "salon.booking_completed appointment_id=%s tenant=%s by=%s actor=%s",
+            appointment.id, tenant.slug, request.user.id, actor,
+        )
+        return success_response(AppointmentDetailSerializer(appointment).data)
+
+
+class SalonBookingNoShowView(_SalonBookingBase):
+    """POST /api/v1/tenants/me/appointments/{id}/no-show/ — «не пришёл».
+
+    DRF-1851 (карта кабинета K8, OD-V1): салон должен уметь сказать «не
+    пришёл» с той поверхности, до которой бот дотягивается, — иначе у
+    администратора в диалоге «Визит состоялся?» есть только «состоялся /
+    перенести / отменить», и неявка записывается как отмена без причины.
+
+    Тот же тонкий обёртывающий вид, что и ``complete`` выше: lock,
+    capacity (``resolve_booking_operator``), tenant assertion, version,
+    затем ``completion.mark_booking_no_show`` — та же функция, что зовёт
+    мобильный путь, так что «не пришёл» от стойки и от мастера
+    неотличимы ни для одного потребителя (событие ``booking.cancelled`` +
+    ``reason_code="user_no_show"`` и внутреннее ``booking.no_show``).
+    """
+
+    serializer_class = SalonCompleteSerializer
+
+    @extend_schema(
+        tags=["tenants"],
+        request=SalonCompleteSerializer,
+        responses={
+            200: AppointmentDetailSerializer,
+            404: OpenApiResponse(description="Not a booking of this salon"),
+            409: OpenApiResponse(description="Stale version"),
+            422: OpenApiResponse(description="Not markable from this state"),
+        },
+    )
+    def post(self, request: Request, appointment_id) -> Response:
+        from django.core.exceptions import ValidationError as DjangoValidationError
+        from django.db import transaction
+
+        from appointments.application.services.completion import mark_booking_no_show
+        from appointments.authz import resolve_booking_operator
+
+        tenant = self._tenant(request)
+        if tenant is None:
+            return self._not_found()
+
+        serializer = SalonCompleteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        expected_version = serializer.validated_data["expected_version"]
+
+        try:
+            with transaction.atomic():
+                appointment = (
+                    Appointment.objects
+                    .select_for_update(of=("self",))
+                    .select_related("specialist", "client", "service")
+                    .filter(tenant=tenant)
+                    .filter(pk=appointment_id)
+                    .first()
+                )
+                if appointment is None:
+                    return self._not_found()
+                actor = resolve_booking_operator(request, appointment)
+                if actor is None:
+                    return self._not_found()
+                if appointment.version != expected_version:
+                    return error_response(
+                        "STALE_VERSION",
+                        f"Appointment {appointment.id} expected_version="
+                        f"{expected_version} but current version is "
+                        f"{appointment.version}.",
+                        status_code=409,
+                    )
+                mark_booking_no_show(appointment, marked_by=actor)
+        except DjangoValidationError as exc:
+            return error_response(
+                "INVALID_STATUS", str(exc.message), status_code=422,
+            )
+
+        logger.info(
+            "salon.booking_no_show appointment_id=%s tenant=%s by=%s actor=%s",
             appointment.id, tenant.slug, request.user.id, actor,
         )
         return success_response(AppointmentDetailSerializer(appointment).data)

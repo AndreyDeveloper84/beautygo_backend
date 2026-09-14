@@ -92,7 +92,10 @@ def _template_for(code: str) -> ServiceTemplate:
     cat, _ = ServiceCategory.objects.get_or_create(name=row["subcategory"] or row["category"])
     tpl, _ = ServiceTemplate.objects.get_or_create(
         category=cat, name=row["service"],
-        defaults={"requires_health_check": str(row["requires_health_check"]).lower() == "true"},
+        defaults={
+            "requires_health_check": str(row["requires_health_check"]).lower() == "true",
+            "canonical_code": code,   # MAP-AUTO-01: команда резолвит по коду, не по паре
+        },
     )
     return tpl
 
@@ -184,6 +187,23 @@ def test_health_check_mismatch_between_seed_and_db_stops_the_row(salon, owner):
     out, _ = _run(by="owner-vps")
     assert "RHC канона True ≠ ожиданию задания False" in out
     assert "изменилось бы 1" in out
+
+
+@pytest.mark.django_db
+def test_template_is_resolved_by_canonical_code_not_by_pair(salon, owner):
+    """MAP-AUTO-01: пара (подкатегория, название) — не идентичность.
+
+    Тот же канон под другим именем находится по коду; канон с той же парой,
+    но без кода (bootstrap не прошёл) — не находится, строка стоит с причиной.
+    """
+    ServiceTemplate.objects.filter(canonical_code="1.1.5").update(name="ШВЗ (переименован)")
+    out, _ = _run(by="owner-vps")
+    assert "канон: 1.1.5 «ШВЗ (переименован)»" in out
+
+    ServiceTemplate.objects.filter(canonical_code="1.1.4").update(canonical_code=None)
+    out, _ = _run(by="owner-vps")
+    assert "canonical_code=1.1.4 не найден в базе" in out
+    assert "изменилось бы 1" in out          # осталась только строка 1
 
 
 @pytest.mark.django_db
