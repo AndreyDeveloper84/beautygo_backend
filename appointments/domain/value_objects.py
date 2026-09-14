@@ -105,6 +105,17 @@ _BOOKING_TRANSITIONS: dict[BookingStatus, FrozenSet[BookingStatus]] = {
     BookingStatus.NO_SHOW: frozenset(),
 }
 
+# DRF-1852 — owner decision OD-V2 (15.08): a visit closed as completed may be
+# corrected to no-show within a day, through the operator path only.
+# Deliberately a SEPARATE table: the ordinary flow keeps ``completed``
+# terminal (``can_transition`` / ``is_terminal`` above are unchanged), so no
+# ordinary caller — mobile action, salon route, sweep — can reach this move.
+# The window lives in settings (``BOOKING_COMPLETION_CORRECTION_WINDOW_HOURS``)
+# because the owner said the policy is not settled yet.
+_BOOKING_CORRECTIONS: dict[BookingStatus, FrozenSet[BookingStatus]] = {
+    BookingStatus.COMPLETED: frozenset({BookingStatus.NO_SHOW}),
+}
+
 # Statuses that "hold" a slot (block future bookings)
 ACTIVE_BOOKING_STATUSES: FrozenSet[BookingStatus] = frozenset({
     BookingStatus.PENDING,
@@ -306,6 +317,16 @@ class BookingStateMachine:
     @staticmethod
     def is_terminal(status: BookingStatus) -> bool:
         return not _BOOKING_TRANSITIONS.get(status, frozenset())
+
+    @staticmethod
+    def can_correct(current: BookingStatus, target: BookingStatus) -> bool:
+        """Is ``current -> target`` a service correction (DRF-1852, OD-V2)?
+
+        Not an ordinary move: :meth:`can_transition` still refuses it. Only
+        ``appointments.application.services.completion
+        .correct_completion_to_no_show`` asks this question.
+        """
+        return target in _BOOKING_CORRECTIONS.get(current, frozenset())
 
 
 # ---------------------------------------------------------------------------
