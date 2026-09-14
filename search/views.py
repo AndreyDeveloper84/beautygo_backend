@@ -188,13 +188,11 @@ class GlobalSearchView(APIView):
     def _search_specialists(
         self, q: str, request: Request, limit: int,
     ) -> QuerySet:
+        from users.sellable import sellable_q
+
         qs = (
             SpecialistProfile.objects
-            .filter(
-                status=SpecialistProfile.ProfileStatus.ACTIVE,
-                is_available=True,
-                user__is_active=True,
-            )
+            .filter(sellable_q(), user__is_active=True)
             .select_related('user', 'works_at')
             # Превью услуг читает оба слоя каталога — без prefetch это
             # два запроса на каждую строку выдачи.
@@ -258,14 +256,13 @@ class GlobalSearchView(APIView):
         Возвращает список словарей, а не queryset: два слоя — две
         модели, общего queryset у них нет.
         """
+        from users.sellable import sellable_q
+
         legacy_qs = (
             Service.objects
             .filter(is_active=True)
             .select_related('category', 'specialist', 'specialist__user')
-            .filter(
-                specialist__status=SpecialistProfile.ProfileStatus.ACTIVE,
-                specialist__is_available=True,
-            )
+            .filter(sellable_q("specialist"))
             .filter(
                 Q(name__icontains=q)
                 | Q(description__icontains=q)
@@ -332,9 +329,8 @@ class GlobalSearchView(APIView):
             .filter(
                 is_active=True,
                 salon_service__is_active=True,
-                specialist__status=SpecialistProfile.ProfileStatus.ACTIVE,
-                specialist__is_available=True,
             )
+            .filter(sellable_q("specialist"))
             .filter(Q(salon_service__name__icontains=q) | category_match)
             .select_related(
                 'salon_service', 'salon_service__category',

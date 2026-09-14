@@ -371,11 +371,9 @@ class RecommendationEngine:
         # Порог по рейтингу здесь НЕ применяется — он навешивается
         # ниже, отдельно на «мастеров с оценками». См. DRF-1433 и
         # докстринг ``_split_by_review_evidence``.
-        qs = SpecialistProfile.objects.filter(
-            status=SpecialistProfile.ProfileStatus.ACTIVE,
-            is_available=True,
-            is_booking_enabled=True,
-        )
+        from users.sellable import sellable_q
+
+        qs = SpecialistProfile.objects.filter(sellable_q())
 
         # DRF-1430. Отключённый салон уводит своих мастеров из выдачи.
         #

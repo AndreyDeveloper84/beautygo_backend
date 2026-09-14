@@ -739,6 +739,10 @@ class TestGuardCoversTheWholeSurface:
             "InternalCanonGapRequestListView": "заявка о разрыве канона — workspace мастера, не персданные",
             "InternalCanonGapSimilarView": "подсказка канона по названию — не персданные",
             "InternalCanonGapRequestDetailView": "заявка о разрыве канона — workspace мастера, не персданные",
+            # DRF-1845 — the same kind of fact: whether the master takes bookings.
+            "InternalSpecialistAvailabilityView": (
+                "приём записей — настройка workspace мастера, не персданные субъекта"
+            ),
         }
         guarded = set()
         for module in (
