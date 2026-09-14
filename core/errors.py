@@ -202,6 +202,10 @@ class ErrorCode(str, Enum):
     # другим названием. Не общий CONFLICT: оператору нужно имя занявшего,
     # а боту — отличить «опечатка в названии» от «Ayla недоступна».
     TENANT_SLUG_TAKEN = "TENANT_SLUG_TAKEN"
+    # DRF-1828 — provisioning solo-workspace отказал: slug/UUID занят
+    # другим тенантом или claim заведён под другим workspace. Причина —
+    # в details.reason машинным именем; ничего не создано.
+    SOLO_PROVISIONING_REFUSED = "SOLO_PROVISIONING_REFUSED"
     # DRF-1699 D2 (§7 свода) — у человека живая заявка на удаление:
     # персонализация и новая обработка данных прекращены. Один код на все
     # три класса читателей (память, рекомендации, проактив), чтобы бот ловил
