@@ -43,6 +43,7 @@ from rest_framework.views import APIView
 
 from core.errors import ErrorCode
 from tenants.provisioning import TenantNameMismatch, ensure_tenant
+from tenants.solo_provisioning import SoloProvisioningRefused, provision_solo_workspace
 from users.permissions import IsTenantProvisioningBearer
 from users.response import error_response, success_response
 
@@ -139,4 +140,103 @@ class InternalEnsureTenantView(APIView):
         return success_response(
             _payload(tenant),
             status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+# ─── DRF-1828 (G1/G4): solo-workspace — Tenant с UUID бота + DRAFT-профиль ───
+
+
+class _SoloWorkspaceRequestSerializer(serializers.Serializer):
+    tenant_id = serializers.UUIDField()
+    slug = serializers.SlugField(max_length=50)
+    name = serializers.CharField(max_length=200)
+    city = serializers.CharField(
+        max_length=120, required=False, allow_blank=True, default="",
+    )
+    external_user_id = serializers.CharField(max_length=200)
+    display_name = serializers.CharField(max_length=255)
+
+
+class _SoloWorkspaceResponseSerializer(serializers.Serializer):
+    tenant_id = serializers.UUIDField()
+    slug = serializers.CharField()
+    specialist_id = serializers.UUIDField()
+    user_id = serializers.UUIDField()
+    status = serializers.CharField()
+
+
+class InternalSoloWorkspaceView(APIView):
+    """PROVISIONING-ONLY: завести solo-workspace или вернуть уже заведённый.
+
+    См. ``tenants/solo_provisioning.py``. Тот же сторож, что у ``/internal/tenants/``;
+    общий и identity-токены отвергаются. Входов, адресующих существующего
+    специалиста или тенант, нет — на существующих строках ничего не
+    обновляется.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsTenantProvisioningBearer]
+    serializer_class = _SoloWorkspaceRequestSerializer
+
+    @extend_schema(
+        operation_id="internal_solo_workspace_provision",
+        tags=["internal"],
+        request=_SoloWorkspaceRequestSerializer,
+        responses={
+            200: _SoloWorkspaceResponseSerializer,
+            201: _SoloWorkspaceResponseSerializer,
+            400: OpenApiResponse(description="Malformed body"),
+            403: OpenApiResponse(
+                description="Missing / invalid provisioning bearer token "
+                            "(general and identity tokens are NOT accepted)",
+            ),
+            409: OpenApiResponse(
+                description="slug / tenant_id taken by another tenant, or the "
+                            "claim is bound to another workspace (details.reason)",
+            ),
+        },
+        description=(
+            "PROVISIONING-ONLY (DRF-1828, owner ruling G1/G4): create the solo "
+            "master's catalog workspace — Tenant with the bot's UUID and "
+            "kind=solo, a working specialist User, SpecialistProfile(DRAFT) "
+            "claimed by external_user_id, admin TenantUserRelationship — in one "
+            "transaction. Idempotent by external_user_id: a repeat with the same "
+            "tenant_id/slug is 200 with the same ids. Nothing on an existing row "
+            "is ever updated here; pre-LINKED identity is NOT asserted."
+        ),
+    )
+    def post(self, request: Request) -> Response:
+        serializer = _SoloWorkspaceRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            workspace = provision_solo_workspace(
+                tenant_id=data["tenant_id"],
+                slug=data["slug"],
+                name=data["name"],
+                city=data["city"],
+                external_user_id=data["external_user_id"],
+                display_name=data["display_name"],
+            )
+        except SoloProvisioningRefused as exc:
+            logger.info(
+                "tenants.solo_provisioning.refused reason=%s slug=%s tenant_id=%s",
+                exc.reason, data["slug"], data["tenant_id"],
+            )
+            return error_response(
+                ErrorCode.SOLO_PROVISIONING_REFUSED,
+                "Solo workspace not provisioned.",
+                details={"reason": exc.reason, **exc.details},
+                status_code=status.HTTP_409_CONFLICT,
+            )
+
+        return success_response(
+            {
+                "tenant_id": str(workspace.tenant.id),
+                "slug": workspace.tenant.slug,
+                "specialist_id": str(workspace.profile.id),
+                "user_id": str(workspace.user.id),
+                "status": workspace.profile.status,
+            },
+            status_code=status.HTTP_201_CREATED if workspace.created else status.HTTP_200_OK,
         )
