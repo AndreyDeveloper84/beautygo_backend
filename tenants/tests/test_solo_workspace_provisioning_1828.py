@@ -21,6 +21,7 @@ DRAFT привязывается одной записью.
 
 from __future__ import annotations
 
+import ast
 import re
 import uuid
 from pathlib import Path
@@ -233,19 +234,107 @@ class TestTheClaimIsNotASecondIdentityGraph:
         """Риск 1 pre-flight: если claim начнут читать резолверы личности
         или сторожа без условия «прокси не связан», pre-LINKED станет identity
         authority. Список читателей закрытый; миграции и тесты не считаются.
-        M28 добавит сюда ровно один класс — permission provisioned workspace."""
+
+        DRF-1874: сторож читает **код**, а не текст — упоминание в комментарии
+        или докстринге читателем не делает (прежний регэксп считал и их), а
+        переименование в строке `update_fields` — делает."""
 
         root = Path(__file__).resolve().parents[2]
-        pattern = re.compile(r"provisioned_external_user_id")
         readers: set[str] = set()
+        scanned = 0
         for path in root.rglob("*.py"):
             rel = path.relative_to(root).as_posix()
             if "/migrations/" in rel or "/tests/" in rel or rel.startswith("tests/"):
                 continue
             if ".venv" in rel or rel.startswith("scripts/"):
                 continue
-            if pattern.search(path.read_text(encoding="utf-8")):
+            scanned += 1
+            if _reads_the_claim(path.read_text(encoding="utf-8-sig")):
                 readers.add(rel)
+        # Нижняя граница: обход действительно прошёл по коду проекта.
+        assert scanned > 100, scanned
         assert readers == self.ALLOWED_READERS, sorted(readers)
         # Положительная стража: сам сторож видит хотя бы настоящих читателей.
         assert "tenants/solo_provisioning.py" in readers
+
+    def test_the_guard_counts_code_not_prose(self):
+        """Самопроверка сторожа на известных формах — без неё «читателей нет»
+        зеленело бы и на сторожe, который не видит ничего."""
+
+        assert _reads_the_claim("qs.filter(provisioned_external_user_id=x)")
+        assert _reads_the_claim("value = profile.provisioned_external_user_id")
+        assert _reads_the_claim("profile.save(update_fields=['provisioned_external_user_id'])")
+        assert _reads_the_claim("provisioned_external_user_id = models.CharField()")
+        assert not _reads_the_claim("# provisioned_external_user_id — только комментарий")
+        assert not _reads_the_claim('"""Докстринг про provisioned_external_user_id."""')
+        assert not _reads_the_claim("other_field = 1")
+
+    def test_the_field_comment_points_at_a_test_that_exists(self):
+        """DRF-1874: комментарий у поля claim называл сторожа по неверному
+        пути (``users/tests/…``) — ссылка, по которой нельзя пройти."""
+
+        root = Path(__file__).resolve().parents[2]
+        text = (root / "users" / "models.py").read_text(encoding="utf-8")
+        cited = set(re.findall(r"\b\w+/tests/test_\w+\.py", text))
+        assert "tenants/tests/test_solo_workspace_provisioning_1828.py" in cited, sorted(cited)
+        missing = sorted(p for p in cited if not (root / p).exists())
+        assert missing == []
+
+
+def _reads_the_claim(source: str) -> bool:
+    """Код обращается к claim: атрибут, именованный аргумент, имя присваивания
+    или строка-литерал ровно с этим именем (``update_fields``). Комментарии
+    и докстринги с этим словом внутри — не обращение."""
+
+    name = "provisioned_external_user_id"
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr == name:
+            return True
+        if isinstance(node, ast.keyword) and node.arg == name:
+            return True
+        if isinstance(node, ast.Name) and node.id == name:
+            return True
+        if isinstance(node, ast.Constant) and node.value == name:
+            return True
+    return False
+
+
+class TestDRF1874OrphanUsernameAndForeignIds:
+    """DRF-1874 (LOW после ревью #432/#433)."""
+
+    def test_an_orphaned_workspace_username_is_409_not_500(self, client):
+        """Красный до правки: ``User(solo:<slug>)`` без тенанта и claim (ручная
+        правка, откат) — ``IntegrityError`` уходил наружу 500."""
+
+        orphan = User(username=f"solo:{SLUG}", role="specialist", is_proxy=False, phone=None)
+        orphan.set_unusable_password()
+        orphan.save()
+
+        r = client.post(URL, _body(), format="json")
+
+        assert r.status_code == 409, r.content
+        assert r.json()["error"]["details"] == {"reason": "username_taken"}
+        assert Tenant.all_objects.filter(slug=SLUG).count() == 0
+        assert SpecialistProfile.objects.filter(provisioned_external_user_id=EXTERNAL).count() == 0
+
+    @pytest.mark.parametrize("taken", ["slug", "tenant_id", "claim"])
+    def test_a_refusal_names_the_reason_and_not_the_other_tenant(self, client, taken):
+        """Красный до правки: 409 отдавал ``existing_tenant_id`` / ``existing_slug``
+        чужого тенанта. Держателю provisioning-токена хватает причины; чужие
+        идентификаторы — в лог каталога."""
+
+        if taken == "slug":
+            Tenant.all_objects.create(slug=SLUG, name="Чужой салон")
+            body, reason = _body(), "slug_taken"
+        elif taken == "tenant_id":
+            Tenant.all_objects.create(id=TENANT_ID, slug="salon-1874-x", name="Чужой салон")
+            body, reason = _body(), "tenant_id_taken"
+        else:
+            assert client.post(URL, _body(), format="json").status_code == 201
+            body = _body(tenant_id=str(uuid.uuid4()), slug="solo-max-1874zzzz")
+            reason = "claim_bound_elsewhere"
+
+        r = client.post(URL, body, format="json")
+
+        assert r.status_code == 409, r.content
+        assert r.json()["error"]["details"] == {"reason": reason}

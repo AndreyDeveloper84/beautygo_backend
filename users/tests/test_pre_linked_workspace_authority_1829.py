@@ -186,3 +186,27 @@ class TestAfterLinkedTheSameRequestIsTheSubjects:
         olga.save(update_fields=["status"])
         resp = _client(actor=OLGA).put(_url(olga.pk), _week(), format="json")
         assert resp.status_code == 200, resp.content
+
+
+class TestDRF1874OnlyALiveWorkspaceIsOpenToTheClaim:
+    """DRF-1874: claim + DRAFT открывали workspace и при выключенном/удалённом
+    ``User`` workspace или выключенном тенанте. Положительная половина — тот
+    же workspace до выключения."""
+
+    @pytest.mark.parametrize("switch_off", ["user_inactive", "user_deleted", "tenant_inactive"])
+    def test_a_switched_off_workspace_is_403(self, olga, switch_off):
+        from django.utils import timezone
+
+        assert _client(actor=OLGA).put(_url(olga.pk), _week(), format="json").status_code == 200
+
+        if switch_off == "user_inactive":
+            User.objects.filter(pk=olga.user_id).update(is_active=False)
+        elif switch_off == "user_deleted":
+            User.objects.filter(pk=olga.user_id).update(deleted_at=timezone.now())
+        else:
+            from tenants.models import Tenant
+
+            Tenant.all_objects.filter(pk=olga.tenant_id).update(is_active=False)
+
+        resp = _client(actor=OLGA).put(_url(olga.pk), _week(), format="json")
+        assert resp.status_code == 403, resp.content

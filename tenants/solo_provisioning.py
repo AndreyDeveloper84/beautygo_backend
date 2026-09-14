@@ -166,6 +166,11 @@ def _refuse_if_taken(*, tenant_id: UUID, slug: str) -> None:
     by_slug = Tenant.all_objects.filter(slug=slug).first()
     if by_slug is not None:
         raise SoloProvisioningRefused("slug_taken", existing_tenant_id=str(by_slug.id))
+    # DRF-1874: рабочий аккаунт без тенанта и claim (ручная правка, откат) —
+    # его username занят; без этой проверки create падал IntegrityError → 500.
+    username = f"{USERNAME_PREFIX}{slug}"
+    if User.objects.filter(username=username).exists():
+        raise SoloProvisioningRefused("username_taken", username=username)
 
 
 def _create(
