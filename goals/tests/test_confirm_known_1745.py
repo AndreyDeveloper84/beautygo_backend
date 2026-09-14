@@ -78,7 +78,11 @@ def _complete_first_pass(api, *, feeling: str = "calmer") -> None:
     for step, key in (
         (anketa.GOAL_STEP_KEY, "relax"), (AREA.key, "face"), (FEELING.key, feeling),
     ):
-        resp = _answer(api, step, option_key=key)
+        if step == FEELING.key and key != anketa.UNKNOWN_OPTION_KEY:
+            # DRF-1759 — feeling отвечает массивом; «не знаю» — одним ключом.
+            resp = _answer(api, step, option_keys=[key])
+        else:
+            resp = _answer(api, step, option_key=key)
         assert resp.status_code == 200, resp.content
     assert not GoalAnketaRun.objects.filter(completed_at__isnull=True).exists()
 

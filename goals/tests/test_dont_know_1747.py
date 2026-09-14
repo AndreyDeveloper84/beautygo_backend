@@ -194,7 +194,8 @@ class TestDurableUnknown:
         api = _api()
         _open(api)
         assert _answer(api, FEELING.key, option_key=anketa.UNKNOWN_OPTION_KEY).status_code == 200
-        resp = _answer(api, FEELING.key, option_key="calmer", revise=True)
+        # DRF-1759 — feeling стал multi: настоящий ответ — массив.
+        resp = _answer(api, FEELING.key, option_keys=["calmer"], revise=True)
         assert resp.status_code == 200, resp.content
         known = build_decision_context(customer)["known"]["anketa"]
-        assert [(r["option_key"], r["unknown"]) for r in known] == [("calmer", False)]
+        assert [(r["option_keys"], r["unknown"]) for r in known] == [(["calmer"], False)]
