@@ -67,7 +67,10 @@ def _svc(tenant, name, cat_name, **kw):
 
 @pytest.fixture
 def owner(db):
-    return User.objects.create_superuser(username="owner-review", password="pw", email="o@b.c", role="admin")
+    return User.objects.create_superuser(
+        username="owner-review", password="pw",  # pragma: allowlist secret
+        email="o@b.c", role="admin",
+    )
 
 
 @pytest.fixture
