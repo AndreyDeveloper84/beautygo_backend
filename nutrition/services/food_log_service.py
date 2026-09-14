@@ -57,6 +57,8 @@ class CreateFoodLogInput:
     dish_name: Optional[str] = None
     logged_at: Optional[datetime] = None
     idempotency_key: Optional[str] = None
+    #: §136 — чем получено число; пишется как передано вызывающим.
+    entry_origin: Optional[str] = None
 
 
 class FoodLogServiceError(Exception):
@@ -156,6 +158,7 @@ class FoodLogService:
             meal_type=data.meal_type,
             logged_at=data.logged_at or timezone.now(),
             idempotency_key=data.idempotency_key,
+            entry_origin=data.entry_origin,
         )
 
     def _create_manual(self, data: CreateFoodLogInput) -> FoodLog:
@@ -186,6 +189,7 @@ class FoodLogService:
             meal_type=data.meal_type,
             logged_at=data.logged_at or timezone.now(),
             idempotency_key=data.idempotency_key,
+            entry_origin=data.entry_origin,
         )
 
 

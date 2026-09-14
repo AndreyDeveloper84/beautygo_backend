@@ -288,6 +288,9 @@ class FoodLogCreateSerializer(serializers.Serializer):
     portion_multiplier = serializers.FloatField(min_value=0.1, max_value=20.0)
     meal_type = serializers.ChoiceField(choices=FoodLog.MealType.choices)
     logged_at = serializers.DateTimeField(required=False)
+    entry_origin = serializers.ChoiceField(
+        choices=FoodLog.EntryOrigin.choices, required=False, allow_null=True,
+    )
 
     def validate(self, attrs):
         if not attrs.get("scan_id") and not attrs.get("dish_name"):
@@ -311,8 +314,20 @@ class FoodLogEntrySerializer(serializers.ModelSerializer):
             "carbs_g",
             "meal_type",
             "logged_at",
+            "entry_origin",
         ]
         read_only_fields = fields
+
+
+class FoodEstimateRequestSerializer(serializers.Serializer):
+    """DRF-1837: оценка блюда по названию БЕЗ записи (§109 шаги 2–3).
+
+    ``portion_g`` — граммы, если человек их назвал; без них оценка идёт на
+    базовые 100 г и ответ говорит об этом ``portion_estimated=true``.
+    """
+
+    dish_name = serializers.CharField(allow_blank=False, max_length=200)
+    portion_g = serializers.FloatField(required=False, min_value=1.0, max_value=3000.0)
 
 
 # ---------------------------------------------------------------------------

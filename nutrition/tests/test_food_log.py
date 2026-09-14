@@ -186,11 +186,13 @@ class TestScanPath:
         }, format="json")
         assert resp.status_code == status.HTTP_201_CREATED, resp.json()
         body = resp.json()["data"]
-        # Spec FoodLogEntry shape
+        # Spec FoodLogEntry shape + DRF-1837 §136 ``entry_origin``
+        # (NULL here: the client app does not pass an origin).
         assert set(body.keys()) == {
             "id", "dish_name", "calories", "protein_g",
-            "fat_g", "carbs_g", "meal_type", "logged_at",
+            "fat_g", "carbs_g", "meal_type", "logged_at", "entry_origin",
         }
+        assert body["entry_origin"] is None
         assert body["dish_name"] == "Борщ"
         assert body["calories"] == 147.0
         assert body["meal_type"] == "lunch"
