@@ -185,6 +185,38 @@ def find_orphans(storage) -> list[str]:
     return sorted(found)
 
 
+def purge_one(scan: FoodScan) -> tuple[str, str]:
+    """Объект, затем строка. Порядок — предмет, а не стиль.
+
+    Обратный порядок оставляет объект в бакете без ссылки на него:
+    строки больше нет, найти файл по базе невозможно. Семь таких
+    объектов на пилоте уже лежат.
+    """
+    name = scan.image.name
+    if not name:
+        # Пятый исход. Строка без фотографии — удалять было НЕЧЕГО, и
+        # это не то же самое, что «имя есть, объекта нет»: там
+        # фотография была и куда-то делась, здесь её не было никогда.
+        # Слив их, отчёт сообщал бы об исчезновении фотографий, которых
+        # не существовало.
+        scan.delete()
+        return "no_image", ""
+
+    try:
+        existed = scan.image.storage.exists(name)
+        if existed:
+            scan.image.delete(save=False)
+    except Exception as exc:  # noqa: BLE001 — причина обязана быть названа
+        # Строка НЕ трогается: потерять ссылку на живой файл хуже,
+        # чем оставить просроченную строку до следующего запуска.
+        return "refused", f"{type(exc).__name__}: {exc}"[:200]
+
+    # Сырой ответ уходит вместе со строкой — §135. Отдельно стирать
+    # его не нужно: он поле этой же строки.
+    scan.delete()
+    return ("deleted" if existed else "object_absent"), ""
+
+
 class Command(BaseCommand):
     help = (
         "Удалить фотографии еды и сырые ответы старше 30 суток (§134/§135). "
@@ -286,35 +318,11 @@ class Command(BaseCommand):
         self._report(tally, apply, expired, options["scan_orphans"])
 
     def _purge_one(self, scan: FoodScan) -> tuple[str, str]:
-        """Объект, затем строка. Порядок — предмет, а не стиль.
-
-        Обратный порядок оставляет объект в бакете без ссылки на него:
-        строки больше нет, найти файл по базе невозможно. Семь таких
-        объектов на пилоте уже лежат.
-        """
-        name = scan.image.name
-        if not name:
-            # Пятый исход. Строка без фотографии — удалять было НЕЧЕГО, и
-            # это не то же самое, что «имя есть, объекта нет»: там
-            # фотография была и куда-то делась, здесь её не было никогда.
-            # Слив их, отчёт сообщал бы об исчезновении фотографий, которых
-            # не существовало.
-            scan.delete()
-            return "no_image", ""
-
-        try:
-            existed = scan.image.storage.exists(name)
-            if existed:
-                scan.image.delete(save=False)
-        except Exception as exc:  # noqa: BLE001 — причина обязана быть названа
-            # Строка НЕ трогается: потерять ссылку на живой файл хуже,
-            # чем оставить просроченную строку до следующего запуска.
-            return "refused", f"{type(exc).__name__}: {exc}"[:200]
-
-        # Сырой ответ уходит вместе со строкой — §135. Отдельно стирать
-        # его не нужно: он поле этой же строки.
-        scan.delete()
-        return ("deleted" if existed else "object_absent"), ""
+        # DRF-1843: одна реализация на команду и задачу beat
+        # (``nutrition.tasks.purge_expired_food_photos_task``) — два
+        # удаления одного и того же разошлись бы в порядке «объект, затем
+        # строка», а это и есть главная ловушка задачи.
+        return purge_one(scan)
 
     def _report(self, tally: Tally, apply: bool, expired: list, scanned: bool) -> None:
         self.stdout.write("")
