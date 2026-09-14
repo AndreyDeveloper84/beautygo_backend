@@ -54,13 +54,10 @@ def _similar_payload(name: str) -> list[dict]:
     ]
 
 
-class _SpecialistSubjectView(APIView):
+class InternalCanonGapRequestListView(APIView):
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSpecialistSubject]
     subject_url_kwarg = "specialist_id"
-
-
-class InternalCanonGapRequestListView(_SpecialistSubjectView):
     http_method_names = ["get", "post"]
 
     @extend_schema(tags=["internal"], responses={200: OpenApiResponse(description="requests[]")})
@@ -96,7 +93,10 @@ class InternalCanonGapRequestListView(_SpecialistSubjectView):
         )
 
 
-class InternalCanonGapSimilarView(_SpecialistSubjectView):
+class InternalCanonGapSimilarView(APIView):
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearerForSpecialistSubject]
+    subject_url_kwarg = "specialist_id"
     http_method_names = ["get"]
 
     @extend_schema(tags=["internal"], responses={200: OpenApiResponse(description="similar[]")})
@@ -107,7 +107,10 @@ class InternalCanonGapSimilarView(_SpecialistSubjectView):
         return success_response({"similar": _similar_payload(name)})
 
 
-class InternalCanonGapRequestDetailView(_SpecialistSubjectView):
+class InternalCanonGapRequestDetailView(APIView):
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearerForSpecialistSubject]
+    subject_url_kwarg = "specialist_id"
     http_method_names = ["get"]
 
     @extend_schema(tags=["internal"], responses={200: OpenApiResponse(description="request")})
