@@ -10,6 +10,11 @@ from drf_spectacular.views import (
 
 from .health import liveness, readiness
 from payments.views import InternalPaymentStatusView, InternalPayoutPreviewView
+from users.internal_canon_gap_api import (  # noqa: E402
+    InternalCanonGapRequestDetailView,
+    InternalCanonGapRequestListView,
+    InternalCanonGapSimilarView,
+)
 from users.internal_schedule_api import (
     InternalSpecialistScheduleView,
     InternalSpecialistTimeOffView,
@@ -133,6 +138,25 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/working-hours/',
         InternalSpecialistWorkingHoursView.as_view(),
         name='internal-specialist-working-hours',
+    ),
+    # DRF-1801 (M9) — «своя услуга» мастера = заявка о разрыве канона к
+    # владельцу (G6 / D6): завести и прочитать под субъектом; решает только
+    # владелец в Django-admin. Same "explicit route BEFORE the include"
+    # reason as above; `similar/` before `<uuid:request_id>/`.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/canon-gap-requests/',
+        InternalCanonGapRequestListView.as_view(),
+        name='internal-specialist-canon-gap-requests',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/canon-gap-requests/similar/',
+        InternalCanonGapSimilarView.as_view(),
+        name='internal-specialist-canon-gap-similar',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/canon-gap-requests/<uuid:request_id>/',
+        InternalCanonGapRequestDetailView.as_view(),
+        name='internal-specialist-canon-gap-request',
     ),
     path(
         'api/v1/internal/specialists/',
