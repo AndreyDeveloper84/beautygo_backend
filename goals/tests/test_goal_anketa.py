@@ -95,11 +95,17 @@ def _answer_goal(api, option_key: str = "relax"):
     return _answer(api, anketa.GOAL_STEP_KEY, option_key=option_key)
 
 
+def _first_option(step: anketa.AnketaStep) -> dict:
+    """Первый вариант шага в форме его режима: multi — массивом (DRF-1759)."""
+    key = step.options[0][0]
+    return {"option_keys": [key]} if step.mode == anketa.MODE_MULTI else {"option_key": key}
+
+
 def _answer_narrowing(api):
     """Все сужающие шаги по порядку сервера."""
     doc = None
     for step in anketa.ANKETA_STEPS:
-        resp = _answer(api, step.key, option_key=step.options[0][0])
+        resp = _answer(api, step.key, **_first_option(step))
         assert resp.status_code == 200, resp.content
         doc = resp.json()["data"]
     return doc
@@ -197,7 +203,7 @@ class TestAnketaFormsAGoal:
         for step in anketa.ANKETA_STEPS:
             item = doc["missing"][0]
             assert item["step"] == step.key
-            resp = _answer(api, step.key, option_key=step.options[0][0])
+            resp = _answer(api, step.key, **_first_option(step))
             assert resp.status_code == 200, resp.content
             doc = resp.json()["data"]
 
@@ -625,7 +631,7 @@ class TestOldPathsSurvive:
             assert doc["next"]["id"] == NEXT_BROWSE_CATALOG, "выход обязан быть всегда"
             step = doc["missing"][0]["step"]
             expected = next(s for s in anketa.ANKETA_STEPS if s.key == step)
-            doc = _answer(api, step, option_key=expected.options[0][0]).json()["data"]
+            doc = _answer(api, step, **_first_option(expected)).json()["data"]
 
     def test_need_guidance_still_answers_with_a_guiding_question(
         self, customer, token,
@@ -757,7 +763,7 @@ class TestIsLastIsAGuarantee:
         for step in anketa.ANKETA_STEPS:
             item = doc["missing"][0]
             seen.append((item["step"], item["progress"]["is_last"]))
-            doc = _answer(api, step.key, option_key=step.options[0][0]).json()["data"]
+            doc = _answer(api, step.key, **_first_option(step)).json()["data"]
 
         assert seen == [
             (anketa.GOAL_STEP_KEY, False),
