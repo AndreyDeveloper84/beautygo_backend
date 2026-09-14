@@ -358,6 +358,10 @@ SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
     "internal-specialist-working-hours": (
         "users/tests/test_internal_working_hours_1815.py::TestSubject"
     ),
+    # DRF-1801 (M9) — заявки мастера о разрыве канона.
+    "internal-specialist-canon-gap-requests": "services/tests/test_canon_gap_request_m9.py::TestSubject",
+    "internal-specialist-canon-gap-similar": "services/tests/test_canon_gap_request_m9.py::TestSubject",
+    "internal-specialist-canon-gap-request": "services/tests/test_canon_gap_request_m9.py::TestSubject",
 }
 
 _SPECIALIST_ROUTE_RE = re.compile(
@@ -422,6 +426,10 @@ class TestGuardCoversItsSubject:
             assert GUARDED_OTHERWISE_SPECIALIST[name].strip(), f"{name}: причина пустая"
             return
         sample = template.replace(f"<uuid:{kwarg}>", "11111111-1111-1111-1111-111111111111")
+        # Второй UUID в пути (DRF-1801: ``…/canon-gap-requests/<uuid:request_id>/``)
+        # — тот же приём, что у маршрутов ``users`` выше: иначе маршрут не
+        # разрешается, и сторож падает раньше своей проверки.
+        sample = re.sub(r"<uuid:\w+>", "22222222-2222-2222-2222-222222222222", sample)
         view_cls = resolve("/" + sample).func.view_class
         assert _has_subject_guard(view_cls), f"{name}: профиль в URL, а проверки субъекта нет"
         assert getattr(view_cls, "subject_url_kwarg", None) == kwarg, (

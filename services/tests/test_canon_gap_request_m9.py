@@ -293,6 +293,16 @@ class TestSubject:
         assert resp.status_code == 403
         assert CanonGapRequest.objects.count() == before
 
+    def test_similar_and_detail_refuse_a_foreign_profile(self, master, other):
+        """Отрицательные тесты для всех трёх маршрутов под субъектом (сторож
+        ``SPECIALIST_ROUTES_TESTED_ELSEWHERE`` указывает сюда)."""
+        foreign = create_request(other, name="Чужая", description="", duration_minutes=60, price=Decimal("1"))
+        assert _api("bot:max:m9001").get(_url(other, "similar/"), {"name": "x"}).status_code == 403
+        assert _api("bot:max:m9001").get(_url(other, f"{foreign.pk}/")).status_code == 403
+        assert _api("bot:max:m9001").get(_url(other)).status_code == 403
+        # Положительная пара: свой профиль по тем же маршрутам — 200.
+        assert _api("bot:max:m9002").get(_url(other, f"{foreign.pk}/")).status_code == 200
+
     def test_foreign_request_id_under_own_url_is_404(self, master, other):
         foreign = create_request(other, name="Чужая", description="", duration_minutes=60, price=Decimal("1"))
         assert _api().get(_url(master, f"{foreign.pk}/")).status_code == 404
