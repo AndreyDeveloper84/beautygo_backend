@@ -48,6 +48,16 @@ from django.db import models
 from .models import GeocodeStatus, Tenant
 
 
+def same_address(a: str, b: str) -> bool:
+    """Тот же ли адрес — одно правило сравнения на все команды триажа места (§9).
+
+    Регистр и лишние пробелы не различают адреса; всё остальное различает.
+    Это сравнение ДО геокодирования: после него дубли ловит схема
+    (``servicelocation_point_is_unique``).
+    """
+    return " ".join((a or "").split()).casefold() == " ".join((b or "").split()).casefold()
+
+
 class LocationStatus(models.TextChoices):
     """Подтверждено ли место — §9 дословно, три исхода."""
 

@@ -33,11 +33,8 @@ from django.utils import timezone
 
 from core.measurement_subject import gather_pulse, subject_lines
 from tenants.models import LocationStatus, ServiceLocation, Tenant
+from tenants.service_location import same_address
 from users.models import User
-
-
-def _same_address(a: str, b: str) -> bool:
-    return " ".join(a.split()).casefold() == " ".join(b.split()).casefold()
 
 
 class Command(BaseCommand):
@@ -88,7 +85,7 @@ class Command(BaseCommand):
         status = LocationStatus.CONFIRMED if options["confirm"] else LocationStatus.REVIEW_REQUIRED
 
         existing = next(
-            (loc for loc in ServiceLocation.objects.filter(tenant=tenant) if _same_address(loc.address, address)),
+            (loc for loc in ServiceLocation.objects.filter(tenant=tenant) if same_address(loc.address, address)),
             None,
         )
         mode = "ЗАПИСЬ (--apply)" if options["apply"] else "СУХОЙ ПРОГОН"
