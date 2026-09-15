@@ -112,12 +112,18 @@ class PersonalDataAccessLog(models.Model):
         READ_PROFILE = "read_profile", "Чтение карточки пользователя"
         # DRF-1855: отзыв клиента из бота — текст самого человека о визите.
         REVIEW_CREATE = "review_create", "Отзыв клиента о визите"
+        # DRF-1813 (M21): мастер правит свой профиль из кабинета через бота.
+        WRITE_SPECIALIST_PROFILE = "write_specialist_profile", "Запись профиля мастера"
+        UPLOAD_MEDIA = "upload_media", "Загрузка фото мастера"
+        DELETE_MEDIA = "delete_media", "Удаление фото мастера"
 
     class ObjectCategory(models.TextChoices):
         PERSONAL_DATA = "personal_data", "Персональные данные"
         PERSONAL_CONTEXT = "personal_context", "Личный профиль (декларации)"
         DELETION_REQUEST = "deletion_request", "Заявка на удаление аккаунта"
         REVIEW = "review", "Отзыв клиента"
+        # DRF-1813 (M21): профиль мастера — имя, «о себе», аватар, портфолио.
+        SPECIALIST_PROFILE = "specialist_profile", "Профиль мастера"
 
     class Result(models.TextChoices):
         ALLOWED = "allowed", "Доступ разрешён"

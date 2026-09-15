@@ -327,14 +327,21 @@ class TestServedOperationsDoNotStopTheProduct:
         analogy, this is where it shows.
         """
         op = PersonalDataAccessLog.Operation
+        # DRF-1813 (M21): DELETE_MEDIA joined the set by the main window's
+        # decision of 15.09 — deleting a master's photo is deletion of personal
+        # data literally, alongside DELETE, not by analogy. Uploading and
+        # writing profile fields stay served, like WRITE_CONTEXT.
         assert policy.FAIL_CLOSED_OPERATIONS == {
             op.EXPORT, op.DELETE, op.ERASE_CONTEXT, op.DELETION_REQUEST_CREATE,
+            op.DELETE_MEDIA,
         }
-        for stopped in (op.EXPORT, op.DELETE, op.ERASE_CONTEXT, op.DELETION_REQUEST_CREATE):
+        for stopped in (
+            op.EXPORT, op.DELETE, op.ERASE_CONTEXT, op.DELETION_REQUEST_CREATE, op.DELETE_MEDIA,
+        ):
             assert policy.stops_when_unauditable(stopped)
         for served in (
             op.READ_CONTEXT, op.WRITE_CONTEXT, op.ASK_METADATA, op.DELETION_REQUEST_READ,
-            op.READ_PROFILE,
+            op.READ_PROFILE, op.WRITE_SPECIALIST_PROFILE, op.UPLOAD_MEDIA,
         ):
             assert not policy.stops_when_unauditable(served)
 
@@ -711,6 +718,11 @@ class TestGuardCoversTheWholeSurface:
         DELREQ_URL + "{request_id}/",
         "/api/v1/internal/users/{subject}/",  # DRF-1709
         "/api/v1/internal/users/{subject}/reviews/",  # DRF-1855
+        # DRF-1813 (M21) — профиль мастера: имя, «о себе», аватар, портфолио.
+        "/api/v1/internal/specialists/{subject}/profile/",
+        "/api/v1/internal/specialists/{subject}/media/avatar/",
+        "/api/v1/internal/specialists/{subject}/portfolio/",
+        "/api/v1/internal/specialists/{subject}/portfolio/{request_id}/",
     ]
 
     def test_the_list_above_is_every_guarded_view_not_a_hand_picked_subset(self):
@@ -753,6 +765,7 @@ class TestGuardCoversTheWholeSurface:
             "internal_reviews_api",  # DRF-1855 — a client's review from the bot
             "internal_schedule_api",  # DRF-1815 — working hours under the subject
             "internal_canon_gap_api",  # DRF-1801 — canon gap requests under the subject
+            "internal_specialist_profile_api",  # DRF-1813 — the master's profile, avatar, portfolio
         ):
             mod = __import__(f"users.{module}", fromlist=["x"])
             for obj in vars(mod).values():
@@ -770,7 +783,7 @@ class TestGuardCoversTheWholeSurface:
             "guarded_not_listed": sorted(c.__name__ for c in guarded - listed),
             "listed_not_guarded": sorted(c.__name__ for c in listed - guarded),
         }
-        assert len(guarded) == 10
+        assert len(guarded) == 14
 
     @pytest.mark.parametrize("template", ROUTES)
     def test_route_is_audited(self, template):

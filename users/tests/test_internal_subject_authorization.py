@@ -373,6 +373,20 @@ SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
     "internal-specialist-working-hours": (
         "users/tests/test_internal_working_hours_1815.py::TestSubject"
     ),
+    # DRF-1813 (M21): чужой workspace → 403, чужой элемент портфолио → 404;
+    # отказы — рядом с положительной половиной.
+    "internal-specialist-profile": (
+        "users/tests/test_specialist_profile_m21_1813.py::TestSubject"
+    ),
+    "internal-specialist-avatar": (
+        "users/tests/test_specialist_profile_m21_1813.py::TestSubject"
+    ),
+    "internal-specialist-portfolio": (
+        "users/tests/test_specialist_profile_m21_1813.py::TestSubject"
+    ),
+    "internal-specialist-portfolio-item": (
+        "users/tests/test_specialist_profile_m21_1813.py::TestPortfolio"
+    ),
     # DRF-1801 (M9) — заявки мастера о разрыве канона.
     "internal-specialist-canon-gap-requests": "services/tests/test_canon_gap_request_m9.py::TestSubject",
     "internal-specialist-canon-gap-similar": "services/tests/test_canon_gap_request_m9.py::TestSubject",
