@@ -226,7 +226,7 @@ class InternalBookingCreateView(_InternalAuthMixin, APIView):
 
         appointment = (
             Appointment.objects
-            .select_related('client', 'specialist', 'service')
+            .select_related('client', 'specialist', 'specialist__works_at', 'service')
             .prefetch_related('payments')
             .get(id=result.booking_id)
         )
