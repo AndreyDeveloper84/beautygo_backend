@@ -80,6 +80,7 @@ def _url(user) -> str:
 def _rec(**over) -> dict:
     base = {
         "role": "primary", "direction_code": "REDUCE_MUSCLE_TENSION_BACK", "family": "ADDRESS",
+        "target": "BACK_COMFORT", "action_type": "PROVIDER_SESSION",
         "target_outcomes": ["REDUCE(MUSCLE_TENSION)"],
         "reason_codes": ["ELIG_CAPABILITY_VERIFIED"],
         "evidence_refs": [{"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"}],

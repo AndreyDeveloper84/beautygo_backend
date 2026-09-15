@@ -83,6 +83,7 @@ EVIDENCE = [{"source": "conversation", "ref": "msg-1", "said_at": "2026-09-12T10
 def _rec(role="primary", **over) -> RecommendationInput:
     base = dict(
         role=role, direction_code="REDUCE_MUSCLE_TENSION_BACK", family="ADDRESS",
+        target="BACK_COMFORT", action_type="PROVIDER_SESSION",
         target_outcomes=["REDUCE(MUSCLE_TENSION)"],
         reason_codes=["ELIG_CAPABILITY_VERIFIED"], evidence_refs=list(EVIDENCE),
         explanation={"displayable": True, "user_visible_reasons": ["ты сказала, что ноет спина"], "internal_only": []},
@@ -138,7 +139,7 @@ def test_persist_writes_set_primary_alternatives_and_created_events():
     assert rset.result_status == "CLEAR_PRIMARY" and rset.readiness_state == "READY"
     assert rset.decision_policy_version == "dp-2026-09-12"
     assert rset.context_snapshot.content_digest == SNAPSHOT.content_digest == content_digest(SNAPSHOT_CONTENT)
-    assert rset.record_schema_version == primary.record_schema_version == RECORD_SCHEMA_VERSION == "1.2"
+    assert rset.record_schema_version == primary.record_schema_version == RECORD_SCHEMA_VERSION == "1.3"
     # WHY варианта остаётся на варианте (C04.2)
     assert alt.reason_codes == ["ELIG_CAPABILITY_VERIFIED"] and alt.explanation["displayable"] is True
     assert list(RecommendationEvent.objects.values_list("kind", flat=True)) == ["recommendation.created"] * 2
@@ -166,6 +167,11 @@ def test_no_action_is_a_valid_recorded_result():
 @pytest.mark.parametrize("bad, match", [
     ({"direction_code": ""}, "direction_code"),
     ({"family": "INTERVENE"}, "family"),
+    # DRF-1922: оси H5 — код вне словаря и строчный код отказывают по имени поля
+    ({"target": "BACK_PAIN"}, "primary: target"),
+    ({"target": "back_comfort"}, "primary: target"),
+    ({"action_type": "BOOKING"}, "primary: action_type"),
+    ({"action_type": "observe"}, "primary: action_type"),
     ({"reason_codes": []}, "primary: reason_codes"),
     ({"explanation": {"user_visible_reasons": []}}, "primary: explanation.displayable"),
     ({"memory_snapshot_ref": {"entries": ["copied value"]}}, "memory_snapshot_ref"),
