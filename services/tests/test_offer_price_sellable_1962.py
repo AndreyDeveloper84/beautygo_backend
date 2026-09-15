@@ -60,7 +60,9 @@ def _future_iso(hours: int = 3) -> str:
     return dt.replace(minute=dt.minute - (dt.minute % 30)).isoformat()
 
 
-def _offer(slug: str, name: str, edge_price: str, phone: str) -> tuple[SpecialistProfile, SalonService, SpecialistService]:
+def _offer(
+    slug: str, name: str, edge_price: str, phone: str,
+) -> tuple[SpecialistProfile, SalonService, SpecialistService]:
     tenant = Tenant.objects.create(slug=slug, name=f"Salon {slug}")
     u = User.objects.create_user(
         username=f"{slug}-master", password="x",  # pragma: allowlist secret
