@@ -73,6 +73,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from users.models import DeletionRequest
+from users.subject_identities import subject_users
 
 logger = logging.getLogger(__name__)
 
@@ -252,18 +253,27 @@ def execute(request: DeletionRequest, *, bot_client=None) -> ExecutionOutcome:
 
     try:
         with transaction.atomic():
-            steps = _erase_catalog(user)
+            # DRF-1038: субъект — аккаунт И связанные прокси. Внешние
+            # идентификаторы снимаются ДО стирания: стирание переименовывает
+            # прокси (``deleted:<pk>``), а боту нужен ``bot:max:<id>``.
+            identities = subject_users(user)
+            external_ids = _external_ids_for_bot(request, identities)
+            steps = _erase_identities(identities)
+            pending = {**steps, EXTERNAL_IDS_KEY: external_ids}
+            DeletionRequest.objects.filter(pk=request.pk).update(steps=pending)
+        request.steps = pending
     except Exception as exc:  # noqa: BLE001 — любая неполнота = FAILED с причиной
         reason = f"{exc.__class__.__name__}: {exc}"[:500]
         _mark_failed(request, reason)
         logger.exception("deletion_executor.catalog_failed request=%s", request.pk)
         return ExecutionOutcome(str(request.pk), request.status, request.steps, reason)
 
-    bot = _confirm_with_bot(request, user, client=bot_client)
+    bot = _confirm_with_bot(request, user, external_ids, client=bot_client)
     if not bot.ok:
         # Каталог стёрт, бот не подтвердил: заявка остаётся живой,
         # deletion_gate закрыт, следующий тик повторит.
-        request.steps = {**steps, "bot": bot.steps}
+        # Бот не подтвердил: идентификаторы остаются на заявке для повтора.
+        request.steps = {**steps, EXTERNAL_IDS_KEY: external_ids, "bot": bot.steps}
         request.failure_reason = bot.reason[:500]
         request.save(update_fields=["steps", "failure_reason"])
         logger.warning(
@@ -273,13 +283,50 @@ def execute(request: DeletionRequest, *, bot_client=None) -> ExecutionOutcome:
 
     with transaction.atomic():
         _unlink_proxies(user)
-        request.steps = {**steps, "bot": bot.steps}
+        # Подтверждено: MAX-идентификаторы человека не переживают его
+        # удаление даже в журнале исполнения — остаётся только число.
+        request.steps = {**steps, EXTERNAL_IDS_COUNT_KEY: len(external_ids), "bot": bot.steps}
         request.status = DeletionRequest.Status.COMPLETED
         request.completed_at = timezone.now()
         request.failure_reason = ""
         request.save(update_fields=["steps", "status", "completed_at", "failure_reason"])
     logger.info("deletion_executor.completed request=%s user=%s", request.pk, user.pk)
     return ExecutionOutcome(str(request.pk), request.status, request.steps)
+
+
+#: Внешние идентификаторы связанных прокси до подтверждения бота (DRF-1038).
+EXTERNAL_IDS_KEY = "external_user_ids"
+#: После подтверждения — только их число.
+EXTERNAL_IDS_COUNT_KEY = "external_user_ids_count"
+
+
+def _external_ids_for_bot(request: DeletionRequest, identities: list) -> list[str]:
+    """Список для бота: сохранённый на заявке (повтор) или снятый сейчас.
+
+    Повтор обязан брать сохранённый: первый проход уже переименовал прокси.
+    Заявка без ключа (прокси тогда не стирались) снимает список как раньше.
+    """
+    stored = (request.steps or {}).get(EXTERNAL_IDS_KEY)
+    if isinstance(stored, list):
+        return list(stored)
+    return [identity.username for identity in identities[1:]]
+
+
+def _erase_identities(identities: list) -> dict:
+    """``_erase_catalog`` по каждой строке субъекта; счёты складываются."""
+    total: dict | None = None
+    for identity in identities:
+        steps = _erase_catalog(identity)
+        if total is None:
+            total = steps
+            continue
+        for bucket in ("deleted", "anonymised"):
+            for key, n in steps[bucket].items():
+                total[bucket][key] = total[bucket].get(key, 0) + n
+        total["files_deleted"] += steps["files_deleted"]
+    assert total is not None
+    total["identities"] = len(identities)
+    return total
 
 
 def _mark_processing(request: DeletionRequest) -> None:
@@ -759,11 +806,10 @@ class BotDeletionClient:
         return BotConfirmation(True, payload)
 
 
-def _confirm_with_bot(request: DeletionRequest, user, *, client=None) -> BotConfirmation:
+def _confirm_with_bot(
+    request: DeletionRequest, user, external_ids: list[str], *, client=None
+) -> BotConfirmation:
     client = client or BotDeletionClient()
-    external_ids = list(
-        User.objects.filter(is_proxy=True, linked_user=user).values_list("username", flat=True)
-    )
     return client.confirm(
         request_id=str(request.pk),
         ayla_user_id=str(user.pk),

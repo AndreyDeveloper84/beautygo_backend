@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import timedelta
 from decimal import Decimal
@@ -716,3 +717,91 @@ class TestAdminExecuteNow:
         assert resp.status_code == 200
         delay.assert_called_once_with(str(open_req.pk))
         assert "Поставлено в очередь исполнителя: 1." in resp.content.decode()
+
+
+# ---------------------------------------------------------------------------
+# DRF-1038 — данные связанного прокси стираются вместе с человеком
+# ---------------------------------------------------------------------------
+
+PREBINDING_PROXY = "bot:max:d3-prebind"
+
+
+def _prebinding_proxy(person):
+    """Прокси с данными ДО привязки: бот писал на него, потом его связали с
+    ``person``. После привязки резолвер отдаёт реальный аккаунт, и эти строки
+    не видит ни стирание по ``user_id``, ни экспорт — ровно разрыв DRF-1038."""
+    from nutrition.models import FoodLog
+
+    proxy = User.objects.create(
+        username=PREBINDING_PROXY, role="client", is_proxy=True, linked_user=person
+    )
+    FoodLog.objects.create(
+        user=proxy, dish_name="Окрошка", meal_type="dinner", logged_at=timezone.now(),
+        idempotency_key=str(uuid.uuid4()),
+    )
+    UserPersonalContext.objects.create(user=proxy, diet_type="keto")
+    return proxy
+
+
+def _no_external_ids_in(steps) -> bool:
+    return "bot:max:" not in json.dumps(steps, ensure_ascii=False)
+
+
+class TestLinkedProxyDataIsErased:
+    def test_proxy_rows_are_erased_and_the_bot_still_gets_the_external_ids(self, person):
+        from nutrition.models import FoodLog
+
+        proxy = _prebinding_proxy(person)
+        # Положительная пара: чужой прокси с данными, НЕ связанный с person.
+        stranger = User.objects.create(username="bot:max:d3-stranger", role="client", is_proxy=True)
+        FoodLog.objects.create(
+            user=stranger, dish_name="Щи", meal_type="lunch", logged_at=timezone.now(),
+            idempotency_key=str(uuid.uuid4()),
+        )
+        req = ensure_deletion_request(person, initiator="bot").request
+        bot = _BotOk()
+
+        out = execute(req, bot_client=bot)
+
+        req.refresh_from_db()
+        assert out.completed
+        assert FoodLog.objects.filter(user=proxy).count() == 0
+        assert UserPersonalContext.objects.filter(user=proxy).count() == 0
+        proxy.refresh_from_db()
+        assert proxy.username == f"deleted:{proxy.pk}" and proxy.linked_user_id is None
+        assert FoodLog.objects.filter(user=stranger).count() == 1
+        # Боту — личности, какими они были ДО стирания.
+        assert sorted(bot.calls[0]["external_user_ids"]) == ["bot:max:d3-1", PREBINDING_PROXY]
+        # Журнал исполнения после подтверждения не хранит MAX-идентификаторы.
+        assert _no_external_ids_in(req.steps)
+        assert req.steps["external_user_ids_count"] == 2
+
+    def test_bot_down_window_shows_no_pre_binding_data_and_retry_reuses_ids(self, person):
+        from nutrition.models import FoodLog
+        from users.services import resolve_external_user
+
+        proxy = _prebinding_proxy(person)
+        req = ensure_deletion_request(person, initiator="bot").request
+
+        out = execute(req, bot_client=_BotDown("bot_http_503"))
+
+        req.refresh_from_db()
+        assert out.status == DeletionRequest.Status.PROCESSING
+        assert FoodLog.objects.filter(user=proxy).count() == 0
+        assert UserPersonalContext.objects.filter(user=proxy).count() == 0
+        # Цель soft-deleted → связь void → резолвер идёт в прокси. Кем бы ни
+        # оказалась бот-личность сейчас, досвязных данных у неё нет.
+        resolved = resolve_external_user(PREBINDING_PROXY)
+        assert resolved.pk != person.pk
+        assert FoodLog.objects.filter(user=resolved).count() == 0
+        assert not UserPersonalContext.objects.filter(user=resolved).exclude(diet_type="").exists()
+        # До подтверждения бота идентификаторы для повтора лежат на заявке.
+        assert sorted(req.steps["external_user_ids"]) == ["bot:max:d3-1", PREBINDING_PROXY]
+
+        ok = _BotOk()
+        out2 = execute(req, bot_client=ok)
+
+        req.refresh_from_db()
+        assert out2.completed
+        assert sorted(ok.calls[0]["external_user_ids"]) == ["bot:max:d3-1", PREBINDING_PROXY]
+        assert _no_external_ids_in(req.steps) and req.steps["external_user_ids_count"] == 2
