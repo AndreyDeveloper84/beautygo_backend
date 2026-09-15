@@ -153,13 +153,26 @@ def _works_at(sp: SpecialistProfile) -> dict | None:
     tenant = place.tenant
     if tenant is None or tenant.kind == Tenant.Kind.SOLO:
         return {
+            "kind": place.kind,
+            "label": place.label,
             "address": place.address,
+            "note_for_client": place.note_for_client,
             "latitude": _decimal(place.latitude),
             "longitude": _decimal(place.longitude),
         }
     if tenant.kind == Tenant.Kind.SALON:
         return {"excluded": WORKS_AT_ORGANISATION}
     return {"excluded": WORKS_AT_UNKNOWN_KIND}
+
+
+def _service_areas(sp: SpecialistProfile) -> list[dict]:
+    """Зоны выезда мастера (DRF-1803): город и охват; стираются вместе с аккаунтом."""
+    from tenants.models import ServiceArea
+
+    return [
+        {"kind": area.kind, "city": area.city, "coverage": area.coverage}
+        for area in ServiceArea.objects.filter(specialist=sp).order_by("kind", "created_at")
+    ]
 
 
 def _specialist_profile(user: User) -> dict | None:
@@ -185,6 +198,7 @@ def _specialist_profile(user: User) -> dict | None:
         "provisioned_external_user_id": sp.provisioned_external_user_id,
         "yookassa_account_id": sp.yookassa_account_id,
         "works_at": _works_at(sp),
+        "service_areas": _service_areas(sp),
         "portfolio": portfolio,
     }
 
