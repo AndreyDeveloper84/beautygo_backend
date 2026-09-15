@@ -230,10 +230,17 @@ class TestSalonBranch:
             tenant=other_tenant, category=category, name="Foreign",
             duration_minutes=30,
         )
-        SpecialistService.objects.create(
-            salon_service=foreign_salon, specialist=specialist,
+        # Через save() такое ребро больше не записать: clean() требует
+        # мастера салона услуги. Резолвер обязан держать оборону и на строке,
+        # посаженной мимо clean() (bulk_create/update, старые данные), —
+        # поэтому ребро сажается именно так.
+        SpecialistService.objects.bulk_create([SpecialistService(
+            salon_service=foreign_salon, specialist=specialist, tenant=other_tenant,
             duration_minutes=None, price=Decimal("500.00"), is_active=True,
-        )
+        )])
+        assert SpecialistService.objects.filter(
+            salon_service=foreign_salon, specialist=specialist,
+        ).exists()
         with pytest.raises(ServiceUnavailableForSpecialistError):
             resolve_bookable_service(
                 service_id=foreign_salon.id, specialist=specialist,

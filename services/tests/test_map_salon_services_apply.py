@@ -218,6 +218,8 @@ def test_only_limits_the_write_to_named_rows(tenant, world):
 def test_affected_edges_verdict_moves_from_unknown_to_known(tenant, world):
     user = User.objects.create_user(username="m-apply", password="x", role="specialist", phone="+79990002400")
     master = SpecialistProfile.objects.get(user=user)
+    master.tenant = tenant  # ребро держит только мастер салона услуги
+    master.save(update_fields=["tenant"])
     SpecialistService.objects.create(salon_service=world["shvz"], specialist=master, price=1000, duration_minutes=60)
     report = _apply(tenant, only={world["shvz"].pk})
     assert report.edges_verdict_before == {"None": 1}
