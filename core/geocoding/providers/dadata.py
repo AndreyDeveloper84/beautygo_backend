@@ -40,6 +40,8 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from decimal import Decimal, InvalidOperation
 
 import requests
@@ -50,6 +52,8 @@ from core.geocoding.contract import GeocodeResult, Outcome, Precision
 SUGGEST_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/suggest/address"
 GEOLOCATE_URL = "https://suggestions.dadata.ru/suggestions/api/4_1/rs/geolocate/address"
 TIMEOUT_SEC = 5
+#: Сколько подсказок адреса отдавать экрану (M12a, DRF-1804). Потолок DaData — 20.
+SUGGEST_COUNT_MAX = 10
 
 #: ``qc_geo`` DaData → общая точность. Словарь провайдера хранится рядом
 #: как есть (``provider_precision``), это — только для порога контракта.
@@ -78,6 +82,18 @@ def _locality(data: dict) -> str:
     # Город либо населённый пункт внутри района; ``city_with_type`` даёт
     # «г Пенза» — контракт сравнивает по вхождению, поэтому годится любое.
     return data.get("city") or data.get("settlement") or data.get("city_with_type") or ""
+
+
+@dataclass(frozen=True)
+class AddressSuggestion:
+    """Одна подсказка адреса для экрана: как показать и как сохранить.
+
+    Координат здесь нет намеренно: подсказка — ввод человека, а не результат
+    геокодирования. Координаты места появляются только при его сохранении.
+    """
+
+    value: str
+    unrestricted_value: str
 
 
 class DaDataGeocoder:
@@ -137,6 +153,36 @@ class DaDataGeocoder:
         if not suggestions:
             return GeocodeResult(outcome=Outcome.NOT_FOUND, provider=self.name)
         return suggestions
+
+    def suggest(self, query: str, *, city: str, count: int = 5) -> list[AddressSuggestion] | GeocodeResult:
+        """Подсказки адреса в городе мастера (M12a, DRF-1804) — список либо отрицательный исход.
+
+        Тот же разбор HTTP, что у ``geocode``: пустой или отклонённый ключ —
+        ``MISCONFIGURED``, лимит и сбой — ``UNAVAILABLE``, пустой ответ —
+        ``NOT_FOUND``. Без города подсказки не запрашиваются вовсе: подсказка
+        «по всей стране» — не место мастера.
+        """
+        refusal = self.check()
+        if refusal is not None:
+            return refusal
+        if not (city or "").strip():
+            raise ValueError("suggest без города не вызывается: вызывающий обязан отказать до провайдера")
+        payload = {
+            "query": query,
+            "count": max(1, min(count, SUGGEST_COUNT_MAX)),
+            "locations": [{"city": city}],
+        }
+        got = self._post(SUGGEST_URL, payload)
+        if isinstance(got, GeocodeResult):
+            return got
+        return [
+            AddressSuggestion(
+                value=item.get("value") or "",
+                unrestricted_value=item.get("unrestricted_value") or item.get("value") or "",
+            )
+            for item in got
+            if item.get("value")
+        ]
 
     def reverse(self, lat: float, lon: float) -> GeocodeResult:
         """``geolocate/address``: ближайший адрес к точке, нужен только город."""
