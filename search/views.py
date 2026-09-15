@@ -256,11 +256,12 @@ class GlobalSearchView(APIView):
         Возвращает список словарей, а не queryset: два слоя — две
         модели, общего queryset у них нет.
         """
+        from services.offer_sellable import sellable_legacy_q
         from users.sellable import sellable_q
 
         legacy_qs = (
             Service.objects
-            .filter(is_active=True)
+            .filter(sellable_legacy_q())
             .select_related('category', 'specialist', 'specialist__user')
             .filter(sellable_q("specialist"))
             .filter(
@@ -316,6 +317,7 @@ class GlobalSearchView(APIView):
         категория салона побеждает (``services.catalog_reads``).
         """
         from services.models import SpecialistService
+        from services.offer_sellable import sellable_offer_q
         from users.sellable import sellable_q
 
         category_match = (
@@ -327,10 +329,7 @@ class GlobalSearchView(APIView):
         )
         return list(
             SpecialistService.objects
-            .filter(
-                is_active=True,
-                salon_service__is_active=True,
-            )
+            .filter(sellable_offer_q())
             .filter(sellable_q("specialist"))
             .filter(Q(salon_service__name__icontains=q) | category_match)
             .select_related(

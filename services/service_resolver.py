@@ -36,9 +36,12 @@ class ServiceUnavailableForSpecialistError(Exception):
     current tenant (another tenant's rows are the same error BY DESIGN —
     no existence leak)."""
 
-    def __init__(self, service_id: UUID, specialist_id: UUID):
+    def __init__(self, service_id: UUID, specialist_id: UUID, *, reason: str | None = None):
         self.service_id = service_id
         self.specialist_id = specialist_id
+        #: Имя причины, когда отказ его несёт (DRF-1962
+        #: ``price_below_minimum``); ``None`` — прежний безымянный отказ.
+        self.reason = reason
         super().__init__(
             f"Service {service_id} unavailable for specialist {specialist_id}"
         )
@@ -88,6 +91,7 @@ def resolve_bookable_service(
     shape (slots → 404, create → ServiceNotActiveError/422).
     """
     from services.models import SalonService, Service, SpecialistService
+    from services.offer_sellable import offer_refusal
 
     # 1) Marketplace catalog — priority on UUID collision (AMD-019).
     service = (
@@ -99,6 +103,12 @@ def resolve_bookable_service(
         if not service.is_active:
             raise ServiceUnavailableForSpecialistError(
                 service_id, specialist.id,
+            )
+        # DRF-1962: цена ниже 1 ₽ не продаёт предложение — отказ с именем.
+        refusal = offer_refusal(service.price)
+        if refusal is not None:
+            raise ServiceUnavailableForSpecialistError(
+                service_id, specialist.id, reason=refusal,
             )
         return ResolvedService(
             kind="marketplace",
@@ -162,6 +172,12 @@ def resolve_bookable_service(
     )
     if link is None:
         raise ServiceUnavailableForSpecialistError(service_id, specialist.id)
+    # DRF-1962: цена правила — цена ребра (D4), не ``base_price`` салона.
+    refusal = offer_refusal(link.price)
+    if refusal is not None:
+        raise ServiceUnavailableForSpecialistError(
+            service_id, specialist.id, reason=refusal,
+        )
 
     # Duration: SalonService.duration_minutes per AMD-019; the link's
     # resolution cascade (specialist → salon → template) is the fallback

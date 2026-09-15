@@ -228,10 +228,11 @@ class SpecialistProfileDetailSerializer(serializers.ModelSerializer):
         активная legacy-услуга + активная каноническая связка с активной
         ``SalonService``. Второго определения «сколько у мастера услуг» нет.
         """
-        legacy = obj.services.filter(is_active=True).count()
-        canonical = obj.specialist_services.filter(
-            is_active=True, salon_service__is_active=True,
-        ).count()
+        from services.offer_sellable import sellable_legacy_q, sellable_offer_q
+
+        # DRF-1962: предложение ниже 1 ₽ не продаётся и услугой не считается.
+        legacy = obj.services.filter(sellable_legacy_q()).count()
+        canonical = obj.specialist_services.filter(sellable_offer_q()).count()
         return legacy + canonical
 
 
