@@ -10,11 +10,15 @@
   новых строк; тот же ключ с другим телом → 422; запись immutable, поэтому дубль
   можно только не создать;
 * неполное решение — 400 с именем поля и ноль строк; лишнее поле (``service_id``)
-  — отказ по имени, а не молчаливый пропуск (B2);
+  — в варианте или на верхнем уровне — отказ по имени, а не молчаливый пропуск (B2);
 * чужой или неназванный субъект → 403; живая заявка на удаление → 423 (§7 D2);
   в обоих случаях ноль строк;
 * **писатель один**: ``persist`` вне тестов зовётся ровно из этой ручки (AST,
   с нижней границей переписи и положительным контролем).
+
+DRF-1905 — исход на уровне набора: сегодняшний честный исход мозга без NBA
+(``SAFETY_BOUNDARY``) пишется без primary и alternatives — 201 и ноль записей
+варианта; исход без NBA с вариантами и строчный ``readiness_state`` — 400 по имени.
 """
 from __future__ import annotations
 
@@ -68,15 +72,12 @@ def _url(user) -> str:
 def _rec(**over) -> dict:
     base = {
         "role": "primary", "direction_code": "REDUCE_MUSCLE_TENSION_BACK", "family": "ADDRESS",
-        "target_outcomes": ["REDUCE(MUSCLE_TENSION)"], "result_status": "CLEAR_PRIMARY", "readiness_state": "READY",
+        "target_outcomes": ["REDUCE(MUSCLE_TENSION)"],
         "reason_codes": ["ELIG_CAPABILITY_VERIFIED"],
         "evidence_refs": [{"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"}],
         "explanation": {
             "displayable": True, "user_visible_reasons": ["ты сказала, что ноет спина"], "internal_only": [],
         },
-        "safety_evaluation_ref": {"state": "NORMAL", "rule_id": "r-0", "policy_version": "sp-1",
-                                  "evidence_ref": "ev-0", "activated_at": "2026-09-15T10:00:00Z"},
-        "context_snapshot_ref": {"snapshot_id": "ctx-1", "snapshot_version": 1, "content_digest": "sha256:abc"},
     }
     base.update(over)
     return base
@@ -88,10 +89,31 @@ def _body(**over) -> dict:
         "conversation_ref": {"conversation_id": "c-1", "trace_id": "trace-1"},
         "versions": {"decision_policy": "dp-1", "taxonomy": "tx-1", "safety_policy": "sp-1",
                      "catalog_mapping": "cm-1", "presentation_policy": "pp-1"},
+        "result_status": "CLEAR_PRIMARY",
+        "readiness_state": "READY",
+        "reason_codes": ["CLEAR_PRIMARY_BY_POLICY"],
+        "evidence_refs": [{"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"}],
+        "explanation": {"displayable": True, "user_visible_reasons": ["подходит под твою цель"], "internal_only": []},
+        "safety_evaluation_ref": {"state": "NORMAL", "rule_id": "r-0", "policy_version": "sp-1",
+                                  "evidence_ref": "ev-0", "activated_at": "2026-09-15T10:00:00Z"},
+        "context_snapshot_ref": {"snapshot_id": "ctx-1", "snapshot_version": 1, "content_digest": "sha256:abc"},
         "primary": _rec(),
         "alternatives": [_rec(role="alternative", direction_code="IMPROVE_RELAXATION", family="SUPPORT",
                               rerank_reason="ALTERNATIVE_REQUESTED")],
     }
+    base.update(over)
+    return base
+
+
+def _boundary_body(**over) -> dict:
+    """Сегодняшний честный исход мозга без NBA (6.4, в тени) — SAFETY_BOUNDARY."""
+    base = _body(
+        result_status="SAFETY_BOUNDARY", readiness_state="BLOCKED", reason_codes=["SAFETY_STOP"],
+        explanation={"displayable": False, "user_visible_reasons": [], "internal_only": ["SAFETY_STOP"]},
+        safety_evaluation_ref={"state": "STOP", "rule_id": "r-stop", "policy_version": "sp-1",
+                               "evidence_ref": "ev-1", "activated_at": "2026-09-15T10:00:00Z"},
+        primary=None, alternatives=[],
+    )
     base.update(over)
     return base
 
@@ -106,8 +128,8 @@ def test_creates_a_shadow_set_and_reads_back(bearer, subject):
     resp = _api(bearer, subject).post(_url(subject), _body(), format="json")
     assert resp.status_code == 201, resp.content[:400]
     data = resp.json()["data"]
-    assert data["execution_mode"] == "SHADOW"
-    assert len(data["alternative_recommendation_ids"]) == 1
+    assert data["execution_mode"] == "SHADOW" and data["result_status"] == "CLEAR_PRIMARY"
+    assert data["primary_recommendation_id"] and len(data["alternative_recommendation_ids"]) == 1
     assert _rows() == (1, 2, 2)                                   # set + primary + alternative, два created
 
     read = _api(bearer, subject).get(
@@ -116,8 +138,33 @@ def test_creates_a_shadow_set_and_reads_back(bearer, subject):
     assert read.status_code == 200, read.content[:300]
     got = read.json()["data"]
     assert got["execution_mode"] == "SHADOW" and got["subject_id"] == str(subject.pk)
+    assert got["outcome"]["result_status"] == "CLEAR_PRIMARY"
     assert got["primary"]["recommendation_id"] == data["primary_recommendation_id"]
     assert got["alternatives"][0]["parent_recommendation_id"] == data["primary_recommendation_id"]
+
+
+def test_safety_boundary_is_written_without_any_variant(bearer, subject):
+    resp = _api(bearer, subject).post(_url(subject), _boundary_body(), format="json")
+    assert resp.status_code == 201, resp.content[:400]
+    data = resp.json()["data"]
+    assert data["result_status"] == "SAFETY_BOUNDARY"
+    assert data["primary_recommendation_id"] is None and data["alternative_recommendation_ids"] == []
+    assert _rows() == (1, 0, 0)
+
+
+def test_no_nba_outcome_with_a_primary_is_refused_by_name(bearer, subject):
+    resp = _api(bearer, subject).post(_url(subject), _boundary_body(primary=_rec()), format="json")
+    assert resp.status_code == 400, resp.content[:300]
+    assert "не является NBA" in resp.json()["error"]["message"]
+    assert _rows() == (0, 0, 0)
+
+
+def test_lowercase_readiness_is_refused_by_name(bearer, subject):
+    """Движок бота отдаёт строчные; каталог не нормализует за вызывающего."""
+    resp = _api(bearer, subject).post(_url(subject), _boundary_body(readiness_state="blocked"), format="json")
+    assert resp.status_code == 400, resp.content[:300]
+    assert "readiness_state" in resp.json()["error"]["message"]
+    assert _rows() == (0, 0, 0)
 
 
 def test_live_from_the_caller_is_refused_and_nothing_is_written(bearer, subject):
@@ -154,12 +201,20 @@ def test_same_key_with_a_different_decision_is_a_conflict(bearer, subject):
 def test_incomplete_decision_is_refused_by_field_name(bearer, subject):
     resp = _api(bearer, subject).post(_url(subject), _body(primary=_rec(reason_codes=[])), format="json")
     assert resp.status_code == 400, resp.content[:300]
-    assert "reason_codes" in resp.json()["error"]["message"]
+    assert "primary: reason_codes" in resp.json()["error"]["message"]
     assert _rows() == (0, 0, 0)
 
 
 def test_execution_fields_are_refused_by_name_not_dropped(bearer, subject):
     resp = _api(bearer, subject).post(_url(subject), _body(primary=_rec(service_id="svc-1")), format="json")
+    assert resp.status_code == 400, resp.content[:300]
+    assert "service_id" in resp.json()["error"]["message"]
+    assert _rows() == (0, 0, 0)
+
+
+def test_unknown_top_level_field_is_refused_by_name_not_dropped(bearer, subject):
+    """Сериализатор DRF выбросил бы ключ молча — одно правило «лишнее поле → отказ» на оба уровня."""
+    resp = _api(bearer, subject).post(_url(subject), _body(service_id="svc-1"), format="json")
     assert resp.status_code == 400, resp.content[:300]
     assert "service_id" in resp.json()["error"]["message"]
     assert _rows() == (0, 0, 0)

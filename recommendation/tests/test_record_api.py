@@ -8,12 +8,17 @@
   запись на месте;
 * ``why`` — только ``user_visible_reasons`` и только при ``displayable``;
   **internal-only текст не встречается нигде в теле ответа** (сторож по
-  сырому JSON, не по одному полю);
+  сырому JSON, не по одному полю) — ни у варианта, ни у исхода набора;
 * primary + alternatives с ``parent`` / ``rerank_reason`` (код), ``execution_mode``;
 * услуги/мастера/цены/слота в ответе нет;
 * события: четыре канальных → 201 и append; ``accepted``/``declined`` → 400
   ``EVENT_NOT_IN_TAXONOMY`` (B8); ``created`` и ``booking_intent.created`` этой
   ручкой не пишутся; чужой субъект → 404.
+
+DRF-1905: исход, готовность и вердикт безопасности — в ``outcome`` набора;
+набор без NBA (``SAFETY_BOUNDARY``) читается с ``primary = null`` и пустыми
+``alternatives``; правило показа ``why`` / ``evidence_refs`` (DRF-1889) —
+одно на обоих уровнях.
 """
 from __future__ import annotations
 
@@ -32,6 +37,11 @@ from users.tests.conftest import name_subject
 pytestmark = pytest.mark.django_db
 
 INTERNAL_ONLY = "INTERNAL-ONLY-SIGNAL rating=4.8 provider_score=0.91"
+SET_INTERNAL_ONLY = "SET-INTERNAL-ONLY policy_threshold=0.42"
+VERSIONS = PolicyVersions("dp", "tx", "sp", "cm", "pp")
+SAFETY = {"state": "NORMAL", "rule_id": "r", "policy_version": "sp", "evidence_ref": "e",
+          "activated_at": "2026-09-12T10:00:00Z"}
+SNAPSHOT = {"snapshot_id": "ctx", "snapshot_version": 1, "content_digest": "sha256:x"}
 
 
 @pytest.fixture
@@ -59,19 +69,30 @@ def _api(bearer, user) -> APIClient:
 def _rec(role="primary", **over) -> RecommendationInput:
     base = dict(
         role=role, direction_code="REDUCE_MUSCLE_TENSION_BACK", family="ADDRESS",
-        target_outcomes=["REDUCE(MUSCLE_TENSION)"], result_status="CLEAR_PRIMARY", readiness_state="READY",
+        target_outcomes=["REDUCE(MUSCLE_TENSION)"],
         reason_codes=["ELIG_CAPABILITY_VERIFIED"],
         evidence_refs=[{"source": "conversation", "ref": "msg-1"}],
         explanation={"displayable": True, "user_visible_reasons": ["ты сказала, что ноет спина после работы"],
                      "internal_only": [INTERNAL_ONLY]},
-        safety_evaluation_ref={"state": "NORMAL", "rule_id": "r", "policy_version": "sp", "evidence_ref": "e",
-                               "activated_at": "2026-09-12T10:00:00Z"},
-        context_snapshot_ref={"snapshot_id": "ctx", "snapshot_version": 1, "content_digest": "sha256:x"},
     )
     if role == "alternative":
         base["rerank_reason"] = "ALTERNATIVE_REQUESTED"
     base.update(over)
     return RecommendationInput(**base)
+
+
+def _set_in(subject, **over) -> RecommendationSetInput:
+    base = dict(
+        subject_ref=str(subject.pk), intent_id="i", versions=VERSIONS,
+        result_status="CLEAR_PRIMARY", readiness_state="READY",
+        reason_codes=["CLEAR_PRIMARY_BY_POLICY"],
+        evidence_refs=[{"source": "conversation", "ref": "msg-set"}],
+        explanation={"displayable": True, "user_visible_reasons": ["подходит под твою цель"],
+                     "internal_only": [SET_INTERNAL_ONLY]},
+        safety_evaluation_ref=SAFETY, context_snapshot_ref=SNAPSHOT, primary=_rec(),
+    )
+    base.update(over)
+    return RecommendationSetInput(**base)
 
 
 @pytest.fixture
@@ -80,11 +101,9 @@ def rset(subject):
     alt = _rec("alternative", direction_code="IMPROVE_RELAXATION", family="SUPPORT",
                explanation={"displayable": True, "user_visible_reasons": ["или просто расслабиться"],
                             "internal_only": [INTERNAL_ONLY]})
-    return persist(RecommendationSetInput(
-        subject_ref=str(subject.pk), intent_id="intent-1", execution_mode="LIVE",
-        conversation_ref={"conversation_id": "c-1", "trace_id": "t-1"},
-        versions=PolicyVersions("dp", "tx", "sp", "cm", "pp"),
-        primary=_rec(), alternatives=(alt,),
+    return persist(_set_in(
+        subject, intent_id="intent-1", execution_mode="LIVE",
+        conversation_ref={"conversation_id": "c-1", "trace_id": "t-1"}, alternatives=(alt,),
     ), now=now)
 
 
@@ -98,18 +117,24 @@ def _events_url(user, rec) -> str:
 
 # ---------------------------------------------------------------- чтение
 
-def test_read_returns_direction_why_lineage_and_actionable(bearer, subject, rset):
+def test_read_returns_outcome_direction_why_lineage_and_actionable(bearer, subject, rset):
     resp = _api(bearer, subject).get(_set_url(subject, rset))
     assert resp.status_code == 200, resp.content[:300]
     data = resp.json()["data"]
     assert data["recommendation_set_id"] == str(rset.pk) and data["subject_id"] == str(subject.pk)
     assert data["execution_mode"] == "LIVE" and data["conversation_ref"]["trace_id"] == "t-1"
+    assert data["record_schema_version"] == "1.1"
+    o = data["outcome"]
+    assert o["result_status"] == "CLEAR_PRIMARY" and o["readiness_state"] == "READY" and o["safety_state"] == "NORMAL"
+    assert o["reason_codes"] == ["CLEAR_PRIMARY_BY_POLICY"] and o["why"] == ["подходит под твою цель"]
     p = data["primary"]
     assert p["decision_subject"] == {"direction_code": "REDUCE_MUSCLE_TENSION_BACK", "family": "ADDRESS",
                                      "target_outcomes": ["REDUCE(MUSCLE_TENSION)"]}
     assert p["why"] == ["ты сказала, что ноет спина после работы"] and p["displayable"] is True
     assert p["actionable"] is True and p["role"] == "primary" and p["parent_recommendation_id"] is None
-    assert p["safety_state"] == "NORMAL" and p["reason_codes"] == ["ELIG_CAPABILITY_VERIFIED"]
+    assert p["reason_codes"] == ["ELIG_CAPABILITY_VERIFIED"]
+    # исход, готовность и безопасность — только у набора (DRF-1905)
+    assert not {"result_status", "readiness_state", "safety_state"} & set(p)
     a = data["alternatives"][0]
     assert a["role"] == "alternative" and a["parent_recommendation_id"] == p["recommendation_id"]
     assert a["rerank_reason"] == "ALTERNATIVE_REQUESTED" and a["why"] == ["или просто расслабиться"]
@@ -117,29 +142,31 @@ def test_read_returns_direction_why_lineage_and_actionable(bearer, subject, rset
 
 def test_internal_only_never_leaves_the_record(bearer, subject, rset):
     raw = _api(bearer, subject).get(_set_url(subject, rset)).content.decode()
-    assert INTERNAL_ONLY not in raw and "internal_only" not in raw and "provider_score" not in raw
+    assert INTERNAL_ONLY not in raw and SET_INTERNAL_ONLY not in raw
+    assert "internal_only" not in raw and "provider_score" not in raw and "policy_threshold" not in raw
     for forbidden in ("service", "specialist", "provider", "price", "slot", "distance"):
         assert f'"{forbidden}"' not in raw, forbidden
 
 
 def test_not_displayable_gives_empty_why_not_internal_text(bearer, subject):
-    rset = persist(RecommendationSetInput(
-        subject_ref=str(subject.pk), intent_id="i", versions=PolicyVersions("dp", "tx", "sp", "cm", "pp"),
+    rset = persist(_set_in(
+        subject,
+        explanation={"displayable": False, "user_visible_reasons": ["исход не показывать"],
+                     "internal_only": [SET_INTERNAL_ONLY]},
         primary=_rec(explanation={"displayable": False, "user_visible_reasons": ["не показывать"],
                                   "internal_only": [INTERNAL_ONLY]}),
     ))
     resp = _api(bearer, subject).get(_set_url(subject, rset))
-    p = resp.json()["data"]["primary"]
-    assert p["displayable"] is False and p["why"] == []
-    assert "не показывать" not in resp.content.decode()
+    data = resp.json()["data"]
+    assert data["primary"]["displayable"] is False and data["primary"]["why"] == []
+    assert data["outcome"]["displayable"] is False and data["outcome"]["why"] == []
+    raw = resp.content.decode()
+    assert "не показывать" not in raw and "исход не показывать" not in raw
 
 
 def test_actionable_flips_after_two_hours_but_the_record_stays(bearer, subject):
     then = timezone.now() - timedelta(hours=2, minutes=1)
-    rset = persist(RecommendationSetInput(
-        subject_ref=str(subject.pk), intent_id="i", versions=PolicyVersions("dp", "tx", "sp", "cm", "pp"),
-        primary=_rec(),
-    ), now=then)
+    rset = persist(_set_in(subject), now=then)
     resp = _api(bearer, subject).get(_set_url(subject, rset))
     assert resp.status_code == 200
     p = resp.json()["data"]["primary"]
@@ -158,6 +185,24 @@ def test_foreign_subject_gets_404_and_unnamed_caller_403(bearer, subject, strang
     # чужой bearer
     c.credentials(HTTP_AUTHORIZATION="Bearer nope", HTTP_X_EXTERNAL_USER_ID=name_subject(subject))
     assert c.get(_set_url(subject, rset)).status_code == 403
+
+
+def test_safety_boundary_set_reads_without_nba(bearer, subject):
+    """DRF-1905: исход без NBA — primary null, alternatives пусты, исход объяснён набором."""
+    rset = persist(_set_in(
+        subject, result_status="SAFETY_BOUNDARY", readiness_state="BLOCKED", primary=None,
+        reason_codes=["SAFETY_STOP"],
+        explanation={"displayable": False, "user_visible_reasons": [], "internal_only": ["SAFETY_STOP"]},
+        safety_evaluation_ref={**SAFETY, "state": "STOP"},
+    ))
+    resp = _api(bearer, subject).get(_set_url(subject, rset))
+    assert resp.status_code == 200, resp.content[:300]
+    data = resp.json()["data"]
+    assert data["primary"] is None and data["alternatives"] == []
+    o = data["outcome"]
+    assert o["result_status"] == "SAFETY_BOUNDARY" and o["readiness_state"] == "BLOCKED"
+    assert o["safety_state"] == "STOP" and o["reason_codes"] == ["SAFETY_STOP"]
+    assert o["displayable"] is False and o["why"] == [] and o["evidence_refs"] == []
 
 
 # ---------------------------------------------------------------- события
@@ -213,44 +258,57 @@ HIDDEN_REFS = {
     "safety": "SAFETY-REF-7f3", "anketa": "ANKETA-REF-7f3", "policy": "POLICY-REF-7f3",
     "operator": "OPERATOR-REF-7f3", "catalog": "CATALOG-REF-7f3", "brand_new_source": "NEWSRC-REF-7f3",
 }
+STORED = [
+    {"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"},
+    *({"source": s, "ref": r} for s, r in HIDDEN_REFS.items()),
+    {"source": "user_stated", "ref": "u-1"},
+    {"source": "journey", "ref": "j-1", "said_at": "2026-09-15T10:05:00Z", "text": "СЫРОЙ ТЕКСТ РЕПЛИКИ"},
+]
+SHOWN = [
+    {"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"},
+    {"source": "user_stated", "ref": "u-1", "said_at": None},
+    {"source": "journey", "ref": "j-1", "said_at": "2026-09-15T10:05:00Z"},
+]
 
 
-def test_evidence_refs_show_only_allowed_sources_and_only_three_keys(bearer, subject):
-    """Разрешённые источники — в порядке хранения, ровно {source, ref, said_at}; остальное не покидает запись."""
-    stored = [
-        {"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"},
-        *({"source": s, "ref": r} for s, r in HIDDEN_REFS.items()),
-        {"source": "user_stated", "ref": "u-1"},
-        {"source": "journey", "ref": "j-1", "said_at": "2026-09-15T10:05:00Z", "text": "СЫРОЙ ТЕКСТ РЕПЛИКИ"},
-    ]
-    rset = persist(RecommendationSetInput(
-        subject_ref=str(subject.pk), intent_id="i", versions=PolicyVersions("dp", "tx", "sp", "cm", "pp"),
-        primary=_rec(evidence_refs=stored),
-    ))
-    resp = _api(bearer, subject).get(_set_url(subject, rset))
-    assert resp.status_code == 200, resp.content[:300]
-    assert resp.json()["data"]["primary"]["evidence_refs"] == [
-        {"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"},
-        {"source": "user_stated", "ref": "u-1", "said_at": None},
-        {"source": "journey", "ref": "j-1", "said_at": "2026-09-15T10:05:00Z"},
-    ]
-    raw = resp.content.decode()
+def _assert_hidden_absent(raw: str) -> None:
     for source, ref in HIDDEN_REFS.items():
         assert ref not in raw and f'"{source}"' not in raw, source
     assert "СЫРОЙ ТЕКСТ" not in raw and '"text"' not in raw
 
 
+def test_evidence_refs_show_only_allowed_sources_and_only_three_keys(bearer, subject):
+    """Вариант: разрешённые источники — в порядке хранения, ровно {source, ref, said_at}; остальное — нет."""
+    rset = persist(_set_in(subject, primary=_rec(evidence_refs=list(STORED))))
+    resp = _api(bearer, subject).get(_set_url(subject, rset))
+    assert resp.status_code == 200, resp.content[:300]
+    assert resp.json()["data"]["primary"]["evidence_refs"] == SHOWN
+    _assert_hidden_absent(resp.content.decode())
+
+
+def test_outcome_evidence_follows_the_same_rule(bearer, subject):
+    """DRF-1905: evidence исхода набора — тот же закрытый список и та же форма."""
+    rset = persist(_set_in(subject, evidence_refs=list(STORED)))
+    resp = _api(bearer, subject).get(_set_url(subject, rset))
+    assert resp.json()["data"]["outcome"]["evidence_refs"] == SHOWN
+    _assert_hidden_absent(resp.content.decode())
+
+
 def test_not_displayable_record_shows_no_evidence(bearer, subject):
-    rset = persist(RecommendationSetInput(
-        subject_ref=str(subject.pk), intent_id="i", versions=PolicyVersions("dp", "tx", "sp", "cm", "pp"),
+    rset = persist(_set_in(
+        subject,
+        evidence_refs=[{"source": "conversation", "ref": "msg-set-hidden-7f3"}],
+        explanation={"displayable": False, "user_visible_reasons": [], "internal_only": []},
         primary=_rec(
             evidence_refs=[{"source": "conversation", "ref": "msg-hidden-7f3"}],
             explanation={"displayable": False, "user_visible_reasons": [], "internal_only": []},
         ),
     ))
     resp = _api(bearer, subject).get(_set_url(subject, rset))
-    assert resp.json()["data"]["primary"]["evidence_refs"] == []
-    assert "msg-hidden-7f3" not in resp.content.decode()
+    data = resp.json()["data"]
+    assert data["primary"]["evidence_refs"] == [] and data["outcome"]["evidence_refs"] == []
+    raw = resp.content.decode()
+    assert "msg-hidden-7f3" not in raw and "msg-set-hidden-7f3" not in raw
 
 
 def test_allowlist_names_no_health_or_internal_source():

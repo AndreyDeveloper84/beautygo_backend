@@ -10,6 +10,15 @@
 ``RecommendationSet.subject_ref`` — UUID пользователя Ayla строкой (уже
 псевдоним; ни телефона, ни имени).
 
+Исход на уровне набора (DRF-1905, §32)
+--------------------------------------
+
+Исход прохода, готовность, вердикт безопасности, снимок контекста и версии —
+у набора. ``SAFETY_BOUNDARY`` / ``INSUFFICIENT_CONTEXT`` «не являются NBA»: у
+такого набора нет ни primary, ни alternatives, а ``outcome`` объясняет, почему.
+У каждого варианта NBA — свои ``reason_codes`` / ``why`` / ``evidence_refs``
+(WHY альтернативы, C04.2).
+
 Вход записи (DRF-1888)
 ----------------------
 
@@ -19,9 +28,10 @@
 замер ``docs/MEASURE_RECOMMENDATION_RECORD_LIVE_PATH_2026-09-15.md``). Решение
 приносит тот, кто его принял; здесь — только проверка и запись:
 
-* проверка — тот же ``records.persist`` (минимум §5, версии политик, lineage);
-  лишнее поле во входе — отказ по имени, а не молчаливый пропуск
-  (``service_id`` в записи NBA не место, B2);
+* проверка — тот же ``records.persist`` (минимум §5, версии политик, lineage,
+  пара «исход ⇔ primary»); лишнее поле во входе — на верхнем уровне или в
+  варианте — отказ по имени, а не молчаливый пропуск (``service_id`` в записи
+  NBA не место, B2);
 * ``execution_mode`` ставит **сервер**: ``SHADOW`` (C1). ``LIVE`` — 400
   ``LIVE_NOT_ALLOWED``, пока пороги DecisionReadiness не доказаны (C1, O3);
 * живая заявка на удаление — 423 до любой записи (§7 D2);
@@ -35,6 +45,9 @@
 
 Что отдаётся при чтении (просьба e8 к #426):
 
+* ``outcome`` набора: ``result_status``, ``readiness_state``, ``safety_state``,
+  ``reason_codes``, ``displayable``, ``why``, ``evidence_refs`` — по тем же
+  правилам показа, что и у варианта;
 * ``actionable`` — ``now < actionable_until`` **на момент ответа**: канал
   срок не считает; после 2 ч — ``false``, запись при этом на месте (B13);
 * ``why`` — **только** ``explanation.user_visible_reasons`` и только при
@@ -47,8 +60,9 @@
   контекст пути); элемент — ровно ``{source, ref, said_at}``, без текста.
   Список — предложение до решения OQ-REC-6; здоровье, safety, внутренности
   правил и служебные пометки не отдаются;
-* primary + alternatives с ``parent`` и ``rerank_reason`` (код словаря
-  канона v1.1 §10.3 — не фраза; фраза альтернативы — её собственный ``why``);
+* primary (``null`` при исходе без NBA) + alternatives с ``parent`` и
+  ``rerank_reason`` (код словаря канона v1.1 §10.3 — не фраза; фраза
+  альтернативы — её собственный ``why``);
 * ``execution_mode`` набора (C1): бот не показывает ``SHADOW``.
 
 Услуги, мастера, цены, слота в ответе нет — их в записи нет по построению
@@ -57,7 +71,8 @@
 События: ``presented / explanation_requested / alternative_requested /
 engaged`` — пишет канал; ``booking_intent.created`` — Booking / Handoff, не
 эта ручка (отказ по имени). ``accepted`` / ``declined`` → 400 с кодом
-``EVENT_NOT_IN_TAXONOMY`` (B8).
+``EVENT_NOT_IN_TAXONOMY`` (B8). События бывают только у записи варианта: у
+набора без NBA писать их не на что.
 """
 from __future__ import annotations
 
@@ -109,9 +124,9 @@ _RECORD_FIELDS = frozenset(f.name for f in dataclass_fields(RecommendationInput)
 _VERSION_FIELDS = tuple(f.name for f in dataclass_fields(PolicyVersions))
 
 
-def _why(rec: Recommendation) -> list[str]:
+def _why(obj: Recommendation | RecommendationSet) -> list[str]:
     """Только displayable и только user_visible_reasons. internal_only не покидает модель."""
-    exp = rec.explanation or {}
+    exp = obj.explanation or {}
     if not exp.get("displayable"):
         return []
     return [str(s) for s in exp.get("user_visible_reasons", []) if str(s).strip()]
@@ -129,26 +144,40 @@ def _why(rec: Recommendation) -> list[str]:
 EVIDENCE_DISPLAYABLE_SOURCES = frozenset({"user_stated", "conversation", "confirmed_memory", "journey"})
 
 
-def _evidence(rec: Recommendation) -> list[dict]:
-    """Ссылки на основания решения — только displayable и только разрешённых источников.
+def _evidence(obj: Recommendation | RecommendationSet) -> list[dict]:
+    """Ссылки на основания — только displayable и только разрешённых источников.
 
-    Элемент — ровно ``{source, ref, said_at}``: ``ref`` — указатель (текст живёт в
-    транскрипте бота), поэтому ни текста, ни ПДн, ни здоровья в ответе нет по
-    построению; лишние ключи хранимого элемента наружу не идут.
+    Одно правило для исхода набора и для варианта. Элемент — ровно
+    ``{source, ref, said_at}``: ``ref`` — указатель (текст живёт в транскрипте
+    бота), поэтому ни текста, ни ПДн, ни здоровья в ответе нет по построению;
+    лишние ключи хранимого элемента наружу не идут.
     """
-    if not (rec.explanation or {}).get("displayable"):
+    if not (obj.explanation or {}).get("displayable"):
         return []
     shown = []
-    for ev in rec.evidence_refs or []:
+    for ev in obj.evidence_refs or []:
         if not isinstance(ev, dict):
             continue
         source, ref = str(ev.get("source") or ""), str(ev.get("ref") or "")
-        # Пустой ref сюда не доходит: persist отказывает такой записи (records._check_record).
+        # Пустой ref сюда не доходит: persist отказывает такой записи (records._check_grounds).
         if source not in EVIDENCE_DISPLAYABLE_SOURCES:
             continue
         said_at = ev.get("said_at")
         shown.append({"source": source, "ref": ref, "said_at": str(said_at) if said_at else None})
     return shown
+
+
+def _outcome(rset: RecommendationSet) -> dict:
+    """Исход прохода (DRF-1905): одно на набор, в том числе когда NBA нет."""
+    return {
+        "result_status": rset.result_status,
+        "readiness_state": rset.readiness_state,
+        "safety_state": (rset.safety_evaluation_ref or {}).get("state"),
+        "reason_codes": list(rset.reason_codes or []),
+        "displayable": bool((rset.explanation or {}).get("displayable")),
+        "why": _why(rset),
+        "evidence_refs": _evidence(rset),
+    }
 
 
 def _record(rec: Recommendation, now) -> dict:
@@ -163,13 +192,10 @@ def _record(rec: Recommendation, now) -> dict:
             "family": rec.family,
             "target_outcomes": list(rec.target_outcomes or []),
         },
-        "result_status": rec.result_status,
-        "readiness_state": rec.readiness_state,
         "reason_codes": list(rec.reason_codes or []),
         "displayable": bool((rec.explanation or {}).get("displayable")),
         "why": _why(rec),
         "evidence_refs": _evidence(rec),
-        "safety_state": (rec.safety_evaluation_ref or {}).get("state"),
         "created_at": rec.created_at.isoformat(),
         "actionable_until": rec.actionable_until.isoformat(),
         "actionable": rec.is_actionable(now),
@@ -179,19 +205,21 @@ def _record(rec: Recommendation, now) -> dict:
 
 
 class RecommendationSetReadSerializer(serializers.Serializer):
-    """Форма ответа — для схемы. Тело собирается в `_record`, здесь — описание."""
+    """Форма ответа — для схемы. Тело собирается в `_outcome`/`_record`, здесь — описание."""
 
     recommendation_set_id = serializers.UUIDField()
     subject_id = serializers.UUIDField()
     intent_id = serializers.CharField()
     execution_mode = serializers.CharField()
+    record_schema_version = serializers.CharField()
     created_at = serializers.DateTimeField()
-    primary = serializers.DictField()
+    outcome = serializers.DictField()
+    primary = serializers.DictField(allow_null=True)
     alternatives = serializers.ListField(child=serializers.DictField())
 
 
 class RecommendationSetCreateSerializer(serializers.Serializer):
-    """Вход записи: форма верхнего уровня. Минимум §5 проверяет ``persist``."""
+    """Вход записи: форма верхнего уровня. Минимум §5 и пару «исход ⇔ primary» проверяет ``persist``."""
 
     intent_id = serializers.CharField(max_length=64)
     semantic_resolution_ref = serializers.CharField(max_length=128, required=False, allow_blank=True, default="")
@@ -199,13 +227,23 @@ class RecommendationSetCreateSerializer(serializers.Serializer):
     execution_mode = serializers.CharField(required=False, allow_blank=True, default="")
     conversation_ref = serializers.DictField(required=False, default=dict)
     versions = serializers.DictField()
-    primary = serializers.DictField()
+    # --- исход прохода (DRF-1905) --------------------------------------------
+    result_status = serializers.CharField()
+    readiness_state = serializers.CharField()
+    reason_codes = serializers.ListField(child=serializers.CharField(), allow_empty=True)
+    evidence_refs = serializers.ListField(child=serializers.DictField(), required=False, default=list)
+    explanation = serializers.DictField()
+    safety_evaluation_ref = serializers.DictField()
+    context_snapshot_ref = serializers.DictField()
+    # --- NBA — только при NBA-исходе --------------------------------------------
+    primary = serializers.DictField(required=False, allow_null=True, default=None)
     alternatives = serializers.ListField(child=serializers.DictField(), required=False, default=list)
 
 
 class RecommendationSetCreatedSerializer(serializers.Serializer):
     recommendation_set_id = serializers.UUIDField()
-    primary_recommendation_id = serializers.UUIDField()
+    result_status = serializers.CharField()
+    primary_recommendation_id = serializers.UUIDField(allow_null=True)
     alternative_recommendation_ids = serializers.ListField(child=serializers.UUIDField())
     execution_mode = serializers.CharField()
 
@@ -215,6 +253,9 @@ class RecommendationEventInSerializer(serializers.Serializer):
     channel = serializers.CharField(required=False, allow_blank=True)
     channel_message_id = serializers.CharField(required=False, allow_blank=True)
     occurred_at = serializers.DateTimeField(required=False)
+
+
+_SET_FIELDS = frozenset(RecommendationSetCreateSerializer().fields)
 
 
 def _record_input(raw: dict, label: str) -> RecommendationInput:
@@ -249,7 +290,14 @@ def _set_input(subject: User, data: dict) -> RecommendationSetInput:
         execution_mode=ExecutionMode.SHADOW,
         conversation_ref=dict(data["conversation_ref"]),
         versions=PolicyVersions(**{name: str(versions.get(name) or "") for name in _VERSION_FIELDS}),
-        primary=_record_input(data["primary"], "primary"),
+        result_status=data["result_status"],
+        readiness_state=data["readiness_state"],
+        reason_codes=list(data["reason_codes"]),
+        evidence_refs=list(data["evidence_refs"]),
+        explanation=dict(data["explanation"]),
+        safety_evaluation_ref=dict(data["safety_evaluation_ref"]),
+        context_snapshot_ref=dict(data["context_snapshot_ref"]),
+        primary=_record_input(data["primary"], "primary") if data["primary"] is not None else None,
         alternatives=tuple(
             _record_input(raw, f"alternative[{i}]") for i, raw in enumerate(data["alternatives"], start=1)
         ),
@@ -271,7 +319,7 @@ class InternalRecommendationSetCreateView(APIView):
             400: OpenApiResponse(
                 description=(
                     "IDEMPOTENCY_KEY_REQUIRED | LIVE_NOT_ALLOWED (C1) | "
-                    "VALIDATION_ERROR (минимум §5, по имени поля)"
+                    "VALIDATION_ERROR (минимум §5, пара «исход ⇔ primary», лишнее поле — по имени)"
                 ),
             ),
             403: OpenApiResponse(description="Missing / invalid bearer, unnamed or foreign subject (DRF-1617)"),
@@ -318,6 +366,14 @@ class InternalRecommendationSetCreateView(APIView):
 
     @staticmethod
     def _create(request: Request, subject: User) -> Response:
+        # Сериализатор DRF молча выбросил бы незнакомый ключ верхнего уровня —
+        # а у варианта лишнее поле уже отказ по имени. Одно правило на оба уровня.
+        extra = sorted(set(request.data or {}) - _SET_FIELDS)
+        if extra:
+            return error_response(
+                "VALIDATION_ERROR", f"набор: поля {extra} не входят в запись RecommendationSet",
+                details={"unknown_fields": extra}, status_code=400,
+            )
         ser = RecommendationSetCreateSerializer(data=request.data)
         if not ser.is_valid():
             return error_response(
@@ -335,12 +391,13 @@ class InternalRecommendationSetCreateView(APIView):
             rset = persist(_set_input(subject, data))
         except RecordInvalid as exc:
             return error_response("VALIDATION_ERROR", str(exc), status_code=400)
-        recs = list(rset.recommendations.order_by("created_at", "pk"))
         return success_response({
             "recommendation_set_id": str(rset.pk),
-            "primary_recommendation_id": next(str(r.pk) for r in recs if r.role == Recommendation.Role.PRIMARY),
+            "result_status": rset.result_status,
+            "primary_recommendation_id": str(rset.primary_id) if rset.primary_id else None,
             "alternative_recommendation_ids": [
-                str(r.pk) for r in recs if r.role == Recommendation.Role.ALTERNATIVE
+                str(pk) for pk in rset.recommendations.filter(role=Recommendation.Role.ALTERNATIVE)
+                .order_by("created_at", "pk").values_list("pk", flat=True)
             ],
             "execution_mode": rset.execution_mode,
         }, status_code=201)
@@ -362,15 +419,17 @@ class InternalRecommendationSetView(APIView):
     def get(self, request: Request, user_id, set_id) -> Response:
         rset = (
             RecommendationSet.objects.filter(pk=set_id, subject_ref=str(user_id))
+            .select_related("primary")
             .prefetch_related("recommendations")
             .first()
         )
         if rset is None:
             return error_response("NOT_FOUND", "Recommendation set not found.", status_code=404)
         now = timezone.now()
-        recs = list(rset.recommendations.order_by("created_at", "pk"))
-        primary = next((r for r in recs if r.role == Recommendation.Role.PRIMARY), None)
-        alternatives = [r for r in recs if r.role == Recommendation.Role.ALTERNATIVE]
+        alternatives = sorted(
+            (r for r in rset.recommendations.all() if r.role == Recommendation.Role.ALTERNATIVE),
+            key=lambda r: (r.created_at, str(r.pk)),
+        )
         return success_response({
             "recommendation_set_id": str(rset.pk),
             "subject_id": rset.subject_ref,
@@ -378,8 +437,10 @@ class InternalRecommendationSetView(APIView):
             "semantic_resolution_ref": rset.semantic_resolution_ref or None,
             "execution_mode": rset.execution_mode,
             "conversation_ref": dict(rset.conversation_ref or {}),
+            "record_schema_version": rset.record_schema_version,
             "created_at": rset.created_at.isoformat(),
-            "primary": _record(primary, now) if primary else None,
+            "outcome": _outcome(rset),
+            "primary": _record(rset.primary, now) if rset.primary_id else None,
             "alternatives": [_record(r, now) for r in alternatives],
         })
 

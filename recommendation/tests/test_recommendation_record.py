@@ -2,29 +2,46 @@
 
 Что стережётся:
 
-* запись пишется только через ``records.persist``: set + primary + ≤2 alternatives
-  + событие ``created``; минимум §5 и версии политик обязательны (отказ по имени поля);
+* запись пишется только через ``records.persist``: набор с исходом + (при NBA)
+  primary и ≤2 alternatives + событие ``created``; минимум §5 и версии политик
+  обязательны (отказ по имени поля);
 * **immutable**: ``save()`` существующей строки, ``QuerySet.update()``,
   ``bulk_update()``, ``delete()`` — ``ImmutableRecordError``; ничего не меняется;
 * **expires ≠ delete**: через 2 ч ``is_actionable`` ложь, запись на месте;
 * decision_subject = NBA/WHAT (B2): у модели **нет** полей execution-слоя
   (service/provider/price/slot/distance/rank/candidate) — список запрещённых имён;
-* три снимка — ссылки (B10): копия содержимого вместо ref — отказ;
+* три снимка варианта — ссылки (B10): копия содержимого вместо ref — отказ;
 * lineage: alternative без parent/rerank_reason — отказ; > 2 alternatives — отказ;
   одна primary на set (constraint);
 * события: ``accepted``/``declined`` не существуют (B8); ``created`` пишет только
   persist; append-only.
+
+DRF-1905 — исход на уровне набора (§32):
+
+* исход, готовность, вердикт безопасности, снимок контекста и версии — у набора;
+  ``SAFETY_BOUNDARY`` / ``INSUFFICIENT_CONTEXT`` записываются **без** primary и
+  alternatives, NBA-исход без primary — отказ; значения проверяются, строчные — отказ;
+* то же держит **база**: CHECK на строке набора (``persist`` в обход — ``IntegrityError``);
+* FK ``primary`` отложен до COMMIT — иначе порядок «набор с id primary, потом primary»
+  невозможен при immutable-наборе; сторож читает SQL миграции 0002;
+* миграция 0002 отказывает на непустой таблице.
 """
 from __future__ import annotations
 
+import importlib
+import io
+import uuid
 from datetime import timedelta
 
 import pytest
-from django.db import IntegrityError, transaction
+from django.apps import apps as django_apps
+from django.core.management import call_command
+from django.db import IntegrityError, connection, transaction
 from django.utils import timezone
 
 from recommendation.models import (
     ACTIONABILITY_TTL,
+    RECORD_SCHEMA_VERSION,
     ImmutableRecordError,
     Recommendation,
     RecommendationEvent,
@@ -48,16 +65,15 @@ VERSIONS = PolicyVersions(
 SNAPSHOT = {"snapshot_id": "ctx-1", "snapshot_version": 1, "content_digest": "sha256:abc"}
 SAFETY = {"state": "NORMAL", "rule_id": "r-0", "policy_version": "sp-1", "evidence_ref": "ev-0",
           "activated_at": "2026-09-12T10:00:00Z"}
+EVIDENCE = [{"source": "conversation", "ref": "msg-1", "said_at": "2026-09-12T10:00:00Z"}]
 
 
 def _rec(role="primary", **over) -> RecommendationInput:
     base = dict(
         role=role, direction_code="REDUCE_MUSCLE_TENSION_BACK", family="ADDRESS",
-        target_outcomes=["REDUCE(MUSCLE_TENSION)"], result_status="CLEAR_PRIMARY", readiness_state="READY",
-        reason_codes=["ELIG_CAPABILITY_VERIFIED"],
-        evidence_refs=[{"source": "conversation", "ref": "msg-1", "said_at": "2026-09-12T10:00:00Z"}],
+        target_outcomes=["REDUCE(MUSCLE_TENSION)"],
+        reason_codes=["ELIG_CAPABILITY_VERIFIED"], evidence_refs=list(EVIDENCE),
         explanation={"displayable": True, "user_visible_reasons": ["ты сказала, что ноет спина"], "internal_only": []},
-        safety_evaluation_ref=SAFETY, context_snapshot_ref=SNAPSHOT,
     )
     if role == "alternative":
         base["rerank_reason"] = "ALTERNATIVE_REQUESTED"
@@ -66,9 +82,31 @@ def _rec(role="primary", **over) -> RecommendationInput:
 
 
 def _set(**over) -> RecommendationSetInput:
-    base = dict(subject_ref="user:pseudo-1", intent_id="intent-1", versions=VERSIONS, primary=_rec())
+    base = dict(
+        subject_ref="user:pseudo-1", intent_id="intent-1", versions=VERSIONS,
+        result_status="CLEAR_PRIMARY", readiness_state="READY",
+        reason_codes=["CLEAR_PRIMARY_BY_POLICY"], evidence_refs=list(EVIDENCE),
+        explanation={"displayable": True, "user_visible_reasons": ["ты сказала, что ноет спина"], "internal_only": []},
+        safety_evaluation_ref=SAFETY, context_snapshot_ref=SNAPSHOT, primary=_rec(),
+    )
     base.update(over)
     return RecommendationSetInput(**base)
+
+
+def _boundary(**over) -> RecommendationSetInput:
+    """Сегодняшний честный исход без NBA, который мозг пишет в тени (6.4): SAFETY_BOUNDARY."""
+    base = dict(
+        result_status="SAFETY_BOUNDARY", readiness_state="BLOCKED", primary=None,
+        reason_codes=["SAFETY_STOP"],
+        explanation={"displayable": False, "user_visible_reasons": [], "internal_only": ["SAFETY_STOP"]},
+        safety_evaluation_ref={**SAFETY, "state": "STOP"},
+    )
+    base.update(over)
+    return _set(**base)
+
+
+def _counts() -> tuple[int, int, int]:
+    return RecommendationSet.objects.count(), Recommendation.objects.count(), RecommendationEvent.objects.count()
 
 
 # ---------------------------------------------------------------- запись
@@ -77,13 +115,19 @@ def test_persist_writes_set_primary_alternatives_and_created_events():
     now = timezone.now()
     alt_in = _rec("alternative", direction_code="IMPROVE_RELAXATION", family="SUPPORT")
     rset = persist(_set(alternatives=(alt_in,)), now=now)
-    assert RecommendationSet.objects.count() == 1 and Recommendation.objects.count() == 2
+    assert _counts() == (1, 2, 2)
     primary = rset.primary
     assert primary.role == "primary" and primary.parent is None and primary.rerank_reason == ""
+    assert primary.recommendation_set_id == rset.pk
     alt = rset.recommendations.get(role="alternative")
     assert alt.parent_id == primary.pk and alt.rerank_reason == "ALTERNATIVE_REQUESTED"
     assert primary.actionable_until == now + ACTIONABILITY_TTL == now + timedelta(hours=2)
-    assert primary.decision_policy_version == "dp-2026-09-12" and primary.record_schema_version == "1.0"
+    # провенанс и исход — у набора; схема 1.1 — у обоих
+    assert rset.result_status == "CLEAR_PRIMARY" and rset.readiness_state == "READY"
+    assert rset.decision_policy_version == "dp-2026-09-12" and rset.context_snapshot_ref == SNAPSHOT
+    assert rset.record_schema_version == primary.record_schema_version == RECORD_SCHEMA_VERSION == "1.1"
+    # WHY варианта остаётся на варианте (C04.2)
+    assert alt.reason_codes == ["ELIG_CAPABILITY_VERIFIED"] and alt.explanation["displayable"] is True
     assert list(RecommendationEvent.objects.values_list("kind", flat=True)) == ["recommendation.created"] * 2
 
 
@@ -100,35 +144,60 @@ def test_set_is_shadow_by_default_and_live_only_when_declared_with_conversation_
 
 
 def test_no_action_is_a_valid_recorded_result():
-    primary = _rec(result_status="NO_ACTION", family="OBSERVE", readiness_state="INSUFFICIENT_EVIDENCE")
-    rset = persist(_set(primary=primary))
-    assert rset.primary.result_status == "NO_ACTION"
+    """NO_ACTION — до размещения в таксономии (OQ-R11) — записывается как NBA, с primary."""
+    rset = persist(_set(result_status="NO_ACTION", readiness_state="INSUFFICIENT_EVIDENCE",
+                        primary=_rec(family="OBSERVE")))
+    assert rset.result_status == "NO_ACTION" and rset.primary.family == "OBSERVE"
 
 
 @pytest.mark.parametrize("bad, match", [
     ({"direction_code": ""}, "direction_code"),
     ({"family": "INTERVENE"}, "family"),
-    ({"reason_codes": []}, "reason_codes"),
-    ({"explanation": {"user_visible_reasons": []}}, "displayable"),
-    ({"safety_evaluation_ref": {"state": "NORMAL"}}, "safety_evaluation_ref"),
-    ({"context_snapshot_ref": {"facts": {"age": 30}}}, "context_snapshot_ref"),
+    ({"reason_codes": []}, "primary: reason_codes"),
+    ({"explanation": {"user_visible_reasons": []}}, "primary: explanation.displayable"),
     ({"memory_snapshot_ref": {"entries": ["copied value"]}}, "memory_snapshot_ref"),
-    ({"result_status": "ACCEPTED"}, "result_status"),
-    ({"readiness_state": "MAYBE"}, "readiness_state"),
-    ({"evidence_refs": [{"kind": "user_stated"}]}, r"evidence_refs\[0\]"),
+    ({"evidence_refs": [{"kind": "user_stated"}]}, r"primary: evidence_refs\[0\]"),
 ])
-def test_incomplete_decision_is_refused_by_field_name(bad, match):
+def test_incomplete_variant_is_refused_by_field_name(bad, match):
     with pytest.raises(RecordInvalid, match=match):
         persist(_set(primary=_rec(**bad)))
-    assert Recommendation.objects.count() == 0
+    assert _counts() == (0, 0, 0)
 
 
-def test_missing_policy_version_is_refused_by_name():
+@pytest.mark.parametrize("bad, match", [
+    ({"safety_evaluation_ref": {"state": "NORMAL"}}, "safety_evaluation_ref"),
+    ({"safety_evaluation_ref": {**SAFETY, "state": "normal"}}, "safety_evaluation_ref.state"),
+    ({"context_snapshot_ref": {"facts": {"age": 30}}}, "context_snapshot_ref"),
+    ({"result_status": "ACCEPTED"}, "result_status"),
+    ({"readiness_state": "MAYBE"}, "readiness_state"),
+    ({"readiness_state": "blocked"}, "readiness_state"),       # движок бота отдаёт строчные — каталог не нормализует
+    ({"reason_codes": []}, "набор: reason_codes"),
+    ({"explanation": {"user_visible_reasons": []}}, "набор: explanation.displayable"),
+    ({"evidence_refs": [{"source": "", "ref": "x"}]}, r"набор: evidence_refs\[0\]"),
+])
+def test_incomplete_set_is_refused_by_field_name(bad, match):
+    with pytest.raises(RecordInvalid, match=match):
+        persist(_set(**bad))
+    assert _counts() == (0, 0, 0)
+
+
+def test_missing_or_too_long_policy_version_is_refused_by_name():
     versions = PolicyVersions(
         decision_policy="dp", taxonomy="", safety_policy="sp", catalog_mapping="", presentation_policy="pp",
     )
     with pytest.raises(RecordInvalid, match="taxonomy, catalog_mapping"):
         persist(_set(versions=versions))
+    too_long = PolicyVersions(
+        decision_policy="none:" + "x" * 28, taxonomy="none:OQ-R11-open", safety_policy="sp",
+        catalog_mapping="none", presentation_policy="none",
+    )
+    with pytest.raises(RecordInvalid, match="длиннее 32 знаков: decision_policy"):
+        persist(_set(versions=too_long))
+    ok = PolicyVersions(
+        decision_policy="dp-v0-shadow", taxonomy="none:OQ-R11-open", safety_policy="sp",
+        catalog_mapping="none", presentation_policy="none",
+    )
+    assert persist(_set(versions=ok)).taxonomy_version == "none:OQ-R11-open"
 
 
 def test_alternative_needs_parent_and_reason_and_no_more_than_two():
@@ -136,24 +205,114 @@ def test_alternative_needs_parent_and_reason_and_no_more_than_two():
         persist(_set(alternatives=(_rec("alternative", rerank_reason=""),)))
     with pytest.raises(RecordInvalid, match="> 2"):
         persist(_set(alternatives=tuple(_rec("alternative") for _ in range(3))))
-    with pytest.raises(RecordInvalid, match="primary.role"):
+    with pytest.raises(RecordInvalid, match="role должен быть primary"):
         persist(_set(primary=_rec("alternative")))
-    assert Recommendation.objects.count() == 0
+    assert _counts() == (0, 0, 0)
 
 
 def test_one_primary_per_set_is_a_schema_constraint():
     rset = persist(_set())
     second = Recommendation(
-        recommendation_set=rset, role="primary", direction_code="X", family="ADDRESS", result_status="CLEAR_PRIMARY",
-        readiness_state="READY", reason_codes=["r"], explanation={"displayable": False},
-        safety_evaluation_ref=SAFETY, context_snapshot_ref=SNAPSHOT,
-        decision_policy_version="d", taxonomy_version="t", safety_policy_version="s",
-        catalog_mapping_version="c", presentation_policy_version="p",
+        recommendation_set=rset, role="primary", direction_code="X", family="ADDRESS",
+        reason_codes=["r"], explanation={"displayable": False},
         created_at=timezone.now(), actionable_until=timezone.now() + ACTIONABILITY_TTL,
     )
     with pytest.raises(IntegrityError):
         with transaction.atomic():
             second.save()
+
+
+# ---------------------------------------------------------------- исход без NBA (DRF-1905, §32)
+
+def test_safety_boundary_is_recorded_without_any_nba():
+    rset = persist(_boundary())
+    assert rset.result_status == "SAFETY_BOUNDARY" and rset.primary_id is None and rset.primary is None
+    assert rset.reason_codes == ["SAFETY_STOP"] and rset.safety_evaluation_ref["state"] == "STOP"
+    assert _counts() == (1, 0, 0)     # записей варианта и событий нет — их не бывает без NBA
+
+
+def test_insufficient_context_is_an_allowed_value_without_nba():
+    """Пока не производится (после OQ-R11), но пара «статус ⇔ primary IS NULL» верна и для него."""
+    rset = persist(_boundary(result_status="INSUFFICIENT_CONTEXT", readiness_state="NEEDS_REQUIRED_CONTEXT"))
+    assert rset.primary_id is None and _counts() == (1, 0, 0)
+
+
+@pytest.mark.parametrize("over, match", [
+    ({"primary": _rec()}, "не является NBA"),
+    ({"alternatives": (_rec("alternative"),)}, "не является NBA"),
+])
+def test_no_nba_outcome_with_variants_is_refused_by_name(over, match):
+    with pytest.raises(RecordInvalid, match=match):
+        persist(_boundary(**over))
+    assert _counts() == (0, 0, 0)
+
+
+@pytest.mark.parametrize("status", ["CLEAR_PRIMARY", "MULTIPLE_SUITABLE", "NO_ACTION"])
+def test_nba_outcome_without_primary_is_refused_by_name(status):
+    with pytest.raises(RecordInvalid, match="NBA-исход без primary"):
+        persist(_set(result_status=status, primary=None))
+    assert _counts() == (0, 0, 0)
+
+
+def _raw_set(**over) -> RecommendationSet:
+    """Набор мимо persist — чтобы проверить, что условие держит БАЗА, а не только код."""
+    fields = dict(
+        subject_ref="user:raw", intent_id="i", result_status="CLEAR_PRIMARY", readiness_state="READY",
+        reason_codes=["r"], explanation={"displayable": False}, safety_evaluation_ref=SAFETY,
+        context_snapshot_ref=SNAPSHOT, decision_policy_version="d", taxonomy_version="t",
+        safety_policy_version="s", catalog_mapping_version="c", presentation_policy_version="p",
+        created_at=timezone.now(),
+    )
+    fields.update(over)
+    return RecommendationSet(**fields)
+
+
+def test_database_check_ties_outcome_to_primary_in_both_directions():
+    with pytest.raises(IntegrityError):                          # NBA-исход без primary
+        with transaction.atomic():
+            _raw_set(result_status="CLEAR_PRIMARY", primary_id=None).save()
+    existing = persist(_set()).primary
+    with pytest.raises(IntegrityError):                          # исход без NBA — но с primary
+        with transaction.atomic():
+            _raw_set(result_status="SAFETY_BOUNDARY", primary_id=existing.pk).save()
+    with transaction.atomic():                                   # положительная стража: верная пара проходит
+        _raw_set(result_status="SAFETY_BOUNDARY", primary_id=None).save()
+
+
+def test_primary_fk_is_checked_at_commit_not_at_insert():
+    """Порядок persist («набор с id primary, потом primary») законен только при отложенном FK.
+
+    Тест-транзакция не коммитится, поэтому проверку на COMMIT вызываем явно:
+    ``check_constraints`` делает ``SET CONSTRAINTS ALL IMMEDIATE``.
+    """
+    persist(_set())
+    connection.check_constraints()                               # целая запись — ограничения сходятся
+    with transaction.atomic():
+        _raw_set(primary_id=uuid.uuid4()).save()                 # висячий primary — вставка проходит (отложено)
+        with pytest.raises(IntegrityError):
+            connection.check_constraints()
+        transaction.set_rollback(True)
+
+
+def test_migration_0002_creates_the_primary_fk_deferrable():
+    """Сторож на форму схемы: будущая миграция, сделавшая FK немедленным, молча сломала бы persist."""
+    out = io.StringIO()
+    call_command("sqlmigrate", "recommendation", "0002", stdout=out)
+    # Для FK, добавленного к существующей таблице, Django пишет ограничение в строке
+    # ADD COLUMN: `"primary_id" uuid NULL CONSTRAINT … REFERENCES … DEFERRABLE INITIALLY DEFERRED`
+    # — без слов FOREIGN KEY. Хвост той же строки `SET CONSTRAINTS … IMMEDIATE` действует
+    # только внутри транзакции миграции, не в определении ограничения.
+    fk_lines = [line for line in out.getvalue().splitlines() if '"primary_id"' in line and "REFERENCES" in line]
+    assert fk_lines, "в SQL миграции 0002 нет FK primary_id — сторож смотрит не туда"
+    assert all("DEFERRABLE INITIALLY DEFERRED" in line for line in fk_lines), fk_lines
+
+
+def test_migration_0002_refuses_a_non_empty_table():
+    migration = importlib.import_module("recommendation.migrations.0002_set_level_outcome")
+    migration.refuse_if_records_exist(django_apps, None)         # пустая таблица — проходит
+    persist(_boundary())
+    with pytest.raises(RuntimeError, match="безопасна только на пустой"):
+        migration.refuse_if_records_exist(django_apps, None)
 
 
 # ---------------------------------------------------------------- immutable
@@ -174,6 +333,8 @@ def test_record_cannot_be_updated_or_deleted_by_any_path():
         Recommendation.objects.filter(pk=rec.pk).delete()
     with pytest.raises(ImmutableRecordError):
         RecommendationSet.objects.all().delete()
+    with pytest.raises(ImmutableRecordError):
+        RecommendationSet.objects.filter(pk=rset.pk).update(result_status="SAFETY_BOUNDARY")
     with pytest.raises(ImmutableRecordError):
         RecommendationEvent.objects.all().update(kind="recommendation.engaged")
     rec.refresh_from_db()
@@ -203,17 +364,31 @@ def test_supersession_is_a_new_record_not_an_edit():
 def test_the_record_carries_no_execution_fields():
     forbidden = {"candidate_id", "rank", "service_ref", "service", "provider_ref", "provider", "specialist",
                  "price", "price_snapshot", "availability_ref", "slot", "distance_meters", "distance_km", "score"}
-    names = {f.name for f in Recommendation._meta.get_fields()}
+    names = {f.name for f in Recommendation._meta.get_fields()} | {f.name for f in RecommendationSet._meta.get_fields()}
     assert not names & forbidden, names & forbidden
 
 
 def test_snapshots_are_refs_not_copies():
-    rec = persist(_set(primary=_rec(
+    rset = persist(_set(primary=_rec(
         execution_mapping_snapshot_ref={"snapshot_id": "exec-1", "snapshot_version": 1, "content_digest": "sha256:e"},
         transaction_snapshot_ref={"snapshot_id": "tx-1", "snapshot_version": 1, "content_digest": "sha256:t"},
-    ))).primary
-    for ref in (rec.context_snapshot_ref, rec.execution_mapping_snapshot_ref, rec.transaction_snapshot_ref):
+    )))
+    rec = rset.primary
+    for ref in (rset.context_snapshot_ref, rec.execution_mapping_snapshot_ref, rec.transaction_snapshot_ref):
         assert set(ref) == {"snapshot_id", "snapshot_version", "content_digest"}
+
+
+def test_decision_level_fields_live_only_on_the_set():
+    """DRF-1905: одно на проход — в одном месте; на варианте их нет, чтобы не разойтись."""
+    moved = {"result_status", "readiness_state", "safety_evaluation_ref", "context_snapshot_ref",
+             "decision_policy_version", "taxonomy_version", "safety_policy_version",
+             "catalog_mapping_version", "presentation_policy_version"}
+    record_fields = {f.name for f in Recommendation._meta.get_fields()}
+    set_fields = {f.name for f in RecommendationSet._meta.get_fields()}
+    assert not record_fields & moved, record_fields & moved
+    assert moved <= set_fields, moved - set_fields
+    # WHY — на обоих уровнях (вариант А главного окна)
+    assert {"reason_codes", "evidence_refs", "explanation"} <= record_fields & set_fields
 
 
 # ---------------------------------------------------------------- события
