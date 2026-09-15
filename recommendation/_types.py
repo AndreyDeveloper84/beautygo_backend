@@ -552,18 +552,23 @@ class RecommendationDecision:
     reason_codes: tuple[ReasonCode, ...]
     policy_versions: PolicyVersions
     computed_at: datetime
-    #: H1-в (DRF-1934): первая стадия S2..S5, разделившая лучший ярус; `None` —
-    #: причина в `separation_state`. S6 ярус не делит и сюда не попадает.
+    #: Поправка O1, утверждена владельцем 15.09
+    #: (`docs/PROMPT_ORCHESTRATOR_AYLA_CONTROLLED_PILOT_NEXT_WAVE.md` §8): ровно
+    #: separation_stage, best_group_size, candidate_count, separation_state, separation_score.
+    #: H1-в: первая стадия S2..S5, разделившая лучший ярус; `None` — причина в
+    #: `separation_state`. S6 ярус не делит и сюда не попадает.
     separation_stage: StageId | None
     separation_state: SeparationState
-    #: Размер лучшего яруса. «Отделён, но не одиночный» различает порог
-    #: мозга, а не каталог (Р2 главного окна 15.09). 0 — при K5 и пустом множестве.
-    best_tier_size: int
+    #: Размер лучшего яруса. «Отделён, но не одиночный» различает порог мозга,
+    #: а не каталог. 0 — при K5 и пустом множестве.
+    best_group_size: int
+    #: Сколько кандидатов допущено к ранжированию (прошли S0/S1) — знаменатель
+    #: к `best_group_size`; тень копит оба (§9).
+    candidate_count: int
     census: "MappingCensus" = field(default_factory=lambda: MappingCensus())
-    #: §13.1 `separation ∈ [0,1]` — **не вычисляется**: H1-в даёт вид, но не
-    #: отображение стадии в число, а оно — `CONTROLLED_POLICY` владельца.
-    #: До решения всегда `None`; тест красит любое другое значение.
-    separation: float | None = None
+    #: O2 (§9): числовой score не задаётся до калибровки по тени — всегда `None`.
+    #: Номер стадии в «вероятность» не превращается (§14); тест красит любое значение.
+    separation_score: float | None = None
 
     @property
     def is_empty(self) -> bool:
