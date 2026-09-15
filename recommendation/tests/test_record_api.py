@@ -267,30 +267,38 @@ def test_response_is_plain_json_without_scores(bearer, subject, rset):
     walk(body)
 
 
-# ---------------------------------------------------------------- evidence_refs (DRF-1889)
+# ---------------------------------------------------------------- evidence_refs (DRF-1889, DRF-1921 / H6)
 
-#: Метки, которые не имеют права появиться нигде в теле ответа.
+#: Метки источников «никогда» (H6) — не имеют права появиться нигде в теле ответа.
 HIDDEN_REFS = {
     "safety": "SAFETY-REF-7f3", "anketa": "ANKETA-REF-7f3", "policy": "POLICY-REF-7f3",
-    "operator": "OPERATOR-REF-7f3", "catalog": "CATALOG-REF-7f3", "brand_new_source": "NEWSRC-REF-7f3",
+    "operator": "OPERATOR-REF-7f3", "catalog": "CATALOG-REF-7f3",
 }
+#: Основания, требующие подтверждения человеком, но без него — тоже не появляются нигде.
+UNCONFIRMED_REFS = {"journey": "JOURNEY-UNCONFIRMED-7f3", "confirmed_memory": "MEMORY-UNCONFIRMED-7f3"}
 STORED = [
     {"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"},
     *({"source": s, "ref": r} for s, r in HIDDEN_REFS.items()),
     {"source": "user_stated", "ref": "u-1"},
-    {"source": "journey", "ref": "j-1", "said_at": "2026-09-15T10:05:00Z", "text": "СЫРОЙ ТЕКСТ РЕПЛИКИ"},
+    {"source": "journey", "ref": "j-1", "said_at": "2026-09-15T10:05:00Z", "user_confirmed": True},
+    {"source": "journey", "ref": UNCONFIRMED_REFS["journey"]},
+    {"source": "confirmed_memory", "ref": UNCONFIRMED_REFS["confirmed_memory"], "user_confirmed": False},
+    {"source": "confirmed_memory", "ref": "cm-1", "user_confirmed": True},
 ]
 SHOWN = [
     {"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"},
     {"source": "user_stated", "ref": "u-1", "said_at": None},
     {"source": "journey", "ref": "j-1", "said_at": "2026-09-15T10:05:00Z"},
+    {"source": "confirmed_memory", "ref": "cm-1", "said_at": None},
 ]
 
 
 def _assert_hidden_absent(raw: str) -> None:
     for source, ref in HIDDEN_REFS.items():
         assert ref not in raw and f'"{source}"' not in raw, source
-    assert "СЫРОЙ ТЕКСТ" not in raw and '"text"' not in raw
+    for ref in UNCONFIRMED_REFS.values():
+        assert ref not in raw, ref
+    assert '"user_confirmed"' not in raw  # признак подтверждения наружу не выдаётся
 
 
 def test_evidence_refs_show_only_allowed_sources_and_only_three_keys(bearer, subject):
@@ -333,3 +341,59 @@ def test_allowlist_names_no_health_or_internal_source():
 
     assert EVIDENCE_DISPLAYABLE_SOURCES, "пустой список прячет всё — и тест выше зеленел бы по пустоте"
     assert not EVIDENCE_DISPLAYABLE_SOURCES & {"safety", "anketa", "policy", "operator", "catalog"}
+
+
+@pytest.mark.parametrize("source, flag, shown", [
+    ("journey", None, False), ("journey", False, False), ("journey", True, True),
+    ("confirmed_memory", None, False), ("confirmed_memory", False, False), ("confirmed_memory", True, True),
+    ("user_stated", None, True), ("user_stated", False, True),
+    ("conversation", None, True), ("conversation", False, True),
+])
+def test_confirmation_rule_per_source(bearer, subject, source, flag, shown):
+    """H6: journey / confirmed_memory — только при user_confirmed строго True; сказанное человеком — без признака."""
+    item = {"source": source, "ref": f"ref-{source}-7f3"}
+    if flag is not None:
+        item["user_confirmed"] = flag
+    rset = persist(_set_in(subject, evidence_refs=[item]))
+    resp = _api(bearer, subject).get(_set_url(subject, rset))
+    assert resp.status_code == 200, resp.content[:300]
+    expected = [{"source": source, "ref": f"ref-{source}-7f3", "said_at": None}] if shown else []
+    assert resp.json()["data"]["outcome"]["evidence_refs"] == expected
+
+
+def test_rows_written_before_the_closed_form_are_still_filtered(bearer, subject):
+    """Строки, записанные до закрытия формы (DRF-1921), показ не отдаёт — мимо persist: незнакомый источник,
+    признак подтверждения строкой «true», лишний ключ с текстом."""
+    from django.db import models
+
+    from recommendation.models import RecommendationSet
+
+    rset = persist(_set_in(subject))
+    legacy = [
+        {"source": "brand_new_source", "ref": "NEWSRC-REF-7f3"},
+        {"source": "journey", "ref": "JOURNEY-TRUTHY-7f3", "user_confirmed": "true"},
+        {"source": "conversation", "ref": "msg-legacy", "text": "СЫРОЙ ТЕКСТ РЕПЛИКИ"},
+    ]
+    models.QuerySet.update(RecommendationSet.objects.filter(pk=rset.pk), evidence_refs=legacy)
+    resp = _api(bearer, subject).get(_set_url(subject, rset))
+    assert resp.json()["data"]["outcome"]["evidence_refs"] == [
+        {"source": "conversation", "ref": "msg-legacy", "said_at": None},
+    ]
+    raw = resp.content.decode()
+    assert "NEWSRC-REF-7f3" not in raw and "JOURNEY-TRUTHY-7f3" not in raw
+    assert "СЫРОЙ ТЕКСТ" not in raw and '"text"' not in raw
+
+
+def test_evidence_sources_are_partitioned_into_shown_and_never():
+    """H6: каждый источник словаря записи решён — показывается или никогда; новый нельзя принять, не решив."""
+    from recommendation.record_api import EVIDENCE_CONFIRMATION_REQUIRED, EVIDENCE_DISPLAYABLE_SOURCES
+    from recommendation.records import EVIDENCE_NEVER_SHOWN, EVIDENCE_SOURCES
+
+    assert not EVIDENCE_DISPLAYABLE_SOURCES & EVIDENCE_NEVER_SHOWN
+    assert EVIDENCE_DISPLAYABLE_SOURCES | EVIDENCE_NEVER_SHOWN == EVIDENCE_SOURCES
+    assert EVIDENCE_CONFIRMATION_REQUIRED <= EVIDENCE_DISPLAYABLE_SOURCES
+    # Нижняя граница поимённо — девять значений, названных владельцем в H6.
+    assert EVIDENCE_SOURCES == {
+        "user_stated", "conversation", "confirmed_memory", "journey",
+        "safety", "anketa", "policy", "operator", "catalog",
+    }

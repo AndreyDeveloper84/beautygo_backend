@@ -62,12 +62,16 @@
   ``explanation.displayable = True``; ``internal_only`` не отдаётся ни в
   каком поле (контракт §12–§13; owner ruling 2026-07-29). Сторож в тестах
   ищет internal-only текст во всём теле ответа;
-* ``evidence_refs`` (DRF-1889) — ссылки на основания решения: тоже **только**
+* ``evidence_refs`` (DRF-1889, DRF-1921) — ссылки на основания решения: тоже **только**
   при ``displayable = True`` и только источников из закрытого списка
   ``EVIDENCE_DISPLAYABLE_SOURCES`` (сказанное человеком, подтверждённая память,
   контекст пути); элемент — ровно ``{source, ref, said_at}``, без текста.
-  Список — предложение до решения OQ-REC-6; здоровье, safety, внутренности
-  правил и служебные пометки не отдаются;
+  Список решён владельцем (H6, 15.09): «displayable по privacy/safety» — это
+  ``explanation.displayable`` записи; ``journey`` / ``confirmed_memory`` — только при
+  подтверждении человеком (``user_confirmed`` строго ``True``, признак наружу не
+  выдаётся); здоровье, safety, анкета, внутренности правил, служебные пометки и
+  каталог не отдаются никогда. На входе элемент закрыт: ключи ровно
+  ``{source, ref, said_at?, user_confirmed?}``, ``source`` — из словаря H6;
 * primary (``null`` при исходе без NBA) + alternatives с ``parent`` и
   ``rerank_reason`` (код словаря канона v1.1 §10.3 — не фраза; фраза
   альтернативы — её собственный ``why``);
@@ -142,16 +146,23 @@ def _why(obj: Recommendation | RecommendationSet) -> list[str]:
     return [str(s) for s in exp.get("user_visible_reasons", []) if str(s).strip()]
 
 
-#: DRF-1889 — источники evidence, которые можно назвать человеку. **Закрыт по
-#: умолчанию**: источник, которого здесь нет, не отдаётся, каким бы новым он ни был.
-#: Это предложение окна канона до решения OQ-REC-6 (классификация displayable /
-#: internal-only — у владельца): сказанное человеком в этом пути
-#: (``user_stated`` / ``conversation``), подтверждённая им память
-#: (``confirmed_memory``) и контекст пути (``journey``). Не отдаются: ``safety``
-#: (здоровье, §13/§23), ``anketa`` (анкета бота содержит скрининг здоровья),
-#: ``policy`` (внутренности правил, §13), ``operator`` (служебная пометка),
-#: ``catalog`` (execution-level, §12 — не основание NBA).
+#: Источники evidence, которые можно назвать человеку — **решено H6** (владелец 15.09;
+#: до этого — предложение окна канона к OQ-REC-6). **Закрыт по умолчанию**: источник,
+#: которого здесь нет, не отдаётся, каким бы новым он ни был. Сказанное человеком в этом
+#: пути (``user_stated`` / ``conversation``), подтверждённая им память (``confirmed_memory``)
+#: и контекст пути (``journey``). Не отдаются никогда: ``safety`` (здоровье, §13/§23),
+#: ``anketa`` (анкета бота содержит скрининг здоровья), ``policy`` (внутренности правил, §13),
+#: ``operator`` (служебная пометка), ``catalog`` (execution-level, §12).
+#:
+#: Толкование H6 «displayable по privacy/safety» = ``explanation.displayable`` **записи**;
+#: признака показа на элементе нет; safety-источники — никогда. Словарь записи и «никогда» —
+#: ``records.EVIDENCE_SOURCES`` / ``records.EVIDENCE_NEVER_SHOWN``; сторож в тестах держит
+#: разбиение: новый источник нельзя принять, не решив, показывается ли он.
 EVIDENCE_DISPLAYABLE_SOURCES = frozenset({"user_stated", "conversation", "confirmed_memory", "journey"})
+#: H6: эти основания показываются только при подтверждении человеком — ``user_confirmed is True``
+#: (строго ``True``, не «похоже на да»). Нет признака или ``False`` — скрыт (fail-closed).
+#: ``user_stated`` / ``conversation`` — сказано человеком в этом пути, подтверждение не нужно.
+EVIDENCE_CONFIRMATION_REQUIRED = frozenset({"journey", "confirmed_memory"})
 
 
 def _evidence(obj: Recommendation | RecommendationSet) -> list[dict]:
@@ -171,6 +182,9 @@ def _evidence(obj: Recommendation | RecommendationSet) -> list[dict]:
         source, ref = str(ev.get("source") or ""), str(ev.get("ref") or "")
         # Пустой ref сюда не доходит: persist отказывает такой записи (records._check_grounds).
         if source not in EVIDENCE_DISPLAYABLE_SOURCES:
+            continue
+        # H6: основание, требующее подтверждения человеком, без строгого True не показывается.
+        if source in EVIDENCE_CONFIRMATION_REQUIRED and ev.get("user_confirmed") is not True:
             continue
         said_at = ev.get("said_at")
         shown.append({"source": source, "ref": ref, "said_at": str(said_at) if said_at else None})

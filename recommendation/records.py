@@ -140,6 +140,26 @@ class RecommendationSetInput:
 _SNAPSHOT_KEYS = {"snapshot_id", "snapshot_version", "content_digest"}
 _SAFETY_KEYS = {"state", "rule_id", "policy_version", "evidence_ref", "activated_at"}
 
+#: Словарь источников основания (решение владельца H6, 15.09): владелец назвал ровно эти девять —
+#: четыре показываемых (``record_api.EVIDENCE_DISPLAYABLE_SOURCES``) и пять «никогда». Незнакомый
+#: источник запись не принимает; названный «никогда» — принимает и не показывает.
+EVIDENCE_SOURCES = frozenset({
+    "user_stated", "conversation", "confirmed_memory", "journey",
+    "safety", "anketa", "policy", "operator", "catalog",
+})
+#: H6 «никогда не показывать». Сторож в тестах: с показываемыми не пересекается, в сумме — словарь.
+EVIDENCE_NEVER_SHOWN = frozenset({"safety", "anketa", "policy", "operator", "catalog"})
+#: Ключи элемента ``evidence_refs`` — ровно эти (DRF-1921): лишний ключ рядом с основанием — путь
+#: пронести текст или id человека, как рядом со ссылкой-снимком (DRF-1909).
+EVIDENCE_ITEM_KEYS = frozenset({"source", "ref", "said_at", "user_confirmed"})
+
+_CODE_NAME_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
+
+
+def _code_name(value: Any) -> str:
+    """Имя для отказа — только если оно само похоже на код: отвергнутое значение не повторяется."""
+    return value if isinstance(value, str) and _CODE_NAME_RE.match(value) else "<не код>"
+
 
 def _need(label: str):
     def need(cond: bool, msg: str) -> None:
@@ -154,13 +174,18 @@ def _check_grounds(need, reason_codes, evidence_refs, explanation) -> None:
          "reason_codes пуст — каждое решение несёт reason codes (канон v1.1 §8)")
     need(isinstance(evidence_refs, list), "evidence_refs — список")
     for j, ev in enumerate(evidence_refs if isinstance(evidence_refs, list) else []):
-        # Форма элемента типизирована: {source, ref, said_at?}. Словарь `source`
-        # (user_stated/confirmed_memory/policy/safety/journey — контракт §12;
-        # conversation/anketa/operator/catalog — мозг) здесь НЕ замыкается:
-        # свести два словаря — дело контракта, не хранилища. Пустые — отказ.
+        # Форма элемента закрыта (DRF-1921): ровно {source, ref, said_at?, user_confirmed?};
+        # source — из словаря H6 (EVIDENCE_SOURCES); user_confirmed — только bool. Пустые — отказ.
         need(isinstance(ev, dict) and str(ev.get("source", "")).strip() != "" and str(ev.get("ref", "")).strip() != "",
-             f"evidence_refs[{j}] — {{source, ref, said_at?}} с непустыми source и ref "
+             f"evidence_refs[{j}] — {{source, ref, said_at?, user_confirmed?}} с непустыми source и ref "
              "(§105/§145: reason без evidence не печатается)")
+        extra = sorted(_code_name(k) for k in ev if k not in EVIDENCE_ITEM_KEYS)
+        need(not extra, f"evidence_refs[{j}] — лишние ключи {extra}: элемент ровно "
+                        "{source, ref, said_at?, user_confirmed?}")
+        need(ev["source"] in EVIDENCE_SOURCES,
+             f"evidence_refs[{j}].source {_code_name(ev['source'])!r} не из словаря H6 {sorted(EVIDENCE_SOURCES)}")
+        need("user_confirmed" not in ev or isinstance(ev["user_confirmed"], bool),
+             f"evidence_refs[{j}].user_confirmed — только bool (подтверждение человеком, H6)")
     need(isinstance(explanation, dict) and isinstance(explanation.get("displayable"), bool),
          "explanation.displayable обязателен (owner 2026-07-29)")
     # internal_only — только коды (решение главного окна 15.09): текст сказанного сюда
