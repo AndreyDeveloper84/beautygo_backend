@@ -382,6 +382,14 @@ SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
     "internal-specialist-service-selection": (
         "services/tests/test_offer_selection_m8a_1800.py::TestRefusals"
     ),
+    # DRF-1800 (M8b): чужой workspace по URL → 403, услуга не из своего
+    # workspace → 404; каждый отказ — с положительной половиной.
+    "internal-specialist-service-offer": (
+        "services/tests/test_offer_price_m8b_1800.py::TestOfferRefusals"
+    ),
+    "internal-specialist-selected-service": (
+        "services/tests/test_offer_price_m8b_1800.py::TestRemoval"
+    ),
 }
 
 _SPECIALIST_ROUTE_RE = re.compile(

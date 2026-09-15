@@ -21,7 +21,7 @@
   ``salon_catalog_owner_managed``.
 * **Идемпотентно по (tenant, template), без перепривязки.** Уже
   существующая строка с этим шаблоном возвращается как есть — её статус
-  связи, имя и активность не трогаются (решённую разметку модератора
+  связи и имя не трогаются; выключенная строка включается снова (решённую разметку модератора
   выбор мастера не переписывает; см. DRF-1668 в ``intake/confirm.py``).
 * **Всё или ничего.** Хоть один неизвестный шаблон — ``TemplatesNotFound``,
   ничего не создано. Шаблон из категории чужого тенанта — тоже неизвестный.
@@ -32,10 +32,12 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
+from decimal import Decimal
 from uuid import UUID
 
 from django.db import IntegrityError, transaction
-from django.db.models import Q
+from django.db.models import ProtectedError, Q
+from django.utils import timezone
 
 from tenants.models import Tenant
 
@@ -112,7 +114,14 @@ def select_templates(profile, template_ids: Iterable[UUID]) -> int:
     with transaction.atomic():
         for tid in wanted:
             template = templates[tid]
-            if _existing(tenant, template) is not None:
+            existing = _existing(tenant, template)
+            if existing is not None:
+                if not existing.is_active:
+                    # Мастер убрал услугу (M8b) и выбрал снова: связь и имя
+                    # те же, включается только строка.
+                    existing.is_active = True
+                    existing.save(update_fields=["is_active", "updated_at"])
+                    created += 1
                 continue
             try:
                 with transaction.atomic():
@@ -171,12 +180,145 @@ def _existing(tenant: Tenant, template: ServiceTemplate) -> SalonService | None:
     )
 
 
+# --- M8b: цена и длительность, «Убрать из моих услуг» -----------------------
+
+#: Решённые модератором статусы связи: такую строку удаление не стирает.
+DECIDED_MAPPING = frozenset({
+    SalonService.MappingStatus.VERIFIED,
+    SalonService.MappingStatus.NOT_RECOMMENDABLE,
+})
+
+
+class ServiceNotSelected(Exception):
+    """Строки с таким id нет среди выбранных в workspace мастера."""
+
+
+class HasFutureAppointments(Exception):
+    """У услуги есть будущая живая запись — убрать нельзя."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__("has_future_appointments")
+        self.count = count
+
+
+def _selected_row(profile, salon_service_id: UUID) -> SalonService:
+    tenant = workspace_tenant(profile)
+    row = (
+        SalonService.objects
+        .select_related("template", "tenant")
+        .filter(pk=salon_service_id, tenant=tenant, template__isnull=False)
+        .first()
+    )
+    if row is None:
+        raise ServiceNotSelected(str(salon_service_id))
+    return row
+
+
+def set_offer(
+    profile, salon_service_id: UUID, *, price: Decimal, duration_minutes: int,
+) -> tuple[SpecialistService, bool]:
+    """Первая цена создаёт предложение мастера; следующие — обновляют его.
+
+    Возвращает ``(offer, created)``. Строка услуги, убранная мастером, —
+    отказ ``service_removed``: сначала выбрать снова (выбор включит её).
+    """
+
+    row = _selected_row(profile, salon_service_id)
+    if not row.is_active:
+        raise SelectionRefused("service_removed")
+
+    def _write(offer: SpecialistService) -> None:
+        offer.price = price
+        offer.duration_minutes = duration_minutes
+        offer.is_active = True
+        offer.save()
+
+    with transaction.atomic():
+        offer = (
+            SpecialistService.objects.select_for_update()
+            .filter(specialist=profile, salon_service=row)
+            .first()
+        )
+        created = offer is None
+        if offer is not None:
+            _write(offer)
+        else:
+            try:
+                with transaction.atomic():
+                    offer = SpecialistService(specialist=profile, salon_service=row)
+                    _write(offer)
+            except IntegrityError:
+                # Гонка двух первых цен: проигравший обновляет строку победителя.
+                offer = SpecialistService.objects.select_for_update().get(
+                    specialist=profile, salon_service=row,
+                )
+                _write(offer)
+                created = False
+
+    logger.info(
+        "services.offer_selection.offer_set specialist=%s salon_service=%s offer=%s created=%s",
+        profile.pk, row.pk, offer.pk, created,
+    )
+    return offer, created
+
+
+def remove_service(profile, salon_service_id: UUID) -> str:
+    """«Убрать из моих услуг». Возвращает ``deleted`` или ``deactivated``.
+
+    * Будущая живая запись на услугу (статусы ``ACTIVE_BOOKING_STATUSES``,
+      конец в будущем) — ``HasFutureAppointments``, ничего не тронуто.
+    * Строка удаляется целиком, только если её ничто не держит: нет ни
+      одной записи (``Appointment.salon_service`` — PROTECT) и связь не решена
+      модератором. Иначе строка и предложения выключаются: история записей
+      и разметка модератора остаются.
+    """
+
+    from appointments.domain.value_objects import ACTIVE_BOOKING_STATUSES
+    from appointments.models import Appointment
+
+    row = _selected_row(profile, salon_service_id)
+    bookings = Appointment.objects.filter(salon_service=row)
+    future = bookings.filter(
+        status__in=[s.value for s in ACTIVE_BOOKING_STATUSES],
+        end_datetime__gt=timezone.now(),
+    ).count()
+    if future:
+        raise HasFutureAppointments(future)
+
+    keep = row.mapping_status in DECIDED_MAPPING or bookings.exists()
+    outcome = "deactivated"
+    with transaction.atomic():
+        if not keep:
+            try:
+                with transaction.atomic():
+                    SpecialistService.objects.filter(salon_service=row).delete()
+                    row.delete()
+                outcome = "deleted"
+            except ProtectedError:
+                keep = True
+        if keep:
+            SpecialistService.objects.filter(salon_service=row).update(is_active=False)
+            if row.is_active:
+                row.is_active = False
+                row.save(update_fields=["is_active", "updated_at"])
+
+    logger.info(
+        "services.offer_selection.removed specialist=%s salon_service=%s outcome=%s",
+        profile.pk, salon_service_id, outcome,
+    )
+    return outcome
+
+
 __all__ = [
     "MAX_TEMPLATES_PER_CALL",
+    "HasFutureAppointments",
     "SelectedService",
     "SelectionRefused",
+    "ServiceNotSelected",
     "TemplatesNotFound",
+    "remove_service",
     "select_templates",
     "selected_services",
+    "set_offer",
     "workspace_tenant",
 ]
