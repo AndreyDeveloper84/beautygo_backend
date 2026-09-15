@@ -319,6 +319,22 @@ class FoodLogEntrySerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class FoodLogUpdateSerializer(serializers.Serializer):
+    """DRF-1838 — ``PATCH internal/food-log/<id>/``: что человек исправил.
+
+    Порция — в тех же границах, что при записи. Название блюда не правится:
+    другое блюдо — другие числа из справочника, это удаление и новая запись.
+    """
+
+    portion_multiplier = serializers.FloatField(min_value=0.1, max_value=20.0, required=False)
+    meal_type = serializers.ChoiceField(choices=FoodLog.MealType.choices, required=False)
+
+    def validate(self, attrs):
+        if not attrs:
+            raise serializers.ValidationError("Нечего менять: нужна порция или приём пищи.")
+        return attrs
+
+
 class FoodEstimateRequestSerializer(serializers.Serializer):
     """DRF-1837: оценка блюда по названию БЕЗ записи (§109 шаги 2–3).
 
