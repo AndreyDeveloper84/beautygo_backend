@@ -578,6 +578,9 @@ SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
     "internal-specialist-canon-gap-requests": "services/tests/test_canon_gap_request_m9.py::TestSubject",
     "internal-specialist-canon-gap-similar": "services/tests/test_canon_gap_request_m9.py::TestSubject",
     "internal-specialist-canon-gap-request": "services/tests/test_canon_gap_request_m9.py::TestSubject",
+    # DRF-1804 (M12a) — подсказки адреса: чужой workspace → 403, салон → 409,
+    # без города → 409 без запроса к провайдеру; каждый отказ — с положительной половиной.
+    "internal-specialist-address-suggest": "users/tests/test_address_suggest_1804.py::TestSubject",
     # DRF-1800 (M8a): чужой workspace → 403, мастер салона → 409, без
     # положительной половины ни одного отказа.
     "internal-specialist-service-selection": (

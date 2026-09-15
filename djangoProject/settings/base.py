@@ -1251,6 +1251,8 @@ if SENTRY_DSN:
     import sentry_sdk
     from sentry_sdk.integrations.django import DjangoIntegration
 
+    from core.sentry_scrub import scrub_event
+
     def _sentry_traces_sampler(sampling_context):
         # Health endpoints get hit every few seconds by load balancers — they
         # would dominate the trace quota and tell us nothing useful.
@@ -1261,12 +1263,12 @@ if SENTRY_DSN:
         return SENTRY_TRACES_SAMPLE_RATE
 
     def _sentry_before_send(event, hint):
-        # send_default_pii=False already strips Authorization headers,
-        # session cookies, and POST body for login forms. This hook is for
-        # forward compatibility — if we ever add a custom field that
-        # legitimately appears in events but legally cannot leave Russia
-        # (e.g. memory-arch sensitive flags), filter it here. Today: no-op.
-        return event
+        # send_default_pii=False strips Authorization headers and session
+        # cookies, but NOT the request body (max_request_body_size defaults to
+        # «medium»). DRF-1804: the address-suggest route carries the master's
+        # typed address in the body — core.sentry_scrub drops body and query
+        # string for that path only; every other event is returned unchanged.
+        return scrub_event(event, hint)
 
     sentry_sdk.init(
         dsn=SENTRY_DSN,
