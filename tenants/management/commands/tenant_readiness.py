@@ -92,7 +92,10 @@ def _flag(value: bool) -> str:
 
 
 class Command(BaseCommand):
-    help = "Готовность салона: проекция фактов каталога и итог READY / READY_WITHOUT_DISTANCE / NOT_READY. Ничего не пишет."
+    help = (
+        "Готовность салона: проекция фактов каталога и итог "
+        "READY / READY_WITHOUT_DISTANCE / NOT_READY. Ничего не пишет."
+    )
 
     def add_arguments(self, parser) -> None:
         parser.add_argument("--tenant", required=True, help="Slug салона.")
