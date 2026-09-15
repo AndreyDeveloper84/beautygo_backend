@@ -1,0 +1,37 @@
+{% extends "admin/base_site.html" %}
+{% comment %}
+Подтверждение места от своего имени (решение владельца, раздел Q).
+
+Кто — вошедший оператор, когда — момент записи. Основание называет он сам:
+поле обязательно, умолчания нет. Запись «кто нажал» основанием не является —
+статус без происхождения читается как факт.
+{% endcomment %}
+{% block content %}
+<form method="post">{% csrf_token %}
+  <h2>Места к подтверждению ({{ places|length }})</h2>
+  <ul>
+    {% for place in places %}
+      <li>{{ place }} — {{ place.address|default:"адрес не указан" }} [{{ place.get_status_display }}]</li>
+    {% endfor %}
+  </ul>
+
+  <p>Подтверждает: <strong>{{ confirmer }}</strong>. Время — момент записи.</p>
+
+  {% if basis_error %}
+    <p class="errornote">Основание не названо: пустая строка или пробелы — не основание. Ничего не подтверждено.</p>
+  {% endif %}
+  <p>
+    <label for="id_source_ref">Основание подтверждения (обязательно)</label><br>
+    <input type="text" name="source_ref" id="id_source_ref" value="{{ basis }}" size="80" required>
+  </p>
+  <p>Например: «договор с салоном от 15.09», «визит в салон 15.09», «решение владельца §10».</p>
+
+  {% for place in places %}
+    <input type="hidden" name="{{ action_checkbox_name }}" value="{{ place.pk }}">
+  {% endfor %}
+  <input type="hidden" name="action" value="confirm_location_as_me">
+  <input type="hidden" name="confirm" value="yes">
+  <input type="submit" value="Подтвердить">
+  <a href="#" onclick="window.history.back(); return false;">Отмена</a>
+</form>
+{% endblock %}
