@@ -25,6 +25,7 @@ from core.errors import ErrorCode
 from users.permissions import IsInternalBearerForSpecialistSubject
 from users.response import error_response, success_response
 
+from .models import ServiceCategory
 from .offer_selection import (
     MAX_TEMPLATES_PER_CALL,
     HasFutureAppointments,
@@ -47,9 +48,42 @@ class _SelectBody(serializers.Serializer):
     )
 
 
-def _item(entry: SelectedService) -> dict:
+def _category_roots(category_ids: set) -> dict:
+    """Самый верхний предок каждой категории (DRF-1912) — одним запросом на дерево.
+
+    Группа экрана 04 — направление, то есть корень дерева категорий ШАБЛОНА
+    на любой глубине. Дерево грузится целиком одним запросом и проходится в
+    Python, поэтому число запросов не зависит ни от числа строк, ни от глубины.
+    Цикл в данных не вешает ответ: проход останавливается на уже виденной вершине.
+
+    Оговорка решения: корни канона (22) ≠ 6 направлений экрана 02 — открытый
+    вопрос владельцу G7; до решения группа = корень канона.
+    """
+    if not category_ids:
+        return {}
+    nodes = {
+        node["id"]: node
+        for node in ServiceCategory.objects.values("id", "parent_id", "name", "sort_order")
+    }
+    roots = {}
+    for category_id in category_ids:
+        current = category_id
+        seen = {current}
+        while current in nodes:
+            parent = nodes[current]["parent_id"]
+            if parent is None or parent not in nodes or parent in seen:
+                break
+            seen.add(parent)
+            current = parent
+        roots[category_id] = nodes.get(current)
+    return roots
+
+
+def _item(entry: SelectedService, roots: dict) -> dict:
     row = entry.salon_service
     offer = entry.offer
+    template_category = row.template.category if row.template_id else None
+    root = roots.get(template_category.pk) if template_category is not None else None
     return {
         "salon_service_id": str(row.pk),
         "template_id": str(row.template_id),
@@ -64,17 +98,25 @@ def _item(entry: SelectedService) -> dict:
             "is_active": offer.is_active,
         },
         "configured": entry.configured,
+        # DRF-1912: группа экрана 04 — от канона (шаблона), не от строки салона.
+        "category_name": template_category.name if template_category is not None else None,
+        "direction_id": str(root["id"]) if root else None,
+        "direction_name": root["name"] if root else None,
+        "direction_sort_order": root["sort_order"] if root else None,
     }
 
 
 def _state(profile) -> dict:
     entries = selected_services(profile)
+    roots = _category_roots(
+        {e.salon_service.template.category_id for e in entries if e.salon_service.template_id}
+    )
     return {
         "specialist_id": str(profile.pk),
         "tenant_id": str(profile.tenant_id),
         "selected": sum(1 for e in entries if e.salon_service.is_active),
         "configured": sum(1 for e in entries if e.configured),
-        "services": [_item(e) for e in entries],
+        "services": [_item(e, roots) for e in entries],
     }
 
 
