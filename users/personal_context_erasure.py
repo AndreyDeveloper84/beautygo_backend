@@ -154,6 +154,53 @@ def erase_personal_context(user, *, initiator: str) -> list[str]:
     return scope
 
 
+#: Состояние строки личного профиля для readback стирания (DRF-1984, C5.3).
+ROW_ABSENT = "absent"
+ROW_TOMBSTONE = "tombstone"
+ROW_HOLDS_VALUES = "holds_values"
+ROW_NOT_ERASED = "not_erased"
+
+
+def context_row_state(user) -> str:
+    """Что сейчас лежит в личном профиле ``user`` — без значений (DRF-1984).
+
+    Четыре исхода, а не три: строка без значений, но НЕ помеченная стёртой
+    (её лениво создаёт чтение ``personal-context/``), — не tombstone, ночной
+    вывод волен её заполнить. Назвать её стёртой значило бы подтвердить
+    стирание, которого не было. Ничего не создаёт.
+    """
+    ctx = UserPersonalContext.objects.filter(user=user).first()
+    if ctx is None:
+        return ROW_ABSENT
+    if _holds_anything(ctx):
+        return ROW_HOLDS_VALUES
+    sources = ctx.data_sources or {}
+    if (
+        all(sources.get(name) == ERASED for name in declared_fields())
+        and not ctx.skipped_questions
+        and not ctx.last_asked_at
+    ):
+        return ROW_TOMBSTONE
+    return ROW_NOT_ERASED
+
+
+def identity_is_erased(user, *, is_account: bool, state: str) -> bool:
+    """Завершено ли стирание одной личности субъекта — ровно то, что делает
+    :func:`erase_personal_context` и C5.2 DELETE:
+
+    - удалённый (``deleted_at``) — строки нет вовсе;
+    - живой аккаунт — tombstone: стирание создаёт его и без строки, значит
+      «строки нет» у живого аккаунта означает «не стирали»;
+    - живой связанный прокси — tombstone или строки нет: DELETE пропускает
+      прокси без строки, не создавая tombstone.
+    """
+    if getattr(user, "deleted_at", None) is not None:
+        return state == ROW_ABSENT
+    if is_account:
+        return state == ROW_TOMBSTONE
+    return state in (ROW_ABSENT, ROW_TOMBSTONE)
+
+
 def mark_field_erased(ctx: UserPersonalContext, field_name: str) -> None:
     """Tombstone a single field the subject reset from the app.
 

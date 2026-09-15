@@ -30,6 +30,7 @@ from recommendation.record_api import (
 from users.internal_reviews_api import InternalReviewCreateView
 from users.personal_data_api import (
     InternalPersonalDataDeleteView,
+    InternalPersonalDataErasureStatusView,
     InternalPersonalDataExportView,
 )
 
@@ -123,6 +124,12 @@ urlpatterns = [
     # C5 (152-ФЗ) — before the plain <uuid:user_id>/ route so the
     # longer path wins by declaration order (it would anyway — Django
     # matches full segments — but explicit ordering documents intent).
+    # DRF-1984 (C5.3/AMD-020) — readback стирания для повтора удаления в боте.
+    path(
+        "<uuid:user_id>/personal-data/erasure-status/",
+        InternalPersonalDataErasureStatusView.as_view(),
+        name="internal-personal-data-erasure-status",
+    ),
     path(
         "<uuid:user_id>/personal-data/export/",
         InternalPersonalDataExportView.as_view(),

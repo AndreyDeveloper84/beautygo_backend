@@ -672,3 +672,25 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
   merge; параллельный persistence-агент запрещён.
 - **Решение:** владелец продукта (GO от 2026-07-21), канонизация —
   оркестратор. Исполнитель: W1 (Ayla backend, booking seam).
+
+### AMD-020 — C5.3: readback стирания personal context (2026-09-15, MINOR)
+
+- **Причина (DRF-1984, половина DRF-1950):** решение владельца M3 — удаление в
+  Ayla проходит durable job → идемпотентность → retry/backoff → **authoritative
+  readback** → completed; до readback человеку не пишется «Удалено». Ни ответ
+  C5.2 (`deleted: []` одинаков для «уже стёрто» и «ничего не было»), ни экспорт
+  C5.1 (все персданные; удалённому субъекту — 403) стирание не подтверждают.
+- **Контракт:** `GET /api/v1/internal/users/{ayla_user_id}/personal-data/erasure-status/`
+  → 200 `{"user_id", "erased": bool, "identities": [{"kind": "account" | "linked_identity",
+  "context_row": "absent" | "tombstone" | "holds_values" | "not_erased", "erased": bool}]}`.
+  Без значений и без внешних идентификаторов; ничего не создаёт.
+- **Вердикт по личности** (то, что делает C5.2): удалённый (`deleted_at`) — строки
+  нет; живой аккаунт — tombstone; живой связанный прокси — tombstone или строки нет.
+  `not_erased` — строка без значений, но не помеченная стёртой (её лениво создаёт
+  чтение personal-context): стиранием не считается.
+- **Доступ:** тот же сторож субъекта, что у C5.2 (`IsInternalBearerForSubject`),
+  с `allow_inactive_subject` — удалённый субъект читает статус до D3; после D3
+  — 403, как на всей поверхности (статус D3 — `DeletionRequest`).
+- **Журнал:** операция `erasure_status_read`, не fail-closed (не раскрывает и не
+  разрушает).
+- **Потоки:** каталог (эта ручка), бот (DRF-1950 — клиент и повтор).
