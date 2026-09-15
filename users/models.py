@@ -238,7 +238,7 @@ class SpecialistProfile(models.Model):
     # (``bot:max:<id>``) этот DRAFT-профиль заведён solo-provisioning'ом.
     # НЕ личность и не ребро связи: ``resolve_external_user`` /
     # ``_follow_binding`` его не читают (сторож
-    # ``users/tests/test_solo_workspace_provisioning_1828.py``); связь
+    # ``tenants/tests/test_solo_workspace_provisioning_1828.py``, AST — DRF-1874); связь
     # личности по-прежнему одна — ``User.linked_user`` у прокси, которое
     # оператор ставит при LINKED. Роль claim — идемпотентность ручки,
     # pre-LINKED setup authority (M28) и подсказка оператору, какой

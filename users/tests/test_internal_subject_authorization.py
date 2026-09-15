@@ -111,10 +111,12 @@ DEL_REQ_GET = ("get", "/api/v1/internal/users/{subject}/deletion-requests/")
 DEL_REQ_POST = ("post", "/api/v1/internal/users/{subject}/deletion-requests/")
 # DRF-1709 (12.09.2026): последняя дыра B-2.1 закрыта — карточка под субъектом.
 PROFILE = ("get", "/api/v1/internal/users/{subject}/")
+# DRF-1855: отзыв клиента из бота — запись от имени субъекта.
+REVIEW_POST = ("post", "/api/v1/internal/users/{subject}/reviews/")
 
 ALL_ROUTES = [
     EXPORT, DELETE, CTX_GET, CTX_PATCH, CTX_DELETE, CTX_ELIG, CTX_ASKED, CTX_SKIP,
-    DEL_REQ_GET, DEL_REQ_POST, PROFILE,
+    DEL_REQ_GET, DEL_REQ_POST, PROFILE, REVIEW_POST,
 ]
 
 _BODIES = {
@@ -122,6 +124,7 @@ _BODIES = {
     CTX_ASKED: {"field": "preferred_time_slots"},
     CTX_SKIP: {"field": "preferred_time_slots"},
     DEL_REQ_POST: {"initiator": "bot"},
+    REVIEW_POST: {"appointment_id": "00000000-0000-0000-0000-000000000000", "rating": 5},
 }
 
 
@@ -266,7 +269,9 @@ class TestOwnSubjectAllowed:
         resp = _call(_client(actor=alice_id), route, alice_user.pk)
         # У списка заявок «заявки нет» — законный 404, но ПОСЛЕ проверки
         # субъекта: 403 здесь означал бы, что проверка не пустила своего.
-        allowed = (200, 201, 404) if route == DEL_REQ_GET else (200, 201)
+        # У отзыва (DRF-1855) тело называет несуществующую бронь — 404 тоже
+        # после проверки субъекта.
+        allowed = (200, 201, 404) if route in (DEL_REQ_GET, REVIEW_POST) else (200, 201)
         assert resp.status_code in allowed, resp.content
 
     def test_binding_is_followed_not_bypassed(self, alice):
