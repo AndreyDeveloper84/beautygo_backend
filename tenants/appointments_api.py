@@ -235,7 +235,7 @@ class _SalonBookingBase(APIView):
             return None
         return (
             Appointment.objects
-            .select_related("client", "specialist", "service")
+            .select_related("client", "specialist", "specialist__works_at", "service")
             .prefetch_related("payments")
             .filter(id=appointment_id, tenant=tenant)
             .first()
@@ -500,7 +500,7 @@ class SalonBookingCreateView(_SalonBookingBase):
 
         appointment = (
             Appointment.objects
-            .select_related("client", "specialist", "service")
+            .select_related("client", "specialist", "specialist__works_at", "service")
             .prefetch_related("payments")
             .get(id=result.booking_id)
         )
@@ -732,7 +732,7 @@ class SalonBookingCompleteView(_SalonBookingBase):
                 appointment = (
                     Appointment.objects
                     .select_for_update(of=("self",))
-                    .select_related("specialist", "client", "service")
+                    .select_related("specialist", "specialist__works_at", "client", "service")
                     .filter(tenant=tenant)
                     .filter(pk=appointment_id)
                     .first()
@@ -825,7 +825,7 @@ class SalonBookingNoShowView(_SalonBookingBase):
                 appointment = (
                     Appointment.objects
                     .select_for_update(of=("self",))
-                    .select_related("specialist", "client", "service")
+                    .select_related("specialist", "specialist__works_at", "client", "service")
                     .filter(tenant=tenant)
                     .filter(pk=appointment_id)
                     .first()

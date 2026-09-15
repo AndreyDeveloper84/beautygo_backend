@@ -5,6 +5,8 @@ import re
 
 from rest_framework import serializers
 
+from tenants.wire import OfferAddressField
+
 from .models import Appointment
 from payments.models import Payment
 
@@ -24,7 +26,9 @@ class AppointmentSpecialistSerializer(serializers.Serializer):
     id = serializers.UUIDField()
     display_name = serializers.CharField()
     avatar = serializers.ImageField(allow_null=True)
-    address = serializers.CharField()
+    # DRF-1953 (§9): адрес места мастера (works_at → CONFIRMED), а не старая
+    # колонка профиля; тот же класс провода, что у остальных сериализаторов.
+    address = OfferAddressField(source="*")
 
 
 class PaymentShortSerializer(serializers.ModelSerializer):
