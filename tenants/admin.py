@@ -94,7 +94,7 @@ class ServiceLocationAdmin(admin.ModelAdmin):
         "geocode_status", "geocoded_at", "created_at", "updated_at",
     )
     fieldsets = (
-        (None, {"fields": ("id", "tenant", "label", "address", "city")}),
+        (None, {"fields": ("id", "tenant", "kind", "label", "address", "city", "note_for_client")}),
         ("Подтверждение места (§9)", {
             "fields": ("status", "confirmed_by", "confirmed_at", "confirmed_source_ref"),
             "description": (

@@ -131,7 +131,7 @@ SPECIALIST_PROFILE_RETAINED_FIELDS: dict[str, str] = {
 #: Своё место мастера (без салона или workspace соло-мастера): стираемые
 #: текстовые поля; координаты — NULL, статус — INACTIVE, строка остаётся (PROTECT).
 OWN_PLACE_ERASED_TEXT_FIELDS: tuple[str, ...] = (
-    "label", "address", "city", "geocode_source_address", "geocode_normalized_address",
+    "label", "address", "city", "note_for_client", "geocode_source_address", "geocode_normalized_address",
 )
 
 #: Имя, которым обезличивается соло-workspace (DRF-1935): у бота это
@@ -642,6 +642,8 @@ def _erase_catalog(user) -> dict:
         anonymised["users.SpecialistProfile.user"] = 1
         _erase_own_place(sp, anonymised, kept)
         _erase_solo_tenant(sp, anonymised, kept)
+        # DRF-1803 — зона выезда: город работы мастера; на строку ничто не ссылается.
+        _erase_service_areas(sp, anonymised)
 
     # 7. Аккаунт. Контекст — ДО обезличивания событий аналитики: erase
     # пишет своё аудит-событие с actor=user, и оно тоже обязано потерять актора.
@@ -744,6 +746,15 @@ def _erase_own_place(sp, anonymised: dict, kept: dict) -> None:
     place.status = LocationStatus.INACTIVE
     place.save(update_fields=[*OWN_PLACE_ERASED_TEXT_FIELDS, "latitude", "longitude", "status", "updated_at"])
     anonymised["tenants.ServiceLocation.own"] = anonymised.get("tenants.ServiceLocation.own", 0) + 1
+
+
+def _erase_service_areas(sp, anonymised: dict) -> None:
+    """Зоны выезда мастера (DRF-1803): город работы — о человеке; строки удаляются."""
+    from tenants.models import ServiceArea
+
+    deleted, _ = ServiceArea.objects.filter(specialist=sp).delete()
+    if deleted:
+        anonymised["tenants.ServiceArea.deleted"] = anonymised.get("tenants.ServiceArea.deleted", 0) + deleted
 
 
 def _erase_solo_tenant(sp, anonymised: dict, kept: dict) -> None:
@@ -886,7 +897,7 @@ def _residue(user) -> dict[str, int]:
 
 def _own_place_residue(sp) -> dict[str, int]:
     """Своё место и соло-workspace после стирания — чтением строки (DRF-1935)."""
-    from tenants.models import Tenant
+    from tenants.models import ServiceArea, Tenant
 
     found: dict[str, int] = {}
     if sp is None:
@@ -906,6 +917,9 @@ def _own_place_residue(sp) -> dict[str, int]:
             or tenant.latitude is not None
         ):
             found["tenants.Tenant.solo"] = 1
+    areas = ServiceArea.objects.filter(specialist=sp).count()
+    if areas:
+        found["tenants.ServiceArea"] = areas
     return found
 
 

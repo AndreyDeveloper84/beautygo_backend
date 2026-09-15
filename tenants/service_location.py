@@ -66,6 +66,17 @@ class LocationStatus(models.TextChoices):
     INACTIVE = "inactive", "Недействительно"
 
 
+class LocationKind(models.TextChoices):
+    """Формат места соло-мастера (макет 5, P44/P56; DRF-1803, M11).
+
+    Пусто — вид не указан: места салонов, заведённые до M11, и места, созданные
+    не мастером. Выезд — не место, а зона (:class:`tenants.service_area.ServiceArea`).
+    """
+
+    PRIVATE_STUDIO = "private_studio", "Свой кабинет"
+    SALON_OR_STUDIO = "salon_or_studio", "Салон или студия"
+
+
 class ServiceLocation(models.Model):
     #: Исходы геокодера, при которых координаты пригодны (§139) — как у Tenant.
     GEOCODED_STATUSES = frozenset({GeocodeStatus.OK.value, GeocodeStatus.CONFIRMED.value})
@@ -78,6 +89,15 @@ class ServiceLocation(models.Model):
     label = models.CharField(
         max_length=120, blank=True, default="",
         help_text="Как место называют люди: «Салон на Пушкина», «Кабинет 3». Пусто — берётся адрес.",
+    )
+    # -- Формат и подсказка клиенту (DRF-1803, M11) --------------------------
+    kind = models.CharField(
+        max_length=32, choices=LocationKind.choices, blank=True, default="",
+        help_text="Формат места соло-мастера: свой кабинет или салон/студия. Пусто — не указан.",
+    )
+    note_for_client = models.CharField(
+        max_length=200, blank=True, default="",
+        help_text="«Как клиенту вас найти?» — текст мастера, до 200 символов. Стирается при удалении аккаунта.",
     )
 
     # -- Вход геокодера -----------------------------------------------------
