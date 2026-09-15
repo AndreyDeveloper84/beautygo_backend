@@ -41,6 +41,12 @@
   ``explanation.displayable = True``; ``internal_only`` не отдаётся ни в
   каком поле (контракт §12–§13; owner ruling 2026-07-29). Сторож в тестах
   ищет internal-only текст во всём теле ответа;
+* ``evidence_refs`` (DRF-1889) — ссылки на основания решения: тоже **только**
+  при ``displayable = True`` и только источников из закрытого списка
+  ``EVIDENCE_DISPLAYABLE_SOURCES`` (сказанное человеком, подтверждённая память,
+  контекст пути); элемент — ровно ``{source, ref, said_at}``, без текста.
+  Список — предложение до решения OQ-REC-6; здоровье, safety, внутренности
+  правил и служебные пометки не отдаются;
 * primary + alternatives с ``parent`` и ``rerank_reason`` (код словаря
   канона v1.1 §10.3 — не фраза; фраза альтернативы — её собственный ``why``);
 * ``execution_mode`` набора (C1): бот не показывает ``SHADOW``.
@@ -111,6 +117,40 @@ def _why(rec: Recommendation) -> list[str]:
     return [str(s) for s in exp.get("user_visible_reasons", []) if str(s).strip()]
 
 
+#: DRF-1889 — источники evidence, которые можно назвать человеку. **Закрыт по
+#: умолчанию**: источник, которого здесь нет, не отдаётся, каким бы новым он ни был.
+#: Это предложение окна канона до решения OQ-REC-6 (классификация displayable /
+#: internal-only — у владельца): сказанное человеком в этом пути
+#: (``user_stated`` / ``conversation``), подтверждённая им память
+#: (``confirmed_memory``) и контекст пути (``journey``). Не отдаются: ``safety``
+#: (здоровье, §13/§23), ``anketa`` (анкета бота содержит скрининг здоровья),
+#: ``policy`` (внутренности правил, §13), ``operator`` (служебная пометка),
+#: ``catalog`` (execution-level, §12 — не основание NBA).
+EVIDENCE_DISPLAYABLE_SOURCES = frozenset({"user_stated", "conversation", "confirmed_memory", "journey"})
+
+
+def _evidence(rec: Recommendation) -> list[dict]:
+    """Ссылки на основания решения — только displayable и только разрешённых источников.
+
+    Элемент — ровно ``{source, ref, said_at}``: ``ref`` — указатель (текст живёт в
+    транскрипте бота), поэтому ни текста, ни ПДн, ни здоровья в ответе нет по
+    построению; лишние ключи хранимого элемента наружу не идут.
+    """
+    if not (rec.explanation or {}).get("displayable"):
+        return []
+    shown = []
+    for ev in rec.evidence_refs or []:
+        if not isinstance(ev, dict):
+            continue
+        source, ref = str(ev.get("source") or ""), str(ev.get("ref") or "")
+        # Пустой ref сюда не доходит: persist отказывает такой записи (records._check_record).
+        if source not in EVIDENCE_DISPLAYABLE_SOURCES:
+            continue
+        said_at = ev.get("said_at")
+        shown.append({"source": source, "ref": ref, "said_at": str(said_at) if said_at else None})
+    return shown
+
+
 def _record(rec: Recommendation, now) -> dict:
     return {
         "recommendation_id": str(rec.pk),
@@ -128,6 +168,7 @@ def _record(rec: Recommendation, now) -> dict:
         "reason_codes": list(rec.reason_codes or []),
         "displayable": bool((rec.explanation or {}).get("displayable")),
         "why": _why(rec),
+        "evidence_refs": _evidence(rec),
         "safety_state": (rec.safety_evaluation_ref or {}).get("state"),
         "created_at": rec.created_at.isoformat(),
         "actionable_until": rec.actionable_until.isoformat(),

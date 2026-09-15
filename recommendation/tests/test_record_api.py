@@ -204,3 +204,58 @@ def test_response_is_plain_json_without_scores(bearer, subject, rset):
             for v in x:
                 walk(v)
     walk(body)
+
+
+# ---------------------------------------------------------------- evidence_refs (DRF-1889)
+
+#: Метки, которые не имеют права появиться нигде в теле ответа.
+HIDDEN_REFS = {
+    "safety": "SAFETY-REF-7f3", "anketa": "ANKETA-REF-7f3", "policy": "POLICY-REF-7f3",
+    "operator": "OPERATOR-REF-7f3", "catalog": "CATALOG-REF-7f3", "brand_new_source": "NEWSRC-REF-7f3",
+}
+
+
+def test_evidence_refs_show_only_allowed_sources_and_only_three_keys(bearer, subject):
+    """Разрешённые источники — в порядке хранения, ровно {source, ref, said_at}; остальное не покидает запись."""
+    stored = [
+        {"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"},
+        *({"source": s, "ref": r} for s, r in HIDDEN_REFS.items()),
+        {"source": "user_stated", "ref": "u-1"},
+        {"source": "journey", "ref": "j-1", "said_at": "2026-09-15T10:05:00Z", "text": "СЫРОЙ ТЕКСТ РЕПЛИКИ"},
+    ]
+    rset = persist(RecommendationSetInput(
+        subject_ref=str(subject.pk), intent_id="i", versions=PolicyVersions("dp", "tx", "sp", "cm", "pp"),
+        primary=_rec(evidence_refs=stored),
+    ))
+    resp = _api(bearer, subject).get(_set_url(subject, rset))
+    assert resp.status_code == 200, resp.content[:300]
+    assert resp.json()["data"]["primary"]["evidence_refs"] == [
+        {"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"},
+        {"source": "user_stated", "ref": "u-1", "said_at": None},
+        {"source": "journey", "ref": "j-1", "said_at": "2026-09-15T10:05:00Z"},
+    ]
+    raw = resp.content.decode()
+    for source, ref in HIDDEN_REFS.items():
+        assert ref not in raw and f'"{source}"' not in raw, source
+    assert "СЫРОЙ ТЕКСТ" not in raw and '"text"' not in raw
+
+
+def test_not_displayable_record_shows_no_evidence(bearer, subject):
+    rset = persist(RecommendationSetInput(
+        subject_ref=str(subject.pk), intent_id="i", versions=PolicyVersions("dp", "tx", "sp", "cm", "pp"),
+        primary=_rec(
+            evidence_refs=[{"source": "conversation", "ref": "msg-hidden-7f3"}],
+            explanation={"displayable": False, "user_visible_reasons": [], "internal_only": []},
+        ),
+    ))
+    resp = _api(bearer, subject).get(_set_url(subject, rset))
+    assert resp.json()["data"]["primary"]["evidence_refs"] == []
+    assert "msg-hidden-7f3" not in resp.content.decode()
+
+
+def test_allowlist_names_no_health_or_internal_source():
+    """Положительная стража состава: расширить список можно, но не этими именами (§13, §23, OQ-REC-6)."""
+    from recommendation.record_api import EVIDENCE_DISPLAYABLE_SOURCES
+
+    assert EVIDENCE_DISPLAYABLE_SOURCES, "пустой список прячет всё — и тест выше зеленел бы по пустоте"
+    assert not EVIDENCE_DISPLAYABLE_SOURCES & {"safety", "anketa", "policy", "operator", "catalog"}
