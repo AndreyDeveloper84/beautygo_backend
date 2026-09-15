@@ -21,13 +21,22 @@
 где стадия для кандидата неактивна, и ноль немедленно стал бы понижением за
 отсутствие данных. Группировка позволяет стадии честно промолчать.
 
-Чего здесь нет намеренно
-------------------------
-* **`CandidateSetSignature` и `separation`** (§13) — интерфейс к треку A.
-  `separation` определён как функция глубины различившей стадии, но её вид
-  и порог `tau_separation` — `CONTROLLED_POLICY`, уже вынесенный владельцу
-  (DRF-1519/DRF-1533). Написать «пока так» значило бы назначить политику
-  молча — ровно то, чем стал литерал рейтинга в сиде.
+Что из §13 здесь есть, а чего нет намеренно
+-------------------------------------------
+* **Стадия, разделившая лучший ярус, — есть** (DRF-1934): `separation_stage`,
+  `separation_state`, `best_tier_size` в решении. Вид величины решил
+  владелец: H1 = «в, считает каталог» (`docs/OWNER_QUESTIONS_2026-09-12.md`
+  §H1, ответ 15.09) — номер стадии, которая первой разделила лучший ярус.
+* **`separation` как число в [0,1]** (§13.1) — **нет**, и это не недоделка.
+  H1-в даёт вид, но не отображение стадии в число: номер не нормирован,
+  а раньше — значит сильнее. Отображение — `CONTROLLED_POLICY`, калибруется
+  в DRF-1883; черновик поправки канона —
+  `docs/DRAFT_AMENDMENT_SEPARATION_H1V_2026-09-15.md`. До решения владельца
+  поле `None`: написать «пока так» значило бы назначить политику молча —
+  ровно то, чем стал литерал рейтинга в сиде.
+* **Порог `tau_separation`** — не здесь и не в коде вообще: калибруется по тени.
+* **Остальная `CandidateSetSignature`** (digest, spans, narrowed_by, probe) —
+  интерфейс к треку A, отдельной задачей.
 * **Персистенция `Recommendation`** — авторитет домена (§6.1).
 """
 from __future__ import annotations
@@ -59,6 +68,7 @@ from ._types import (
     RankedCandidate,
     RecommendationDecision,
     RecommendationRequest,
+    SeparationState,
     StageActivity,
     StageId,
     StageVerdict,
@@ -66,7 +76,9 @@ from ._types import (
 
 #: Версия настоящего контракта. Уезжает в ответ: потребитель, получивший
 #: неизвестную мажорную версию, обязан вернуть CONTRACT_VIOLATION (§9.4).
-RESOLVER_SPEC_VERSION = "1.0.0"
+#: 1.1.0 — DRF-1934: добавочные поля separation_stage / separation_state /
+#: best_tier_size / separation (null) — минор: мажор 1 разбирается прежним клиентом.
+RESOLVER_SPEC_VERSION = "1.1.0"
 
 #: Ротация — чистая функция пары (seed, id); версия отдельная, потому что
 #: смена ключа меняет экспозицию и обязана быть видна в истории решений.
@@ -105,6 +117,7 @@ def resolve(
     stage_outputs = _run_ranking_stages(survivors, request, policy)
     tiers, verdicts = _build_tiers(survivors, stage_outputs)
     tiers = _apply_tier_one_ban(tiers, stage_outputs)
+    separation_stage, separation_state, best_tier_size = _separation(tiers, verdicts, len(survivors))
     ordered = _order_candidates(
         tiers=tiers,
         refs={f.ref.id: f.ref for f in survivors},
@@ -131,6 +144,9 @@ def resolve(
             tie_break_policy_version=TIE_BREAK_POLICY_VERSION,
         ),
         computed_at=datetime.now(timezone.utc),
+        separation_stage=separation_stage,
+        separation_state=separation_state,
+        best_tier_size=best_tier_size,
         census=admitted.census,
     )
 
@@ -235,6 +251,39 @@ def _apply_tier_one_ban(
     if all(cid in banned for cid in tiers[0]):
         return [[]] + tiers
     return tiers
+
+
+def _separation(
+    tiers: list[list[UUID]],
+    verdicts: dict[UUID, dict[StageId, StageVerdict]],
+    survivor_count: int,
+) -> tuple[StageId | None, SeparationState, int]:
+    """H1-в: какая стадия **первой** разделила лучший ярус — или почему такой нет.
+
+    Отдельного прохода не нужно. Члены итогового первого яруса на каждой
+    стадии лежали в одной группе (иначе они оказались бы в разных ярусах),
+    а `_split_group` ставит вердикт всей группе сразу. Поэтому вердикты
+    стадий у членов яруса одинаковы, и первая стадия с `DISTINGUISHED` у
+    любого из них — это стадия, которая первой отделила их группу от прочих.
+
+    Порядок проверок значим: K5 раньше «один кандидат». Единственный
+    кандидат с неподтверждённым расписанием даёт `[[], [x]]` — это «первого
+    нет», а не «отделять не от кого».
+
+    S6 сюда не попадает: ротация крутит внутри яруса и не делит его.
+    """
+    if survivor_count == 0:
+        return None, SeparationState.NO_CANDIDATES, 0
+    if not tiers[0]:
+        return None, SeparationState.TIER_ONE_EMPTY, 0
+    if survivor_count == 1:
+        return None, SeparationState.SINGLE_CANDIDATE, 1
+    best = tiers[0]
+    member_verdicts = verdicts[best[0]]
+    for stage_id in _RANKING_STAGES:
+        if member_verdicts.get(stage_id) is StageVerdict.DISTINGUISHED:
+            return stage_id, SeparationState.SPLIT, len(best)
+    return None, SeparationState.NOT_SPLIT, len(best)
 
 
 def _order_candidates(

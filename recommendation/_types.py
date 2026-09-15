@@ -197,6 +197,24 @@ class StageVerdict(StrEnum):
     INACTIVE = "INACTIVE"
 
 
+class SeparationState(StrEnum):
+    """Почему у решения есть стадия, разделившая лучший ярус, — или почему её нет.
+
+    H1 = «в, считает каталог» (владелец 15.09): `separation_stage` — номер
+    стадии, которая **первой** разделила лучший ярус. Когда стадии нет,
+    причина называется явно, а не угадывается: «никто не различил»,
+    «не от кого отделять», «некого показывать» и «первого нет по K5» — четыре
+    разных ответа, и треку A из них следуют разные действия. Словарь закрыт
+    (DRF-1934): неизвестное состояние не выдумывается.
+    """
+
+    SPLIT = "SPLIT"
+    NOT_SPLIT = "NOT_SPLIT"
+    SINGLE_CANDIDATE = "SINGLE_CANDIDATE"
+    NO_CANDIDATES = "NO_CANDIDATES"
+    TIER_ONE_EMPTY = "TIER_ONE_EMPTY"
+
+
 # ---------------------------------------------------------------------------
 # Трёхзначное ограничение
 # ---------------------------------------------------------------------------
@@ -534,7 +552,18 @@ class RecommendationDecision:
     reason_codes: tuple[ReasonCode, ...]
     policy_versions: PolicyVersions
     computed_at: datetime
+    #: H1-в (DRF-1934): первая стадия S2..S5, разделившая лучший ярус; `None` —
+    #: причина в `separation_state`. S6 ярус не делит и сюда не попадает.
+    separation_stage: StageId | None
+    separation_state: SeparationState
+    #: Размер лучшего яруса. «Отделён, но не одиночный» различает порог
+    #: мозга, а не каталог (Р2 главного окна 15.09). 0 — при K5 и пустом множестве.
+    best_tier_size: int
     census: "MappingCensus" = field(default_factory=lambda: MappingCensus())
+    #: §13.1 `separation ∈ [0,1]` — **не вычисляется**: H1-в даёт вид, но не
+    #: отображение стадии в число, а оно — `CONTROLLED_POLICY` владельца.
+    #: До решения всегда `None`; тест красит любое другое значение.
+    separation: float | None = None
 
     @property
     def is_empty(self) -> bool:
