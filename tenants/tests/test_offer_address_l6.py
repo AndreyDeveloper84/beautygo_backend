@@ -97,6 +97,9 @@ USE_REGISTRY: dict[str, tuple[int, str]] = {
         4, "профиль и своё место: выгрузка субъекту по 152-ФЗ (C5.1, DRF-1918) — только чтение, не показ"
     ),
     "core/management/commands/surface_state.py": (4, "профиль и Tenant: замер состояния — счёт, не показ"),
+    "tenants/management/commands/propose_master_locations.py": (
+        8, "профиль, Tenant и место: триаж старого адреса (§9, H4, DRF-1924) — печать; адреса с --with-address"
+    ),
     # --- НЕ профиль: место, салон, DTO кандидата, координата клиента ---
     "ai/application/services/recommendation_engine.py": (1, "ScoredSpecialist(address=offer_address(s)) — DTO"),
     "ai/application/services/specialist_context_builder.py": (2, "SpecialistCandidate ← ScoredSpecialist — DTO"),

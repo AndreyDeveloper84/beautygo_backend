@@ -276,7 +276,8 @@ SUBJECT_REF: dict[str, str] = {
         "строка, версия и digest остаются (В2), ссылка набора цела"
     ),
     "recommendation.RecommendationSet.subject_ref": (
-        "решение — DRF-1909; до него хранится как есть (0 записей на пилоте, бот не пишет до 6.4)"
+        "обезличить: RecommendationSet.objects.anonymise_for_subject — subject_ref → tombstone; указатели "
+        "на ход, реплики, память и согласие — пусто; коды и исход остаются (D7/D9, В3 а, DRF-1909)"
     ),
 }
 
@@ -517,7 +518,7 @@ def _erase_catalog(user) -> dict:
     )
     from ai.models import Conversation
     from analytics.models import AnalyticsEvent
-    from recommendation.models import ContextSnapshot
+    from recommendation.models import ContextSnapshot, RecommendationSet
 
     now = timezone.now()
     deleted: dict[str, int] = {}
@@ -679,9 +680,17 @@ def _erase_catalog(user) -> dict:
     # 7a. Строковый субъект (SUBJECT_REF, DRF-1906 ч.2). Снимок контекста решения:
     # содержимое стирается, строка остаётся — ссылка набора цела, digest доказывает,
     # «что было», не храня «что» (В2). Строка на месте, личного нет — поэтому
-    # anonymised. Наборы — решение DRF-1909, здесь не трогаются.
+    # anonymised. Наборы — шаг 7b.
     anonymised["recommendation.ContextSnapshot.content"] = ContextSnapshot.objects.erase_for_subject(
         str(user.pk), now
+    )
+
+    # 7b. Записи Recommendation (SUBJECT_REF, DRF-1909): набор, варианты и события
+    # обезличиваются — subject_ref → tombstone, указатели на ход, реплики, память и
+    # согласие — пусто; коды и исход остаются (D7/D9). Перепись полей —
+    # recommendation.models.ANONYMISATION_FIELDS.
+    anonymised["recommendation.RecommendationSet"] = RecommendationSet.objects.anonymise_for_subject(
+        str(user.pk), str(tombstone_user().pk)
     )
 
     # 8. Полнота — по перечитанным строкам, внутри транзакции.
@@ -793,13 +802,15 @@ def _residue(user) -> dict[str, int]:
     from wellness.models import DesiredOutcome, PersonalPlan, ProgressObservation
     from ai.models import Conversation
     from analytics.models import AnalyticsEvent
-    from recommendation.models import ContextSnapshot
+    from recommendation.models import ContextSnapshot, RecommendationSet
 
     checks = {
         # Строковый субъект (SUBJECT_REF): нестёртый снимок человека — остаток.
         "recommendation.ContextSnapshot.content": ContextSnapshot.objects.filter(
             subject_ref=str(user.pk), erased_at__isnull=True
         ),
+        # Набор, всё ещё названный человеком, — не обезличен (DRF-1909).
+        "recommendation.RecommendationSet.subject_ref": RecommendationSet.objects.filter(subject_ref=str(user.pk)),
         "nutrition.NutritionProfile": NutritionProfile.objects.filter(user=user),
         "nutrition.FoodLog": FoodLog.objects.filter(user=user),
         "nutrition.DeletedFoodLog": DeletedFoodLog.objects.filter(user=user),

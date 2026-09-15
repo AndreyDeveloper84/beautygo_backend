@@ -169,6 +169,15 @@ def test_no_action_is_a_valid_recorded_result():
     ({"reason_codes": []}, "primary: reason_codes"),
     ({"explanation": {"user_visible_reasons": []}}, "primary: explanation.displayable"),
     ({"memory_snapshot_ref": {"entries": ["copied value"]}}, "memory_snapshot_ref"),
+    # DRF-1909: форма ссылки закрыта — лишний ключ рядом с тремя ключами ссылки отказывает по имени
+    ({"memory_snapshot_ref": {"snapshot_id": "m-1", "snapshot_version": 1, "content_digest": "sha256:m",
+                              "subject_ref": "u-1"}}, "memory_snapshot_ref"),
+    ({"execution_mapping_snapshot_ref": {"snapshot_id": "e-1", "snapshot_version": 1, "content_digest": "sha256:e",
+                                         "client_ref": "c-1"}}, "execution_mapping_snapshot_ref"),
+    ({"transaction_snapshot_ref": {"snapshot_id": "t-1", "snapshot_version": 1, "content_digest": "sha256:t",
+                                   "booking_owner": "c-1"}}, "transaction_snapshot_ref"),
+    # ссылка — объект, а не перечень имён её ключей: set(список) совпал бы с ключами ссылки
+    ({"transaction_snapshot_ref": ["snapshot_id", "snapshot_version", "content_digest"]}, "transaction_snapshot_ref"),
     ({"evidence_refs": [{"kind": "user_stated"}]}, r"primary: evidence_refs\[0\]"),
 ])
 def test_incomplete_variant_is_refused_by_field_name(bad, match):
