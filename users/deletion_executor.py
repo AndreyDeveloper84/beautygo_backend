@@ -205,6 +205,55 @@ def undecided_pointers() -> dict[str, list[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Строковый субъект — ключ ``app.Model.subject_ref`` (DRF-1906, часть 2)
+# ---------------------------------------------------------------------------
+
+#: Модели записи Recommendation связаны с человеком не FK, а строкой
+#: ``subject_ref`` = pk ``User``: ``pointers_to_user()`` их не видит, и до этой
+#: таблицы записи переживали удаление аккаунта молча. Своя таблица, своя
+#: перепись (вариант (а) главного окна 15.09). Значение — как.
+SUBJECT_REF: dict[str, str] = {
+    "recommendation.ContextSnapshot.subject_ref": (
+        "стереть содержимое: ContextSnapshot.objects.erase_for_subject — content={}, erased_at; "
+        "строка, версия и digest остаются (В2), ссылка набора цела"
+    ),
+    "recommendation.RecommendationSet.subject_ref": (
+        "решение — DRF-1909; до него хранится как есть (0 записей на пилоте, бот не пишет до 6.4)"
+    ),
+}
+
+
+def subject_ref_fields() -> set[str]:
+    """Живая перепись: каждое конкретное нереляционное поле ``subject_ref``.
+
+    По имени поля: строковый субъект под другим именем эта перепись не увидит —
+    предел назван, новое имя добавляется сюда вместе с моделью.
+    """
+    found: set[str] = set()
+    for model in apps.get_models():
+        if model._meta.proxy:
+            continue
+        for f in model._meta.get_fields():
+            if f.concrete and not f.is_relation and f.name == "subject_ref":
+                found.add(f"{model._meta.label}.{f.name}")
+    return found
+
+
+def undecided_subject_refs() -> dict[str, list[str]]:
+    """Расхождения ``SUBJECT_REF`` с переписью: ``{"missing": [...], "stale": [...]}``."""
+    live = subject_ref_fields()
+    named = set(SUBJECT_REF)
+    out: dict[str, list[str]] = {}
+    missing = sorted(live - named)
+    stale = sorted(named - live)
+    if missing:
+        out["missing"] = missing
+    if stale:
+        out["stale"] = stale
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Исходы
 # ---------------------------------------------------------------------------
 
@@ -243,6 +292,9 @@ def execute(request: DeletionRequest, *, bot_client=None) -> ExecutionOutcome:
         return ExecutionOutcome(str(request.pk), request.status, request.steps)
 
     gaps = undecided_pointers()
+    subject_gaps = undecided_subject_refs()
+    if subject_gaps:
+        gaps = {**gaps, "subject_ref": subject_gaps}
     if gaps:
         reason = f"undecided relations: {json.dumps(gaps, ensure_ascii=False)}"
         _mark_failed(request, reason)
@@ -407,6 +459,7 @@ def _erase_catalog(user) -> dict:
     )
     from ai.models import Conversation
     from analytics.models import AnalyticsEvent
+    from recommendation.models import ContextSnapshot
 
     now = timezone.now()
     deleted: dict[str, int] = {}
@@ -562,6 +615,14 @@ def _erase_catalog(user) -> dict:
         actor=user
     ).update(actor=None)
 
+    # 7a. Строковый субъект (SUBJECT_REF, DRF-1906 ч.2). Снимок контекста решения:
+    # содержимое стирается, строка остаётся — ссылка набора цела, digest доказывает,
+    # «что было», не храня «что» (В2). Строка на месте, личного нет — поэтому
+    # anonymised. Наборы — решение DRF-1909, здесь не трогаются.
+    anonymised["recommendation.ContextSnapshot.content"] = ContextSnapshot.objects.erase_for_subject(
+        str(user.pk), now
+    )
+
     # 8. Полнота — по перечитанным строкам, внутри транзакции.
     residue = _residue(user)
     if residue:
@@ -611,8 +672,13 @@ def _residue(user) -> dict[str, int]:
     from wellness.models import DesiredOutcome, PersonalPlan, ProgressObservation
     from ai.models import Conversation
     from analytics.models import AnalyticsEvent
+    from recommendation.models import ContextSnapshot
 
     checks = {
+        # Строковый субъект (SUBJECT_REF): нестёртый снимок человека — остаток.
+        "recommendation.ContextSnapshot.content": ContextSnapshot.objects.filter(
+            subject_ref=str(user.pk), erased_at__isnull=True
+        ),
         "nutrition.NutritionProfile": NutritionProfile.objects.filter(user=user),
         "nutrition.FoodLog": FoodLog.objects.filter(user=user),
         "nutrition.DeletedFoodLog": DeletedFoodLog.objects.filter(user=user),
