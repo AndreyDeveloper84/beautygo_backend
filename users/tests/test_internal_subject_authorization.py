@@ -113,10 +113,12 @@ DEL_REQ_POST = ("post", "/api/v1/internal/users/{subject}/deletion-requests/")
 PROFILE = ("get", "/api/v1/internal/users/{subject}/")
 # DRF-1855: отзыв клиента из бота — запись от имени субъекта.
 REVIEW_POST = ("post", "/api/v1/internal/users/{subject}/reviews/")
+# DRF-1888: вход записи Recommendation для производителя NBA — запись от имени субъекта.
+REC_SET_POST = ("post", "/api/v1/internal/users/{subject}/recommendation-sets/")
 
 ALL_ROUTES = [
     EXPORT, DELETE, CTX_GET, CTX_PATCH, CTX_DELETE, CTX_ELIG, CTX_ASKED, CTX_SKIP,
-    DEL_REQ_GET, DEL_REQ_POST, PROFILE, REVIEW_POST,
+    DEL_REQ_GET, DEL_REQ_POST, PROFILE, REVIEW_POST, REC_SET_POST,
 ]
 
 _BODIES = {
@@ -125,6 +127,7 @@ _BODIES = {
     CTX_SKIP: {"field": "preferred_time_slots"},
     DEL_REQ_POST: {"initiator": "bot"},
     REVIEW_POST: {"appointment_id": "00000000-0000-0000-0000-000000000000", "rating": 5},
+    REC_SET_POST: {"intent_id": "intent-authz"},
 }
 
 
@@ -267,6 +270,13 @@ class TestOwnSubjectAllowed:
     def test_caller_reaches_its_own_subject(self, route, alice):
         alice_user, alice_id = alice
         resp = _call(_client(actor=alice_id), route, alice_user.pk)
+        if route == REC_SET_POST:
+            # DRF-1888: X-Idempotency-Key обязателен, общий _call его не шлёт —
+            # 400 IDEMPOTENCY_KEY_REQUIRED отвечает ручка ПОСЛЕ проверки
+            # субъекта; 403 означал бы, что проверка не пустила своего.
+            assert resp.status_code == 400, resp.content
+            assert resp.json()["error"]["code"] == "IDEMPOTENCY_KEY_REQUIRED", resp.content
+            return
         # У списка заявок «заявки нет» — законный 404, но ПОСЛЕ проверки
         # субъекта: 403 здесь означал бы, что проверка не пустила своего.
         # У отзыва (DRF-1855) тело называет несуществующую бронь — 404 тоже

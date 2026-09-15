@@ -57,6 +57,7 @@ from services.catalog_reads import (
     catalog_services_prefetch,
 )
 from tenants.distance import distance_km_to, haversine_km, offer_address
+from tenants.service_location import LocationStatus
 from users.models import SpecialistProfile
 
 logger = logging.getLogger(__name__)
@@ -407,7 +408,23 @@ class RecommendationEngine:
         qs = qs.filter(Q(tenant__isnull=True) | Q(tenant__is_active=True))
 
         if query.city:
-            qs = qs.filter(address__icontains=query.city)
+            # L8a (§9): город — у места предложения или у салона, не в старом
+            # адресе профиля (``address__icontains`` читал адрес человека).
+            #
+            # 1. ПОДТВЕРЖДЁННОЕ место говорит первым: его город и решает;
+            # 2. места нет или оно не подтверждено — город салона
+            #    (``Tenant.city``, «город салона»);
+            # 3. не знает никто — мастер в городской ответ НЕ попадает. Это
+            #    прежнее поведение (адрес без города не совпадал) и правило
+            #    самого ``Tenant.city``: «пусто — не попадает ни в один
+            #    городской ответ». Молча расширять выдачу на неизвестный город
+            #    нельзя: клиент из другого города увидел бы чужих мастеров.
+            city = query.city.strip()
+            confirmed = Q(works_at__status=LocationStatus.CONFIRMED)
+            qs = qs.filter(
+                (confirmed & Q(works_at__city__iexact=city))
+                | ((Q(works_at__isnull=True) | ~confirmed) & Q(tenant__city__iexact=city))
+            )
 
         if query.category_id:
             qs = qs.filter(

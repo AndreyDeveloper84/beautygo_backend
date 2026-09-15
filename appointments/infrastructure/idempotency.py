@@ -134,15 +134,22 @@ def lookup_or_open_idempotency(
     operation_name: str,
     target_type: str = "",
     target_id: str = "",
+    user=None,
 ) -> tuple[dict | None, IdempotencyKey | None]:
     """Look up the (user, operation, key) tuple from X-Idempotency-Key.
 
     Returns ``(cached, record)`` per the module docstring. May raise
     ``IdempotencyConflict`` or ``IdempotencyInFlight``.
+
+    ``user`` — whose key this is, when it is not ``request.user``: a
+    subject-bound internal surface (``IsInternalBearerForSubject``) does not
+    replace ``request.user`` and names the person in the URL instead
+    (DRF-1888). Defaults to ``request.user`` — booking endpoints unchanged.
     """
     key = (request.META.get("HTTP_X_IDEMPOTENCY_KEY") or "").strip()
     if not key:
         return None, None
+    owner = request.user if user is None else user
 
     body_hash = _hash_body(getattr(request, "data", {}) or {})
 
@@ -151,7 +158,7 @@ def lookup_or_open_idempotency(
     # (cancel(apt_X) vs cancel(apt_Y) with the same key must NOT
     # share a cached response).
     existing = IdempotencyKey.objects.filter(
-        user=request.user,
+        user=owner,
         operation_name=operation_name,
         key=key,
         target_id=target_id,
@@ -168,7 +175,7 @@ def lookup_or_open_idempotency(
     # two concurrent first-creators serialise here; the loser hits
     # IntegrityError and re-resolves the winner's row.
     record = IdempotencyKey(
-        user=request.user,
+        user=owner,
         key=key,
         operation_name=operation_name,
         target_type=target_type,
@@ -182,7 +189,7 @@ def lookup_or_open_idempotency(
         record.save()
     except IntegrityError:
         existing = IdempotencyKey.objects.filter(
-            user=request.user,
+            user=owner,
             operation_name=operation_name,
             key=key,
             target_id=target_id,
