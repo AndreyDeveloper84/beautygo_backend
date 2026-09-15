@@ -40,8 +40,16 @@ class SpecialistNotActiveError(BookingDomainError):
 
 
 class ServiceNotActiveError(BookingDomainError):
-    """Raised when the service is not available for booking."""
-    pass
+    """Raised when the service is not available for booking.
+
+    ``reason`` — имя причины, когда оно есть (DRF-1962:
+    ``price_below_minimum``); уходит наружу в ``details.reason``.
+    Без причины форма ответа прежняя.
+    """
+
+    def __init__(self, message: str = "", *, reason: str | None = None):
+        super().__init__(message)
+        self.reason = reason
 
 
 class BookingWindowError(BookingDomainError):

@@ -223,12 +223,14 @@ class CreateBookingService:
                 specialist=specialist,
                 tenant=specialist.tenant,
             )
-        except ServiceUnavailableForSpecialistError:
+        except ServiceUnavailableForSpecialistError as exc:
             # Same public shape as before: marketplace-inactive and
             # missing/unlinked/unavailable all map to the existing
-            # 422 SERVICE_NOT_ACTIVE (no existence leak).
+            # 422 SERVICE_NOT_ACTIVE (no existence leak). A named reason
+            # (DRF-1962: price below the minimum) rides in details.reason.
             raise ServiceNotActiveError(
-                "This service is not available for booking"
+                "This service is not available for booking",
+                reason=exc.reason,
             )
 
         if resolved.duration_minutes is None:
