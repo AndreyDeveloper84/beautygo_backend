@@ -671,6 +671,47 @@ class TestRecommendationRecordsAreAnonymised:
         assert scanned >= 400, f"просканировано {scanned} файлов — корень не тот"
         assert calls == {"users/deletion_executor.py": 1}, calls
 
+    def test_anonymised_sets_are_unreachable_through_the_record_read(self, person, settings):
+        """Обезличенный набор наружу не отдаётся ни через tombstone, ни через удалённого субъекта.
+
+        Условие главного окна 15.09. Tombstone назвать нельзя: его имя не формат внешней
+        личности, привязанных к нему прокси D3 не создаёт. Держат это два значения
+        (``TOMBSTONE_USERNAME`` и ``_EXTERNAL_USER_ID_RE``), поэтому — тест, а не довод.
+        Удалённого человека назвать можно (``deleted:<uuid>`` — формат внешней личности),
+        но его наборы уже под tombstone.
+        """
+        from rest_framework.test import APIClient
+
+        from recommendation.models import RecommendationSet
+        from users.deletion_executor import TOMBSTONE_USERNAME
+        from users.services import is_valid_external_user_id
+        from users.tests.conftest import name_subject
+
+        settings.AYLA_INTERNAL_API_TOKEN = "test-bearer-1909"
+        set_pk = RecommendationSet.objects.get(subject_ref=str(person.pk)).pk
+
+        def read(url_subject_pk, header):
+            client = APIClient()
+            client.credentials(HTTP_AUTHORIZATION="Bearer test-bearer-1909", HTTP_X_EXTERNAL_USER_ID=header)
+            return client.get(f"/api/v1/internal/users/{url_subject_pk}/recommendations/{set_pk}/")
+
+        # положительная пара: до удаления человек читает свой набор
+        assert read(person.pk, name_subject(person)).status_code == 200
+
+        out = execute(ensure_deletion_request(person, initiator="bot").request, bot_client=_BotOk())
+        assert out.completed
+        tomb = tombstone_user()
+        assert RecommendationSet.objects.get(pk=set_pk).subject_ref == str(tomb.pk)
+
+        assert not is_valid_external_user_id(TOMBSTONE_USERNAME)
+        resp = read(tomb.pk, TOMBSTONE_USERNAME)
+        assert resp.status_code == 403, resp.content[:200]
+
+        person.refresh_from_db()
+        assert person.username == f"deleted:{person.pk}" and is_valid_external_user_id(person.username)
+        resp = read(person.pk, person.username)
+        assert resp.status_code == 404, resp.content[:200]
+
 
 # ---------------------------------------------------------------------------
 # 4. Откат при неполноте
