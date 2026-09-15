@@ -166,6 +166,36 @@ def local_day_window_utc(
     )
 
 
+def count_stranded_bookings(specialists, local_date, start_time=None, end_time=None) -> int:
+    """Live bookings a date-bounded closure would strand, summed over masters.
+
+    One function for every writer of a date-bounded reduction: the salon-admin
+    API (``users.schedule_admin_api._refuse_if_bookings_are_stranded``) and the
+    Django admin forms for ``TenantClosure`` / ``SpecialistScheduleException``.
+    Moved here verbatim from the API so the two doors cannot disagree about
+    which bookings a closed day strands.
+
+    ``start_time``/``end_time`` of ``None`` mean the whole local day. Scope is
+    the same simple interval overlap as :func:`count_active_bookings_in_window`
+    — not the shrinking question, which is
+    :func:`refuse_if_the_change_strands_bookings`.
+    """
+    affected = 0
+    for specialist in specialists:
+        # Per master, not per salon: ``Tenant`` carries no timezone, and
+        # the same local window resolves to a different UTC window for
+        # each master. Resolving it once from the first master would put
+        # the wrong hours on everyone else the moment a salon spans two.
+        tz = ZoneInfo(specialist.timezone)
+        start_at, end_at = local_day_window_utc(
+            local_date, tz, start_time, end_time,
+        )
+        affected += count_active_bookings_in_window(
+            specialist, start_at, end_at,
+        )
+    return affected
+
+
 def get_schedule_impact(
     specialist,
     start_at: datetime,
