@@ -70,9 +70,8 @@ def live_sentry():
             release=None,
             traces_sampler=lambda context: 1.0,
         ),
+        # Как в settings/base.py: интеграции по умолчанию включены (логи, крошки, дедупликация).
         integrations=[DjangoIntegration()],
-        default_integrations=False,
-        auto_enabling_integrations=False,
         transport=transport,
     )
     try:
