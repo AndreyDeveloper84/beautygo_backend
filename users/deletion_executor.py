@@ -87,6 +87,15 @@ TOMBSTONE_USERNAME = "deleted-client"
 #: Значение, которым обезличиваются имена.
 ERASED_NAME = "Удалён"
 
+#: Поля ``SpecialistProfile``, которые стирает D3 (``_erase_catalog``, шаг 6):
+#: ровно этот список уходит в ``save(update_fields=...)``. Он же — вход сторожа
+#: выгрузки DRF-1918: стёртое поле либо выгружается, либо исключено с причиной
+#: (``users.personal_data_api.SPECIALIST_EXPORTED_FIELDS`` / ``..._EXCLUDED_FIELDS``).
+SPECIALIST_PROFILE_ERASED_FIELDS: tuple[str, ...] = (
+    "avatar", "display_name", "bio", "address", "location_lat",
+    "location_lng", "is_available", "is_booking_enabled",
+)
+
 #: Что пишется в тексте отзыва вместо найденных ПДн (D9 scrub).
 SCRUBBED = "[скрыто]"
 
@@ -573,12 +582,7 @@ def _erase_catalog(user) -> dict:
         sp.location_lng = None
         sp.is_available = False
         sp.is_booking_enabled = False
-        sp.save(
-            update_fields=[
-                "avatar", "display_name", "bio", "address", "location_lat",
-                "location_lng", "is_available", "is_booking_enabled", "updated_at",
-            ]
-        )
+        sp.save(update_fields=[*SPECIALIST_PROFILE_ERASED_FIELDS, "updated_at"])
         anonymised["users.SpecialistProfile.user"] = 1
 
     # 7. Аккаунт. Контекст — ДО обезличивания событий аналитики: erase
