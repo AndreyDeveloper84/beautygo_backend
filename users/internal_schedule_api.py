@@ -626,3 +626,90 @@ class InternalSpecialistWorkingHoursView(APIView):
             sum(1 for d in serializer.validated_data["schedule"] if d["is_working_day"]),
         )
         return success_response(self._payload(profile))
+
+
+class InternalSpecialistAvailabilityView(APIView):
+    """GET/PATCH /api/v1/internal/specialists/{specialist_id}/availability/
+
+    «Принимаю записи / Не принимаю» из кабинета мастера (DRF-1845, K1a; карта
+    кабинета D03). Пишет ``SpecialistProfile.is_booking_enabled`` — решение
+    владельца (DRF-1349, 15.09): пауза приёма без деактивации профиля;
+    ``is_available`` не трогается. Продажу по этому флагу решает
+    ``users.sellable.sellable_q``.
+
+    **Субъект** — :class:`IsInternalBearerForSpecialistSubject`, как у часов.
+    **Только опубликованный профиль.** Pre-LINKED claim (M28) пускает владельца
+    DRAFT-workspace к НАСТРОЙКЕ; приём клиентов — не настройка (G1-б: setup
+    authority, не приём; G2-б: активирует модератор), поэтому на DRAFT —
+    409 ``PROFILE_NOT_ACTIVE``, флаг не трогается.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearerForSpecialistSubject]
+    subject_url_kwarg = "specialist_id"
+
+    @staticmethod
+    def _profile(specialist_id: UUID):
+        from users.models import SpecialistProfile
+
+        return SpecialistProfile.objects.filter(pk=specialist_id).first()
+
+    @staticmethod
+    def _payload(profile) -> dict:
+        return {
+            "specialist_id": str(profile.pk),
+            "accepting_bookings": bool(profile.is_booking_enabled),
+            "status": profile.status,
+        }
+
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(description="specialist_id, accepting_bookings, status"),
+            403: OpenApiResponse(description="Not the acting subject"),
+            404: OpenApiResponse(description="No such specialist"),
+        },
+    )
+    def get(self, request: Request, specialist_id: UUID) -> Response:
+        profile = self._profile(specialist_id)
+        if profile is None:
+            return error_response("NOT_FOUND", "Specialist profile not found.", status_code=404)
+        return success_response(self._payload(profile))
+
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(description="Saved"),
+            400: OpenApiResponse(description="accepting_bookings is not a boolean"),
+            403: OpenApiResponse(description="Not the acting subject"),
+            404: OpenApiResponse(description="No such specialist"),
+            409: OpenApiResponse(description="PROFILE_NOT_ACTIVE"),
+        },
+    )
+    def patch(self, request: Request, specialist_id: UUID) -> Response:
+        from users.sellable import is_published
+
+        data = request.data if hasattr(request.data, "get") else {}
+        value = data.get("accepting_bookings")
+        # Strict: "false" as a string is a caller bug, not a pause.
+        if not isinstance(value, bool):
+            return error_response(
+                "VALIDATION_ERROR", "accepting_bookings must be a boolean.", status_code=400,
+            )
+        profile = self._profile(specialist_id)
+        if profile is None:
+            return error_response("NOT_FOUND", "Specialist profile not found.", status_code=404)
+        if not is_published(profile):
+            return error_response(
+                "PROFILE_NOT_ACTIVE",
+                "Bookings can be paused or resumed only on a published profile.",
+                status_code=409,
+            )
+        if profile.is_booking_enabled != value:
+            profile.is_booking_enabled = value
+            profile.save(update_fields=["is_booking_enabled"])
+        logger.info(
+            "internal.availability.saved specialist=%s accepting_bookings=%s",
+            profile.pk, value,
+        )
+        return success_response(self._payload(profile))

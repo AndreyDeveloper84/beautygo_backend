@@ -20,7 +20,13 @@ from users.internal_canon_gap_api import (  # noqa: E402
     InternalCanonGapRequestListView,
     InternalCanonGapSimilarView,
 )
+from users.internal_publication_api import (
+    InternalSpecialistPublicationReadinessView,
+    InternalSpecialistPublicationStatusView,
+    InternalSpecialistPublicationView,
+)
 from users.internal_schedule_api import (
+    InternalSpecialistAvailabilityView,
     InternalSpecialistScheduleView,
     InternalSpecialistTimeOffView,
     InternalSpecialistWorkingHoursView,
@@ -182,6 +188,31 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/services/<uuid:salon_service_id>/',
         InternalSpecialistSelectedServiceView.as_view(),
         name='internal-specialist-selected-service',
+    ),
+    # DRF-1845 (K1a) — «Принимаю записи» мастера под субъектом; explicit
+    # route BEFORE the include, same reason as above.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/availability/',
+        InternalSpecialistAvailabilityView.as_view(),
+        name='internal-specialist-availability',
+    ),
+    # DRF-1796 (M4) — готовность к публикации, «Опубликовать» (DRAFT → PENDING,
+    # идемпотентно по ключу команды), «Проверить статус». ACTIVE — только
+    # модератор. Под субъектом; explicit routes BEFORE the include.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/publication/readiness/',
+        InternalSpecialistPublicationReadinessView.as_view(),
+        name='internal-specialist-publication-readiness',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/publication/status/',
+        InternalSpecialistPublicationStatusView.as_view(),
+        name='internal-specialist-publication-status',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/publication/',
+        InternalSpecialistPublicationView.as_view(),
+        name='internal-specialist-publication',
     ),
     path(
         'api/v1/internal/specialists/',
