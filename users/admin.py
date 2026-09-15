@@ -117,8 +117,20 @@ def approve_specialists(modeladmin, request, queryset):
     настроенная услуга, место, рабочий день. Неготовый остаётся в своём
     статусе, модератор видит поимённый список недостающего. Салонного
     мастера гейт не касается: его каталог и публикацию ведёт владелец салона.
+
+    DRF-1957 (Q2 → а): если у соло-мастера не хватает только подтверждения
+    своего места, одобрение подтверждает и место — модератор, сейчас,
+    «модерация профиля <id>» — в одной транзакции с активацией. Место вне
+    workspace мастера так не подтверждается: отказ с ``location_not_confirmed``.
     """
-    from users.publication import approval_refusal
+    from django.db import transaction
+
+    from users.publication import (
+        LOCATION_NOT_CONFIRMED,
+        approval_refusal,
+        confirm_place_by_moderation,
+        place_confirmable_by_moderation,
+    )
 
     candidates = queryset.filter(
         status__in=[
@@ -126,20 +138,32 @@ def approve_specialists(modeladmin, request, queryset):
             SpecialistProfile.ProfileStatus.DRAFT,
         ],
     ).select_related('tenant', 'works_at')
-    allowed = []
     refused = []
+    updated = 0
+    confirmed_places = 0
     for profile in candidates:
+        name = profile.display_name or profile.pk
         codes = approval_refusal(profile)
-        if codes:
-            refused.append(f'{profile.display_name or profile.pk}: {", ".join(codes)}')
-        else:
-            allowed.append(profile.pk)
-    updated = SpecialistProfile.objects.filter(pk__in=allowed).update(
-        status=SpecialistProfile.ProfileStatus.ACTIVE,
-    )
+        confirm = codes == [LOCATION_NOT_CONFIRMED] and place_confirmable_by_moderation(profile)
+        if codes and not confirm:
+            refused.append(f'{name}: {", ".join(codes)}')
+            continue
+        with transaction.atomic():
+            if confirm:
+                if not confirm_place_by_moderation(profile, request.user):
+                    refused.append(f'{name}: {LOCATION_NOT_CONFIRMED}')
+                    continue
+                confirmed_places += 1
+            updated += SpecialistProfile.objects.filter(pk=profile.pk).update(
+                status=SpecialistProfile.ProfileStatus.ACTIVE,
+            )
     modeladmin.message_user(
         request, f'Подтверждено мастеров: {updated}', messages.SUCCESS,
     )
+    if confirmed_places:
+        modeladmin.message_user(
+            request, f'Места подтверждены модерацией профиля: {confirmed_places}', messages.SUCCESS,
+        )
     if refused:
         modeladmin.message_user(
             request,
