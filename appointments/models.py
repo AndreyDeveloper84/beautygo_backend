@@ -386,6 +386,34 @@ class Appointment(models.Model):
             'status', 'no_show_marked_by', 'updated_at',
         ])
 
+    def correct_completion_to_no_show(self, *, marked_by: str = "") -> None:
+        """Service correction ``completed -> no_show`` (DRF-1852, OD-V2).
+
+        Not an ordinary move — :meth:`mark_no_show` still refuses a
+        completed visit. The window, the reason and who corrected are the
+        caller's (``completion.correct_completion_to_no_show``): this method
+        only refuses a correction the state machine does not know.
+
+        ``completed_at`` / ``completed_by`` are left as they were: they are
+        the fact being corrected, and the correction trace cites them.
+        """
+        try:
+            allowed = BookingStateMachine.can_correct(
+                self.booking_status, BookingStatus.NO_SHOW,
+            )
+        except ValueError:
+            allowed = False
+        if not allowed:
+            raise ValidationError(
+                f"Cannot correct appointment with status '{self.status}' "
+                f"to no-show."
+            )
+        self.status = self.Status.NO_SHOW
+        self.no_show_marked_by = self._validated_actor(marked_by)
+        self.save(update_fields=[
+            'status', 'no_show_marked_by', 'updated_at',
+        ])
+
     @property
     def duration_minutes(self) -> int:
         """Computed duration from start/end."""

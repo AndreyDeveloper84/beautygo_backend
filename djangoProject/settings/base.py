@@ -478,6 +478,14 @@ BOOKING_AUTO_COMPLETE_ENABLED = (
 BOOKING_AUTO_COMPLETE_AFTER_HOURS = int(
     os.environ.get("BOOKING_AUTO_COMPLETE_AFTER_HOURS", "3")
 )
+# DRF-1852 — owner decision OD-V2 (15.08): a completed visit may be corrected
+# to no-show within a day, through the operator path only
+# (`manage.py correct_completion_to_no_show`). Next to the closure knobs on
+# purpose: the owner said the policy is not settled, so a different window
+# is a config change, not a code change.
+BOOKING_COMPLETION_CORRECTION_WINDOW_HOURS = int(
+    os.environ.get("BOOKING_COMPLETION_CORRECTION_WINDOW_HOURS", "24")
+)
 # ISO-8601 instant (e.g. "2026-08-20T00:00:00+03:00"). Bookings that
 # ended BEFORE this are never touched by the sweep. Set it to the moment
 # the feature goes live; the backlog before it is a separate, explicit

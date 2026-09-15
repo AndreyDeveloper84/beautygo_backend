@@ -250,10 +250,32 @@ class TestConcurrency:
         assert resp.status_code == 422
         assert len(_events(OutboxEvent.Topic.BOOKING_CANCELLED)) == 1
 
-    def test_a_completed_visit_cannot_be_marked(self, salon, admin_user, customer, master, service):
+    def test_the_ordinary_path_refuses_a_completed_visit(
+        self, salon, admin_user, customer, master, service
+    ):
+        """DRF-1852 (OD-V2): correcting «состоялся → не пришёл» is the
+        operator path only (`manage.py correct_completion_to_no_show`). This
+        salon route is the ORDINARY no-show path and refuses a completed
+        visit at any age — narrowing it to the window would hand the salon
+        the self-service flow OD-V2 rules out."""
         done = _booking(salon, customer, master, service, status=Appointment.Status.COMPLETED)
         resp = _no_show(_api(admin_user, tenant_slug=salon.slug), done)
         assert resp.status_code == 422
+
+    def test_the_ordinary_path_refuses_even_one_minute_after_closing(
+        self, salon, admin_user, customer, master, service
+    ):
+        """Inside the correction window the salon route still refuses."""
+        done = _booking(salon, customer, master, service, status=Appointment.Status.COMPLETED)
+        Appointment.objects.filter(pk=done.pk).update(
+            completed_at=datetime.now(tz=dt_timezone.utc) - timedelta(minutes=1),
+            completed_by="salon",
+        )
+        done.refresh_from_db()
+        resp = _no_show(_api(admin_user, tenant_slug=salon.slug), done)
+        assert resp.status_code == 422
+        done.refresh_from_db()
+        assert done.status == Appointment.Status.COMPLETED
 
 
 @pytest.mark.django_db(transaction=True)

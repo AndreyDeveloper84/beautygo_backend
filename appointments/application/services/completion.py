@@ -20,6 +20,7 @@ than not taking it here at all.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 
 from appointments.domain.value_objects import envelope_actor_for
 
@@ -77,7 +78,7 @@ def close_booking(appointment, *, completed_by: str) -> None:
     emit_booking_completed(appointment, completed_by=completed_by)
 
 
-def emit_booking_no_show(appointment, *, marked_by: str):
+def emit_booking_no_show(appointment, *, marked_by: str, correction: dict | None = None):
     """Write the two outbox rows a no-show produces (DRF-1851, K8).
 
     Call AFTER ``Appointment.mark_no_show()``. Two rows, on purpose:
@@ -114,6 +115,11 @@ def emit_booking_no_show(appointment, *, marked_by: str):
             # Registry reserves an optional `marked_by` on
             # appointment.no_show — this is the value behind it.
             "no_show_marked_by": marked_by,
+            # DRF-1852 — present only on a service correction: who corrected
+            # what, and why. Internal-delivery row only; the cross-service
+            # booking.cancelled below stays byte-identical to an ordinary
+            # no-show, so the operator's name does not travel to the bot.
+            **({"correction": correction} if correction is not None else {}),
         },
         user_id=appointment.client_id,
         tenant_id=safe_tenant_id(appointment, context="booking.no_show"),
@@ -146,6 +152,114 @@ def mark_booking_no_show(appointment, *, marked_by: str) -> None:
     """
     appointment.mark_no_show(marked_by=marked_by)
     emit_booking_no_show(appointment, marked_by=marked_by)
+
+
+class CorrectionRefused(Exception):
+    """A service correction the operator path must not perform.
+
+    ``code`` is stable (``reason_required``, ``operator_required``,
+    ``not_found``, ``not_completed``, ``no_completed_at``,
+    ``window_closed``) so a caller can branch without parsing prose.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
+def correction_window() -> timedelta:
+    """The OD-V2 window, from settings — one configurable place."""
+    from django.conf import settings
+
+    return timedelta(
+        hours=getattr(settings, "BOOKING_COMPLETION_CORRECTION_WINDOW_HOURS", 24),
+    )
+
+
+def correct_completion_to_no_show(
+    appointment_id,
+    *,
+    reason: str,
+    operator: str,
+    marked_by: str = "salon",
+    now: datetime | None = None,
+):
+    """Correct a completed visit to no-show within the window (DRF-1852).
+
+    Owner decision OD-V2 (Linear DRF-1064, 2026-08-15): «разрешить
+    исправление в течение суток. Исполнение — через техподдержку и ручную
+    отмену, отдельного продуктового потока не строить»; the operator path
+    must record «кто и почему исправил»; the Django admin does not qualify
+    because it bypasses the state machine and emits nothing.
+
+    This is the one implementation; ``manage.py correct_completion_to_no_show``
+    is its only caller. It takes its own lock — unlike the functions above,
+    nothing else is being serialised alongside it.
+
+    The window is re-checked on the locked row against ``completed_at``,
+    never against anything the caller supplies. ``now`` exists for tests.
+    Payments are not touched: a captured fee is returned by hand, as OD-V2
+    says («ручная отмена»).
+    """
+    from django.db import transaction
+    from django.utils import timezone
+
+    from appointments.models import Appointment
+
+    reason = (reason or "").strip()
+    operator = (operator or "").strip()
+    if not reason:
+        raise CorrectionRefused("reason_required", "a correction needs a reason")
+    if not operator:
+        raise CorrectionRefused("operator_required", "a correction needs the operator's name")
+
+    now = now or timezone.now()
+    window = correction_window()
+    with transaction.atomic():
+        try:
+            appointment = (
+                Appointment.objects.select_for_update(of=("self",))
+                .get(pk=appointment_id)
+            )
+        except Appointment.DoesNotExist:
+            raise CorrectionRefused("not_found", f"no appointment {appointment_id}") from None
+        if appointment.status != Appointment.Status.COMPLETED:
+            raise CorrectionRefused(
+                "not_completed", f"status is '{appointment.status}', not 'completed'",
+            )
+        if appointment.completed_at is None:
+            raise CorrectionRefused(
+                "no_completed_at", "completed visit without completed_at — nothing to measure from",
+            )
+        age = now - appointment.completed_at
+        if age > window:
+            raise CorrectionRefused(
+                "window_closed",
+                f"closed {age} ago, window is {window}",
+            )
+
+        completed_at = appointment.completed_at
+        completed_by = appointment.completed_by
+        appointment.correct_completion_to_no_show(marked_by=marked_by)
+        emit_booking_no_show(
+            appointment,
+            marked_by=marked_by,
+            correction={
+                "from_status": "completed",
+                "completed_at": completed_at.isoformat(),
+                "completed_by": completed_by,
+                "reason": reason,
+                "operator": operator,
+                "window_hours": window.total_seconds() / 3600,
+                "corrected_at": now.isoformat(),
+            },
+        )
+    logger.info(
+        "booking.completion_corrected appointment_id=%s completed_by=%s operator=%s",
+        appointment.id, completed_by, operator,
+    )
+    return appointment
 
 
 def schedule_capture_safely(appointment) -> None:
