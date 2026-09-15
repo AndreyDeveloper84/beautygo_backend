@@ -232,6 +232,10 @@ class TestTheClaimIsNotASecondIdentityGraph:
         # claim как данные — только чтение, не резолвер личности и не сторож
         # доступа: личность субъекта там решает IsInternalBearerForSubject.
         "users/personal_data_api.py",
+        # DRF-1935: исполнитель удаления аккаунта стирает claim (NULL) и по
+        # перечитанной строке проверяет, что его нет, — не резолвер личности
+        # и не сторож доступа.
+        "users/deletion_executor.py",
     }
 
     def test_only_the_provisioning_service_reads_the_claim(self):

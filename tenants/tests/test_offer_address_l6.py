@@ -88,7 +88,11 @@ _SKIP_PARTS = frozenset({"tests", "migrations", "venv", ".venv", "node_modules"}
 #: надо опустить, иначе следующее обращение спрячется в освободившейся квоте.
 USE_REGISTRY: dict[str, tuple[int, str]] = {
     # --- старые колонки ПРОФИЛЯ мастера: законны только до L8b (DRF-1892) ---
-    "users/deletion_executor.py": (9, "профиль: стирание при удалении аккаунта (§7 D3) и проверка остатка"),
+    "users/deletion_executor.py": (
+        11,
+        "профиль: стирание при удалении аккаунта (§7 D3) и проверка остатка; плюс адрес своего места "
+        "и соло-workspace при их обезличивании (DRF-1935, update_fields ServiceLocation/Tenant)",
+    ),
     "users/personal_data_api.py": (
         4, "профиль и своё место: выгрузка субъекту по 152-ФЗ (C5.1, DRF-1918) — только чтение, не показ"
     ),
