@@ -12,6 +12,11 @@ PILOT_CONTRACTS_2026-08-15 v1.3.0:
 - **AMD-010** — deletion audit via ``AnalyticsEvent`` (actor, scope,
   initiator), NEVER the deleted personal values.
 
+Subject (DRF-1038): the account AND its linked proxies
+(``users.subject_identities.subject_users``). Export adds
+``linked_identities``; delete erases the personal context of every linked
+proxy that holds one. One journal row per request, under the URL subject.
+
 Pilot scope (C5.2): personal context only. Transactional records
 (bookings, payments) follow statutory retention; anonymization is
 post-pilot and explicitly out of this contract.
@@ -40,6 +45,7 @@ from privacy_audit.models import PersonalDataAccessLog
 from users.permissions import IsInternalBearerForSubject
 from users.personal_context_erasure import erase_personal_context
 from users.personal_context_views import UserPersonalContextSerializer
+from users.subject_identities import subject_users
 from users.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
@@ -67,6 +73,26 @@ def _get_user_for_erasure(user_id: UUID) -> User | None:
     ``_get_live_user`` — a deleted account has nothing to hand out.
     """
     return User.objects.filter(pk=user_id).first()
+
+
+def _profile_subset(user: User) -> dict:
+    """Client profile only. Closed field list: extend deliberately, never via
+    serializer drift (the bot mirrors the specialist display pair elsewhere)."""
+    profile: Profile | None = getattr(user, "profile", None)
+    return {
+        "phone": user.phone or "",
+        "email": user.email or "",
+        "full_name": (profile.full_name if profile else "") or "",
+        "bio": (profile.bio if profile else "") or "",
+        "city": (profile.city if profile else "") or "",
+    }
+
+
+def _context_data(user: User) -> dict | None:
+    """Full personal-context catalogue; null without a row — no lazy create
+    on export, an export must not CREATE data about the user."""
+    ctx = UserPersonalContext.objects.filter(user=user).first()
+    return UserPersonalContextSerializer(ctx).data if ctx is not None else None
 
 
 def _not_found(request: Request, user_id: UUID) -> Response:
@@ -109,25 +135,18 @@ class InternalPersonalDataExportView(AuditedPersonalDataAccess, APIView):
         if user is None:
             return _not_found(request, user_id)
 
-        # Profile subset — client profile only (bot mirrors the
-        # specialist display pair via InternalUserProfileView). Closed
-        # field list: extend deliberately, never via serializer drift.
-        profile: Profile | None = getattr(user, "profile", None)
-        profile_data = {
-            "phone": user.phone or "",
-            "email": user.email or "",
-            "full_name": (profile.full_name if profile else "") or "",
-            "bio": (profile.bio if profile else "") or "",
-            "city": (profile.city if profile else "") or "",
-        }
-
-        # Full personal-context catalogue (declared prefs + provenance);
-        # null when the user never personalised (no row — no lazy create
-        # on export, an export must not CREATE data about the user).
-        ctx = UserPersonalContext.objects.filter(user=user).first()
-        context_data = (
-            UserPersonalContextSerializer(ctx).data if ctx is not None else None
-        )
+        profile_data = _profile_subset(user)
+        context_data = _context_data(user)
+        # DRF-1038: rows written on a proxy BEFORE it was bound stay on the
+        # proxy; they belong to this subject and are exported with it.
+        linked = [
+            {
+                "external_user_id": identity.username,
+                "profile": _profile_subset(identity),
+                "personal_context": _context_data(identity),
+            }
+            for identity in subject_users(user)[1:]
+        ]
 
         logger.info(
             "internal.personal_data.exported user_id=%s request_id=%s",
@@ -138,6 +157,7 @@ class InternalPersonalDataExportView(AuditedPersonalDataAccess, APIView):
             "exported_at": timezone.now().isoformat(),
             "profile": profile_data,
             "personal_context": context_data,
+            "linked_identities": linked,
         })
 
 
@@ -180,7 +200,18 @@ class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
         # so tonight's inference cannot refill what this call emptied,
         # and it writes the AMD-010 audit itself — repeats included,
         # scope=[] meaning nothing was left to remove.
-        scope = erase_personal_context(user, initiator="internal_api")
+        # DRF-1038: the account always; a linked proxy only when it holds a
+        # context row — an erasure never CREATES a tombstone (and an audit
+        # event) for an identity that had nothing.
+        scope: list[str] = []
+        for identity in subject_users(user):
+            if identity is not user and not UserPersonalContext.objects.filter(
+                user=identity
+            ).exists():
+                continue
+            for item in erase_personal_context(identity, initiator="internal_api"):
+                if item not in scope:
+                    scope.append(item)
         logger.info(
             "internal.personal_data.deleted user_id=%s scope=%s request_id=%s",
             user_id, scope, getattr(request, "request_id", "-"),

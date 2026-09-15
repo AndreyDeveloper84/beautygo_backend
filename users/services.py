@@ -323,16 +323,13 @@ def bind_external_identity(
     `beautygo_backend#220
     <https://github.com/AndreyDeveloper84/beautygo_backend/issues/220>`_):
     the personal-data
-    delete/export surface (``users/personal_data_api.py``) operates on
-    ONE explicit ``user_id`` and does NOT walk linked proxies. Before
-    binding, proxy-held personal data was reachable (and erasable) via
-    the proxy id; after binding, callers resolve and send the REAL
-    account id, so the proxy row — and any personal data on it — falls
-    outside BOTH resolution AND the per-user delete/export scope.
-    Before the provisioning token is first enabled in production, the
-    domain owner must EITHER extend delete/export to cover linked
-    proxies OR refuse binding when the proxy holds personal data
-    (#220; AYLA-DEC-0016 §4).
+    delete/export surface (``users/personal_data_api.py``) and the
+    account deletion executor (``users/deletion_executor.py``) walk the
+    subject through ``users.subject_identities.subject_users`` — the
+    account AND its linked proxies (DRF-1038, closing #220 by the
+    "extend" branch of AYLA-DEC-0016 §4). Rows written on the proxy
+    before binding stay on the proxy row, but they are exported and
+    erased together with the account.
 
     Returns ``(proxy_user, created)`` where ``created`` tells whether the
     proxy row was created by this call.

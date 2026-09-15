@@ -243,3 +243,74 @@ class TestDelete:
         events = AnalyticsEvent.objects.filter(event_name="personal_data_deleted")
         assert events.count() == 2
         assert events.latest("created_at").payload["scope"] == []
+
+
+# ---------------------------------------------------------------------------
+# DRF-1038 — связанный прокси входит в субъекта
+# ---------------------------------------------------------------------------
+
+
+def _linked_proxy_with_context(user, external_id="bot:max:pd-prebind"):
+    """Прокси, связанный с ``user``, с данными ДО привязки: бот писал на прокси,
+    потом его связали с аккаунтом. После привязки экспорт и стирание по
+    ``user_id`` этих строк не видели — разрыв DRF-1038."""
+    proxy = User.objects.create(
+        username=external_id, role="client", is_proxy=True, is_guest=False, linked_user=user,
+    )
+    UserPersonalContext.objects.create(
+        user=proxy, diet_type="keto", preferred_districts=["Арбеково"],
+        data_sources={"diet_type": "explicit"},
+    )
+    return proxy
+
+
+@pytest.mark.django_db
+class TestLinkedProxiesArePartOfTheSubject:
+    def test_export_includes_pre_binding_data_of_a_linked_proxy(self, api, user_with_context):
+        from privacy_audit.models import PersonalDataAccessLog
+        from users.personal_data_api import InternalPersonalDataExportView
+
+        proxy = _linked_proxy_with_context(user_with_context)
+        before = set(PersonalDataAccessLog.objects.values_list("pk", flat=True))
+
+        resp = api.get(EXPORT_URL.format(user_id=user_with_context.pk))
+
+        assert resp.status_code == 200
+        data = resp.json()["data"]
+        assert data["personal_context"]["diet_type"] == "vegan"
+        by_id = {item["external_user_id"]: item for item in data["linked_identities"]}
+        assert by_id[proxy.username]["personal_context"]["diet_type"] == "keto"
+        assert set(by_id[proxy.username]["profile"].keys()) == PROFILE_KEYS
+        # Один ряд журнала, субъект — тот же, что в URL.
+        rows = PersonalDataAccessLog.objects.exclude(pk__in=before).filter(
+            operation=InternalPersonalDataExportView.audit_operations["GET"]
+        )
+        assert rows.count() == 1 and rows.get().object_id == user_with_context.pk
+
+    def test_delete_erases_a_linked_proxys_context_and_leaves_a_stranger(
+        self, api, user_with_context,
+    ):
+        from privacy_audit.models import PersonalDataAccessLog
+        from users.personal_data_api import InternalPersonalDataDeleteView
+
+        proxy = _linked_proxy_with_context(user_with_context)
+        # Положительная пара: чужой прокси с данными, не связанный с user.
+        stranger = User.objects.create(
+            username="bot:max:pd-stranger", role="client", is_proxy=True, is_guest=False,
+        )
+        UserPersonalContext.objects.create(user=stranger, diet_type="paleo")
+        before = set(PersonalDataAccessLog.objects.values_list("pk", flat=True))
+
+        resp = api.delete(DELETE_URL.format(user_id=user_with_context.pk))
+
+        assert resp.status_code == 200
+        assert resp.json()["data"] == {
+            "user_id": str(user_with_context.pk),
+            "deleted": ["personal_context"],
+        }
+        assert UserPersonalContext.objects.get(user=proxy).diet_type == ""
+        assert UserPersonalContext.objects.get(user=stranger).diet_type == "paleo"
+        rows = PersonalDataAccessLog.objects.exclude(pk__in=before).filter(
+            operation=InternalPersonalDataDeleteView.audit_operations["DELETE"]
+        )
+        assert rows.count() == 1 and rows.get().object_id == user_with_context.pk
