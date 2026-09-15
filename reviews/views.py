@@ -3,8 +3,6 @@ from __future__ import annotations
 
 import logging
 
-from django.db import transaction
-from django.db.models import Avg, Count
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import permissions
 from rest_framework.exceptions import PermissionDenied
@@ -13,11 +11,11 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from appointments.models import Appointment
 from users.response import error_response, success_response
 
 from users.permissions import IsClient, IsSpecialist
 from .models import Review
+from .services import ReviewRefused, create_review, recalculate_rating
 from .serializers import (
     ReviewCreateSerializer, ReviewDetailSerializer,
     ReviewListSerializer, ReviewReplySerializer, ReviewUpdateSerializer,
@@ -27,29 +25,8 @@ logger = logging.getLogger(__name__)
 
 
 def _recalculate_rating(specialist) -> None:
-    """
-    Recalculate and persist specialist rating + reviews_count.
-
-    Synchronous — called inside the create-review transaction.
-    When Celery is available, this can be extracted into a shared_task.
-    """
-    result = Review.objects.filter(
-        specialist=specialist, is_hidden=False,
-    ).aggregate(
-        avg=Avg('rating'),
-        cnt=Count('id'),
-    )
-    avg = result['avg'] or 0
-    cnt = result['cnt'] or 0
-
-    specialist.__class__.objects.filter(id=specialist.id).update(
-        rating=round(avg, 1),
-        reviews_count=cnt,
-    )
-    logger.info(
-        "Rating recalculated: specialist=%s rating=%.1f count=%d",
-        specialist.id, avg, cnt,
-    )
+    """Kept as the name other views call; the implementation is shared (DRF-1855)."""
+    recalculate_rating(specialist)
 
 
 class ReviewPagination(PageNumberPagination):
@@ -84,56 +61,21 @@ class ReviewCreateView(APIView):
         serializer = ReviewCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        appointment_id = serializer.validated_data['appointment_id']
-
-        # Fetch and validate appointment
+        data = serializer.validated_data
+        # DRF-1855 — one implementation for the app door and the bot's
+        # internal door: reviews.services.create_review.
         try:
-            appointment = Appointment.objects.select_related(
-                'specialist', 'service', 'salon_service',
-            ).get(id=appointment_id, client=request.user)
-        except Appointment.DoesNotExist:
-            return error_response(
-                "NOT_FOUND", "Appointment not found.", status_code=404,
-            )
-
-        if appointment.status != Appointment.Status.COMPLETED:
-            return error_response(
-                "APPOINTMENT_NOT_COMPLETED",
-                "Reviews can only be left for completed appointments.",
-                status_code=400,
-            )
-
-        # Check for duplicate
-        if Review.objects.filter(appointment=appointment).exists():
-            return error_response(
-                "REVIEW_EXISTS",
-                "A review for this appointment already exists.",
-                status_code=409,
-            )
-
-        with transaction.atomic():
-            review = Review.objects.create(
-                appointment=appointment,
+            review = create_review(
                 client=request.user,
-                specialist=appointment.specialist,
-                # DRF-1421 — прямое копирование пары ссылок из брони.
-                # Разбирать случаи не нужно: XOR уже соблюдён на
-                # ``Appointment`` (CHECK appointment_exactly_one_service_
-                # source), и ``Review`` несёт тот же CHECK. До этого сюда
-                # шла одна ``appointment.service``, а у пилотной брони она
-                # NULL — отзыв падал на NOT NULL и не сохранялся вовсе.
-                service=appointment.service,
-                salon_service=appointment.salon_service,
-                rating=serializer.validated_data['rating'],
-                text=serializer.validated_data.get('text', ''),
-                is_anonymous=serializer.validated_data.get('is_anonymous', False),
+                appointment_id=data['appointment_id'],
+                rating=data['rating'],
+                text=data.get('text', ''),
+                is_anonymous=data.get('is_anonymous', False),
             )
-            _recalculate_rating(appointment.specialist)
-
-        logger.info(
-            "Review created: id=%s specialist=%s rating=%d",
-            review.id, review.specialist_id, review.rating,
-        )
+        except ReviewRefused as refused:
+            return error_response(
+                refused.code, refused.message, status_code=refused.status_code,
+            )
 
         return success_response(
             ReviewDetailSerializer(review).data,

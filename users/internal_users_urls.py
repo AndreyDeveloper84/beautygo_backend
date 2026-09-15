@@ -26,6 +26,7 @@ from recommendation.record_api import (
     InternalRecommendationEventView,
     InternalRecommendationSetView,
 )
+from users.internal_reviews_api import InternalReviewCreateView
 from users.personal_data_api import (
     InternalPersonalDataDeleteView,
     InternalPersonalDataExportView,
@@ -96,6 +97,12 @@ urlpatterns = [
     ),
     # DRF-1699 (§7 свода) — заявка на удаление аккаунта. Заводится ботом
     # ДО любого стирания; стирание — исполнитель (D3), не эти ручки.
+    # DRF-1855 — отзыв клиента из бота под субъектом; правила — reviews.services.
+    path(
+        "<uuid:user_id>/reviews/",
+        InternalReviewCreateView.as_view(),
+        name="internal-review-create",
+    ),
     path(
         "<uuid:user_id>/deletion-requests/",
         InternalDeletionRequestCreateView.as_view(),

@@ -110,11 +110,14 @@ class PersonalDataAccessLog(models.Model):
         DELETION_REQUEST_READ = "deletion_request_read", "Чтение заявки на удаление"
         # DRF-1709 (B-2.2): карточка display_name+avatar_url для зеркала бота.
         READ_PROFILE = "read_profile", "Чтение карточки пользователя"
+        # DRF-1855: отзыв клиента из бота — текст самого человека о визите.
+        REVIEW_CREATE = "review_create", "Отзыв клиента о визите"
 
     class ObjectCategory(models.TextChoices):
         PERSONAL_DATA = "personal_data", "Персональные данные"
         PERSONAL_CONTEXT = "personal_context", "Личный профиль (декларации)"
         DELETION_REQUEST = "deletion_request", "Заявка на удаление аккаунта"
+        REVIEW = "review", "Отзыв клиента"
 
     class Result(models.TextChoices):
         ALLOWED = "allowed", "Доступ разрешён"
