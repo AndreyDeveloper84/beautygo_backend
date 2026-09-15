@@ -344,6 +344,9 @@ class TestServedOperationsDoNotStopTheProduct:
             op.READ_PROFILE, op.WRITE_SPECIALIST_PROFILE, op.UPLOAD_MEDIA,
             # DRF-1857 — мастер читает отзывы о себе: чтение, не разрушение и не экспорт.
             op.REVIEW_READ,
+            # DRF-1803 — место мастера: чтение и запись полей, не разрушение и не
+            # раскрытие; закрытый список политики не расширяется по аналогии.
+            op.READ_SERVICE_LOCATION, op.WRITE_SERVICE_LOCATION,
         ):
             assert not policy.stops_when_unauditable(served)
 
@@ -726,6 +729,9 @@ class TestGuardCoversTheWholeSurface:
         "/api/v1/internal/specialists/{subject}/portfolio/",
         "/api/v1/internal/specialists/{subject}/portfolio/{request_id}/",
         "/api/v1/internal/specialists/{subject}/reviews/",  # DRF-1857 — «Мои отзывы»
+        # DRF-1803 (M11) — место работы мастера: своё место выгружается и стирается.
+        "/api/v1/internal/specialists/{subject}/service-locations/",
+        "/api/v1/internal/specialists/{subject}/service-locations/{request_id}/",
     ]
 
     def test_the_list_above_is_every_guarded_view_not_a_hand_picked_subset(self):
@@ -769,6 +775,7 @@ class TestGuardCoversTheWholeSurface:
             "internal_schedule_api",  # DRF-1815 — working hours under the subject
             "internal_canon_gap_api",  # DRF-1801 — canon gap requests under the subject
             "internal_specialist_profile_api",  # DRF-1813 — the master's profile, avatar, portfolio
+            "internal_service_locations_api",  # DRF-1803 — the master's own place and travel zone
         ):
             mod = __import__(f"users.{module}", fromlist=["x"])
             for obj in vars(mod).values():
@@ -786,7 +793,7 @@ class TestGuardCoversTheWholeSurface:
             "guarded_not_listed": sorted(c.__name__ for c in guarded - listed),
             "listed_not_guarded": sorted(c.__name__ for c in listed - guarded),
         }
-        assert len(guarded) == 15
+        assert len(guarded) == 17
 
     @pytest.mark.parametrize("template", ROUTES)
     def test_route_is_audited(self, template):

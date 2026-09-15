@@ -171,7 +171,10 @@ class TestWorksAt:
     def test_own_place_without_a_salon_is_exported(self, master):
         place = self._place(master, None)
         assert _section(_export(master))["works_at"] == {
+            "kind": "",
+            "label": "",
             "address": "ул. Рабочая, 3",
+            "note_for_client": "",
             "latitude": str(place.latitude),
             "longitude": str(place.longitude),
         }
@@ -180,7 +183,10 @@ class TestWorksAt:
         solo = Tenant.objects.create(slug="pd1918-solo", name="Соло", kind=Tenant.Kind.SOLO)
         place = self._place(master, solo)
         assert _section(_export(master))["works_at"] == {
+            "kind": "",
+            "label": "",
             "address": "ул. Рабочая, 3",
+            "note_for_client": "",
             "latitude": str(place.latitude),
             "longitude": str(place.longitude),
         }
@@ -268,7 +274,9 @@ class TestErasedImpliesExported:
         from users.personal_data_api import SPECIALIST_EXPORTED_FIELDS
 
         section = _section(_export(master))
-        assert set(section) == set(SPECIALIST_EXPORTED_FIELDS.values()) | {"portfolio"}
+        # Кроме полей профиля — связанные строки субъекта: портфолио и зоны выезда
+        # (DRF-1803) — списки строк, а не поля ``SpecialistProfile``.
+        assert set(section) == set(SPECIALIST_EXPORTED_FIELDS.values()) | {"portfolio", "service_areas"}
 
     def test_the_executor_saves_exactly_the_declared_erased_fields(self, master):
         from users.deletion_executor import ERASED_NAME, SPECIALIST_PROFILE_ERASED_FIELDS, _erase_catalog
