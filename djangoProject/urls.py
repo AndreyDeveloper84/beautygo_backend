@@ -25,6 +25,12 @@ from users.internal_publication_api import (
     InternalSpecialistPublicationStatusView,
     InternalSpecialistPublicationView,
 )
+from users.internal_specialist_profile_api import (
+    InternalSpecialistAvatarView,
+    InternalSpecialistPortfolioItemView,
+    InternalSpecialistPortfolioView,
+    InternalSpecialistProfileView,
+)
 from users.internal_schedule_api import (
     InternalSpecialistAvailabilityView,
     InternalSpecialistScheduleView,
@@ -149,6 +155,28 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/working-hours/',
         InternalSpecialistWorkingHoursView.as_view(),
         name='internal-specialist-working-hours',
+    ),
+    # DRF-1813 (M21) — профиль мастера, аватар и портфолио под субъектом и
+    # журналом §96; explicit routes BEFORE the include.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/profile/',
+        InternalSpecialistProfileView.as_view(),
+        name='internal-specialist-profile',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/media/avatar/',
+        InternalSpecialistAvatarView.as_view(),
+        name='internal-specialist-avatar',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/portfolio/',
+        InternalSpecialistPortfolioView.as_view(),
+        name='internal-specialist-portfolio',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/portfolio/<uuid:item_id>/',
+        InternalSpecialistPortfolioItemView.as_view(),
+        name='internal-specialist-portfolio-item',
     ),
     # DRF-1801 (M9) — «своя услуга» мастера = заявка о разрыве канона к
     # владельцу (G6 / D6): завести и прочитать под субъектом; решает только
