@@ -31,6 +31,7 @@ from users.internal_specialist_profile_api import (
     InternalSpecialistPortfolioView,
     InternalSpecialistProfileView,
 )
+from users.internal_reviews_api import InternalSpecialistReviewsView
 from users.internal_schedule_api import (
     InternalSpecialistAvailabilityView,
     InternalSpecialistScheduleView,
@@ -223,6 +224,13 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/availability/',
         InternalSpecialistAvailabilityView.as_view(),
         name='internal-specialist-availability',
+    ),
+    # DRF-1857 (K14) — «Мои отзывы» мастера под субъектом, без персданных
+    # клиента; журнал §96. Explicit route BEFORE the include.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/reviews/',
+        InternalSpecialistReviewsView.as_view(),
+        name='internal-specialist-reviews',
     ),
     # DRF-1796 (M4) — готовность к публикации, «Опубликовать» (DRAFT → PENDING,
     # идемпотентно по ключу команды), «Проверить статус». ACTIVE — только
