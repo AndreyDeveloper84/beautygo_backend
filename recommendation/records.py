@@ -4,9 +4,24 @@
 здесь — только проверка формы и запись одной транзакцией. Ни одной ветки
 выбора NBA: если решение неполно, отказ ``RecordInvalid`` с именем поля, а
 не догадка. Никаких LLM, ранжирования, кандидатов.
+
+DRF-1905 — исход на уровне набора (§32)
+--------------------------------------
+
+Исход прохода, готовность, вердикт безопасности, снимок контекста и версии
+политик — одно на проход и пишутся в набор. ``SAFETY_BOUNDARY`` и
+``INSUFFICIENT_CONTEXT`` «не являются NBA»: у такого набора нет ни primary, ни
+alternatives, а ``reason_codes`` / ``evidence_refs`` / ``explanation`` набора
+объясняют, почему NBA нет. У NBA-исхода primary обязателен; у каждого варианта
+свои ``reason_codes`` / ``evidence_refs`` / ``explanation`` (WHY альтернативы, C04.2).
+
+Проверяются **значения**, а не только ключи: ``readiness_state`` и
+``safety_evaluation_ref.state`` — ровно из словарей (верхний регистр); строчное
+``"blocked"`` — отказ по имени поля, каталог не нормализует за вызывающего.
 """
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -15,14 +30,21 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 
+from recommendation._types import SafetyState
 from recommendation.models import (
     ACTIONABILITY_TTL,
+    NO_NBA_STATUSES,
     RECORD_SCHEMA_VERSION,
     ExecutionMode,
+    ReadinessState,
     Recommendation,
     RecommendationEvent,
     RecommendationSet,
+    ResultStatus,
 )
+
+#: Длина колонок версий (``CharField(max_length=32)``): длиннее — отказ по имени, а не обрезка.
+VERSION_MAX_LENGTH = 32
 
 
 class RecordInvalid(ValueError):
@@ -40,20 +62,21 @@ class PolicyVersions:
     def missing(self) -> list[str]:
         return [k for k, v in self.__dict__.items() if not str(v or "").strip()]
 
+    def too_long(self) -> list[str]:
+        return [k for k, v in self.__dict__.items() if len(str(v or "")) > VERSION_MAX_LENGTH]
+
 
 @dataclass(frozen=True)
 class RecommendationInput:
+    """Вариант NBA. Исход прохода, готовность, безопасность, снимок и версии — у набора (DRF-1905)."""
+
     role: str                                  #: primary | alternative
     direction_code: str
     family: str
     target_outcomes: list[str]
-    result_status: str
-    readiness_state: str
     reason_codes: list[str]
     evidence_refs: list[dict[str, Any]]
     explanation: dict[str, Any]               #: {displayable, user_visible_reasons, internal_only}
-    safety_evaluation_ref: dict[str, Any]     #: {state, rule_id, policy_version, evidence_ref, activated_at}
-    context_snapshot_ref: dict[str, Any]      #: {snapshot_id, snapshot_version, content_digest}
     consent_evaluation_ref: dict[str, Any] = field(default_factory=dict)
     memory_snapshot_ref: dict[str, Any] | None = None
     execution_mapping_snapshot_ref: dict[str, Any] | None = None
@@ -68,7 +91,15 @@ class RecommendationSetInput:
     subject_ref: str
     intent_id: str
     versions: PolicyVersions
-    primary: RecommendationInput
+    #: Исход прохода (§32). SAFETY_BOUNDARY / INSUFFICIENT_CONTEXT — без primary и alternatives.
+    result_status: str
+    readiness_state: str
+    reason_codes: list[str]
+    evidence_refs: list[dict[str, Any]]
+    explanation: dict[str, Any]
+    safety_evaluation_ref: dict[str, Any]     #: {state, rule_id, policy_version, evidence_ref, activated_at}
+    context_snapshot_ref: dict[str, Any]      #: {snapshot_id, snapshot_version, content_digest}
+    primary: RecommendationInput | None = None
     alternatives: tuple[RecommendationInput, ...] = ()
     semantic_resolution_ref: str = ""
     #: C1: SHADOW по умолчанию — живым набор называет вызывающий явно.
@@ -81,34 +112,68 @@ _SNAPSHOT_KEYS = {"snapshot_id", "snapshot_version", "content_digest"}
 _SAFETY_KEYS = {"state", "rule_id", "policy_version", "evidence_ref", "activated_at"}
 
 
-def _check_record(inp: RecommendationInput, label: str) -> None:
+def _need(label: str):
     def need(cond: bool, msg: str) -> None:
         if not cond:
             raise RecordInvalid(f"{label}: {msg}")
+    return need
 
-    need(inp.role in Recommendation.Role.values, f"role {inp.role!r} не из primary|alternative")
-    need(bool(inp.direction_code.strip()), "direction_code пуст — decision_subject обязателен (B2)")
-    need(inp.family in Recommendation.Family.values,
-         f"family {inp.family!r} не из ADDRESS/SUPPORT/RECOVER/OBSERVE (B9)")
-    need(isinstance(inp.target_outcomes, list), "target_outcomes — список")
-    need(inp.result_status in Recommendation.ResultStatus.values, f"result_status {inp.result_status!r}")
-    need(inp.readiness_state in Recommendation.ReadinessState.values, f"readiness_state {inp.readiness_state!r}")
-    need(isinstance(inp.reason_codes, list) and len(inp.reason_codes) > 0,
+
+def _check_grounds(need, reason_codes, evidence_refs, explanation) -> None:
+    """reason_codes / evidence_refs / explanation — одинаковое правило для набора и варианта."""
+    need(isinstance(reason_codes, list) and len(reason_codes) > 0,
          "reason_codes пуст — каждое решение несёт reason codes (канон v1.1 §8)")
-    need(isinstance(inp.evidence_refs, list), "evidence_refs — список")
-    for j, ev in enumerate(inp.evidence_refs):
+    need(isinstance(evidence_refs, list), "evidence_refs — список")
+    for j, ev in enumerate(evidence_refs if isinstance(evidence_refs, list) else []):
         # Форма элемента типизирована: {source, ref, said_at?}. Словарь `source`
         # (user_stated/confirmed_memory/policy/safety/journey — контракт §12;
-        # conversation/anketa/operator/catalog — мозг, #417) здесь НЕ замыкается:
+        # conversation/anketa/operator/catalog — мозг) здесь НЕ замыкается:
         # свести два словаря — дело контракта, не хранилища. Пустые — отказ.
         need(isinstance(ev, dict) and str(ev.get("source", "")).strip() != "" and str(ev.get("ref", "")).strip() != "",
              f"evidence_refs[{j}] — {{source, ref, said_at?}} с непустыми source и ref "
              "(§105/§145: reason без evidence не печатается)")
-    need(isinstance(inp.explanation.get("displayable"), bool), "explanation.displayable обязателен (owner 2026-07-29)")
-    need(_SAFETY_KEYS <= set(inp.safety_evaluation_ref),
-         f"safety_evaluation_ref без {_SAFETY_KEYS - set(inp.safety_evaluation_ref)}")
-    need(_SNAPSHOT_KEYS <= set(inp.context_snapshot_ref),
+    need(isinstance(explanation, dict) and isinstance(explanation.get("displayable"), bool),
+         "explanation.displayable обязателен (owner 2026-07-29)")
+
+
+def _check_set(inp: RecommendationSetInput) -> None:
+    need = _need("набор")
+    missing = inp.versions.missing()
+    if missing:
+        raise RecordInvalid("провенанс неполон — версии политик пусты: " + ", ".join(missing))
+    too_long = inp.versions.too_long()
+    if too_long:
+        raise RecordInvalid(f"версии политик длиннее {VERSION_MAX_LENGTH} знаков: " + ", ".join(too_long))
+    need(inp.result_status in ResultStatus.values, f"result_status {inp.result_status!r} не из §32")
+    need(inp.readiness_state in ReadinessState.values,
+         f"readiness_state {inp.readiness_state!r} не из {list(ReadinessState.values)} (верхний регистр)")
+    _check_grounds(need, inp.reason_codes, inp.evidence_refs, inp.explanation)
+    need(isinstance(inp.safety_evaluation_ref, dict) and _SAFETY_KEYS <= set(inp.safety_evaluation_ref),
+         f"safety_evaluation_ref без {_SAFETY_KEYS - set(inp.safety_evaluation_ref or {})}")
+    state = (inp.safety_evaluation_ref or {}).get("state")
+    need(state in {s.value for s in SafetyState},
+         f"safety_evaluation_ref.state {state!r} не из {[s.value for s in SafetyState]} (верхний регистр)")
+    need(isinstance(inp.context_snapshot_ref, dict) and _SNAPSHOT_KEYS <= set(inp.context_snapshot_ref),
          "context_snapshot_ref — ссылка {snapshot_id, snapshot_version, content_digest} (§7)")
+    need(inp.execution_mode in ExecutionMode.values, f"execution_mode {inp.execution_mode!r} не из SHADOW|LIVE (C1)")
+    need(not inp.conversation_ref or {"conversation_id", "trace_id"} <= set(inp.conversation_ref),
+         "conversation_ref — {conversation_id, trace_id} либо пусто")
+    if inp.result_status in NO_NBA_STATUSES:
+        need(inp.primary is None and not inp.alternatives,
+             f"result_status {inp.result_status} не является NBA (§32) — primary и alternatives не пишутся")
+    else:
+        need(inp.primary is not None, f"result_status {inp.result_status} — NBA-исход без primary (§32)")
+        need(len(inp.alternatives) <= 2, f"alternatives: {len(inp.alternatives)} > 2 (Killer PRD §5.1; контракт §10)")
+
+
+def _check_record(inp: RecommendationInput, label: str, expected_role: str) -> None:
+    need = _need(label)
+    need(inp.role == expected_role, f"role должен быть {expected_role}")
+    need(bool(inp.direction_code.strip()), "direction_code пуст — decision_subject обязателен (B2)")
+    need(inp.family in Recommendation.Family.values,
+         f"family {inp.family!r} не из ADDRESS/SUPPORT/RECOVER/OBSERVE (B9)")
+    need(isinstance(inp.target_outcomes, list), "target_outcomes — список")
+    _check_grounds(need, inp.reason_codes, inp.evidence_refs, inp.explanation)
     for name in ("memory_snapshot_ref", "execution_mapping_snapshot_ref", "transaction_snapshot_ref"):
         ref = getattr(inp, name)
         need(ref is None or _SNAPSHOT_KEYS <= set(ref), f"{name} — ссылка на снимок, не копия (B10)")
@@ -119,66 +184,68 @@ def _check_record(inp: RecommendationInput, label: str) -> None:
         need(inp.rerank_reason == "" and inp.parent_id is None, "у primary нет parent/rerank_reason")
 
 
-def _build(inp: RecommendationInput, rset: RecommendationSet, versions: PolicyVersions, now: datetime,
-           parent: Recommendation | None) -> Recommendation:
+def _build(inp: RecommendationInput, rset: RecommendationSet, now: datetime,
+           parent: Recommendation | None, pk: UUID | None = None) -> Recommendation:
     return Recommendation(
+        id=pk or uuid.uuid4(),
         recommendation_set=rset, role=inp.role, parent=parent, rerank_reason=inp.rerank_reason,
         supersedes_id=inp.supersedes_id,
         direction_code=inp.direction_code, target_outcomes=list(inp.target_outcomes), family=inp.family,
-        result_status=inp.result_status, readiness_state=inp.readiness_state,
         reason_codes=list(inp.reason_codes), evidence_refs=list(inp.evidence_refs),
-        explanation=dict(inp.explanation), safety_evaluation_ref=dict(inp.safety_evaluation_ref),
+        explanation=dict(inp.explanation),
         consent_evaluation_ref=dict(inp.consent_evaluation_ref),
-        context_snapshot_ref=dict(inp.context_snapshot_ref), memory_snapshot_ref=inp.memory_snapshot_ref,
+        memory_snapshot_ref=inp.memory_snapshot_ref,
         execution_mapping_snapshot_ref=inp.execution_mapping_snapshot_ref,
         transaction_snapshot_ref=inp.transaction_snapshot_ref,
-        decision_policy_version=versions.decision_policy, taxonomy_version=versions.taxonomy,
-        safety_policy_version=versions.safety_policy, catalog_mapping_version=versions.catalog_mapping,
-        presentation_policy_version=versions.presentation_policy,
         record_schema_version=RECORD_SCHEMA_VERSION,
         created_at=now, actionable_until=now + ACTIONABILITY_TTL,
     )
 
 
 def persist(inp: RecommendationSetInput, *, now: datetime | None = None) -> RecommendationSet:
-    """Записать выдачу: set + primary + ≤2 alternatives + событие `created` на каждую.
+    """Записать выдачу: набор с исходом + (при NBA) primary и ≤2 alternatives + ``created`` на каждую запись.
 
-    Отказ до первой записи, если: версии политик неполны; primary не primary;
-    alternatives > 2 или не alternative; любая запись не проходит минимум §5.
+    Отказ до первой записи, если набор или любая запись не проходят минимум §5,
+    провенанс неполон, или исход и наличие NBA расходятся (§32).
+
+    Порядок записи. Набор immutable и после создания не обновляется, а CHECK на
+    его строке требует ``primary_id`` уже при вставке. Поэтому id primary
+    выбирается заранее, набор пишется с ним, затем primary с этим id — одна
+    транзакция; FK ``primary`` проверяется на COMMIT (DEFERRABLE INITIALLY DEFERRED).
     """
     now = now or timezone.now()
-    missing = inp.versions.missing()
-    if missing:
-        raise RecordInvalid("провенанс неполон — версии политик пусты: " + ", ".join(missing))
-    if inp.primary.role != Recommendation.Role.PRIMARY:
-        raise RecordInvalid("primary.role должен быть primary")
-    if len(inp.alternatives) > 2:
-        raise RecordInvalid(f"alternatives: {len(inp.alternatives)} > 2 (Killer PRD §5.1; контракт §10)")
-    if inp.execution_mode not in ExecutionMode.values:
-        raise RecordInvalid(f"execution_mode {inp.execution_mode!r} не из SHADOW|LIVE (C1)")
-    if inp.conversation_ref and not {"conversation_id", "trace_id"} <= set(inp.conversation_ref):
-        raise RecordInvalid("conversation_ref — {conversation_id, trace_id} либо пусто")
-    _check_record(inp.primary, "primary")
-    for i, alt in enumerate(inp.alternatives, start=1):
-        if alt.role != Recommendation.Role.ALTERNATIVE:
-            raise RecordInvalid(f"alternative[{i}].role должен быть alternative")
-        _check_record(alt, f"alternative[{i}]")
+    _check_set(inp)
+    if inp.primary is not None:
+        _check_record(inp.primary, "primary", Recommendation.Role.PRIMARY)
+        for i, alt in enumerate(inp.alternatives, start=1):
+            _check_record(alt, f"alternative[{i}]", Recommendation.Role.ALTERNATIVE)
 
+    versions = inp.versions
     with transaction.atomic():
+        primary_id = uuid.uuid4() if inp.primary is not None else None
         rset = RecommendationSet(
             subject_ref=inp.subject_ref, intent_id=inp.intent_id,
             semantic_resolution_ref=inp.semantic_resolution_ref, created_at=now,
             execution_mode=inp.execution_mode, conversation_ref=dict(inp.conversation_ref),
+            result_status=inp.result_status, readiness_state=inp.readiness_state,
+            reason_codes=list(inp.reason_codes), evidence_refs=list(inp.evidence_refs),
+            explanation=dict(inp.explanation), safety_evaluation_ref=dict(inp.safety_evaluation_ref),
+            context_snapshot_ref=dict(inp.context_snapshot_ref), primary_id=primary_id,
+            decision_policy_version=versions.decision_policy, taxonomy_version=versions.taxonomy,
+            safety_policy_version=versions.safety_policy, catalog_mapping_version=versions.catalog_mapping,
+            presentation_policy_version=versions.presentation_policy,
+            record_schema_version=RECORD_SCHEMA_VERSION,
         )
         rset.save()
-        primary = _build(inp.primary, rset, inp.versions, now, parent=None)
-        primary.save()
-        _event(primary, RecommendationEvent.Kind.CREATED, now, producer="Recommendation")
-        for alt in inp.alternatives:
-            parent = primary if alt.parent_id is None else Recommendation.objects.get(pk=alt.parent_id)
-            rec = _build(alt, rset, inp.versions, now, parent=parent)
-            rec.save()
-            _event(rec, RecommendationEvent.Kind.CREATED, now, producer="Recommendation")
+        if inp.primary is not None:
+            primary = _build(inp.primary, rset, now, parent=None, pk=primary_id)
+            primary.save()
+            _event(primary, RecommendationEvent.Kind.CREATED, now, producer="Recommendation")
+            for alt in inp.alternatives:
+                parent = primary if alt.parent_id is None else Recommendation.objects.get(pk=alt.parent_id)
+                rec = _build(alt, rset, now, parent=parent)
+                rec.save()
+                _event(rec, RecommendationEvent.Kind.CREATED, now, producer="Recommendation")
     return rset
 
 
