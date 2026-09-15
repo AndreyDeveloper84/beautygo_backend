@@ -120,6 +120,10 @@ class PersonalDataAccessLog(models.Model):
         REVIEW_READ = "review_read", "Чтение мастером отзывов о себе"
         # DRF-1984 (C5.3): бот читает статус стирания личного профиля — без значений.
         ERASURE_STATUS_READ = "erasure_status_read", "Чтение статуса стирания"
+        # DRF-1803 (M11) — место работы мастера: своё место — его данные
+        # (выгружается и стирается); чтение и запись полей, не разрушение.
+        READ_SERVICE_LOCATION = "read_service_location", "Чтение места работы мастера"
+        WRITE_SERVICE_LOCATION = "write_service_location", "Запись места работы мастера"
 
     class ObjectCategory(models.TextChoices):
         PERSONAL_DATA = "personal_data", "Персональные данные"

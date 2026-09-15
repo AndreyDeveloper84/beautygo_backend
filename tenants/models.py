@@ -446,4 +446,6 @@ class Tenant(models.Model):
 
 # `ServiceLocation` (§9, DRF-1687) живёт в отдельном модуле, чтобы этот файл не
 # рос дальше; импорт здесь — чтобы Django увидел модель при загрузке приложения.
-from .service_location import LocationStatus, ServiceLocation  # noqa: E402,F401
+from .service_location import LocationKind, LocationStatus, ServiceLocation  # noqa: E402,F401
+# `ServiceArea` (DRF-1803) — зона выезда мастера, тоже отдельным модулем.
+from .service_area import AreaCoverage, AreaKind, ServiceArea  # noqa: E402,F401
