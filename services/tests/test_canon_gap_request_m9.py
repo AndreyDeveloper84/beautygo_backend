@@ -152,6 +152,40 @@ class TestPendingCreatesNothingInCanon:
         assert out.decided_by == owner and out.decided_at is not None
         assert _canon_counts() == before
 
+    def test_approval_does_not_verify_any_salon_row(self, salon, master, category, template, owner):
+        """Решение главного окна 15.09 (C2/E1, §76 «кто»): APPROVED даёт
+        заявке шаблон и только. Строку салона в VERIFIED переводит владелец
+        отдельным подтверждением маппинга, а не ``decide()``.
+
+        Счётчики выше смену статуса существующей строки не видят — поэтому
+        сравнивается само состояние строк, в том числе той, что уже стоит на
+        одобряемом шаблоне и ждёт проверки."""
+        unmapped = SalonService.objects.create(
+            tenant=salon, category=category, name="Татуаж (как в салоне)", duration_minutes=60,
+        )
+        on_template = SalonService.objects.create(
+            tenant=salon, category=category, template=template, name="Пм бровей (выбрано)",
+            duration_minutes=90, mapping_status=SalonService.MappingStatus.REVIEW_REQUIRED,
+        )
+        fields = (
+            "mapping_status", "template_id", "mapping_confirmed_by_id",
+            "mapping_confirmed_at", "mapping_confirmed_rule", "mapping_source_ref",
+        )
+
+        def snapshot():
+            return {
+                row.pk: tuple(getattr(row, f) for f in fields)
+                for row in SalonService.objects.filter(pk__in=[unmapped.pk, on_template.pk])
+            }
+
+        before = snapshot()
+        req = create_request(master, name="Татуаж", description="", duration_minutes=60, price=Decimal("1000"))
+        out = decide(req, actor=owner, status=S.APPROVED, template=template)
+        # Положительная пара: решение записано.
+        assert out.status == S.APPROVED and out.resolved_template_id == template.pk
+        assert snapshot() == before
+        assert not SalonService.objects.filter(mapping_status=SalonService.MappingStatus.VERIFIED).exists()
+
 
 class TestSimilarIsAHintNotALink:
     def test_synonym_found_link_not_created(self, master, template, owner):
