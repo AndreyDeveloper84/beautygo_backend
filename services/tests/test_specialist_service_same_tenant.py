@@ -238,3 +238,138 @@ class TestTheSalonServiceInline:
         assert not formset.is_valid()
         assert formset.forms[0].non_field_errors() or formset.forms[0].errors
         assert SpecialistService.objects.get(pk=edge.pk).price == Decimal("1500.00")
+
+
+# ---------------------------------------------------------------------------
+# Настоящий HTTP POST форм админки: 200 и ошибка формы, не 500 и не сохранение
+# ---------------------------------------------------------------------------
+#
+# Уровень формсета выше доказывает правило; этот уровень доказывает, что
+# админка его показывает. Представление change_view рендерит ошибки, а
+# ошибка модели на поле, которого в форме нет, стала бы ValueError, то есть 500.
+#
+# Достижимость. Новая строка инлайна чужой tenant получить не может по
+# построению: поля ``tenant`` в инлайне нет, а ``save()`` берёт его у услуги-
+# родителя. Несовпадение tenant в инлайне бывает только на строке, посаженной
+# мимо ``clean()`` (``update``/``bulk_create``, старые данные), — такой тест ниже.
+# В отдельной форме ребра ``tenant`` есть, и там несовпадение достижимо напрямую.
+
+
+def _post_data_from(response) -> dict:
+    """Тело POST, какое отправил бы браузер со страницы формы без правок.
+
+    Собирается из контекста GET: основная форма, management-формы инлайнов
+    и их строки. Значение берётся тем же виджетом, который его рисует, —
+    иначе тест проверял бы собственный сборщик, а не админку.
+    """
+    from django import forms
+
+    data: dict[str, str] = {}
+
+    def put(form) -> None:
+        for bf in form:
+            widget = bf.field.widget
+            value = bf.value()
+            name = bf.html_name
+            if isinstance(widget, forms.CheckboxInput):
+                if value:
+                    data[name] = "on"
+                continue
+            inner = getattr(widget, "widget", widget)  # RelatedFieldWidgetWrapper
+            if isinstance(inner, forms.MultiWidget):
+                parts = value if isinstance(value, (list, tuple)) else inner.decompress(value)
+                for i, part in enumerate(parts):
+                    data[f"{name}_{i}"] = "" if part is None else str(part)
+                continue
+            formatted = inner.format_value(value)
+            if isinstance(formatted, (list, tuple)):
+                formatted = formatted[0] if formatted else ""
+            data[name] = "" if formatted is None else str(formatted)
+
+    put(response.context["adminform"].form)
+    for inline in response.context["inline_admin_formsets"]:
+        put(inline.formset.management_form)
+        for form in inline.formset.forms:
+            put(form)
+    return data
+
+
+def _edges_formset(response):
+    for inline in response.context["inline_admin_formsets"]:
+        if inline.formset.model is SpecialistService:
+            return inline.formset
+    raise AssertionError("SpecialistServiceInline is not on the salon service form")
+
+
+class TestTheAdminOverHttp:
+    ADD = "admin:services_specialistservice_add"
+    CHANGE = "admin:services_salonservice_change"
+
+    def test_edge_form_with_a_foreign_edge_tenant_is_200_and_a_form_error(
+        self, owner, service_a, master_a, salon_b,
+    ):
+        body = _add_body(service_a, master_a) | {"tenant": str(salon_b.pk)}
+        r = _admin_client(owner).post(reverse(self.ADD), body)
+        assert r.status_code == 200, r.status_code
+        form = r.context["adminform"].form
+        assert form.non_field_errors(), form.errors
+        assert not SpecialistService.objects.filter(specialist=master_a).exists()
+
+    @staticmethod
+    def _with_new_row(client, service, master) -> tuple[dict, str, int]:
+        url = reverse(TestTheAdminOverHttp.CHANGE, args=[service.pk])
+        page = client.get(url)
+        assert page.status_code == 200, page.status_code
+        data = _post_data_from(page)
+        formset = _edges_formset(page)
+        prefix, index = formset.prefix, int(data[f"{formset.prefix}-TOTAL_FORMS"])
+        data[f"{prefix}-TOTAL_FORMS"] = str(index + 1)
+        data.update({
+            f"{prefix}-{index}-specialist": str(master.pk),
+            f"{prefix}-{index}-price": "1500.00",
+            f"{prefix}-{index}-duration_minutes": "60",
+            f"{prefix}-{index}-buffer_after_minutes": "0",
+            f"{prefix}-{index}-is_active": "on",
+            f"{prefix}-{index}-salon_service": str(service.pk),
+        })
+        return data, url, index
+
+    def test_the_form_builder_saves_an_unchanged_page_and_a_same_salon_row(self, owner, service_a, master_a):
+        # Положительная стража: без неё отказы ниже могли бы «пройти» на
+        # сломанном сборщике тела, который админка отвергает по другой причине.
+        client = _admin_client(owner)
+        data, url, _ = self._with_new_row(client, service_a, master_a)
+        r = client.post(url, data)
+        assert r.status_code == 302, (
+            r.context["adminform"].form.errors, _edges_formset(r).errors,
+        ) if r.context else r.status_code
+        assert SpecialistService.objects.filter(specialist=master_a, salon_service=service_a).exists()
+
+    def test_inline_row_with_another_salons_master_is_200_and_a_form_error(self, owner, service_a, master_b):
+        client = _admin_client(owner)
+        data, url, index = self._with_new_row(client, service_a, master_b)
+        r = client.post(url, data)
+        assert r.status_code == 200, r.status_code
+        assert r.context["adminform"].form.errors == {}, r.context["adminform"].form.errors
+        assert "specialist" in _edges_formset(r).forms[index].errors
+        assert not SpecialistService.objects.filter(specialist=master_b).exists()
+
+    def test_inline_edit_of_a_planted_foreign_tenant_is_200_and_a_form_error(
+        self, owner, service_a, master_a, salon_b,
+    ):
+        edge = _edge(service_a, master_a)
+        # Достижимо только мимо clean(): update() — тот самый обход.
+        SpecialistService.objects.filter(pk=edge.pk).update(tenant=salon_b)
+        client = _admin_client(owner)
+        url = reverse(self.CHANGE, args=[service_a.pk])
+        page = client.get(url)
+        assert page.status_code == 200, page.status_code
+        data = _post_data_from(page)
+        formset = _edges_formset(page)
+        row = next(i for i, f in enumerate(formset.forms) if f.instance.pk == edge.pk)
+        data[f"{formset.prefix}-{row}-price"] = "1600.00"
+        r = client.post(url, data)
+        assert r.status_code == 200, r.status_code
+        assert r.context["adminform"].form.errors == {}, r.context["adminform"].form.errors
+        assert _edges_formset(r).forms[row].non_field_errors(), _edges_formset(r).errors
+        assert SpecialistService.objects.get(pk=edge.pk).price == Decimal("1500.00")
