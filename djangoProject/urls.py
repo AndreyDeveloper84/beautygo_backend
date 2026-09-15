@@ -10,6 +10,7 @@ from drf_spectacular.views import (
 
 from .health import liveness, readiness
 from payments.views import InternalPaymentStatusView, InternalPayoutPreviewView
+from services.internal_offer_api import InternalSpecialistServiceSelectionView
 from users.internal_canon_gap_api import (  # noqa: E402
     InternalCanonGapRequestDetailView,
     InternalCanonGapRequestListView,
@@ -157,6 +158,14 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/canon-gap-requests/<uuid:request_id>/',
         InternalCanonGapRequestDetailView.as_view(),
         name='internal-specialist-canon-gap-request',
+    ),
+    # DRF-1800 (M8a) — мастер-соло выбирает канонические услуги: выбор
+    # заводит SalonService(REVIEW_REQUIRED), предложение с ценой — при
+    # первой цене (M8b). Под субъектом; explicit route BEFORE the include.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/services/selection/',
+        InternalSpecialistServiceSelectionView.as_view(),
+        name='internal-specialist-service-selection',
     ),
     path(
         'api/v1/internal/specialists/',

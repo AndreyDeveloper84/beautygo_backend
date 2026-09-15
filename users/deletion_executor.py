@@ -103,6 +103,7 @@ DELETE: dict[str, str] = {
     # дневники и питание — D6
     "nutrition.NutritionProfile.user": "erase_personal_calculation_inputs (#402), затем строка",
     "nutrition.FoodLog.user": "строки",
+    "nutrition.DeletedFoodLog.user": "строки (снимок удалённой записи на окно восстановления, DRF-1838)",
     "nutrition.FoodScan.user": "строки + файлы image через storage",
     "nutrition.WaterEntry.user": "строки",
     "nutrition.WaterLog.user": "строки",
@@ -374,6 +375,7 @@ def _erase_catalog(user) -> dict:
     from notifications.models import Notification
     from nutrition.models import (
         CrossDomainShownRule,
+        DeletedFoodLog,
         FoodLog,
         FoodScan,
         NutritionProfile,
@@ -428,6 +430,7 @@ def _erase_catalog(user) -> dict:
         files_deleted += _delete_file(scan.image)
     _delete("nutrition.FoodScan", FoodScan.objects.filter(user=user))
     _delete("nutrition.FoodLog", FoodLog.objects.filter(user=user))
+    _delete("nutrition.DeletedFoodLog", DeletedFoodLog.objects.filter(user=user))
     _delete("nutrition.WaterEntry", WaterEntry.objects.filter(user=user))
     _delete("nutrition.WaterLog", WaterLog.objects.filter(user=user))
     _delete("nutrition.CrossDomainShownRule", CrossDomainShownRule.objects.filter(user=user))
@@ -585,6 +588,7 @@ def _residue(user) -> dict[str, int]:
     from notifications.models import Notification
     from nutrition.models import (
         CrossDomainShownRule,
+        DeletedFoodLog,
         FoodLog,
         FoodScan,
         NutritionProfile,
@@ -611,6 +615,7 @@ def _residue(user) -> dict[str, int]:
     checks = {
         "nutrition.NutritionProfile": NutritionProfile.objects.filter(user=user),
         "nutrition.FoodLog": FoodLog.objects.filter(user=user),
+        "nutrition.DeletedFoodLog": DeletedFoodLog.objects.filter(user=user),
         "nutrition.FoodScan": FoodScan.objects.filter(user=user),
         "nutrition.WaterEntry": WaterEntry.objects.filter(user=user),
         "nutrition.WaterLog": WaterLog.objects.filter(user=user),

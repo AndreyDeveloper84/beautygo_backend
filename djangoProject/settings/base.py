@@ -1169,6 +1169,13 @@ CELERY_BEAT_SCHEDULE = {
         "task": "nutrition.purge_deleted_water_entries",
         "schedule": crontab(hour=3, minute=0),
     },
+    # DRF-1838: удалённая запись еды восстановима 15 минут, после —
+    # окончательно. Снимок стирается этим тиком, если человек больше не
+    # звал ручку дневника.
+    "purge-expired-deleted-food-logs": {
+        "task": "nutrition.purge_expired_deleted_food_logs",
+        "schedule": crontab(minute="*/15"),
+    },
     # DRF-1843, §134 — фотографии еды старше 30 суток. 02:45 UTC = 05:45 MSK,
     # до утренней записи еды. Без FOOD_PHOTO_PURGE_ENABLED только считает и
     # пишет событие прогона.
