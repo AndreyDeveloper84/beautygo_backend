@@ -1072,6 +1072,51 @@ class SpecialistService(models.Model):
             raise ValidationError(
                 {"duration_minutes": "An active bookable service needs a resolvable duration."}
             )
+        self._clean_same_tenant()
+
+    def _clean_same_tenant(self) -> None:
+        """Мастер и услуга ребра — из одного салона (решение владельца, раздел Q).
+
+        Салоны читаются из базы, а не с закешированных объектов: вызывающий
+        мог держать экземпляр профиля до переезда мастера, и решать по нему
+        значило бы решать по прошлому.
+
+        Ключи ошибок выбраны под формы. ``specialist`` есть и в салонном
+        инлайне, и в отдельной форме ребра. Расхождение собственного тенанта
+        ребра — ошибка без поля: у инлайна поля ``tenant`` нет, а ``ModelForm``
+        превращает ошибку модели на отсутствующем поле в ``ValueError``, то есть в 500.
+
+        Названный предел, как у ``SpecialistProfile.clean`` для ``works_at``:
+        ``bulk_create`` и ``update()`` идут мимо ``clean()``, а ``CheckConstraint``
+        в соседнюю таблицу не смотрит.
+        """
+        if self.salon_service_id is None or self.specialist_id is None:
+            return
+        specialist_model = self._meta.get_field("specialist").related_model
+        master_tenant_id = (
+            specialist_model.objects
+            .filter(pk=self.specialist_id)
+            .values_list("tenant_id", flat=True)
+            .first()
+        )
+        salon_tenant_id = (
+            SalonService.objects
+            .filter(pk=self.salon_service_id)
+            .values_list("tenant_id", flat=True)
+            .first()
+        )
+        if master_tenant_id is None or master_tenant_id != salon_tenant_id:
+            raise ValidationError({
+                "specialist": (
+                    "Мастер не из салона этой услуги. Услугу салона оказывает "
+                    "только мастер этого салона."
+                ),
+            })
+        if self.tenant_id is not None and self.tenant_id != salon_tenant_id:
+            raise ValidationError(
+                "Салон предложения не совпадает с салоном услуги — "
+                "такую строку нужно исправить, а не сохранять."
+            )
 
     def save(self, *args: Any, **kwargs: Any) -> None:
         if self.tenant_id is None and self.salon_service_id is not None:
