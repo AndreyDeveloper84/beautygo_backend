@@ -66,6 +66,7 @@ def _ref(prefix: str) -> dict:
 def _variant(role: str = "primary", **over) -> RecommendationInput:
     base = dict(
         role=role, direction_code="REDUCE_MUSCLE_TENSION_BACK", family="ADDRESS",
+        target="BACK_COMFORT", action_type="PROVIDER_SESSION",
         target_outcomes=[OUTCOME_ID], reason_codes=["ELIG_CAPABILITY_VERIFIED"],
         evidence_refs=[{"source": "conversation", "ref": "msg-7"}],
         explanation={"displayable": True, "user_visible_reasons": ["ты сказала, что ноет спина"],

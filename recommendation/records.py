@@ -93,6 +93,8 @@ class RecommendationInput:
     role: str                                  #: primary | alternative
     direction_code: str
     family: str
+    target: str                                #: H5 — одно значение на вариант (DRF-1922)
+    action_type: str                           #: H5 — форма исполнения (DRF-1922)
     target_outcomes: list[str]
     reason_codes: list[str]
     evidence_refs: list[dict[str, Any]]
@@ -243,6 +245,12 @@ def _check_record(inp: RecommendationInput, label: str, expected_role: str) -> N
     need(bool(inp.direction_code.strip()), "direction_code пуст — decision_subject обязателен (B2)")
     need(inp.family in Recommendation.Family.values,
          f"family {inp.family!r} не из ADDRESS/SUPPORT/RECOVER/OBSERVE (B9)")
+    # H5 / I1 (а): каждая ось — по своему закрытому словарю, независимо; таблицы сочетаний нет.
+    # Регистр не приводится: строчный код — не код.
+    need(inp.target in Recommendation.Target.values,
+         f"target {_code_name(inp.target)!r} не из {list(Recommendation.Target.values)} (H5)")
+    need(inp.action_type in Recommendation.ActionType.values,
+         f"action_type {_code_name(inp.action_type)!r} не из {list(Recommendation.ActionType.values)} (H5)")
     need(isinstance(inp.target_outcomes, list), "target_outcomes — список")
     _check_grounds(need, inp.reason_codes, inp.evidence_refs, inp.explanation)
     for name in ("memory_snapshot_ref", "execution_mapping_snapshot_ref", "transaction_snapshot_ref"):
@@ -265,6 +273,7 @@ def _build(inp: RecommendationInput, rset: RecommendationSet, now: datetime,
         recommendation_set=rset, role=inp.role, parent=parent, rerank_reason=inp.rerank_reason,
         supersedes_id=inp.supersedes_id,
         direction_code=inp.direction_code, target_outcomes=list(inp.target_outcomes), family=inp.family,
+        target=inp.target, action_type=inp.action_type,
         reason_codes=list(inp.reason_codes), evidence_refs=list(inp.evidence_refs),
         explanation=dict(inp.explanation),
         consent_evaluation_ref=dict(inp.consent_evaluation_ref),
