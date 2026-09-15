@@ -105,7 +105,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         user = self.request.user
         qs = (
             Appointment.objects
-            .select_related('client', 'specialist', 'service', 'service__category')
+            .select_related('client', 'specialist', 'specialist__works_at', 'service', 'service__category')
             .prefetch_related('payments')
         )
 
@@ -226,7 +226,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
         # Reload for full serialization
         appointment = (
             Appointment.objects
-            .select_related('client', 'specialist', 'service')
+            .select_related('client', 'specialist', 'specialist__works_at', 'service')
             .prefetch_related('payments')
             .get(id=result.booking_id)
         )
@@ -292,7 +292,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
 
         appointment = (
             Appointment.objects
-            .select_related('client', 'specialist', 'service')
+            .select_related('client', 'specialist', 'specialist__works_at', 'service')
             .prefetch_related('payments')
             .get(id=result.booking_id)
         )
@@ -459,7 +459,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         # and bare FOR UPDATE is rejected by Postgres
                         # (same trap as billing.charges' nullable invoice).
                         .select_for_update(of=("self",))
-                        .select_related('specialist', 'client', 'service')
+                        .select_related('specialist', 'specialist__works_at', 'client', 'service')
                         .get(pk=pk)
                     )
                 except Appointment.DoesNotExist:
@@ -582,7 +582,7 @@ class AppointmentViewSet(viewsets.GenericViewSet):
                         # and bare FOR UPDATE is rejected by Postgres
                         # (same trap as billing.charges' nullable invoice).
                         .select_for_update(of=("self",))
-                        .select_related('specialist', 'client', 'service')
+                        .select_related('specialist', 'specialist__works_at', 'client', 'service')
                         .get(pk=pk)
                     )
                 except Appointment.DoesNotExist:
