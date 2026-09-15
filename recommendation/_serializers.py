@@ -196,14 +196,15 @@ class ResolveResponseSerializer(serializers.Serializer):
     reason_codes = serializers.ListField(child=serializers.CharField())
     policy_versions = _PolicyVersionsSerializer()
     computed_at = serializers.DateTimeField()
-    # H1-в (DRF-1934): добавочные поля, мажор контракта прежний.
+    # H1-в (DRF-1934), форма — поправка O1 (§8): добавочные поля, мажор контракта прежний.
     separation_stage = serializers.ChoiceField(
         choices=[StageId.S2.value, StageId.S3.value, StageId.S4.value, StageId.S5.value], allow_null=True,
     )
     separation_state = serializers.ChoiceField(choices=[s.value for s in SeparationState])
-    best_tier_size = serializers.IntegerField(min_value=0)
-    # §13.1: до решения владельца об отображении стадии в число — всегда null.
-    separation = serializers.FloatField(allow_null=True, min_value=0.0, max_value=1.0)
+    best_group_size = serializers.IntegerField(min_value=0)
+    candidate_count = serializers.IntegerField(min_value=0)
+    # O2 (§9): до калибровки по тени — всегда null.
+    separation_score = serializers.FloatField(allow_null=True, min_value=0.0, max_value=1.0)
 
 
 def decision_to_payload(decision: RecommendationDecision) -> dict:
@@ -247,8 +248,9 @@ def decision_to_payload(decision: RecommendationDecision) -> dict:
         "computed_at": decision.computed_at.isoformat(),
         "separation_stage": decision.separation_stage.value if decision.separation_stage else None,
         "separation_state": decision.separation_state.value,
-        "best_tier_size": decision.best_tier_size,
-        "separation": decision.separation,
+        "best_group_size": decision.best_group_size,
+        "candidate_count": decision.candidate_count,
+        "separation_score": decision.separation_score,
     }
 
 

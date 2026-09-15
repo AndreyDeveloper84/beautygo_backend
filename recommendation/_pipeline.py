@@ -23,17 +23,17 @@
 
 Что из §13 здесь есть, а чего нет намеренно
 -------------------------------------------
-* **Стадия, разделившая лучший ярус, — есть** (DRF-1934): `separation_stage`,
-  `separation_state`, `best_tier_size` в решении. Вид величины решил
+* **Стадия, разделившая лучший ярус, — есть** (DRF-1934). Вид величины решил
   владелец: H1 = «в, считает каталог» (`docs/OWNER_QUESTIONS_2026-09-12.md`
-  §H1, ответ 15.09) — номер стадии, которая первой разделила лучший ярус.
-* **`separation` как число в [0,1]** (§13.1) — **нет**, и это не недоделка.
-  H1-в даёт вид, но не отображение стадии в число: номер не нормирован,
-  а раньше — значит сильнее. Отображение — `CONTROLLED_POLICY`, калибруется
-  в DRF-1883; черновик поправки канона —
-  `docs/DRAFT_AMENDMENT_SEPARATION_H1V_2026-09-15.md`. До решения владельца
-  поле `None`: написать «пока так» значило бы назначить политику молча —
-  ровно то, чем стал литерал рейтинга в сиде.
+  §H1) — номер стадии, которая первой разделила лучший ярус. Форма —
+  утверждённая поправка O1 (`docs/PROMPT_ORCHESTRATOR_AYLA_CONTROLLED_PILOT_NEXT_WAVE.md`
+  §8): `separation_stage`, `best_group_size`, `candidate_count`,
+  `separation_state`, `separation_score`.
+* **`separation_score` как число в [0,1]** — **всегда `None`**, и это не
+  недоделка. O2 (§9): числовой score не задаётся до калибровки по тени;
+  порядковый номер стадии в «вероятность» не превращается (§14). Написать
+  «пока так» значило бы назначить политику молча — ровно то, чем стал
+  литерал рейтинга в сиде.
 * **Порог `tau_separation`** — не здесь и не в коде вообще: калибруется по тени.
 * **Остальная `CandidateSetSignature`** (digest, spans, narrowed_by, probe) —
   интерфейс к треку A, отдельной задачей.
@@ -76,8 +76,9 @@ from ._types import (
 
 #: Версия настоящего контракта. Уезжает в ответ: потребитель, получивший
 #: неизвестную мажорную версию, обязан вернуть CONTRACT_VIOLATION (§9.4).
-#: 1.1.0 — DRF-1934: добавочные поля separation_stage / separation_state /
-#: best_tier_size / separation (null) — минор: мажор 1 разбирается прежним клиентом.
+#: 1.1.0 — DRF-1934: добавочные поля O1 — separation_stage / best_group_size /
+#: candidate_count / separation_state / separation_score (null) — минор: мажор 1
+#: разбирается прежним клиентом.
 RESOLVER_SPEC_VERSION = "1.1.0"
 
 #: Ротация — чистая функция пары (seed, id); версия отдельная, потому что
@@ -117,7 +118,7 @@ def resolve(
     stage_outputs = _run_ranking_stages(survivors, request, policy)
     tiers, verdicts = _build_tiers(survivors, stage_outputs)
     tiers = _apply_tier_one_ban(tiers, stage_outputs)
-    separation_stage, separation_state, best_tier_size = _separation(tiers, verdicts, len(survivors))
+    separation_stage, separation_state, best_group_size = _separation(tiers, verdicts, len(survivors))
     ordered = _order_candidates(
         tiers=tiers,
         refs={f.ref.id: f.ref for f in survivors},
@@ -146,7 +147,8 @@ def resolve(
         computed_at=datetime.now(timezone.utc),
         separation_stage=separation_stage,
         separation_state=separation_state,
-        best_tier_size=best_tier_size,
+        best_group_size=best_group_size,
+        candidate_count=len(survivors),
         census=admitted.census,
     )
 
