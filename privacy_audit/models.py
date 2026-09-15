@@ -118,6 +118,8 @@ class PersonalDataAccessLog(models.Model):
         DELETE_MEDIA = "delete_media", "Удаление фото мастера"
         # DRF-1857 (K14): мастер читает отзывы о себе — имя и текст клиентов.
         REVIEW_READ = "review_read", "Чтение мастером отзывов о себе"
+        # DRF-1984 (C5.3): бот читает статус стирания личного профиля — без значений.
+        ERASURE_STATUS_READ = "erasure_status_read", "Чтение статуса стирания"
 
     class ObjectCategory(models.TextChoices):
         PERSONAL_DATA = "personal_data", "Персональные данные"
