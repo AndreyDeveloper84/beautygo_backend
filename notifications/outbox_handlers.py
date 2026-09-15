@@ -38,6 +38,7 @@ from typing import Callable
 from django.core.exceptions import ValidationError
 
 from appointments.models import Appointment, OutboxEvent
+from tenants.distance import offer_address
 
 from .models import Notification
 from .services.dispatcher import NotificationService
@@ -77,7 +78,7 @@ def _load_appointment(event: OutboxEvent) -> Appointment | None:
     try:
         return (
             Appointment.objects
-            .select_related("client", "specialist", "service")
+            .select_related("client", "specialist__works_at", "service")
             .get(id=appointment_id)
         )
     except (
@@ -119,10 +120,10 @@ def _appointment_context(appointment: Appointment) -> dict:
         ),
         "client_name": _client_name(appointment),
         "date_time": appointment.start_datetime.strftime("%H:%M %d.%m"),
-        "address": (
-            getattr(appointment.specialist, "address", "") or ""
-            if appointment.specialist_id else ""
-        ),
+        # L8a (§9): адрес места предложения (``offer_address``), как у
+        # напоминания за час. Старый ``getattr(specialist, "address", "")``
+        # после снятия колонки (L8b) молча отдал бы "" — подменой, а не отказом.
+        "address": offer_address(appointment.specialist) if appointment.specialist_id else "",
     }
 
 
@@ -356,7 +357,7 @@ def _load_payment(event: OutboxEvent):
             Payment.objects
             .select_related(
                 "appointment__client",
-                "appointment__specialist",
+                "appointment__specialist__works_at",
                 "appointment__service",
             )
             .get(id=payment_id)

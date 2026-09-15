@@ -317,9 +317,11 @@ class Command(BaseCommand):
         # второй прогон не нашёл бы созданный первым тенант и упал бы на
         # уникальном слаге. Идемпотентность здесь держится именно на
         # выборе менеджера.
+        # Адрес салона — у салона (§9, L8a): раньше сид клал его в профиль
+        # каждого мастера, то есть делал адрес салона «адресом человека».
         tenant, created = Tenant.all_objects.get_or_create(
             slug=salon["slug"],
-            defaults={"name": salon["name"], "is_active": False},
+            defaults={"name": salon["name"], "is_active": False, "address": salon.get("address", "")},
         )
         if created:
             counts.tenants += 1
@@ -327,9 +329,16 @@ class Command(BaseCommand):
             counts.reused_tenants += 1
             # Имя обновляем, is_active — никогда: владелец мог включить
             # салон осознанно, и повторный сид не вправе это отменить.
+            # Адрес дописываем только в пустой: заданный оператором не трогаем.
+            fields = []
             if tenant.name != salon["name"]:
                 tenant.name = salon["name"]
-                tenant.save(update_fields=["name"])
+                fields.append("name")
+            if not tenant.address and salon.get("address"):
+                tenant.address = salon["address"]
+                fields.append("address")
+            if fields:
+                tenant.save(update_fields=fields)
         return tenant
 
     def _upsert_specialists(
@@ -374,7 +383,6 @@ class Command(BaseCommand):
             about = person.get("bio", "")
             profile.bio = f"{role} — {about}" if role and about else (role or about)
             profile.experience_years = person.get("experience_years", 0)
-            profile.address = salon["address"]
             profile.timezone = salon.get("timezone", "Europe/Moscow")
             profile.rating = Decimal(person["rating"])
             # reviews_count остаётся 0: рейтинг нужен движку (порог
