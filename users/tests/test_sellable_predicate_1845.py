@@ -139,6 +139,8 @@ def paused(salon):
 def client_api(db):
     user = User.objects.create_user(username="sell1845_client", password="x", role="client", phone="+79991845103")
     api = APIClient()
+    # The public catalog refuses a caller that does not name its app (APP_TYPE_MISSING).
+    api.defaults["HTTP_X_APP_TYPE"] = "client"
     api.force_authenticate(user=user)
     return api
 
