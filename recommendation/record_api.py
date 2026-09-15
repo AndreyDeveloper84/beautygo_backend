@@ -214,6 +214,9 @@ def _record(rec: Recommendation, now) -> dict:
         "decision_subject": {
             "direction_code": rec.direction_code,
             "family": rec.family,
+            # тройка варианта (H5, I1): цель, семейство и форма исполнения — независимые оси
+            "target": rec.target,
+            "action_type": rec.action_type,
             "target_outcomes": list(rec.target_outcomes or []),
         },
         "reason_codes": list(rec.reason_codes or []),

@@ -83,6 +83,7 @@ def _api(bearer, user) -> APIClient:
 def _rec(role="primary", **over) -> RecommendationInput:
     base = dict(
         role=role, direction_code="REDUCE_MUSCLE_TENSION_BACK", family="ADDRESS",
+        target="BACK_COMFORT", action_type="PROVIDER_SESSION",
         target_outcomes=["REDUCE(MUSCLE_TENSION)"],
         reason_codes=["ELIG_CAPABILITY_VERIFIED"],
         evidence_refs=[{"source": "conversation", "ref": "msg-1"}],
@@ -137,12 +138,13 @@ def test_read_returns_outcome_direction_why_lineage_and_actionable(bearer, subje
     data = resp.json()["data"]
     assert data["recommendation_set_id"] == str(rset.pk) and data["subject_id"] == str(subject.pk)
     assert data["execution_mode"] == "LIVE" and data["conversation_ref"]["trace_id"] == "t-1"
-    assert data["record_schema_version"] == "1.2"
+    assert data["record_schema_version"] == "1.3"
     o = data["outcome"]
     assert o["result_status"] == "CLEAR_PRIMARY" and o["readiness_state"] == "READY" and o["safety_state"] == "NORMAL"
     assert o["reason_codes"] == ["CLEAR_PRIMARY_BY_POLICY"] and o["why"] == ["подходит под твою цель"]
     p = data["primary"]
     assert p["decision_subject"] == {"direction_code": "REDUCE_MUSCLE_TENSION_BACK", "family": "ADDRESS",
+                                     "target": "BACK_COMFORT", "action_type": "PROVIDER_SESSION",
                                      "target_outcomes": ["REDUCE(MUSCLE_TENSION)"]}
     assert p["why"] == ["ты сказала, что ноет спина после работы"] and p["displayable"] is True
     assert p["actionable"] is True and p["role"] == "primary" and p["parent_recommendation_id"] is None

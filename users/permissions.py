@@ -617,6 +617,29 @@ class IsInternalBearerForSubject(permissions.BasePermission):
         )
         return True
 
+    @staticmethod
+    def _inactive_subject_refusal(view: Any, actor: Any) -> str | None:
+        """DRF-1947 — отказ по СОСТОЯНИЮ субъекта, не по написанию имени.
+
+        Неактивный и удалённый субъект — отказ (неактивный приравнен к
+        удалённому, fail-closed). Исключение — view с непустым
+        ``allow_inactive_subject``: стирание уже удалённого через бота
+        (докстринг ``users.services._follow_binding``). Tombstone — отказ
+        всегда: стирание служебной строки обезличило бы клиента всех
+        перевешанных на неё записей.
+        """
+        from users.deletion_executor import TOMBSTONE_USERNAME
+
+        # Узнаётся запросом, а не чтением имени: имя человека наружу идёт только
+        # через users.public_name (перепись DRF-1914). Один запрос по уникальному
+        # полю — и tombstone отказывается всегда, даже если его кто-то активировал.
+        if type(actor)._default_manager.filter(pk=actor.pk, username=TOMBSTONE_USERNAME).exists():
+            return "subject_tombstone"
+        inactive = not actor.is_active or actor.deleted_at is not None
+        if inactive and not getattr(view, "allow_inactive_subject", ""):
+            return "subject_inactive"
+        return None
+
     def has_permission(self, request: Any, view: Any) -> bool:
         from users.services import resolve_external_user_readonly
 
@@ -688,6 +711,19 @@ class IsInternalBearerForSubject(permissions.BasePermission):
             _publish_verdict(
                 request, purpose=purpose, actor=None, actor_named=True,
                 allowed=False, reason="unknown_actor",
+            )
+            return False
+
+        refusal = self._inactive_subject_refusal(view, actor)
+        if refusal is not None:
+            logger.warning(
+                "internal.subject_authz.subject_inactive path=%s subject=%s actor=%s reason=%s",
+                request.path, subject_id, actor.pk, refusal,
+            )
+            self.message = "acting subject is not active"
+            _publish_verdict(
+                request, purpose=purpose, actor=actor, actor_named=True,
+                allowed=False, reason=refusal,
             )
             return False
 

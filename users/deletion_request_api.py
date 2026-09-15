@@ -80,6 +80,9 @@ class InternalDeletionRequestCreateView(AuditedPersonalDataAccess, APIView):
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "user_id"
+    #: DRF-1947 — заявка на удаление законна и у уже удалённого/неактивного
+    #: субъекта: удаление через бота должно доходить до конца.
+    allow_inactive_subject = "заявка на удаление законна у удалённого и неактивного субъекта"
     audit_object_category = PersonalDataAccessLog.ObjectCategory.DELETION_REQUEST
     audit_operations = {
         "GET": PersonalDataAccessLog.Operation.DELETION_REQUEST_READ,
@@ -158,6 +161,8 @@ class InternalDeletionRequestDetailView(AuditedPersonalDataAccess, APIView):
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "user_id"
+    #: DRF-1947 — статус своей заявки видит и уже удалённый субъект.
+    allow_inactive_subject = "статус заявки на удаление доступен удалённому субъекту"
     audit_object_category = PersonalDataAccessLog.ObjectCategory.DELETION_REQUEST
     audit_operations = {"GET": PersonalDataAccessLog.Operation.DELETION_REQUEST_READ}
 

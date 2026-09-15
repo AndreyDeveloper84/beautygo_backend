@@ -324,6 +324,193 @@ class TestAuthorizationCreatesNothing:
 
 
 # ---------------------------------------------------------------------------
+# DRF-1947 — неактивный, удалённый и tombstone-субъект
+# ---------------------------------------------------------------------------
+
+#: Ручки, где неактивный/удалённый субъект законен: стирание уже удалённого
+#: через бота должно работать (докстринг ``users.services._follow_binding``).
+ERASURE_ROUTES = [DEL_REQ_GET, DEL_REQ_POST, DELETE]
+
+#: Классы view, которым разрешён неактивный субъект, — ровно эти (решение
+#: главного окна 15.09). Сторож ниже сверяет с живым набором URL.
+ALLOW_INACTIVE_SUBJECT_VIEWS = {
+    "InternalDeletionRequestCreateView",
+    "InternalDeletionRequestDetailView",
+    "InternalPersonalDataDeleteView",
+}
+
+
+def _deactivate(user: User, *, deleted: bool) -> User:
+    from django.utils import timezone
+
+    user.is_active = False
+    fields = ["is_active"]
+    if deleted:
+        user.deleted_at = timezone.now()
+        fields.append("deleted_at")
+    user.save(update_fields=fields)
+    return user
+
+
+def _as_after_d3(user: User) -> None:
+    """Состояние после исполнителя D3: аккаунт и прокси — ``deleted:<pk>``."""
+    from django.utils import timezone
+
+    for row in [user, *User.objects.filter(linked_user=user)]:
+        row.username = f"deleted:{row.pk}"
+        row.is_active = False
+        row.deleted_at = row.deleted_at or timezone.now()
+        row.save(update_fields=["username", "is_active", "deleted_at"])
+
+
+def _expect_refused(resp, route, state):
+    assert resp.status_code == 403, f"{state}: {route} пустил субъекта: {resp.status_code}"
+
+
+def _expect_allowed(resp, route, state):
+    assert resp.status_code in (200, 201, 404), (
+        f"{state}: {route} — ручка стирания должна пускать: {resp.status_code} {resp.content!r}"
+    )
+
+
+class TestInactiveOrDeletedSubject:
+    """Состояние субъекта, а не написание имени, решает доступ (DRF-1947)."""
+
+    @pytest.mark.parametrize("route", ALL_ROUTES, ids=_ids)
+    def test_inactive_subject(self, route, alice):
+        user, actor = alice
+        _deactivate(user, deleted=False)
+        resp = _call(_client(actor=actor), route, user.pk)
+        if route in ERASURE_ROUTES:
+            _expect_allowed(resp, route, "inactive")
+        else:
+            _expect_refused(resp, route, "inactive")
+
+    @pytest.mark.parametrize("route", ALL_ROUTES, ids=_ids)
+    def test_deleted_before_d3(self, route, alice):
+        """Удаление из приложения: is_active=False + deleted_at, привязка прокси жива."""
+        user, actor = alice
+        _deactivate(user, deleted=True)
+        resp = _call(_client(actor=actor), route, user.pk)
+        if route in ERASURE_ROUTES:
+            _expect_allowed(resp, route, "deleted-before-d3")
+        else:
+            _expect_refused(resp, route, "deleted-before-d3")
+
+    @pytest.mark.parametrize("route", ALL_ROUTES, ids=_ids)
+    def test_deleted_after_d3(self, route, alice):
+        """После D3 заголовок бота не резолвится — отказ везде (страж регрессии)."""
+        user, actor = alice
+        _as_after_d3(user)
+        _expect_refused(_call(_client(actor=actor), route, user.pk), route, "deleted-after-d3")
+
+    @pytest.mark.parametrize("route", ALL_ROUTES, ids=_ids)
+    def test_reserved_deleted_header(self, route, alice):
+        """``deleted:<pk>`` — зарезервированный источник, не внешняя личность."""
+        user, _ = alice
+        _as_after_d3(user)
+        resp = _call(_client(actor=f"deleted:{user.pk}"), route, user.pk)
+        _expect_refused(resp, route, "deleted-header")
+
+    @pytest.mark.parametrize("route", ALL_ROUTES, ids=_ids)
+    def test_tombstone_subject(self, route):
+        """Прокси, привязанный к tombstone: отказ везде, и на стирании тоже —
+        стирание tombstone обезличило бы клиента всех перевешанных на него записей."""
+        from users.deletion_executor import tombstone_user
+
+        tomb = tombstone_user()
+        User.objects.create(
+            username="bot:telegram:7007", role="client", is_proxy=True, is_guest=False,
+            linked_user=tomb,
+        )
+        resp = _call(_client(actor="bot:telegram:7007"), route, tomb.pk)
+        _expect_refused(resp, route, "tombstone")
+
+    def test_erasure_of_an_already_deleted_subject_still_works(self, alice):
+        """Ровно то, что держат исключения: стирание удалённого через бота."""
+        from users.models import DeletionRequest
+
+        user, actor = alice
+        UserPersonalContext.objects.create(
+            user=user, workplace_district="Заводской",
+            data_sources={"workplace_district": "explicit"},
+        )
+        _deactivate(user, deleted=True)
+        client = _client(actor=actor)
+
+        resp = _call(client, DELETE, user.pk)
+        assert resp.status_code == 200, resp.content
+        ctx = UserPersonalContext.objects.filter(user=user).first()
+        assert ctx is None or ctx.workplace_district != "Заводской"
+        resp = _call(client, DEL_REQ_POST, user.pk)
+        assert resp.status_code in (200, 201), resp.content
+        assert DeletionRequest.objects.filter(user=user).exists()
+
+
+class TestReservedAndInactiveExternalIds:
+    def test_reserved_source_and_tombstone_are_not_external_ids(self, alice):
+        from users.deletion_executor import TOMBSTONE_USERNAME
+        from users.services import is_valid_external_user_id
+
+        user, actor = alice
+        # Присутствие впереди отсутствия: обычная внешняя личность валидна.
+        assert is_valid_external_user_id(actor) is True
+        assert is_valid_external_user_id(f"deleted:{user.pk}") is False
+        assert is_valid_external_user_id(TOMBSTONE_USERNAME) is False
+
+    def test_acting_resolver_refuses_the_reserved_source_and_creates_nothing(self):
+        import uuid
+
+        from users.services import InvalidExternalUserIDError, resolve_external_user
+
+        header = f"deleted:{uuid.uuid4()}"
+        before = User.objects.count()
+        with pytest.raises(InvalidExternalUserIDError):
+            resolve_external_user(header)
+        assert User.objects.count() == before
+
+    def test_acting_resolver_refuses_an_inactive_non_proxy_row(self):
+        from users.services import InvalidExternalUserIDError, resolve_external_user
+
+        User.objects.create_user(
+            username="legacy:4242", password="x", role="client", phone="+79990004242",
+        )
+        row = User.objects.get(username="legacy:4242")
+        # Присутствие: активная строка резолвится в себя.
+        assert resolve_external_user("legacy:4242").pk == row.pk
+        _deactivate(row, deleted=True)
+        with pytest.raises(InvalidExternalUserIDError):
+            resolve_external_user("legacy:4242")
+
+    def test_acting_route_refuses_the_reserved_header(self, alice):
+        user, _ = alice
+        _as_after_d3(user)
+        resp = _client(actor=f"deleted:{user.pk}").get("/api/v1/internal/me/identity/")
+        assert resp.status_code == 403, resp.content
+
+
+class TestAllowInactiveSubjectIsNamed:
+    def test_only_the_named_erasure_views_allow_an_inactive_subject(self):
+        from django.urls import get_resolver
+
+        found: dict[str, str] = {}
+
+        def walk(patterns):
+            for p in patterns:
+                if hasattr(p, "url_patterns"):
+                    walk(p.url_patterns)
+                    continue
+                cls = getattr(getattr(p, "callback", None), "view_class", None)
+                reason = getattr(cls, "allow_inactive_subject", "") if cls else ""
+                if reason:
+                    found[cls.__name__] = reason
+
+        walk(get_resolver().url_patterns)
+        assert set(found) == ALLOW_INACTIVE_SUBJECT_VIEWS, found
+        assert all(len(r.strip()) >= 20 for r in found.values()), found
+
+
+# ---------------------------------------------------------------------------
 # Сторож на СОСТАВ поверхности: маршрут девятый приедет через месяц
 # ---------------------------------------------------------------------------
 
