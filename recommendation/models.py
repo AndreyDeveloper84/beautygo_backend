@@ -203,6 +203,132 @@ class ContextSnapshot(_ImmutableModel):
         return f"ContextSnapshot {self.id} ({self.snapshot_version})"
 
 
+#: Ключи ссылки-снимка (§7, B10) — ровно эти три; всё прочее рядом со ссылкой — не ссылка.
+SNAPSHOT_REF_KEYS = ("snapshot_id", "snapshot_version", "content_digest")
+
+
+def _only_ref_keys(ref):
+    """Ссылка без лишних ключей: при обезличивании остаётся указатель, а не пронесённое рядом."""
+    if not isinstance(ref, dict):
+        return None
+    return {k: ref[k] for k in SNAPSHOT_REF_KEYS if k in ref}
+
+
+def _without_reasons(explanation) -> dict:
+    """Пересказ сказанного и внутренние коды — пусто; ``displayable`` остаётся."""
+    exp = dict(explanation or {})
+    exp["user_visible_reasons"] = []
+    exp["internal_only"] = []
+    return exp
+
+
+class _RecommendationSetQuerySet(_ImmutableQuerySet):
+    def anonymise_for_subject(self, subject_ref: str, tombstone_ref: str) -> int:
+        """Единственный переход записи Recommendation (DRF-1909): обезличивание исполнителем D3.
+
+        Принцип D7/D9: запись и исход остаются; всё, что указывает на строку или событие
+        человека, чистится (перепись — :data:`ANONYMISATION_FIELDS`). Набор, его варианты и
+        события вариантов — построчно базовым ``update``: JSON правится вычислением.
+        Обезличенный набор фильтр по ``subject_ref`` больше не находит — повтор ничего не
+        меняет. Вызов с ``subject_ref`` = tombstone прошёл бы по наборам всех удалённых
+        людей — отказ до записи. Прочие ``update()`` по-прежнему отказывают.
+        """
+        if not subject_ref or subject_ref == tombstone_ref:
+            raise ValueError("anonymise_for_subject: subject_ref пуст или равен tombstone — отказ до записи")
+        count = 0
+        for rset in list(self.filter(subject_ref=subject_ref)):
+            models.QuerySet.update(
+                self.model.objects.filter(pk=rset.pk),
+                subject_ref=tombstone_ref, intent_id="", semantic_resolution_ref="", conversation_ref={},
+                evidence_refs=[], explanation=_without_reasons(rset.explanation),
+                safety_evaluation_ref={**(rset.safety_evaluation_ref or {}), "evidence_ref": ""},
+            )
+            for rec in list(Recommendation.objects.filter(recommendation_set_id=rset.pk)):
+                models.QuerySet.update(
+                    Recommendation.objects.filter(pk=rec.pk),
+                    target_outcomes=[], evidence_refs=[], explanation=_without_reasons(rec.explanation),
+                    consent_evaluation_ref={}, memory_snapshot_ref=None,
+                    execution_mapping_snapshot_ref=_only_ref_keys(rec.execution_mapping_snapshot_ref),
+                    transaction_snapshot_ref=_only_ref_keys(rec.transaction_snapshot_ref),
+                )
+                for ev in list(RecommendationEvent.objects.filter(recommendation_id=rec.pk)):
+                    if "channel_message_id" in (ev.payload or {}):
+                        models.QuerySet.update(
+                            RecommendationEvent.objects.filter(pk=ev.pk),
+                            payload={k: v for k, v in ev.payload.items() if k != "channel_message_id"},
+                        )
+            count += 1
+        return count
+
+
+class _RecommendationSetManager(models.Manager.from_queryset(_RecommendationSetQuerySet)):
+    pass
+
+
+#: Перепись полей записи для обезличивания (DRF-1909, решения главного окна 15.09).
+#: Каждое concrete-поле трёх моделей классифицировано: ``clear:`` — чистит переход;
+#: ``keep:`` — остаётся, с причиной; ``keep-ref:`` — остаётся ссылкой ровно из трёх ключей.
+#: Новое поле без строки здесь — красный тест у того, кто его вводит
+#: (``recommendation/tests/test_record_anonymisation.py``).
+ANONYMISATION_FIELDS: dict[str, dict[str, str]] = {
+    "recommendation.RecommendationSet": {
+        "id": "keep: идентификатор записи",
+        "subject_ref": "clear: → pk tombstone_user (D7/D9), не пусто",
+        "intent_id": "clear: uuid хода (замер ayla-26, бот e834fb14)",
+        "semantic_resolution_ref": "clear: ссылка на разбор сказанного",
+        "execution_mode": "keep: код SHADOW/LIVE",
+        "conversation_ref": "clear: ход диалога человека",
+        "result_status": "keep: исход (attribution, B13)",
+        "readiness_state": "keep: исход",
+        "reason_codes": "keep: коды политики",
+        "evidence_refs": "clear: указатели на реплики",
+        "explanation": "clear: user_visible_reasons и internal_only → []; displayable остаётся",
+        "safety_evaluation_ref": "clear: evidence_ref → ''; state, rule_id, policy_version, activated_at остаются",
+        "context_snapshot": "keep: FK на снимок; содержимое стирает D3 (DRF-1906)",
+        "primary": "keep: FK на вариант",
+        "decision_policy_version": "keep: провенанс",
+        "taxonomy_version": "keep: провенанс",
+        "safety_policy_version": "keep: провенанс",
+        "catalog_mapping_version": "keep: провенанс",
+        "presentation_policy_version": "keep: провенанс",
+        "record_schema_version": "keep: версия схемы записи",
+        "created_at": "keep: момент выдачи",
+    },
+    "recommendation.Recommendation": {
+        "id": "keep: идентификатор записи",
+        "recommendation_set": "keep: FK на набор",
+        "role": "keep: код",
+        "parent": "keep: lineage",
+        "rerank_reason": "keep: код",
+        "supersedes": "keep: lineage",
+        "direction_code": "keep: код направления",
+        "target_outcomes": "clear: uuid строк DesiredOutcome человека (замер ayla-26)",
+        "family": "keep: код B9",
+        "reason_codes": "keep: коды политики",
+        "evidence_refs": "clear: указатели на реплики",
+        "explanation": "clear: user_visible_reasons и internal_only → []; displayable остаётся",
+        "consent_evaluation_ref": "clear: оценка согласия человека",
+        "memory_snapshot_ref": "clear: → null — указатель на память человека",
+        "execution_mapping_snapshot_ref": (
+            "keep-ref: ровно три ключа; объект ExecutionOption не существует, писателя/читателя нет"
+        ),
+        "transaction_snapshot_ref": "keep-ref: ровно три ключа; Appointment хранится обезличенным (D7)",
+        "presentation_version": "keep: версия представления",
+        "record_schema_version": "keep: версия схемы записи",
+        "created_at": "keep: момент выдачи",
+        "actionable_until": "keep: срок контекста (B13)",
+    },
+    "recommendation.RecommendationEvent": {
+        "id": "keep: идентификатор события",
+        "recommendation": "keep: FK NOT NULL на вариант — событий набора без варианта модель не допускает",
+        "kind": "keep: код события",
+        "occurred_at": "keep: момент",
+        "producer": "keep: код производителя",
+        "payload": "clear: channel_message_id удаляется; channel и внутренние id остаются",
+    },
+}
+
+
 class RecommendationSet(_ImmutableModel):
     """Одна выдача: исход прохода + (при NBA) primary и ≤2 alternatives (OQ-R1; контракт §3, §32).
 
@@ -261,7 +387,8 @@ class RecommendationSet(_ImmutableModel):
 
     created_at = models.DateTimeField()
 
-    objects = _ImmutableManager()
+    #: Неизменяем, кроме одного перехода — ``objects.anonymise_for_subject`` (DRF-1909).
+    objects = _RecommendationSetManager()
 
     class Meta:
         indexes = [models.Index(fields=["subject_ref", "created_at"], name="recset_subject_created_idx")]

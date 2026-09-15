@@ -222,7 +222,10 @@ def _check_record(inp: RecommendationInput, label: str, expected_role: str) -> N
     _check_grounds(need, inp.reason_codes, inp.evidence_refs, inp.explanation)
     for name in ("memory_snapshot_ref", "execution_mapping_snapshot_ref", "transaction_snapshot_ref"):
         ref = getattr(inp, name)
-        need(ref is None or _SNAPSHOT_KEYS <= set(ref), f"{name} — ссылка на снимок, не копия (B10)")
+        # Ровно три ключа ссылки, не подмножество (DRF-1909): лишний ключ рядом со
+        # ссылкой — путь пронести в «оставляемую» при удалении ссылку id человека.
+        need(ref is None or (isinstance(ref, dict) and set(ref) == _SNAPSHOT_KEYS),
+             f"{name} — ссылка на снимок ровно {sorted(_SNAPSHOT_KEYS)}, не копия и без лишних ключей (B10)")
     if inp.role == Recommendation.Role.ALTERNATIVE:
         need(inp.rerank_reason in Recommendation.RerankReason.values,
              "alternative без rerank_reason (канон v1.1 §10.2)")
