@@ -179,6 +179,12 @@ def test_no_action_is_a_valid_recorded_result():
     # ссылка — объект, а не перечень имён её ключей: set(список) совпал бы с ключами ссылки
     ({"transaction_snapshot_ref": ["snapshot_id", "snapshot_version", "content_digest"]}, "transaction_snapshot_ref"),
     ({"evidence_refs": [{"kind": "user_stated"}]}, r"primary: evidence_refs\[0\]"),
+    # DRF-1921: элемент evidence закрыт — незнакомый источник, лишний ключ, признак не-bool
+    ({"evidence_refs": [{"source": "brand_new_source", "ref": "x"}]}, r"primary: evidence_refs\[0\]\.source"),
+    ({"evidence_refs": [{"source": "conversation", "ref": "x", "text": "ноет спина"}]},
+     r"primary: evidence_refs\[0\] — лишние ключи"),
+    ({"evidence_refs": [{"source": "journey", "ref": "x", "user_confirmed": "yes"}]},
+     r"primary: evidence_refs\[0\]\.user_confirmed"),
 ])
 def test_incomplete_variant_is_refused_by_field_name(bad, match):
     with pytest.raises(RecordInvalid, match=match):
