@@ -15,6 +15,7 @@ delete them — the storage still needs a cell in the matrix.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -826,3 +827,79 @@ class TestBotPromptRendererPin:
         # five are not speech and must never render as a quote.
         assert "explicit" in STATED_SOURCES
         assert backend_writes - {"explicit"} <= DERIVED_SOURCES
+
+
+# ---------------------------------------------------------------------------
+# DRF-2005 — гонка «стирание ↔ ночной пересчёт» (моделирование порядка чтений)
+# ---------------------------------------------------------------------------
+
+
+#: Провенанс «человек сам задал оба списка» — inference их пропускает, но сохраняет.
+EXPLICIT_LISTS = {"favorite_masters": "explicit", "busy_days": "explicit"}
+
+
+def _assert_tombstone(user) -> None:
+    """Tombstone из БД: 12 объявленных полей на умолчаниях и провенанс «erased» у всех."""
+    row = UserPersonalContext.objects.get(user=user)
+    _assert_all_twelve_at_default(row)
+    assert row.data_sources == {name: ERASED for name in declared_fields()}
+
+
+class TestNightlyInferenceRace:
+    """DRF-2005 — ночной ``infer_for_user``, прочитавший строку ДО стирания.
+
+    **Моделирование порядка чтений, не реальная параллельность.** Ночной проход
+    читает строку (``get_or_create``), решает по ``data_sources`` ЭТОГО экземпляра и
+    сохраняет ``favorite_masters`` / ``busy_days`` / ``data_sources`` через
+    ``update_fields`` — без ``select_for_update`` и без перечтения. Если между его
+    чтением и сохранением прошло ``erase_personal_context``, сохранение пишет
+    устаревший JSON поверх tombstone. Тест воспроизводит именно этот порядок:
+    экземпляр читается до стирания и подставляется вместо ``get_or_create``.
+
+    **xfail нельзя: красный = дефект.** Не инвертировать и не ослаблять без
+    исправления — исправление идёт одним PR с этими тестами (красное до, зелёное
+    после). Последовательный порядок держит положительная стража ниже.
+    """
+
+    @pytest.mark.parametrize(
+        "provenance", [{}, EXPLICIT_LISTS], ids=["no-provenance", "explicit-lists"]
+    )
+    def test_a_pass_that_read_the_row_before_the_erasure_keeps_it_a_tombstone(
+        self, user, ctx, provenance
+    ):
+        if provenance:
+            UserPersonalContext.objects.filter(pk=ctx.pk).update(data_sources=provenance)
+        snapshot = UserPersonalContext.objects.get(user=user)
+        # Присутствие: в прочитанном экземпляре есть что воскрешать.
+        assert snapshot.busy_days != default_for("busy_days")
+        assert snapshot.favorite_masters != default_for("favorite_masters")
+
+        erase_personal_context(user, initiator="app")
+        # Присутствие: стирание отработало — в БД сейчас tombstone.
+        _assert_tombstone(user)
+
+        with patch.object(
+            UserPersonalContext.objects, "get_or_create", return_value=(snapshot, False)
+        ) as read:
+            infer_for_user(user)
+
+        assert read.called
+        _assert_tombstone(user)
+
+    @pytest.mark.parametrize(
+        "provenance", [{}, EXPLICIT_LISTS], ids=["no-provenance", "explicit-lists"]
+    )
+    def test_a_pass_that_reads_after_the_erasure_keeps_the_tombstone(
+        self, user, ctx, provenance
+    ):
+        """Положительная стража: те же данные, порядок последовательный — tombstone держится."""
+        if provenance:
+            UserPersonalContext.objects.filter(pk=ctx.pk).update(data_sources=provenance)
+        assert UserPersonalContext.objects.get(user=user).busy_days != default_for("busy_days")
+
+        erase_personal_context(user, initiator="app")
+        _assert_tombstone(user)
+
+        infer_for_user(user)
+
+        _assert_tombstone(user)
