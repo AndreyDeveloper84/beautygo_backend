@@ -234,6 +234,47 @@ class FoodLog(models.Model):
         return f"{self.dish_name} ({self.meal_type}, {self.calories:.0f} kcal)"
 
 
+class DeletedFoodLog(models.Model):
+    """Снимок удалённой записи дневника на время окна восстановления (DRF-1838).
+
+    §109 шаг 7: сохранённую запись можно удалить. Удаление обратимо
+    ``RESTORE_WINDOW_MINUTES`` (15, как у воды), после — окончательно.
+
+    Строка ``FoodLog`` удаляется СРАЗУ, а здесь живёт только её снимок. У
+    ``FoodLog`` двадцать один читатель вне тестов — итог дня, сводки 14/28
+    и счёт дней, паттерны, уведомления, карточка личности, удаление ПДн.
+    Колонка мягкого удаления требовала бы фильтра в каждом, и первый
+    забытый показал бы удалённую еду в итогах. Здесь удалённой записи в
+    ``FoodLog`` просто нет — ни один читатель не может её увидеть. Тот же
+    приём, что у зеркала воды (``WaterEntryService.soft_delete`` удаляет
+    ``FoodLog`` и пересоздаёт её при восстановлении).
+
+    Снимок не переживает окно: ``purge_expired_deleted_food_logs`` зовётся
+    при каждом удалении и восстановлении и задачей beat раз в 15 минут.
+    Удаление аккаунта стирает снимки вместе с дневником
+    (``users.deletion_executor``).
+    """
+
+    #: Тот же ``id``, что был у записи: восстановление возвращает ту же запись.
+    id = models.UUIDField(primary_key=True, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="deleted_food_logs",
+    )
+    #: Все столбцы ``FoodLog`` по ``attname`` — даты ISO-строкой, UUID строкой.
+    snapshot = models.JSONField()
+    deleted_at = models.DateTimeField()
+
+    class Meta:
+        verbose_name = "Deleted Food Log (restore window)"
+        verbose_name_plural = "Deleted Food Logs (restore window)"
+        indexes = [models.Index(fields=["deleted_at"])]
+
+    def __str__(self) -> str:
+        return f"deleted food log {self.id} @ {self.deleted_at:%Y-%m-%d %H:%M}"
+
+
 class WaterLog(models.Model):
     """One row per glass of water the user tapped in the app.
 

@@ -10,7 +10,11 @@ from drf_spectacular.views import (
 
 from .health import liveness, readiness
 from payments.views import InternalPaymentStatusView, InternalPayoutPreviewView
-from services.internal_offer_api import InternalSpecialistServiceSelectionView
+from services.internal_offer_api import (
+    InternalSpecialistSelectedServiceView,
+    InternalSpecialistServiceOfferView,
+    InternalSpecialistServiceSelectionView,
+)
 from users.internal_canon_gap_api import (  # noqa: E402
     InternalCanonGapRequestDetailView,
     InternalCanonGapRequestListView,
@@ -166,6 +170,18 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/services/selection/',
         InternalSpecialistServiceSelectionView.as_view(),
         name='internal-specialist-service-selection',
+    ),
+    # DRF-1800 (M8b) — первая цена создаёт предложение мастера, следующие
+    # обновляют; «Убрать из моих услуг» — 409 при будущей записи.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/services/<uuid:salon_service_id>/offer/',
+        InternalSpecialistServiceOfferView.as_view(),
+        name='internal-specialist-service-offer',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/services/<uuid:salon_service_id>/',
+        InternalSpecialistSelectedServiceView.as_view(),
+        name='internal-specialist-selected-service',
     ),
     path(
         'api/v1/internal/specialists/',
