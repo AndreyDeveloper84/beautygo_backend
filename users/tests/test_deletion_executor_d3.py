@@ -894,17 +894,46 @@ class TestGraceWindow:
         req.refresh_from_db()
         assert req.status == DeletionRequest.Status.COMPLETED
 
-    def test_window_is_a_setting_with_a_default_of_30(self, person, settings):
+    def test_window_is_a_setting_with_a_default_of_7(self, person, settings):
+        """F7 (владелец 15.09, DRF-1936): окно до исполнения — 7 дней."""
         from users.deletion_executor import deletion_grace, open_requests_due
 
         delattr(settings, "DELETION_GRACE_DAYS")
-        assert deletion_grace() == timedelta(days=30)
-        req = _age(ensure_deletion_request(person, initiator="bot").request, 29)
+        assert deletion_grace() == timedelta(days=7)
+        req = _age(ensure_deletion_request(person, initiator="bot").request, 6)
         assert list(open_requests_due()) == []
-        settings.DELETION_GRACE_DAYS = "7"
+        req = _age(req, 7)
         assert [r.pk for r in open_requests_due()] == [req.pk]
+        settings.DELETION_GRACE_DAYS = "30"
+        assert list(open_requests_due()) == []
         settings.DELETION_GRACE_DAYS = 0
         assert [r.pk for r in open_requests_due()] == [req.pk]
+
+    def test_the_two_defaults_of_the_window_agree(self):
+        """Умолчание настройки и запасное умолчание исполнителя — одно число.
+
+        До DRF-1936 оба были 30; сменить одно — значит оставить второе
+        старым, и без env окно зависело бы от того, есть ли атрибут в settings.
+        """
+        import re
+        from pathlib import Path
+
+        import djangoProject.settings.base as base_module
+        from users.deletion_executor import DEFAULT_DELETION_GRACE_DAYS
+
+        text = Path(base_module.__file__).read_text(encoding="utf-8")
+        found = re.findall(r'os\.environ\.get\("DELETION_GRACE_DAYS",\s*"(\d+)"\)', text)
+        assert found == ["7"], f"умолчание в settings.base: {found}"
+        assert DEFAULT_DELETION_GRACE_DAYS == int(found[0]) == 7
+
+    def test_the_section_7_deadline_is_not_the_window(self, person):
+        """Граница §7 («не позднее 30 дней») окном не меняется: человек видит её дату."""
+        req = ensure_deletion_request(person, initiator="bot").request
+        assert DeletionRequest.DEADLINE_DAYS == 30
+        # deadline_at и requested_at берут «сейчас» разными вызовами — сравнение
+        # с допуском в минуту, а не по .days (29.9999 дня дали бы 29).
+        gap = (req.deadline_at - req.requested_at).total_seconds()
+        assert abs(gap - 30 * 86400) < 60
 
     @pytest.mark.parametrize("bad", ["", "месяц", -1, None])
     def test_misconfigured_window_takes_nobody(self, person, settings, bad):
