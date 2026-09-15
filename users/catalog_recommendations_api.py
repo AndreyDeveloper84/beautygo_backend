@@ -408,6 +408,7 @@ def _catalog_pool(*, goal: str, goal_category_ids) -> QuerySet:
 
     Ранжирования здесь нет и быть не может: это счётчики, а не кандидаты.
     """
+    from services.offer_sellable import sellable_offer_q
     from users.sellable import sellable_q
 
     pool = SpecialistProfile.objects.filter(sellable_q(), tenant__is_active=True)
@@ -418,8 +419,7 @@ def _catalog_pool(*, goal: str, goal_category_ids) -> QuerySet:
 
         pool = pool.filter(
             RecommendationEngine._goal_category_predicate(tuple(goal_category_ids)),
-            specialist_services__is_active=True,
-            specialist_services__salon_service__is_active=True,
+            sellable_offer_q("specialist_services__"),
         ).distinct()
     return pool
 

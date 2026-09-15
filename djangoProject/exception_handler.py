@@ -235,8 +235,11 @@ def _handle_booking_domain(exc: Exception) -> Optional[Response]:
             ErrorCode.SPECIALIST_NOT_ACTIVE.value, str(exc), status_code=422,
         )
     if isinstance(exc, ServiceNotActiveError):
+        reason = getattr(exc, "reason", None)
         return _envelope(
-            ErrorCode.SERVICE_NOT_ACTIVE.value, str(exc), status_code=422,
+            ErrorCode.SERVICE_NOT_ACTIVE.value, str(exc),
+            details={"reason": reason} if reason else None,
+            status_code=422,
         )
     if isinstance(exc, HealthScreeningRequiredError):
         # Решение владельца (c) от 10.09.2026. Три вещи здесь намеренны.

@@ -89,6 +89,7 @@ from recommendation.api import (
     Scope,
 )
 from services.catalog_reads import catalog_services_for, catalog_services_prefetch
+from services.offer_sellable import sellable_offer_q
 from services.models import DraftSalonService, SpecialistService
 from users.models import SpecialistProfile
 
@@ -170,9 +171,8 @@ class SpecialistCandidateSource:
         links = list(
             SpecialistService.objects
             .filter(
+                sellable_offer_q(),
                 specialist_id__in=specialist_ids,
-                is_active=True,
-                salon_service__is_active=True,
             )
             .select_related("salon_service", "salon_service__template")
         )
