@@ -1083,6 +1083,100 @@ class SpecialistService(models.Model):
         return f"{self.salon_service.name} — {self.specialist.display_name}"
 
 
+class CanonGapRequest(models.Model):
+    """Заявка мастера о разрыве канона — «своя услуга» (G6 / D6, M9, DRF-1801).
+
+    Принцип владельца (DRF-1349 08:31): канон первичен, «своя услуга» — не
+    новая каноническая строка и не предложение мастера, а заявка к
+    владельцу. ``PENDING`` ничего не создаёт в каноне; решает только
+    человек в Django-admin (``services.canon_gap.decide``, §143 — актор
+    обязателен). Смысл статусов и пути — в докстринге ``services/canon_gap.py``.
+
+    Инварианты — в схеме, а не в договорённости: ``clean()`` обходится
+    любым ``update()``, а решение без автора через месяц читается как
+    умолчание.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "На проверке"
+        APPROVED = "approved", "Подтверждена"
+        NEEDS_CLARIFICATION = "needs_clarification", "Нужно уточнение"
+        REJECTED = "rejected", "Отклонена"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # Салон мастера на момент заявки; у соло-мастера без салона — NULL.
+    tenant = models.ForeignKey(
+        "tenants.Tenant", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="canon_gap_requests",
+    )
+    specialist = models.ForeignKey(
+        "users.SpecialistProfile", on_delete=models.CASCADE,
+        related_name="canon_gap_requests",
+    )
+    # Данные заявки — как мастер их ввёл (макет 3.2): это не «предположение
+    # системы», а то, что владелец читает, решая.
+    name = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default="")
+    duration_minutes = models.PositiveIntegerField()
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+
+    status = models.CharField(max_length=24, choices=Status.choices, default=Status.PENDING)
+    resolved_template = models.ForeignKey(
+        ServiceTemplate, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="canon_gap_requests",
+    )
+    clarification_question = models.TextField(blank=True, default="")
+    rejection_reason = models.TextField(blank=True, default="")
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="+",
+    )
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Заявка о разрыве канона"
+        verbose_name_plural = "Заявки о разрыве канона"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["specialist", "status"], name="canongap_specialist_status_idx"),
+            models.Index(fields=["status", "created_at"], name="canongap_status_created_idx"),
+        ]
+        constraints = [
+            # «Подтверждена» — связь С ЧЕМ: без шаблона подтверждения нет.
+            models.CheckConstraint(
+                condition=~models.Q(status="approved") | models.Q(resolved_template__isnull=False),
+                name="canongap_approved_requires_template",
+            ),
+            # До решения канон не называется: PENDING шаблона не несёт.
+            models.CheckConstraint(
+                condition=~models.Q(status="pending") | models.Q(resolved_template__isnull=True),
+                name="canongap_pending_binds_no_template",
+            ),
+            # Решение — всегда с автором и временем (§143).
+            models.CheckConstraint(
+                condition=(
+                    models.Q(status="pending")
+                    | (models.Q(decided_by__isnull=False) & models.Q(decided_at__isnull=False))
+                ),
+                name="canongap_decision_requires_actor",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(status="needs_clarification") | ~models.Q(clarification_question=""),
+                name="canongap_clarification_requires_question",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(status="rejected") | ~models.Q(rejection_reason=""),
+                name="canongap_rejection_requires_reason",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name} ({self.get_status_display()})"
+
+
 class DraftSalonService(models.Model):
     """External-prefill staging row for onboarding "Confirm, don't create".
 

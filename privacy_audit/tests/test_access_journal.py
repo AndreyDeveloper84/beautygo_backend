@@ -733,6 +733,12 @@ class TestGuardCoversTheWholeSurface:
             "InternalSpecialistWorkingHoursView": (
                 "часы работы — настройка workspace мастера, не персданные субъекта"
             ),
+            # DRF-1801 (M9) — заявка о разрыве канона: предложение услуги в
+            # каталог (название, описание, длительность, цена), не данные о
+            # субъекте; класс тот же, что у часов работы.
+            "InternalCanonGapRequestListView": "заявка о разрыве канона — workspace мастера, не персданные",
+            "InternalCanonGapSimilarView": "подсказка канона по названию — не персданные",
+            "InternalCanonGapRequestDetailView": "заявка о разрыве канона — workspace мастера, не персданные",
         }
         guarded = set()
         for module in (
@@ -742,6 +748,7 @@ class TestGuardCoversTheWholeSurface:
             "internal_users_api",  # DRF-1709 — the profile card joined the surface
             "internal_reviews_api",  # DRF-1855 — a client's review from the bot
             "internal_schedule_api",  # DRF-1815 — working hours under the subject
+            "internal_canon_gap_api",  # DRF-1801 — canon gap requests under the subject
         ):
             mod = __import__(f"users.{module}", fromlist=["x"])
             for obj in vars(mod).values():
