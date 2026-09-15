@@ -751,7 +751,13 @@ class TestLinkedProxyDataIsErased:
     def test_proxy_rows_are_erased_and_the_bot_still_gets_the_external_ids(self, person):
         from nutrition.models import FoodLog
 
+        from nutrition.models import DeletedFoodLog
+
         proxy = _prebinding_proxy(person)
+        # #450 (DRF-1838): снимок удалённой записи дневника — тоже строка прокси.
+        DeletedFoodLog.objects.create(
+            id=uuid.uuid4(), user=proxy, snapshot={"dish_name": "Окрошка"}, deleted_at=timezone.now(),
+        )
         # Положительная пара: чужой прокси с данными, НЕ связанный с person.
         stranger = User.objects.create(username="bot:max:d3-stranger", role="client", is_proxy=True)
         FoodLog.objects.create(
@@ -766,6 +772,7 @@ class TestLinkedProxyDataIsErased:
         req.refresh_from_db()
         assert out.completed
         assert FoodLog.objects.filter(user=proxy).count() == 0
+        assert DeletedFoodLog.objects.filter(user=proxy).count() == 0
         assert UserPersonalContext.objects.filter(user=proxy).count() == 0
         proxy.refresh_from_db()
         assert proxy.username == f"deleted:{proxy.pk}" and proxy.linked_user_id is None
