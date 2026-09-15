@@ -69,6 +69,11 @@ def get_jwt_tenant_claim(user) -> str | None:
 _EXTERNAL_USER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*(?::[A-Za-z0-9_-]{1,64})+$")
 
 
+#: DRF-1947 — источники, которые не бывают внешней личностью: их пишет сам
+#: каталог (``deleted:<pk>`` у стёртых строк, ``users.deletion_executor``).
+RESERVED_EXTERNAL_SOURCES: frozenset[str] = frozenset({"deleted"})
+
+
 class InvalidExternalUserIDError(ValueError):
     """Raised when X-External-User-ID does not match the
     `<source>:<id>[:<id>...]` shape."""
@@ -83,10 +88,19 @@ def is_valid_external_user_id(value: str) -> bool:
     account for the rejected caller. Callers that only need the
     predicate (denial-reason logging on the internal surface) use this.
 
-    Shares the single ``_EXTERNAL_USER_ID_RE`` source of truth; the
-    resolver's own validation path is untouched.
+    Shares the single ``_EXTERNAL_USER_ID_RE`` source of truth. DRF-1947:
+    this is also THE predicate of every resolver and binder (acting,
+    authorising, bind, bind-by-operator, unlink) — a shape that matches the
+    regex but names a row the catalog itself wrote (``deleted:<pk>``, the
+    tombstone) is not an external identity anywhere.
     """
-    return bool(value) and bool(_EXTERNAL_USER_ID_RE.match(value))
+    if not value or not _EXTERNAL_USER_ID_RE.match(value):
+        return False
+    # DRF-1947: ``deleted:<pk>`` — имя, которое исполнитель D3 даёт стёртым
+    # строкам, а не внешняя личность; служебный tombstone — тоже нет.
+    from users.deletion_executor import TOMBSTONE_USERNAME
+
+    return value.split(":", 1)[0] not in RESERVED_EXTERNAL_SOURCES and value != TOMBSTONE_USERNAME
 
 
 def resolve_external_user(external_user_id: str) -> User:
@@ -113,7 +127,7 @@ def resolve_external_user(external_user_id: str) -> User:
     and `bot:telegram:12345` (channel-scoped, #1016) are valid. The whole
     string is stored as `username` directly (already unique on AbstractUser).
     """
-    if not external_user_id or not _EXTERNAL_USER_ID_RE.match(external_user_id):
+    if not is_valid_external_user_id(external_user_id):
         raise InvalidExternalUserIDError(
             "external_user_id must match '<source>:<id>[:<id>...]', "
             f"got {external_user_id!r}"
@@ -137,6 +151,11 @@ def resolve_external_user(external_user_id: str) -> User:
             "identity.proxy_created user_id=%s external_user_id=%s",
             user.id, external_user_id,
         )
+    if not user.is_proxy and (not user.is_active or user.deleted_at is not None):
+        # DRF-1947: действовать ОТ ИМЕНИ неактивного/удалённого аккаунта нельзя —
+        # отказ по состоянию строки, а не по её имени. Прокси сюда не попадает:
+        # у него своя судьба в ``_follow_binding`` (изолированный пустой результат).
+        raise InvalidExternalUserIDError("external subject is not active")
     return _follow_binding(user)
 
 
@@ -344,7 +363,7 @@ def bind_external_identity(
         emit_identity_binding,
     )
 
-    if not external_user_id or not _EXTERNAL_USER_ID_RE.match(external_user_id):
+    if not is_valid_external_user_id(external_user_id):
         emit_identity_binding(
             actor=None, external_user_id=external_user_id or "",
             result="rejected", reason=REASON_INVALID_EXTERNAL_ID,
@@ -560,7 +579,7 @@ def bind_external_identity_by_operator(
             "binding by operator requires an authenticated actor (§143); "
             "refusing to bind without an author"
         )
-    if not external_user_id or not _EXTERNAL_USER_ID_RE.match(external_user_id):
+    if not is_valid_external_user_id(external_user_id):
         raise InvalidExternalUserIDError(
             "external_user_id must match '<source>:<id>[:<id>...]', "
             f"got {external_user_id!r}"
@@ -626,7 +645,7 @@ def unlink_external_identity(
         emit_identity_binding,
     )
 
-    if not external_user_id or not _EXTERNAL_USER_ID_RE.match(external_user_id):
+    if not is_valid_external_user_id(external_user_id):
         emit_identity_binding(
             actor=None, external_user_id=external_user_id or "",
             result="rejected", reason=REASON_INVALID_EXTERNAL_ID,

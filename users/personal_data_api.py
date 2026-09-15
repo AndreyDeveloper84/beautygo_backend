@@ -271,6 +271,8 @@ class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
     authentication_classes: list = []
     permission_classes = [IsInternalBearerForSubject]
     subject_url_kwarg = "user_id"
+    #: DRF-1947 — стирание уже удалённого через бота (C5.2, идемпотентно).
+    allow_inactive_subject = "стирание уже удалённого субъекта через бота идемпотентно (C5.2)"
     audit_object_category = PersonalDataAccessLog.ObjectCategory.PERSONAL_DATA
     audit_operations = {"DELETE": PersonalDataAccessLog.Operation.DELETE}
 
