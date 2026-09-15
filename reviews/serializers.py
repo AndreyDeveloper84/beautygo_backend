@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from rest_framework import serializers
 
+from users.public_name import CLIENT_LABEL, public_person_name
+
 from .models import Review
 
 
@@ -45,11 +47,10 @@ class ReviewListSerializer(serializers.ModelSerializer):
         ]
 
     def get_client_name(self, obj: Review) -> str | None:
+        # DRF-1914: username (bot:max:<id>, user_<телефон>) — не имя.
         if obj.is_anonymous:
             return None
-        user = obj.client
-        full = f"{user.first_name} {user.last_name}".strip()
-        return full or user.username
+        return public_person_name(obj.client, fallback=CLIENT_LABEL)
 
 
 class ReviewDetailSerializer(serializers.ModelSerializer):
@@ -70,8 +71,7 @@ class ReviewDetailSerializer(serializers.ModelSerializer):
         ]
 
     def get_client_name(self, obj: Review) -> str | None:
+        # DRF-1914: username (bot:max:<id>, user_<телефон>) — не имя.
         if obj.is_anonymous:
             return None
-        user = obj.client
-        full = f"{user.first_name} {user.last_name}".strip()
-        return full or user.username
+        return public_person_name(obj.client, fallback=CLIENT_LABEL)
