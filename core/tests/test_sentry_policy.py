@@ -6,9 +6,10 @@
 теги, correlation id). Пустой отчёт прошёл бы первую половину, поэтому вторая
 обязательна.
 
-Тесты чистые: базы и сети не нужно, ``sentry_sdk.init`` не вызывается (DSN
+Тесты чистые: базы и сети не нужно, ``sentry_sdk.init`` здесь не вызывается (DSN
 пуст). То, что настройки берут опции из ``init_options``, проверяется текстом
-``settings/base.py`` — названный предел.
+``settings/base.py``. Сами опции на настоящем SDK и WSGI-входе каталога —
+в ``test_sentry_policy_live_sdk.py``.
 """
 from __future__ import annotations
 
@@ -123,6 +124,25 @@ def test_breadcrumb_urls_lose_their_query():
     assert got["breadcrumbs"]["values"][0]["data"]["url"] == "https://x.example/s"
 
 
+def test_stack_frames_lose_local_variables_but_keep_where_it_failed():
+    def frame(function):
+        return {"function": function, "lineno": 7, "vars": {"request": f"<WSGIRequest: POST '/s/?q={HOME}'>"}}
+
+    event = {
+        "exception": {"values": [{"type": "ValueError", "stacktrace": {"frames": [frame("post"), frame("boom")]}}]},
+        "threads": {"values": [{"id": 1, "stacktrace": {"frames": [frame("run")]}}]},
+        "stacktrace": {"frames": [frame("capture")]},
+    }
+
+    got = scrub_event(event)
+
+    assert HOME not in str(got)
+    assert [f["function"] for f in got["exception"]["values"][0]["stacktrace"]["frames"]] == ["post", "boom"]
+    assert got["exception"]["values"][0]["stacktrace"]["frames"][0]["lineno"] == 7
+    assert got["threads"]["values"][0]["stacktrace"]["frames"][0]["function"] == "run"
+    assert got["stacktrace"]["frames"][0]["function"] == "capture"
+
+
 def test_odd_shapes_are_safe():
     assert scrub_event("not-an-event") == "not-an-event"
     assert scrub_event({"message": "boot"})["message"] == "boot"
@@ -136,6 +156,7 @@ def test_init_options_never_send_the_body_and_scrub_both_event_kinds():
     options = init_options(dsn="https://k@o.example/1", environment="dev", release=None, traces_sampler=sampler)
 
     assert options["max_request_body_size"] == "never"
+    assert options["include_local_variables"] is False
     assert options["send_default_pii"] is False
     assert options["before_send"] is scrub_event
     assert options["before_send_transaction"] is scrub_event
