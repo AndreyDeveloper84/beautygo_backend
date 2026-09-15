@@ -130,16 +130,21 @@ class TestVerdict:
         assert data["erased"] is False
 
     def test_a_linked_proxy_with_values_keeps_the_subject_unerased_until_the_delete(self, api, user):
+        """Вердикт — по ВСЕМ личностям: аккаунт уже стёрт, а прокси с данными до
+        привязки — нет, и субъект не стёрт."""
+        from users.personal_context_erasure import erase_personal_context
+
         proxy = User.objects.create(
             username="bot:max:es-prebind", role="client", is_proxy=True, is_guest=False,
             linked_user=user,
         )
         _with_values(proxy)
-        UserPersonalContext.objects.create(user=user, data_sources={}).delete()
+        erase_personal_context(user, initiator="app")
         before = _status(api, user)
         kinds = sorted(item["kind"] for item in before["identities"])
         # Аккаунт + прокси бота (name_subject) + прокси с данными до привязки.
         assert kinds == ["account", "linked_identity", "linked_identity"], before
+        assert _account(before) == {"kind": "account", "context_row": "tombstone", "erased": True}
         assert {"kind": "linked_identity", "context_row": "holds_values", "erased": False} in before["identities"]
         assert before["erased"] is False
 
