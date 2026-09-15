@@ -23,6 +23,7 @@ from users.response import error_response, success_response
 
 from .models import RegionalPricing, ServiceCategory, ServiceTemplate
 from .pricing import get_region_key
+from .taxonomy import category_nodes, direction_category_ids, is_direction
 
 CACHE_TTL_SECONDS = 3600  # 1 hour (AC)
 CACHE_KEY_PREFIX = 'service_templates'
@@ -142,42 +143,56 @@ class ServiceTemplatesListView(APIView):
             .filter(category_id=category_id)
             .order_by('-is_popular', 'sort_order', 'name')
         )
-        template_ids = [t.id for t in templates]
+        return _payload_for(templates, region_key)
 
-        prices = list(
-            RegionalPricing.objects.filter(
-                template_id__in=template_ids, region_key=region_key,
-            )
+
+def _payload_for(
+    templates: list[ServiceTemplate], region_key: str, *, with_category: bool = False,
+) -> dict:
+    """Шаблоны с региональной ценой — общий ответ для категории и направления.
+
+    ``with_category`` добавляет к строке ``category_id`` / ``category_name``:
+    в ответе по направлению (DRF-1799) шаблоны из разных подкатегорий, и экрану
+    нужна группа; ответ по категории остаётся прежним байт в байт.
+    """
+    template_ids = [t.id for t in templates]
+
+    prices = list(
+        RegionalPricing.objects.filter(
+            template_id__in=template_ids, region_key=region_key,
         )
-        prices_by_template = {str(p.template_id): p for p in prices}
+    )
+    prices_by_template = {str(p.template_id): p for p in prices}
 
-        fallback_prices_by_template: dict[str, RegionalPricing] = {}
-        if region_key != RegionalPricing.DEFAULT_REGION_KEY:
-            missing_ids = [
-                tid for tid in template_ids
-                if str(tid) not in prices_by_template
-            ]
-            if missing_ids:
-                fallback_prices = RegionalPricing.objects.filter(
-                    template_id__in=missing_ids,
-                    region_key=RegionalPricing.DEFAULT_REGION_KEY,
-                )
-                fallback_prices_by_template = {
-                    str(p.template_id): p for p in fallback_prices
-                }
+    fallback_prices_by_template: dict[str, RegionalPricing] = {}
+    if region_key != RegionalPricing.DEFAULT_REGION_KEY:
+        missing_ids = [
+            tid for tid in template_ids
+            if str(tid) not in prices_by_template
+        ]
+        if missing_ids:
+            fallback_prices = RegionalPricing.objects.filter(
+                template_id__in=missing_ids,
+                region_key=RegionalPricing.DEFAULT_REGION_KEY,
+            )
+            fallback_prices_by_template = {
+                str(p.template_id): p for p in fallback_prices
+            }
 
-        region_name = _resolve_region_name(region_key, prices)
+    region_name = _resolve_region_name(region_key, prices)
 
-        return {
-            'region': region_key,
-            'region_name': region_name,
-            'templates': [
-                _serialize_template(
-                    t, prices_by_template, fallback_prices_by_template,
-                )
-                for t in templates
-            ],
-        }
+    rows = []
+    for t in templates:
+        row = _serialize_template(t, prices_by_template, fallback_prices_by_template)
+        if with_category:
+            row['category_id'] = str(t.category_id)
+            row['category_name'] = t.category.name
+        rows.append(row)
+    return {
+        'region': region_key,
+        'region_name': region_name,
+        'templates': rows,
+    }
 
 
 def _resolve_region_name(
@@ -252,3 +267,58 @@ class InternalServiceTemplatesListView(ServiceTemplatesListView):
     # ``InternalSpecialistViewSet``.
     authentication_classes: list = []
     permission_classes = [IsInternalBearer]
+
+    def get(self, request: Request) -> Response:
+        """``?direction_id=`` — все шаблоны направления на любой глубине (DRF-1799, M7a).
+
+        Канон вешает шаблон на подкатегорию, поэтому по id корня режим
+        ``category_id`` отдаёт только то, что висит прямо на корне. Направление —
+        то же, что у ``/internal/services/directions/`` и у группы экрана 04
+        (DRF-1912): определение одно, в :mod:`services.taxonomy`. Отказы — по
+        имени: ``category_id`` вместе с ``direction_id`` —
+        ``CATEGORY_AND_DIRECTION_EXCLUSIVE``, не корень глобальной таксономии —
+        ``NOT_A_DIRECTION``. Без ``direction_id`` — прежний ответ по категории.
+        """
+        direction_raw = request.query_params.get('direction_id')
+        if direction_raw is None:
+            return super().get(request)
+        if request.query_params.get('category_id') is not None:
+            return error_response(
+                'CATEGORY_AND_DIRECTION_EXCLUSIVE',
+                'category_id and direction_id are mutually exclusive',
+                status_code=400,
+            )
+        try:
+            direction_id = UUID(direction_raw)
+        except (TypeError, ValueError):
+            return error_response(
+                'VALIDATION_ERROR', 'direction_id must be a valid UUID', status_code=400,
+            )
+
+        nodes = category_nodes()
+        node = nodes.get(direction_id)
+        if node is None:
+            return error_response('NOT_FOUND', 'Direction not found', status_code=404)
+        if not is_direction(node):
+            return error_response(
+                'NOT_A_DIRECTION',
+                'direction_id must be a root of the global taxonomy '
+                '(GET /api/v1/internal/services/directions/)',
+                status_code=400,
+            )
+
+        region_key = self._resolve_region(request)
+        cache_key = f"{CACHE_KEY_PREFIX}:direction:{direction_id}:{region_key}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return success_response(cached)
+
+        templates = list(
+            ServiceTemplate.objects
+            .filter(category_id__in=direction_category_ids(direction_id, nodes))
+            .select_related('category')
+            .order_by('category__sort_order', 'category__name', '-is_popular', 'sort_order', 'name')
+        )
+        payload = _payload_for(templates, region_key, with_category=True)
+        cache.set(cache_key, payload, timeout=CACHE_TTL_SECONDS)
+        return success_response(payload)
