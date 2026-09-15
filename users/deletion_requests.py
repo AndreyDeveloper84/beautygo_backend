@@ -116,7 +116,37 @@ def deletion_block_for(user: User) -> DeletionRequest | None:
     Возвращает саму заявку, а не ``bool``: отказ обязан назвать
     ``request_id``, чтобы человек на любом экране видел тот же номер.
     """
-    return open_request_for(user)
+    return (
+        DeletionRequest.objects
+        .filter(user__in=_person_rows(user), status__in=DeletionRequest.OPEN_STATUSES)
+        .order_by("requested_at", "pk")
+        .first()
+    )
+
+
+def _person_rows(user: User) -> list[User]:
+    """Строки одного человека для стопа по заявке (DRF-1955).
+
+    Корень — ``linked_user`` привязанного прокси НЕЗАВИСИМО от состояния
+    аккаунта: действующий резолвер для деактивированного или удалённого
+    аккаунта возвращает изолированный прокси, но человек тот же, и его
+    открытая заявка обязана остановить персонализацию и на прокси. Затем —
+    аккаунт и все его прокси (``subject_users``, DRF-1038: заявка, принятая
+    на прокси до привязки, тоже его) и сама строка.
+
+    Служебный tombstone корнем не раскрывается: на него перевешены чужие
+    строки, и «одним человеком» они от этого не становятся.
+    """
+    from users.deletion_executor import TOMBSTONE_USERNAME
+    from users.subject_identities import subject_users
+
+    root = user.linked_user if user.is_proxy and user.linked_user_id is not None else user
+    if root.username == TOMBSTONE_USERNAME:
+        return [user]
+    rows = subject_users(root)
+    if all(row.pk != user.pk for row in rows):
+        rows.append(user)
+    return rows
 
 
 def deletion_refusal(req: DeletionRequest):
