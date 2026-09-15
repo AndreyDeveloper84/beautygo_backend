@@ -868,11 +868,13 @@ AYLA_PUBLIC_BASE_URL = os.environ.get("AYLA_PUBLIC_BASE_URL", "")
 PRIVACY_AUDIT_RETENTION_DAYS = os.environ.get("PRIVACY_AUDIT_RETENTION_DAYS", "365")
 
 # §7 / DRF-1699 — окно между приёмом заявки на удаление и её исполнением,
-# дней. §7 даёт только верхнюю границу (не позднее 30 дней); число для
-# окна — параметр с умолчанием, не решение (вопрос владельцу). Кривое
-# значение — тик исполнителя никого не берёт (разбор в
-# users.deletion_executor.deletion_grace, не при старте).
-DELETION_GRACE_DAYS = os.environ.get("DELETION_GRACE_DAYS", "30")
+# дней. §7 даёт только верхнюю границу (не позднее 30 дней —
+# DeletionRequest.DEADLINE_DAYS, её это окно не меняет). Число окна —
+# решение владельца F7 от 15.09 (DRF-1936): 7 дней. То же умолчание стоит в
+# users.deletion_executor.DEFAULT_DELETION_GRACE_DAYS; сторож следит, чтобы
+# они не разошлись. Кривое значение — тик исполнителя никого не берёт
+# (разбор в users.deletion_executor.deletion_grace, не при старте).
+DELETION_GRACE_DAYS = os.environ.get("DELETION_GRACE_DAYS", "7")
 
 # Block C → C2 — bot-platform ingest endpoint for cross-service events.
 # Empty default means the publisher will no-op (raises RuntimeError on
