@@ -57,6 +57,14 @@ DISPLAY_NAME_MIN_LENGTH = 2
 AVATAR_MAX_BYTES = 5 * 1024 * 1024
 PORTFOLIO_MAX_BYTES = 10 * 1024 * 1024
 PORTFOLIO_LIMIT = 10
+#: Лимиты в ответе профиля (DRF-1960) — ровно проверяемые значения.
+PROFILE_LIMITS = {
+    "bio": BIO_MAX_LENGTH,
+    "display_name_min": DISPLAY_NAME_MIN_LENGTH,
+    "avatar_bytes": AVATAR_MAX_BYTES,
+    "portfolio_bytes": PORTFOLIO_MAX_BYTES,
+    "portfolio_count": PORTFOLIO_LIMIT,
+}
 #: Допуск «квадрата» аватара: |ширина − высота| ≤ 2 % большей стороны.
 SQUARE_TOLERANCE = 0.02
 #: Формат по содержимому (Pillow) → допустимый заявленный тип.
@@ -125,6 +133,9 @@ def _profile_state(profile: SpecialistProfile) -> dict:
         "bio": profile.bio or "",
         "avatar_url": _url(profile.avatar),
         "portfolio": {"count": profile.portfolio.count(), "limit": PORTFOLIO_LIMIT},
+        # DRF-1960: те же константы, по которым проверяется запись, — один
+        # источник для экрана профиля (Mini App своих чисел не держит).
+        "limits": PROFILE_LIMITS,
     }
 
 
