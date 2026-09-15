@@ -116,6 +116,8 @@ class PersonalDataAccessLog(models.Model):
         WRITE_SPECIALIST_PROFILE = "write_specialist_profile", "Запись профиля мастера"
         UPLOAD_MEDIA = "upload_media", "Загрузка фото мастера"
         DELETE_MEDIA = "delete_media", "Удаление фото мастера"
+        # DRF-1857 (K14): мастер читает отзывы о себе — имя и текст клиентов.
+        REVIEW_READ = "review_read", "Чтение мастером отзывов о себе"
 
     class ObjectCategory(models.TextChoices):
         PERSONAL_DATA = "personal_data", "Персональные данные"
