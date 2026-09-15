@@ -342,6 +342,8 @@ class TestServedOperationsDoNotStopTheProduct:
         for served in (
             op.READ_CONTEXT, op.WRITE_CONTEXT, op.ASK_METADATA, op.DELETION_REQUEST_READ,
             op.READ_PROFILE, op.WRITE_SPECIALIST_PROFILE, op.UPLOAD_MEDIA,
+            # DRF-1857 — мастер читает отзывы о себе: чтение, не разрушение и не экспорт.
+            op.REVIEW_READ,
         ):
             assert not policy.stops_when_unauditable(served)
 
