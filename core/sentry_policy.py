@@ -12,6 +12,10 @@
   :data:`ALLOWED_QUERY_PARAMS`, у остальных — ``[Filtered]``. Из ``url`` строка
   запроса вырезана, в HTTP-крошках — тоже.
 * **cookies, env** (адрес клиента, окружение сервера), **user** — не уходят.
+* **Локальные переменные кадров стека — никогда.** Держат двое:
+  ``include_local_variables=False`` и снятие ``vars`` у кадров здесь. Найдено тестом
+  на настоящем SDK: без этого строка запроса с адресом уходила в ``vars.request``
+  каждого кадра, хотя ``request`` события был чист.
 * **Остаются:** маршрут (``transaction``), уровень, класс и стек ошибки, теги,
   контексты (там статус ответа) и correlation id — тег ``request_id`` из
   ``RequestIDMiddleware`` (``core.log_filters``). Раньше в отчётах его не было.
@@ -20,9 +24,9 @@
 событие производительности тоже несёт ``request``.
 
 Функции чистые и импортируемые; ``settings`` собирает ``init`` из
-:func:`init_options`. ``sentry_sdk.init`` в тестах не вызывается (DSN пуст),
-поэтому то, что настройки действительно берут эти опции, проверяется текстом
-настроек — это названный предел проверки.
+:func:`init_options`. В настройках тестов DSN пуст, поэтому то, что настройки берут
+эти опции, проверяется текстом настроек. Сами опции проходят через настоящий
+``sentry_sdk.init`` и WSGI-вход каталога в ``core/tests/test_sentry_policy_live_sdk.py``.
 """
 from __future__ import annotations
 
@@ -35,6 +39,10 @@ FILTERED = "[Filtered]"
 
 #: Сколько тела запроса отдаёт SDK. Держит политику вместе с чисткой ниже.
 BODY_SIZE = "never"
+
+#: Снимок локальных переменных кадров стека. В них ``request`` с полной строкой запроса,
+#: разобранное тело, данные сериализатора — всё, что политика не отправляет.
+LOCAL_VARIABLES = False
 
 #: Технические заголовки, которые можно отправить. Всё остальное — нет.
 ALLOWED_HEADERS: frozenset[str] = frozenset({
@@ -109,6 +117,26 @@ def _clean_breadcrumbs(event: dict) -> None:
             data["url"] = _strip_query(data["url"])
 
 
+def _frame_lists(event: dict):
+    stacktrace = event.get("stacktrace")
+    if isinstance(stacktrace, dict):
+        yield stacktrace.get("frames")
+    for kind in ("exception", "threads"):
+        container = event.get(kind)
+        values = container.get("values") if isinstance(container, dict) else container
+        for value in values if isinstance(values, list) else []:
+            stacktrace = value.get("stacktrace") if isinstance(value, dict) else None
+            if isinstance(stacktrace, dict):
+                yield stacktrace.get("frames")
+
+
+def _drop_frame_vars(event: dict) -> None:
+    for frames in _frame_lists(event):
+        for frame in frames if isinstance(frames, list) else []:
+            if isinstance(frame, dict):
+                frame.pop("vars", None)
+
+
 def scrub_event(event: Any, hint: Any = None) -> Any:
     """Событие Sentry по политике R3; не словарь — как есть."""
     if not isinstance(event, dict):
@@ -117,6 +145,7 @@ def scrub_event(event: Any, hint: Any = None) -> Any:
     if isinstance(request, dict):
         event["request"] = _clean_request(request)
     event.pop("user", None)
+    _drop_frame_vars(event)
     _tag_request_id(event)
     _clean_breadcrumbs(event)
     return event
@@ -130,6 +159,7 @@ def init_options(*, dsn: str, environment: str, release: str | None, traces_samp
         "release": release,
         "send_default_pii": False,
         "max_request_body_size": BODY_SIZE,
+        "include_local_variables": LOCAL_VARIABLES,
         "traces_sampler": traces_sampler,
         "before_send": scrub_event,
         "before_send_transaction": scrub_event,
