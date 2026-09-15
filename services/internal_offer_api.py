@@ -25,7 +25,6 @@ from core.errors import ErrorCode
 from users.permissions import IsInternalBearerForSpecialistSubject
 from users.response import error_response, success_response
 
-from .models import ServiceCategory
 from .offer_selection import (
     MAX_TEMPLATES_PER_CALL,
     HasFutureAppointments,
@@ -38,6 +37,7 @@ from .offer_selection import (
     selected_services,
     set_offer,
 )
+from .taxonomy import category_roots
 
 
 class _SelectBody(serializers.Serializer):
@@ -46,37 +46,6 @@ class _SelectBody(serializers.Serializer):
         min_length=1,
         max_length=MAX_TEMPLATES_PER_CALL,
     )
-
-
-def _category_roots(category_ids: set) -> dict:
-    """Самый верхний предок каждой категории (DRF-1912) — одним запросом на дерево.
-
-    Группа экрана 04 — направление, то есть корень дерева категорий ШАБЛОНА
-    на любой глубине. Дерево грузится целиком одним запросом и проходится в
-    Python, поэтому число запросов не зависит ни от числа строк, ни от глубины.
-    Цикл в данных не вешает ответ: проход останавливается на уже виденной вершине.
-
-    Оговорка решения: корни канона (22) ≠ 6 направлений экрана 02 — открытый
-    вопрос владельцу G7; до решения группа = корень канона.
-    """
-    if not category_ids:
-        return {}
-    nodes = {
-        node["id"]: node
-        for node in ServiceCategory.objects.values("id", "parent_id", "name", "sort_order")
-    }
-    roots = {}
-    for category_id in category_ids:
-        current = category_id
-        seen = {current}
-        while current in nodes:
-            parent = nodes[current]["parent_id"]
-            if parent is None or parent not in nodes or parent in seen:
-                break
-            seen.add(parent)
-            current = parent
-        roots[category_id] = nodes.get(current)
-    return roots
 
 
 def _item(entry: SelectedService, roots: dict) -> dict:
@@ -108,7 +77,9 @@ def _item(entry: SelectedService, roots: dict) -> dict:
 
 def _state(profile) -> dict:
     entries = selected_services(profile)
-    roots = _category_roots(
+    # DRF-1912: группа экрана 04 — направление шаблона; определение одно,
+    # в services.taxonomy (им же отбираются шаблоны направления, DRF-1799).
+    roots = category_roots(
         {e.salon_service.template.category_id for e in entries if e.salon_service.template_id}
     )
     return {
