@@ -14,7 +14,8 @@ PILOT_CONTRACTS_2026-08-15 v1.3.0:
 
 Subject (DRF-1038): the account AND its linked proxies
 (``users.subject_identities.subject_users``). Export adds
-``linked_identities``; delete erases the personal context of every linked
+``linked_identities`` and (DRF-1918) the specialist profile with the whole
+portfolio for every identity that has one; delete erases the personal context of every linked
 proxy that holds one. One journal row per request, under the URL subject.
 
 Pilot scope (C5.2): personal context only. Transactional records
@@ -39,7 +40,8 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from users.models import Profile, User, UserPersonalContext
+from tenants.models import Tenant
+from users.models import Profile, SpecialistPortfolio, SpecialistProfile, User, UserPersonalContext
 from privacy_audit.mixins import AuditedPersonalDataAccess
 from privacy_audit.models import PersonalDataAccessLog
 from users.permissions import IsInternalBearerForSubject
@@ -88,6 +90,105 @@ def _profile_subset(user: User) -> dict:
     }
 
 
+#: Профиль мастера в выгрузке (DRF-1918): поле модели → ключ ответа. Закрытый
+#: список, как у клиентского профиля. Стёртое исполнителем удаления поле
+#: (``users.deletion_executor.SPECIALIST_PROFILE_ERASED_FIELDS``) обязано быть
+#: здесь или в ``SPECIALIST_EXCLUDED_FIELDS`` с причиной; каждое поле модели
+#: классифицировано (сторож — ``users/tests/test_personal_data_export_specialist_1918.py``).
+SPECIALIST_EXPORTED_FIELDS: dict[str, str] = {
+    "display_name": "display_name",
+    "bio": "bio",
+    "address": "address",
+    "location_lat": "location_lat",
+    "location_lng": "location_lng",
+    "avatar": "avatar_url",
+    "experience_years": "experience_years",
+    "timezone": "timezone",
+    # Собственный MAX-идентификатор субъекта — как external_user_id прокси (#451).
+    "provisioned_external_user_id": "provisioned_external_user_id",
+    # У соло-мастера это его платёжный субсчёт; только id, в ЮKassa не ходим.
+    "yookassa_account_id": "yookassa_account_id",
+    # Место: своё выгружается, место салона — нет (``_works_at``).
+    "works_at": "works_at",
+}
+
+_EXTERNAL_REF = "ссылка на внешнюю систему/организацию, не данные о человеке"
+
+#: Поля профиля мастера, которые в выгрузку не идут, — каждое с причиной.
+SPECIALIST_EXCLUDED_FIELDS: dict[str, str] = {
+    "id": "служебный ключ строки",
+    "user": "субъект выгрузки — его user_id уже в ответе",
+    "tenant": _EXTERNAL_REF,
+    "booking_source": _EXTERNAL_REF,
+    "yclients_company_id": _EXTERNAL_REF,
+    "yclients_staff_id": _EXTERNAL_REF,
+    "status": "служебное состояние профиля на платформе, не данные о человеке",
+    "rating": "производное от отзывов клиентов, не данные о человеке",
+    "reviews_count": "производное от отзывов клиентов, не данные о человеке",
+    "is_available": "служебный флаг записи, не данные о человеке",
+    "is_booking_enabled": "служебный флаг записи, не данные о человеке",
+    "created_at": "служебная отметка времени строки",
+    "updated_at": "служебная отметка времени строки",
+}
+
+WORKS_AT_ORGANISATION = "адрес организации"
+WORKS_AT_UNKNOWN_KIND = "вид места не определён"
+
+
+def _decimal(value) -> str | None:
+    return None if value is None else str(value)
+
+
+def _file_url(fieldfile) -> str | None:
+    return fieldfile.url if fieldfile else None
+
+
+def _works_at(sp: SpecialistProfile) -> dict | None:
+    """Место мастера. Своё (без салона или workspace соло-мастера) — выгружается;
+    место салона — исключение «адрес организации»; вид, которого код не знает,
+    — исключение с причиной, а не молча в выгрузку."""
+    place = sp.works_at
+    if place is None:
+        return None
+    tenant = place.tenant
+    if tenant is None or tenant.kind == Tenant.Kind.SOLO:
+        return {
+            "address": place.address,
+            "latitude": _decimal(place.latitude),
+            "longitude": _decimal(place.longitude),
+        }
+    if tenant.kind == Tenant.Kind.SALON:
+        return {"excluded": WORKS_AT_ORGANISATION}
+    return {"excluded": WORKS_AT_UNKNOWN_KIND}
+
+
+def _specialist_profile(user: User) -> dict | None:
+    """Профиль мастера и всё портфолио (DRF-1918); null без строки — выгрузка
+    не создаёт данных о человеке. Портфолио — все строки по sort_order: путь
+    M21 держит 10, старый Pro-путь пускал 30."""
+    sp = SpecialistProfile.objects.filter(user=user).select_related("works_at__tenant").first()
+    if sp is None:
+        return None
+    portfolio = [
+        {"image_url": _file_url(item.image), "sort_order": item.sort_order}
+        for item in SpecialistPortfolio.objects.filter(specialist=sp).order_by("sort_order", "created_at")
+    ]
+    return {
+        "display_name": sp.display_name,
+        "bio": sp.bio,
+        "address": sp.address,
+        "location_lat": _decimal(sp.location_lat),
+        "location_lng": _decimal(sp.location_lng),
+        "avatar_url": _file_url(sp.avatar),
+        "experience_years": sp.experience_years,
+        "timezone": sp.timezone,
+        "provisioned_external_user_id": sp.provisioned_external_user_id,
+        "yookassa_account_id": sp.yookassa_account_id,
+        "works_at": _works_at(sp),
+        "portfolio": portfolio,
+    }
+
+
 def _context_data(user: User) -> dict | None:
     """Full personal-context catalogue; null without a row — no lazy create
     on export, an export must not CREATE data about the user."""
@@ -126,7 +227,8 @@ class InternalPersonalDataExportView(AuditedPersonalDataAccess, APIView):
         description=(
             "152-ФЗ personal-data export (C5.1): profile subset "
             "(phone, email, full_name, bio, city) + the full "
-            "personal-context catalogue. Synchronous JSON; archives "
+            "personal-context catalogue + the specialist profile with "
+            "the whole portfolio (DRF-1918). Synchronous JSON; archives "
             "are post-pilot."
         ),
     )
@@ -144,6 +246,7 @@ class InternalPersonalDataExportView(AuditedPersonalDataAccess, APIView):
                 "external_user_id": identity.username,
                 "profile": _profile_subset(identity),
                 "personal_context": _context_data(identity),
+                "specialist_profile": _specialist_profile(identity),
             }
             for identity in subject_users(user)[1:]
         ]
@@ -157,6 +260,7 @@ class InternalPersonalDataExportView(AuditedPersonalDataAccess, APIView):
             "exported_at": timezone.now().isoformat(),
             "profile": profile_data,
             "personal_context": context_data,
+            "specialist_profile": _specialist_profile(user),
             "linked_identities": linked,
         })
 

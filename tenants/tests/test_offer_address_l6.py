@@ -89,6 +89,9 @@ _SKIP_PARTS = frozenset({"tests", "migrations", "venv", ".venv", "node_modules"}
 USE_REGISTRY: dict[str, tuple[int, str]] = {
     # --- старые колонки ПРОФИЛЯ мастера: законны только до L8b (DRF-1892) ---
     "users/deletion_executor.py": (9, "профиль: стирание при удалении аккаунта (§7 D3) и проверка остатка"),
+    "users/personal_data_api.py": (
+        4, "профиль и своё место: выгрузка субъекту по 152-ФЗ (C5.1, DRF-1918) — только чтение, не показ"
+    ),
     "core/management/commands/surface_state.py": (4, "профиль и Tenant: замер состояния — счёт, не показ"),
     # --- НЕ профиль: место, салон, DTO кандидата, координата клиента ---
     "ai/application/services/recommendation_engine.py": (1, "ScoredSpecialist(address=offer_address(s)) — DTO"),
@@ -114,8 +117,40 @@ def _base(name: str) -> str:
     return name.split("__")[0]
 
 
+def _module_string_lists(tree: ast.AST) -> dict[str, tuple[str, ...]]:
+    """Модульные константы-перечни строк: ``X = ("a", "b")`` / ``X: tuple[...] = (...)``.
+
+    DRF-1918: исполнитель удаления сохраняет ``update_fields=[*SPECIALIST_PROFILE_ERASED_FIELDS, ...]``
+    — перепись обязана видеть в этом те же литералы, что и в прежнем списке, иначе
+    стирание старых колонок пропадает из счёта. Названный предел: звёздочка по имени,
+    которое не является такой константой того же модуля, не раскрывается.
+    """
+    found: dict[str, tuple[str, ...]] = {}
+    for stmt in getattr(tree, "body", []):
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            name, value = stmt.targets[0].id, stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.value is not None:
+            name, value = stmt.target.id, stmt.value
+        else:
+            continue
+        if isinstance(value, (ast.Tuple, ast.List)) and value.elts and all(
+            isinstance(e, ast.Constant) and isinstance(e.value, str) for e in value.elts
+        ):
+            found[name] = tuple(e.value for e in value.elts)
+    return found
+
+
+def _list_strings(node: ast.AST, lists: dict[str, tuple[str, ...]]):
+    for e in node.elts:
+        if isinstance(e, ast.Constant) and isinstance(e.value, str):
+            yield e.value
+        elif isinstance(e, ast.Starred) and isinstance(e.value, ast.Name) and e.value.id in lists:
+            yield from lists[e.value.id]
+
+
 def _column_uses(tree: ast.AST) -> list[str]:
     uses: list[str] = []
+    lists = _module_string_lists(tree)
     for n in ast.walk(tree):
         if isinstance(n, ast.Attribute) and n.attr in COLUMN_NAMES:
             uses.append(f"{n.lineno}: {ast.unparse(n)}")
@@ -132,8 +167,8 @@ def _column_uses(tree: ast.AST) -> list[str]:
                     uses.append(f"{n.lineno}: {short}({kw.arg}=)")
                 if kw.arg in _LIST_KWARGS and isinstance(kw.value, (ast.List, ast.Tuple)):
                     uses.extend(
-                        f"{n.lineno}: {kw.arg}[{e.value}]" for e in kw.value.elts
-                        if isinstance(e, ast.Constant) and isinstance(e.value, str) and _base(e.value) in COLUMN_NAMES
+                        f"{n.lineno}: {kw.arg}[{v}]" for v in _list_strings(kw.value, lists)
+                        if _base(v) in COLUMN_NAMES
                     )
             if short in _LIST_CALLS:
                 uses.extend(

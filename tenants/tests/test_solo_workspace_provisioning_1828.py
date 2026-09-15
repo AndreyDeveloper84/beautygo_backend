@@ -228,6 +228,10 @@ class TestTheClaimIsNotASecondIdentityGraph:
         # читатель claim вне provisioning; условие «прокси не связан» и DRAFT
         # стережёт users/tests/test_pre_linked_workspace_authority_1829.py.
         "users/permissions.py",
+        # DRF-1918: выгрузка субъекту по 152-ФЗ (C5.1) отдаёт человеку его же
+        # claim как данные — только чтение, не резолвер личности и не сторож
+        # доступа: личность субъекта там решает IsInternalBearerForSubject.
+        "users/personal_data_api.py",
     }
 
     def test_only_the_provisioning_service_reads_the_claim(self):
