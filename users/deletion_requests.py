@@ -141,7 +141,9 @@ def _person_rows(user: User) -> list[User]:
     from users.subject_identities import subject_users
 
     root = user.linked_user if user.is_proxy and user.linked_user_id is not None else user
-    if root.username == TOMBSTONE_USERNAME:
+    # Не чтением ``username`` (сторож DRF-1914 держит его в названных местах),
+    # а запросом — и без ``tombstone_user()``: гейт не создаёт строк.
+    if User.objects.filter(pk=root.pk, username=TOMBSTONE_USERNAME).exists():
         return [user]
     rows = subject_users(root)
     if all(row.pk != user.pk for row in rows):
