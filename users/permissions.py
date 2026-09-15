@@ -776,6 +776,11 @@ class IsInternalBearerForSpecialistSubject(IsInternalBearerForSubject):
                 pk=subject_id,
                 provisioned_external_user_id=external_user_id,
                 status=SpecialistProfile.ProfileStatus.DRAFT,
+                # DRF-1874: только живой workspace — выключенный или удалённый
+                # аккаунт и выключенный тенант claim не открывает.
+                user__is_active=True,
+                user__deleted_at__isnull=True,
+                tenant__is_active=True,
             )
             .first()
         )

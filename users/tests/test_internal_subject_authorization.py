@@ -111,10 +111,12 @@ DEL_REQ_GET = ("get", "/api/v1/internal/users/{subject}/deletion-requests/")
 DEL_REQ_POST = ("post", "/api/v1/internal/users/{subject}/deletion-requests/")
 # DRF-1709 (12.09.2026): последняя дыра B-2.1 закрыта — карточка под субъектом.
 PROFILE = ("get", "/api/v1/internal/users/{subject}/")
+# DRF-1855: отзыв клиента из бота — запись от имени субъекта.
+REVIEW_POST = ("post", "/api/v1/internal/users/{subject}/reviews/")
 
 ALL_ROUTES = [
     EXPORT, DELETE, CTX_GET, CTX_PATCH, CTX_DELETE, CTX_ELIG, CTX_ASKED, CTX_SKIP,
-    DEL_REQ_GET, DEL_REQ_POST, PROFILE,
+    DEL_REQ_GET, DEL_REQ_POST, PROFILE, REVIEW_POST,
 ]
 
 _BODIES = {
@@ -122,6 +124,7 @@ _BODIES = {
     CTX_ASKED: {"field": "preferred_time_slots"},
     CTX_SKIP: {"field": "preferred_time_slots"},
     DEL_REQ_POST: {"initiator": "bot"},
+    REVIEW_POST: {"appointment_id": "00000000-0000-0000-0000-000000000000", "rating": 5},
 }
 
 
@@ -266,7 +269,9 @@ class TestOwnSubjectAllowed:
         resp = _call(_client(actor=alice_id), route, alice_user.pk)
         # У списка заявок «заявки нет» — законный 404, но ПОСЛЕ проверки
         # субъекта: 403 здесь означал бы, что проверка не пустила своего.
-        allowed = (200, 201, 404) if route == DEL_REQ_GET else (200, 201)
+        # У отзыва (DRF-1855) тело называет несуществующую бронь — 404 тоже
+        # после проверки субъекта.
+        allowed = (200, 201, 404) if route in (DEL_REQ_GET, REVIEW_POST) else (200, 201)
         assert resp.status_code in allowed, resp.content
 
     def test_binding_is_followed_not_bypassed(self, alice):
@@ -358,6 +363,10 @@ SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
     "internal-specialist-working-hours": (
         "users/tests/test_internal_working_hours_1815.py::TestSubject"
     ),
+    # DRF-1801 (M9) — заявки мастера о разрыве канона.
+    "internal-specialist-canon-gap-requests": "services/tests/test_canon_gap_request_m9.py::TestSubject",
+    "internal-specialist-canon-gap-similar": "services/tests/test_canon_gap_request_m9.py::TestSubject",
+    "internal-specialist-canon-gap-request": "services/tests/test_canon_gap_request_m9.py::TestSubject",
 }
 
 _SPECIALIST_ROUTE_RE = re.compile(
@@ -422,6 +431,10 @@ class TestGuardCoversItsSubject:
             assert GUARDED_OTHERWISE_SPECIALIST[name].strip(), f"{name}: причина пустая"
             return
         sample = template.replace(f"<uuid:{kwarg}>", "11111111-1111-1111-1111-111111111111")
+        # Второй UUID в пути (DRF-1801: ``…/canon-gap-requests/<uuid:request_id>/``)
+        # — тот же приём, что у маршрутов ``users`` выше: иначе маршрут не
+        # разрешается, и сторож падает раньше своей проверки.
+        sample = re.sub(r"<uuid:\w+>", "22222222-2222-2222-2222-222222222222", sample)
         view_cls = resolve("/" + sample).func.view_class
         assert _has_subject_guard(view_cls), f"{name}: профиль в URL, а проверки субъекта нет"
         assert getattr(view_cls, "subject_url_kwarg", None) == kwarg, (

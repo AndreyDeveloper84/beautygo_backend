@@ -11,6 +11,7 @@ from services.mapping_review import confirm_single_candidate, evidence_text, mar
 from services.normalization import normalize_service_name
 
 from .models import (
+    CanonGapRequest,
     DraftSalonService,
     ExternalBusyInterval,
     ExternalSourceMapping,
@@ -588,3 +589,98 @@ class GoalOptionCategoryAdmin(admin.ModelAdmin):
     search_fields = ('goal_option__key', 'goal_option__label', 'category__name')
     raw_id_fields = ('category',)
     ordering = ('goal_option', 'sort_order')
+
+
+# ── Заявки о разрыве канона (M9, DRF-1801, G6 / D6) ──────────────────────
+
+
+class CanonGapRequestAdminForm(forms.ModelForm):
+    """Решение владельца по заявке мастера — ошибки по полям, не имена ограничений."""
+
+    class Meta:
+        model = CanonGapRequest
+        fields = ("status", "resolved_template", "clarification_question", "rejection_reason")
+
+    def clean(self):
+        cleaned = super().clean()
+        status = cleaned.get("status")
+        before = self.instance.status if self.instance and self.instance.pk else None
+        if before in (CanonGapRequest.Status.APPROVED, CanonGapRequest.Status.REJECTED) and status != before:
+            self.add_error("status", forms.ValidationError(
+                "Решение уже принято и не перезаписывается: пересмотр — новая заявка мастера.",
+                code="already_decided",
+            ))
+        if status == CanonGapRequest.Status.PENDING and before and before != CanonGapRequest.Status.PENDING:
+            self.add_error("status", forms.ValidationError(
+                "Вернуть заявку «на проверку» нельзя — выберите решение.", code="not_a_decision",
+            ))
+        if status == CanonGapRequest.Status.APPROVED and cleaned.get("resolved_template") is None:
+            self.add_error("resolved_template", forms.ValidationError(
+                "Подтверждение связывает заявку с каноническим шаблоном: найдите существующий "
+                "или осознанно создайте новый и выберите его здесь.",
+                code="template_required",
+            ))
+        if status == CanonGapRequest.Status.NEEDS_CLARIFICATION and not (
+            cleaned.get("clarification_question") or ""
+        ).strip():
+            self.add_error("clarification_question", forms.ValidationError(
+                "Напишите вопрос мастеру.", code="question_required",
+            ))
+        if status == CanonGapRequest.Status.REJECTED and not (cleaned.get("rejection_reason") or "").strip():
+            self.add_error("rejection_reason", forms.ValidationError(
+                "Напишите мастеру понятную причину.", code="reason_required",
+            ))
+        if status != CanonGapRequest.Status.APPROVED and cleaned.get("resolved_template") is not None:
+            self.add_error("resolved_template", forms.ValidationError(
+                "Шаблон называется только при подтверждении.", code="template_only_when_approved",
+            ))
+        return cleaned
+
+
+@admin.register(CanonGapRequest)
+class CanonGapRequestAdmin(admin.ModelAdmin):
+    """Единственное место решения по заявкам (D6 — (а)): владелец в Django-admin.
+
+    Заводит заявку мастер (бот), не сотрудник — добавления нет. Удаления нет:
+    заявка и решение — след. Автор решения — всегда тот, кто сохранил
+    (``request.user``), а не поле формы.
+    """
+
+    form = CanonGapRequestAdminForm
+    list_display = ("name", "specialist", "tenant", "status", "resolved_template", "created_at", "decided_at")
+    list_filter = ("status",)
+    search_fields = ("name", "specialist__display_name")
+    readonly_fields = (
+        "specialist", "tenant", "name", "description", "duration_minutes", "price",
+        "decided_by", "decided_at", "created_at", "updated_at",
+    )
+    fields = readonly_fields[:6] + (
+        "status", "resolved_template", "clarification_question", "rejection_reason",
+    ) + readonly_fields[6:]
+    raw_id_fields = ("resolved_template",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        from services.canon_gap import CanonGapDecisionError, decide
+
+        status = form.cleaned_data.get("status")
+        if status == CanonGapRequest.Status.PENDING:
+            return  # решения нет — писать нечего
+        try:
+            decide(
+                obj,
+                actor=request.user,
+                status=status,
+                template=form.cleaned_data.get("resolved_template"),
+                question=form.cleaned_data.get("clarification_question") or "",
+                reason=form.cleaned_data.get("rejection_reason") or "",
+            )
+        except CanonGapDecisionError as exc:
+            from django.contrib import messages
+
+            messages.error(request, str(exc))

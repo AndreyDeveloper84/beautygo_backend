@@ -219,14 +219,17 @@ class InternalSoloWorkspaceView(APIView):
                 display_name=data["display_name"],
             )
         except SoloProvisioningRefused as exc:
+            # DRF-1874: чужие идентификаторы (id/slug занявшего тенанта) —
+            # оператору в лог; наружу, даже держателю provisioning-токена,
+            # только причина.
             logger.info(
-                "tenants.solo_provisioning.refused reason=%s slug=%s tenant_id=%s",
-                exc.reason, data["slug"], data["tenant_id"],
+                "tenants.solo_provisioning.refused reason=%s slug=%s tenant_id=%s details=%s",
+                exc.reason, data["slug"], data["tenant_id"], exc.details,
             )
             return error_response(
                 ErrorCode.SOLO_PROVISIONING_REFUSED,
                 "Solo workspace not provisioned.",
-                details={"reason": exc.reason, **exc.details},
+                details={"reason": exc.reason},
                 status_code=status.HTTP_409_CONFLICT,
             )
 

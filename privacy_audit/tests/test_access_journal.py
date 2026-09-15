@@ -710,6 +710,7 @@ class TestGuardCoversTheWholeSurface:
         DELREQ_URL,
         DELREQ_URL + "{request_id}/",
         "/api/v1/internal/users/{subject}/",  # DRF-1709
+        "/api/v1/internal/users/{subject}/reviews/",  # DRF-1855
     ]
 
     def test_the_list_above_is_every_guarded_view_not_a_hand_picked_subset(self):
@@ -732,6 +733,12 @@ class TestGuardCoversTheWholeSurface:
             "InternalSpecialistWorkingHoursView": (
                 "часы работы — настройка workspace мастера, не персданные субъекта"
             ),
+            # DRF-1801 (M9) — заявка о разрыве канона: предложение услуги в
+            # каталог (название, описание, длительность, цена), не данные о
+            # субъекте; класс тот же, что у часов работы.
+            "InternalCanonGapRequestListView": "заявка о разрыве канона — workspace мастера, не персданные",
+            "InternalCanonGapSimilarView": "подсказка канона по названию — не персданные",
+            "InternalCanonGapRequestDetailView": "заявка о разрыве канона — workspace мастера, не персданные",
         }
         guarded = set()
         for module in (
@@ -739,7 +746,9 @@ class TestGuardCoversTheWholeSurface:
             "internal_personal_context_api",
             "deletion_request_api",
             "internal_users_api",  # DRF-1709 — the profile card joined the surface
+            "internal_reviews_api",  # DRF-1855 — a client's review from the bot
             "internal_schedule_api",  # DRF-1815 — working hours under the subject
+            "internal_canon_gap_api",  # DRF-1801 — canon gap requests under the subject
         ):
             mod = __import__(f"users.{module}", fromlist=["x"])
             for obj in vars(mod).values():
@@ -757,7 +766,7 @@ class TestGuardCoversTheWholeSurface:
             "guarded_not_listed": sorted(c.__name__ for c in guarded - listed),
             "listed_not_guarded": sorted(c.__name__ for c in listed - guarded),
         }
-        assert len(guarded) == 9
+        assert len(guarded) == 10
 
     @pytest.mark.parametrize("template", ROUTES)
     def test_route_is_audited(self, template):

@@ -155,6 +155,9 @@ RETAIN: dict[str, str] = {
     "services.SalonService.mapping_confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "services.DraftSalonService.confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "tenants.ServiceLocation.confirmed_by": "провенанс подтверждения адреса, актор — сотрудник",
+    "services.CanonGapRequest.decided_by": (
+        "провенанс решения владельца по заявке о разрыве канона (§143), актор — сотрудник"
+    ),
     "privacy_audit.PersonalDataAccessLog.actor": (
         "журнал доступа к ПДн (§96, D1, #407) — append-only доказательство того, кто и к чему "
         "обращался; строка User остаётся обезличенной, указатель не снимается"
