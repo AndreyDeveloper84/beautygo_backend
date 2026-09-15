@@ -63,7 +63,7 @@ from django.db import models
 ACTIONABILITY_TTL = timedelta(hours=2)
 
 #: Версия схемы записи (контракт v1.0 §3 `record_schema_version`).
-RECORD_SCHEMA_VERSION = "1.0"
+RECORD_SCHEMA_VERSION = "1.1"   #: 1.1 — DRF-1905: исход, готовность, безопасность, снимок и версии — у набора
 
 
 class ImmutableRecordError(RuntimeError):
@@ -112,8 +112,44 @@ class ExecutionMode(models.TextChoices):
     LIVE = "LIVE", "LIVE"         #: показано / может быть показано человеку
 
 
+class ResultStatus(models.TextChoices):
+    """Исход прохода — контракт §32 + OD-9. С DRF-1905 — свойство НАБОРА, а не записи."""
+
+    CLEAR_PRIMARY = "CLEAR_PRIMARY", "CLEAR_PRIMARY"
+    MULTIPLE_SUITABLE = "MULTIPLE_SUITABLE", "MULTIPLE_SUITABLE"
+    INSUFFICIENT_CONTEXT = "INSUFFICIENT_CONTEXT", "INSUFFICIENT_CONTEXT"
+    SAFETY_BOUNDARY = "SAFETY_BOUNDARY", "SAFETY_BOUNDARY"
+    NO_ACTION = "NO_ACTION", "NO_ACTION"
+
+
+class ReadinessState(models.TextChoices):
+    """Канон v1.1 Decision 5 — DecisionReadiness (контракт v1.0 §30). Свойство набора."""
+
+    READY = "READY", "READY"
+    NEEDS_DISCRIMINATION = "NEEDS_DISCRIMINATION", "NEEDS_DISCRIMINATION"
+    NEEDS_REQUIRED_CONTEXT = "NEEDS_REQUIRED_CONTEXT", "NEEDS_REQUIRED_CONTEXT"
+    INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE", "INSUFFICIENT_EVIDENCE"
+    BLOCKED = "BLOCKED", "BLOCKED"
+
+
+#: Исходы §32, которые «не являются NBA»: у набора нет ни primary, ни alternatives.
+#: ``NO_ACTION`` сюда не входит — до размещения в таксономии (OQ-R11) он записывается как NBA.
+NO_NBA_STATUSES = (ResultStatus.INSUFFICIENT_CONTEXT, ResultStatus.SAFETY_BOUNDARY)
+
+
 class RecommendationSet(_ImmutableModel):
-    """Одна выдача: primary + ≤2 alternatives (OQ-R1; контракт v1.0 §3)."""
+    """Одна выдача: исход прохода + (при NBA) primary и ≤2 alternatives (OQ-R1; контракт §3, §32).
+
+    DRF-1905: исход, готовность, вердикт безопасности, снимок контекста и версии
+    политик — одно на проход и живут здесь. ``reason_codes`` / ``evidence_refs`` /
+    ``explanation`` набора объясняют ИСХОД (в том числе «почему NBA нет»); у каждого
+    варианта остаются свои (WHY альтернативы, C04.2).
+
+    ``primary`` — колонка, а не выборка по роли: только так CHECK на строке набора
+    может связать исход и наличие NBA. Набор immutable и не обновляется после
+    создания primary, поэтому ``persist`` заранее выбирает id primary и пишет набор
+    с ним; FK отложен до COMMIT (``DEFERRABLE INITIALLY DEFERRED`` — сторож в тестах).
+    """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     #: Псевдонимизированный субъект (контракт §3): ключ пользователя Ayla, не ФИО/телефон.
@@ -129,19 +165,52 @@ class RecommendationSet(_ImmutableModel):
     #: Ход диалога, не содержимое: {conversation_id, trace_id} — связь с dialog_transcript
     #: (DRF-1754) и ConversationState (2 ч, B13). Снимок контекста этого не заменяет.
     conversation_ref = models.JSONField(default=dict, blank=True)
+
+    # --- исход прохода (DRF-1905, §32) ---------------------------------------
+    result_status = models.CharField(max_length=24, choices=ResultStatus.choices)
+    readiness_state = models.CharField(max_length=24, choices=ReadinessState.choices)
+    reason_codes = models.JSONField(default=list)             #: почему такой исход — из Decision Policy
+    evidence_refs = models.JSONField(default=list)            #: {source, ref, said_at?} — основания исхода
+    #: {displayable: bool, user_visible_reasons: [], internal_only: []} — owner ruling 2026-07-29
+    explanation = models.JSONField(default=dict)
+    #: {state, rule_id, policy_version, evidence_ref, activated_at} — owner 11.09 §3; B6
+    safety_evaluation_ref = models.JSONField(default=dict)
+    #: Decision Snapshot хода: {snapshot_id, snapshot_version, content_digest} — контракт §7; DRF-1906
+    context_snapshot_ref = models.JSONField(default=dict)
+    #: NBA набора; NULL ⇔ исход из NO_NBA_STATUSES (CHECK ниже).
+    primary = models.ForeignKey(
+        "Recommendation", on_delete=models.PROTECT, null=True, blank=True, related_name="+",
+    )
+
+    # --- версии политик (провенанс прохода) ----------------------------------
+    decision_policy_version = models.CharField(max_length=32)
+    taxonomy_version = models.CharField(max_length=32)
+    safety_policy_version = models.CharField(max_length=32)
+    catalog_mapping_version = models.CharField(max_length=32)
+    presentation_policy_version = models.CharField(max_length=32)
+    record_schema_version = models.CharField(max_length=8, default=RECORD_SCHEMA_VERSION)
+
     created_at = models.DateTimeField()
 
     objects = _ImmutableManager()
 
     class Meta:
         indexes = [models.Index(fields=["subject_ref", "created_at"], name="recset_subject_created_idx")]
-
-    @property
-    def primary(self) -> "Recommendation | None":
-        return self.recommendations.filter(role=Recommendation.Role.PRIMARY).first()
+        constraints = [
+            # §32: SAFETY_BOUNDARY / INSUFFICIENT_CONTEXT «не являются NBA» — primary нет;
+            # любой другой исход без primary — выдуманная пустота. CHECK проверяется при вставке.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(result_status__in=[s.value for s in NO_NBA_STATUSES]) & models.Q(primary__isnull=True))
+                    | (~models.Q(result_status__in=[s.value for s in NO_NBA_STATUSES])
+                       & models.Q(primary__isnull=False))
+                ),
+                name="recset_primary_iff_nba_status",
+            ),
+        ]
 
     def __str__(self) -> str:
-        return f"RecommendationSet {self.id}"
+        return f"RecommendationSet {self.id} ({self.result_status})"
 
 
 class Recommendation(_ImmutableModel):
@@ -162,23 +231,9 @@ class Recommendation(_ImmutableModel):
         RECOVER = "RECOVER", "RECOVER"
         OBSERVE = "OBSERVE", "OBSERVE"
 
-    class ResultStatus(models.TextChoices):
-        """Контракт §32 + OD-9 (`no_action` — валидный объяснимый результат)."""
-
-        CLEAR_PRIMARY = "CLEAR_PRIMARY", "CLEAR_PRIMARY"
-        MULTIPLE_SUITABLE = "MULTIPLE_SUITABLE", "MULTIPLE_SUITABLE"
-        INSUFFICIENT_CONTEXT = "INSUFFICIENT_CONTEXT", "INSUFFICIENT_CONTEXT"
-        SAFETY_BOUNDARY = "SAFETY_BOUNDARY", "SAFETY_BOUNDARY"
-        NO_ACTION = "NO_ACTION", "NO_ACTION"
-
-    class ReadinessState(models.TextChoices):
-        """Канон v1.1 Decision 5 — DecisionReadiness (контракт v1.0 §30)."""
-
-        READY = "READY", "READY"
-        NEEDS_DISCRIMINATION = "NEEDS_DISCRIMINATION", "NEEDS_DISCRIMINATION"
-        NEEDS_REQUIRED_CONTEXT = "NEEDS_REQUIRED_CONTEXT", "NEEDS_REQUIRED_CONTEXT"
-        INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE", "INSUFFICIENT_EVIDENCE"
-        BLOCKED = "BLOCKED", "BLOCKED"
+    #: DRF-1905: исход и готовность — свойства набора; имена оставлены для прежних вызывающих.
+    ResultStatus = ResultStatus
+    ReadinessState = ReadinessState
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     recommendation_set = models.ForeignKey(RecommendationSet, on_delete=models.PROTECT, related_name="recommendations")
@@ -196,32 +251,22 @@ class Recommendation(_ImmutableModel):
     target_outcomes = models.JSONField(default=list)          #: DesiredOutcome refs (A1)
     family = models.CharField(max_length=12, choices=Family.choices)
 
-    result_status = models.CharField(max_length=24, choices=ResultStatus.choices)
-    readiness_state = models.CharField(max_length=24, choices=ReadinessState.choices)
+    # Исход прохода, готовность, вердикт безопасности, снимок контекста хода и
+    # версии политик — у НАБОРА (DRF-1905): одно на проход. Здесь — WHY варианта.
     reason_codes = models.JSONField(default=list)             #: из Decision Policy, не из LLM
     #: user_stated | confirmed_memory | policy | safety | journey (контракт §12)
     evidence_refs = models.JSONField(default=list)
     #: {displayable: bool, user_visible_reasons: [], internal_only: []} — owner ruling 2026-07-29, owner 24.08
     explanation = models.JSONField(default=dict)
-    #: {state, rule_id, policy_version, evidence_ref, activated_at} — owner 11.09 §3; B6
-    safety_evaluation_ref = models.JSONField(default=dict)
     consent_evaluation_ref = models.JSONField(default=dict)
 
-    # --- три логических снимка (B10) — ССЫЛКИ, не копии ------------------
-    #: Decision Snapshot: {snapshot_id, snapshot_version, content_digest} — контракт §7
-    context_snapshot_ref = models.JSONField(default=dict)
+    # --- снимки варианта (B10) — ССЫЛКИ, не копии -------------------------
     memory_snapshot_ref = models.JSONField(null=True, blank=True)     #: Phase 1 — null
     #: Execution Mapping Snapshot — в ExecutionOption; здесь только ref, если уже есть
     execution_mapping_snapshot_ref = models.JSONField(null=True, blank=True)
     #: Transaction Snapshot — в PendingBookingIntent / Booking; здесь только ref
     transaction_snapshot_ref = models.JSONField(null=True, blank=True)
 
-    # --- версии политик (провенанс решения) -------------------------------
-    decision_policy_version = models.CharField(max_length=32)
-    taxonomy_version = models.CharField(max_length=32)
-    safety_policy_version = models.CharField(max_length=32)
-    catalog_mapping_version = models.CharField(max_length=32)
-    presentation_policy_version = models.CharField(max_length=32)
     presentation_version = models.PositiveIntegerField(default=1)
     record_schema_version = models.CharField(max_length=8, default=RECORD_SCHEMA_VERSION)
 
