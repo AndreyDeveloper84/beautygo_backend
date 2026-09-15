@@ -94,6 +94,52 @@ ERASED_NAME = "Удалён"
 SPECIALIST_PROFILE_ERASED_FIELDS: tuple[str, ...] = (
     "avatar", "display_name", "bio", "address", "location_lat",
     "location_lng", "is_available", "is_booking_enabled",
+    # DRF-1935 — обратное направление «о человеке ⇒ стирается».
+    "experience_years",
+    # MAX-идентификатор человека (claim провижининга): после удаления открывать
+    # нечего, а оставленный claim вернул бы повторному провижинингу мёртвый workspace.
+    "provisioned_external_user_id",
+    # Реквизит выплаты = способ оплаты (D8, стереть сразу). Читается только при
+    # создании НОВОГО холда; capture/cancel/refund идут по provider_payment_id.
+    "yookassa_account_id",
+)
+
+_EXTERNAL_REF = "ссылка на внешнюю систему/организацию, не данные о человеке"
+
+#: Поля ``SpecialistProfile``, которые D3 НЕ стирает, — каждое с основанием
+#: (DRF-1935). Вместе с ``SPECIALIST_PROFILE_ERASED_FIELDS`` покрывают модель
+#: целиком; новое поле без решения роняет сторож.
+SPECIALIST_PROFILE_RETAINED_FIELDS: dict[str, str] = {
+    "id": "ключ строки; обезличенный профиль хранится — на него ссылаются записи (D7)",
+    "user": "указатель на обезличенного User; строка User физически не удаляется",
+    "tenant": "ссылка на организацию/workspace; соло-workspace обезличивается отдельно",
+    "works_at": "ссылка на место; своё место обезличивается отдельно, место салона — адрес организации",
+    "timezone": (
+        "часовой пояс региона, не данные о человеке в отдельности; нужен, чтобы "
+        "хранимые 5 лет записи (D7) показывались в местном времени мастера"
+    ),
+    "status": "служебное состояние профиля на платформе, не данные о человеке",
+    "rating": "производное от отзывов клиентов, не данные о человеке",
+    "reviews_count": "производное от отзывов клиентов, не данные о человеке",
+    "booking_source": _EXTERNAL_REF,
+    "yclients_company_id": _EXTERNAL_REF,
+    "yclients_staff_id": _EXTERNAL_REF,
+    "created_at": "служебная отметка времени строки",
+    "updated_at": "служебная отметка времени строки",
+}
+
+#: Своё место мастера (без салона или workspace соло-мастера): стираемые
+#: текстовые поля; координаты — NULL, статус — INACTIVE, строка остаётся (PROTECT).
+OWN_PLACE_ERASED_TEXT_FIELDS: tuple[str, ...] = (
+    "label", "address", "city", "geocode_source_address", "geocode_normalized_address",
+)
+
+#: Имя, которым обезличивается соло-workspace (DRF-1935): у бота это
+#: «Студия {имя}», и оно видно клиенту в истории записей.
+SOLO_TENANT_ERASED_NAME = "Студия"
+#: Стираемые текстовые поля соло-workspace; координаты — NULL, строка остаётся.
+SOLO_TENANT_ERASED_TEXT_FIELDS: tuple[str, ...] = (
+    "address", "city", "geocode_source_address", "geocode_normalized_address",
 )
 
 #: Что пишется в тексте отзыва вместо найденных ПДн (D9 scrub).
@@ -144,7 +190,10 @@ DELETE: dict[str, str] = {
 #: оставить. Значение — как.
 ANONYMISE: dict[str, str] = {
     "users.Profile.user": "full_name/bio/city/avatar/координаты",
-    "users.SpecialistProfile.user": "display_name/bio/address/avatar/координаты; портфолио — файлы и строки",
+    "users.SpecialistProfile.user": (
+        "display_name/bio/address/avatar/координаты, стаж, claim провижининга, субсчёт выплат; "
+        "портфолио — файлы и строки; своё место и соло-workspace — обезличить (DRF-1935)"
+    ),
     "users.TenantUserRelationship.user": "is_active=False, revoked_at, revoke_reason=account_deleted",
     "users.User.linked_user": "у прокси linked_user=NULL — последним, вместе с COMPLETED",
     "appointments.Appointment.client": "client → tombstone, notes='' (D7)",
@@ -383,7 +432,7 @@ def _erase_identities(identities: list) -> dict:
         if total is None:
             total = steps
             continue
-        for bucket in ("deleted", "anonymised"):
+        for bucket in ("deleted", "anonymised", "kept"):
             for key, n in steps[bucket].items():
                 total[bucket][key] = total[bucket].get(key, 0) + n
         total["files_deleted"] += steps["files_deleted"]
@@ -474,6 +523,9 @@ def _erase_catalog(user) -> dict:
     now = timezone.now()
     deleted: dict[str, int] = {}
     anonymised: dict[str, int] = {}
+    #: Что сознательно НЕ тронуто и почему — место или workspace, на котором
+    #: работает другой живой мастер, неизвестный вид тенанта (DRF-1935).
+    kept: dict[str, int] = {}
     files_deleted = 0
 
     def _delete(key: str, qs) -> None:
@@ -583,8 +635,13 @@ def _erase_catalog(user) -> dict:
         sp.location_lng = None
         sp.is_available = False
         sp.is_booking_enabled = False
+        sp.experience_years = 0
+        sp.provisioned_external_user_id = None
+        sp.yookassa_account_id = ""
         sp.save(update_fields=[*SPECIALIST_PROFILE_ERASED_FIELDS, "updated_at"])
         anonymised["users.SpecialistProfile.user"] = 1
+        _erase_own_place(sp, anonymised, kept)
+        _erase_solo_tenant(sp, anonymised, kept)
 
     # 7. Аккаунт. Контекст — ДО обезличивания событий аналитики: erase
     # пишет своё аудит-событие с actor=user, и оно тоже обязано потерять актора.
@@ -645,8 +702,68 @@ def _erase_catalog(user) -> dict:
         "deleted": deleted,
         "anonymised": anonymised,
         "retained": dict(RETAIN),
+        "kept": kept,
         "files_deleted": files_deleted,
     }
+
+
+def _other_live_masters(sp, **where) -> bool:
+    from users.models import SpecialistProfile
+
+    return (
+        SpecialistProfile.objects.filter(**where)
+        .exclude(pk=sp.pk)
+        .filter(user__deleted_at__isnull=True)
+        .exists()
+    )
+
+
+def _erase_own_place(sp, anonymised: dict, kept: dict) -> None:
+    """Своё место мастера (tenant NULL / workspace соло) — обезличить, строку
+    оставить (PROTECT). Место салона — адрес организации, не трогается.
+    Место, на котором работает другой живой мастер, или тенант неизвестного
+    вида — не трогается и называется в ``kept``."""
+    from tenants.models import LocationStatus, Tenant
+
+    place = sp.works_at
+    if place is None:
+        return
+    tenant = place.tenant
+    if tenant is not None and tenant.kind == Tenant.Kind.SALON:
+        return
+    if tenant is not None and tenant.kind != Tenant.Kind.SOLO:
+        kept["tenants.ServiceLocation.unknown_kind"] = kept.get("tenants.ServiceLocation.unknown_kind", 0) + 1
+        return
+    if _other_live_masters(sp, works_at=place):
+        kept["tenants.ServiceLocation.shared"] = kept.get("tenants.ServiceLocation.shared", 0) + 1
+        return
+    for name in OWN_PLACE_ERASED_TEXT_FIELDS:
+        setattr(place, name, "")
+    place.latitude = None
+    place.longitude = None
+    place.status = LocationStatus.INACTIVE
+    place.save(update_fields=[*OWN_PLACE_ERASED_TEXT_FIELDS, "latitude", "longitude", "status", "updated_at"])
+    anonymised["tenants.ServiceLocation.own"] = anonymised.get("tenants.ServiceLocation.own", 0) + 1
+
+
+def _erase_solo_tenant(sp, anonymised: dict, kept: dict) -> None:
+    """Соло-workspace: имя «Студия {имя}» → «Студия», адрес/город/координаты
+    стереть, строку оставить (записи, подписка и общий с ботом UUID)."""
+    from tenants.models import Tenant
+
+    tenant = Tenant.all_objects.filter(pk=sp.tenant_id, kind=Tenant.Kind.SOLO).first()
+    if tenant is None:
+        return
+    if _other_live_masters(sp, tenant=tenant):
+        kept["tenants.Tenant.solo_shared"] = kept.get("tenants.Tenant.solo_shared", 0) + 1
+        return
+    tenant.name = SOLO_TENANT_ERASED_NAME
+    for name in SOLO_TENANT_ERASED_TEXT_FIELDS:
+        setattr(tenant, name, "")
+    tenant.latitude = None
+    tenant.longitude = None
+    tenant.save(update_fields=["name", *SOLO_TENANT_ERASED_TEXT_FIELDS, "latitude", "longitude", "updated_at"])
+    anonymised["tenants.Tenant.solo"] = anonymised.get("tenants.Tenant.solo", 0) + 1
 
 
 def _residue(user) -> dict[str, int]:
@@ -756,10 +873,40 @@ def _residue(user) -> dict[str, int]:
         "users.User.user_permissions": user.user_permissions.all(),
     }
     residue = {k: n for k, qs in checks.items() if (n := qs.count())}
-    sp = SpecialistProfile.objects.filter(user=user).first()
+    sp = SpecialistProfile.objects.filter(user=user).select_related("works_at__tenant").first()
     if sp is not None and (sp.location_lat is not None or sp.location_lng is not None):
         residue["users.SpecialistProfile.coordinates"] = 1
+    if sp is not None and (
+        sp.experience_years or sp.provisioned_external_user_id is not None or sp.yookassa_account_id
+    ):
+        residue["users.SpecialistProfile.claims"] = 1
+    residue.update(_own_place_residue(sp))
     return residue
+
+
+def _own_place_residue(sp) -> dict[str, int]:
+    """Своё место и соло-workspace после стирания — чтением строки (DRF-1935)."""
+    from tenants.models import Tenant
+
+    found: dict[str, int] = {}
+    if sp is None:
+        return found
+    place = sp.works_at
+    own_place = place is not None and (
+        place.tenant is None or place.tenant.kind == Tenant.Kind.SOLO
+    )
+    if own_place and not _other_live_masters(sp, works_at=place):
+        if any(getattr(place, n) for n in OWN_PLACE_ERASED_TEXT_FIELDS) or place.latitude is not None:
+            found["tenants.ServiceLocation.own"] = 1
+    tenant = Tenant.all_objects.filter(pk=sp.tenant_id, kind=Tenant.Kind.SOLO).first()
+    if tenant is not None and not _other_live_masters(sp, tenant=tenant):
+        if (
+            tenant.name != SOLO_TENANT_ERASED_NAME
+            or any(getattr(tenant, n) for n in SOLO_TENANT_ERASED_TEXT_FIELDS)
+            or tenant.latitude is not None
+        ):
+            found["tenants.Tenant.solo"] = 1
+    return found
 
 
 def _delete_file(fieldfile) -> int:
@@ -909,14 +1056,16 @@ def _confirm_with_bot(
 
 
 #: Окно между приёмом заявки и её исполнением, дней. §7 называет только
-#: верхнюю границу («срок завершения — не позднее 30 дней») и «после
-#: начала удаления действие нельзя отменить» — числа для окна в §7 нет,
-#: поэтому это ПАРАМЕТР с умолчанием, а не решение (вопрос владельцу в
-#: OWNER_QUESTIONS). До этого окна тик брал заявку сразу: нажатие в Mini
-#: App = стирание через ≤15 минут, а человек на экране видел «крайнюю
-#: дату» через месяц.
+#: верхнюю границу («срок завершения — не позднее 30 дней»,
+#: ``DeletionRequest.DEADLINE_DAYS`` — окно её не меняет) и «после начала
+#: удаления действие нельзя отменить» — числа для окна в §7 нет. Число —
+#: решение владельца F7 от 15.09 (DRF-1936): 7 дней; то же умолчание — у
+#: ``DELETION_GRACE_DAYS`` в settings.base, сторож следит, чтобы они не
+#: разошлись. До этого окна тик брал заявку сразу: нажатие в Mini App =
+#: стирание через ≤15 минут, а человек на экране видел «крайнюю дату» через
+#: месяц.
 DELETION_GRACE_SETTING = "DELETION_GRACE_DAYS"
-DEFAULT_DELETION_GRACE_DAYS = 30
+DEFAULT_DELETION_GRACE_DAYS = 7
 
 
 class GraceMisconfigured(ValueError):
