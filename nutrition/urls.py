@@ -17,6 +17,8 @@ from nutrition.views import (
     InternalCrossDomainView,
     InternalDeficitsView,
     InternalFoodEstimateView,
+    InternalFoodLogDetailView,
+    InternalFoodLogRestoreView,
     InternalFoodLogView,
     InternalFoodScanView,
     InternalPatternsView,
@@ -66,6 +68,17 @@ urlpatterns = [
         "internal/food-log/",
         InternalFoodLogView.as_view(),
         name="internal-food-log",
+    ),
+    # DRF-1838 — правка/удаление записи и восстановление в окне (§109 шаг 7).
+    path(
+        "internal/food-log/<uuid:pk>/restore/",
+        InternalFoodLogRestoreView.as_view(),
+        name="internal-food-log-restore",
+    ),
+    path(
+        "internal/food-log/<uuid:pk>/",
+        InternalFoodLogDetailView.as_view(),
+        name="internal-food-log-detail",
     ),
     path(
         "internal/summary/",

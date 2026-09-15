@@ -39,6 +39,7 @@ from nutrition.serializers import (
     CrossDomainHistoryResponseSerializer,
     FoodLogCreateSerializer,
     FoodLogEntrySerializer,
+    FoodLogUpdateSerializer,
     FoodEstimateRequestSerializer,
     FoodScanResponseSerializer,
     NutritionProfileResponseSerializer,
@@ -517,6 +518,156 @@ class InternalFoodLogView(APIView):
                 details=serializer.errors,
             )
         return _create_food_log_for(user, serializer.validated_data, request)
+
+
+def _food_log_actor(request: Request):
+    external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+    try:
+        return resolve_external_user(external_user_id), None
+    except InvalidExternalUserIDError as exc:
+        return None, error_response(
+            "VALIDATION_ERROR",
+            f"X-External-User-ID невалиден: {exc}",
+        )
+
+
+def _food_log_refusal(exc: Exception) -> Response:
+    from nutrition.services.food_log_edit_service import (
+        FoodLogManagedByWaterError,
+        FoodLogNotFoundError,
+        RESTORE_WINDOW_MINUTES,
+        RestoreWindowExpiredError,
+    )
+
+    if isinstance(exc, FoodLogNotFoundError):
+        return error_response(
+            "NOT_FOUND", "Запись не найдена", status_code=status.HTTP_404_NOT_FOUND,
+        )
+    if isinstance(exc, FoodLogManagedByWaterError):
+        return error_response(
+            "CONFLICT",
+            "Эту запись ведёт учёт воды — её убирает отмена стакана",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    if isinstance(exc, RestoreWindowExpiredError):
+        return error_response(
+            "RESTORE_WINDOW_EXPIRED",
+            f"Окно для восстановления истекло ({RESTORE_WINDOW_MINUTES} минут)",
+            status_code=status.HTTP_410_GONE,
+        )
+    return error_response(
+        "CONFLICT", "Запись нельзя пересчитать", status_code=status.HTTP_409_CONFLICT,
+    )
+
+
+class InternalFoodLogDetailView(APIView):
+    """PATCH / DELETE /api/v1/nutrition/internal/food-log/{entry_id}/ — DRF-1838.
+
+    §109 шаг 7: сохранённую запись можно исправить или удалить. Владелец —
+    только сам человек из ``X-External-User-ID``; чужая запись — 404.
+    Правила пересчёта и окна — ``nutrition.services.food_log_edit_service``.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+    serializer_class = FoodLogUpdateSerializer
+
+    @extend_schema(
+        tags=["internal"],
+        request=FoodLogUpdateSerializer,
+        responses={
+            200: FoodLogEntrySerializer,
+            400: OpenApiResponse(description="Nothing to change / invalid values"),
+            404: OpenApiResponse(description="Entry not found for this person"),
+            409: OpenApiResponse(description="Entry mirrors a water entry"),
+        },
+    )
+    def patch(self, request: Request, pk: UUID) -> Response:
+        from nutrition.services.food_log_edit_service import FoodLogEditError, update_food_log
+
+        user, refusal = _food_log_actor(request)
+        if refusal is not None:
+            return refusal
+        serializer = FoodLogUpdateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Невалидные данные", details=serializer.errors,
+            )
+        try:
+            log = update_food_log(user_id=user.id, log_id=pk, **serializer.validated_data)
+        except FoodLogEditError as exc:
+            return _food_log_refusal(exc)
+        return success_response(FoodLogEntrySerializer(log).data)
+
+    @extend_schema(
+        tags=["internal"],
+        request=None,
+        responses={
+            200: inline_serializer(
+                name="InternalFoodLogDeleteResponse",
+                fields={
+                    "entry_id": drf_serializers.UUIDField(),
+                    "deleted": drf_serializers.BooleanField(),
+                    "restore_window_expires_at": drf_serializers.DateTimeField(),
+                },
+            ),
+            404: OpenApiResponse(description="Entry not found for this person"),
+            409: OpenApiResponse(description="Entry mirrors a water entry"),
+        },
+    )
+    def delete(self, request: Request, pk: UUID) -> Response:
+        from nutrition.services.food_log_edit_service import (
+            RESTORE_WINDOW_MINUTES,
+            FoodLogEditError,
+            delete_food_log,
+        )
+
+        user, refusal = _food_log_actor(request)
+        if refusal is not None:
+            return refusal
+        try:
+            deleted = delete_food_log(user_id=user.id, log_id=pk)
+        except FoodLogEditError as exc:
+            return _food_log_refusal(exc)
+        return success_response(
+            {
+                "entry_id": str(deleted.id),
+                "deleted": True,
+                "restore_window_expires_at": (
+                    deleted.deleted_at + timedelta(minutes=RESTORE_WINDOW_MINUTES)
+                ).isoformat(),
+            },
+        )
+
+
+class InternalFoodLogRestoreView(APIView):
+    """POST /api/v1/nutrition/internal/food-log/{entry_id}/restore/ — DRF-1838."""
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    @extend_schema(
+        tags=["internal"],
+        request=None,
+        responses={
+            200: FoodLogEntrySerializer,
+            404: OpenApiResponse(description="No deletion of this entry for this person"),
+            410: OpenApiResponse(description="Restore window expired"),
+        },
+    )
+    def post(self, request: Request, pk: UUID) -> Response:
+        from nutrition.services.food_log_edit_service import FoodLogEditError, restore_food_log
+
+        user, refusal = _food_log_actor(request)
+        if refusal is not None:
+            return refusal
+        try:
+            log = restore_food_log(user_id=user.id, log_id=pk)
+        except FoodLogEditError as exc:
+            return _food_log_refusal(exc)
+        return success_response(FoodLogEntrySerializer(log).data)
 
 
 class InternalSummaryView(APIView):

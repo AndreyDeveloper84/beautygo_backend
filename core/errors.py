@@ -204,6 +204,10 @@ class ErrorCode(str, Enum):
     # --- Resource ---
     NOT_FOUND = "NOT_FOUND"
     CONFLICT = "CONFLICT"
+    # Окно восстановления удалённой записи закрылось (410). Отдавала ручка
+    # воды с DRF-302 без регистрации — в DEBUG это AssertionError, в бою
+    # предупреждение; DRF-1838 отдаёт тот же код для записи еды.
+    RESTORE_WINDOW_EXPIRED = "RESTORE_WINDOW_EXPIRED"
     # DRF-1525 — «салон по slug» для экрана бота: slug занят салоном с
     # другим названием. Не общий CONFLICT: оператору нужно имя занявшего,
     # а боту — отличить «опечатка в названии» от «Ayla недоступна».

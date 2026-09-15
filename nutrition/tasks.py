@@ -140,3 +140,20 @@ def purge_expired_food_photos_task() -> dict:
         len(tally.refused),
     )
     return result
+
+
+@shared_task(name="nutrition.purge_expired_deleted_food_logs")
+def purge_expired_deleted_food_logs_task() -> int:
+    """DRF-1838 — снимки удалённых записей еды не переживают окно восстановления.
+
+    Удаление записи обратимо 15 минут, после — окончательно. Сервис стирает
+    просроченные снимки при каждом удалении, но человек, удаливший одну
+    запись и ушедший, не сделает второго вызова — этот тик и есть «после —
+    окончательно» для него. Раз в 15 минут: снимок живёт не дольше 30.
+    """
+    from nutrition.services.food_log_edit_service import purge_expired_deleted_food_logs
+
+    purged = purge_expired_deleted_food_logs()
+    if purged:
+        logger.info("nutrition.purge_deleted_food_logs purged=%d", purged)
+    return purged
