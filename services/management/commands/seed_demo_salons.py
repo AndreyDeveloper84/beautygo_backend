@@ -186,6 +186,7 @@ class Command(BaseCommand):
         protected = PROTECTED_SLUGS | set(options["protect"])
         self._refuse_protected(salons, protected)
         self._refuse_unresolved_templates(salons)
+        self._refuse_invalid_timezones(salons)
 
         apply_changes = options["apply"]
         before = goal_master_coverage()
@@ -212,6 +213,29 @@ class Command(BaseCommand):
                 "Seed file names protected tenant slug(s): "
                 + ", ".join(clash)
                 + ". Demo data must never be written into a live tenant."
+            )
+
+    @staticmethod
+    def _refuse_invalid_timezones(salons: list[dict]) -> None:
+        """Пояс салона из файла — только настоящее имя IANA.
+
+        Сид пишет пояс мастеру ``save()`` без ``full_clean``, поэтому
+        валидатор поля сюда не доходит. Опечатка в файле стала бы поясом
+        каждого мастера салона, а восемь мест делают ``ZoneInfo(timezone)``
+        без защиты. Отказ — до записи, со списком всех плохих значений.
+        """
+        from users.timezones import is_iana_timezone
+
+        bad = [
+            (salon["slug"], salon.get("timezone", "Europe/Moscow"))
+            for salon in salons
+            if not is_iana_timezone(salon.get("timezone", "Europe/Moscow"))
+        ]
+        if bad:
+            raise CommandError(
+                "Seed file names a timezone that is not an IANA zone: "
+                + ", ".join(f"{slug}: {tz!r}" for slug, tz in bad)
+                + ". Example: Europe/Moscow."
             )
 
     @staticmethod
