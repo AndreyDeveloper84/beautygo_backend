@@ -710,6 +710,7 @@ class TestGuardCoversTheWholeSurface:
         DELREQ_URL,
         DELREQ_URL + "{request_id}/",
         "/api/v1/internal/users/{subject}/",  # DRF-1709
+        "/api/v1/internal/users/{subject}/reviews/",  # DRF-1855
     ]
 
     def test_the_list_above_is_every_guarded_view_not_a_hand_picked_subset(self):
@@ -739,6 +740,7 @@ class TestGuardCoversTheWholeSurface:
             "internal_personal_context_api",
             "deletion_request_api",
             "internal_users_api",  # DRF-1709 — the profile card joined the surface
+            "internal_reviews_api",  # DRF-1855 — a client's review from the bot
             "internal_schedule_api",  # DRF-1815 — working hours under the subject
         ):
             mod = __import__(f"users.{module}", fromlist=["x"])
@@ -757,7 +759,7 @@ class TestGuardCoversTheWholeSurface:
             "guarded_not_listed": sorted(c.__name__ for c in guarded - listed),
             "listed_not_guarded": sorted(c.__name__ for c in listed - guarded),
         }
-        assert len(guarded) == 9
+        assert len(guarded) == 10
 
     @pytest.mark.parametrize("template", ROUTES)
     def test_route_is_audited(self, template):
