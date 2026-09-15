@@ -32,6 +32,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from django.contrib.auth import get_user_model
+from freezegun import freeze_time
 from rest_framework.test import APIClient
 
 from nutrition.models import FoodLog, NutritionProfile
@@ -66,12 +67,19 @@ def progressive_user(db):
 def _seed_food_logs(user, days_back: int, per_day: int = 1, kcal: float = 500):
     """Create N daily FoodLogs going back from now.
 
-    Anchor each log at ``now - d days - i minutes``. Subtracting only
-    minutes (not hours) keeps every per_day entry on the same calendar
-    date as its parent ``d`` — earlier seeding used ``- i hours`` which
-    pushed the i=1, i=2 entries onto the previous calendar day when
-    the test ran near midnight UTC, inflating distinct-day counts by
-    one (observed in CI 2026-05-07T00:19 UTC: assert 11 == 10).
+    Every per_day entry of day ``d`` sits at the SAME instant,
+    ``now - d days``. Any offset inside the day crosses midnight UTC for
+    some wall clock, and then ``d`` days land on ``d + 1`` UTC dates:
+
+    * ``- i hours`` did it for the first three hours of the UTC day
+      (CI 2026-05-07T00:19 UTC: assert 11 == 10, fixed in #104 by
+      switching to minutes);
+    * ``- i minutes`` narrowed that window to three minutes, and the
+      class stayed: CI/CD dev 2026-09-15T00:00:17 UTC, run 34911143478,
+      assert 11 == 10 again.
+
+    No offset, no window. ``now - d days`` is never in the future, so the
+    ``logged_at <= now`` bound of ``get_commitment_days`` keeps it.
     """
     now = datetime.now(timezone.utc)
     for d in range(days_back):
@@ -81,7 +89,7 @@ def _seed_food_logs(user, days_back: int, per_day: int = 1, kcal: float = 500):
                 user=user, dish_name=f"Test {d}-{i}",
                 calories=kcal, protein_g=20, fat_g=10, carbs_g=50,
                 meal_type="lunch",
-                logged_at=day_anchor - timedelta(minutes=i),
+                logged_at=day_anchor,
             )
 
 
@@ -95,6 +103,28 @@ class TestCommitmentDays:
     def test_counts_distinct_days(self, progressive_user):
         _seed_food_logs(progressive_user, days_back=10, per_day=3)
         assert get_commitment_days(progressive_user) == 10
+
+    @pytest.mark.parametrize(
+        "instant",
+        [
+            # CI/CD dev каталога, run 34911143478: в эту секунду было 11 == 10.
+            "2026-09-15T00:00:17+00:00",
+            "2026-09-14T23:59:59+00:00",
+            "2026-09-15T12:00:00+00:00",
+        ],
+    )
+    def test_counts_distinct_days_at_any_clock(self, progressive_user, instant):
+        """Счёт не зависит от часов прогона.
+
+        Тест выше берёт «сейчас» со стенных часов и зеленеет, пока прогон
+        не попадёт в первые минуты суток UTC. Здесь часы заморожены на
+        самых неудобных мгновениях, и случай расходится при каждом прогоне,
+        а не раз в сутки.
+        """
+        with freeze_time(instant):
+            _seed_food_logs(progressive_user, days_back=10, per_day=3)
+            assert FoodLog.objects.filter(user=progressive_user).count() == 30
+            assert get_commitment_days(progressive_user) == 10
 
     def test_caps_at_60_day_lookback(self, progressive_user):
         # Logs older than 60 days don't count toward commitment.
