@@ -393,6 +393,17 @@ SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
     "internal-specialist-availability": (
         "users/tests/test_internal_availability_1845.py::TestSubject"
     ),
+    # DRF-1796 (M4): чужой workspace → 403, салон → 409, неготовность → 409;
+    # отказы — рядом с положительной половиной.
+    "internal-specialist-publication-readiness": (
+        "users/tests/test_publication_m4_1796.py::TestPublish"
+    ),
+    "internal-specialist-publication-status": (
+        "users/tests/test_publication_m4_1796.py::TestPublish"
+    ),
+    "internal-specialist-publication": (
+        "users/tests/test_publication_m4_1796.py::TestPublish"
+    ),
 }
 
 _SPECIALIST_ROUTE_RE = re.compile(

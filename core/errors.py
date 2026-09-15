@@ -220,6 +220,12 @@ class ErrorCode(str, Enum):
     # (каталог салона ведёт владелец салона; у профиля нет тенанта).
     # Причина — в details.reason машинным именем; ничего не создано.
     SERVICE_SELECTION_REFUSED = "SERVICE_SELECTION_REFUSED"
+    # DRF-1796 (M4) — готовность к публикации неполна: details — та же
+    # готовность ({status, missing[{code, section, detail}]}), ничего не записано.
+    PUBLICATION_NOT_READY = "PUBLICATION_NOT_READY"
+    # DRF-1796 (M4) — публикация недоступна этому workspace (салон, нет
+    # тенанта) или ключ команды занят другим мастером; причина — details.reason.
+    PUBLICATION_REFUSED = "PUBLICATION_REFUSED"
     # DRF-1699 D2 (§7 свода) — у человека живая заявка на удаление:
     # персонализация и новая обработка данных прекращены. Один код на все
     # три класса читателей (память, рекомендации, проактив), чтобы бот ловил

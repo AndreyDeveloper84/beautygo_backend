@@ -20,6 +20,11 @@ from users.internal_canon_gap_api import (  # noqa: E402
     InternalCanonGapRequestListView,
     InternalCanonGapSimilarView,
 )
+from users.internal_publication_api import (
+    InternalSpecialistPublicationReadinessView,
+    InternalSpecialistPublicationStatusView,
+    InternalSpecialistPublicationView,
+)
 from users.internal_schedule_api import (
     InternalSpecialistAvailabilityView,
     InternalSpecialistScheduleView,
@@ -190,6 +195,24 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/availability/',
         InternalSpecialistAvailabilityView.as_view(),
         name='internal-specialist-availability',
+    ),
+    # DRF-1796 (M4) — готовность к публикации, «Опубликовать» (DRAFT → PENDING,
+    # идемпотентно по ключу команды), «Проверить статус». ACTIVE — только
+    # модератор. Под субъектом; explicit routes BEFORE the include.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/publication/readiness/',
+        InternalSpecialistPublicationReadinessView.as_view(),
+        name='internal-specialist-publication-readiness',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/publication/status/',
+        InternalSpecialistPublicationStatusView.as_view(),
+        name='internal-specialist-publication-status',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/publication/',
+        InternalSpecialistPublicationView.as_view(),
+        name='internal-specialist-publication',
     ),
     path(
         'api/v1/internal/specialists/',
