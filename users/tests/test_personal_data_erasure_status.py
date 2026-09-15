@@ -154,15 +154,88 @@ class TestVerdict:
         assert after["erased"] is True
 
 
+class TestVerdictEdges:
+    """Ревью: состояния, где неверное правило оставалось бы зелёным."""
+
+    def test_a_soft_deleted_account_with_a_tombstone_is_not_erased(self, api, user):
+        """Стёрт, пока был жив, потом удалён из приложения — у удалённого строки быть не должно."""
+        from users.personal_context_erasure import erase_personal_context
+
+        _with_values(user)
+        erase_personal_context(user, initiator="app")
+        user.deleted_at = timezone.now()
+        user.save(update_fields=["deleted_at"])
+        data = _status(api, user)
+        assert _account(data) == {"kind": "account", "context_row": "tombstone", "erased": False}
+        assert data["erased"] is False
+
+    def test_a_linked_proxy_with_an_empty_unmarked_row_keeps_the_subject_unerased(self, api, user):
+        from users.personal_context_erasure import erase_personal_context
+
+        erase_personal_context(user, initiator="app")
+        proxy = User.objects.create(
+            username="bot:max:es-empty", role="client", is_proxy=True, is_guest=False, linked_user=user,
+        )
+        UserPersonalContext.objects.create(user=proxy)
+        data = _status(api, user)
+        assert _account(data)["erased"] is True
+        assert {"kind": "linked_identity", "context_row": "not_erased", "erased": False} in data["identities"]
+        assert data["erased"] is False
+
+    def test_a_deleted_linked_proxy_with_a_tombstone_is_not_erased(self, api, user):
+        from users.personal_context_erasure import erase_personal_context
+
+        erase_personal_context(user, initiator="app")
+        proxy = User.objects.create(
+            username="bot:max:es-gone", role="client", is_proxy=True, is_guest=False, linked_user=user,
+        )
+        _with_values(proxy)
+        erase_personal_context(proxy, initiator="app")
+        proxy.deleted_at = timezone.now()
+        proxy.save(update_fields=["deleted_at"])
+        data = _status(api, user)
+        assert {"kind": "linked_identity", "context_row": "tombstone", "erased": False} in data["identities"]
+        assert data["erased"] is False
+
+    @pytest.mark.parametrize("field", ["last_asked_at", "skipped_questions"])
+    def test_a_tombstone_with_engine_bookkeeping_is_not_a_tombstone(self, api, user, field):
+        """``mark_asked`` / ``mark_skipped`` пишут эти поля поверх tombstone — это уже не tombstone."""
+        from users.personal_context_erasure import erase_personal_context
+
+        erase_personal_context(user, initiator="app")
+        UserPersonalContext.objects.filter(user=user).update(**{field: {"diet_type": "2026-09-15"}})
+        data = _status(api, user)
+        assert _account(data) == {"kind": "account", "context_row": "not_erased", "erased": False}
+
+    def test_a_tombstone_missing_one_erased_mark_is_not_a_tombstone(self, api, user):
+        """Частичная пометка (как после ``mark_field_erased`` одного поля или нового поля модели)."""
+        from users.personal_context_erasure import declared_fields, erase_personal_context
+
+        erase_personal_context(user, initiator="app")
+        row = UserPersonalContext.objects.get(user=user)
+        sources = dict(row.data_sources)
+        sources.pop(declared_fields()[0])
+        UserPersonalContext.objects.filter(user=user).update(data_sources=sources)
+        data = _status(api, user)
+        assert _account(data) == {"kind": "account", "context_row": "not_erased", "erased": False}
+
+
 class TestWhatTheReadDoesNot:
     def test_the_body_carries_no_personal_values_and_no_external_ids(self, api, user):
+        """Вероятный путь утечки — связанная личность: экспорт отдаёт её username
+        и значения. Здесь у прокси есть и то и другое — в ответе нет ни того ни другого."""
         _with_values(user)
+        proxy = User.objects.create(
+            username="bot:max:es-leak", role="client", is_proxy=True, is_guest=False, linked_user=user,
+        )
+        UserPersonalContext.objects.create(user=proxy, diet_type="keto", preferred_districts=["Арбеково"])
         resp = api.get(STATUS_URL.format(user_id=user.pk))
         assert resp.status_code == 200, resp.content
-        assert resp.json()["data"]["identities"], resp.content
+        # Аккаунт + прокси бота (name_subject) + прокси с данными.
+        assert len(resp.json()["data"]["identities"]) == 3, resp.content
         text = resp.content.decode()
-        for value in ("vegan", "Центр", "Заводской", "500", "es@example.com", "79992230001",
-                      "Эля", "Пенза", "bot:test:", "es-user"):
+        for value in ("vegan", "keto", "Центр", "Арбеково", "Заводской", "500.00", "es@example.com",
+                      "79992230001", "Эля", "Пенза", "bot:test:", "bot:max:", "es-user", "es-leak"):
             assert value not in text, value
 
     def test_reading_the_status_creates_nothing(self, api, user):
