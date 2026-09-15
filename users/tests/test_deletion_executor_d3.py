@@ -676,9 +676,10 @@ class TestRecommendationRecordsAreAnonymised:
 
         Условие главного окна 15.09. Tombstone назвать нельзя: его имя не формат внешней
         личности, привязанных к нему прокси D3 не создаёт. Держат это два значения
-        (``TOMBSTONE_USERNAME`` и ``_EXTERNAL_USER_ID_RE``), поэтому — тест, а не довод.
-        Удалённого человека назвать можно (``deleted:<uuid>`` — формат внешней личности),
-        но его наборы уже под tombstone.
+        (``TOMBSTONE_USERNAME`` и предикат ``is_valid_external_user_id``), поэтому — тест, а не довод.
+        Удалённого человека назвать тоже нельзя: DRF-1947 (б) зарезервировал источник
+        ``deleted:`` — это имя, которое исполнитель даёт стёртой строке; его наборы
+        к тому же уже под tombstone.
         """
         from rest_framework.test import APIClient
 
@@ -708,9 +709,10 @@ class TestRecommendationRecordsAreAnonymised:
         assert resp.status_code == 403, resp.content[:200]
 
         person.refresh_from_db()
-        assert person.username == f"deleted:{person.pk}" and is_valid_external_user_id(person.username)
+        assert person.username == f"deleted:{person.pk}"
+        assert not is_valid_external_user_id(person.username)
         resp = read(person.pk, person.username)
-        assert resp.status_code == 404, resp.content[:200]
+        assert resp.status_code == 403, resp.content[:200]
 
 
 # ---------------------------------------------------------------------------
