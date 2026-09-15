@@ -24,6 +24,7 @@ from users.internal_users_api import (
 )
 from recommendation.record_api import (
     InternalRecommendationEventView,
+    InternalRecommendationSetCreateView,
     InternalRecommendationSetView,
 )
 from users.internal_reviews_api import InternalReviewCreateView
@@ -34,9 +35,15 @@ from users.personal_data_api import (
 
 
 urlpatterns = [
-    # DRF-1666 — запись Recommendation для C04.1: чтение набора и события
-    # взаимодействия, оба под субъектом (DRF-1617). Здесь, а не в
-    # recommendation/urls.py: та ручка — граница резолвера и остаётся одна.
+    # DRF-1666 — запись Recommendation для C04.1: вход производителя NBA
+    # (DRF-1888), чтение набора и события взаимодействия — все под субъектом
+    # (DRF-1617). Здесь, а не в recommendation/urls.py: та ручка — граница
+    # резолвера и остаётся одна.
+    path(
+        "<uuid:user_id>/recommendation-sets/",
+        InternalRecommendationSetCreateView.as_view(),
+        name="internal-recommendation-set-create",
+    ),
     path(
         "<uuid:user_id>/recommendations/<uuid:set_id>/",
         InternalRecommendationSetView.as_view(),
