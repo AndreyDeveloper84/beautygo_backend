@@ -397,12 +397,10 @@ class TestEverySubjectRefIsDecided:
         } <= live, sorted(live)
         assert undecided_subject_refs() == {}, undecided_subject_refs()
 
-    def test_deferred_decision_names_its_open_leaf(self):
-        """«Как есть» у набора — не решение навсегда: причина обязана назвать лист.
-
-        Условие главного окна 15.09; снимается в DRF-1909 вместе с заменой строки.
-        """
-        assert "DRF-1909" in SUBJECT_REF["recommendation.RecommendationSet.subject_ref"]
+    def test_record_set_row_is_anonymisation_not_a_deferral(self):
+        """DRF-1909 снял отложенное решение: строка набора — обезличивание, а не «хранится как есть»."""
+        reason = SUBJECT_REF["recommendation.RecommendationSet.subject_ref"]
+        assert "как есть" not in reason and "anonymise_for_subject" in reason
 
     def test_a_new_or_vanished_subject_ref_is_reported(self):
         live = subject_ref_fields()
@@ -585,8 +583,8 @@ class TestContextSnapshotsAreErased:
         for snap in ContextSnapshot.objects.filter(pk__in=before):
             assert snap.content == {} and snap.erased_at is not None
             assert snap.content_digest == before[snap.pk]  # digest доказывает «что было»
-        own_set = RecommendationSet.objects.get(subject_ref=str(person.pk))
-        assert own_set.context_snapshot_id in before  # набор на месте (DRF-1909), ссылка цела
+        # наборы на месте и ссылаются на стёртые снимки; subject_ref у них уже tombstone (DRF-1909)
+        assert RecommendationSet.objects.filter(context_snapshot_id__in=before).count() == 2
         stranger.refresh_from_db()
         assert stranger.content and stranger.erased_at is None
 
@@ -604,6 +602,74 @@ class TestContextSnapshotsAreErased:
         assert ContextSnapshot.objects.filter(subject_ref=str(person.pk), erased_at__isnull=True).count() == 1
         person.refresh_from_db()
         assert person.phone == PHONE  # откат целиком
+
+
+class TestRecommendationRecordsAreAnonymised:
+    """DRF-1909: записи Recommendation человека обезличивает исполнитель — у каждой строки субъекта.
+
+    Поле за полем переход держит ``recommendation/tests/test_record_anonymisation.py``; здесь —
+    проводка в D3: шаг, счёт, остаток, единственный вызывающий.
+    """
+
+    def test_sets_of_every_identity_carry_the_tombstone_and_a_stranger_keeps_its_subject(self, person):
+        from recommendation.models import RecommendationSet
+
+        # Прокси снимается ДО исполнения: после подтверждения бота linked_user = NULL.
+        proxy = User.objects.get(is_proxy=True, linked_user=person)
+        refs = [str(person.pk), str(proxy.pk)]
+        mine = set(RecommendationSet.objects.filter(subject_ref__in=refs).values_list("pk", flat=True))
+        assert len(mine) == 2  # положительная стража: фикстура дала наборы аккаунта и прокси
+
+        out = execute(ensure_deletion_request(person, initiator="bot").request, bot_client=_BotOk())
+
+        assert out.completed
+        assert out.steps["anonymised"]["recommendation.RecommendationSet"] == 2
+        tomb = str(tombstone_user().pk)
+        assert set(RecommendationSet.objects.filter(pk__in=mine).values_list("subject_ref", flat=True)) == {tomb}
+        # Чтение набора фильтрует по subject_ref = pk человека — у удалённого субъекта наборов больше нет.
+        assert not RecommendationSet.objects.filter(subject_ref__in=refs).exists()
+        assert RecommendationSet.objects.filter(subject_ref=STRANGER_SUBJECT_REF).count() == 1
+
+    def test_a_set_left_unanonymised_is_incomplete_and_rolls_back(self, person):
+        """Не подменой _residue, а настоящим остатком: переход «ничего не сделал» — полнота видит."""
+        from recommendation.models import RecommendationSet, _RecommendationSetQuerySet
+
+        req = ensure_deletion_request(person, initiator="bot").request
+        with patch.object(
+            _RecommendationSetQuerySet, "anonymise_for_subject", lambda self, subject_ref, tombstone_ref: 0,
+        ):
+            out = execute(req, bot_client=_BotOk())
+
+        req.refresh_from_db()
+        assert out.status == req.status == DeletionRequest.Status.FAILED
+        assert "recommendation.RecommendationSet.subject_ref" in req.failure_reason
+        assert RecommendationSet.objects.filter(subject_ref=str(person.pk)).count() == 1
+        person.refresh_from_db()
+        assert person.phone == PHONE  # откат целиком
+
+    def test_anonymisation_has_exactly_one_caller_outside_tests(self):
+        """Единственный разрешённый переход записи зовётся только исполнителем D3 (AST, нижняя граница скана)."""
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        skip = {"tests", "migrations", "venv", ".venv", "node_modules"}
+        scanned, calls = 0, {}
+        for path in sorted(root.rglob("*.py")):
+            parts = path.relative_to(root).parts
+            if any(p in skip or p.startswith(".") for p in parts):
+                continue
+            scanned += 1
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            n = sum(
+                1 for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "anonymise_for_subject"
+            )
+            if n:
+                calls["/".join(parts)] = n
+        assert scanned >= 400, f"просканировано {scanned} файлов — корень не тот"
+        assert calls == {"users/deletion_executor.py": 1}, calls
 
 
 # ---------------------------------------------------------------------------
