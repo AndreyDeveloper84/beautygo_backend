@@ -30,18 +30,32 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from recommendation.models import RecommendationEvent
-from recommendation.records import PolicyVersions, RecommendationInput, RecommendationSetInput, persist
+from recommendation.records import (
+    ContextSnapshotInput,
+    PolicyVersions,
+    RecommendationInput,
+    RecommendationSetInput,
+    persist,
+)
+from recommendation.snapshots import content_digest
 from users.models import User
 from users.tests.conftest import name_subject
 
 pytestmark = pytest.mark.django_db
 
-INTERNAL_ONLY = "INTERNAL-ONLY-SIGNAL rating=4.8 provider_score=0.91"
-SET_INTERNAL_ONLY = "SET-INTERNAL-ONLY policy_threshold=0.42"
+#: internal_only — только коды (DRF-1906): метки уникальны, чтобы поиск по сырому телу не зеленел по совпадению.
+INTERNAL_ONLY = "INTERNAL_ONLY_SIGNAL_PROVIDER_SCORE_7F3"
+SET_INTERNAL_ONLY = "SET_INTERNAL_ONLY_POLICY_THRESHOLD_7F3"
 VERSIONS = PolicyVersions("dp", "tx", "sp", "cm", "pp")
 SAFETY = {"state": "NORMAL", "rule_id": "r", "policy_version": "sp", "evidence_ref": "e",
           "activated_at": "2026-09-12T10:00:00Z"}
-SNAPSHOT = {"snapshot_id": "ctx", "snapshot_version": 1, "content_digest": "sha256:x"}
+SNAPSHOT_CONTENT = {
+    "snapshot_version": "turn-context-v1",
+    "decision_readiness": {"state_revision": 1, "readiness_state": "ready"},
+    "said": [{"key": "visit_context", "value": "weekend", "origin": "conversation", "said_on": "2026-09-12"}],
+    "answered_question": {"question_id": "said.visit_context"},
+}
+SNAPSHOT = ContextSnapshotInput("turn-context-v1", content_digest(SNAPSHOT_CONTENT), SNAPSHOT_CONTENT)
 
 
 @pytest.fixture
@@ -89,7 +103,7 @@ def _set_in(subject, **over) -> RecommendationSetInput:
         evidence_refs=[{"source": "conversation", "ref": "msg-set"}],
         explanation={"displayable": True, "user_visible_reasons": ["подходит под твою цель"],
                      "internal_only": [SET_INTERNAL_ONLY]},
-        safety_evaluation_ref=SAFETY, context_snapshot_ref=SNAPSHOT, primary=_rec(),
+        safety_evaluation_ref=SAFETY, context_snapshot=SNAPSHOT, primary=_rec(),
     )
     base.update(over)
     return RecommendationSetInput(**base)
@@ -123,7 +137,7 @@ def test_read_returns_outcome_direction_why_lineage_and_actionable(bearer, subje
     data = resp.json()["data"]
     assert data["recommendation_set_id"] == str(rset.pk) and data["subject_id"] == str(subject.pk)
     assert data["execution_mode"] == "LIVE" and data["conversation_ref"]["trace_id"] == "t-1"
-    assert data["record_schema_version"] == "1.1"
+    assert data["record_schema_version"] == "1.2"
     o = data["outcome"]
     assert o["result_status"] == "CLEAR_PRIMARY" and o["readiness_state"] == "READY" and o["safety_state"] == "NORMAL"
     assert o["reason_codes"] == ["CLEAR_PRIMARY_BY_POLICY"] and o["why"] == ["подходит под твою цель"]
@@ -144,6 +158,8 @@ def test_internal_only_never_leaves_the_record(bearer, subject, rset):
     raw = _api(bearer, subject).get(_set_url(subject, rset)).content.decode()
     assert INTERNAL_ONLY not in raw and SET_INTERNAL_ONLY not in raw
     assert "internal_only" not in raw and "provider_score" not in raw and "policy_threshold" not in raw
+    # содержимое снимка (DRF-1906) чтением не отдаётся — ни значения, ни вопрос
+    assert '"weekend"' not in raw and "said.visit_context" not in raw and "context_snapshot" not in raw
     for forbidden in ("service", "specialist", "provider", "price", "slot", "distance"):
         assert f'"{forbidden}"' not in raw, forbidden
 

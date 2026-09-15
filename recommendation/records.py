@@ -18,9 +18,23 @@ alternatives, а ``reason_codes`` / ``evidence_refs`` / ``explanation`` набо
 Проверяются **значения**, а не только ключи: ``readiness_state`` и
 ``safety_evaluation_ref.state`` — ровно из словарей (верхний регистр); строчное
 ``"blocked"`` — отказ по имени поля, каталог не нормализует за вызывающего.
+
+DRF-1906 — снимок контекста
+---------------------------
+
+Снимок приходит **содержимым** (``ContextSnapshotInput``), а не ссылкой: схему,
+закрытые словари и класс здоровья проверяет ``recommendation.snapshots``,
+digest каталог пересчитывает и сравнивает с присланным; строка снимка и набор с
+FK на неё пишутся одной транзакцией. Ссылку §7 строит каталог (``as_ref``).
+
+``explanation.internal_only`` — только коды формы reason_codes
+(:data:`CODE_FORM`): текст здесь не хранится, у записи его некому стирать по
+отдельности (решение главного окна 15.09; стирание при удалении — DRF-1909).
 """
 from __future__ import annotations
 
+import copy
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -30,11 +44,13 @@ from uuid import UUID
 from django.db import transaction
 from django.utils import timezone
 
+from recommendation import snapshots
 from recommendation._types import SafetyState
 from recommendation.models import (
     ACTIONABILITY_TTL,
     NO_NBA_STATUSES,
     RECORD_SCHEMA_VERSION,
+    ContextSnapshot,
     ExecutionMode,
     ReadinessState,
     Recommendation,
@@ -45,6 +61,10 @@ from recommendation.models import (
 
 #: Длина колонок версий (``CharField(max_length=32)``): длиннее — отказ по имени, а не обрезка.
 VERSION_MAX_LENGTH = 32
+
+#: Форма кода reason_codes (``_reason_codes.ReasonCode``: значение = имя, верхний регистр).
+#: Этой формы — и только её — принимает ``explanation.internal_only``.
+CODE_FORM = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
 
 
 class RecordInvalid(ValueError):
@@ -87,6 +107,15 @@ class RecommendationInput:
 
 
 @dataclass(frozen=True)
+class ContextSnapshotInput:
+    """Снимок хода содержимым (DRF-1906). Схему, словари и digest проверяет каталог; ссылку строит он же."""
+
+    snapshot_version: str
+    content_digest: str                       #: sha256 канонического JSON, hex
+    content: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class RecommendationSetInput:
     subject_ref: str
     intent_id: str
@@ -98,7 +127,7 @@ class RecommendationSetInput:
     evidence_refs: list[dict[str, Any]]
     explanation: dict[str, Any]
     safety_evaluation_ref: dict[str, Any]     #: {state, rule_id, policy_version, evidence_ref, activated_at}
-    context_snapshot_ref: dict[str, Any]      #: {snapshot_id, snapshot_version, content_digest}
+    context_snapshot: ContextSnapshotInput
     primary: RecommendationInput | None = None
     alternatives: tuple[RecommendationInput, ...] = ()
     semantic_resolution_ref: str = ""
@@ -134,6 +163,14 @@ def _check_grounds(need, reason_codes, evidence_refs, explanation) -> None:
              "(§105/§145: reason без evidence не печатается)")
     need(isinstance(explanation, dict) and isinstance(explanation.get("displayable"), bool),
          "explanation.displayable обязателен (owner 2026-07-29)")
+    # internal_only — только коды (решение главного окна 15.09): текст сказанного сюда
+    # не пишется. Значение в отказе не повторяется — оно и есть то, чему здесь не место.
+    internal = explanation.get("internal_only", [])
+    need(isinstance(internal, list), "explanation.internal_only — список кодов")
+    for j, code in enumerate(internal):
+        need(isinstance(code, str) and CODE_FORM.match(code) is not None,
+             f"explanation.internal_only[{j}] — не код формы reason_codes ({CODE_FORM.pattern}): "
+             "текст здесь не хранится")
 
 
 def _check_set(inp: RecommendationSetInput) -> None:
@@ -153,8 +190,17 @@ def _check_set(inp: RecommendationSetInput) -> None:
     state = (inp.safety_evaluation_ref or {}).get("state")
     need(state in {s.value for s in SafetyState},
          f"safety_evaluation_ref.state {state!r} не из {[s.value for s in SafetyState]} (верхний регистр)")
-    need(isinstance(inp.context_snapshot_ref, dict) and _SNAPSHOT_KEYS <= set(inp.context_snapshot_ref),
-         "context_snapshot_ref — ссылка {snapshot_id, snapshot_version, content_digest} (§7)")
+    snap = inp.context_snapshot
+    need(isinstance(snap, ContextSnapshotInput),
+         "context_snapshot — снимок содержимым {snapshot_version, content_digest, content} (§7, DRF-1906)")
+    try:
+        snapshots.check_content(snap.content, snapshot_version=snap.snapshot_version)
+    except snapshots.SnapshotInvalid as exc:
+        raise RecordInvalid(f"набор: context_snapshot: {exc}") from exc
+    # Равенство пересчитанному hexdigest само держит и форму: отдельная проверка формы была бы без сторожа.
+    need(snap.content_digest == snapshots.content_digest(snap.content),
+         "context_snapshot.content_digest не совпадает с пересчитанным каталогом "
+         "(sha256 канонического JSON: sort_keys, separators (',', ':'), ensure_ascii=False)")
     need(inp.execution_mode in ExecutionMode.values, f"execution_mode {inp.execution_mode!r} не из SHADOW|LIVE (C1)")
     need(not inp.conversation_ref or {"conversation_id", "trace_id"} <= set(inp.conversation_ref),
          "conversation_ref — {conversation_id, trace_id} либо пусто")
@@ -222,6 +268,13 @@ def persist(inp: RecommendationSetInput, *, now: datetime | None = None) -> Reco
 
     versions = inp.versions
     with transaction.atomic():
+        # Снимок — в той же транзакции, что набор: без набора его не бывает, набора без него — тоже.
+        snapshot = ContextSnapshot(
+            subject_ref=inp.subject_ref, snapshot_version=inp.context_snapshot.snapshot_version,
+            content_digest=inp.context_snapshot.content_digest, content=copy.deepcopy(inp.context_snapshot.content),
+            created_at=now,
+        )
+        snapshot.save()
         primary_id = uuid.uuid4() if inp.primary is not None else None
         rset = RecommendationSet(
             subject_ref=inp.subject_ref, intent_id=inp.intent_id,
@@ -230,7 +283,7 @@ def persist(inp: RecommendationSetInput, *, now: datetime | None = None) -> Reco
             result_status=inp.result_status, readiness_state=inp.readiness_state,
             reason_codes=list(inp.reason_codes), evidence_refs=list(inp.evidence_refs),
             explanation=dict(inp.explanation), safety_evaluation_ref=dict(inp.safety_evaluation_ref),
-            context_snapshot_ref=dict(inp.context_snapshot_ref), primary_id=primary_id,
+            context_snapshot=snapshot, primary_id=primary_id,
             decision_policy_version=versions.decision_policy, taxonomy_version=versions.taxonomy,
             safety_policy_version=versions.safety_policy, catalog_mapping_version=versions.catalog_mapping,
             presentation_policy_version=versions.presentation_policy,

@@ -41,7 +41,15 @@
   ``IDEMPOTENCY_CONFLICT``. Запись immutable, поэтому дубль не исправить задним
   числом — его можно только не создать. Бот ставит ключ ``intent_id:trace_id``;
 * ссылка на решение резолвера — только ``execution_mapping_snapshot_ref``
-  (ссылка, не копия, B10).
+  (ссылка, не копия, B10);
+* снимок контекста хода (DRF-1906) приходит **содержимым** — ``context_snapshot
+  {snapshot_version, content_digest, content}``; схему, закрытые словари
+  ``said[].value`` и класс здоровья проверяет ``recommendation.snapshots``,
+  digest каталог пересчитывает; снимок и набор — одна транзакция. Ссылку
+  ``{snapshot_id, snapshot_version, content_digest}`` строит каталог и отдаёт в
+  ответе 201; присланный ``context_snapshot_ref`` — 400 по имени. Чтением
+  содержимое снимка не отдаётся;
+* ``explanation.internal_only`` — только коды формы reason_codes; текст — 400 по имени.
 
 Что отдаётся при чтении (просьба e8 к #426):
 
@@ -94,6 +102,7 @@ from appointments.infrastructure.idempotency import (
 )
 from recommendation.models import ExecutionMode, Recommendation, RecommendationEvent, RecommendationSet
 from recommendation.records import (
+    ContextSnapshotInput,
     PolicyVersions,
     RecommendationInput,
     RecommendationSetInput,
@@ -122,6 +131,7 @@ IDEMPOTENCY_OPERATION = "recommendation_set.create"
 
 _RECORD_FIELDS = frozenset(f.name for f in dataclass_fields(RecommendationInput))
 _VERSION_FIELDS = tuple(f.name for f in dataclass_fields(PolicyVersions))
+_SNAPSHOT_FIELDS = frozenset(f.name for f in dataclass_fields(ContextSnapshotInput))
 
 
 def _why(obj: Recommendation | RecommendationSet) -> list[str]:
@@ -234,7 +244,8 @@ class RecommendationSetCreateSerializer(serializers.Serializer):
     evidence_refs = serializers.ListField(child=serializers.DictField(), required=False, default=list)
     explanation = serializers.DictField()
     safety_evaluation_ref = serializers.DictField()
-    context_snapshot_ref = serializers.DictField()
+    #: {snapshot_version, content_digest, content} — ссылку {snapshot_id, …} строит каталог (DRF-1906).
+    context_snapshot = serializers.DictField()
     # --- NBA — только при NBA-исходе --------------------------------------------
     primary = serializers.DictField(required=False, allow_null=True, default=None)
     alternatives = serializers.ListField(child=serializers.DictField(), required=False, default=list)
@@ -246,6 +257,8 @@ class RecommendationSetCreatedSerializer(serializers.Serializer):
     primary_recommendation_id = serializers.UUIDField(allow_null=True)
     alternative_recommendation_ids = serializers.ListField(child=serializers.UUIDField())
     execution_mode = serializers.CharField()
+    #: {snapshot_id, snapshot_version, content_digest} — строит каталог (DRF-1906)
+    context_snapshot_ref = serializers.DictField()
 
 
 class RecommendationEventInSerializer(serializers.Serializer):
@@ -278,6 +291,17 @@ def _record_input(raw: dict, label: str) -> RecommendationInput:
         raise RecordInvalid(f"{label}: {exc}") from exc
 
 
+def _snapshot_input(raw: dict) -> ContextSnapshotInput:
+    """Снимок содержимым. ``snapshot_id`` и ссылку строит каталог — прислать их нельзя."""
+    extra = sorted(set(raw) - _SNAPSHOT_FIELDS)
+    if extra:
+        raise RecordInvalid(f"context_snapshot: поля {extra} не входят в снимок — id и ссылку строит каталог")
+    missing = sorted(_SNAPSHOT_FIELDS - set(raw))
+    if missing:
+        raise RecordInvalid(f"context_snapshot: нет полей {missing}")
+    return ContextSnapshotInput(**raw)
+
+
 def _set_input(subject: User, data: dict) -> RecommendationSetInput:
     versions = data["versions"]
     extra = sorted(set(versions) - set(_VERSION_FIELDS))
@@ -296,7 +320,7 @@ def _set_input(subject: User, data: dict) -> RecommendationSetInput:
         evidence_refs=list(data["evidence_refs"]),
         explanation=dict(data["explanation"]),
         safety_evaluation_ref=dict(data["safety_evaluation_ref"]),
-        context_snapshot_ref=dict(data["context_snapshot_ref"]),
+        context_snapshot=_snapshot_input(data["context_snapshot"]),
         primary=_record_input(data["primary"], "primary") if data["primary"] is not None else None,
         alternatives=tuple(
             _record_input(raw, f"alternative[{i}]") for i, raw in enumerate(data["alternatives"], start=1)
@@ -368,6 +392,14 @@ class InternalRecommendationSetCreateView(APIView):
     def _create(request: Request, subject: User) -> Response:
         # Сериализатор DRF молча выбросил бы незнакомый ключ верхнего уровня —
         # а у варианта лишнее поле уже отказ по имени. Одно правило на оба уровня.
+        if "context_snapshot_ref" in (request.data or {}):
+            # Отдельное имя, а не «лишнее поле»: до DRF-1906 это поле было частью входа.
+            return error_response(
+                "VALIDATION_ERROR",
+                "context_snapshot_ref: ссылку на снимок строит каталог — присылайте context_snapshot "
+                "{snapshot_version, content_digest, content} (DRF-1906)",
+                details={"unknown_fields": ["context_snapshot_ref"]}, status_code=400,
+            )
         extra = sorted(set(request.data or {}) - _SET_FIELDS)
         if extra:
             return error_response(
@@ -400,6 +432,7 @@ class InternalRecommendationSetCreateView(APIView):
                 .order_by("created_at", "pk").values_list("pk", flat=True)
             ],
             "execution_mode": rset.execution_mode,
+            "context_snapshot_ref": rset.context_snapshot.as_ref(),
         }, status_code=201)
 
 

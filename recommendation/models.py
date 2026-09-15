@@ -63,7 +63,9 @@ from django.db import models
 ACTIONABILITY_TTL = timedelta(hours=2)
 
 #: Версия схемы записи (контракт v1.0 §3 `record_schema_version`).
-RECORD_SCHEMA_VERSION = "1.1"   #: 1.1 — DRF-1905: исход, готовность, безопасность, снимок и версии — у набора
+#: 1.1 — DRF-1905: исход, готовность, безопасность, снимок и версии — у набора;
+#: 1.2 — DRF-1906: снимок контекста — строка ContextSnapshot, FK вместо JSON-ссылки
+RECORD_SCHEMA_VERSION = "1.2"
 
 
 class ImmutableRecordError(RuntimeError):
@@ -137,6 +139,70 @@ class ReadinessState(models.TextChoices):
 NO_NBA_STATUSES = (ResultStatus.INSUFFICIENT_CONTEXT, ResultStatus.SAFETY_BOUNDARY)
 
 
+class _ContextSnapshotQuerySet(_ImmutableQuerySet):
+    def erase_for_subject(self, subject_ref: str, now) -> int:
+        """Единственный переход снимка (DRF-1906, В2): стирание содержимого исполнителем D3.
+
+        ``content`` → ``{}``, ``erased_at`` → ``now``; ``id``, ``snapshot_version`` и
+        ``content_digest`` остаются — ссылка набора цела, digest доказывает, *что*
+        было, не храня *что*. Уже стёртые не трогаются: повтор не сдвигает момент.
+        Прочие ``update()`` отказывают, как у записей.
+        """
+        return models.QuerySet.update(
+            self.filter(subject_ref=subject_ref, erased_at__isnull=True), content={}, erased_at=now,
+        )
+
+
+class _ContextSnapshotManager(models.Manager.from_queryset(_ContextSnapshotQuerySet)):
+    pass
+
+
+class ContextSnapshot(_ImmutableModel):
+    """Снимок фактов хода, на которые опиралось решение (контракт §7; DRF-1906).
+
+    Хранит каталог; пишет только ``records.persist`` в одной транзакции с набором.
+    Содержимое — только коды, даты и значения закрытых словарей схемы версии
+    (``recommendation.snapshots``); ``content_digest`` пересчитан каталогом.
+
+    Связь с человеком — строкой ``subject_ref``, как у набора (В1-а): сторож FK
+    исполнителя D3 её не видит, поэтому стирание — явный шаг D3 (часть 2).
+    Неизменяем, кроме одного перехода — ``objects.erase_for_subject`` (В2).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    subject_ref = models.CharField(max_length=64)
+    snapshot_version = models.CharField(max_length=32)
+    #: sha256 канонического JSON содержимого — hex, 64 знака.
+    content_digest = models.CharField(max_length=64)
+    content = models.JSONField(default=dict)
+    created_at = models.DateTimeField()
+    #: Момент стирания исполнителем D3; NULL — содержимое на месте.
+    erased_at = models.DateTimeField(null=True, blank=True)
+
+    objects = _ContextSnapshotManager()
+
+    class Meta:
+        indexes = [models.Index(fields=["subject_ref", "created_at"], name="ctxsnap_subject_created_idx")]
+        constraints = [
+            # Стёртый снимок пуст по построению — не «стёрт, но с содержимым».
+            models.CheckConstraint(
+                condition=models.Q(erased_at__isnull=True) | models.Q(content={}),
+                name="ctxsnap_erased_has_empty_content",
+            ),
+        ]
+
+    def as_ref(self) -> dict:
+        """Ссылка §7 — строится из снимка, вручную её не пишет никто."""
+        return {
+            "snapshot_id": str(self.pk),
+            "snapshot_version": self.snapshot_version,
+            "content_digest": self.content_digest,
+        }
+
+    def __str__(self) -> str:
+        return f"ContextSnapshot {self.id} ({self.snapshot_version})"
+
+
 class RecommendationSet(_ImmutableModel):
     """Одна выдача: исход прохода + (при NBA) primary и ≤2 alternatives (OQ-R1; контракт §3, §32).
 
@@ -175,8 +241,11 @@ class RecommendationSet(_ImmutableModel):
     explanation = models.JSONField(default=dict)
     #: {state, rule_id, policy_version, evidence_ref, activated_at} — owner 11.09 §3; B6
     safety_evaluation_ref = models.JSONField(default=dict)
-    #: Decision Snapshot хода: {snapshot_id, snapshot_version, content_digest} — контракт §7; DRF-1906
-    context_snapshot_ref = models.JSONField(default=dict)
+    #: Decision Snapshot хода (контракт §7; DRF-1906). Одна правда: ссылка
+    #: {snapshot_id, snapshot_version, content_digest} строится из строки снимка.
+    context_snapshot = models.ForeignKey(
+        ContextSnapshot, on_delete=models.PROTECT, related_name="recommendation_sets",
+    )
     #: NBA набора; NULL ⇔ исход из NO_NBA_STATUSES (CHECK ниже).
     primary = models.ForeignKey(
         "Recommendation", on_delete=models.PROTECT, null=True, blank=True, related_name="+",

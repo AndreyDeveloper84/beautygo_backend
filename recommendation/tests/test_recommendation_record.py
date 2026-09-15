@@ -42,12 +42,14 @@ from django.utils import timezone
 from recommendation.models import (
     ACTIONABILITY_TTL,
     RECORD_SCHEMA_VERSION,
+    ContextSnapshot,
     ImmutableRecordError,
     Recommendation,
     RecommendationEvent,
     RecommendationSet,
 )
 from recommendation.records import (
+    ContextSnapshotInput,
     PolicyVersions,
     RecommendationInput,
     RecommendationSetInput,
@@ -55,6 +57,7 @@ from recommendation.records import (
     persist,
     record_event,
 )
+from recommendation.snapshots import content_digest
 
 pytestmark = pytest.mark.django_db
 
@@ -62,7 +65,16 @@ VERSIONS = PolicyVersions(
     decision_policy="dp-2026-09-12", taxonomy="tx-2026-07", safety_policy="sp-1",
     catalog_mapping="cm-2026-09-12", presentation_policy="pp-1",
 )
-SNAPSHOT = {"snapshot_id": "ctx-1", "snapshot_version": 1, "content_digest": "sha256:abc"}
+#: Снимок без города — словарь городов каталога здесь не нужен (он — в test_context_snapshot.py).
+SNAPSHOT_CONTENT = {
+    "snapshot_version": "turn-context-v1",
+    "decision_readiness": {"state_revision": 3, "readiness_state": "ready"},
+    "said": [{"key": "visit_context", "value": "after_work", "origin": "conversation", "said_on": "2026-09-12"}],
+    "answered_question": None,
+}
+SNAPSHOT = ContextSnapshotInput(
+    snapshot_version="turn-context-v1", content_digest=content_digest(SNAPSHOT_CONTENT), content=SNAPSHOT_CONTENT,
+)
 SAFETY = {"state": "NORMAL", "rule_id": "r-0", "policy_version": "sp-1", "evidence_ref": "ev-0",
           "activated_at": "2026-09-12T10:00:00Z"}
 EVIDENCE = [{"source": "conversation", "ref": "msg-1", "said_at": "2026-09-12T10:00:00Z"}]
@@ -87,7 +99,7 @@ def _set(**over) -> RecommendationSetInput:
         result_status="CLEAR_PRIMARY", readiness_state="READY",
         reason_codes=["CLEAR_PRIMARY_BY_POLICY"], evidence_refs=list(EVIDENCE),
         explanation={"displayable": True, "user_visible_reasons": ["ты сказала, что ноет спина"], "internal_only": []},
-        safety_evaluation_ref=SAFETY, context_snapshot_ref=SNAPSHOT, primary=_rec(),
+        safety_evaluation_ref=SAFETY, context_snapshot=SNAPSHOT, primary=_rec(),
     )
     base.update(over)
     return RecommendationSetInput(**base)
@@ -124,8 +136,9 @@ def test_persist_writes_set_primary_alternatives_and_created_events():
     assert primary.actionable_until == now + ACTIONABILITY_TTL == now + timedelta(hours=2)
     # провенанс и исход — у набора; схема 1.1 — у обоих
     assert rset.result_status == "CLEAR_PRIMARY" and rset.readiness_state == "READY"
-    assert rset.decision_policy_version == "dp-2026-09-12" and rset.context_snapshot_ref == SNAPSHOT
-    assert rset.record_schema_version == primary.record_schema_version == RECORD_SCHEMA_VERSION == "1.1"
+    assert rset.decision_policy_version == "dp-2026-09-12"
+    assert rset.context_snapshot.content_digest == SNAPSHOT.content_digest == content_digest(SNAPSHOT_CONTENT)
+    assert rset.record_schema_version == primary.record_schema_version == RECORD_SCHEMA_VERSION == "1.2"
     # WHY варианта остаётся на варианте (C04.2)
     assert alt.reason_codes == ["ELIG_CAPABILITY_VERIFIED"] and alt.explanation["displayable"] is True
     assert list(RecommendationEvent.objects.values_list("kind", flat=True)) == ["recommendation.created"] * 2
@@ -167,7 +180,7 @@ def test_incomplete_variant_is_refused_by_field_name(bad, match):
 @pytest.mark.parametrize("bad, match", [
     ({"safety_evaluation_ref": {"state": "NORMAL"}}, "safety_evaluation_ref"),
     ({"safety_evaluation_ref": {**SAFETY, "state": "normal"}}, "safety_evaluation_ref.state"),
-    ({"context_snapshot_ref": {"facts": {"age": 30}}}, "context_snapshot_ref"),
+    ({"context_snapshot": {"facts": {"age": 30}}}, "набор: context_snapshot"),
     ({"result_status": "ACCEPTED"}, "result_status"),
     ({"readiness_state": "MAYBE"}, "readiness_state"),
     ({"readiness_state": "blocked"}, "readiness_state"),       # движок бота отдаёт строчные — каталог не нормализует
@@ -256,10 +269,14 @@ def test_nba_outcome_without_primary_is_refused_by_name(status):
 
 def _raw_set(**over) -> RecommendationSet:
     """Набор мимо persist — чтобы проверить, что условие держит БАЗА, а не только код."""
+    snapshot = ContextSnapshot.objects.create(
+        subject_ref="user:raw", snapshot_version=SNAPSHOT.snapshot_version, content_digest=SNAPSHOT.content_digest,
+        content=SNAPSHOT_CONTENT, created_at=timezone.now(),
+    )
     fields = dict(
         subject_ref="user:raw", intent_id="i", result_status="CLEAR_PRIMARY", readiness_state="READY",
         reason_codes=["r"], explanation={"displayable": False}, safety_evaluation_ref=SAFETY,
-        context_snapshot_ref=SNAPSHOT, decision_policy_version="d", taxonomy_version="t",
+        context_snapshot=snapshot, decision_policy_version="d", taxonomy_version="t",
         safety_policy_version="s", catalog_mapping_version="c", presentation_policy_version="p",
         created_at=timezone.now(),
     )
@@ -374,13 +391,13 @@ def test_snapshots_are_refs_not_copies():
         transaction_snapshot_ref={"snapshot_id": "tx-1", "snapshot_version": 1, "content_digest": "sha256:t"},
     )))
     rec = rset.primary
-    for ref in (rset.context_snapshot_ref, rec.execution_mapping_snapshot_ref, rec.transaction_snapshot_ref):
+    for ref in (rset.context_snapshot.as_ref(), rec.execution_mapping_snapshot_ref, rec.transaction_snapshot_ref):
         assert set(ref) == {"snapshot_id", "snapshot_version", "content_digest"}
 
 
 def test_decision_level_fields_live_only_on_the_set():
     """DRF-1905: одно на проход — в одном месте; на варианте их нет, чтобы не разойтись."""
-    moved = {"result_status", "readiness_state", "safety_evaluation_ref", "context_snapshot_ref",
+    moved = {"result_status", "readiness_state", "safety_evaluation_ref", "context_snapshot",
              "decision_policy_version", "taxonomy_version", "safety_policy_version",
              "catalog_mapping_version", "presentation_policy_version"}
     record_fields = {f.name for f in Recommendation._meta.get_fields()}
