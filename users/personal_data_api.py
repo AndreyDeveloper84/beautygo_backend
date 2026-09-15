@@ -11,6 +11,11 @@ PILOT_CONTRACTS_2026-08-15 v1.3.0:
   Idempotent: a repeat request returns 200 with an empty scope.
 - **AMD-010** — deletion audit via ``AnalyticsEvent`` (actor, scope,
   initiator), NEVER the deleted personal values.
+- **C5.3 / AMD-020** ``GET /api/v1/internal/users/{ayla_user_id}/personal-data/erasure-status/``
+  (DRF-1984) — authoritative readback of the C5.2 erasure: the state of the
+  personal-context row of every identity of the subject and a verdict, never
+  the values. The bot's durable retry (ai-bot-platform DRF-1950) says
+  «удалено» only after this read.
 
 Subject (DRF-1038): the account AND its linked proxies
 (``users.subject_identities.subject_users``). Export adds
@@ -45,7 +50,11 @@ from users.models import Profile, SpecialistPortfolio, SpecialistProfile, User, 
 from privacy_audit.mixins import AuditedPersonalDataAccess
 from privacy_audit.models import PersonalDataAccessLog
 from users.permissions import IsInternalBearerForSubject
-from users.personal_context_erasure import erase_personal_context
+from users.personal_context_erasure import (
+    context_row_state,
+    erase_personal_context,
+    identity_is_erased,
+)
 from users.personal_context_views import UserPersonalContextSerializer
 from users.subject_identities import subject_users
 from users.response import error_response, success_response
@@ -325,4 +334,69 @@ class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
         return success_response({
             "user_id": str(user.pk),
             "deleted": scope,
+        })
+
+
+class InternalPersonalDataErasureStatusView(AuditedPersonalDataAccess, APIView):
+    """GET …/personal-data/erasure-status/ — C5.3/AMD-020 readback стирания (DRF-1984).
+
+    Бот повторяет стирание (ai-bot-platform DRF-1950) и пишет человеку
+    «удалено» только после этого чтения. Ни ответ DELETE (``deleted: []`` не
+    отличает «уже стёрто» от «ничего не было»), ни экспорт (отдаёт все
+    персданные, удалённому — 403) этого не доказывают. Здесь — состояние
+    строки по каждой личности и вердикт; без значений, без внешних
+    идентификаторов; ничего не создаёт.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "user_id"
+    #: DRF-1984 — подтвердить стирание уже удалённого можно только чтением у удалённого.
+    allow_inactive_subject = "статус стирания уже удалённого субъекта — подтверждение C5.2 (DRF-1984)"
+    audit_object_category = PersonalDataAccessLog.ObjectCategory.PERSONAL_DATA
+    audit_operations = {"GET": PersonalDataAccessLog.Operation.ERASURE_STATUS_READ}
+
+    @extend_schema(
+        operation_id="internal_personal_data_erasure_status",
+        tags=["internal"],
+        responses={
+            200: inline_serializer(
+                name="InternalPersonalDataErasureStatus",
+                fields={"data": serializers.DictField()},
+            ),
+            401: OpenApiResponse(description="Missing / invalid bearer token"),
+            404: OpenApiResponse(description="User does not exist"),
+        },
+        description=(
+            "Readback of the C5.2 erasure (C5.3, DRF-1984): for every identity "
+            "of the subject — kind (account | linked_identity), context_row "
+            "(absent | tombstone | holds_values | not_erased) and erased; plus "
+            "the overall verdict. No personal values, no external ids; reads "
+            "a deleted subject too; creates nothing."
+        ),
+    )
+    def get(self, request: Request, user_id: UUID) -> Response:
+        user = _get_user_for_erasure(user_id)
+        if user is None:
+            return _not_found(request, user_id)
+
+        identities = []
+        for identity in subject_users(user):
+            is_account = identity.pk == user.pk
+            state = context_row_state(identity)
+            identities.append({
+                "kind": "account" if is_account else "linked_identity",
+                "context_row": state,
+                "erased": identity_is_erased(identity, is_account=is_account, state=state),
+            })
+        erased = all(item["erased"] for item in identities)
+        logger.info(
+            "internal.personal_data.erasure_status user_id=%s erased=%s states=%s request_id=%s",
+            user_id, erased, [item["context_row"] for item in identities],
+            getattr(request, "request_id", "-"),
+        )
+        return success_response({
+            "user_id": str(user.pk),
+            "erased": erased,
+            "identities": identities,
         })
