@@ -31,12 +31,15 @@ from users.deletion_executor import (
     ERASED_NAME,
     RETAIN,
     SCRUBBED,
+    SUBJECT_REF,
     BotConfirmation,
     execute,
     pointers_to_user,
     scrub_personal_data,
+    subject_ref_fields,
     tombstone_user,
     undecided_pointers,
+    undecided_subject_refs,
 )
 from users.deletion_requests import deletion_block_for, ensure_deletion_request
 from users.models import (
@@ -81,6 +84,41 @@ class _BotDown:
     def confirm(self, **kw):
         self.calls += 1
         return BotConfirmation(False, {}, self.reason)
+
+
+#: Чужой субъект записи Recommendation — его снимок стирание трогать не вправе.
+STRANGER_SUBJECT_REF = "user:not-this-person"
+
+
+def _recommendation_rows(*subject_refs: str) -> None:
+    """Набор + снимок контекста на каждый ``subject_ref`` — тем же ``persist``, что пишет вход.
+
+    Исход без NBA (SAFETY_BOUNDARY): вариантов нет, строк ровно две на субъекта.
+    """
+    from recommendation.records import (
+        ContextSnapshotInput,
+        PolicyVersions,
+        RecommendationSetInput,
+        persist,
+    )
+    from recommendation.snapshots import content_digest
+
+    for ref in subject_refs:
+        content = {
+            "snapshot_version": "turn-context-v1",
+            "decision_readiness": {"state_revision": 1, "readiness_state": "blocked"},
+            "said": [{"key": "visit_context", "value": "evening", "origin": "conversation", "said_on": "2026-09-15"}],
+            "answered_question": None,
+        }
+        persist(RecommendationSetInput(
+            subject_ref=ref, intent_id="d3-intent", versions=PolicyVersions("dp", "tx", "sp", "cm", "pp"),
+            result_status="SAFETY_BOUNDARY", readiness_state="BLOCKED", reason_codes=["SAFETY_STOP"],
+            evidence_refs=[],
+            explanation={"displayable": False, "user_visible_reasons": [], "internal_only": ["SAFETY_STOP"]},
+            safety_evaluation_ref={"state": "STOP", "rule_id": "r-stop", "policy_version": "sp",
+                                   "evidence_ref": "ev", "activated_at": "2026-09-15T10:00:00Z"},
+            context_snapshot=ContextSnapshotInput("turn-context-v1", content_digest(content), content),
+        ))
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +229,11 @@ def person(master, service):
     assert OutstandingToken.objects.filter(user=u).exists()
 
     # прокси бота
-    User.objects.create(username="bot:max:d3-1", role="client", is_proxy=True, linked_user=u)
+    proxy = User.objects.create(username="bot:max:d3-1", role="client", is_proxy=True, linked_user=u)
+
+    # запись Recommendation (DRF-1906): субъект — строка subject_ref, не FK.
+    # Снимок контекста на аккаунт и на прокси, набор при каждом; чужой — для «не тронут».
+    _recommendation_rows(str(u.pk), str(proxy.pk), STRANGER_SUBJECT_REF)
 
     # питание
     NutritionProfile.objects.create(
@@ -343,6 +385,76 @@ class TestEveryPointerToUserIsDecided:
         assert person.phone == PHONE  # ничего не тронуто
 
 
+class TestEverySubjectRefIsDecided:
+    """DRF-1906 ч.2: строковый субъект не FK — своя таблица и своя перепись."""
+
+    def test_table_covers_the_live_census_exactly(self):
+        live = subject_ref_fields()
+        # Нижняя граница поимённо: перепись, не нашедшая эти два поля, смотрит не туда.
+        assert {
+            "recommendation.RecommendationSet.subject_ref",
+            "recommendation.ContextSnapshot.subject_ref",
+        } <= live, sorted(live)
+        assert undecided_subject_refs() == {}, undecided_subject_refs()
+
+    def test_deferred_decision_names_its_open_leaf(self):
+        """«Как есть» у набора — не решение навсегда: причина обязана назвать лист.
+
+        Условие главного окна 15.09; снимается в DRF-1909 вместе с заменой строки.
+        """
+        assert "DRF-1909" in SUBJECT_REF["recommendation.RecommendationSet.subject_ref"]
+
+    def test_a_new_or_vanished_subject_ref_is_reported(self):
+        live = subject_ref_fields()
+        with patch("users.deletion_executor.subject_ref_fields", return_value=live | {"x.New.subject_ref"}):
+            assert undecided_subject_refs() == {"missing": ["x.New.subject_ref"]}
+        gone = "recommendation.ContextSnapshot.subject_ref"
+        with patch("users.deletion_executor.subject_ref_fields", return_value=live - {gone}):
+            assert undecided_subject_refs() == {"stale": [gone]}
+
+    def test_an_undecided_subject_ref_stops_the_executor_before_any_write(self, person):
+        from recommendation.models import ContextSnapshot
+
+        req = ensure_deletion_request(person, initiator="bot").request
+        live = subject_ref_fields()
+        with patch("users.deletion_executor.subject_ref_fields", return_value=live | {"x.New.subject_ref"}):
+            out = execute(req, bot_client=_BotOk())
+        req.refresh_from_db()
+        assert out.status == req.status == DeletionRequest.Status.FAILED
+        assert "x.New.subject_ref" in req.failure_reason
+        person.refresh_from_db()
+        assert person.phone == PHONE
+        assert ContextSnapshot.objects.get(subject_ref=str(person.pk)).erased_at is None
+
+    def test_snapshot_erasure_has_exactly_one_caller_outside_tests(self):
+        """Единственный разрешённый переход снимка (В2) зовётся только исполнителем D3.
+
+        AST по вызовам с нижней границей переписи: скан не того корня дал бы
+        «ноль нарушителей» при любом коде.
+        """
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        skip = {"tests", "migrations", "venv", ".venv", "node_modules"}
+        scanned, calls = 0, {}
+        for path in sorted(root.rglob("*.py")):
+            parts = path.relative_to(root).parts
+            if any(p in skip or p.startswith(".") for p in parts):
+                continue
+            scanned += 1
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            n = sum(
+                1 for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "erase_for_subject"
+            )
+            if n:
+                calls["/".join(parts)] = n
+        assert scanned >= 400, f"просканировано {scanned} файлов — корень не тот"
+        assert calls == {"users/deletion_executor.py": 1}, calls
+
+
 # ---------------------------------------------------------------------------
 # 2–3. Полнота по данным и файлы
 # ---------------------------------------------------------------------------
@@ -450,6 +562,48 @@ class TestScrub:
 
     def test_short_or_erased_names_do_not_scrub_ordinary_words(self):
         assert scrub_personal_data("Ок, всё хорошо", ["Ок", ERASED_NAME]) == "Ок, всё хорошо"
+
+
+class TestContextSnapshotsAreErased:
+    """DRF-1906 ч.2: снимок контекста решения стирается у каждой строки субъекта."""
+
+    def test_every_identity_is_erased_sets_stay_and_a_stranger_is_untouched(self, person):
+        from recommendation.models import ContextSnapshot, RecommendationSet
+
+        # Прокси снимается ДО исполнения: после подтверждения бота linked_user = NULL.
+        proxy = User.objects.get(is_proxy=True, linked_user=person)
+        refs = [str(person.pk), str(proxy.pk)]
+        before = {s.pk: s.content_digest for s in ContextSnapshot.objects.filter(subject_ref__in=refs)}
+        assert len(before) == 2  # положительная стража: фикстура дала оба снимка
+        assert ContextSnapshot.objects.filter(pk__in=before, content={}).count() == 0
+        stranger = ContextSnapshot.objects.get(subject_ref=STRANGER_SUBJECT_REF)
+
+        out = execute(ensure_deletion_request(person, initiator="bot").request, bot_client=_BotOk())
+
+        assert out.completed
+        assert out.steps["anonymised"]["recommendation.ContextSnapshot.content"] == 2
+        for snap in ContextSnapshot.objects.filter(pk__in=before):
+            assert snap.content == {} and snap.erased_at is not None
+            assert snap.content_digest == before[snap.pk]  # digest доказывает «что было»
+        own_set = RecommendationSet.objects.get(subject_ref=str(person.pk))
+        assert own_set.context_snapshot_id in before  # набор на месте (DRF-1909), ссылка цела
+        stranger.refresh_from_db()
+        assert stranger.content and stranger.erased_at is None
+
+    def test_a_snapshot_left_unerased_is_incomplete_and_rolls_back(self, person):
+        """Не подменой _residue, а настоящим остатком: шаг «забыл» стереть — полнота видит."""
+        from recommendation.models import ContextSnapshot, _ContextSnapshotQuerySet
+
+        req = ensure_deletion_request(person, initiator="bot").request
+        with patch.object(_ContextSnapshotQuerySet, "erase_for_subject", lambda self, subject_ref, now: 0):
+            out = execute(req, bot_client=_BotOk())
+
+        req.refresh_from_db()
+        assert out.status == req.status == DeletionRequest.Status.FAILED
+        assert "recommendation.ContextSnapshot.content" in req.failure_reason
+        assert ContextSnapshot.objects.filter(subject_ref=str(person.pk), erased_at__isnull=True).count() == 1
+        person.refresh_from_db()
+        assert person.phone == PHONE  # откат целиком
 
 
 # ---------------------------------------------------------------------------
