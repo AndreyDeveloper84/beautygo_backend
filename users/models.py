@@ -950,3 +950,40 @@ class DeletionRequest(models.Model):
     @property
     def is_open(self) -> bool:
         return self.status in self.OPEN_STATUSES
+
+
+class SpecialistPublicationRequest(models.Model):
+    """Команда «Опубликовать» соло-мастера и её след (DRF-1796, M4).
+
+    Одна строка на ключ команды: повтор с тем же ``command_id`` не делает
+    второго перехода и второй строки — возвращается эта. Строка и есть аудит
+    перехода: из какого статуса в какой. Отказ по неготовности не пишется:
+    ничего не произошло, и повтор проверит готовность заново. ACTIVE эта
+    таблица не ставит никогда — только модератор (G2 → б).
+    """
+
+    class Outcome(models.TextChoices):
+        SUBMITTED = "submitted", "Отправлен на проверку"
+        ALREADY_PENDING = "already_pending", "Уже на проверке"
+        ALREADY_ACTIVE = "already_active", "Уже опубликован"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    specialist = models.ForeignKey(
+        SpecialistProfile,
+        on_delete=models.CASCADE,
+        related_name="publication_requests",
+    )
+    command_id = models.UUIDField(unique=True)
+    outcome = models.CharField(max_length=20, choices=Outcome.choices)
+    from_status = models.CharField(max_length=20)
+    to_status = models.CharField(max_length=20)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["specialist", "created_at"], name="pubreq_spec_created_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.specialist_id} {self.outcome} {self.command_id}"

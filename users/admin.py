@@ -110,15 +110,42 @@ def unblock_users(modeladmin, request, queryset):
 
 @admin.action(description='✅ Подтвердить мастеров (→ active)')
 def approve_specialists(modeladmin, request, queryset):
-    updated = queryset.filter(
+    """ACTIVE ставит модератор (G2 → б) — но соло-мастера только готового.
+
+    DRF-1796 (M4): у соло-тенанта активация проверяет ту же готовность, что
+    ручка публикации (``users.publication.approval_refusal``): LINKED, фото,
+    настроенная услуга, место, рабочий день. Неготовый остаётся в своём
+    статусе, модератор видит поимённый список недостающего. Салонного
+    мастера гейт не касается: его каталог и публикацию ведёт владелец салона.
+    """
+    from users.publication import approval_refusal
+
+    candidates = queryset.filter(
         status__in=[
             SpecialistProfile.ProfileStatus.PENDING,
             SpecialistProfile.ProfileStatus.DRAFT,
         ],
-    ).update(status=SpecialistProfile.ProfileStatus.ACTIVE)
+    ).select_related('tenant', 'works_at')
+    allowed = []
+    refused = []
+    for profile in candidates:
+        codes = approval_refusal(profile)
+        if codes:
+            refused.append(f'{profile.display_name or profile.pk}: {", ".join(codes)}')
+        else:
+            allowed.append(profile.pk)
+    updated = SpecialistProfile.objects.filter(pk__in=allowed).update(
+        status=SpecialistProfile.ProfileStatus.ACTIVE,
+    )
     modeladmin.message_user(
         request, f'Подтверждено мастеров: {updated}', messages.SUCCESS,
     )
+    if refused:
+        modeladmin.message_user(
+            request,
+            'Не подтверждены — соло-мастер не готов к публикации: ' + '; '.join(refused),
+            messages.WARNING,
+        )
 
 
 @admin.action(description='❌ Отклонить мастеров (→ draft)')
