@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from uuid import UUID
 
 from rest_framework import serializers, status
@@ -26,11 +27,15 @@ from users.response import error_response, success_response
 
 from .offer_selection import (
     MAX_TEMPLATES_PER_CALL,
+    HasFutureAppointments,
     SelectedService,
     SelectionRefused,
+    ServiceNotSelected,
     TemplatesNotFound,
+    remove_service,
     select_templates,
     selected_services,
+    set_offer,
 )
 
 
@@ -133,3 +138,99 @@ class InternalSpecialistServiceSelectionView(APIView):
         return success_response(
             payload, status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+# --- M8b: PUT …/services/{salon_service_id}/offer/, DELETE …/services/{salon_service_id}/ ---
+
+
+class _OfferBody(serializers.Serializer):
+    price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("1"))
+    duration_minutes = serializers.IntegerField(min_value=5, max_value=480)
+
+
+def _not_selected() -> Response:
+    return error_response(
+        ErrorCode.NOT_FOUND,
+        "Service is not selected in this workspace.",
+        details={"reason": "service_not_selected"},
+        status_code=status.HTTP_404_NOT_FOUND,
+    )
+
+
+def _no_specialist() -> Response:
+    return error_response(
+        ErrorCode.SPECIALIST_NOT_FOUND, "Specialist not found.", status_code=404,
+    )
+
+
+class InternalSpecialistServiceOfferView(APIView):
+    """PUT — цена и длительность выбранной услуги (шторка 4.2/4.4, P36–P40).
+
+    Первая цена создаёт ``SpecialistService`` мастера (до неё предложения нет,
+    см. ``offer_selection``), следующие обновляют ту же строку: 201 / 200.
+    Цена >= 1, длительность 5..480 — обе обязательны.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearerForSpecialistSubject]
+    subject_url_kwarg = "specialist_id"
+
+    def put(self, request: Request, specialist_id: UUID, salon_service_id: UUID) -> Response:
+        profile = InternalSpecialistServiceSelectionView._profile(specialist_id)
+        if profile is None:
+            return _no_specialist()
+        body = _OfferBody(data=request.data)
+        if not body.is_valid():
+            return error_response(
+                ErrorCode.VALIDATION_ERROR,
+                "price >= 1 and duration_minutes 5..480 are required.",
+                details=body.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            offer, created = set_offer(
+                profile,
+                salon_service_id,
+                price=body.validated_data["price"],
+                duration_minutes=body.validated_data["duration_minutes"],
+            )
+        except SelectionRefused as exc:
+            return _refused(exc)
+        except ServiceNotSelected:
+            return _not_selected()
+        payload = {**_state(profile), "offer_id": str(offer.pk)}
+        return success_response(
+            payload, status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class InternalSpecialistSelectedServiceView(APIView):
+    """DELETE — «Убрать из моих услуг» (шторка 4.2, P40).
+
+    Будущая живая запись — 409 ``HAS_APPOINTMENTS`` с ``count``; иначе строка
+    удаляется или, если её держат записи или решение модератора, выключается
+    (``removal``: ``deleted`` / ``deactivated``). Ответ — состояние выбора.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearerForSpecialistSubject]
+    subject_url_kwarg = "specialist_id"
+
+    def delete(self, request: Request, specialist_id: UUID, salon_service_id: UUID) -> Response:
+        profile = InternalSpecialistServiceSelectionView._profile(specialist_id)
+        if profile is None:
+            return _no_specialist()
+        try:
+            outcome = remove_service(profile, salon_service_id)
+        except SelectionRefused as exc:
+            return _refused(exc)
+        except ServiceNotSelected:
+            return _not_selected()
+        except HasFutureAppointments as exc:
+            return error_response(
+                ErrorCode.HAS_APPOINTMENTS,
+                "Service has upcoming appointments.",
+                details={"reason": "has_future_appointments", "count": exc.count},
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        return success_response({**_state(profile), "removal": outcome})
