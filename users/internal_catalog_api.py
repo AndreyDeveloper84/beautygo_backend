@@ -155,6 +155,8 @@ class InternalSpecialistListSerializer(
     class Meta(SpecialistListSerializer.Meta):
         fields = SpecialistListSerializer.Meta.fields + [
             'tenant', 'tenant_address', 'tenant_city',
+            # DRF-1845 — the bot computes CatalogMaster.is_active from it.
+            'is_booking_enabled',
         ]
 
 
@@ -169,6 +171,7 @@ class InternalSpecialistDetailSerializer(
     class Meta(SpecialistDetailSerializer.Meta):
         fields = SpecialistDetailSerializer.Meta.fields + [
             'tenant', 'tenant_address', 'tenant_city',
+            'is_booking_enabled',
         ]
 
 
@@ -188,6 +191,12 @@ class InternalSpecialistViewSet(SpecialistViewSet):
     authentication_classes: list = []
     permission_classes = [IsInternalBearer]
     filterset_class = InternalSpecialistFilter
+    # DRF-1845 — the feed is the POOL, not the sale. The bot's sync upserts
+    # rows and never deactivates the ones that stop arriving
+    # (``upsert_specialists``: «upsert-only, no proactive deactivation»), so a
+    # paused master must stay here with is_booking_enabled=false — dropping him
+    # would leave his old active row selling in the bot.
+    list_sells_only = False
     # DRF-1446. With `authentication_classes = []` every call here is
     # anonymous to DRF, so `slots` was spending the per-IP `anon` bucket
     # (30/min) — and every bot process reaches us from one source IP, so

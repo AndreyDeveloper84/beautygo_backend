@@ -390,6 +390,9 @@ SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
     "internal-specialist-selected-service": (
         "services/tests/test_offer_price_m8b_1800.py::TestRemoval"
     ),
+    "internal-specialist-availability": (
+        "users/tests/test_internal_availability_1845.py::TestSubject"
+    ),
 }
 
 _SPECIALIST_ROUTE_RE = re.compile(

@@ -21,6 +21,7 @@ from users.internal_canon_gap_api import (  # noqa: E402
     InternalCanonGapSimilarView,
 )
 from users.internal_schedule_api import (
+    InternalSpecialistAvailabilityView,
     InternalSpecialistScheduleView,
     InternalSpecialistTimeOffView,
     InternalSpecialistWorkingHoursView,
@@ -182,6 +183,13 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/services/<uuid:salon_service_id>/',
         InternalSpecialistSelectedServiceView.as_view(),
         name='internal-specialist-selected-service',
+    ),
+    # DRF-1845 (K1a) — «Принимаю записи» мастера под субъектом; explicit
+    # route BEFORE the include, same reason as above.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/availability/',
+        InternalSpecialistAvailabilityView.as_view(),
+        name='internal-specialist-availability',
     ),
     path(
         'api/v1/internal/specialists/',

@@ -408,12 +408,9 @@ def _catalog_pool(*, goal: str, goal_category_ids) -> QuerySet:
 
     Ранжирования здесь нет и быть не может: это счётчики, а не кандидаты.
     """
-    pool = SpecialistProfile.objects.filter(
-        is_available=True,
-        is_booking_enabled=True,
-        status=SpecialistProfile.ProfileStatus.ACTIVE,
-        tenant__is_active=True,
-    )
+    from users.sellable import sellable_q
+
+    pool = SpecialistProfile.objects.filter(sellable_q(), tenant__is_active=True)
     if goal:
         pool = pool.filter(specialist_service_text_q(goal)).distinct()
     elif goal_category_ids:
