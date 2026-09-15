@@ -31,13 +31,21 @@ import pytest
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from recommendation.models import Recommendation, RecommendationEvent, RecommendationSet
+from recommendation.models import ContextSnapshot, Recommendation, RecommendationEvent, RecommendationSet
+from recommendation.snapshots import content_digest
 from users.models import DeletionRequest, User
 from users.tests.conftest import name_subject
 
 pytestmark = pytest.mark.django_db
 
 ROOT = Path(__file__).resolve().parents[2]
+
+SNAPSHOT_CONTENT = {
+    "snapshot_version": "turn-context-v1",
+    "decision_readiness": {"state_revision": 2, "readiness_state": "blocked"},
+    "said": [{"key": "visit_context", "value": "evening", "origin": "conversation", "said_on": "2026-09-15"}],
+    "answered_question": None,
+}
 
 
 @pytest.fixture
@@ -96,7 +104,8 @@ def _body(**over) -> dict:
         "explanation": {"displayable": True, "user_visible_reasons": ["подходит под твою цель"], "internal_only": []},
         "safety_evaluation_ref": {"state": "NORMAL", "rule_id": "r-0", "policy_version": "sp-1",
                                   "evidence_ref": "ev-0", "activated_at": "2026-09-15T10:00:00Z"},
-        "context_snapshot_ref": {"snapshot_id": "ctx-1", "snapshot_version": 1, "content_digest": "sha256:abc"},
+        "context_snapshot": {"snapshot_version": "turn-context-v1", "content_digest": content_digest(SNAPSHOT_CONTENT),
+                             "content": copy.deepcopy(SNAPSHOT_CONTENT)},
         "primary": _rec(),
         "alternatives": [_rec(role="alternative", direction_code="IMPROVE_RELAXATION", family="SUPPORT",
                               rerank_reason="ALTERNATIVE_REQUESTED")],
@@ -141,6 +150,62 @@ def test_creates_a_shadow_set_and_reads_back(bearer, subject):
     assert got["outcome"]["result_status"] == "CLEAR_PRIMARY"
     assert got["primary"]["recommendation_id"] == data["primary_recommendation_id"]
     assert got["alternatives"][0]["parent_recommendation_id"] == data["primary_recommendation_id"]
+
+
+def test_snapshot_is_stored_with_the_set_and_the_ref_is_built_by_the_catalog(bearer, subject):
+    """DRF-1906: снимок приходит содержимым, строка снимка и набор — одна запись; ссылку отдаёт каталог."""
+    resp = _api(bearer, subject).post(_url(subject), _boundary_body(), format="json")
+    assert resp.status_code == 201, resp.content[:400]
+    snap = ContextSnapshot.objects.get()
+    assert RecommendationSet.objects.get().context_snapshot_id == snap.pk and snap.subject_ref == str(subject.pk)
+    assert resp.json()["data"]["context_snapshot_ref"] == {
+        "snapshot_id": str(snap.pk), "snapshot_version": "turn-context-v1",
+        "content_digest": content_digest(SNAPSHOT_CONTENT),
+    }
+    assert snap.content == SNAPSHOT_CONTENT
+
+
+def test_a_caller_made_snapshot_ref_is_refused_by_name(bearer, subject):
+    body = _boundary_body()
+    body["context_snapshot_ref"] = {"snapshot_id": "ctx-1", "snapshot_version": 1, "content_digest": "sha256:abc"}
+    resp = _api(bearer, subject).post(_url(subject), body, format="json")
+    assert resp.status_code == 400, resp.content[:300]
+    assert "context_snapshot_ref: ссылку на снимок строит каталог" in resp.json()["error"]["message"]
+    assert _rows() == (0, 0, 0) and ContextSnapshot.objects.count() == 0
+
+
+def test_snapshot_id_inside_the_snapshot_is_refused_by_name(bearer, subject):
+    body = _boundary_body()
+    body["context_snapshot"]["snapshot_id"] = "ctx-1"
+    resp = _api(bearer, subject).post(_url(subject), body, format="json")
+    assert resp.status_code == 400, resp.content[:300]
+    assert "context_snapshot: поля ['snapshot_id']" in resp.json()["error"]["message"]
+    assert ContextSnapshot.objects.count() == 0
+
+
+def test_digest_mismatch_and_text_in_snapshot_are_refused_by_name(bearer, subject):
+    body = _boundary_body()
+    body["context_snapshot"]["content_digest"] = "0" * 64
+    resp = _api(bearer, subject).post(_url(subject), body, format="json")
+    assert resp.status_code == 400 and "content_digest не совпадает" in resp.json()["error"]["message"]
+
+    body = _boundary_body()
+    body["context_snapshot"]["content"]["said"][0]["value"] = "болит спина после работы"
+    body["context_snapshot"]["content_digest"] = content_digest(body["context_snapshot"]["content"])
+    resp = _api(bearer, subject, key="intent-1:trace-2").post(_url(subject), body, format="json")
+    assert resp.status_code == 400, resp.content[:300]
+    message = resp.json()["error"]["message"]
+    assert "context_snapshot: content.said[0].value" in message and "болит" not in message
+    assert _rows() == (0, 0, 0) and ContextSnapshot.objects.count() == 0
+
+
+def test_internal_only_text_is_refused_at_the_ingress(bearer, subject):
+    body = _boundary_body(explanation={"displayable": False, "user_visible_reasons": [],
+                                       "internal_only": ["provider_score=0.91"]})
+    resp = _api(bearer, subject).post(_url(subject), body, format="json")
+    assert resp.status_code == 400, resp.content[:300]
+    assert "explanation.internal_only[0]" in resp.json()["error"]["message"]
+    assert _rows() == (0, 0, 0)
 
 
 def test_safety_boundary_is_written_without_any_variant(bearer, subject):
