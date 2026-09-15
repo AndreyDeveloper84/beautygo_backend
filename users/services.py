@@ -8,10 +8,11 @@ from datetime import timedelta
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import OTPCode, User
+from .models import OTPCode, TenantUserRelationship, User
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,17 @@ class BindTargetNotFoundError(IdentityBindingError):
     status_code = 404
 
 
+class BindTargetNotSalonAdminError(BindTargetNotFoundError):
+    """A ``role=admin`` target the operator may not bind (DRF-1987).
+
+    Named apart from "not found" so the operator reads why: the account has
+    no active ``admin`` relationship in an active salon, or it is platform
+    staff (``is_superuser`` / ``is_staff``) — a MAX identity must never
+    resolve into a platform account. ``reason`` is the audit reason.
+    """
+    reason: str = ""
+
+
 class IdentityBindingConflictError(IdentityBindingError):
     """The external identity is already bound to a DIFFERENT account."""
     code = "CONFLICT"
@@ -247,12 +259,72 @@ class IdentityBindingConflictError(IdentityBindingError):
 #: mirrors ``SpecialistProfile.user_id``), and the operator is an
 #: authenticated, audited human rather than a bearer.
 BIND_TARGET_ROLES_S2S: tuple[str, ...] = ("client",)
-BIND_TARGET_ROLES_OPERATOR: tuple[str, ...] = ("specialist",)
+#: DRF-1987 (F10, owner section Q): the operator may also bind a salon
+#: administrator — but ``admin`` is never taken by role alone. It passes
+#: only through :func:`bindable_target_q`: an active ``admin`` relationship
+#: in an active salon, and not platform staff. The same condition is
+#: applied in the pre-check and under the row lock.
+BIND_TARGET_ROLES_OPERATOR: tuple[str, ...] = ("specialist", "admin")
 
 #: ``initiator`` value written by the admin action. A distinct name so
 #: audit queries can tell "an operator pressed the button" from "the
 #: provisioning bearer called the endpoint" without parsing anything.
 INITIATOR_ADMIN_LINK_SOLO_MASTER = "admin_link_solo_master"
+INITIATOR_ADMIN_LINK_SALON_ADMIN = "admin_link_salon_admin"
+
+
+def bindable_target_q(target_roles: tuple[str, ...]) -> Q:
+    """Which ``User.role`` a binding target may carry — as one Q for both checks.
+
+    Every role except ``admin`` is taken as is. ``admin`` (DRF-1987) needs an
+    active ``TenantUserRelationship(role=admin)`` in an active salon and must
+    not be platform staff: authority in a salon comes from the relationship,
+    and a MAX identity never leads into a Django superuser/staff account.
+    """
+    q = Q(role__in=tuple(r for r in target_roles if r != "admin"))
+    if "admin" in target_roles:
+        q |= Q(role="admin", is_superuser=False, is_staff=False) & Exists(
+            TenantUserRelationship.objects.filter(
+                user=OuterRef("pk"),
+                role=TenantUserRelationship.Role.ADMIN,
+                is_active=True,
+                tenant__is_active=True,
+            )
+        )
+    return q
+
+
+def _salon_admin_refusal(ayla_user_id, target_roles: tuple[str, ...]) -> str | None:
+    """The named reason a live ``role=admin`` account failed ``bindable_target_q``, else ``None``."""
+    if "admin" not in target_roles:
+        return None
+    from users.identity_events import (
+        REASON_ADMIN_WITHOUT_ACTIVE_SALON_ROLE,
+        REASON_TARGET_IS_PLATFORM_STAFF,
+    )
+    try:
+        user = User.objects.filter(
+            pk=ayla_user_id, role="admin", is_proxy=False,
+            is_active=True, deleted_at=None,
+        ).first()
+    except (ValueError, TypeError, ValidationError):
+        return None
+    if user is None:
+        return None
+    if user.is_superuser or user.is_staff:
+        return REASON_TARGET_IS_PLATFORM_STAFF
+    return REASON_ADMIN_WITHOUT_ACTIVE_SALON_ROLE
+
+
+def _operator_initiator(ayla_user_id) -> str:
+    """Audit initiator of the operator path: salon admin or solo master, by the target's role."""
+    try:
+        role = User.objects.filter(pk=ayla_user_id).values_list("role", flat=True).first()
+    except (ValueError, TypeError, ValidationError):
+        role = None
+    if role == "admin":
+        return INITIATOR_ADMIN_LINK_SALON_ADMIN
+    return INITIATOR_ADMIN_LINK_SOLO_MASTER
 
 
 def bind_external_identity(
@@ -377,18 +449,26 @@ def bind_external_identity(
         )
     try:
         target = User.objects.get(
-            pk=ayla_user_id, is_proxy=False, role__in=target_roles,
+            bindable_target_q(target_roles), pk=ayla_user_id, is_proxy=False,
             is_active=True, deleted_at=None,
         )
     except (User.DoesNotExist, ValueError, TypeError, ValidationError) as exc:
+        refusal = _salon_admin_refusal(ayla_user_id, target_roles)
         emit_identity_binding(
             actor=None, external_user_id=external_user_id,
             target_user_id=ayla_user_id,
-            result="rejected", reason=REASON_TARGET_NOT_BINDABLE,
+            result="rejected", reason=refusal or REASON_TARGET_NOT_BINDABLE,
             initiator=initiator, request_id=request_id,
             initiator_user_id=initiator_user_id,
             initiator_role=initiator_role,
         )
+        if refusal is not None:
+            named = BindTargetNotSalonAdminError(
+                f"ayla_user_id {ayla_user_id!r} is not a salon administrator "
+                f"the operator may bind: {refusal}"
+            )
+            named.reason = refusal
+            raise named from exc
         raise BindTargetNotFoundError(
             f"ayla_user_id {ayla_user_id!r} does not name a bindable account"
         ) from exc
@@ -418,7 +498,7 @@ def bind_external_identity(
             target = (
                 User.objects.select_for_update()
                 .filter(
-                    pk=target.pk, is_proxy=False, role__in=target_roles,
+                    bindable_target_q(target_roles), pk=target.pk, is_proxy=False,
                     is_active=True, deleted_at=None,
                 )
                 .first()
@@ -550,7 +630,9 @@ def bind_external_identity_by_operator(
       ``IdentityBindingActorRequiredError`` before a single row is read
       or written. The author lands in the audit payload as
       ``initiator_user_id`` / ``initiator_role``.
-    * **Target must be a SPECIALIST**, not a client: a solo master's
+    * **Target must be a SPECIALIST — or a salon ADMIN (DRF-1987)** with an
+      active ``admin`` relationship in an active salon and not platform
+      staff (:func:`bindable_target_q`); never a client. A solo master's
       Ayla account is the ``SpecialistProfile.user`` that the catalog
       export publishes as ``user_id`` and the bot stores as
       ``CatalogMaster.ayla_user_id``. The s2s default (client only,
@@ -597,7 +679,7 @@ def bind_external_identity_by_operator(
         )
     proxy, _created = bind_external_identity(
         external_user_id, ayla_user_id,
-        initiator=INITIATOR_ADMIN_LINK_SOLO_MASTER,
+        initiator=_operator_initiator(ayla_user_id),
         request_id=request_id,
         initiator_user_id=actor_pk,
         initiator_role=getattr(actor, "role", None),
