@@ -2,6 +2,8 @@ import uuid
 
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+
+from users.timezones import validate_iana_timezone
 from django.conf import settings
 from django.utils import timezone
 
@@ -283,6 +285,9 @@ class SpecialistProfile(models.Model):
     timezone = models.CharField(
         max_length=50, default="Europe/Moscow",
         help_text="IANA timezone string, e.g. Europe/Moscow",
+        # Только настоящее имя IANA: восемь мест делают ZoneInfo(timezone)
+        # без защиты, и опечатка превратила бы запись и слоты в 500.
+        validators=[validate_iana_timezone],
     )
     is_booking_enabled = models.BooleanField(
         default=True,
