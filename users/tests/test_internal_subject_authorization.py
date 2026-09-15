@@ -377,6 +377,11 @@ SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
     "internal-specialist-canon-gap-requests": "services/tests/test_canon_gap_request_m9.py::TestSubject",
     "internal-specialist-canon-gap-similar": "services/tests/test_canon_gap_request_m9.py::TestSubject",
     "internal-specialist-canon-gap-request": "services/tests/test_canon_gap_request_m9.py::TestSubject",
+    # DRF-1800 (M8a): чужой workspace → 403, мастер салона → 409, без
+    # положительной половины ни одного отказа.
+    "internal-specialist-service-selection": (
+        "services/tests/test_offer_selection_m8a_1800.py::TestRefusals"
+    ),
 }
 
 _SPECIALIST_ROUTE_RE = re.compile(
