@@ -65,7 +65,8 @@ ACTIONABILITY_TTL = timedelta(hours=2)
 #: Версия схемы записи (контракт v1.0 §3 `record_schema_version`).
 #: 1.1 — DRF-1905: исход, готовность, безопасность, снимок и версии — у набора;
 #: 1.2 — DRF-1906: снимок контекста — строка ContextSnapshot, FK вместо JSON-ссылки
-RECORD_SCHEMA_VERSION = "1.2"
+#: 1.3 — DRF-1922: у варианта target и action_type (H5), тройка с family (I1)
+RECORD_SCHEMA_VERSION = "1.3"
 
 
 class ImmutableRecordError(RuntimeError):
@@ -304,6 +305,8 @@ ANONYMISATION_FIELDS: dict[str, dict[str, str]] = {
         "direction_code": "keep: код направления",
         "target_outcomes": "clear: uuid строк DesiredOutcome человека (замер ayla-26)",
         "family": "keep: код B9",
+        "target": "keep: код цели H5 (одно значение на вариант, I1)",
+        "action_type": "keep: код формы исполнения H5 (ось независима от family, I1)",
         "reason_codes": "keep: коды политики",
         "evidence_refs": "clear: указатели на реплики",
         "explanation": "clear: user_visible_reasons и internal_only → []; displayable остаётся",
@@ -409,6 +412,34 @@ class RecommendationSet(_ImmutableModel):
         return f"RecommendationSet {self.id} ({self.result_status})"
 
 
+class Target(models.TextChoices):
+    """Цель варианта — таксономия пилота H5 (владелец 15.09). Одно значение на вариант.
+
+    Ось независима от ``family`` и ``action_type``: таблицы допустимых сочетаний нет
+    (I1 (а), владелец 15.09) — каждая ось валидируется по своему словарю, выбранные
+    тройки логируются в тени. Значение = имя. Не путать с ``target_outcomes``
+    (DesiredOutcome refs, A1) и с ``direction_code`` (ось каталога, DRF-1912).
+    """
+
+    FACE_FRESHNESS = "FACE_FRESHNESS", "FACE_FRESHNESS"
+    PUFFINESS_REDUCTION = "PUFFINESS_REDUCTION", "PUFFINESS_REDUCTION"
+    RELAXATION = "RELAXATION", "RELAXATION"
+    BACK_COMFORT = "BACK_COMFORT", "BACK_COMFORT"
+
+
+class ActionType(models.TextChoices):
+    """Форма исполнения варианта — таксономия пилота H5 (владелец 15.09).
+
+    ``ActionType.OBSERVE`` и ``Recommendation.Family.OBSERVE`` — разные оси с одним
+    написанием, автоматической связи нет (I1). Значение = имя.
+    """
+
+    PROVIDER_SESSION = "PROVIDER_SESSION", "PROVIDER_SESSION"
+    SELF_CARE = "SELF_CARE", "SELF_CARE"
+    OBSERVE = "OBSERVE", "OBSERVE"
+    PLAN = "PLAN", "PLAN"
+
+
 class Recommendation(_ImmutableModel):
     class Role(models.TextChoices):
         PRIMARY = "primary", "primary"
@@ -430,6 +461,9 @@ class Recommendation(_ImmutableModel):
     #: DRF-1905: исход и готовность — свойства набора; имена оставлены для прежних вызывающих.
     ResultStatus = ResultStatus
     ReadinessState = ReadinessState
+    #: DRF-1922: оси таксономии пилота H5 — модульные enum, здесь для записи ``Recommendation.Target``.
+    Target = Target
+    ActionType = ActionType
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     recommendation_set = models.ForeignKey(RecommendationSet, on_delete=models.PROTECT, related_name="recommendations")
@@ -446,6 +480,11 @@ class Recommendation(_ImmutableModel):
     direction_code = models.CharField(max_length=64)          #: рабочий код направления (taxonomy_version)
     target_outcomes = models.JSONField(default=list)          #: DesiredOutcome refs (A1)
     family = models.CharField(max_length=12, choices=Family.choices)
+    #: Тройка варианта (H5, I1 (а), владелец 15.09): цель и форма исполнения — отдельные оси рядом
+    #: с ``family``; каждая по своему словарю, таблицы допустимых сочетаний нет. Обязательны: вариант
+    #: бывает только у NBA-исхода, и тройка у него есть всегда (DRF-1922).
+    target = models.CharField(max_length=32, choices=Target.choices)
+    action_type = models.CharField(max_length=24, choices=ActionType.choices)
 
     # Исход прохода, готовность, вердикт безопасности, снимок контекста хода и
     # версии политик — у НАБОРА (DRF-1905): одно на проход. Здесь — WHY варианта.

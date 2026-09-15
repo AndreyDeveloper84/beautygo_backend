@@ -95,6 +95,7 @@ def _snap(content: dict | None = None, *, digest: str | None = None,
 def _rec(**over) -> RecommendationInput:
     base = dict(
         role="primary", direction_code="REDUCE_MUSCLE_TENSION_BACK", family="ADDRESS",
+        target="BACK_COMFORT", action_type="PROVIDER_SESSION",
         target_outcomes=["REDUCE(MUSCLE_TENSION)"], reason_codes=["ELIG_CAPABILITY_VERIFIED"],
         evidence_refs=[{"source": "conversation", "ref": "msg-1"}],
         explanation={"displayable": False, "user_visible_reasons": [], "internal_only": []},
