@@ -111,10 +111,16 @@ class TestAuth:
         """Export stays strict: a deleted account has nothing to hand out."""
         from django.utils import timezone
 
+        from users.personal_data_api import _get_live_user
+
+        assert _get_live_user(user.pk) == user
         user.deleted_at = timezone.now()
         user.save(update_fields=["deleted_at"])
         resp = api.get(EXPORT_URL.format(user_id=user.pk))
-        assert resp.status_code == 404
+        # DRF-1947 (а): the subject guard refuses first (403); the view's
+        # own live-user filter is pinned directly.
+        assert resp.status_code == 403
+        assert _get_live_user(user.pk) is None
 
     def test_soft_deleted_user_can_still_be_erased(self, api, user):
         """DRF-1368 — delete stops being strict, on purpose.

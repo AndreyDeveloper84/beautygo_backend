@@ -545,12 +545,20 @@ class TestAccountDeletion:
         """
         from users.services import AuthService
 
+        from users.internal_personal_context_api import _resolve_user
+
+        assert _resolve_user(str(user.id)) == user
         AuthService.delete_account(user=user, reason="test")
 
         resp = _internal().get(_url(user.id))
 
-        assert resp.status_code == 404
-        assert resp.data["error"]["code"] == "USER_NOT_FOUND"
+        # DRF-1947 (а): the subject guard refuses a deleted subject before
+        # the view runs — the refusal moved one layer out (403, internal
+        # reason subject_inactive). The view's own filter stays half the fix
+        # for any path that reaches it, so it is pinned directly.
+        assert resp.status_code == 403
+        assert resp.json()["error"]["code"] == "PERMISSION_DENIED"
+        assert _resolve_user(str(user.id)) is None
 
     def test_every_internal_context_route_refuses_a_deleted_user(self, user, ctx):
         """One resolver, four doors. A filter on GET only would be a hole on
@@ -561,12 +569,13 @@ class TestAccountDeletion:
         AuthService.delete_account(user=user, reason="test")
         api = _internal()
 
-        assert api.get(_url(user.id)).status_code == 404
+        # DRF-1947 (а): refused by the subject guard (403) before the view.
+        assert api.get(_url(user.id)).status_code == 403
         assert api.patch(
             _url(user.id), {"updates": BOT_FORGET_ALL_UPDATES}, format="json",
-        ).status_code == 404
-        assert api.delete(_url(user.id)).status_code == 404
-        assert api.get(_url(user.id, "ask-eligibility/")).status_code == 404
+        ).status_code == 403
+        assert api.delete(_url(user.id)).status_code == 403
+        assert api.get(_url(user.id, "ask-eligibility/")).status_code == 403
         assert not UserPersonalContext.objects.filter(user=user).exists()
 
     def test_bot_initiated_delete_leaves_a_tombstone_not_a_dropped_row(
