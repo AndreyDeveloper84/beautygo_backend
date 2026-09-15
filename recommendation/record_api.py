@@ -1,15 +1,39 @@
-"""Чтение записи Recommendation и события взаимодействия — для бота (C04.1).
+"""Запись Recommendation для бота (C04.1): вход производителя NBA, чтение набора, события.
 
+``POST /api/v1/internal/users/{user_id}/recommendation-sets/``
 ``GET  /api/v1/internal/users/{user_id}/recommendations/{set_id}/``
 ``POST /api/v1/internal/users/{user_id}/recommendations/{recommendation_id}/events/``
 
-Оба — под ``IsInternalBearerForSubject`` (DRF-1617 / B-2.1): субъект в URL =
+Все три — под ``IsInternalBearerForSubject`` (DRF-1617 / B-2.1): субъект в URL =
 человек, чей набор, и он же обязан стоять в ``X-External-User-ID``. Набор
 чужого субъекта — 404, не 403: «нет такого» для того, кто не вправе знать.
 ``RecommendationSet.subject_ref`` — UUID пользователя Ayla строкой (уже
 псевдоним; ни телефона, ни имени).
 
-Что отдаётся (просьба e8 к #426):
+Вход записи (DRF-1888)
+----------------------
+
+**Рабочий, но пустой вход до производителя NBA (мозг, срез 6).** Резолвер
+каталога запись не пишет и писать не будет: он ранжирует исполнителей (сегмент
+исполнения, контракт §5 этап 17), а запись — это решение WHAT (B2/B10;
+замер ``docs/MEASURE_RECOMMENDATION_RECORD_LIVE_PATH_2026-09-15.md``). Решение
+приносит тот, кто его принял; здесь — только проверка и запись:
+
+* проверка — тот же ``records.persist`` (минимум §5, версии политик, lineage);
+  лишнее поле во входе — отказ по имени, а не молчаливый пропуск
+  (``service_id`` в записи NBA не место, B2);
+* ``execution_mode`` ставит **сервер**: ``SHADOW`` (C1). ``LIVE`` — 400
+  ``LIVE_NOT_ALLOWED``, пока пороги DecisionReadiness не доказаны (C1, O3);
+* живая заявка на удаление — 423 до любой записи (§7 D2);
+* повтор — ``X-Idempotency-Key`` обязателен (тот же механизм, что у записи и
+  отмены визита бота, ``appointments.infrastructure.idempotency``): тот же ключ
+  и тело — тот же ответ без второй записи; тот же ключ с другим телом — 422
+  ``IDEMPOTENCY_CONFLICT``. Запись immutable, поэтому дубль не исправить задним
+  числом — его можно только не создать. Бот ставит ключ ``intent_id:trace_id``;
+* ссылка на решение резолвера — только ``execution_mapping_snapshot_ref``
+  (ссылка, не копия, B10).
+
+Что отдаётся при чтении (просьба e8 к #426):
 
 * ``actionable`` — ``now < actionable_until`` **на момент ответа**: канал
   срок не считает; после 2 ч — ``false``, запись при этом на месте (B13);
@@ -31,6 +55,9 @@ engaged`` — пишет канал; ``booking_intent.created`` — Booking / Ha
 """
 from __future__ import annotations
 
+from dataclasses import fields as dataclass_fields
+from uuid import UUID
+
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import serializers
 from rest_framework.request import Request
@@ -38,8 +65,23 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.utils import timezone
 
-from recommendation.models import Recommendation, RecommendationEvent, RecommendationSet
-from recommendation.records import RecordInvalid, record_event
+from appointments.infrastructure.idempotency import (
+    IdempotencyConflict,
+    IdempotencyInFlight,
+    lookup_or_open_idempotency,
+    record_response,
+)
+from recommendation.models import ExecutionMode, Recommendation, RecommendationEvent, RecommendationSet
+from recommendation.records import (
+    PolicyVersions,
+    RecommendationInput,
+    RecommendationSetInput,
+    RecordInvalid,
+    persist,
+    record_event,
+)
+from users.deletion_requests import deletion_block_for, deletion_refusal
+from users.models import User
 from users.permissions import IsInternalBearerForSubject
 from users.response import error_response, success_response
 
@@ -52,6 +94,13 @@ CHANNEL_EVENT_KINDS = (
     RecommendationEvent.Kind.ENGAGED,
 )
 _B8_REFUSED = ("recommendation.accepted", "recommendation.declined", "accepted", "declined")
+
+#: Операция в таблице ключей идемпотентности — своя, чтобы ключ бота для
+#: записи визита не совпал с ключом записи рекомендации.
+IDEMPOTENCY_OPERATION = "recommendation_set.create"
+
+_RECORD_FIELDS = frozenset(f.name for f in dataclass_fields(RecommendationInput))
+_VERSION_FIELDS = tuple(f.name for f in dataclass_fields(PolicyVersions))
 
 
 def _why(rec: Recommendation) -> list[str]:
@@ -100,11 +149,160 @@ class RecommendationSetReadSerializer(serializers.Serializer):
     alternatives = serializers.ListField(child=serializers.DictField())
 
 
+class RecommendationSetCreateSerializer(serializers.Serializer):
+    """Вход записи: форма верхнего уровня. Минимум §5 проверяет ``persist``."""
+
+    intent_id = serializers.CharField(max_length=64)
+    semantic_resolution_ref = serializers.CharField(max_length=128, required=False, allow_blank=True, default="")
+    #: Только чтобы назвать отказ: значение ставит сервер (C1).
+    execution_mode = serializers.CharField(required=False, allow_blank=True, default="")
+    conversation_ref = serializers.DictField(required=False, default=dict)
+    versions = serializers.DictField()
+    primary = serializers.DictField()
+    alternatives = serializers.ListField(child=serializers.DictField(), required=False, default=list)
+
+
+class RecommendationSetCreatedSerializer(serializers.Serializer):
+    recommendation_set_id = serializers.UUIDField()
+    primary_recommendation_id = serializers.UUIDField()
+    alternative_recommendation_ids = serializers.ListField(child=serializers.UUIDField())
+    execution_mode = serializers.CharField()
+
+
 class RecommendationEventInSerializer(serializers.Serializer):
     kind = serializers.CharField()
     channel = serializers.CharField(required=False, allow_blank=True)
     channel_message_id = serializers.CharField(required=False, allow_blank=True)
     occurred_at = serializers.DateTimeField(required=False)
+
+
+def _record_input(raw: dict, label: str) -> RecommendationInput:
+    """Словарь входа → ``RecommendationInput``. Лишний ключ — отказ по имени."""
+    extra = sorted(set(raw) - _RECORD_FIELDS)
+    if extra:
+        raise RecordInvalid(f"{label}: поля {extra} не входят в запись Recommendation (B2: WHAT, не HOW/WHO)")
+    data = dict(raw)
+    for name in ("parent_id", "supersedes_id"):
+        if data.get(name) not in (None, ""):
+            try:
+                data[name] = UUID(str(data[name]))
+            except ValueError as exc:
+                raise RecordInvalid(f"{label}: {name} — не UUID") from exc
+        else:
+            data.pop(name, None)
+    try:
+        return RecommendationInput(**data)
+    except TypeError as exc:   # нет обязательного поля
+        raise RecordInvalid(f"{label}: {exc}") from exc
+
+
+def _set_input(subject: User, data: dict) -> RecommendationSetInput:
+    versions = data["versions"]
+    extra = sorted(set(versions) - set(_VERSION_FIELDS))
+    if extra:
+        raise RecordInvalid(f"versions: поля {extra} не входят в провенанс")
+    return RecommendationSetInput(
+        subject_ref=str(subject.pk),
+        intent_id=data["intent_id"],
+        semantic_resolution_ref=data["semantic_resolution_ref"],
+        execution_mode=ExecutionMode.SHADOW,
+        conversation_ref=dict(data["conversation_ref"]),
+        versions=PolicyVersions(**{name: str(versions.get(name) or "") for name in _VERSION_FIELDS}),
+        primary=_record_input(data["primary"], "primary"),
+        alternatives=tuple(
+            _record_input(raw, f"alternative[{i}]") for i, raw in enumerate(data["alternatives"], start=1)
+        ),
+    )
+
+
+class InternalRecommendationSetCreateView(APIView):
+    """Вход производителя NBA — см. докстринг модуля, раздел «Вход записи»."""
+
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearerForSubject]
+    subject_url_kwarg = "user_id"
+
+    @extend_schema(
+        tags=["internal-recommendation"],
+        request=RecommendationSetCreateSerializer,
+        responses={
+            201: RecommendationSetCreatedSerializer,
+            400: OpenApiResponse(
+                description=(
+                    "IDEMPOTENCY_KEY_REQUIRED | LIVE_NOT_ALLOWED (C1) | "
+                    "VALIDATION_ERROR (минимум §5, по имени поля)"
+                ),
+            ),
+            403: OpenApiResponse(description="Missing / invalid bearer, unnamed or foreign subject (DRF-1617)"),
+            404: OpenApiResponse(description="No such user"),
+            409: OpenApiResponse(description="IDEMPOTENCY_IN_FLIGHT"),
+            422: OpenApiResponse(description="IDEMPOTENCY_CONFLICT — тот же ключ, другое тело"),
+            423: OpenApiResponse(description="DELETION_IN_PROGRESS (§7 D2)"),
+        },
+    )
+    def post(self, request: Request, user_id) -> Response:
+        subject = User.objects.filter(pk=user_id).first()
+        if subject is None:
+            return error_response("NOT_FOUND", "User not found.", status_code=404)
+        # D2: отказ по воле человека раньше ключа и формы — и в кэш ответов
+        # не попадает: повтор после отзыва заявки обязан записать.
+        blocked = deletion_block_for(subject)
+        if blocked is not None:
+            return deletion_refusal(blocked)
+        if not (request.META.get("HTTP_X_IDEMPOTENCY_KEY") or "").strip():
+            return error_response(
+                "IDEMPOTENCY_KEY_REQUIRED",
+                "X-Idempotency-Key is required: the record is immutable, a duplicate cannot be undone.",
+                status_code=400,
+            )
+        try:
+            cached, idem = lookup_or_open_idempotency(
+                request, user=subject, operation_name=IDEMPOTENCY_OPERATION,
+                target_type="RecommendationSet", target_id=str(subject.pk),
+            )
+        except IdempotencyConflict:
+            return error_response(
+                "IDEMPOTENCY_CONFLICT", "X-Idempotency-Key reused with a different body.", status_code=422,
+            )
+        except IdempotencyInFlight:
+            return error_response(
+                "IDEMPOTENCY_IN_FLIGHT", "Same key already being processed; retry in a moment.", status_code=409,
+            )
+        if cached is not None:
+            return Response(cached["payload"], status=cached["status"])
+
+        response = self._create(request, subject)
+        record_response(idem, response.status_code, response.data)
+        return response
+
+    @staticmethod
+    def _create(request: Request, subject: User) -> Response:
+        ser = RecommendationSetCreateSerializer(data=request.data)
+        if not ser.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Invalid recommendation set.", details=ser.errors, status_code=400,
+            )
+        data = ser.validated_data
+        mode = (data["execution_mode"] or "").strip()
+        if mode and mode != ExecutionMode.SHADOW:
+            return error_response(
+                "LIVE_NOT_ALLOWED",
+                "execution_mode is set by the server: SHADOW until DecisionReadiness thresholds are proven (C1).",
+                details={"execution_mode": mode}, status_code=400,
+            )
+        try:
+            rset = persist(_set_input(subject, data))
+        except RecordInvalid as exc:
+            return error_response("VALIDATION_ERROR", str(exc), status_code=400)
+        recs = list(rset.recommendations.order_by("created_at", "pk"))
+        return success_response({
+            "recommendation_set_id": str(rset.pk),
+            "primary_recommendation_id": next(str(r.pk) for r in recs if r.role == Recommendation.Role.PRIMARY),
+            "alternative_recommendation_ids": [
+                str(r.pk) for r in recs if r.role == Recommendation.Role.ALTERNATIVE
+            ],
+            "execution_mode": rset.execution_mode,
+        }, status_code=201)
 
 
 class InternalRecommendationSetView(APIView):

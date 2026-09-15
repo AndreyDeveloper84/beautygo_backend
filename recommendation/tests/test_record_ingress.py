@@ -1,0 +1,245 @@
+"""Вход записи Recommendation для производителя NBA — под субъектом (DRF-1888).
+
+Что стережётся:
+
+* набор пишется через тот же ``persist``: 201, id набора и записей, чтение
+  назад GET-ручкой #428 даёт то же;
+* ``execution_mode`` ставит сервер — ``SHADOW``; ``LIVE`` от вызывающего → 400
+  ``LIVE_NOT_ALLOWED`` и **ноль строк** (C1);
+* ``X-Idempotency-Key`` обязателен; повтор с тем же телом — тот же ответ и ноль
+  новых строк; тот же ключ с другим телом → 422; запись immutable, поэтому дубль
+  можно только не создать;
+* неполное решение — 400 с именем поля и ноль строк; лишнее поле (``service_id``)
+  — отказ по имени, а не молчаливый пропуск (B2);
+* чужой или неназванный субъект → 403; живая заявка на удаление → 423 (§7 D2);
+  в обоих случаях ноль строк;
+* **писатель один**: ``persist`` вне тестов зовётся ровно из этой ручки (AST,
+  с нижней границей переписи и положительным контролем).
+"""
+from __future__ import annotations
+
+import ast
+import copy
+from datetime import timedelta
+from pathlib import Path
+
+import pytest
+from django.utils import timezone
+from rest_framework.test import APIClient
+
+from recommendation.models import Recommendation, RecommendationEvent, RecommendationSet
+from users.models import DeletionRequest, User
+from users.tests.conftest import name_subject
+
+pytestmark = pytest.mark.django_db
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture
+def bearer(settings):
+    settings.AYLA_INTERNAL_API_TOKEN = "test-bearer-1888"
+    return "test-bearer-1888"
+
+
+@pytest.fixture
+def subject(db):
+    return User.objects.create_user(username="ingress-subject", password="x", role="client", phone="+79992221888")
+
+
+@pytest.fixture
+def stranger(db):
+    return User.objects.create_user(username="ingress-stranger", password="x", role="client", phone="+79992221889")
+
+
+def _api(bearer, named_user, key: str | None = "intent-1:trace-1") -> APIClient:
+    c = APIClient()
+    headers = {"HTTP_AUTHORIZATION": f"Bearer {bearer}", "HTTP_X_EXTERNAL_USER_ID": name_subject(named_user)}
+    if key is not None:
+        headers["HTTP_X_IDEMPOTENCY_KEY"] = key
+    c.credentials(**headers)
+    return c
+
+
+def _url(user) -> str:
+    return f"/api/v1/internal/users/{user.pk}/recommendation-sets/"
+
+
+def _rec(**over) -> dict:
+    base = {
+        "role": "primary", "direction_code": "REDUCE_MUSCLE_TENSION_BACK", "family": "ADDRESS",
+        "target_outcomes": ["REDUCE(MUSCLE_TENSION)"], "result_status": "CLEAR_PRIMARY", "readiness_state": "READY",
+        "reason_codes": ["ELIG_CAPABILITY_VERIFIED"],
+        "evidence_refs": [{"source": "conversation", "ref": "msg-1", "said_at": "2026-09-15T10:00:00Z"}],
+        "explanation": {
+            "displayable": True, "user_visible_reasons": ["ты сказала, что ноет спина"], "internal_only": [],
+        },
+        "safety_evaluation_ref": {"state": "NORMAL", "rule_id": "r-0", "policy_version": "sp-1",
+                                  "evidence_ref": "ev-0", "activated_at": "2026-09-15T10:00:00Z"},
+        "context_snapshot_ref": {"snapshot_id": "ctx-1", "snapshot_version": 1, "content_digest": "sha256:abc"},
+    }
+    base.update(over)
+    return base
+
+
+def _body(**over) -> dict:
+    base = {
+        "intent_id": "intent-1",
+        "conversation_ref": {"conversation_id": "c-1", "trace_id": "trace-1"},
+        "versions": {"decision_policy": "dp-1", "taxonomy": "tx-1", "safety_policy": "sp-1",
+                     "catalog_mapping": "cm-1", "presentation_policy": "pp-1"},
+        "primary": _rec(),
+        "alternatives": [_rec(role="alternative", direction_code="IMPROVE_RELAXATION", family="SUPPORT",
+                              rerank_reason="ALTERNATIVE_REQUESTED")],
+    }
+    base.update(over)
+    return base
+
+
+def _rows() -> tuple[int, int, int]:
+    return RecommendationSet.objects.count(), Recommendation.objects.count(), RecommendationEvent.objects.count()
+
+
+# ---------------------------------------------------------------- запись
+
+def test_creates_a_shadow_set_and_reads_back(bearer, subject):
+    resp = _api(bearer, subject).post(_url(subject), _body(), format="json")
+    assert resp.status_code == 201, resp.content[:400]
+    data = resp.json()["data"]
+    assert data["execution_mode"] == "SHADOW"
+    assert len(data["alternative_recommendation_ids"]) == 1
+    assert _rows() == (1, 2, 2)                                   # set + primary + alternative, два created
+
+    read = _api(bearer, subject).get(
+        f"/api/v1/internal/users/{subject.pk}/recommendations/{data['recommendation_set_id']}/",
+    )
+    assert read.status_code == 200, read.content[:300]
+    got = read.json()["data"]
+    assert got["execution_mode"] == "SHADOW" and got["subject_id"] == str(subject.pk)
+    assert got["primary"]["recommendation_id"] == data["primary_recommendation_id"]
+    assert got["alternatives"][0]["parent_recommendation_id"] == data["primary_recommendation_id"]
+
+
+def test_live_from_the_caller_is_refused_and_nothing_is_written(bearer, subject):
+    resp = _api(bearer, subject).post(_url(subject), _body(execution_mode="LIVE"), format="json")
+    assert resp.status_code == 400, resp.content[:300]
+    assert resp.json()["error"]["code"] == "LIVE_NOT_ALLOWED"
+    assert _rows() == (0, 0, 0)
+
+
+def test_idempotency_key_is_required_before_anything(bearer, subject):
+    resp = _api(bearer, subject, key=None).post(_url(subject), _body(), format="json")
+    assert resp.status_code == 400, resp.content[:300]
+    assert resp.json()["error"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
+    assert _rows() == (0, 0, 0)
+
+
+def test_replay_returns_the_same_set_and_writes_nothing_new(bearer, subject):
+    first = _api(bearer, subject).post(_url(subject), _body(), format="json")
+    again = _api(bearer, subject).post(_url(subject), _body(), format="json")
+    assert first.status_code == again.status_code == 201, (first.content[:200], again.content[:200])
+    assert again.json()["data"]["recommendation_set_id"] == first.json()["data"]["recommendation_set_id"]
+    assert _rows() == (1, 2, 2)
+
+
+def test_same_key_with_a_different_decision_is_a_conflict(bearer, subject):
+    assert _api(bearer, subject).post(_url(subject), _body(), format="json").status_code == 201
+    other = _body(primary=_rec(direction_code="IMPROVE_SLEEP"))
+    resp = _api(bearer, subject).post(_url(subject), other, format="json")
+    assert resp.status_code == 422, resp.content[:300]
+    assert resp.json()["error"]["code"] == "IDEMPOTENCY_CONFLICT"
+    assert _rows() == (1, 2, 2)
+
+
+def test_incomplete_decision_is_refused_by_field_name(bearer, subject):
+    resp = _api(bearer, subject).post(_url(subject), _body(primary=_rec(reason_codes=[])), format="json")
+    assert resp.status_code == 400, resp.content[:300]
+    assert "reason_codes" in resp.json()["error"]["message"]
+    assert _rows() == (0, 0, 0)
+
+
+def test_execution_fields_are_refused_by_name_not_dropped(bearer, subject):
+    resp = _api(bearer, subject).post(_url(subject), _body(primary=_rec(service_id="svc-1")), format="json")
+    assert resp.status_code == 400, resp.content[:300]
+    assert "service_id" in resp.json()["error"]["message"]
+    assert _rows() == (0, 0, 0)
+
+
+def test_foreign_or_unnamed_subject_is_refused(bearer, subject, stranger):
+    as_stranger = _api(bearer, stranger).post(_url(subject), _body(), format="json")
+    assert as_stranger.status_code == 403, as_stranger.content[:300]
+    unnamed = APIClient()
+    unnamed.credentials(HTTP_AUTHORIZATION=f"Bearer {bearer}", HTTP_X_IDEMPOTENCY_KEY="k")
+    assert unnamed.post(_url(subject), _body(), format="json").status_code == 403
+    assert _rows() == (0, 0, 0)
+
+
+def test_open_deletion_request_stops_the_write(bearer, subject):
+    DeletionRequest.objects.create(
+        user=subject, status=DeletionRequest.Status.REQUESTED, initiator="bot",
+        deadline_at=timezone.now() + timedelta(days=30),
+    )
+    resp = _api(bearer, subject).post(_url(subject), _body(), format="json")
+    assert resp.status_code == 423, resp.content[:300]
+    assert _rows() == (0, 0, 0)
+
+
+def test_the_body_is_not_mutated_into_live_by_the_server_either(bearer, subject):
+    """Положительная стража: SHADOW явно — тоже 201 и SHADOW (значение принимается, не переписывается)."""
+    body = _body(execution_mode="SHADOW")
+    resp = _api(bearer, subject).post(_url(subject), copy.deepcopy(body), format="json")
+    assert resp.status_code == 201, resp.content[:300]
+    assert RecommendationSet.objects.get().execution_mode == "SHADOW"
+
+
+def test_idempotency_helper_still_defaults_to_request_user(subject):
+    """``user=`` добавлен для субъектной поверхности; запись/отмена визита его не передают.
+
+    Положительная стража умолчания: без ``user`` ключ принадлежит ``request.user`` —
+    иначе четыре вызова в appointments молча сменили бы владельца ключа.
+    """
+    from rest_framework.parsers import JSONParser
+    from rest_framework.request import Request
+    from rest_framework.test import APIRequestFactory
+
+    from appointments.infrastructure.idempotency import lookup_or_open_idempotency
+    from appointments.models import IdempotencyKey
+
+    django_request = APIRequestFactory().post("/x/", {"a": 1}, format="json", HTTP_X_IDEMPOTENCY_KEY="k-default")
+    # Помощник читает request.data (хеш тела) — без JSON-парсера Request падает UnsupportedMediaType.
+    request = Request(django_request, parsers=[JSONParser()])
+    request.user = subject
+    cached, record = lookup_or_open_idempotency(request, operation_name="booking.cancel", target_id="t")
+    assert cached is None and record is not None
+    assert IdempotencyKey.objects.get(pk=record.pk).user_id == subject.pk
+
+
+# ---------------------------------------------------------------- писатель один
+
+#: Нижняя граница переписи: рабочих .py-файлов на dev больше 400. Меньше — скан не того корня.
+MIN_SCANNED = 400
+_SKIP_PARTS = frozenset({"tests", "migrations", "venv", ".venv", "node_modules"})
+
+
+def _persist_calls() -> tuple[int, dict[str, int]]:
+    scanned, calls = 0, {}
+    for path in sorted(ROOT.rglob("*.py")):
+        parts = path.relative_to(ROOT).parts
+        if any(p in _SKIP_PARTS or p.startswith(".") for p in parts):
+            continue
+        scanned += 1
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        n = sum(
+            1 for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and ast.unparse(node.func).split(".")[-1] == "persist"
+        )
+        if n:
+            calls["/".join(parts)] = n
+    return scanned, calls
+
+
+def test_persist_has_exactly_one_caller_outside_tests():
+    """Запись immutable и её пишет один вход: второй писатель — второй набор правил."""
+    scanned, calls = _persist_calls()
+    assert scanned >= MIN_SCANNED, f"просканировано {scanned} файлов — корень не тот"
+    assert calls == {"recommendation/record_api.py": 1}, calls
