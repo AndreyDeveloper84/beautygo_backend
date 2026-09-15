@@ -154,7 +154,7 @@ def selected_services(profile) -> list[SelectedService]:
     tenant = workspace_tenant(profile)
     rows = list(
         SalonService.objects
-        .select_related("template", "category")
+        .select_related("template", "template__category", "category")
         .filter(tenant=tenant, template__isnull=False)
         .order_by("created_at", "name")
     )
