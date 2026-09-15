@@ -15,6 +15,7 @@ from services.internal_offer_api import (
     InternalSpecialistServiceOfferView,
     InternalSpecialistServiceSelectionView,
 )
+from users.internal_address_suggest_api import InternalAddressSuggestView
 from users.internal_canon_gap_api import (  # noqa: E402
     InternalCanonGapRequestDetailView,
     InternalCanonGapRequestListView,
@@ -192,6 +193,12 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/canon-gap-requests/similar/',
         InternalCanonGapSimilarView.as_view(),
         name='internal-specialist-canon-gap-similar',
+    ),
+    # DRF-1804 (M12a) — подсказки адреса места мастера: POST, ввод не в URL.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/geocoding/suggest/',
+        InternalAddressSuggestView.as_view(),
+        name='internal-specialist-address-suggest',
     ),
     path(
         'api/v1/internal/specialists/<uuid:specialist_id>/canon-gap-requests/<uuid:request_id>/',
