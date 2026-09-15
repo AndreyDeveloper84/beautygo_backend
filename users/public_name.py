@@ -26,3 +26,19 @@ def public_person_name(user: Any, *, fallback: str) -> str:
         return fallback
     full = " ".join(f"{user.first_name or ''} {user.last_name or ''}".split())
     return full or fallback
+
+
+def initial_person_name(user: Any, *, fallback: str) -> str:
+    """Имя и первая буква фамилии («Анна П.») или ``fallback``.
+
+    Для поверхностей, где человека видит другая сторона (мастер — клиента):
+    фамилия целиком не уходит. Без имени — ``fallback``, а не одна буква
+    фамилии и не ``username``.
+    """
+    if user is None:
+        return fallback
+    first = " ".join((user.first_name or "").split())
+    last = " ".join((user.last_name or "").split())
+    if not first:
+        return fallback
+    return f"{first} {last[0]}." if last else first

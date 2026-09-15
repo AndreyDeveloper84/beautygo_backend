@@ -407,6 +407,9 @@ SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
     "internal-specialist-availability": (
         "users/tests/test_internal_availability_1845.py::TestSubject"
     ),
+    "internal-specialist-reviews": (
+        "users/tests/test_internal_specialist_reviews_1857.py::TestSubject"
+    ),
     # DRF-1796 (M4): чужой workspace → 403, салон → 409, неготовность → 409;
     # отказы — рядом с положительной половиной.
     "internal-specialist-publication-readiness": (
