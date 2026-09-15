@@ -630,7 +630,10 @@ class IsInternalBearerForSubject(permissions.BasePermission):
         """
         from users.deletion_executor import TOMBSTONE_USERNAME
 
-        if getattr(actor, "username", None) == TOMBSTONE_USERNAME:
+        # Узнаётся запросом, а не чтением имени: имя человека наружу идёт только
+        # через users.public_name (перепись DRF-1914). Один запрос по уникальному
+        # полю — и tombstone отказывается всегда, даже если его кто-то активировал.
+        if type(actor)._default_manager.filter(pk=actor.pk, username=TOMBSTONE_USERNAME).exists():
             return "subject_tombstone"
         inactive = not actor.is_active or actor.deleted_at is not None
         if inactive and not getattr(view, "allow_inactive_subject", ""):
