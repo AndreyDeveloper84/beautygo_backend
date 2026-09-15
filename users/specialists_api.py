@@ -170,6 +170,9 @@ class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
     recent_reviews = serializers.SerializerMethodField()
     working_hours = serializers.SerializerMethodField()
     portfolio = serializers.SerializerMethodField()
+    # DRF-1845 — a profile opened by direct link says whether the master takes
+    # bookings now, instead of disappearing.
+    accepting_bookings = serializers.BooleanField(source='is_booking_enabled', read_only=True)
 
     class Meta:
         model = SpecialistProfile
@@ -177,7 +180,7 @@ class SpecialistDetailSerializer(DistanceMixin, serializers.ModelSerializer):
             'id', 'user_id', 'display_name', 'avatar', 'bio',
             'experience_years', 'address',
             'location_lat', 'location_lng',
-            'rating', 'reviews_count', 'is_available',
+            'rating', 'reviews_count', 'is_available', 'accepting_bookings',
             'services', 'services_count', 'distance_km', 'distance_meters',
             'reviews_summary', 'recent_reviews', 'working_hours',
             'portfolio', 'created_at',
@@ -465,6 +468,8 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     filter_backends = [DjangoFilterBackend, OrderingFilter]
     filterset_class = SpecialistFilter
+    #: DRF-1845 — the public list offers only masters that take bookings.
+    list_sells_only = True
     ordering_fields = ['rating', 'reviews_count', 'experience_years']
     ordering = ['-rating']
 
@@ -512,18 +517,22 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
     # and the per-action permission_classes override that used to live here.
 
     def get_queryset(self) -> QuerySet:
+        from users.sellable import catalog_pool_q, sellable_q
+
         qs = (
             SpecialistProfile.objects
-            .filter(
-                status=SpecialistProfile.ProfileStatus.ACTIVE,
-                is_available=True,
-                user__is_active=True,
-            )
+            .filter(catalog_pool_q(), user__is_active=True)
             .select_related('user', 'works_at')
             .prefetch_related(
                 *catalog_services_prefetch(), 'portfolio', 'working_hours',
             )
         )
+        # DRF-1845 (K1a) — the public LIST sells: a master whose bookings are
+        # paused is not offered. A direct link (retrieve) still opens the
+        # profile, with accepting_bookings=false; the bot feed keeps the pool
+        # (``InternalSpecialistViewSet.list_sells_only``).
+        if self.action == 'list' and self.list_sells_only:
+            qs = qs.filter(sellable_q())
         # Счётчик по обоим слоям каталога — раньше считались только
         # легаси-строки, то есть на пилоте ноль у каждого мастера.
         qs = annotate_catalog_services_count(qs)

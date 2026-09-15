@@ -142,14 +142,11 @@ class SpecialistCandidateSource:
         а не политика. Любое дополнительное условие здесь стало бы
         отбором, то есть политикой, то есть авторитетом.
         """
+        from users.sellable import sellable_q
+
         qs = (
             SpecialistProfile.objects
-            .filter(
-                is_available=True,
-                is_booking_enabled=True,
-                status=SpecialistProfile.ProfileStatus.ACTIVE,
-                tenant__is_active=True,
-            )
+            .filter(sellable_q(), tenant__is_active=True)
             .select_related("tenant")
             .prefetch_related(*catalog_services_prefetch())
         )
