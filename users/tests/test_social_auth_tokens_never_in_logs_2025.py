@@ -96,8 +96,8 @@ class TestVkTokenNeverReachesTheLog:
 
         captured = _text(caplog)
         assert captured, "перехват пуст — узел не проверил бы ничего"
-        assert VK_TOKEN not in captured
-        assert "access_token" not in captured
+        assert VK_TOKEN not in captured, f"утечка: токен ВК в логе — {captured}"
+        assert "access_token" not in captured, f"утечка: имя параметра с токеном — {captured}"
 
     def test_the_vk_failure_is_still_recorded_by_class(self, caplog):
         """Положительная стража: значение убрано, наблюдаемость — нет."""
@@ -111,8 +111,8 @@ class TestVkTokenNeverReachesTheLog:
 
         captured = _text(caplog)
         assert captured, "перехват пуст — узел не проверил бы ничего"
-        assert "ConnectionError" in captured, captured
-        assert VK_TOKEN not in captured
+        assert "ConnectionError" in captured, f"потеряна диагностика: класса отказа нет — {captured}"
+        assert VK_TOKEN not in captured, f"утечка: токен ВК в логе — {captured}"
 
 
 class TestGoogleTokenNeverReachesTheLog:
@@ -129,8 +129,8 @@ class TestGoogleTokenNeverReachesTheLog:
 
         captured = _text(caplog)
         assert captured, "перехват пуст — узел не проверил бы ничего"
-        assert GOOGLE_TOKEN not in captured
-        assert "id_token" not in captured
+        assert GOOGLE_TOKEN not in captured, f"утечка: токен Google в логе — {captured}"
+        assert "id_token" not in captured, f"утечка: имя параметра с токеном — {captured}"
 
     def test_the_google_failure_is_still_recorded_by_class(self, caplog):
         """Положительная стража для второго провайдера."""
@@ -144,5 +144,5 @@ class TestGoogleTokenNeverReachesTheLog:
 
         captured = _text(caplog)
         assert captured, "перехват пуст — узел не проверил бы ничего"
-        assert "ConnectionError" in captured, captured
-        assert GOOGLE_TOKEN not in captured
+        assert "ConnectionError" in captured, f"потеряна диагностика: класса отказа нет — {captured}"
+        assert GOOGLE_TOKEN not in captured, f"утечка: токен Google в логе — {captured}"
