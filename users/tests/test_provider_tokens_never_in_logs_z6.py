@@ -38,6 +38,8 @@ from contextlib import contextmanager
 
 import pytest
 import requests
+import urllib3
+from urllib3.exceptions import MaxRetryError
 
 from users import social_auth
 
@@ -218,3 +220,72 @@ class TestTheCapture:
             "перехват пуст: логгер users.* объявлен propagate=False, "
             "и подвеска на корень записей не видит"
         )
+
+
+def _library_built_transport_error(url_with_query: str) -> requests.ConnectionError:
+    """Тот же отказ, но текст сообщения собирает БИБЛИОТЕКА, а не тест.
+
+    Узлы выше кладут текст `f`-строкой и потому проверяют только **нашу**
+    обязанность: что бы ни лежало в исключении, целиком в лог оно не уйдёт.
+    Посылку — «`urllib3` действительно вкладывает в текст переданный URL
+    вместе с query» — они **принимают на веру**. Перестань библиотека это
+    делать, и они останутся зелёными, продолжая «доказывать» закрытие
+    утечки, которой больше нет.
+
+    Здесь сообщение строит сам `urllib3` (`MaxRetryError.__str__`), а
+    `requests.ConnectionError` переносит его наружу — как в живом отказе.
+    Приём перенесён из #489 (DRF-2025) при выборе канонической ветки.
+    """
+    reason = OSError("[Errno 111] Connection refused")
+    inner = MaxRetryError(pool=None, url=url_with_query, reason=reason)
+    return requests.ConnectionError(inner)
+
+
+class TestTheLibraryItselfPutsTheQueryIntoTheMessage:
+    """Проверка ПОСЫЛКИ, на которой стоит весь дефект.
+
+    **Утверждается только присутствие переданной строки запроса, а не
+    дословная формулировка `urllib3`.** Это намеренно: обновление,
+    сохранившее поведение, проходит; версия, переставшая вкладывать URL,
+    **краснеет — и такая краснота истинна**, потому что посылка дефекта
+    действительно изменилась. Узел на дословном тексте вместо этого
+    ломался бы на бампе, ничего не сообщая о предмете.
+
+    **Про версию — узел не хрупок по природе, и вот почему.** `urllib3` в
+    `requirements.txt` не упомянут вовсе, и дрейф уже случился: один и тот
+    же файл дал в CI **2.7.0** на прогоне по `dev` и **2.8.0** на прогонах
+    #487/#489. Форма сообщения в 2.7.0 и 2.8.0 **дословно одинакова** —
+    измерено в #491 (DRF-2027) чтением колёс; тот же PR добавляет пин
+    `urllib3==2.8.0`, после которого привязка к версии перестаёт быть
+    риском. Версия печатается в сообщении отказа: иначе связь «покраснело
+    ↔ обновили библиотеку» никто не восстановит.
+    """
+
+    URL = f"/method/users.get?access_token={VK_MARKER}&v=5.199"
+
+    def test_the_library_embeds_the_query_it_was_given(self):
+        text = str(_library_built_transport_error(self.URL))
+        assert VK_MARKER in text, (
+            f"urllib3 {urllib3.__version__} больше не вкладывает переданный URL "
+            f"в текст исключения: посылка дефекта изменилась, предмет "
+            f"пересмотреть — {text!r}"
+        )
+        assert "access_token" in text, (
+            f"urllib3 {urllib3.__version__}: строка запроса из текста пропала "
+            f"— {text!r}"
+        )
+
+    def test_and_the_named_logger_carries_none_of_it(self, caplog, monkeypatch):
+        def _boom(*args, **kwargs):
+            raise _library_built_transport_error(self.URL)
+
+        monkeypatch.setattr(social_auth.requests, "get", _boom)
+        with _capturing(caplog):
+            with pytest.raises(social_auth.SocialAuthTokenError):
+                social_auth.verify_vk_token("unused-by-the-stub")
+        captured = _text(caplog)
+        assert captured, "перехват пуст — утверждения ниже ничего не проверяют"
+        assert VK_MARKER not in captured
+        assert "access_token" not in captured
+        assert "?" not in captured and "&" not in captured
+        assert not _opaque_runs(captured)
