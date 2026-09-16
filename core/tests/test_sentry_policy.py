@@ -31,6 +31,7 @@ def _redacted(type_name: str) -> str:
     """
     return f"<redacted: {type_name}>"
 
+
 HOME = "Пушкина 45 кв 12"
 PHONE = "+79990001234"
 
@@ -113,7 +114,9 @@ def test_the_type_module_and_frames_survive_the_message_scrub():
 
     outer = scrubbed["exception"]["values"][-1]
     assert outer["type"] == "RuntimeError"
-    assert outer["module"] is not None
+    # ``module`` у встроенных классов SDK не заполняет (``get_type_module``
+    # опускает builtins), поэтому стережём то, что он действительно кладёт.
+    assert outer["value"] == _redacted("RuntimeError")
     frames = outer["stacktrace"]["frames"]
     assert frames, outer
     assert frames[-1]["function"] == "_real_event_from_a_chain"
@@ -178,6 +181,15 @@ def test_the_user_is_not_sent():
 
 
 def test_route_status_error_class_stack_and_tags_stay():
+    """DRF-2020: правило сменилось решением главного окна — текст заменяется.
+
+    Раньше этот сторож сравнивал ``exception`` целиком, то есть закреплял и
+    СООБЩЕНИЕ (``'boom'``). Теперь сообщение заменяется у каждого исключения, а
+    предмет сторожа — маршрут, уровень, класс, стек, статус и теги — остаётся
+    тем же и проверяется поимённо. Это смена правила, а не ослабление стража:
+    утечку текста стерегут узлы DRF-2020, а здесь стоит то, что обязано пережить
+    чистку.
+    """
     event = _event("https://api.example/api/v1/appointments/")
     before = copy.deepcopy(event)
 
@@ -185,7 +197,10 @@ def test_route_status_error_class_stack_and_tags_stay():
 
     assert got["transaction"] == before["transaction"]
     assert got["level"] == "error"
-    assert got["exception"] == before["exception"]
+    outer = got["exception"]["values"][-1]
+    assert outer["type"] == before["exception"]["values"][-1]["type"]
+    assert outer["stacktrace"] == before["exception"]["values"][-1]["stacktrace"]
+    assert outer["value"] == _redacted("ValueError")
     assert got["contexts"]["response"]["status_code"] == 500
     assert got["tags"]["app"] == "catalog"
 

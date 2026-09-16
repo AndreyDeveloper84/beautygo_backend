@@ -95,6 +95,86 @@ def _clean_request(request: dict) -> dict:
     return clean
 
 
+#: Сколько позиций ``sys.argv`` остаётся: путь скрипта и имя подкоманды.
+#: Отрезание ПО ПОЗИЦИИ, а не по образцу: роль «значение опции» по написанию не
+#: восстанавливается, а позиции 0 и 1 — структура вызова, не пользовательские
+#: данные. Предел назван: всё старше первой позиции отрезается независимо от
+#: содержимого, и если точка входа когда-нибудь начнёт нести смысл в ``argv[2]``,
+#: он будет потерян — намеренно.
+ARGV_KEPT = 2
+
+#: Замена тексту записи лога: у записи нет класса, который стоило бы сохранить.
+REDACTED_LOG = "<redacted: log message>"
+
+
+def redacted_message(type_name: str) -> str:
+    """Чем заменяется текст исключения: класс остаётся, текст — нет.
+
+    Класс здесь не для красоты: он единственное, что остаётся в САМОМ поле
+    сообщения, и по нему видно, что случилось, без ``type``.
+    """
+
+    return f"<redacted: {type_name or 'Exception'}>"
+
+
+def _scrub_exception_messages(event: dict) -> None:
+    """Текст КАЖДОГО исключения цепочки, а не последнего.
+
+    ``raise X(str(exc)) from exc`` переносит текст в сообщение другого типа
+    (``ai/application/services/chat_service.py:120-121``), поэтому опознавать
+    «опасные» классы нельзя — заменяется всё.
+    """
+
+    values = event.get("exception")
+    values = values.get("values") if isinstance(values, dict) else values
+    for value in values if isinstance(values, list) else []:
+        if isinstance(value, dict):
+            value["value"] = redacted_message(str(value.get("type") or ""))
+
+
+def _scrub_logentry(event: dict) -> None:
+    """Три поля одного канала: чистка одного создаёт видимость закрытия.
+
+    ``message`` — неформатированный ``record.msg``; ``params`` — ``record.args``,
+    где значение и лежит при ``logger.error("... %s", value)``; ``formatted`` —
+    ``record.getMessage()``, то есть подставленный текст целиком
+    (``sentry_sdk/integrations/logging.py:329-333``, пин 2.68.1).
+    """
+
+    logentry = event.get("logentry")
+    if not isinstance(logentry, dict):
+        return
+    if "message" in logentry:
+        logentry["message"] = REDACTED_LOG
+    if "formatted" in logentry:
+        logentry["formatted"] = REDACTED_LOG
+    if "params" in logentry:
+        logentry["params"] = ()
+
+
+def _scrub_extra(event: dict) -> None:
+    """Из ``extra`` остаётся только начало ``sys.argv``.
+
+    Пишет его не наш код, а сам SDK: ``ArgvIntegration`` входит в
+    ``_DEFAULT_INTEGRATIONS`` и её глобальный процессор кладёт ``sys.argv`` в
+    КАЖДОЕ событие (``sentry_sdk/integrations/argv.py:19-27``). В argv каталога
+    есть личность: ``provision_salon_admin`` требует ``--phone``. Прочие ключи
+    ``extra`` снимаются целиком — их роль нам неизвестна.
+    """
+
+    extra = event.get("extra")
+    if not isinstance(extra, dict):
+        return
+    argv = extra.get("sys.argv")
+    clean = {}
+    if isinstance(argv, (list, tuple)):
+        clean["sys.argv"] = list(argv)[:ARGV_KEPT]
+    if clean:
+        event["extra"] = clean
+    else:
+        event.pop("extra", None)
+
+
 def _tag_request_id(event: dict) -> None:
     request_id = get_request_id()
     if request_id in _NO_REQUEST_ID:
@@ -112,9 +192,17 @@ def _clean_breadcrumbs(event: dict) -> None:
     crumbs = event.get("breadcrumbs")
     values = crumbs.get("values") if isinstance(crumbs, dict) else crumbs if isinstance(crumbs, list) else None
     for crumb in values or []:
-        data = crumb.get("data") if isinstance(crumb, dict) else None
-        if isinstance(data, dict) and isinstance(data.get("url"), str):
-            data["url"] = _strip_query(data["url"])
+        if not isinstance(crumb, dict):
+            continue
+        # Крошка несёт УЖЕ форматированный текст записи
+        # (``sentry_sdk/integrations/logging.py:376``), а её ``data`` — то же,
+        # что попадает в ``extra``. Остаётся адрес без строки запроса.
+        if "message" in crumb:
+            crumb["message"] = REDACTED_LOG
+        data = crumb.get("data")
+        if isinstance(data, dict):
+            url = data.get("url")
+            crumb["data"] = {"url": _strip_query(url)} if isinstance(url, str) else {}
 
 
 def _frame_lists(event: dict):
@@ -146,6 +234,9 @@ def scrub_event(event: Any, hint: Any = None) -> Any:
         event["request"] = _clean_request(request)
     event.pop("user", None)
     _drop_frame_vars(event)
+    _scrub_exception_messages(event)
+    _scrub_logentry(event)
+    _scrub_extra(event)
     _tag_request_id(event)
     _clean_breadcrumbs(event)
     return event

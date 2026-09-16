@@ -148,7 +148,10 @@ def test_a_real_error_message_does_not_carry_the_value_it_named(live_sentry):
         path=PATH_WITH_VALUE,
         query=f"identity={IDENTITY}",
         body=b"{}",
-        headers={"HTTP_X_REQUEST_ID": REQUEST_ID},
+        # ``X-App-Type`` обязателен: ``AppTypeMiddleware``
+        # (``users/middleware.py:109-131``) отвечает 403 APP_TYPE_MISSING на
+        # любой путь API без него, и запрос не дошёл бы до ручки вовсе.
+        headers={"HTTP_X_REQUEST_ID": REQUEST_ID, "HTTP_X_APP_TYPE": "client"},
     )
 
     assert status.startswith("500")

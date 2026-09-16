@@ -27,6 +27,10 @@ python-dotenv==1.2.3
 # Observability — error monitoring + structured logging.
 # Sentry SDK no-ops when SENTRY_DSN env is empty, so dev / CI stay quiet.
 # python-json-logger is the JSON formatter used by prod LOGGING config.
+# DRF-2020: перечень полей события, которые чистит ``core/sentry_policy.scrub_event``,
+# снят переписью по ЭТОЙ версии SDK (exception.values[].value, logentry
+# message/params/formatted, extra, текст крошек). Менять версию — вместе с
+# перечнем: в 2.20.0, например, поля ``logentry.formatted`` ещё не было.
 sentry-sdk[django]==2.68.1
 python-json-logger==3.3.0
 
