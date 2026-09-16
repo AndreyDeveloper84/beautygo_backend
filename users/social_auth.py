@@ -100,7 +100,11 @@ def verify_vk_token(token: str) -> SocialUserInfo:
         )
         data = response.json()
     except (requests.RequestException, ValueError) as e:
-        logger.warning("VK API error: %s", e)
+        # Z6: в лог уходит ТОЛЬКО класс отказа. Текст исключения `requests`
+        # несёт полный URL вместе с query, а в query здесь `access_token`
+        # пользователя. Класс сохранён нарочно: он и различает две причины,
+        # пойманные одним `except` — `ConnectionError` против `ValueError`.
+        logger.warning("vk.transport_failed error=%s", type(e).__name__)
         raise SocialAuthTokenError("VK API unavailable")
 
     if "error" in data:
@@ -128,7 +132,9 @@ def verify_google_token(token: str) -> SocialUserInfo:
             timeout=10,
         )
     except requests.RequestException as e:
-        logger.warning("Google API error: %s", e)
+        # Z6: см. `verify_vk_token` — текст исключения `requests` несёт URL с
+        # query, а в query здесь `id_token`. В лог уходит только класс отказа.
+        logger.warning("google.transport_failed error=%s", type(e).__name__)
         raise SocialAuthTokenError("Google API unavailable")
 
     if response.status_code != 200:
