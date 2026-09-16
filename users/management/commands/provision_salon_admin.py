@@ -8,16 +8,51 @@ to create that row would repeat the mistake that left the bot's Mini App
 built, deployed and unusable behind an empty ``TenantStaff`` table.
 
 Idempotent by construction: re-running reuses the user and the grant. The
-phone number is an argument, never a literal in this repository — it is
-personal data and belongs in the operator's command line, not in git.
+phone number is never a literal in this repository — it is personal data and
+belongs to the operator, not to git.
+
+**It is not an argument either (DRF-2024).** ``--phone`` put the number into
+four places at once: the process list on the host, the operator's shell
+history, the host audit log, and — because sentry-sdk's ``ArgvIntegration``
+ships in the default integrations — ``extra["sys.argv"]`` of every Sentry
+event. Only the last of the four is reachable by an application-side
+scrubber; the other three live outside the process. So the number arrives on
+**stdin**, and the guide's own invocation form already keeps stdin open
+(``docker exec -i``), so the operator's move stays a one-liner.
+
+The optional display name follows on the second line for the same reason: it
+is a person's name. ``--tenant`` and ``--dry-run`` stay arguments — a salon
+slug is not personal data.
 
 Deliberately refuses to act when a *revoked* relationship exists: someone
 removed that person's access on purpose, and silently restoring it from a
 provisioning script is not a decision a script should make.
 
-    manage.py provision_salon_admin --phone +79001234567 --tenant formula-tela
+**Interactive form — the default.** The operator types the number at the
+prompt, so it lands in no argv and in no shell history::
+
+    docker exec -it dev-web-1 python manage.py provision_salon_admin \\
+        --tenant formula-tela
+
+``-it``, not ``-i``: without a TTY the command reads blind and looks hung.
+The optional display name is the second line of the same input.
+
+**Non-interactive form — from a file**, when a run cannot be attended::
+
+    docker exec -i dev-web-1 python manage.py provision_salon_admin \\
+        --tenant formula-tela < /root/phone.txt
+
+Redirection creates no argv entry. Its named limit: the file now has a life
+of its own — permissions, and deleting it afterwards — and that is outside
+this command.
+
+**Not** ``printf '…' | docker exec …``: a pipe does not remove the number, it
+moves it into *printf's* argv, where ``ps``, the shell history and the host
+audit log see it exactly as they saw ``--phone``.
 """
 from __future__ import annotations
+
+import sys
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
@@ -29,18 +64,51 @@ from users.models import TenantUserRelationship, User
 class Command(BaseCommand):
     help = "Create or reuse a salon administrator and grant them tenant admin."
 
+    #: ``stdin`` is deliberately NOT a parser option — it must never be able
+    #: to appear in a command line. Django's stealth options are the supported
+    #: way to hand a stream to ``call_command``, which is what the tests do.
+    stealth_options = ("stdin",)
+
+    #: Флаги, снятые в DRF-2024. Оператор с прежней командой в буфере обмена
+    #: получил бы от argparse «unrecognized arguments: --phone» — из этого не
+    #: следует, что делать, и человек повторяет ход, а каждый повтор снова
+    #: кладёт номер в `ps`, историю, аудит и `extra["sys.argv"]` Sentry.
+    REMOVED_PERSONAL_FLAGS = ("--phone", "--name")
+
+    def run_from_argv(self, argv) -> None:
+        """Отказать понятно, если персональные данные всё же пришли в argv.
+
+        Экспозицию это НЕ уменьшает: к этому моменту значение уже в списке
+        процессов и в истории оболочки — утечка произошла при exec, до Python.
+        Смысл в другом: назвать верную форму и сказать, что номер засвечен,
+        чтобы не было второго и третьего захода.
+
+        Сравниваются только ИМЕНА флагов; значение не читается и не печатается.
+        Флаг не возвращается ни в парсер, ни в ``--help`` — иначе он снова
+        начал бы ПРИНИМАТЬ значение.
+        """
+        offending = [
+            flag
+            for flag in self.REMOVED_PERSONAL_FLAGS
+            if flag in argv or any(str(arg).startswith(f"{flag}=") for arg in argv)
+        ]
+        if offending:
+            raise CommandError(
+                f"{', '.join(offending)} is no longer an argument (DRF-2024): "
+                "personal data is read from stdin, not from the command line. "
+                "Retry as: docker exec -it dev-web-1 python manage.py "
+                "provision_salon_admin --tenant <slug>, and type the number at "
+                "the prompt (unattended: append < /root/phone.txt). NOTE: the "
+                "value you just passed is already in the host process list, "
+                "your shell history, the host audit log and the Sentry event's "
+                "sys.argv — treat it as exposed."
+            )
+        super().run_from_argv(argv)
+
     def add_arguments(self, parser) -> None:
-        parser.add_argument(
-            "--phone", required=True,
-            help="Login phone (OTP is the only auth route for humans).",
-        )
         parser.add_argument(
             "--tenant", required=True,
             help="Tenant slug, e.g. formula-tela.",
-        )
-        parser.add_argument(
-            "--name", default="",
-            help="Optional display name for a newly created account.",
         )
         parser.add_argument(
             "--dry-run", action="store_true",
@@ -49,7 +117,33 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args, **options) -> None:
-        phone = options["phone"].strip()
+        stream = options.get("stdin") or sys.stdin
+        # Приглашение печатается ВСЕГДА и в stderr, а не по `isatty()`.
+        #
+        # `isatty()` различает не то, что нужно: `docker exec -i …` без
+        # перенаправления даёт не-TTY, но ждёт живого человека — приглашения
+        # не было бы там, где оно нужнее всего, и команда выглядела бы
+        # зависшей (нашёл ayla-9d). Молчаливое ожидание опаснее лишней
+        # строки: оператор убьёт команду и вернётся к прежней форме с
+        # флагом, то есть к утечке.
+        #
+        # stderr, чтобы `stdout` неинтерактивного прогона оставался чистым:
+        # приглашение — это диалог с человеком, а не результат команды.
+        self.stderr.write("Телефон владельца (+7…), затем Enter: ", ending="")
+        phone = (stream.readline() or "").strip()
+        if not phone:
+            raise CommandError(
+                "stdin gave no number — the phone goes on the FIRST line of "
+                "stdin, not into an argument (DRF-2024). Retry interactively: "
+                "docker exec -it dev-web-1 python manage.py "
+                "provision_salon_admin --tenant <slug>, and type the number at "
+                "the prompt. Unattended: append < /root/phone.txt (a pipe from "
+                "printf would put the number back into a command line)."
+            )
+        # The second line is optional and is used only when the account is
+        # created. Read it unconditionally: a two-line input must not leave a
+        # dangling tail in the caller's stream.
+        display_name = (stream.readline() or "").strip()
         slug = options["tenant"].strip()
         dry_run = options["dry_run"]
 
@@ -69,7 +163,7 @@ class Command(BaseCommand):
                     username=phone,
                     phone=phone,
                     role="admin",
-                    first_name=options["name"],
+                    first_name=display_name,
                     is_verified=True,
                 )
         else:
