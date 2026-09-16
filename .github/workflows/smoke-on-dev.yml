@@ -180,7 +180,16 @@ jobs:
               PYTEST_ARGS_RESOLVED="-v --tb=short"
             fi
             set +e
-            docker compose exec -T web pytest nutrition/tests/smoke $PYTEST_ARGS_RESOLVED
+            # DRF-1677 (класс DRF-1646) перевёл web на `user:` 11.09 17:34, и уже
+            # следующий ночной прогон 12.09 08:28 упал INTERNALERROR'ом ДО сбора
+            # тестов: PermissionError на '/app/test_results.log'. `log_file` в
+            # pytest.ini относительный, WORKDIR образа — /app, а сам файл остался
+            # там от эпохи root-контейнера (*.log в .dockerignore, значит не из
+            # сборки). Журнал уводится из /app; консольный (`log_cli = true`) не
+            # трогается, файл никто не читает — во всём репозитории два вхождения:
+            # .gitignore и pytest.ini.
+            docker compose exec -T web pytest nutrition/tests/smoke \
+              -o log_file=/tmp/test_results.log $PYTEST_ARGS_RESOLVED
             PYTEST_RC=$?
             set -e
             echo "pytest exit=$PYTEST_RC"
