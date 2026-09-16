@@ -70,6 +70,37 @@ class TestPersonalDataIsNotAnArgument:
         assert "--dry-run" in options
 
 
+class TestTheOldFormRefusesClearly:
+    """Снятый флаг обязан отказывать понятно, иначе оператор повторит ход.
+
+    Экспозицию это НЕ уменьшает: к моменту запуска Python номер уже в `ps`,
+    истории оболочки, журнале аудита и `extra["sys.argv"]` события Sentry —
+    утечка происходит при exec, до нашего кода. Но argparse-ное «unrecognized
+    arguments: --phone» человек читает как «версия не та» и **повторяет
+    вызов**, а каждый повтор — новая утечка. Поэтому отказ называет, что
+    делать, и говорит, что номер уже засвечен.
+
+    Проверяется `run_from_argv`, а не парсер: флаг не возвращается ни в
+    парсер, ни в `--help` — иначе он снова начнёт ПРИНИМАТЬ значение.
+    """
+
+    def test_phone_flag_is_refused_with_guidance_not_argparse_noise(self):
+        command = load_command_class("users", "provision_salon_admin")
+
+        with pytest.raises(CommandError, match="stdin"):
+            command.run_from_argv(
+                ["manage.py", "provision_salon_admin", "--tenant", "x", "--phone", PHONE],
+            )
+
+    def test_name_flag_is_refused_the_same_way(self):
+        command = load_command_class("users", "provision_salon_admin")
+
+        with pytest.raises(CommandError, match="stdin"):
+            command.run_from_argv(
+                ["manage.py", "provision_salon_admin", "--tenant", "x", "--name", OWNER_NAME],
+            )
+
+
 class TestPhoneComesFromStdin:
     def test_phone_from_stdin_creates_the_account_and_grants_admin(self, salon):
         call_command(
