@@ -11,8 +11,14 @@
 аргумент, «never a literal in this repository». Чтение из stdin закрывает argv
 и **сохраняет** это: в репозитории номера по-прежнему нет.
 
-Форма вызова из гайда уже держит stdin открытым (`docker exec -i …`), поэтому
-однострочность операторского хода не теряется.
+Форма вызова остаётся однострочной: `docker exec -it dev-web-1 … --tenant
+<slug>`, номер печатается на приглашение. Для неинтерактивного прогона —
+перенаправление из файла (`< /root/phone.txt`), у которого свой предел: права
+и удаление файла живут вне этой команды.
+
+**Не `printf '…' | docker exec …`**: канал не убирает номер, а переносит его в
+argv процесса `printf`, где его видят `ps`, история оболочки и журнал аудита
+хоста — ровно как прежний `--phone` (нашёл ayla-9d при сверке формы).
 
 **Предел, названный честно:** сторож проверяет ПАРСЕР и поведение команды. Если
 однажды номер начнут передавать в аргументе другой команды, этот тест этого не
@@ -99,6 +105,43 @@ class TestTheOldFormRefusesClearly:
             command.run_from_argv(
                 ["manage.py", "provision_salon_admin", "--tenant", "x", "--name", OWNER_NAME],
             )
+
+
+class TestItAsksBeforeItReads:
+    """Ожидание ввода обязано быть видно, иначе команда читается как зависшая.
+
+    Приглашение печатается **всегда и в stderr**, а не по `isatty()`:
+    `docker exec -i …` без перенаправления даёт не-TTY, но ждёт живого
+    человека — там приглашение нужнее всего (нашёл ayla-9d). Молчаливое
+    ожидание опаснее лишней строки: оператор убьёт команду и вернётся к
+    прежней форме с флагом, то есть к утечке.
+
+    `stdout` при этом остаётся чистым: приглашение — диалог с человеком, а не
+    результат команды.
+    """
+
+    def test_the_prompt_is_printed_before_reading(self, salon):
+        err = io.StringIO()
+        call_command(
+            "provision_salon_admin",
+            tenant=salon.slug,
+            stdin=io.StringIO(f"{PHONE}\n"),
+            stderr=err,
+        )
+
+        assert "+7" in err.getvalue(), "нет приглашения — ожидание ввода выглядит зависанием"
+
+    def test_the_prompt_does_not_pollute_stdout(self, salon):
+        """Результат команды и диалог с человеком идут разными потоками."""
+        out = io.StringIO()
+        call_command(
+            "provision_salon_admin",
+            tenant=salon.slug,
+            stdin=io.StringIO(f"{PHONE}\n"),
+            stdout=out,
+        )
+
+        assert "Телефон" not in out.getvalue()
 
 
 class TestPhoneComesFromStdin:
