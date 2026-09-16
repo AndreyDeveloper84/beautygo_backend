@@ -33,7 +33,7 @@ from django.utils import timezone
 
 from core.measurement_subject import gather_pulse, subject_lines
 from tenants.models import LocationStatus, ServiceLocation, Tenant
-from tenants.service_location import same_address
+from tenants.service_location import same_address, tenant_has_no_masters, tenant_master_count
 from users.models import User
 
 
@@ -48,6 +48,11 @@ class Command(BaseCommand):
         parser.add_argument("--by", default=None, help="username подтверждающего (для --confirm).")
         parser.add_argument("--source-ref", default="", help="Основание подтверждения (для --confirm).")
         parser.add_argument("--apply", action="store_true", help="Записать. Без флага — сухой прогон.")
+        parser.add_argument(
+            "--no-masters-ok", action="store_true",
+            help="Завести место тенанту без мастеров. Без флага такой тенант требует "
+                 "подтверждения: у служебного тенанта мастеров нет, и место ему не нужно.",
+        )
 
     def _fail(self, msg: str) -> None:
         self.stderr.write(self.style.ERROR(msg))
@@ -70,6 +75,26 @@ class Command(BaseCommand):
             self._fail(
                 f"у салона {slug!r} пустой адрес — переносить нечего "
                 "(Tenant.address — вход, заполняется оператором)"
+            )
+
+        # Единственная защита команды — непустой адрес, и у служебного тенанта
+        # она пройдена: адрес у него есть, происхождения этого адреса никто не
+        # знает. Отличить служебного от салона схемой нельзя (`Tenant.Kind` —
+        # только SALON/SOLO), поэтому спрашиваем по свойству и печатаем ЧИСЛО:
+        # отказ без числа неотличим от отказа по ошибке.
+        masters = tenant_master_count(tenant)
+        if tenant_has_no_masters(tenant) and options["no_masters_ok"]:
+            # Решение оставляет след: флаг, прошедший молча, через месяц
+            # неотличим от отсутствия проверки.
+            self.stdout.write(self.style.WARNING(
+                f"  мастеров у салона {masters} — место заводится по явному --no-masters-ok"
+            ))
+        if tenant_has_no_masters(tenant) and not options["no_masters_ok"]:
+            self._fail(
+                f"у салона {slug!r} мастеров {masters} — место оказания услуг нужно тому, к кому "
+                "привязывают мастеров. Если это служебный тенант (например, маркетплейсный), "
+                "места ему не нужно вовсе; если это новый салон, заведите мастера сначала "
+                "или повторите с --no-masters-ok."
             )
 
         confirmed_by = None

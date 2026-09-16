@@ -6,9 +6,12 @@ rename / deactivate a tenant from the admin without a migration.
 """
 from __future__ import annotations
 
+from django import forms
 from django.contrib import admin
+from django.core.exceptions import ValidationError
 
 from tenants.models import ServiceLocation, Tenant
+from tenants.service_location import tenant_has_no_masters
 from users.admin import TenantMastersInline
 
 
@@ -52,10 +55,39 @@ class TenantAdmin(admin.ModelAdmin):
         return Tenant.all_objects.all()
 
 
+class ServiceLocationInlineForm(forms.ModelForm):
+    """Место тенанту без мастеров — только осознанным решением.
+
+    Это дверь, которой места заводят на самом деле: по операторскому порядку
+    салон, мастера и место создаются одним сохранением на форме салона, а
+    команда переноса приходит третьим шагом и на готовом месте печатает «уже
+    есть». Сторож в одной команде оставил бы эту дверь открытой.
+
+    Условие общее с командой (``tenant_has_no_masters``), действие — своё:
+    здесь отказ формы, там флаг. Копии условия нет намеренно.
+    """
+
+    class Meta:
+        model = ServiceLocation
+        fields = "__all__"
+
+    def clean(self):
+        cleaned = super().clean()
+        tenant = getattr(self.instance, "tenant", None)
+        if tenant_has_no_masters(tenant):
+            raise ValidationError(
+                "У этого салона нет ни одного мастера. Место оказания услуг нужно тому, к кому "
+                "привязывают мастеров: заведите мастера сначала. Служебному тенанту "
+                "(например, маркетплейсному) место не нужно вовсе."
+            )
+        return cleaned
+
+
 class ServiceLocationInline(admin.TabularInline):
     """Места салона — рядом с ним, чтобы подтверждающий видел, что уже есть."""
 
     model = ServiceLocation
+    form = ServiceLocationInlineForm
     extra = 0
     fields = ("label", "address", "city", "status", "geocode_status", "latitude", "longitude")
     readonly_fields = ("geocode_status", "latitude", "longitude")
