@@ -321,9 +321,9 @@ class InternalBindExternalIdentityView(APIView):
             return error_response(exc.code, str(exc), status_code=exc.status_code)
 
         logger.info(
-            "internal.users.bind_external external_user_id=%s ayla_user_id=%s "
+            "internal.users.bind_external ayla_user_id=%s "
             "proxy_created=%s request_id=%s",
-            external_user_id, ayla_user_id, created,
+            ayla_user_id, created,
             request_id or "-",
         )
         return success_response({

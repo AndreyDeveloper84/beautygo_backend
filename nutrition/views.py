@@ -310,8 +310,8 @@ class InternalFoodScanView(APIView):
             scan.error_message = str(exc)[:500]
             scan.save()
             logger.warning(
-                "nutrition.internal_scan.all_providers_failed user=%s ext=%s code=%s err=%s",
-                user.id, external_user_id, error_code, exc,
+                "nutrition.internal_scan.all_providers_failed user=%s code=%s err=%s",
+                user.id, error_code, exc,
             )
             return error_response(error_code, msg, status_code=http_status)
 
@@ -1114,8 +1114,8 @@ class InternalProfileView(APIView):
             require_consent(serializer.validated_data)
         except PersonalCalculationConsentRequired as exc:
             logger.info(
-                "nutrition.profile.consent_refused external_user_id=%s fields=%s",
-                external_user_id,
+                "nutrition.profile.consent_refused user=%s fields=%s",
+                user.pk,
                 exc.fields,
             )
             return error_response(
@@ -1180,8 +1180,8 @@ class InternalProfileTargetsConfirmView(APIView):
             body, outcome = confirm_targets(user=user, external_user_id=external_user_id)
         except NothingToConfirm as exc:
             logger.info(
-                "nutrition.targets.confirm_refused external_user_id=%s source=%s",
-                external_user_id,
+                "nutrition.targets.confirm_refused user=%s source=%s",
+                user.pk,
                 exc.source,
             )
             return error_response(
@@ -1191,8 +1191,8 @@ class InternalProfileTargetsConfirmView(APIView):
                 status_code=status.HTTP_409_CONFLICT,
             )
         logger.info(
-            "nutrition.targets.confirm external_user_id=%s outcome=%s",
-            external_user_id,
+            "nutrition.targets.confirm user=%s outcome=%s",
+            user.pk,
             outcome,
         )
         body = dict(body)
@@ -1262,8 +1262,8 @@ class InternalProfileTargetsManualView(APIView):
             return error_response(exc.code, str(exc), details=exc.details)
         except CaloriesBelowFloor as exc:
             logger.info(
-                "nutrition.targets.manual_refused external_user_id=%s code=%s",
-                external_user_id, exc.code,
+                "nutrition.targets.manual_refused user=%s code=%s",
+                user.pk, exc.code,
             )
             return error_response(
                 exc.code, str(exc), details=exc.details,
@@ -1271,16 +1271,16 @@ class InternalProfileTargetsManualView(APIView):
             )
         except ConfirmationRequired as exc:
             logger.info(
-                "nutrition.targets.manual_confirmation_required external_user_id=%s kind=%s",
-                external_user_id, exc.kind,
+                "nutrition.targets.manual_confirmation_required user=%s kind=%s",
+                user.pk, exc.kind,
             )
             return error_response(
                 exc.code, str(exc), details=exc.details,
                 status_code=status.HTTP_409_CONFLICT,
             )
         logger.info(
-            "nutrition.targets.manual external_user_id=%s set=%s warnings=%s",
-            external_user_id, report["set"], report["warnings"],
+            "nutrition.targets.manual user=%s set=%s warnings=%s",
+            user.pk, report["set"], report["warnings"],
         )
         body = dict(serialize_profile(profile, external_user_id))
         body["manual_targets"] = report
