@@ -56,6 +56,41 @@ class Command(BaseCommand):
     #: way to hand a stream to ``call_command``, which is what the tests do.
     stealth_options = ("stdin",)
 
+    #: Флаги, снятые в DRF-2024. Оператор с прежней командой в буфере обмена
+    #: получил бы от argparse «unrecognized arguments: --phone» — из этого не
+    #: следует, что делать, и человек повторяет ход, а каждый повтор снова
+    #: кладёт номер в `ps`, историю, аудит и `extra["sys.argv"]` Sentry.
+    REMOVED_PERSONAL_FLAGS = ("--phone", "--name")
+
+    def run_from_argv(self, argv) -> None:
+        """Отказать понятно, если персональные данные всё же пришли в argv.
+
+        Экспозицию это НЕ уменьшает: к этому моменту значение уже в списке
+        процессов и в истории оболочки — утечка произошла при exec, до Python.
+        Смысл в другом: назвать верную форму и сказать, что номер засвечен,
+        чтобы не было второго и третьего захода.
+
+        Сравниваются только ИМЕНА флагов; значение не читается и не печатается.
+        Флаг не возвращается ни в парсер, ни в ``--help`` — иначе он снова
+        начал бы ПРИНИМАТЬ значение.
+        """
+        offending = [
+            flag
+            for flag in self.REMOVED_PERSONAL_FLAGS
+            if flag in argv or any(str(arg).startswith(f"{flag}=") for arg in argv)
+        ]
+        if offending:
+            raise CommandError(
+                f"{', '.join(offending)} is no longer an argument (DRF-2024): "
+                "personal data is read from stdin, not from the command line. "
+                "Retry as: printf '+7 9xx xxx-xx-xx\\n' | docker exec -i "
+                "dev-web-1 python manage.py provision_salon_admin "
+                "--tenant <slug>. NOTE: the value you just passed is already "
+                "in the host process list, your shell history, the host audit "
+                "log and the Sentry event's sys.argv — treat it as exposed."
+            )
+        super().run_from_argv(argv)
+
     def add_arguments(self, parser) -> None:
         parser.add_argument(
             "--tenant", required=True,
