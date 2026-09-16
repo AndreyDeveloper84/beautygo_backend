@@ -8,16 +8,38 @@ to create that row would repeat the mistake that left the bot's Mini App
 built, deployed and unusable behind an empty ``TenantStaff`` table.
 
 Idempotent by construction: re-running reuses the user and the grant. The
-phone number is an argument, never a literal in this repository — it is
-personal data and belongs in the operator's command line, not in git.
+phone number is never a literal in this repository — it is personal data and
+belongs to the operator, not to git.
+
+**It is not an argument either (DRF-2024).** ``--phone`` put the number into
+four places at once: the process list on the host, the operator's shell
+history, the host audit log, and — because sentry-sdk's ``ArgvIntegration``
+ships in the default integrations — ``extra["sys.argv"]`` of every Sentry
+event. Only the last of the four is reachable by an application-side
+scrubber; the other three live outside the process. So the number arrives on
+**stdin**, and the guide's own invocation form already keeps stdin open
+(``docker exec -i``), so the operator's move stays a one-liner.
+
+The optional display name follows on the second line for the same reason: it
+is a person's name. ``--tenant`` and ``--dry-run`` stay arguments — a salon
+slug is not personal data.
 
 Deliberately refuses to act when a *revoked* relationship exists: someone
 removed that person's access on purpose, and silently restoring it from a
 provisioning script is not a decision a script should make.
 
-    manage.py provision_salon_admin --phone +79001234567 --tenant formula-tela
+    printf '+7 9xx xxx-xx-xx\\n' | docker exec -i dev-web-1 \\
+        python manage.py provision_salon_admin --tenant formula-tela
+
+Second line, optional — the display name used only when the account is
+created::
+
+    printf '+7 9xx xxx-xx-xx\\nИмя Владельца\\n' | docker exec -i dev-web-1 \\
+        python manage.py provision_salon_admin --tenant formula-tela
 """
 from __future__ import annotations
+
+import sys
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
@@ -29,18 +51,15 @@ from users.models import TenantUserRelationship, User
 class Command(BaseCommand):
     help = "Create or reuse a salon administrator and grant them tenant admin."
 
+    #: ``stdin`` is deliberately NOT a parser option — it must never be able
+    #: to appear in a command line. Django's stealth options are the supported
+    #: way to hand a stream to ``call_command``, which is what the tests do.
+    stealth_options = ("stdin",)
+
     def add_arguments(self, parser) -> None:
-        parser.add_argument(
-            "--phone", required=True,
-            help="Login phone (OTP is the only auth route for humans).",
-        )
         parser.add_argument(
             "--tenant", required=True,
             help="Tenant slug, e.g. formula-tela.",
-        )
-        parser.add_argument(
-            "--name", default="",
-            help="Optional display name for a newly created account.",
         )
         parser.add_argument(
             "--dry-run", action="store_true",
@@ -49,7 +68,19 @@ class Command(BaseCommand):
 
     @transaction.atomic
     def handle(self, *args, **options) -> None:
-        phone = options["phone"].strip()
+        stream = options.get("stdin") or sys.stdin
+        phone = (stream.readline() or "").strip()
+        if not phone:
+            raise CommandError(
+                "stdin gave no number — the phone goes on the FIRST line of "
+                "stdin, not into an argument (DRF-2024). Example: "
+                "printf '+7 9xx xxx-xx-xx\\n' | docker exec -i dev-web-1 "
+                "python manage.py provision_salon_admin --tenant <slug>"
+            )
+        # The second line is optional and is used only when the account is
+        # created. Read it unconditionally: a two-line input must not leave a
+        # dangling tail in the caller's stream.
+        display_name = (stream.readline() or "").strip()
         slug = options["tenant"].strip()
         dry_run = options["dry_run"]
 
@@ -69,7 +100,7 @@ class Command(BaseCommand):
                     username=phone,
                     phone=phone,
                     role="admin",
-                    first_name=options["name"],
+                    first_name=display_name,
                     is_verified=True,
                 )
         else:
