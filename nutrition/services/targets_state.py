@@ -29,8 +29,69 @@ CONFIRMED_SOURCES: frozenset[str] = frozenset({
 })
 
 
-def targets_confirmed(profile: NutritionProfile | None) -> bool:
-    """Действует ли ориентир профиля — по происхождению, не по числу."""
+#: Виды ориентира, у каждого своё происхождение (DRF-1929, F1(б)).
+#: Имена совпадают с ключами ``targets_method_versions`` — там грань по
+#: видам проведена раньше и по той же причине (§85).
+KIND_CALORIES = "calories"
+KIND_FLUIDS = "fluids"
+
+#: Вид → поле происхождения. Словарь, а не ветвление: новый вид
+#: добавляется сюда, и все читатели получают его сразу.
+KIND_SOURCE_FIELD: dict[str, str] = {
+    KIND_CALORIES: "calories_source",
+    KIND_FLUIDS: "fluids_source",
+}
+
+
+def kind_source(profile: NutritionProfile | None, kind: str) -> str | None:
+    """Происхождение ОДНОГО вида — или ``None``, если по видам не писалось.
+
+    ``None`` возвращается только у строк, заведённых до DRF-1929: у них
+    по-видовых колонок нет, и подставлять им значение мы не вправе
+    (умолчание для существующих строк — решение владельца, см. сторож
+    ``test_per_kind_provenance_backfill_decision``). Чтобы поведение этих
+    строк не менялось молча, читатели падают обратно на общее
+    ``targets_source`` — ЯВНО и временно, до ответа владельца.
+    """
+    if profile is None:
+        return None
+    field = KIND_SOURCE_FIELD.get(kind)
+    if field is None:
+        raise ValueError(f"Неизвестный вид ориентира: {kind!r}")
+    return getattr(profile, field, None)
+
+
+def kind_confirmed(profile: NutritionProfile | None, kind: str) -> bool:
+    """Действует ли ориентир ЭТОГО вида — по происхождению, не по числу."""
     if profile is None:
         return False
-    return profile.targets_source in CONFIRMED_SOURCES
+    source = kind_source(profile, kind)
+    if source is None:
+        # Названный временный откат: строка до DRF-1929. Не «считаем
+        # подтверждённым», а «спрашиваем прежнюю общую подпись», чтобы
+        # существующие клиенты не потеряли ориентир до решения владельца.
+        source = profile.targets_source
+    return source in CONFIRMED_SOURCES
+
+
+def calories_confirmed(profile: NutritionProfile | None) -> bool:
+    """Действует ли ориентир по калориям (и всё, что из него выведено)."""
+    return kind_confirmed(profile, KIND_CALORIES)
+
+
+def fluids_confirmed(profile: NutritionProfile | None) -> bool:
+    """Действует ли ориентир по жидкости."""
+    return kind_confirmed(profile, KIND_FLUIDS)
+
+
+def targets_confirmed(profile: NutritionProfile | None) -> bool:
+    """Действует ли ориентир профиля — по происхождению, не по числу.
+
+    Оставлен для читателей, которым нужен НАБОР целиком. После F1(б)
+    таких в каталоге нет: каждый читатель знает свой вид и обязан
+    спрашивать ``calories_confirmed`` / ``fluids_confirmed``. Смысл здесь
+    — «действует хоть один вид»: ослабить прежнее поведение он не может.
+    """
+    if profile is None:
+        return False
+    return calories_confirmed(profile) or fluids_confirmed(profile)
