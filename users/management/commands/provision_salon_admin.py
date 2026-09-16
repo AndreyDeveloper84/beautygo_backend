@@ -28,14 +28,27 @@ Deliberately refuses to act when a *revoked* relationship exists: someone
 removed that person's access on purpose, and silently restoring it from a
 provisioning script is not a decision a script should make.
 
-    printf '+7 9xx xxx-xx-xx\\n' | docker exec -i dev-web-1 \\
-        python manage.py provision_salon_admin --tenant formula-tela
+**Interactive form — the default.** The operator types the number at the
+prompt, so it lands in no argv and in no shell history::
 
-Second line, optional — the display name used only when the account is
-created::
+    docker exec -it dev-web-1 python manage.py provision_salon_admin \\
+        --tenant formula-tela
 
-    printf '+7 9xx xxx-xx-xx\\nИмя Владельца\\n' | docker exec -i dev-web-1 \\
-        python manage.py provision_salon_admin --tenant formula-tela
+``-it``, not ``-i``: without a TTY the command reads blind and looks hung.
+The optional display name is the second line of the same input.
+
+**Non-interactive form — from a file**, when a run cannot be attended::
+
+    docker exec -i dev-web-1 python manage.py provision_salon_admin \\
+        --tenant formula-tela < /root/phone.txt
+
+Redirection creates no argv entry. Its named limit: the file now has a life
+of its own — permissions, and deleting it afterwards — and that is outside
+this command.
+
+**Not** ``printf '…' | docker exec …``: a pipe does not remove the number, it
+moves it into *printf's* argv, where ``ps``, the shell history and the host
+audit log see it exactly as they saw ``--phone``.
 """
 from __future__ import annotations
 
@@ -83,11 +96,12 @@ class Command(BaseCommand):
             raise CommandError(
                 f"{', '.join(offending)} is no longer an argument (DRF-2024): "
                 "personal data is read from stdin, not from the command line. "
-                "Retry as: printf '+7 9xx xxx-xx-xx\\n' | docker exec -i "
-                "dev-web-1 python manage.py provision_salon_admin "
-                "--tenant <slug>. NOTE: the value you just passed is already "
-                "in the host process list, your shell history, the host audit "
-                "log and the Sentry event's sys.argv — treat it as exposed."
+                "Retry as: docker exec -it dev-web-1 python manage.py "
+                "provision_salon_admin --tenant <slug>, and type the number at "
+                "the prompt (unattended: append < /root/phone.txt). NOTE: the "
+                "value you just passed is already in the host process list, "
+                "your shell history, the host audit log and the Sentry event's "
+                "sys.argv — treat it as exposed."
             )
         super().run_from_argv(argv)
 
@@ -104,13 +118,27 @@ class Command(BaseCommand):
     @transaction.atomic
     def handle(self, *args, **options) -> None:
         stream = options.get("stdin") or sys.stdin
+        # Приглашение печатается ВСЕГДА и в stderr, а не по `isatty()`.
+        #
+        # `isatty()` различает не то, что нужно: `docker exec -i …` без
+        # перенаправления даёт не-TTY, но ждёт живого человека — приглашения
+        # не было бы там, где оно нужнее всего, и команда выглядела бы
+        # зависшей (нашёл ayla-9d). Молчаливое ожидание опаснее лишней
+        # строки: оператор убьёт команду и вернётся к прежней форме с
+        # флагом, то есть к утечке.
+        #
+        # stderr, чтобы `stdout` неинтерактивного прогона оставался чистым:
+        # приглашение — это диалог с человеком, а не результат команды.
+        self.stderr.write("Телефон владельца (+7…), затем Enter: ", ending="")
         phone = (stream.readline() or "").strip()
         if not phone:
             raise CommandError(
                 "stdin gave no number — the phone goes on the FIRST line of "
-                "stdin, not into an argument (DRF-2024). Example: "
-                "printf '+7 9xx xxx-xx-xx\\n' | docker exec -i dev-web-1 "
-                "python manage.py provision_salon_admin --tenant <slug>"
+                "stdin, not into an argument (DRF-2024). Retry interactively: "
+                "docker exec -it dev-web-1 python manage.py "
+                "provision_salon_admin --tenant <slug>, and type the number at "
+                "the prompt. Unattended: append < /root/phone.txt (a pipe from "
+                "printf would put the number back into a command line)."
             )
         # The second line is optional and is used only when the account is
         # created. Read it unconditionally: a two-line input must not leave a
