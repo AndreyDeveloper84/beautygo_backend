@@ -14,12 +14,22 @@
 from __future__ import annotations
 
 import copy
+import sys
 from pathlib import Path
 
 import pytest
 
 from core.log_filters import clear_request_id, set_request_id
 from core.sentry_policy import FILTERED, init_options, scrub_event
+
+
+def _redacted(type_name: str) -> str:
+    """Ожидаемая замена: класс остаётся, текст — нет.
+
+    Литерал здесь намеренно: узел обязан краснеть оттого, что значение ещё
+    в событии, а не оттого, что в `core.sentry_policy` пока нет имени.
+    """
+    return f"<redacted: {type_name}>"
 
 HOME = "Пушкина 45 кв 12"
 PHONE = "+79990001234"
@@ -52,6 +62,81 @@ def _event(url: str) -> dict:
             },
         },
     }
+
+
+def _real_event_from_a_chain(secret: str):
+    """Событие, собранное ТЕМ ЖЕ путём, что собирает SDK.
+
+    Не словарь руками: `event_from_exception` — вход, которым пользуется сам
+    SDK (`sentry_sdk/utils.py`), и только он кладёт текст в
+    `exception.values[].value` через `get_error_message`.
+    """
+    from sentry_sdk.utils import event_from_exception
+
+    try:
+        try:
+            raise ValueError(f"external identity {secret!r} is unknown")
+        except ValueError as inner:
+            raise RuntimeError(f"while binding {secret!r}") from inner
+    except RuntimeError:
+        event, _hint = event_from_exception(sys.exc_info())
+    return event
+
+
+def test_every_exception_in_a_chain_loses_its_message():
+    """DRF-2020 — заменяется КАЖДЫЙ элемент `exception.values`, не последний.
+
+    Цепочка `raise ... from ...` — не редкость: `ai/application/services/
+    chat_service.py:120-121` переносит текст исходного исключения в сообщение
+    нового типа (`raise AIUnavailable(str(exc)) from exc`, находка ayla-9d).
+    Скруббер, узнающий «опасные» типы, такой случай пропустил бы; замена по
+    всем элементам — нет.
+    """
+    event = _real_event_from_a_chain(PHONE)
+
+    scrubbed = scrub_event(event)
+
+    values = scrubbed["exception"]["values"]
+    assert len(values) == 2, values
+    assert [value["value"] for value in values] == [
+        _redacted("ValueError"),
+        _redacted("RuntimeError"),
+    ]
+    assert PHONE not in str(scrubbed)
+
+
+def test_the_type_module_and_frames_survive_the_message_scrub():
+    """Положительная стража: «текста нет» прошло бы и на пустом событии."""
+    event = _real_event_from_a_chain(PHONE)
+
+    scrubbed = scrub_event(event)
+
+    outer = scrubbed["exception"]["values"][-1]
+    assert outer["type"] == "RuntimeError"
+    assert outer["module"] is not None
+    frames = outer["stacktrace"]["frames"]
+    assert frames, outer
+    assert frames[-1]["function"] == "_real_event_from_a_chain"
+    assert frames[-1]["lineno"] > 0
+
+
+def test_init_options_do_not_enable_the_logs_sink():
+    """Дормантный канал остаётся выключенным — и сообщение говорит, что делать.
+
+    `SentryLogsHandler` шлёт запись через `_capture_log`
+    (`sentry_sdk/integrations/logging.py:484-493`), МИМО `before_send`; у SDK
+    для него отдельный хук `before_send_log` (`sentry_sdk/consts.py:81`).
+    """
+    options = init_options(
+        dsn="http://public@127.0.0.1/1", environment="test", release=None,
+        traces_sampler=lambda context: 1.0,
+    )
+
+    assert not options.get("enable_logs", False), (
+        "канал логов включён, но `before_send_log` не задан: текст записи уйдёт в "
+        "Sentry мимо `scrub_event`. Включать логи можно только вместе со "
+        "скрабированием в `before_send_log`."
+    )
 
 
 @pytest.mark.parametrize("url", [

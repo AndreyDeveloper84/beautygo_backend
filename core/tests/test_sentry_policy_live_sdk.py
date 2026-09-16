@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import sys
 
 import pytest
@@ -40,6 +41,12 @@ SESSION = "sessionid=live-secret-session"
 CLIENT_IP = "203.0.113.77"
 REQUEST_ID = "req-live-sentry-1"
 PATH = "/api/v1/sentry-probe/7/boom/"
+PATH_WITH_VALUE = "/api/v1/sentry-probe/7/boom-with-value/"
+#: Значение, которое в бою приходит снаружи: `{external_user_id!r}` девяти мест
+#: `users/services.py`. Без пробелов — ищется по всему тексту события.
+IDENTITY = "max:8310001234-secret"
+#: Телефон входа, который `provision_salon_admin --phone` обязан принять argv.
+PHONE_IN_ARGV = "+79990007766"
 
 
 class _CaptureTransport(Transport):
@@ -108,6 +115,129 @@ def _call_wsgi(app, *, method, path, query, body, headers):
     finally:
         getattr(response, "close", lambda: None)()
     return status[0]
+
+
+def _events(live_sentry) -> list:
+    return [env.get_event() for env in live_sentry.envelopes if env.get_event() is not None]
+
+
+def _log_event(live_sentry, call) -> dict:
+    """Одно событие из настоящего пути логирования SDK.
+
+    Уровень ERROR — умолчание самого SDK (`DEFAULT_EVENT_LEVEL`,
+    `sentry_sdk/integrations/logging.py:27`), а не наша настройка.
+    """
+    call(logging.getLogger("core.tests.drf2020"))
+    events = _events(live_sentry)
+    assert len(events) == 1, [env.items for env in live_sentry.envelopes]
+    return events[0]
+
+
+@pytest.mark.urls("core.tests.sentry_live_probe_urls")
+def test_a_real_error_message_does_not_carry_the_value_it_named(live_sentry):
+    """DRF-2020, предмет листа: текст исключения уходит в Sentry целиком.
+
+    Ручка `boom_with_value` падает СО значением из запроса — существующая
+    падает с константным текстом и утечку показать не может.
+    """
+    from djangoProject.wsgi import application
+
+    status = _call_wsgi(
+        application,
+        method="POST",
+        path=PATH_WITH_VALUE,
+        query=f"identity={IDENTITY}",
+        body=b"{}",
+        headers={"HTTP_X_REQUEST_ID": REQUEST_ID},
+    )
+
+    assert status.startswith("500")
+    event = _events(live_sentry)[0]
+    outer = event["exception"]["values"][-1]
+    assert outer["type"] == "ProbeIdentityError"
+    assert IDENTITY not in str(event), outer["value"]
+
+
+def test_a_logged_error_built_by_fstring_is_scrubbed(live_sentry):
+    """`logger.error(f"...{value}")` — значение внутри `record.msg`."""
+    event = _log_event(live_sentry, lambda log: log.error(f"identity {IDENTITY!r} rejected"))
+
+    assert IDENTITY not in str(event), event["logentry"]
+
+
+def test_a_logged_error_passed_as_params_is_scrubbed(live_sentry):
+    """`logger.error("... %s", value)` — в `message` значения НЕТ вовсе.
+
+    Оно лежит в `logentry.params` (`integrations/logging.py:332`). Скруббер по
+    одному `message` был бы зелёным и бесполезным именно здесь.
+    """
+    event = _log_event(live_sentry, lambda log: log.error("identity %s rejected", IDENTITY))
+
+    assert IDENTITY not in str(event["logentry"].get("params")), event["logentry"]
+    assert IDENTITY not in str(event)
+
+
+def test_the_formatted_copy_of_a_logged_message_is_scrubbed(live_sentry):
+    """Третье поле того же канала: `formatted` = `record.getMessage()`.
+
+    Его не было в 2.20.0 и оно есть в пинованной 2.68.1
+    (`integrations/logging.py:331`) — чистка двух полей из трёх создала бы
+    видимость закрытия.
+    """
+    event = _log_event(live_sentry, lambda log: log.error("identity %s rejected", IDENTITY))
+
+    assert IDENTITY not in str(event["logentry"].get("formatted")), event["logentry"]
+
+
+def test_breadcrumb_text_is_scrubbed_not_only_its_url(live_sentry):
+    """Крошка несёт УЖЕ форматированный текст (`:376`), а не только url."""
+    log = logging.getLogger("core.tests.drf2020")
+    log.info("identity %s seen", IDENTITY)
+    log.error("binding failed")
+
+    event = _events(live_sentry)[0]
+    crumbs = (event.get("breadcrumbs") or {}).get("values") or []
+    assert crumbs, event
+    assert IDENTITY not in str(crumbs), crumbs
+
+
+def test_argv_is_scrubbed_from_the_extra_of_every_event(live_sentry, monkeypatch):
+    """Пишет не наш код, а сам SDK — на КАЖДОМ событии.
+
+    `ArgvIntegration` входит в `_DEFAULT_INTEGRATIONS`
+    (`sentry_sdk/integrations/__init__.py:57`), её глобальный процессор делает
+    `extra["sys.argv"] = sys.argv` (`integrations/argv.py:19-27`). Находка
+    ayla-9d: `users/management/commands/provision_salon_admin.py:33-36`
+    требует `--phone` обязательным аргументом, значит хвост argv несёт телефон
+    входа. Порядок проверен по коду: глобальные процессоры применяются в
+    `_prepare_event` (`client.py:782`) ДО `before_send` (`:917-925`).
+
+    Остаётся `argv[:2]` — путь скрипта и имя подкоманды: отрезание по позиции,
+    а не по образцу.
+    """
+    monkeypatch.setattr(
+        sys, "argv", ["manage.py", "provision_salon_admin", "--phone", PHONE_IN_ARGV]
+    )
+
+    event = _log_event(live_sentry, lambda log: log.error("provisioning failed"))
+
+    assert event["extra"]["sys.argv"] == ["manage.py", "provision_salon_admin"]
+    assert PHONE_IN_ARGV not in str(event), event["extra"]
+
+
+def test_extra_passed_by_a_caller_is_scrubbed(live_sentry):
+    """`extra=` в каталоге сегодня не пишет никто (0 мест `extra={`).
+
+    Узел закрывает поле ДО появления первого писателя: `_extra_from_record`
+    (`integrations/logging.py:335`) копирует в событие всё, что не входит в
+    `COMMON_RECORD_ATTRS`.
+    """
+    event = _log_event(
+        live_sentry,
+        lambda log: log.error("binding failed", extra={"external_user_id": IDENTITY}),
+    )
+
+    assert IDENTITY not in str(event.get("extra")), event.get("extra")
 
 
 @pytest.mark.urls("core.tests.sentry_live_probe_urls")
