@@ -322,11 +322,22 @@ class Command(BaseCommand):
         logs = FoodLog._base_manager.all()
         out = ["питание"]
         out.append(_row("профилей", profiles.count(), "nutrition.NutritionProfile"))
-        for value, n in _by_value(profiles, "targets_source", Profile.TargetsSource.choices):
-            out.append(_row(
-                f"  {value}", n,
-                f"nutrition.NutritionProfile.targets_source = {value.split(' ')[0]}",
-            ))
+        # DRF-1929 (F1(б)): происхождение хранится ПО ВИДАМ, поэтому здесь
+        # два распределения, а не одно. Общая подпись ``targets_source``
+        # остаётся ради читателей до-DRF-1929 и внешнего контракта, но
+        # предмет решения — по-видовые колонки, и именно их состав должен
+        # быть виден на поверхности.
+        #
+        # ``None`` печатается как ``'None' (вне choices)`` — так ``_by_value``
+        # показывает всё, чего нет в объявлении. Это не шум: NULL означает
+        # «по видам не устанавливалось» (строка не прошла ``0023``), и
+        # спрятать его значило бы потерять строки из суммы.
+        for field in ("targets_source", "calories_source", "fluids_source"):
+            for value, n in _by_value(profiles, field, Profile.TargetsSource.choices):
+                out.append(_row(
+                    f"{field.split('_')[0]}/{value}", n,
+                    f"nutrition.NutritionProfile.{field} = {value.split(' ')[0]}",
+                ))
         out.append(_row("записей еды", logs.count(), "nutrition.FoodLog"))
         out.append(_row(
             "людей с записями еды", logs.values("user_id").distinct().count(),

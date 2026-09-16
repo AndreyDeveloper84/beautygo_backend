@@ -227,18 +227,30 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
     # числам, и переносить его на новые значило бы подтвердить за
     # человека то, чего он не видел. Поэтому ``targets_confirmed_at``
     # стирается вместе с пересчётом, а не только при отказе.
+    #
+    # DRF-1929 (F1(б)): расчёт считает ОБА вида сразу (калории — Миффлин
+    # — Сан Жеор, жидкость — справочник), поэтому подпись получают оба, и
+    # подтверждение снимается у обоих: предложение новое у обоих.
     if norms.computed:
         profile.targets_source = NutritionProfile.TargetsSource.AYLA_PROPOSED
+        profile.calories_source = NutritionProfile.TargetsSource.AYLA_PROPOSED
+        profile.fluids_source = NutritionProfile.TargetsSource.AYLA_PROPOSED
         profile.targets_method_versions = dict(norms.method_versions)
         profile.targets_input_snapshot = dict(norms.input_snapshot)
         profile.targets_computed_at = datetime.now(dt_tz.utc)
         profile.targets_confirmed_at = None
+        profile.calories_confirmed_at = None
+        profile.fluids_confirmed_at = None
     else:
         profile.targets_source = NutritionProfile.TargetsSource.NONE
+        profile.calories_source = NutritionProfile.TargetsSource.NONE
+        profile.fluids_source = NutritionProfile.TargetsSource.NONE
         profile.targets_method_versions = {}
         profile.targets_input_snapshot = {}
         profile.targets_computed_at = None
         profile.targets_confirmed_at = None
+        profile.calories_confirmed_at = None
+        profile.fluids_confirmed_at = None
 
 
 def _refuse_recompute(profile: NutritionProfile) -> None:
@@ -286,6 +298,19 @@ _WATER_SOURCES = (
     NutritionProfile.TargetsSource.AYLA_PROPOSED,
     NutritionProfile.TargetsSource.AYLA_CALCULATED,
 )
+
+
+def _fluids_source(profile: NutritionProfile) -> str | None:
+    """Происхождение ЖИДКОСТИ (DRF-1929, F1(б)).
+
+    ``NULL`` в колонке бывает только у строк, записанных до этой правки и
+    не прошедших миграцию данных; для них спрашивается прежняя общая
+    подпись, иначе существующий клиент потерял бы воду на ровном месте.
+    Откат назван ЯВНО и исчезает вместе с ``NULL``-ами — он не умолчание,
+    а мост ([[targets_state.kind_confirmed]] держит тот же мост для
+    остальных видов).
+    """
+    return profile.fluids_source or profile.targets_source
 
 
 def _norms_block(profile: NutritionProfile) -> dict[str, Any]:
@@ -343,8 +368,14 @@ def _norms_block(profile: NutritionProfile) -> dict[str, Any]:
     # ``unknown_legacy`` в столбце остаток снятой формулы 30 × вес до
     # команды очистки — его отдать значило бы выдать снятую методику за
     # живую; сюда он не проходит по источнику, а не по значению.
+    #
+    # DRF-1929 (F1(б)): спрашивается происхождение ЖИДКОСТИ, а не набора.
+    # Раньше здесь стоял общий ``targets_source``, и именно поэтому ручные
+    # калории меняли судьбу воды: набор становился ``user_entered``, и
+    # справочная вода уезжала под чужой подписью — либо её приходилось
+    # гасить в NULL, чтобы не соврать. Теперь у воды своя подпись.
     if (
-        profile.targets_source in _WATER_SOURCES
+        _fluids_source(profile) in _WATER_SOURCES
         and profile.daily_water_ml is not None
     ):
         block["daily_water_ml"] = profile.daily_water_ml
@@ -431,6 +462,24 @@ def _serialize(
             # строк, поставленных до введения подтверждения.
             "confirmed_at": _strip_microseconds(profile.targets_confirmed_at),
             "input_snapshot": dict(profile.targets_input_snapshot or {}),
+            # DRF-1929 (F1(б)): происхождение ПО ВИДАМ. Ключ ``by_kind``
+            # добавлен рядом, а не вместо ``source``: бот держит СВОЮ
+            # копию множества действующих источников
+            # (``nutrition_client.py:327``) и читает ``source`` сегодня —
+            # снять его здесь значило бы сломать чтение до того, как бот
+            # научится по видам (отдельный PR). ``None`` внутри — «по
+            # видам не устанавливалось» (строка до DRF-1929), и это НЕ то
+            # же самое, что ``none``.
+            "by_kind": {
+                "calories": {
+                    "source": profile.calories_source,
+                    "confirmed_at": _strip_microseconds(profile.calories_confirmed_at),
+                },
+                "fluids": {
+                    "source": profile.fluids_source,
+                    "confirmed_at": _strip_microseconds(profile.fluids_confirmed_at),
+                },
+            },
         },
         "disclaimer_acked": profile.disclaimer_acked,
         "onboarded_at": _strip_microseconds(profile.onboarded_at),
@@ -513,7 +562,24 @@ def confirm_targets(*, user, external_user_id: str) -> tuple[dict, str]:
             return _serialize(profile, external_user_id, exists=True), "already_confirmed"
         if source != NutritionProfile.TargetsSource.AYLA_PROPOSED:
             raise NothingToConfirm(source)
+        now = datetime.now(dt_tz.utc)
         profile.targets_source = NutritionProfile.TargetsSource.AYLA_CALCULATED
-        profile.targets_confirmed_at = datetime.now(dt_tz.utc)
-        profile.save(update_fields=["targets_source", "targets_confirmed_at", "updated_at"])
+        profile.targets_confirmed_at = now
+        # DRF-1929 (F1(б)): подтверждение — по виду. Подтверждается
+        # каждый вид, стоящий на ``ayla_proposed``; вид, который человек
+        # задал рукой (``user_entered``), НЕ трогается — он уже подписан
+        # человеком, и переподписать его расчётом значило бы отменить его
+        # решение. Селектора вида у ручки нет намеренно: владелец решил
+        # «подтверждение по видам», а не «кнопка на каждый вид», и лишний
+        # параметр контракта — это объём, которого мне не давали.
+        updated = ["targets_source", "targets_confirmed_at", "updated_at"]
+        for kind_field, stamp_field in (
+            ("calories_source", "calories_confirmed_at"),
+            ("fluids_source", "fluids_confirmed_at"),
+        ):
+            if getattr(profile, kind_field) == NutritionProfile.TargetsSource.AYLA_PROPOSED:
+                setattr(profile, kind_field, NutritionProfile.TargetsSource.AYLA_CALCULATED)
+                setattr(profile, stamp_field, now)
+                updated += [kind_field, stamp_field]
+        profile.save(update_fields=updated)
     return _serialize(profile, external_user_id, exists=True), "confirmed"
