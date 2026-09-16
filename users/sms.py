@@ -1,6 +1,7 @@
 """SMS service — sends messages via SMS.RU API."""
 
 import logging
+import re
 
 import requests
 from django.conf import settings
@@ -8,6 +9,16 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 SMS_RU_SEND_URL = "https://sms.ru/sms/send"
+
+#: Описание отказа пишет провайдер, а не мы: это единственное поле в наших
+#: логах с неконтролируемым содержимым. Длинная цифровая последовательность
+#: в нём — почти наверняка номер, который мы же и передали.
+_LONG_DIGIT_RUN = re.compile(r"\d{7,}")
+
+
+def _without_long_digit_runs(text: str) -> str:
+    """Снять из чужого текста то, что похоже на номер, оставив слова."""
+    return _LONG_DIGIT_RUN.sub("…", text)
 
 
 class SMSError(Exception):
@@ -89,7 +100,7 @@ class SMSService:
         status_text = data.get("status_text", "Unknown error")
         logger.error(
             "sms.provider_error code=%s text=%s",
-            status_code, status_text,
+            status_code, _without_long_digit_runs(status_text),
         )
         return False
 

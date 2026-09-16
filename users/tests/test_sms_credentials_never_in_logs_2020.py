@@ -151,6 +151,28 @@ class TestTheProviderPaths:
 
         assert PHONE not in _text(caplog)
 
+    def test_a_number_inside_the_provider_text_does_not_reach_the_log(self, caplog, settings):
+        """``status_text`` пишет провайдер, а не мы.
+
+        Описание отказа оставлено намеренно — оно операционное («no route») и
+        нужно для диагностики. Но содержимое поля мы не контролируем: если
+        провайдер вернёт в описании номер получателя, поле пропустит его в
+        лог. Здесь это и проверяется — вместе с положительной стражей, чтобы
+        «защита» не свелась к удалению поля целиком.
+        """
+        settings.SMS_ENABLED = True
+        settings.SMS_RU_API_ID = "test-api-id"  # pragma: allowlist secret
+
+        leaky = {"status_code": 202, "status_text": f"no route for {PHONE.lstrip('+')}"}
+        response = type("R", (), {"json": lambda self: leaky})()
+        with _capturing_the_sms_log(caplog), patch("users.sms.requests.get", return_value=response):
+            assert SMSService().send(PHONE, "любой текст") is False
+
+        captured = _text(caplog)
+        assert captured, "перехват пуст — тест не проверил бы ничего"
+        assert PHONE.lstrip("+") not in captured
+        assert "no route" in captured
+
 
 class TestTheTransportFailure:
     """Отказ транспорта: в тексте исключения ``requests`` лежит URL с параметрами.
