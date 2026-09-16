@@ -165,9 +165,16 @@ def _substitutions(source: str) -> list[str]:
 
 #: Имена, под условием которых чтение столбца разрешено: источники с
 #: известным происхождением числа (§5.1 — назвал человек; раздел 4 —
-#: справочник по полу состоявшегося расчёта) и предикат ``targets_confirmed``.
+#: справочник по полу состоявшегося расчёта) и предикаты происхождения.
+#:
+#: DRF-1929 (F1(б)): добавлены ПО-ВИДОВЫЕ имена. ``targets_confirmed``
+#: спрашивал происхождение НАБОРА, и именно поэтому ручные калории решали
+#: судьбу воды; теперь воду открывает её собственная подпись. Набор имён
+#: остаётся закрытым намеренно — сторож обязан ловить чтение под
+#: НЕизвестным предикатом, а не под любым.
 PROVENANCE_GATE_NAMES = frozenset({
     "USER_ENTERED", "AYLA_PROPOSED", "AYLA_CALCULATED", "_WATER_SOURCES", "targets_confirmed",
+    "fluids_confirmed", "_fluids_source",
 })
 
 #: Имя переменной с результатом ``compute_norms`` в сервисе записи: её
@@ -283,9 +290,11 @@ def load(profile, norms):
         allowed = profile.daily_water_ml
     else:
         forbidden_else = profile.daily_water_ml
+    if fluids_confirmed(profile) and profile.daily_water_ml:
+        allowed_per_kind = profile.daily_water_ml
     if profile.goal == "lose":
         forbidden_other_if = profile.daily_water_ml
-    return allowed, forbidden_else, forbidden_other_if
+    return allowed, allowed_per_kind, forbidden_else, forbidden_other_if
 '''
 
 
@@ -344,9 +353,15 @@ class TestTargetsStayAbsent:
         """§5.1: чтение под ``USER_ENTERED`` разрешено; под другим условием,
         в ``else`` того же ``if`` и запись — нет/да соответственно.
 
-        Стража парная: разрешённое место НЕ в списке (иначе исключение
+        Стража парная: разрешённые места НЕ в списке (иначе исключение
         не работает), два запрещённых — в списке (иначе исключение
         проглотило всё), записи в списке нет.
+
+        DRF-1929 (F1(б)): в образце ДВА разрешённых чтения — под старым
+        общим ``USER_ENTERED`` и под по-видовым ``fluids_confirmed``. Без
+        второго список ``PROVENANCE_GATE_NAMES`` можно было бы пополнить
+        опечаткой, и ни один узел этого не заметил бы: добавленное имя
+        нигде не проверялось бы на деле.
         """
         reads = _stale_column_reads(_A_PROVENANCE_GATED_READ_LOOKS_LIKE_THIS)
         assert reads == [

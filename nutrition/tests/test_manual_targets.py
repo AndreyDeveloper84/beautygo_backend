@@ -154,17 +154,62 @@ class TestWriter:
             NutritionProfile.objects.filter(user=proxy_user).update(targets_source=source)
             assert _load_nutrition_context(proxy_user.id).fluid_target_ml == 2100, source
 
-    def test_manual_calories_alone_drop_the_reference_water(self, proxy_user, headers):
-        """Справочная вода расчёта под именем user_entered — число, которого
-        человек не называл; при ручных калориях без воды она снимается."""
+    def test_water_acts_on_its_own_signature_not_the_calories_one(self, proxy_user):
+        """DRF-1929: воду открывает ``fluids_source``, а не подпись набора.
+
+        Узел выше пишет только ``targets_source`` и по-видовые колонки
+        оставляет ``NULL`` — то есть проверяет НАЗВАННЫЙ ОТКАТ для строк,
+        не прошедших ``0023``. Здесь предмет другой: когда по-видовая
+        подпись есть, читается она, и общая на решение не влияет.
+        """
+        # Вода действует, хотя набор подписан как «ориентира нет».
+        NutritionProfile.objects.update_or_create(
+            user=proxy_user,
+            defaults={
+                "targets_source": Source.NONE,
+                "fluids_source": Source.USER_ENTERED,
+                "daily_water_ml": 2100,
+            },
+        )
+        assert _load_nutrition_context(proxy_user.id).fluid_target_ml == 2100
+
+        # И наоборот: набор «действует», а вода — предложение, не подтверждена.
+        NutritionProfile.objects.filter(user=proxy_user).update(
+            targets_source=Source.USER_ENTERED, fluids_source=Source.AYLA_PROPOSED,
+        )
+        assert _load_nutrition_context(proxy_user.id).fluid_target_ml is None
+
+    def test_manual_calories_alone_keep_the_reference_water(self, proxy_user, headers):
+        """DRF-1929 (F1(б)): вода ПЕРЕЖИВАЕТ ручные калории.
+
+        Прежде этот узел утверждал обратное — «при ручных калориях без
+        воды она снимается», — и это было верно ПОКА подпись была одна:
+        справочная вода под именем ``user_entered`` стала бы «числом
+        человека», которого он не называл, и честнее было её стереть.
+
+        Обнуление было не правилом, а КОМПЕНСАЦИЕЙ отсутствия разделения.
+        С раздельным происхождением компенсировать нечего: у воды своя
+        подпись (``ayla_proposed`` — справочник состоявшегося расчёта), у
+        калорий своя (``user_entered``), и человек не теряет число,
+        которого не отменял.
+        """
         _compute(headers)
         p = NutritionProfile.objects.get(user=proxy_user)
         assert p.daily_water_ml == 2200  # POSITIVE: справочник записан
+        assert p.fluids_source == Source.AYLA_PROPOSED  # POSITIVE: подпись воды до правки
+
         resp = _manual({"calories_kcal": 1800, "confirm_deviation": True}, headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
         p.refresh_from_db()
-        assert p.daily_water_ml is None
-        assert resp.json()["data"]["norms"] == {"daily_kcal": 1800}
+
+        # Вода на месте и со СВОИМ происхождением — вот предмет F1(б).
+        assert p.daily_water_ml == 2200, "ручные калории снова погасили воду"
+        assert p.fluids_source == Source.AYLA_PROPOSED, "подпись воды переписана калориями"
+        # Калории — от человека, и только они.
+        assert p.calories_source == Source.USER_ENTERED
+        assert p.daily_kcal == 1800
+        # Наружу едут оба числа: вода больше не исчезает из ответа.
+        assert resp.json()["data"]["norms"] == {"daily_kcal": 1800, "daily_water_ml": 2200}
 
     def test_manual_calories_keep_own_earlier_manual_water(self, proxy_user, headers):
         _manual({"water_ml": 2500}, headers)
