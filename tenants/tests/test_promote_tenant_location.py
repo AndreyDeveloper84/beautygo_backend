@@ -14,7 +14,7 @@ import pytest
 from django.core.management import call_command
 
 from tenants.models import LocationStatus, ServiceLocation, Tenant
-from users.models import User
+from users.models import SpecialistProfile, User
 
 pytestmark = pytest.mark.django_db
 
@@ -31,8 +31,22 @@ def _run(**kw):
 
 @pytest.fixture
 def formula():
-    return Tenant.objects.create(slug="formula-tela-t", name="Формула тела",
-                                 city="Пенза", address="г. Пенза, ул. Пушкина, д. 45")
+    """Настоящий салон: адрес И мастер.
+
+    Мастер появился здесь с DRF-2030: место оказания услуг заводится тому, к
+    кому привязывают мастеров, и тенанту без мастеров команда теперь задаёт
+    вопрос (`--no-masters-ok`). До того у этой фикстуры мастеров не было —
+    не по замыслу, а потому что прежний контракт о них не имел мнения:
+    в докстринге файла названы три запрета, и мастеров среди них нет.
+    Проверки ниже от мастера не зависят — они про slug, провенанс и дубли.
+    """
+    tenant = Tenant.objects.create(slug="formula-tela-t", name="Формула тела",
+                                   city="Пенза", address="г. Пенза, ул. Пушкина, д. 45")
+    # `users.signals.create_user_profile` заводит профиль только при
+    # role='specialist'; здесь роль не задана, поэтому профиль создаём сами.
+    user = User.objects.create_user(username="m-l3", password="x", phone="+79990001699")
+    SpecialistProfile._base_manager.create(user=user, display_name="Мастер", tenant=tenant)
+    return tenant
 
 
 @pytest.fixture
