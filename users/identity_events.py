@@ -239,20 +239,20 @@ def emit_identity_binding(
                 # previous generation's row. Never swallow that mute.
                 logger.warning(
                     "identity.binding_audit_replay_absorbed"
-                    " external_user_id=%s result=%s key=%s",
-                    external_user_id, result, dedup_key,
+                    " actor=%s result=%s key=%s",
+                    actor.pk if actor is not None else "-", result, dedup_key,
                 )
             return
         if strict:
             raise
         logger.warning(
-            "identity.binding_audit_failed external_user_id=%s result=%s err=%s",
-            external_user_id, result, exc,
+            "identity.binding_audit_failed actor=%s result=%s err=%s",
+            actor.pk if actor is not None else "-", result, exc,
         )
     except Exception as exc:
         if strict:
             raise
         logger.warning(
-            "identity.binding_audit_failed external_user_id=%s result=%s err=%s",
-            external_user_id, result, exc,
+            "identity.binding_audit_failed actor=%s result=%s err=%s",
+            actor.pk if actor is not None else "-", result, exc,
         )

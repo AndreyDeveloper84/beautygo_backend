@@ -146,11 +146,20 @@ def resolve_external_user(external_user_id: str) -> User:
         # read nor visible anywhere else — DRF-1035's root cause was
         # precisely that nobody could tell when (or whether) a proxy got
         # created. Logged ONLY on creation, so the hot repeat-call path
-        # stays silent. No PII: the external id is an opaque channel
-        # handle, and a freshly created proxy carries no phone/email/name.
+        # stays silent.
+        #
+        # Прежнее обоснование гласило: «No PII: the external id is an
+        # opaque channel handle, and a freshly created proxy carries no
+        # phone/email/name». Оно НЕ удалено, а помечено: это решение
+        # спорит с `scripts/pii_guard.py`, который считает идентификаторы
+        # каналов персональными данными и держит их хеши. При конфликте
+        # двух решений действует то, у кого есть сторож, — у pii_guard он
+        # в CI. Рабочее допущение выбрано fail-closed: идентификатор снят,
+        # зацепкой остаётся внутренний pk. Окончательная классификация —
+        # вопрос Z7 у владельца.
         logger.info(
-            "identity.proxy_created user_id=%s external_user_id=%s",
-            user.id, external_user_id,
+            "identity.proxy_created user_id=%s",
+            user.id,
         )
     if not user.is_proxy and (not user.is_active or user.deleted_at is not None):
         # DRF-1947: действовать ОТ ИМЕНИ неактивного/удалённого аккаунта нельзя —
