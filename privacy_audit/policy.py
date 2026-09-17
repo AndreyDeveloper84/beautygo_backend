@@ -58,10 +58,32 @@ For everything else §107 still stands — «наказывать человек
 "eventually recorded" no longer exists. What is left for those operations
 is :func:`privacy_audit.services.record_or_lose`: the operation proceeds and
 the loss is written at ERROR with the operation and subject id, as a
-counted, named blind spot — never as a silent nothing. Whether that blind
-spot is acceptable, or whether those operations should stop too now that
-the queue is gone, is a question the two rulings leave open between them;
-it is registered for the owner (OD register) rather than decided here.
+counted, named blind spot — never as a silent nothing.
+
+### The question the two rulings left open is now answered (owner F6, 16.09.2026)
+
+Whether that blind spot is acceptable — or whether those operations should
+stop too, now that the queue is gone — was registered for the owner. The
+answer is **вариант (б), и только для ordinary self-read**: «обычное чтение
+человеком СВОИХ данных не останавливается из-за временного отказа записи
+аудита».
+
+The owner attached a condition of completeness to it, and that condition is
+the reason :mod:`privacy_audit.observability` exists::
+
+    Если ERROR никто не читает и нет metric/alert — вариант (б) НЕ считается
+    полностью реализованным.
+
+So a loss is now also counted, carries the request's correlation id, and
+raises an operational alert on the first occurrence and then by threshold.
+Without those, «потеряно громко» and «потеряно тихо» are the same state.
+
+**The set below did not move, and F6 does not move it.** The ruling says in
+as many words that it «не распространяется автоматически на consequential
+operations»: удаление, выдача и отзыв согласий, межтенантные
+административные действия, изменение ролей and the like keep their own
+fail-closed contracts. F6 licenses the ordinary self-read to proceed; it
+licenses nothing to be removed from this list.
 """
 from __future__ import annotations
 
