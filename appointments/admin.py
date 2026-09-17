@@ -196,9 +196,24 @@ class SpecialistWorkingHoursInline(admin.TabularInline):
     verbose_name_plural = 'Рабочие часы'
 
 
+class SpecialistWorkingHoursForm(WorkingHoursInlineForm):
+    """Отдельная форма «Рабочие часы → Добавить»: та же строка, но с мастером.
+
+    Инлайн на карточке мастера получает ``specialist`` от родителя, поэтому
+    в его форме поля нет. Отдельная форма родителя не имеет — без поля
+    «Добавить» писала строку без обязательного мастера, то есть падала в 500.
+
+    Наследование, а не копия: правила времени одни на обе двери. С обоими
+    полями ``unique_together`` в форме повтор дня у мастера — ошибка формы.
+    """
+
+    class Meta(WorkingHoursInlineForm.Meta):
+        fields = ('specialist', *WorkingHoursInlineForm.Meta.fields)
+
+
 @admin.register(SpecialistWorkingHours)
 class SpecialistWorkingHoursAdmin(admin.ModelAdmin):
-    form = WorkingHoursInlineForm
+    form = SpecialistWorkingHoursForm
     list_display = ('specialist', 'day_of_week', 'is_working_day', 'start_time', 'end_time')
     list_filter = ('is_working_day', 'day_of_week')
     search_fields = ('specialist__display_name',)
