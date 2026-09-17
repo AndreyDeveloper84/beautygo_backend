@@ -181,8 +181,19 @@ def record_or_lose(**kwargs) -> str:
     A **denial** proceeds too, whatever the operation: refusing harder is not
     available — the request was already refused — and the ERROR line is what
     stands in for the missing row.
+
+    Since owner F6 (16.09.2026) the line is not the only thing that happens.
+    The owner closed the open question in favour of «операция продолжается»
+    and attached a condition of completeness to it: «если ERROR никто не
+    читает и нет metric/alert — вариант (б) НЕ считается полностью
+    реализованным». So the loss also moves a counter, carries the request's
+    correlation id, and raises an operational alert on the first occurrence
+    and then by threshold — :mod:`privacy_audit.observability`. The ERROR
+    line keeps its event name and its composition and gains two fields; the
+    name is what log collectors and eyes are pointed at, and moving it would
+    cost more than it gives.
     """
-    from privacy_audit import policy
+    from privacy_audit import observability, policy
 
     try:
         record_access(**kwargs)
@@ -192,13 +203,27 @@ def record_or_lose(**kwargs) -> str:
         operation = kwargs.get("operation", "")
         if allowed and policy.stops_when_unauditable(operation):
             raise
+        # Counted BEFORE the line is written, so the number the line prints is
+        # this loss's own — read back from the counter afterwards it could be
+        # a neighbouring thread's. The subject id is deliberately not passed:
+        # it stays in the ERROR line below, inside the perimeter, and never
+        # reaches the alert that leaves it.
+        note = observability.note_record_lost(
+            operation=operation,
+            result="allowed" if allowed else "denied",
+            actor_named=kwargs.get("actor_named"),
+            request_id=kwargs.get("request_id", ""),
+        )
         logger.error(
             "privacy_audit.record_lost operation=%s result=%s subject=%s actor_named=%s "
-            "— the journal is unavailable and this operation is not fail-closed (§107, D1)",
+            "request_id=%s lost_total=%d "
+            "— the journal is unavailable and this operation is not fail-closed (§107, D1, F6)",
             operation,
             "allowed" if allowed else "denied",
             kwargs.get("object_id"),
             kwargs.get("actor_named"),
+            note.correlation_id,
+            note.total,
         )
         return "lost"
 
