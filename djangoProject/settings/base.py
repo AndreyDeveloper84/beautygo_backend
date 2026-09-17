@@ -1260,6 +1260,8 @@ if SENTRY_DSN:
     import sentry_sdk
     from sentry_sdk.integrations.django import DjangoIntegration
 
+    from core.sentry_policy import init_options
+
     def _sentry_traces_sampler(sampling_context):
         # Health endpoints get hit every few seconds by load balancers — they
         # would dominate the trace quota and tell us nothing useful.
@@ -1269,21 +1271,19 @@ if SENTRY_DSN:
             return 0.0
         return SENTRY_TRACES_SAMPLE_RATE
 
-    def _sentry_before_send(event, hint):
-        # send_default_pii=False already strips Authorization headers,
-        # session cookies, and POST body for login forms. This hook is for
-        # forward compatibility — if we ever add a custom field that
-        # legitimately appears in events but legally cannot leave Russia
-        # (e.g. memory-arch sensitive flags), filter it here. Today: no-op.
-        return event
-
+    # Owner R3 (15.09): the request body never leaves; sensitive query params and
+    # auth/cookie headers are scrubbed; route, status, error class and the
+    # correlation id stay. Two holders of the body rule — the SDK setting
+    # (max_request_body_size="never") and the scrub on before_send and
+    # before_send_transaction — so neither alone keeps the policy.
+    # See core.sentry_policy.
     sentry_sdk.init(
-        dsn=SENTRY_DSN,
-        environment=SENTRY_ENVIRONMENT,
-        release=SENTRY_RELEASE,
-        send_default_pii=False,                    # 152-ФЗ — no client PII to Sentry
-        traces_sampler=_sentry_traces_sampler,
-        before_send=_sentry_before_send,
+        **init_options(
+            dsn=SENTRY_DSN,
+            environment=SENTRY_ENVIRONMENT,
+            release=SENTRY_RELEASE,
+            traces_sampler=_sentry_traces_sampler,
+        ),
         integrations=[DjangoIntegration()],
     )
 
