@@ -7,6 +7,7 @@ from rest_framework import serializers
 from tenants.wire import OfferAddressField, OfferLatitudeField, OfferLongitudeField
 
 from .goal_resolution import build_category_goal_index
+from .offer_sellable import edge_refusal
 from .models import (
     SalonService,
     Service,
@@ -231,6 +232,10 @@ class SpecialistServiceInternalSerializer(serializers.ModelSerializer):
     resolved_duration = serializers.SerializerMethodField()
     resolved_requires_health_check = serializers.SerializerMethodField()
     template = serializers.SerializerMethodField()
+    # DRF-1962 (контракт DRF-1964): строка остаётся в зеркале, продаётся ли
+    # она — говорит каталог. Бот не выводит это из ``price``/``is_active`` сам.
+    sellable = serializers.SerializerMethodField()
+    unsellable_reason = serializers.SerializerMethodField()
     # C6 link keys (additive): raw values the bot normalizes per the
     # contract above.
     name = serializers.CharField(source='salon_service.name', read_only=True)
@@ -261,6 +266,7 @@ class SpecialistServiceInternalSerializer(serializers.ModelSerializer):
             'duration_minutes', 'resolved_duration',
             'requires_health_check', 'resolved_requires_health_check',
             'price', 'buffer_after_minutes', 'is_active',
+            'sellable', 'unsellable_reason',
             'yclients_staff_id', 'reviews_count', 'rating',
             'created_at', 'updated_at',
         ]
@@ -283,3 +289,10 @@ class SpecialistServiceInternalSerializer(serializers.ModelSerializer):
     def get_template(self, obj: SpecialistService) -> str | None:
         template_id = obj.salon_service.template_id
         return str(template_id) if template_id is not None else None
+
+    def get_sellable(self, obj: SpecialistService) -> bool:
+        return edge_refusal(obj) is None
+
+    def get_unsellable_reason(self, obj: SpecialistService) -> str | None:
+        """``price_below_minimum`` / ``inactive`` / ``null`` — продаётся."""
+        return edge_refusal(obj)

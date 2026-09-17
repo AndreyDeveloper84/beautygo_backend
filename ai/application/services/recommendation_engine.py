@@ -56,6 +56,7 @@ from services.catalog_reads import (
     catalog_services_for,
     catalog_services_prefetch,
 )
+from services.offer_sellable import sellable_legacy_q, sellable_offer_q
 from tenants.distance import distance_km_to, haversine_km, offer_address
 from tenants.service_location import LocationStatus
 from users.models import SpecialistProfile
@@ -426,8 +427,8 @@ class RecommendationEngine:
 
         if query.category_id:
             qs = qs.filter(
+                sellable_legacy_q("services__"),
                 services__category_id=query.category_id,
-                services__is_active=True,
             ).distinct()
 
         # OD-1. Цель клиента — жёсткий фильтр, как и явная категория.
@@ -446,14 +447,13 @@ class RecommendationEngine:
         if query.goal_category_ids:
             qs = qs.filter(
                 self._goal_category_predicate(query.goal_category_ids),
-                specialist_services__is_active=True,
-                specialist_services__salon_service__is_active=True,
+                sellable_offer_q("specialist_services__"),
             ).distinct()
 
         if query.price_max is not None:
             qs = qs.filter(
+                sellable_legacy_q("services__"),
                 services__price__lte=query.price_max,
-                services__is_active=True,
             ).distinct()
 
         return self._split_by_review_evidence(qs, min_rating, limit)

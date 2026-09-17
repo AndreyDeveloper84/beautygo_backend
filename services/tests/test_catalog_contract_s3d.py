@@ -50,6 +50,8 @@ SPECIALIST_SERVICE_FIELDS = {
     "duration_minutes", "resolved_duration",
     "requires_health_check", "resolved_requires_health_check",
     "price", "buffer_after_minutes", "is_active",
+    # DRF-1962 (additive): does the row sell, and why not (contract for DRF-1964).
+    "sellable", "unsellable_reason",
     "yclients_staff_id", "reviews_count", "rating",
     "created_at", "updated_at",
 }
