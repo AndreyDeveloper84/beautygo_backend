@@ -175,6 +175,48 @@ class TestSchedulePut:
         resp = pro_client.put(SCHEDULE_URL, bad, format='json')
         assert resp.status_code == 400
 
+    def test_put_rejects_a_day_off_that_carries_hours(self, pro_client, specialist_profile):
+        """Выходной с временами — 400, а не тихая запись.
+
+        Правила на это не было нигде (d1d706a5): у модели ни constraints,
+        ни ``clean``, а ``validate()`` заходил внутрь только при
+        ``is_working_day=True`` — «выходной с 10 до 19» проходил через API
+        всеми тремя дверями. Замер контура 10.09.2026: пять таких строк,
+        все воскресенья 09:00–21:00. Ограничение на модель не вешается
+        намеренно — бэкфилл упал бы на них; закрывается дверь, а не
+        хранилище.
+        """
+        bad = {
+            'schedule': [
+                *FULL_SCHEDULE['schedule'][:6],
+                {'day_of_week': 6, 'is_working_day': False,
+                 'start_time': '10:00', 'end_time': '19:00'},
+            ]
+        }
+        resp = pro_client.put(SCHEDULE_URL, bad, format='json')
+        assert resp.status_code == 400
+        # Положительная стража на том же клиенте: выходной БЕЗ времён
+        # по-прежнему проходит — иначе отказ выше зеленел бы и на
+        # сериализаторе, который не пускает никого.
+        assert pro_client.put(SCHEDULE_URL, FULL_SCHEDULE, format='json').status_code == 200
+
+    def test_put_rejects_a_day_off_that_carries_a_break(self, pro_client, specialist_profile):
+        """Тот же отказ на перерыве: у выходного нет ни смены, ни перерыва.
+
+        Отдельный узел, а не второй assert: измерены были только
+        ``start``/``end``, и сторож, проверяющий ровно измеренное,
+        оставил бы два поля из четырёх без стражи.
+        """
+        bad = {
+            'schedule': [
+                *FULL_SCHEDULE['schedule'][:6],
+                {'day_of_week': 6, 'is_working_day': False,
+                 'break_start': '13:00', 'break_end': '14:00'},
+            ]
+        }
+        resp = pro_client.put(SCHEDULE_URL, bad, format='json')
+        assert resp.status_code == 400
+
     def test_put_validates_break_within_hours(self, pro_client, specialist_profile):
         """Break outside working hours returns 400."""
         bad_schedule = list(FULL_SCHEDULE['schedule'])
