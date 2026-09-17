@@ -10,6 +10,8 @@ access somebody removed on purpose.
 """
 from __future__ import annotations
 
+import io
+
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -26,7 +28,17 @@ def salon(db):
 
 
 def _run(**kwargs):
-    call_command("provision_salon_admin", **kwargs)
+    """Тот же вызов, но телефон и имя идут через stdin (DRF-2024).
+
+    Форма вызовов ниже не меняется — меняется канал, которым команда получает
+    персональные данные: не аргумент командной строки, а поток.
+    """
+    phone = kwargs.pop("phone", None)
+    name = kwargs.pop("name", "")
+    lines = ""
+    if phone is not None:
+        lines = f"{phone}\n{name}\n" if name else f"{phone}\n"
+    call_command("provision_salon_admin", stdin=io.StringIO(lines), **kwargs)
 
 
 def _active(user, tenant):
