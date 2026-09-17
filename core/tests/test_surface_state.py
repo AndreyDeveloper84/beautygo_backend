@@ -266,10 +266,22 @@ def test_nutrition_profiles_targets_source_and_eaters(surface):
     report = _run()
     block = report.split("\nпитание", 1)[1].split("\nцели", 1)[0]
     assert "профилей                :        2   nutrition.NutritionProfile" in block
-    assert "  none                  :        1   nutrition.NutritionProfile.targets_source = none" in block
-    assert "  unknown_legacy        :        0   " in block
-    assert "  ayla_calculated       :        1   " in block
-    assert "  user_entered          :        0   " in block
+    # Общая подпись — как была (DRF-1929 её не снимает, она нужна читателям
+    # до разделения и внешнему контракту).
+    assert "  targets/none            :        1   nutrition.NutritionProfile.targets_source = none" in block
+    assert "  targets/unknown_legacy  :        0   " in block
+    assert "  targets/ayla_proposed   :        0   " in block
+    assert "  targets/ayla_calculated :        1   " in block
+    assert "  targets/user_entered    :        0   " in block
+    # DRF-1929 (F1(б)): по-видовые распределения — два новых блока.
+    assert "  calories/ayla_calculated:        0   " in block
+    assert "  fluids/user_entered     :        0   " in block
+    # У обоих профилей фикстуры по-видовые колонки NULL: строки заведены
+    # напрямую, без писателей и без миграции данных. Корзина NULL печатается
+    # ЯВНО (``_by_value`` показывает всё, чего нет в объявлении), иначе две
+    # строки пропали бы из распределения и сумма разошлась бы с «профилей».
+    assert "  calories/None (вне choices):        2   nutrition.NutritionProfile.calories_source = None" in block
+    assert "  fluids/None (вне choices):        2   nutrition.NutritionProfile.fluids_source = None" in block
     assert "записей еды             :        3   nutrition.FoodLog" in block
     assert "людей с записями еды    :        2   nutrition.FoodLog.user_id (distinct)" in block
 

@@ -28,7 +28,7 @@ from django.db.models import Sum
 from django.db.models.functions import TruncDate
 
 from nutrition.models import FoodLog, NutritionProfile
-from nutrition.services.targets_state import targets_confirmed
+from nutrition.services.targets_state import calories_confirmed
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,8 @@ def _resolve_goal(profile: NutritionProfile | None) -> int:
     """
     # §5.1: предложение (``ayla_proposed``) — не цель человека, пока он
     # его не подтвердил; для инсайта это отсутствие.
-    if targets_confirmed(profile) and profile.daily_kcal:
+    # DRF-1929: вид — КАЛОРИИ.
+    if calories_confirmed(profile) and profile.daily_kcal:
         return profile.daily_kcal
     return 0
 
