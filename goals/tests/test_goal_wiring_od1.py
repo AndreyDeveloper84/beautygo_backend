@@ -145,6 +145,11 @@ def _canonical(profile, tenant, *, name, category=None, template=None):
         mapping_confirmed_at=timezone.now(),
         mapping_source_ref="fixture:test_goal_wiring_od1",
     )
+    # Ребро держит только мастер салона услуги: фикстура делает мастера
+    # мастером этого салона, а не оставляет ему тестовый салон по умолчанию.
+    if profile.tenant_id != tenant.id:
+        profile.tenant = tenant
+        profile.save(update_fields=["tenant"])
     SpecialistService.objects.create(
         salon_service=salon, specialist=profile,
         price=Decimal("2000"), duration_minutes=60,

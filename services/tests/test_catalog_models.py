@@ -28,6 +28,19 @@ def tenant(db):
 
 
 @pytest.fixture
+def specialist_user(specialist_user, tenant):
+    """Мастер салона этих услуг: ребро держит только мастер салона услуги.
+
+    Общий ``specialist_user`` (services/tests/conftest.py) салона не задаёт,
+    и тестовый сигнал дал бы ему салон по умолчанию — чужой для ``tenant``.
+    """
+    profile = specialist_user.specialist_profile
+    profile.tenant = tenant
+    profile.save(update_fields=["tenant"])
+    return specialist_user
+
+
+@pytest.fixture
 def category(db):
     return ServiceCategory.objects.create(name="Маникюр S3")
 
