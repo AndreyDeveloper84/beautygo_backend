@@ -24,6 +24,14 @@ is what makes erasure a terminal state rather than a moment in time.
 Soft-deleted accounts are skipped entirely and never get a row
 lazy-created: a deleted person must not be re-derived from the booking
 history they left behind.
+
+DRF-2005 — the decision is taken on the row read under ``SELECT … FOR UPDATE``
+and written in the same transaction. An erasure is an ``UPDATE`` of that same
+row, so it either commits before the locked read (the pass then sees the
+tombstone and writes nothing) or waits for this transaction and lands last.
+Until then the pass decided on the instance ``get_or_create`` returned and
+saved it with ``update_fields`` — an erasure between that read and that save
+was overwritten with the stale values.
 """
 from __future__ import annotations
 
@@ -31,11 +39,12 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from django.db import transaction
 from django.db.models import Count, Q
 
 from appointments.models import Appointment
 from users.models import UserPersonalContext
-from users.personal_context_erasure import ERASED
+from users.personal_context_erasure import ERASED, declared_fields
 
 
 logger = logging.getLogger("users.personal_context.inference")
@@ -68,6 +77,12 @@ class InferenceOutcome:
 #: it (DRF-1366). Inference must not write either one; an erasure that a
 #: nightly job can undo is not an erasure.
 _SUBJECT_OWNED = frozenset({"explicit", ERASED})
+
+
+def _is_tombstone(ctx: UserPersonalContext) -> bool:
+    """Every declared field erased — the terminal state of an erasure (DRF-1366/1984)."""
+    sources = ctx.data_sources or {}
+    return all(sources.get(name) == ERASED for name in declared_fields())
 
 
 def _user_owns_explicit(ctx: UserPersonalContext, field: str) -> bool:
@@ -173,6 +188,10 @@ def infer_for_user(user) -> InferenceOutcome:
     Lazy-creates the context row if missing — keeps the task safe to
     schedule for users who never opened personal-context endpoints.
 
+    DRF-2005: the decision is taken on the row read under ``SELECT … FOR
+    UPDATE`` and saved in the same transaction; a full tombstone is left
+    untouched (no write at all).
+
     Refuses soft-deleted accounts outright (DRF-1366): no row is created,
     no field is written. Otherwise "удалить аккаунт" would be undone by
     the next nightly pass, which reads the booking history the deletion
@@ -189,24 +208,41 @@ def infer_for_user(user) -> InferenceOutcome:
             skipped_explicit=[],
         )
 
-    ctx, _ = UserPersonalContext.objects.get_or_create(user=user)
+    # The row must exist before it can be locked. The instance is NOT used for
+    # the decision: it may predate an erasure that commits before we lock.
+    UserPersonalContext.objects.get_or_create(user=user)
     skipped: list[str] = []
 
-    if _user_owns_explicit(ctx, "favorite_masters"):
-        skipped.append("favorite_masters")
-        favs: list[str] = []
-    else:
-        favs = _infer_favorite_masters(ctx)
+    with transaction.atomic():
+        # DRF-2005: decide on the row read under the lock, write in the same
+        # transaction. An erasure (an UPDATE of this row) waits for our COMMIT.
+        ctx = UserPersonalContext.objects.select_for_update().get(user=user)
+        if _is_tombstone(ctx):
+            logger.info(
+                "personal_context.inference_skipped_tombstone user=%s", user.pk,
+            )
+            return InferenceOutcome(
+                user_id=str(user.pk),
+                favorite_masters_added=[],
+                busy_days_added=[],
+                skipped_explicit=[],
+            )
 
-    if _user_owns_explicit(ctx, "busy_days"):
-        skipped.append("busy_days")
-        busy: list[str] = []
-    else:
-        busy = _infer_busy_days(ctx)
+        if _user_owns_explicit(ctx, "favorite_masters"):
+            skipped.append("favorite_masters")
+            favs: list[str] = []
+        else:
+            favs = _infer_favorite_masters(ctx)
 
-    ctx.save(update_fields=[
-        "favorite_masters", "busy_days", "data_sources", "updated_at",
-    ])
+        if _user_owns_explicit(ctx, "busy_days"):
+            skipped.append("busy_days")
+            busy: list[str] = []
+        else:
+            busy = _infer_busy_days(ctx)
+
+        ctx.save(update_fields=[
+            "favorite_masters", "busy_days", "data_sources", "updated_at",
+        ])
 
     logger.info(
         "personal_context.inferred user=%s favs=%d busy=%d skipped=%s",
