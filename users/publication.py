@@ -10,30 +10,43 @@
   DRAFT → PENDING («Отправлен на проверку»); ACTIVE — только действие
   модератора, и оно проверяет ту же готовность (``approval_refusal``).
 * **Готовность считает сервер одним местом** — эта функция; ручка
-  readiness, публикация и гейт модератора читают её, а не свои копии.
+  readiness и публикация читают её, гейт модератора — ``approval_readiness``:
+  тот же список плюс пункт этапа «к одобрению», а не своя копия.
   Ответ — поимённый список недостающего ``{code, section, detail}``;
   ``section`` — те же ключи, что у проекции бота (``services``,
   ``location``, ``hours``, ``profile``) плюс ``identity``. Ссылки экранов
   у бота (``onboarding_readiness.DEEP_LINKS``), каталог маршрутов Mini App
   не знает.
 
-Пункты:
+Пункты — два этапа (DRF-1957). «К проверке» — отправка мастером (``publish``,
+ручка readiness, статус). «К одобрению» — гейт модератора (``approval_refusal``):
+всё, что «к проверке», и место подтверждено человеком.
 
-=====================  ==========  =========================================
-code                   section     когда
-=====================  ==========  =========================================
-photo_missing          profile     ``SpecialistProfile.avatar`` пуст
-display_name_missing   profile     имя пусто
-no_configured_service  services    нет ни одной настроенной услуги (M8:
-                                   активная строка + предложение с ценой и
-                                   длительностью — ``SelectedService.configured``)
-location_not_assigned  location    ``works_at`` пуст
-location_not_          location    место есть, но не участвует в расстоянии —
-participating                      тот же критерий, что у движка
-                                   (``tenants.distance.participating_place_q``)
-no_working_day         hours       нет рабочего дня с началом и концом
-identity_not_linked    identity    связи нет
-=====================  ==========  =========================================
+======================  ==========  ===========  ====================================
+code                    section     этап         когда
+======================  ==========  ===========  ====================================
+photo_missing           profile     к проверке   ``SpecialistProfile.avatar`` пуст
+display_name_missing    profile     к проверке   имя пусто
+no_configured_service   services    к проверке   нет ни одной настроенной услуги (M8:
+                                                 активная строка + предложение с ценой
+                                                 и длительностью — ``configured``)
+location_not_assigned   location    к проверке   ``works_at`` пуст
+location_inactive       location    к проверке   место ``INACTIVE`` (тестовое, личное,
+                                                 недействительное, стёртое)
+no_working_day          hours       к проверке   нет рабочего дня с началом и концом
+identity_not_linked     identity    к проверке   связи нет
+location_not_confirmed  location    к одобрению  место есть, но не ``CONFIRMED``
+======================  ==========  ===========  ====================================
+
+Координаты не входят ни в один этап (Q1 → а): место без геокода отправляется
+и одобряется, расстояние до него — ``DISTANCE_UNKNOWN``, пока его не
+геокодируют. Прежний код ``location_not_participating`` (M4) снят и не
+переиспользуется.
+
+Место подтверждает модератор при одобрении (Q2 → а): своё место соло-мастера в
+``REVIEW_REQUIRED`` одобрение переводит в ``CONFIRMED`` с провенансом
+«модерация профиля <id>» (:func:`confirm_place_by_moderation`). Место вне
+workspace мастера так не подтверждается — его подтверждают в очереди мест.
 
 У пунктов места ``detail.area_option = location_area_unavailable``: выезд и
 «весь город» появятся с M11, до того этой дороги нет — она названа, а не
@@ -51,11 +64,11 @@ from typing import Any
 from uuid import UUID
 
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 
 from appointments.models import SpecialistWorkingHours
 from services.offer_selection import SelectionRefused, selected_services
-from tenants.distance import participating_place_q
-from tenants.models import Tenant
+from tenants.models import LocationStatus, ServiceLocation, Tenant
 from users.models import SpecialistProfile, SpecialistPublicationRequest, User
 
 logger = logging.getLogger(__name__)
@@ -68,6 +81,12 @@ SECTION_IDENTITY = "identity"
 
 #: Выезд / весь город — дорога к пункту «место», которой до M11 нет.
 AREA_UNAVAILABLE = "location_area_unavailable"
+
+LOCATION_NOT_ASSIGNED = "location_not_assigned"
+LOCATION_INACTIVE = "location_inactive"
+LOCATION_NOT_CONFIRMED = "location_not_confirmed"
+#: Провенанс места, подтверждённого модератором при одобрении профиля (Q2 → а).
+MODERATION_SOURCE_REF = "модерация профиля {profile_id}"
 
 
 @dataclass(frozen=True)
@@ -136,6 +155,13 @@ def is_linked(profile: SpecialistProfile) -> bool:
     return User.objects.filter(is_proxy=True, linked_user_id=profile.user_id).exists()
 
 
+def _place_status(profile: SpecialistProfile) -> str | None:
+    """Статус места мастера — свежим чтением строки, не из кэша связи."""
+    if profile.works_at_id is None:
+        return None
+    return ServiceLocation.objects.filter(pk=profile.works_at_id).values_list("status", flat=True).first()
+
+
 def publication_readiness(profile: SpecialistProfile) -> Readiness:
     solo_tenant(profile)
     missing: list[MissingItem] = []
@@ -156,13 +182,14 @@ def publication_readiness(profile: SpecialistProfile) -> Readiness:
             {"selected": sum(1 for e in entries if e.salon_service.is_active), "configured": 0},
         ))
 
-    if profile.works_at_id is None:
+    place_status = _place_status(profile)
+    if place_status is None:
         missing.append(MissingItem(
-            "location_not_assigned", SECTION_LOCATION, {"area_option": AREA_UNAVAILABLE},
+            LOCATION_NOT_ASSIGNED, SECTION_LOCATION, {"area_option": AREA_UNAVAILABLE},
         ))
-    elif not SpecialistProfile.objects.filter(pk=profile.pk).filter(participating_place_q()).exists():
+    elif place_status == LocationStatus.INACTIVE:
         missing.append(MissingItem(
-            "location_not_participating", SECTION_LOCATION, {"area_option": AREA_UNAVAILABLE},
+            LOCATION_INACTIVE, SECTION_LOCATION, {"area_option": AREA_UNAVAILABLE},
         ))
 
     has_working_day = SpecialistWorkingHours.objects.filter(
@@ -259,6 +286,22 @@ def publication_status(profile: SpecialistProfile) -> dict[str, Any]:
     }
 
 
+def approval_readiness(profile: SpecialistProfile) -> Readiness:
+    """Этап «к одобрению»: всё «к проверке» — и место подтверждено человеком.
+
+    ``INACTIVE`` уже назван этапом «к проверке»; второй раз его не называем.
+    """
+
+    readiness = publication_readiness(profile)
+    place_status = _place_status(profile)
+    if place_status is not None and place_status not in (LocationStatus.CONFIRMED, LocationStatus.INACTIVE):
+        return Readiness((
+            *readiness.missing,
+            MissingItem(LOCATION_NOT_CONFIRMED, SECTION_LOCATION, {"area_option": AREA_UNAVAILABLE}),
+        ))
+    return readiness
+
+
 def approval_refusal(profile: SpecialistProfile) -> list[str] | None:
     """Гейт модератора: ``None`` — можно активировать, иначе коды недостающего.
 
@@ -269,8 +312,38 @@ def approval_refusal(profile: SpecialistProfile) -> list[str] | None:
     tenant = profile.tenant
     if tenant is None or tenant.kind != Tenant.Kind.SOLO:
         return None
-    codes = publication_readiness(profile).codes
+    codes = approval_readiness(profile).codes
     return codes or None
+
+
+def place_confirmable_by_moderation(profile: SpecialistProfile) -> bool:
+    """Подтвердит ли одобрение место само: своё место соло-мастера в ``REVIEW_REQUIRED``."""
+
+    if profile.works_at_id is None or profile.tenant_id is None:
+        return False
+    return ServiceLocation.objects.filter(
+        pk=profile.works_at_id, tenant_id=profile.tenant_id, status=LocationStatus.REVIEW_REQUIRED,
+    ).exists()
+
+
+def confirm_place_by_moderation(profile: SpecialistProfile, moderator: User) -> bool:
+    """Q2 → а: модератор подтверждает своё место мастера, одобряя профиль.
+
+    Кто — модератор, когда — сейчас, основание — «модерация профиля <id>».
+    ``False`` — места в этом виде уже нет (изменилось между проверкой и
+    подтверждением): вызывающий профиль не активирует.
+    """
+
+    updated = ServiceLocation.objects.filter(
+        pk=profile.works_at_id, tenant_id=profile.tenant_id, status=LocationStatus.REVIEW_REQUIRED,
+    ).update(
+        status=LocationStatus.CONFIRMED,
+        confirmed_by=moderator,
+        confirmed_at=timezone.now(),
+        confirmed_source_ref=MODERATION_SOURCE_REF.format(profile_id=profile.pk),
+        updated_at=timezone.now(),
+    )
+    return updated == 1
 
 
 def request_as_dict(request: SpecialistPublicationRequest) -> dict[str, Any]:
@@ -300,7 +373,10 @@ __all__ = [
     "PublicationRefused",
     "PublishResult",
     "Readiness",
+    "approval_readiness",
     "approval_refusal",
+    "confirm_place_by_moderation",
+    "place_confirmable_by_moderation",
     "is_linked",
     "publication_readiness",
     "publication_status",

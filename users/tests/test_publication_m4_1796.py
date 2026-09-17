@@ -40,7 +40,7 @@ from tenants.models import GeocodeStatus, LocationStatus, ServiceLocation, Tenan
 from tenants.solo_provisioning import provision_solo_workspace
 from users.admin import SpecialistProfileAdmin, approve_specialists
 from users.models import SpecialistProfile, SpecialistPublicationRequest, User
-from users.publication import publish
+from users.publication import approval_refusal, publication_readiness, publish
 from users.services import bind_external_identity_by_operator
 
 pytestmark = pytest.mark.django_db
@@ -105,17 +105,13 @@ def _make_ready(profile: SpecialistProfile, external_user_id: str, operator: Use
     row = profile.tenant.salon_services.get(template=template)
     set_offer(profile, row.pk, price=Decimal("1500"), duration_minutes=60)
 
+    # DRF-1957: место — как его называет мастер (M11): в своём workspace, ждёт
+    # проверки, без координат. «К проверке» этого достаточно; подтверждает модератор.
     place = ServiceLocation.objects.create(
-        tenant=None,
+        tenant=profile.tenant,
         address=f"Пенза, Московская, {suffix}",
         city="Пенза",
-        latitude=Decimal("53.195000"),
-        longitude=Decimal("45.018000"),
-        geocode_status=GeocodeStatus.OK,
-        status=LocationStatus.CONFIRMED,
-        confirmed_by=operator,
-        confirmed_at=timezone.now(),
-        confirmed_source_ref="test-1796",
+        status=LocationStatus.REVIEW_REQUIRED,
     )
     SpecialistProfile.objects.filter(pk=profile.pk).update(works_at=place)
 
@@ -125,6 +121,15 @@ def _make_ready(profile: SpecialistProfile, external_user_id: str, operator: Use
     _link(profile, external_user_id, operator)
     profile.refresh_from_db()
     return profile
+
+
+def _confirm_place(profile: SpecialistProfile, operator: User, *, ref: str) -> None:
+    """Место подтверждено человеком раньше одобрения (очередь мест), с геокодом."""
+    ServiceLocation.objects.filter(pk=profile.works_at_id).update(
+        status=LocationStatus.CONFIRMED, confirmed_by=operator, confirmed_at=timezone.now(),
+        confirmed_source_ref=ref, latitude=Decimal("53.195000"), longitude=Decimal("45.018000"),
+        geocode_status=GeocodeStatus.OK,
+    )
 
 
 def _client(actor: str = OLGA) -> APIClient:
@@ -179,13 +184,26 @@ class TestReadinessIsOneServerAnswer:
         assert r.status_code == 200, r.content
         assert r.json()["data"] == {"specialist_id": str(olga.pk), "status": "READY", "missing": []}
 
+    def test_an_unconfirmed_place_without_coordinates_is_ready_for_review(self, olga, operator):
+        """DRF-1957 (Q1 → а): к проверке место не обязано быть подтверждённым и геокодированным."""
+        _make_ready(olga, OLGA, operator)
+        place = ServiceLocation.objects.get(pk=olga.works_at_id)
+        assert place.status == LocationStatus.REVIEW_REQUIRED and place.latitude is None
+
+        r = _readiness(olga)
+
+        assert r.status_code == 200, r.content
+        assert r.json()["data"]["status"] == "READY"
+
     @pytest.mark.parametrize(
         "take_away, code, section",
         [
             ("photo", "photo_missing", "profile"),
             ("services", "no_configured_service", "services"),
             ("location_unassigned", "location_not_assigned", "location"),
-            ("location_unconfirmed", "location_not_participating", "location"),
+            # DRF-1957: «не участвует в расстоянии» больше не пункт готовности;
+            # к проверке не пускает только недействительное место.
+            ("location_inactive", "location_inactive", "location"),
             ("hours", "no_working_day", "hours"),
             ("identity", "identity_not_linked", "identity"),
         ],
@@ -198,10 +216,8 @@ class TestReadinessIsOneServerAnswer:
             SpecialistService.objects.filter(specialist=olga).delete()
         elif take_away == "location_unassigned":
             SpecialistProfile.objects.filter(pk=olga.pk).update(works_at=None)
-        elif take_away == "location_unconfirmed":
-            ServiceLocation.objects.filter(pk=olga.works_at_id).update(
-                status=LocationStatus.REVIEW_REQUIRED, confirmed_by=None, confirmed_at=None, confirmed_source_ref="",
-            )
+        elif take_away == "location_inactive":
+            ServiceLocation.objects.filter(pk=olga.works_at_id).update(status=LocationStatus.INACTIVE)
         elif take_away == "hours":
             SpecialistWorkingHours.objects.filter(specialist=olga).delete()
         else:
@@ -349,6 +365,53 @@ class TestTheModeratorActivatesOnlyAReadyLinkedSoloMaster:
 
         olga.refresh_from_db()
         assert olga.status == SpecialistProfile.ProfileStatus.ACTIVE
+        # DRF-1957 (Q2 → а): одобрение подтвердило своё место — кто, когда, на каком основании.
+        place = ServiceLocation.objects.get(pk=olga.works_at_id)
+        assert place.status == LocationStatus.CONFIRMED
+        assert place.confirmed_by == operator and place.confirmed_at is not None
+        assert place.confirmed_source_ref == f"модерация профиля {olga.pk}"
+
+    def test_an_already_confirmed_place_keeps_its_provenance(self, olga, operator):
+        _make_ready(olga, OLGA, operator)
+        _confirm_place(olga, operator, ref="решение владельца")
+        publish(olga, uuid.uuid4())
+
+        _approve(SpecialistProfile.objects.filter(pk=olga.pk), operator)
+
+        olga.refresh_from_db()
+        assert olga.status == SpecialistProfile.ProfileStatus.ACTIVE
+        assert ServiceLocation.objects.get(pk=olga.works_at_id).confirmed_source_ref == "решение владельца"
+
+    def test_an_inactive_place_is_refused_and_nothing_is_written(self, olga, operator):
+        _make_ready(olga, OLGA, operator)
+        publish(olga, uuid.uuid4())
+        ServiceLocation.objects.filter(pk=olga.works_at_id).update(status=LocationStatus.INACTIVE)
+
+        messages = _approve(SpecialistProfile.objects.filter(pk=olga.pk), operator)
+
+        olga.refresh_from_db()
+        assert olga.status == SpecialistProfile.ProfileStatus.PENDING
+        assert any("location_inactive" in m for m in messages), messages
+        place = ServiceLocation.objects.get(pk=olga.works_at_id)
+        assert place.status == LocationStatus.INACTIVE and place.confirmed_by is None
+
+    def test_a_place_outside_the_workspace_is_not_confirmed_by_approval(self, olga, operator):
+        _make_ready(olga, OLGA, operator)
+        publish(olga, uuid.uuid4())
+        ServiceLocation.objects.filter(pk=olga.works_at_id).update(tenant=None)
+
+        messages = _approve(SpecialistProfile.objects.filter(pk=olga.pk), operator)
+
+        olga.refresh_from_db()
+        assert olga.status == SpecialistProfile.ProfileStatus.PENDING
+        assert any("location_not_confirmed" in m for m in messages), messages
+        place = ServiceLocation.objects.get(pk=olga.works_at_id)
+        assert place.status == LocationStatus.REVIEW_REQUIRED and place.confirmed_by is None
+        # Положительная половина: место подтвердили в очереди мест — модератор одобряет.
+        _confirm_place(olga, operator, ref="очередь мест")
+        _approve(SpecialistProfile.objects.filter(pk=olga.pk), operator)
+        olga.refresh_from_db()
+        assert olga.status == SpecialistProfile.ProfileStatus.ACTIVE
 
     def test_an_incomplete_solo_master_is_not_approved_and_the_moderator_sees_why(self, olga, operator):
         _make_ready(olga, OLGA, operator)
@@ -360,6 +423,9 @@ class TestTheModeratorActivatesOnlyAReadyLinkedSoloMaster:
         olga.refresh_from_db()
         assert olga.status == SpecialistProfile.ProfileStatus.PENDING
         assert any("no_working_day" in m for m in messages), messages
+        # Отказ ничего не подтверждает: место ждёт проверки, как ждало.
+        place = ServiceLocation.objects.get(pk=olga.works_at_id)
+        assert place.status == LocationStatus.REVIEW_REQUIRED and place.confirmed_by is None
         # Положительная половина: рабочий день вернулся — модератор одобряет.
         SpecialistWorkingHours.objects.create(
             specialist=olga, day_of_week=1, is_working_day=True, start_time=time(10), end_time=time(19),
@@ -385,3 +451,17 @@ class TestTheModeratorActivatesOnlyAReadyLinkedSoloMaster:
 
         master.refresh_from_db()
         assert master.status == SpecialistProfile.ProfileStatus.ACTIVE
+
+
+class TestTheApprovalGateNamesAnUnconfirmedPlace:
+    """DRF-1957: «к проверке» и «к одобрению» — разные списки на одних данных."""
+
+    def test_an_unconfirmed_place_is_the_only_thing_the_approval_gate_names(self, olga, operator):
+        _make_ready(olga, OLGA, operator)
+
+        assert publication_readiness(olga).ready
+        assert approval_refusal(olga) == ["location_not_confirmed"]
+
+        _confirm_place(olga, operator, ref="решение владельца")
+
+        assert approval_refusal(olga) is None
