@@ -100,7 +100,9 @@ def verify_vk_token(token: str) -> SocialUserInfo:
         )
         data = response.json()
     except (requests.RequestException, ValueError) as e:
-        logger.warning("VK API error: %s", e)
+        # DRF-2025: печатается КЛАСС отказа, а не текст исключения. Текст
+        # несёт URL со строкой запроса, а в ней — `access_token` (:94).
+        logger.warning("social_auth.vk.transport_failed error=%s", type(e).__name__)
         raise SocialAuthTokenError("VK API unavailable")
 
     if "error" in data:
@@ -128,7 +130,8 @@ def verify_google_token(token: str) -> SocialUserInfo:
             timeout=10,
         )
     except requests.RequestException as e:
-        logger.warning("Google API error: %s", e)
+        # DRF-2025: то же, что у ВК, — в строке запроса едет `id_token` (:127).
+        logger.warning("social_auth.google.transport_failed error=%s", type(e).__name__)
         raise SocialAuthTokenError("Google API unavailable")
 
     if response.status_code != 200:
