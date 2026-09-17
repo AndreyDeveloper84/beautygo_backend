@@ -756,6 +756,12 @@ class TestGuardCoversTheWholeSurface:
             # субъекте; класс тот же, что у часов работы.
             "InternalCanonGapRequestListView": "заявка о разрыве канона — workspace мастера, не персданные",
             "InternalCanonGapSimilarView": "подсказка канона по названию — не персданные",
+            # DRF-1804 — подсказка адреса: ввод мастера (часто домашний адрес) не хранится
+            # и о субъекте ничего не читается; строка передаётся обработчику DaData по
+            # решению N1 и не пишется ни в логи, ни в ответ об ошибке.
+            "InternalAddressSuggestView": (
+                "ввод не хранится и не читается о субъекте; передаётся обработчику DaData по N1"
+            ),
             "InternalCanonGapRequestDetailView": "заявка о разрыве канона — workspace мастера, не персданные",
             # DRF-1845 — the same kind of fact: whether the master takes bookings.
             "InternalSpecialistAvailabilityView": (
@@ -771,6 +777,7 @@ class TestGuardCoversTheWholeSurface:
             "internal_reviews_api",  # DRF-1855 — a client's review from the bot
             "internal_schedule_api",  # DRF-1815 — working hours under the subject
             "internal_canon_gap_api",  # DRF-1801 — canon gap requests under the subject
+            "internal_address_suggest_api",  # DRF-1804 — address suggestions for the master's place
             "internal_specialist_profile_api",  # DRF-1813 — the master's profile, avatar, portfolio
         ):
             mod = __import__(f"users.{module}", fromlist=["x"])
