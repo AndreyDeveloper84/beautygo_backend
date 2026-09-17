@@ -90,6 +90,27 @@ class WorkingHoursSerializer(serializers.Serializer):
                     raise serializers.ValidationError(
                         "Break must be within working hours."
                     )
+        else:
+            # Зеркало правила выше. До этой ветки «выходной, а времена
+            # заданы» проходил всеми тремя дверями (PUT, PATCH, внутренняя
+            # DRF-1815): у модели ни constraints, ни ``clean``, и замер
+            # контура 10.09.2026 нашёл пять таких строк — все воскресенья
+            # 09:00–21:00. Такая строка выглядит как настроенный график и
+            # ничего не значит для движка (``_get_working_hours`` спрашивает
+            # ``is_working_day=True``), то есть лжёт ровно тому, кто на неё
+            # смотрит. Ограничение на модель не вешается намеренно —
+            # бэкфилл упал бы на существующих пяти; закрывается дверь.
+            stray = [
+                name
+                for name in ('start_time', 'end_time', 'break_start', 'break_end')
+                if data.get(name) is not None
+            ]
+            if stray:
+                raise serializers.ValidationError(
+                    "A day off carries no hours: "
+                    + ", ".join(stray)
+                    + " must be null when is_working_day is false."
+                )
         return data
 
 
