@@ -322,7 +322,7 @@ class SocialAuthService:
         user.is_verified = True
         user.save(update_fields=["phone", "is_verified"])
 
-        logger.info("Phone %s bound to user %s", phone, user.pk)
+        logger.info("Phone bound to user %s", user.pk)
 
     def _find_or_create_user(
         self, info: SocialUserInfo, app_type: str,
