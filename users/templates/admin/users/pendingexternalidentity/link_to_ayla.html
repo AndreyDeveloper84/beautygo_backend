@@ -31,6 +31,12 @@
       {{ form.target }}
       <div class="help">{{ form.target.help_text }}</div>
     </div>
+    <div class="form-row">
+      {{ form.admin_target.errors }}
+      <label for="{{ form.admin_target.id_for_label }}">{{ form.admin_target.label }}</label>
+      {{ form.admin_target }}
+      <div class="help">{{ form.admin_target.help_text }}</div>
+    </div>
   </fieldset>
 
   <input type="hidden" name="action" value="{{ action_name }}">
