@@ -50,6 +50,16 @@ class TenantAdmin(admin.ModelAdmin):
         }),
     )
 
+    def get_readonly_fields(self, request, obj=None):
+        # Slug — проводной идентификатор салона: по нему бот привязывает
+        # салон, по нему ходит X-Tenant. Задаётся при добавлении и дальше
+        # не правится — ровно как обещает подсказка поля. Сторож в модели
+        # (`Tenant.clean`) держит то же правило для любой формы.
+        readonly = super().get_readonly_fields(request, obj)
+        if obj is not None:
+            readonly = (*readonly, "slug")
+        return readonly
+
     def get_queryset(self, request):
         # Admin must see deactivated tenants too — use all_objects manager.
         return Tenant.all_objects.all()
