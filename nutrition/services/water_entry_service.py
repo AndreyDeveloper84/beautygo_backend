@@ -104,11 +104,16 @@ def _load_nutrition_context(user_id: int) -> NutritionContext:
     любое его чтение эту формулу применяет.
     """
     from nutrition.models import NutritionProfile  # local import to avoid cycle
-    from nutrition.services.targets_state import targets_confirmed
+    from nutrition.services.targets_state import fluids_confirmed
 
     try:
+        # DRF-1929: ``fluids_source`` обязан быть в ``only`` — предикат его
+        # читает, и без этого Django сходит за колонкой ВТОРЫМ запросом на
+        # каждый профиль. ``targets_source`` остаётся: на него падает
+        # названный откат у строк, ещё не писавших по-видовую подпись.
         profile = NutritionProfile.objects.only(
-            "timezone", "health_flags", "targets_source", "daily_water_ml",
+            "timezone", "health_flags", "targets_source", "fluids_source",
+            "daily_water_ml",
         ).get(user_id=user_id)
     except NutritionProfile.DoesNotExist:
         return NutritionContext()
@@ -123,15 +128,18 @@ def _load_nutrition_context(user_id: int) -> NutritionContext:
 
     flags = profile.health_flags or {}
     # ``daily_water_ml`` читается только у ДЕЙСТВУЮЩЕГО ориентира
-    # (``targets_confirmed``: ``user_entered`` — назвал человек, §5.1;
+    # (``fluids_confirmed``: ``user_entered`` — назвал человек, §5.1;
     # ``ayla_calculated`` — справочник по полу, подтверждённый человеком,
     # раздел 4). ``ayla_proposed`` показывается как предложение и не
     # действует; у ``unknown_legacy`` в столбце остаток снятой формулы
     # 30 × вес до команды очистки — прочитать его значило бы применить
     # снятую методику. Признак — происхождение, не значение: по числу
     # 2100 не отличить «человек сказал» от «70 × 30».
+    # DRF-1929 (F1(б)): спрашивается происхождение ЖИДКОСТИ. До разделения
+    # здесь стоял предикат набора, и ручные калории делали воду «числом
+    # человека» — или её приходилось гасить, чтобы не соврать.
     fluid_target: int | None = None
-    if targets_confirmed(profile) and profile.daily_water_ml:
+    if fluids_confirmed(profile) and profile.daily_water_ml:
         fluid_target = int(profile.daily_water_ml)
     return NutritionContext(
         timezone=tz,

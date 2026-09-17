@@ -234,16 +234,27 @@ def set_manual_targets(
         if water_ml is not None:
             profile.daily_water_ml = water_ml
             set_fields.append("daily_water_ml")
-        elif profile.targets_source != NutritionProfile.TargetsSource.USER_ENTERED:
-            # Справочная вода состоявшегося расчёта (раздел 4) под именем
-            # ``user_entered`` стала бы «числом человека», которого он не
-            # называл. Своя прежняя ручная вода — остаётся.
-            profile.daily_water_ml = None
+        # DRF-1929 (F1(б)): прежде здесь стоял ``elif``, гасивший
+        # справочную воду в ``NULL`` при ручных калориях. Он был не
+        # правилом, а КОМПЕНСАЦИЕЙ одной подписи на набор: под именем
+        # ``user_entered`` справочная вода стала бы «числом человека»,
+        # которого он не называл, и честнее было её стереть. Теперь у
+        # воды своя подпись — стирать нечего, и человек не теряет число,
+        # которого не отменял.
         for name in COMPUTED_FIELDS:
             setattr(profile, name, None)
 
         now = datetime.now(dt_tz.utc)
+        # Общая подпись остаётся ради читателей до-DRF-1929 и внешнего
+        # контракта; истина теперь по видам, и меняется ТОЛЬКО тот вид,
+        # который человек действительно задал.
         profile.targets_source = NutritionProfile.TargetsSource.USER_ENTERED
+        if calories_kcal is not None:
+            profile.calories_source = NutritionProfile.TargetsSource.USER_ENTERED
+            profile.calories_confirmed_at = now
+        if water_ml is not None:
+            profile.fluids_source = NutritionProfile.TargetsSource.USER_ENTERED
+            profile.fluids_confirmed_at = now
         profile.targets_method_versions = {}
         profile.targets_input_snapshot = {}
         profile.targets_computed_at = None

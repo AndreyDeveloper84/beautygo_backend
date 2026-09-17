@@ -485,14 +485,19 @@ def _compute_goal_progress(profile) -> dict | None:
     Читателей ``goal_progress`` в боте нет (grep 11.09.2026), так что
     сужение блока контракт не ломает.
     """
-    from nutrition.services.targets_state import targets_confirmed
+    from nutrition.services.targets_state import calories_confirmed
 
     if profile is None or profile.goal not in ("lose", "gain"):
         return None
     # §5.1: предложение (``ayla_proposed``) в оценках не участвует —
     # блок цели строится только на действующем ориентире. ``none`` и
     # ``unknown_legacy`` сюда не проходят по тому же предикату.
-    if not targets_confirmed(profile):
+    #
+    # DRF-1929 (F1(б)): вид — КАЛОРИИ. Блок несёт ``daily_kcal`` и
+    # ``daily_protein_g``; происхождение жидкости к ним отношения не
+    # имеет, и общий предикат означал бы, что подтверждённая вода
+    # открывает блок про калории.
+    if not calories_confirmed(profile):
         return None
     return {
         "type": "weight_loss" if profile.goal == "lose" else "weight_gain",

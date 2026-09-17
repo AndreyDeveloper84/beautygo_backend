@@ -34,7 +34,7 @@ from django.conf import settings
 from django.core.cache import cache
 
 from nutrition.models import Beverage, FoodLog, NutritionProfile, WaterEntry
-from nutrition.services.targets_state import targets_confirmed
+from nutrition.services.targets_state import calories_confirmed
 
 logger = logging.getLogger(__name__)
 
@@ -582,7 +582,11 @@ def _rda(profile: NutritionProfile | None, key: str) -> float:
     # §5.1: RDA из профиля читается только при действующем ориентире;
     # предложение (``ayla_proposed``) сюда не попадает. Откат на
     # настройки/справочник ниже — прежнее поведение, здесь не трогается.
-    if targets_confirmed(profile):
+    #
+    # DRF-1929: вид — КАЛОРИИ. RDA выведены из состоявшегося расчёта
+    # вместе с макросами, то есть принадлежат калорийной родословной, а не
+    # жидкостной; происхождение воды на них не влияет.
+    if calories_confirmed(profile):
         attr = profile_attr_map[key]
         val = getattr(profile, attr, 0)
         if val:
@@ -832,7 +836,8 @@ def _force_severity(pattern: DetectedPattern, severity: str) -> DetectedPattern:
 def _profile_goal_protein(profile: NutritionProfile | None) -> float:
     # §5.1: предложенный (не подтверждённый) ориентир в паттернах не
     # участвует — спрашиваем происхождение, а не число.
-    if targets_confirmed(profile) and profile.daily_protein_g:
+    # DRF-1929: вид — КАЛОРИИ (белок выведен из расчёта калорий).
+    if calories_confirmed(profile) and profile.daily_protein_g:
         return float(profile.daily_protein_g)
     return 0.0
 
@@ -855,7 +860,8 @@ def _profile_goal_water(profile: NutritionProfile | None) -> float:
 
 
 def _profile_goal_kcal(profile: NutritionProfile | None) -> float:
-    if targets_confirmed(profile) and profile.daily_kcal:
+    # DRF-1929: вид — КАЛОРИИ.
+    if calories_confirmed(profile) and profile.daily_kcal:
         return float(profile.daily_kcal)
     return 0.0
 
