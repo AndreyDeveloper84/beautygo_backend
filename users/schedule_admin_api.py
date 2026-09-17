@@ -26,7 +26,6 @@ ids exist.
 from __future__ import annotations
 
 import logging
-from zoneinfo import ZoneInfo
 
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import permissions, serializers
@@ -267,23 +266,14 @@ def _refuse_if_bookings_are_stranded(
         return None
 
     from appointments.application.services.schedule_impact_service import (
-        count_active_bookings_in_window,
-        local_day_window_utc,
+        count_stranded_bookings,
     )
 
-    affected = 0
-    for specialist in specialists:
-        # Per master, not per salon: ``Tenant`` carries no timezone, and
-        # the same local window resolves to a different UTC window for
-        # each master. Resolving it once from the first master would put
-        # the wrong hours on everyone else the moment a salon spans two.
-        tz = ZoneInfo(specialist.timezone)
-        start_at, end_at = local_day_window_utc(
-            local_date, tz, start_time, end_time,
-        )
-        affected += count_active_bookings_in_window(
-            specialist, start_at, end_at,
-        )
+    # One function for this API and the Django admin forms (per master,
+    # in each master's own timezone) — see its docstring.
+    affected = count_stranded_bookings(
+        specialists, local_date, start_time=start_time, end_time=end_time,
+    )
 
     if affected == 0:
         return None

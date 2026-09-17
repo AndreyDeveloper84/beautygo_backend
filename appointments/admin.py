@@ -1,8 +1,13 @@
 """Django Admin for appointments + booking engine models."""
 from __future__ import annotations
 
+import copy
+
 from django import forms
 from django.contrib import admin
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
+from django.forms.models import construct_instance
 from django.utils.html import format_html
 
 from payments.models import Payment
@@ -10,8 +15,10 @@ from payments.models import Payment
 from .models import (
     Appointment,
     OutboxEvent,
+    SpecialistScheduleException,
     SpecialistTimeOff,
     SpecialistWorkingHours,
+    TenantClosure,
 )
 
 
@@ -218,6 +225,143 @@ class SpecialistWorkingHoursAdmin(admin.ModelAdmin):
     list_filter = ('is_working_day', 'day_of_week')
     search_fields = ('specialist__display_name',)
     raw_id_fields = ('specialist',)
+
+
+class _TrialWriteRolledBack(Exception):
+    """Отмена пробной записи, вокруг которой меряет сторож сокращения рамки."""
+
+
+def _stranded(count: int) -> forms.ValidationError:
+    return forms.ValidationError(
+        f"Нельзя: активных записей, которые останутся без мастера, — {count}. "
+        "Сначала перенесите или отмените их. Так же отказывает API админа салона."
+    )
+
+
+_CLOSURE_WINDOW_FIELDS = ('tenant', 'date', 'start_time', 'end_time')
+_EXCEPTION_FRAME_FIELDS = (
+    'specialist', 'date', 'is_working_day', 'start_time', 'end_time', 'break_start', 'break_end',
+)
+
+
+class TenantClosureAdminForm(forms.ModelForm):
+    """Закрытие салона из админки — с тем же сторожем брони, что у API.
+
+    Закрытие покрывает каждого мастера салона, без фильтра по статусу:
+    запись к отключённому мастеру всё равно запись клиента. Окно — локальный
+    день каждого мастера. Счёт — ``count_stranded_bookings``, та же функция,
+    что у API. Отказ — ошибка формы с числом записей, ничего не записано.
+    Уникальность даты, порядок и пара времён — ошибки формы (``clean()`` и
+    ограничения модели).
+    """
+
+    class Meta:
+        model = TenantClosure
+        fields = ('tenant', 'date', 'start_time', 'end_time', 'reason')
+
+    def clean(self):
+        cleaned = super().clean()
+        tenant, day = cleaned.get('tenant'), cleaned.get('date')
+        start, end = cleaned.get('start_time'), cleaned.get('end_time')
+        if self.errors or tenant is None or day is None:
+            return cleaned
+        if bool(start) != bool(end) or (start and end and start >= end):
+            return cleaned  # форму назовут ограничение и clean() модели
+        if not self.instance._state.adding and not set(self.changed_data) & set(_CLOSURE_WINDOW_FIELDS):
+            return cleaned
+        from appointments.application.services.schedule_impact_service import count_stranded_bookings
+        from users.models import SpecialistProfile
+
+        stranded = count_stranded_bookings(
+            list(SpecialistProfile.objects.filter(tenant=tenant)), day,
+            start_time=start, end_time=end,
+        )
+        if stranded:
+            raise _stranded(stranded)
+        return cleaned
+
+
+class SpecialistScheduleExceptionAdminForm(forms.ModelForm):
+    """Исключение в графике мастера из админки — с теми же сторожами, что у API.
+
+    Как в ``PUT .../schedule-exceptions/``:
+    * «не работает» в день с живой записью — отказ по счёту
+      ``count_stranded_bookings`` за локальный день мастера;
+    * любая запись исключения меряется ``refuse_if_the_change_strands_bookings``
+      вокруг настоящей записи. Сокращение часов, после которого запись выпала
+      из рамки, — отказ.
+
+    Сторож меряет вокруг записи, поэтому форма делает пробную запись в точке
+    сохранения и откатывает её. Отказ становится ошибкой формы, а не 500.
+    Настоящую запись делает админка после валидации. Предел тот же, что у API:
+    блокировки нет, запись, созданная между пробой и сохранением, невидима.
+
+    Уникальность (мастер, дата), порядок времён, перерыв вне смены, времена у
+    выходного — ошибки формы (``clean()`` и ограничения модели).
+    """
+
+    class Meta:
+        model = SpecialistScheduleException
+        fields = ('specialist', 'date', 'is_working_day', 'start_time', 'end_time',
+                  'break_start', 'break_end', 'note')
+
+    def clean(self):
+        cleaned = super().clean()
+        specialist, day = cleaned.get('specialist'), cleaned.get('date')
+        if self.errors or specialist is None or day is None:
+            return cleaned
+        if not self.instance._state.adding and not set(self.changed_data) & set(_EXCEPTION_FRAME_FIELDS):
+            return cleaned
+        from appointments.application.services.schedule_impact_service import (
+            ScheduleShrinkConflict,
+            count_stranded_bookings,
+            refuse_if_the_change_strands_bookings,
+        )
+
+        if not cleaned.get('is_working_day'):
+            stranded = count_stranded_bookings([specialist], day)
+            if stranded:
+                raise _stranded(stranded)
+
+        candidate = copy.copy(self.instance)
+        candidate._state = copy.copy(self.instance._state)
+        construct_instance(self, candidate)
+        try:
+            with transaction.atomic():
+                with refuse_if_the_change_strands_bookings(specialist):
+                    candidate.save()
+                raise _TrialWriteRolledBack
+        except _TrialWriteRolledBack:
+            pass
+        except ScheduleShrinkConflict as exc:
+            raise _stranded(exc.stranded)
+        except (IntegrityError, ValidationError):
+            # Уникальность, порядок, перерыв: их назовёт собственная проверка
+            # формы по модели, пробная запись о них не судит.
+            pass
+        return cleaned
+
+
+@admin.register(TenantClosure)
+class TenantClosureAdmin(admin.ModelAdmin):
+    form = TenantClosureAdminForm
+    list_display = ('tenant', 'date', 'start_time', 'end_time', 'reason', 'created_at')
+    list_filter = ('tenant',)
+    search_fields = ('tenant__slug', 'tenant__name', 'reason')
+    raw_id_fields = ('tenant',)
+    date_hierarchy = 'date'
+    ordering = ('-date',)
+
+
+@admin.register(SpecialistScheduleException)
+class SpecialistScheduleExceptionAdmin(admin.ModelAdmin):
+    form = SpecialistScheduleExceptionAdminForm
+    list_display = ('specialist', 'date', 'is_working_day', 'start_time', 'end_time', 'note')
+    list_filter = ('is_working_day',)
+    search_fields = ('specialist__display_name', 'note')
+    raw_id_fields = ('specialist',)
+    date_hierarchy = 'date'
+    ordering = ('-date',)
 
 
 @admin.register(SpecialistTimeOff)
