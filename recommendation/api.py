@@ -70,6 +70,7 @@ from ._types import (
     ScheduleState,
     Scope,
     ScopeMode,
+    SeparationState,
     StageActivity,
     StageId,
     StageVerdict,
@@ -118,6 +119,7 @@ __all__ = [
     "StageActivity",
     "StageId",
     "StageVerdict",
+    "SeparationState",
     "PolicyVersions",
     # свидетельства и коды
     "EvidenceItem",
