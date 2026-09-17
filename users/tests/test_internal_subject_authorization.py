@@ -115,10 +115,12 @@ PROFILE = ("get", "/api/v1/internal/users/{subject}/")
 REVIEW_POST = ("post", "/api/v1/internal/users/{subject}/reviews/")
 # DRF-1888: вход записи Recommendation для производителя NBA — запись от имени субъекта.
 REC_SET_POST = ("post", "/api/v1/internal/users/{subject}/recommendation-sets/")
+# DRF-1984 (C5.3): readback стирания — чтение состояния без значений.
+ERASURE_STATUS = ("get", "/api/v1/internal/users/{subject}/personal-data/erasure-status/")
 
 ALL_ROUTES = [
     EXPORT, DELETE, CTX_GET, CTX_PATCH, CTX_DELETE, CTX_ELIG, CTX_ASKED, CTX_SKIP,
-    DEL_REQ_GET, DEL_REQ_POST, PROFILE, REVIEW_POST, REC_SET_POST,
+    DEL_REQ_GET, DEL_REQ_POST, PROFILE, REVIEW_POST, REC_SET_POST, ERASURE_STATUS,
 ]
 
 _BODIES = {
@@ -329,7 +331,7 @@ class TestAuthorizationCreatesNothing:
 
 #: Ручки, где неактивный/удалённый субъект законен: стирание уже удалённого
 #: через бота должно работать (докстринг ``users.services._follow_binding``).
-ERASURE_ROUTES = [DEL_REQ_GET, DEL_REQ_POST, DELETE]
+ERASURE_ROUTES = [DEL_REQ_GET, DEL_REQ_POST, DELETE, ERASURE_STATUS]
 
 #: Классы view, которым разрешён неактивный субъект, — ровно эти (решение
 #: главного окна 15.09). Сторож ниже сверяет с живым набором URL.
@@ -337,6 +339,8 @@ ALLOW_INACTIVE_SUBJECT_VIEWS = {
     "InternalDeletionRequestCreateView",
     "InternalDeletionRequestDetailView",
     "InternalPersonalDataDeleteView",
+    # DRF-1984 — подтверждение стирания уже удалённого читается у удалённого.
+    "InternalPersonalDataErasureStatusView",
 }
 
 

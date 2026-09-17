@@ -1,8 +1,8 @@
 # Волна 0 — Frozen Contracts пилота (2026-08-15)
 
-**Contract version:** 1.13.0
+**Contract version:** 1.14.0
 **Frozen at:** 2026-07-18 (после пакета amendments READY-WITH-AMENDMENTS)
-**Last amendment:** AMD-019 (2026-07-21, service_id resolver + persistence option A)
+**Last amendment:** AMD-020 (2026-09-15, C5.3 readback стирания personal context)
 **Effective for pilot:** 2026-08-15
 **Владелец:** оркестратор (Chief Product Architect); изменения — только amendment'ом (§13).
 
@@ -672,3 +672,41 @@ Amendment оформляется веткой + commit в `beautygo_backend/docs
   merge; параллельный persistence-агент запрещён.
 - **Решение:** владелец продукта (GO от 2026-07-21), канонизация —
   оркестратор. Исполнитель: W1 (Ayla backend, booking seam).
+
+### AMD-020 — C5.3: readback стирания personal context (2026-09-15, MINOR)
+
+- **Причина (DRF-1984, половина DRF-1950):** решение владельца M3 — удаление в
+  Ayla проходит durable job → идемпотентность → retry/backoff → **authoritative
+  readback** → completed; до readback человеку не пишется «Удалено». Ни ответ
+  C5.2 (`deleted: []` одинаков для «уже стёрто» и «ничего не было»), ни экспорт
+  C5.1 (все персданные; удалённому субъекту — 403) стирание не подтверждают.
+- **Контракт:** `GET /api/v1/internal/users/{ayla_user_id}/personal-data/erasure-status/`
+  → 200 `{"data": {"user_id", "erased": bool, "identities": [{"kind": "account" | "linked_identity",
+  "context_row": "absent" | "tombstone" | "holds_values" | "not_erased", "erased": bool}]}}`.
+  Без значений и без внешних идентификаторов; ничего не создаёт.
+- **Состояния строки:** `absent` — строки нет; `holds_values` — хоть одно declared-поле
+  не по умолчанию; `tombstone` — все declared-поля по умолчанию, `data_sources[поле] = "erased"`
+  для КАЖДОГО declared-поля и пустые `skipped_questions` / `last_asked_at`; `not_erased` —
+  значений нет, но условия tombstone не выполнены (лениво созданная строка; `mark_asked` /
+  `mark_skipped` поверх tombstone; новое поле модели, которого нет в старой пометке).
+- **Вердикт по личности** (то, что делает C5.2): удалённый (`deleted_at`) — строки
+  нет; живой аккаунт — tombstone; живой связанный прокси — tombstone или строки нет.
+  `not_erased` — строка без значений, но не помеченная стёртой (её лениво создаёт
+  чтение personal-context): стиранием не считается.
+- **Повтор в боте — «DELETE, затем readback», а не одно чтение.** `not_erased` бывает временным
+  (служебные поля вопросов, новое поле модели); повторный DELETE переводит любое состояние в
+  стёртое. Повтор стирает и значения, введённые человеком после первого стирания, — это
+  следствие права на удаление, а не побочный эффект.
+- **Доступ:** тот же сторож субъекта, что у C5.2 (`IsInternalBearerForSubject`),
+  с `allow_inactive_subject` — удалённый субъект читает статус до D3.
+- **D3:** 403 наступает ещё ДО `COMPLETED` — исполнитель переименовывает прокси в
+  `deleted:<pk>` раньше, чем бот подтвердил половину; дальше DELETE, readback и чтение заявки
+  отвечают боту 403, неотличимо от сломанного заголовка. Бот (DRF-1950) закрывает задание как
+  `superseded_by_account_deletion` только при своём прочном факте удаления аккаунта (флаг
+  заявки или след бот-половины D3 в журнале); без факта 403 — обычная ошибка повтора.
+- **Слепое пятно (DRF-2005, P0 privacy, сначала замер):** ночной `infer_for_user` загружает
+  строку до стирания и сохраняет после tombstone без блокировки — readback «стёрто» может
+  быть перезаписан воскрешёнными значениями. Эта ручка гонку не закрывает.
+- **Журнал:** операция `erasure_status_read`, не fail-closed (не раскрывает и не
+  разрушает).
+- **Потоки:** каталог (эта ручка), бот (DRF-1950 — клиент и повтор).

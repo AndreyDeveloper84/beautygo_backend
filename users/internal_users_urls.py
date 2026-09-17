@@ -30,6 +30,7 @@ from recommendation.record_api import (
 from users.internal_reviews_api import InternalReviewCreateView
 from users.personal_data_api import (
     InternalPersonalDataDeleteView,
+    InternalPersonalDataErasureStatusView,
     InternalPersonalDataExportView,
 )
 
@@ -132,6 +133,12 @@ urlpatterns = [
         "<uuid:user_id>/personal-data/",
         InternalPersonalDataDeleteView.as_view(),
         name="internal-personal-data-delete",
+    ),
+    # DRF-1984 (C5.3/AMD-020) — readback стирания для повтора удаления в боте.
+    path(
+        "<uuid:user_id>/personal-data/erasure-status/",
+        InternalPersonalDataErasureStatusView.as_view(),
+        name="internal-personal-data-erasure-status",
     ),
     path(
         "<uuid:user_id>/",
