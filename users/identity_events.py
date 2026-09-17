@@ -68,6 +68,9 @@ REASON_EXTERNAL_ID_COLLISION = "external_id_collision"
 REASON_SUPPORT_UNLINK = "support_unlink"
 REASON_ALREADY_UNBOUND = "already_unbound"
 REASON_EXTERNAL_IDENTITY_UNKNOWN = "external_identity_unknown"
+#: DRF-1987 — operator binding of a ``role=admin`` account refused by name.
+REASON_ADMIN_WITHOUT_ACTIVE_SALON_ROLE = "admin_without_active_salon_role"
+REASON_TARGET_IS_PLATFORM_STAFF = "target_is_platform_staff"
 
 
 #: Mutating results whose dedup key carries a GENERATION discriminator.

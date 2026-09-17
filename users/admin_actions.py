@@ -48,19 +48,23 @@ import logging
 from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.db.models import QuerySet
 from django.http import HttpResponseRedirect
 from django.template.response import TemplateResponse
 from django.urls import reverse
 
-from .models import PendingExternalIdentity, SpecialistProfile, User
+from .identity_events import REASON_TARGET_IS_PLATFORM_STAFF
+from .models import PendingExternalIdentity, SpecialistProfile, TenantUserRelationship, User
 from .services import (
     BindTargetNotFoundError,
+    BindTargetNotSalonAdminError,
     ExternalIdentityAlreadyBoundError,
     ExternalIdentityNotFoundError,
     IdentityBindingActorRequiredError,
     IdentityBindingConflictError,
     InvalidExternalUserIDError,
     bind_external_identity_by_operator,
+    bindable_target_q,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,6 +97,19 @@ MSG_SELECT_ONE = (
     "Выберите ровно одну личность: связывание — операция «одна личность → "
     "один мастер», выбрано {count}."
 )
+MSG_CHOOSE_ONE_TARGET = (
+    "Выберите ровно одного: мастера ИЛИ администратора салона — связывание "
+    "«одна личность → один аккаунт». Связывание не выполнено."
+)
+MSG_ADMIN_WITHOUT_ROLE = (
+    "Администратор не связан: у аккаунта нет активной роли администратора "
+    "ни в одном активном салоне (сначала provision_salon_admin --tenant "
+    "<slug>). Связывание не выполнено."
+)
+MSG_ADMIN_PLATFORM_STAFF = (
+    "Администратор не связан: это учётка персонала платформы "
+    "(superuser/staff) — MAX-личность в неё не ведёт. Связывание не выполнено."
+)
 MSG_SUCCESS = (
     "Связано: {external_id} → {master} ({user_id}). Теперь "
     "GET /internal/me/identity/ для этой личности вернёт is_proxy=false и "
@@ -120,11 +137,22 @@ class LinkTargetForm(forms.Form):
 
     target = forms.ModelChoiceField(
         label="Мастер (аккаунт специалиста в Ayla)",
+        required=False,
         queryset=SpecialistProfile.objects.none(),
         help_text=(
             "Показаны только активные аккаунты специалистов. Связывание "
             "одностороннее: перепривязать к другому человеку потом нельзя "
             "без отдельной операции снятия связи."
+        ),
+    )
+    admin_target = forms.ModelChoiceField(
+        label="Администратор салона (учётка role=admin)",
+        queryset=User.objects.none(),
+        required=False,
+        help_text=(
+            "Показаны только учётки с активной ролью администратора в "
+            "активном салоне (provision_salon_admin), без персонала "
+            "платформы. Выберите мастера или администратора — одного."
         ),
     )
 
@@ -140,6 +168,34 @@ class LinkTargetForm(forms.Form):
             .order_by("display_name")
         )
         self.fields["target"].label_from_instance = _target_label
+        self.fields["admin_target"].queryset = salon_admin_targets()
+        self.fields["admin_target"].label_from_instance = _admin_target_label
+
+
+def salon_admin_targets() -> QuerySet[User]:
+    """Учётки, которые операторская привязка примет как администратора салона (DRF-1987).
+
+    Условие — то же, что у сервиса (:func:`users.services.bindable_target_q`);
+    список формы только показывает, решает сервис.
+    """
+    return (
+        User.objects.filter(
+            bindable_target_q(("admin",)),
+            is_proxy=False, is_active=True, deleted_at__isnull=True,
+        )
+        .order_by("first_name", "pk")
+    )
+
+
+def _admin_target_label(user: User) -> str:
+    salons = sorted(
+        TenantUserRelationship.objects.filter(
+            user=user, role=TenantUserRelationship.Role.ADMIN,
+            is_active=True, tenant__is_active=True,
+        ).values_list("tenant__name", flat=True)
+    )
+    name = user.get_full_name() or "без имени"
+    return f"{name} — {', '.join(salons)} — id {user.pk}"
 
 
 def _target_label(profile: SpecialistProfile) -> str:
@@ -190,13 +246,27 @@ def link_to_ayla(modeladmin, request, queryset):
             context,
         )
 
-    form = LinkTargetForm(request.POST)
-    if not form.is_valid():
-        # Единственная ошибка формы — мастер не выбран или выбран не из
-        # разрешённого набора; это тот же отказ «человек не найден».
-        modeladmin.message_user(request, MSG_TARGET_NOT_FOUND, messages.ERROR)
+    picked_master = bool(request.POST.get("target"))
+    picked_admin = bool(request.POST.get("admin_target"))
+    if picked_master == picked_admin:
+        modeladmin.message_user(request, MSG_CHOOSE_ONE_TARGET, messages.ERROR)
         return None
-    target_profile = form.cleaned_data["target"]
+
+    if picked_master:
+        form = LinkTargetForm(request.POST)
+        if not form.is_valid():
+            # Мастер выбран не из разрешённого набора — это тот же отказ
+            # «человек не найден».
+            modeladmin.message_user(request, MSG_TARGET_NOT_FOUND, messages.ERROR)
+            return None
+        target_profile = form.cleaned_data["target"]
+        target_user_id = target_profile.user_id
+        target_label = target_profile.display_name
+    else:
+        # Администратор (DRF-1987): список формы — только показ, решает
+        # сервис — подделанный POST получает тот же именованный отказ.
+        target_user_id = request.POST.get("admin_target")
+        target_label = "администратор салона"
 
     # На шаге подтверждения строка ищется среди ВСЕХ прокси, а не только
     # ждущих: если её успели связать (двойной клик, вторая вкладка),
@@ -208,15 +278,15 @@ def link_to_ayla(modeladmin, request, queryset):
         )
         return None
 
-    return _perform_link(modeladmin, request, proxy, target_profile)
+    return _perform_link(modeladmin, request, proxy, target_user_id, target_label)
 
 
-def _perform_link(modeladmin, request, proxy: User, target_profile: SpecialistProfile):
+def _perform_link(modeladmin, request, proxy: User, target_user_id, target_label: str):
     external_id = proxy.username
     request_id = getattr(request, "request_id", None)
     try:
         bound = bind_external_identity_by_operator(
-            external_id, target_profile.user_id,
+            external_id, target_user_id,
             actor=request.user, request_id=request_id,
         )
     except IdentityBindingActorRequiredError:
@@ -250,20 +320,28 @@ def _perform_link(modeladmin, request, proxy: User, target_profile: SpecialistPr
             messages.ERROR,
         )
         return None
+    except BindTargetNotSalonAdminError as exc:
+        message = (
+            MSG_ADMIN_PLATFORM_STAFF
+            if exc.reason == REASON_TARGET_IS_PLATFORM_STAFF
+            else MSG_ADMIN_WITHOUT_ROLE
+        )
+        modeladmin.message_user(request, message, messages.ERROR)
+        return None
     except (BindTargetNotFoundError, InvalidExternalUserIDError):
         modeladmin.message_user(request, MSG_TARGET_NOT_FOUND, messages.ERROR)
         return None
 
     modeladmin.log_change(
         request, proxy,
-        f"Связана с мастером {target_profile.display_name} "
-        f"(user {target_profile.user_id}) действием «Связать с Ayla»",
+        f"Связана с «{target_label}» "
+        f"(user {target_user_id}) действием «Связать с Ayla»",
     )
     modeladmin.message_user(
         request,
         MSG_SUCCESS.format(
             external_id=external_id,
-            master=target_profile.display_name,
+            master=target_label,
             user_id=bound.linked_user_id,
             actor=request.user.get_username(),
         ),
