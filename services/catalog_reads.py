@@ -60,6 +60,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from django.db.models import Count, Q, QuerySet
+from services.offer_sellable import edge_refusal, offer_refusal, sellable_legacy_q, sellable_offer_q
 from django.db.models.functions import Coalesce
 
 # --------------------------------------------------------------------------- #
@@ -123,15 +124,12 @@ def specialist_service_text_q(needle: str) -> Q:
     слоях каталога. Форма предиката та же, что была у легаси-варианта,
     чтобы наблюдаемый контракт поиска не поехал.
     """
-    legacy = Q(services__is_active=True) & (
+    legacy = sellable_legacy_q("services__") & (
         Q(services__name__icontains=needle)
         | Q(services__category__slug__icontains=needle)
         | Q(services__category__name__icontains=needle)
     )
-    canonical = Q(
-        specialist_services__is_active=True,
-        specialist_services__salon_service__is_active=True,
-    ) & (
+    canonical = sellable_offer_q("specialist_services__") & (
         Q(**{f"{_CANON}__name__icontains": needle})
         | _canonical_category_text_q("slug", needle)
         | _canonical_category_text_q("name", needle)
@@ -154,10 +152,8 @@ def category_service_counts(
     """
     from services.models import Service, SpecialistService
 
-    legacy = Service.objects.filter(is_active=True, category__isnull=False)
-    canonical = SpecialistService.objects.filter(
-        is_active=True, salon_service__is_active=True,
-    )
+    legacy = Service.objects.filter(sellable_legacy_q(), category__isnull=False)
+    canonical = SpecialistService.objects.filter(sellable_offer_q())
     if specialist_ids is not None:
         legacy = legacy.filter(specialist_id__in=specialist_ids)
         canonical = canonical.filter(specialist_id__in=specialist_ids)
@@ -198,7 +194,7 @@ def category_specialist_counts() -> dict[uuid.UUID, int]:
 
     legacy = (
         Service.objects
-        .filter(is_active=True, category__isnull=False)
+        .filter(sellable_legacy_q(), category__isnull=False)
         .values_list("category_id", "specialist_id")
     )
     for category_id, specialist_id in legacy:
@@ -206,7 +202,7 @@ def category_specialist_counts() -> dict[uuid.UUID, int]:
 
     canonical = (
         SpecialistService.objects
-        .filter(is_active=True, salon_service__is_active=True)
+        .filter(sellable_offer_q())
         .annotate(resolved_category=resolved_category_id_expression("salon_service__"))
         .filter(resolved_category__isnull=False)
         .values_list("resolved_category", "specialist_id")
@@ -249,7 +245,7 @@ def _legacy_rows(specialist) -> list[CatalogService]:
     rows = specialist.services.all()
     out: list[CatalogService] = []
     for service in rows:
-        if not service.is_active:
+        if not service.is_active or offer_refusal(service.price) is not None:
             continue
         category = service.category
         out.append(CatalogService(
@@ -273,7 +269,7 @@ def _canonical_rows(specialist) -> list[CatalogService]:
     out: list[CatalogService] = []
     for link in specialist.specialist_services.all():
         salon = link.salon_service
-        if not link.is_active or not salon.is_active:
+        if edge_refusal(link) is not None:
             continue
         category = resolved_category(salon)
         out.append(CatalogService(
@@ -345,14 +341,11 @@ def annotate_catalog_services_count(qs: QuerySet) -> QuerySet:
     """
     return qs.annotate(
         _legacy_services_count=Count(
-            "services", filter=Q(services__is_active=True), distinct=True,
+            "services", filter=sellable_legacy_q("services__"), distinct=True,
         ),
         _canonical_services_count=Count(
             "specialist_services",
-            filter=Q(
-                specialist_services__is_active=True,
-                specialist_services__salon_service__is_active=True,
-            ),
+            filter=sellable_offer_q("specialist_services__"),
             distinct=True,
         ),
     ).annotate(

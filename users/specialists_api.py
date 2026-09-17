@@ -18,6 +18,7 @@ from services.catalog_reads import (
     catalog_services_for,
     catalog_services_prefetch,
 )
+from services.offer_sellable import sellable_legacy_q, sellable_offer_q
 from services.models import Service
 from tenants.distance import bbox_q, distance_km_to, distance_meters
 from tenants.wire import OfferAddressField, OfferLatitudeField, OfferLongitudeField
@@ -29,10 +30,8 @@ logger = logging.getLogger(__name__)
 # Активная бронируемая связка канонического каталога, от
 # ``SpecialistProfile``. Вынесено на уровень модуля: ``FilterSet``
 # разбирает атрибуты класса как объявления фильтров.
-_ACTIVE_CANONICAL = Q(
-    specialist_services__is_active=True,
-    specialist_services__salon_service__is_active=True,
-)
+_SELLABLE_CANONICAL = sellable_offer_q("specialist_services__")
+_SELLABLE_LEGACY = sellable_legacy_q("services__")
 
 
 # --- Mixins ---
@@ -415,7 +414,7 @@ class SpecialistFilter(FilterSet):
 
         Фолбэк, а не объединение (см. ``services.catalog_reads``).
         """
-        canonical = _ACTIVE_CANONICAL & (
+        canonical = _SELLABLE_CANONICAL & (
             Q(specialist_services__salon_service__category_id=value)
             | Q(
                 specialist_services__salon_service__category_id__isnull=True,
@@ -423,7 +422,7 @@ class SpecialistFilter(FilterSet):
             )
         )
         return queryset.filter(
-            (Q(services__category_id=value) & Q(services__is_active=True))
+            (Q(services__category_id=value) & _SELLABLE_LEGACY)
             | canonical
         ).distinct()
 
@@ -434,27 +433,27 @@ class SpecialistFilter(FilterSet):
         (``services.service_resolver.resolve_bookable_service``).
         """
         return queryset.filter(
-            (Q(services__id=value) & Q(services__is_active=True))
+            (Q(services__id=value) & _SELLABLE_LEGACY)
             | (
-                _ACTIVE_CANONICAL
+                _SELLABLE_CANONICAL
                 & Q(specialist_services__salon_service_id=value)
             )
         ).distinct()
 
     def filter_by_min_price(self, queryset: QuerySet, name: str, value: Any) -> QuerySet:
         return queryset.filter(
-            (Q(services__price__gte=value) & Q(services__is_active=True))
+            (Q(services__price__gte=value) & _SELLABLE_LEGACY)
             | (
-                _ACTIVE_CANONICAL
+                _SELLABLE_CANONICAL
                 & Q(specialist_services__price__gte=value)
             )
         ).distinct()
 
     def filter_by_max_price(self, queryset: QuerySet, name: str, value: Any) -> QuerySet:
         return queryset.filter(
-            (Q(services__price__lte=value) & Q(services__is_active=True))
+            (Q(services__price__lte=value) & _SELLABLE_LEGACY)
             | (
-                _ACTIVE_CANONICAL
+                _SELLABLE_CANONICAL
                 & Q(specialist_services__price__lte=value)
             )
         ).distinct()
