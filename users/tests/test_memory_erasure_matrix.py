@@ -14,10 +14,15 @@ delete them — the storage still needs a cell in the matrix.
 """
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from rest_framework.test import APIClient
 
 from appointments.models import Appointment
@@ -30,6 +35,7 @@ from users.personal_context_erasure import (
     default_for,
     erase_personal_context,
 )
+from users import personal_context_inference
 from users.personal_context_inference import infer_for_active_users, infer_for_user
 
 pytestmark = pytest.mark.django_db
@@ -826,3 +832,246 @@ class TestBotPromptRendererPin:
         # five are not speech and must never render as a quote.
         assert "explicit" in STATED_SOURCES
         assert backend_writes - {"explicit"} <= DERIVED_SOURCES
+
+
+# ---------------------------------------------------------------------------
+# DRF-2005 — гонка «стирание ↔ ночной пересчёт» (моделирование порядка чтений)
+# ---------------------------------------------------------------------------
+
+
+#: Провенанс «человек сам задал оба списка» — inference их пропускает, но сохраняет.
+EXPLICIT_LISTS = {"favorite_masters": "explicit", "busy_days": "explicit"}
+
+
+def _assert_tombstone(user) -> None:
+    """Tombstone из БД: 12 объявленных полей на умолчаниях и провенанс «erased» у всех."""
+    row = UserPersonalContext.objects.get(user=user)
+    _assert_all_twelve_at_default(row)
+    assert row.data_sources == {name: ERASED for name in declared_fields()}
+
+
+class TestNightlyInferenceRace:
+    """DRF-2005 — ночной ``infer_for_user``, прочитавший строку ДО стирания.
+
+    **Моделирование порядка чтений, не реальная параллельность.** Ночной проход
+    читает строку (``get_or_create``), решает по ``data_sources`` ЭТОГО экземпляра и
+    сохраняет ``favorite_masters`` / ``busy_days`` / ``data_sources`` через
+    ``update_fields`` — без ``select_for_update`` и без перечтения. Если между его
+    чтением и сохранением прошло ``erase_personal_context``, сохранение пишет
+    устаревший JSON поверх tombstone. Тест воспроизводит именно этот порядок:
+    экземпляр читается до стирания и подставляется вместо ``get_or_create``.
+
+    **xfail нельзя: красный = дефект.** Не инвертировать и не ослаблять без
+    исправления — исправление идёт одним PR с этими тестами (красное до, зелёное
+    после). Последовательный порядок держит положительная стража ниже.
+    """
+
+    @pytest.mark.parametrize(
+        "provenance", [{}, EXPLICIT_LISTS], ids=["no-provenance", "explicit-lists"]
+    )
+    def test_a_pass_that_read_the_row_before_the_erasure_keeps_it_a_tombstone(
+        self, user, ctx, provenance
+    ):
+        if provenance:
+            UserPersonalContext.objects.filter(pk=ctx.pk).update(data_sources=provenance)
+        snapshot = UserPersonalContext.objects.get(user=user)
+        # Присутствие: в прочитанном экземпляре есть что воскрешать.
+        assert snapshot.busy_days != default_for("busy_days")
+        assert snapshot.favorite_masters != default_for("favorite_masters")
+
+        erase_personal_context(user, initiator="app")
+        # Присутствие: стирание отработало — в БД сейчас tombstone.
+        _assert_tombstone(user)
+
+        with patch.object(
+            UserPersonalContext.objects, "get_or_create", return_value=(snapshot, False)
+        ) as read:
+            infer_for_user(user)
+
+        assert read.called
+        _assert_tombstone(user)
+
+    @pytest.mark.parametrize(
+        "provenance", [{}, EXPLICIT_LISTS], ids=["no-provenance", "explicit-lists"]
+    )
+    def test_a_pass_that_reads_after_the_erasure_keeps_the_tombstone(
+        self, user, ctx, provenance
+    ):
+        """Положительная стража: те же данные, порядок последовательный — tombstone держится."""
+        if provenance:
+            UserPersonalContext.objects.filter(pk=ctx.pk).update(data_sources=provenance)
+        assert UserPersonalContext.objects.get(user=user).busy_days != default_for("busy_days")
+
+        erase_personal_context(user, initiator="app")
+        _assert_tombstone(user)
+
+        infer_for_user(user)
+
+        _assert_tombstone(user)
+
+    # --- DRF-2005, раунд исправления: решение под замком, tombstone без записи ---
+    @staticmethod
+    def _context_sql(captured) -> list[str]:
+        table = UserPersonalContext._meta.db_table
+        return [q["sql"] for q in captured.captured_queries if table in q["sql"]]
+
+    def test_the_decision_is_taken_on_the_row_read_under_a_lock(self, user, ctx):
+        """Строка, по которой решает ночной проход, прочитана ``SELECT … FOR UPDATE`` до записи."""
+        with CaptureQueriesContext(connection) as captured:
+            infer_for_user(user)
+
+        sql = self._context_sql(captured)
+        updates = [i for i, q in enumerate(sql) if q.lstrip().upper().startswith("UPDATE")]
+        locked = [i for i, q in enumerate(sql) if "FOR UPDATE" in q.upper()]
+        # Присутствие: живая строка записывается — есть что защищать.
+        assert updates, sql
+        assert locked and locked[0] < updates[0], sql
+
+    def test_a_tombstone_gets_no_write_at_all(self, user, ctx):
+        """Tombstone: проход смотрит на строку и не пишет в неё ничего."""
+        erase_personal_context(user, initiator="app")
+        _assert_tombstone(user)
+
+        with CaptureQueriesContext(connection) as captured:
+            infer_for_user(user)
+
+        sql = self._context_sql(captured)
+        # Присутствие: проход прочитал строку.
+        assert [q for q in sql if q.lstrip().upper().startswith("SELECT")], sql
+        assert [q for q in sql if q.lstrip().upper().startswith("UPDATE")] == [], sql
+        _assert_tombstone(user)
+
+    def test_a_partly_redeclared_row_is_still_inferred_where_nothing_is_erased(self, user, ctx):
+        """Ранний выход — только для полного tombstone, не «после любого стирания вывод выключен».
+
+        Предел, названный честно: после стирания ``favorite_masters`` и ``busy_days``
+        помечены ``erased`` — это терминально для вывода (DRF-1366), и реальной строке
+        выводить уже нечего. Поэтому объявленное поле без пометки ``erased`` здесь
+        смоделировано снятием провенанса ``busy_days`` — так выглядит поле, добавленное
+        в модель после стирания. Субъект заново заявил ``home_district``.
+        """
+        spec = _make_specialist("93")
+        monday = datetime.now(timezone.utc) - timedelta(days=60)
+        monday -= timedelta(days=monday.weekday())
+        for i in range(8):
+            offset = (datetime.now(timezone.utc) - (monday - timedelta(days=7 * i))).days
+            _book(user, spec, day_offset=offset)
+
+        erase_personal_context(user, initiator="app")
+        _assert_tombstone(user)
+        row = UserPersonalContext.objects.get(user=user)
+        sources = dict(row.data_sources)
+        sources["home_district"] = "explicit"
+        sources.pop("busy_days")
+        UserPersonalContext.objects.filter(pk=row.pk).update(
+            home_district="Сокол", data_sources=sources
+        )
+
+        infer_for_user(user)
+
+        row = UserPersonalContext.objects.get(user=user)
+        # Присутствие: вывод работает там, где стирания нет.
+        assert row.busy_days, row.busy_days
+        assert row.data_sources["busy_days"] == "inferred"
+        # Заявленное субъектом и стёртое — не тронуты.
+        assert row.home_district == "Сокол"
+        assert row.data_sources["home_district"] == "explicit"
+        assert row.favorite_masters == []
+        assert row.data_sources["favorite_masters"] == ERASED
+
+
+def _wait_for_erasure(thread: threading.Thread, pid: dict, *, timeout: float = 15.0) -> str:
+    """Ждать, пока стирание завершится или встанет в ожидание блокировки строки.
+
+    ``"waiting"`` — бэкенд стирания ждёт замок (``pg_stat_activity.wait_event_type ==
+    'Lock'``); ``"finished"`` — поток стирания уже закончил. Детерминировано: не
+    зависит от скорости раннера, только от того, держит ли ночной проход замок.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not thread.is_alive():
+            return "finished"
+        backend = pid.get("erasure")
+        if backend is not None:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s", [backend]
+                )
+                found = cursor.fetchone()
+            if found and found[0] == "Lock":
+                return "waiting"
+        time.sleep(0.05)
+    return "timeout"
+
+
+@pytest.mark.django_db(transaction=True)
+class TestNightlyInferenceRealInterleaving:
+    """DRF-2005 — **измеренная параллельность**, два соединения Postgres, не моделирование.
+
+    Поток A — ночной ``infer_for_user``: остановлен после чтения строки (перед решением
+    по ``favorite_masters``). Поток B — ``erase_personal_context``. До исправления B
+    завершается, пока A держит прочитанную без замка строку, и A пишет устаревшее
+    поверх tombstone. После исправления B ждёт замок строки, пока A не зафиксирует
+    транзакцию, и tombstone ложится последним.
+
+    ``transaction=True`` сбрасывает базу после теста — поэтому свой класс; локально —
+    своя ``POSTGRES_DB``, чтобы не стирать посев соседей.
+    """
+
+    def test_an_erasure_during_the_pass_waits_for_it_and_lands_last(self):
+        user = User.objects.create_user(
+            username="race_owner", password="x", role="client", phone="+79995559002",
+        )
+        UserPersonalContext.objects.create(user=user, **FILLED)
+        assert UserPersonalContext.objects.get(user=user).busy_days != default_for("busy_days")
+
+        read_done = threading.Event()
+        go = threading.Event()
+        errors: list[BaseException] = []
+        pid: dict[str, int] = {}
+        original = personal_context_inference._infer_favorite_masters
+
+        def paused(ctx_row):
+            read_done.set()
+            if not go.wait(30):
+                raise TimeoutError("inference was never released")
+            return original(ctx_row)
+
+        def run_inference():
+            try:
+                infer_for_user(User.objects.get(pk=user.pk))
+            except BaseException as exc:  # noqa: BLE001 — reported by the main thread
+                errors.append(exc)
+            finally:
+                connection.close()
+
+        def run_erasure():
+            try:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_backend_pid()")
+                    pid["erasure"] = cursor.fetchone()[0]
+                erase_personal_context(User.objects.get(pk=user.pk), initiator="app")
+            except BaseException as exc:  # noqa: BLE001 — reported by the main thread
+                errors.append(exc)
+            finally:
+                connection.close()
+
+        with patch.object(personal_context_inference, "_infer_favorite_masters", paused):
+            inference = threading.Thread(target=run_inference)
+            inference.start()
+            assert read_done.wait(30), "ночной проход не дошёл до решения"
+            erasure = threading.Thread(target=run_erasure)
+            erasure.start()
+            # Состояние стирания фиксируется ДО освобождения прохода.
+            outcome = _wait_for_erasure(erasure, pid)
+            go.set()
+            inference.join(30)
+            erasure.join(30)
+
+        assert not inference.is_alive() and not erasure.is_alive()
+        assert errors == [], errors
+        assert outcome == "waiting", (
+            f"стирание: {outcome} — оно не ждало замок, пока ночной проход держал "
+            "прочитанную строку"
+        )
+        _assert_tombstone(user)
