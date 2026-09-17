@@ -8,9 +8,11 @@ from django.conf import settings
 from django.contrib import admin, messages
 from django.contrib.admin import helpers as admin_helpers
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+from django.contrib.auth.forms import AdminUserCreationForm
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.shortcuts import render
+from django.urls import reverse
 from django.utils.html import format_html
 
 from appointments.admin import SpecialistWorkingHoursInline
@@ -454,6 +456,98 @@ class TenantMastersInline(admin.StackedInline):
 
 # ─── UserAdmin ───────────────────────────────────────────────────────────────
 
+USER_ADD_IDENTITY_HELP = (
+    'Перед созданием форма ищет уже заведённого человека по телефону и по '
+    'email (регистр email не важен). Если такой есть — второго она не '
+    'заведёт, а покажет, кого нашла: тогда идите к нему и привязывайте '
+    '(роль, салон в блоке «Мастера салона» на форме салона), а не '
+    'создавайте нового. Без телефона обязателен email: человека без того '
+    'и другого не с чем сравнить, и второй такой же завёлся бы молча.'
+)
+
+
+class UserAddForm(AdminUserCreationForm):
+    """Форма «добавить пользователя» находит человека, а не дублирует его
+    (DRF-2067, аудит ``IDENTITY_AUDIT_CATALOG_2026-09-16`` §г).
+
+    Штатная ``BaseUserAdmin`` на дубль человека не проверяла ничего.
+    Единственная защита — ``User.phone`` ``unique=True`` — с ``null=True``
+    защитой не является: ``NULL ≠ NULL``, и человек без телефона заводился
+    повторно сколько угодно раз. Замер до правки: второй ``User`` без
+    телефона с тем же email — 302 и две строки на одного человека.
+
+    Один сторож в одном месте — здесь, в ``clean()`` формы добавления.
+    Не на модели: ограничение на модель ломается о бэкфилл существующих
+    строк (тот же довод, что у d1d706a5 для расписания), а форма
+    закрывает именно ту дверь, через которую заводят руками. Не в
+    ``_post_clean``: тут ничего не подхватывается, подхват сделал бы из
+    «создать» — «изменить чужого», а это отдельное решение оператора.
+
+    Ищет по набору — телефон И email; совпадение по любому из них — отказ,
+    который называет найденного человека, его состояние и ведёт на его
+    карточку. Внешняя личность (SocialAccount, proxy-привязка) на этой
+    форме не вводится, и потому по ней здесь не ищется — её путь
+    ``bind_external_identity``; это названный предел, не пробел.
+
+    Пустой телефон назван: без телефона обязателен email. Иначе форма
+    не может отличить нового человека от заведённого, и молчаливый дубль
+    остался бы по построению — то, ради чего сторож и ставится.
+    """
+
+    def clean(self):
+        cleaned = super().clean()
+        phone = (cleaned.get('phone') or '').strip() or None
+        email = (cleaned.get('email') or '').strip()
+        cleaned['phone'] = phone
+        if 'phone' in self.errors or 'email' in self.errors:
+            return cleaned
+
+        if phone is None and not email:
+            self.add_error('phone', ValidationError(
+                'Укажите телефон или email. Без того и другого человека '
+                'не с чем сравнить с уже заведёнными, и второй такой же '
+                'завёлся бы молча.',
+                code='no_identity_to_match',
+            ))
+            return cleaned
+
+        # Точное совпадение по телефону — как у ``provision_salon_admin``
+        # (``users/management/commands/provision_salon_admin.py``): у
+        # каталога нет нормализатора номеров, и второй способ сравнения
+        # здесь завёл бы два расходящихся понятия «тот же телефон».
+        # Удалённые и неактивные — тоже люди: заводить второго нельзя,
+        # оператор идёт восстанавливать, и отказ называет состояние.
+        people = User.objects.order_by('date_joined')
+        existing = people.filter(phone=phone).first() if phone else None
+        if existing is not None:
+            self.add_error('phone', self._found_error('phone', existing))
+            return cleaned
+        existing = people.filter(email__iexact=email).first() if email else None
+        if existing is not None:
+            self.add_error('email', self._found_error('email', existing))
+        return cleaned
+
+    @staticmethod
+    def _found_error(field: str, existing: User) -> ValidationError:
+        by = 'таким телефоном' if field == 'phone' else 'таким email'
+        if existing.deleted_at is not None:
+            state = 'удалён'
+        elif not existing.is_active:
+            state = 'заблокирован'
+        else:
+            state = 'активен'
+        url = reverse('admin:users_user_change', args=[existing.pk])
+        # ``format_html`` без ``params`` у ``ValidationError``: подстановка
+        # параметров вернула бы обычную строку, и ссылка ушла бы на экран
+        # экранированной. Все значения экранирует сам ``format_html``.
+        return ValidationError(format_html(
+            'Человек с {} уже заведён: <a href="{}">{}</a> ({}, {}). '
+            'Второго не создаём — откройте его карточку и привяжите: '
+            'роль здесь, салон — в блоке «Мастера салона» на форме салона.',
+            by, url, existing.username, existing.get_role_display(), state,
+        ), code='person_already_exists')
+
+
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
     inlines = [ProfileInline]
@@ -476,8 +570,12 @@ class UserAdmin(BaseUserAdmin):
         # audited operations per AYLA-DEC-0016 §4).
         ('Identity binding', {'fields': ('is_proxy', 'linked_user')}),
     )
+    add_form = UserAddForm
     add_fieldsets = BaseUserAdmin.add_fieldsets + (
-        ('BeautyGO', {'fields': ('role', 'phone')}),
+        ('BeautyGO', {
+            'fields': ('role', 'phone', 'email'),
+            'description': USER_ADD_IDENTITY_HELP,
+        }),
     )
 
     @admin.display(description='Имя')
