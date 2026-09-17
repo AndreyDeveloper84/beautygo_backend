@@ -344,6 +344,8 @@ class TestServedOperationsDoNotStopTheProduct:
             op.READ_PROFILE, op.WRITE_SPECIALIST_PROFILE, op.UPLOAD_MEDIA,
             # DRF-1857 — мастер читает отзывы о себе: чтение, не разрушение и не экспорт.
             op.REVIEW_READ,
+            # DRF-1984 — статус стирания: состояние строки без значений, не раскрывает и не разрушает.
+            op.ERASURE_STATUS_READ,
         ):
             assert not policy.stops_when_unauditable(served)
 
@@ -726,6 +728,7 @@ class TestGuardCoversTheWholeSurface:
         "/api/v1/internal/specialists/{subject}/portfolio/",
         "/api/v1/internal/specialists/{subject}/portfolio/{request_id}/",
         "/api/v1/internal/specialists/{subject}/reviews/",  # DRF-1857 — «Мои отзывы»
+        "/api/v1/internal/users/{subject}/personal-data/erasure-status/",  # DRF-1984 — readback стирания
     ]
 
     def test_the_list_above_is_every_guarded_view_not_a_hand_picked_subset(self):
@@ -786,7 +789,7 @@ class TestGuardCoversTheWholeSurface:
             "guarded_not_listed": sorted(c.__name__ for c in guarded - listed),
             "listed_not_guarded": sorted(c.__name__ for c in listed - guarded),
         }
-        assert len(guarded) == 15
+        assert len(guarded) == 16
 
     @pytest.mark.parametrize("template", ROUTES)
     def test_route_is_audited(self, template):
