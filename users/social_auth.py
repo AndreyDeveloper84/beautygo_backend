@@ -106,7 +106,27 @@ def verify_vk_token(token: str) -> SocialUserInfo:
         raise SocialAuthTokenError("VK API unavailable")
 
     if "error" in data:
-        logger.warning("VK token invalid: %s", data["error"])
+        # DRF-2034: в лог уходят только НАЗВАННЫЕ нами поля, а не объект
+        # целиком. Форму `data["error"]` задаём не мы: сегодня в нём три
+        # поля, завтра провайдер добавит четвёртое — и наш лог изменился бы
+        # без единой правки с нашей стороны. Это неограниченная поверхность
+        # по построению, а не по сегодняшнему содержимому.
+        #
+        # По той же причине не предполагается и словарь: `response.json()`
+        # отдаёт объект JSON как `dict`, но провайдер волен прислать строку,
+        # и тогда `.get` бросил бы `AttributeError` — чистый отказ стал бы
+        # 500. Ветка else печатает ТИП, но не значение.
+        vk_error = data["error"]
+        if isinstance(vk_error, dict):
+            logger.warning(
+                "vk.token_invalid error_code=%s error_msg=%s",
+                vk_error.get("error_code"),
+                vk_error.get("error_msg"),
+            )
+        else:
+            logger.warning(
+                "vk.token_invalid error_shape=%s", type(vk_error).__name__
+            )
         raise SocialAuthTokenError()
 
     user = data["response"][0]
