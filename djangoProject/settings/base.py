@@ -549,6 +549,13 @@ GOAL_ANKETA_ENABLED = (
 # SMS.RU Configuration
 SMS_RU_API_ID = os.environ.get("SMS_RU_API_ID", "")
 SMS_ENABLED = os.environ.get("SMS_ENABLED", "false").lower() == "true"
+
+# DRF-2101 — Plan Lite (§49): план из 1–3 действий из цели, adherence без
+# наблюдений тела. Default CLOSED: включает главное окно на стенде после
+# проверки владельцем. Выключен → писатель отвечает 404 PLAN_LITE_DISABLED
+# (штатный отказ, не 5xx — общий breaker бота считает постоянный 5xx
+# аварией), чтение отдаёт plan_lite: null.
+PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() == "true"
 SMS_RU_SENDER = os.environ.get("SMS_RU_SENDER", "")  # Empty = default sender
 SMS_RU_TIMEOUT = 10  # HTTP timeout in seconds
 

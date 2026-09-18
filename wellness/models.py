@@ -112,6 +112,26 @@ class PersonalPlan(models.Model):
         choices=Status.choices,
         default=Status.ACTIVE,
     )
+    # DRF-2101 (Plan Lite, §49) — план держит цель САМ: ссылка на уже
+    # данную ``goals.ClientGoal`` (та живёт под своим основанием) и её ключ
+    # снимком для чтения без join. Не DesiredOutcome: тот пишется только
+    # через ``record_outcome`` под гейтом D (GOALS-R6), а §49 санкционировал
+    # план из действий, не хранение результата. SET_NULL, не CASCADE:
+    # ``PlanAction.plan`` — PROTECT, и каскад из цели в план упал бы на нём;
+    # план переживает снятие цели со своим ``goal_key``.
+    goal = models.ForeignKey(
+        "goals.ClientGoal",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="plans",
+    )
+    goal_key = models.SlugField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Снимок ClientGoal.goal_key на момент составления плана (Plan Lite)",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     closed_at = models.DateTimeField(null=True, blank=True)
 
@@ -378,6 +398,10 @@ class PlanAction(models.Model):
     class ActionType(models.TextChoices):
         LOG_FOOD = "log_food", "Запись питания"
         LOG_WATER = "log_water", "Запись воды"
+        # DRF-2101 — расширение по решению владельца §49 (Plan Lite):
+        # «записаться на услугу под цель». Факт — бронь, не визит и не
+        # результат визита.
+        BOOK_SERVICE = "book_service", "Запись на услугу"
 
     class Cadence(models.TextChoices):
         PER_DAY = "per_day", "Раз в день"

@@ -182,6 +182,7 @@ def person(master, service):
     from wellness.models import (
         DesiredOutcome,
         PersonalPlan,
+        PlanAction,
         PlanOutcomeLink,
         ProgressObservation,
     )
@@ -277,6 +278,10 @@ def person(master, service):
     )
     plan = PersonalPlan.objects.create(user=u)
     PlanOutcomeLink.objects.create(plan=plan, outcome=outcome)
+    # DRF-2101 — обязательство плана (PROTECT на plan): без него стирание
+    # плана ни разу не встречало PlanAction, и шаг «сперва обязательства»
+    # был бы не проверен.
+    PlanAction.objects.create(plan=plan, action_type="log_food", cadence="per_week", target_count=3)
     first = ProgressObservation.objects.create(
         user=u, observation_type=ProgressObservation.ObservationType.WEIGHT,
         value_numeric=Decimal("60"), observed_at=now,
