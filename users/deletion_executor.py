@@ -520,6 +520,7 @@ def _erase_catalog(user) -> dict:
     from wellness.models import (
         DesiredOutcome,
         PersonalPlan,
+        PlanAction,
         PlanOutcomeLink,
         ProgressObservation,
     )
@@ -564,6 +565,11 @@ def _erase_catalog(user) -> dict:
     # связи план↔цель снимаются первыми, наблюдения удаляются набором.
     _delete("wellness.PlanOutcomeLink", PlanOutcomeLink.objects.filter(plan__user=user))
     _delete("wellness.PlanOutcomeLink", PlanOutcomeLink.objects.filter(outcome__user=user))
+    # DRF-2101 — обязательства плана: PROTECT на PlanAction.plan, поэтому
+    # раньше самого плана. До Plan Lite писателей PlanAction в бою не было,
+    # и этот шаг ни разу не понадобился; с первым планом без него стирание
+    # падало бы ProtectedError.
+    _delete("wellness.PlanAction", PlanAction.objects.filter(plan__user=user))
     _delete("wellness.PersonalPlan", PersonalPlan.objects.filter(user=user))
     _delete("wellness.DesiredOutcome", DesiredOutcome.objects.filter(user=user))
     # PROTECT на superseded_by внутри набора: снять указатели, потом строки.
@@ -839,7 +845,7 @@ def _residue(user) -> dict[str, int]:
         TenantUserRelationship,
         UserPersonalContext,
     )
-    from wellness.models import DesiredOutcome, PersonalPlan, ProgressObservation
+    from wellness.models import DesiredOutcome, PersonalPlan, PlanAction, ProgressObservation
     from ai.models import Conversation
     from analytics.models import AnalyticsEvent
     from recommendation.models import ContextSnapshot, RecommendationSet
@@ -864,6 +870,7 @@ def _residue(user) -> dict[str, int]:
         "goals.GoalAnketaRun": GoalAnketaRun.objects.filter(client=user),
         "wellness.DesiredOutcome": DesiredOutcome.objects.filter(user=user),
         "wellness.PersonalPlan": PersonalPlan.objects.filter(user=user),
+        "wellness.PlanAction": PlanAction.objects.filter(plan__user=user),
         "wellness.ProgressObservation": ProgressObservation.objects.filter(user=user),
         "ai.Conversation": Conversation.all_objects.filter(user=user),
         "notifications.Notification": Notification.objects.filter(user=user),
