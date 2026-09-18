@@ -22,14 +22,22 @@ COMMITMENT_LOOKBACK_DAYS = 60
 
 
 def get_commitment_days(user) -> int:
-    """Return the count of distinct UTC days with ≥1 FoodLog in last 60 days."""
+    """Return the count of distinct LOCAL days with ≥1 FoodLog in last 60 days.
+
+    DRF-2099 — сутки по поясу человека (``NutritionProfile.timezone``, иначе
+    UTC): тот же ответ, что у недельного списка ``diary/days/``. Без пояса —
+    UTC, как было.
+    """
+    from nutrition.services.diary_days_service import person_timezone
+
+    tz = person_timezone(user.pk)
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=COMMITMENT_LOOKBACK_DAYS)
 
     distinct = (
         FoodLog.objects
         .filter(user=user, logged_at__gte=start, logged_at__lte=end)
-        .annotate(day=TruncDate("logged_at", tzinfo=timezone.utc))
+        .annotate(day=TruncDate("logged_at", tzinfo=tz))
         .values("day")
         .distinct()
         .count()
