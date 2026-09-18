@@ -110,6 +110,7 @@ USE_REGISTRY: dict[str, tuple[int, str]] = {
     "tenants/distance.py": (1, "place.address — сам offer_address"),
     "tenants/management/commands/geocode_locations.py": (5, "ServiceLocation.address"),
     "tenants/management/commands/promote_tenant_location.py": (3, "Tenant.address → ServiceLocation(address=)"),
+    "tenants/master_places.py": (4, "ServiceLocation.address — своё место соло-мастера, путь записи (DRF-1803)"),
     "tenants/service_location.py": (2, "ServiceLocation.address (self)"),
     "users/home_api.py": (1, "s.address — кандидат движка (DTO)"),
     "users/internal_catalog_api.py": (1, "getattr(obj.tenant, 'address') — адрес салона"),

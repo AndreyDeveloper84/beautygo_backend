@@ -615,6 +615,14 @@ SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
     "internal-specialist-publication": (
         "users/tests/test_publication_m4_1796.py::TestPublish"
     ),
+    # DRF-1803 (M11) — место соло-мастера: чужой workspace → 403, салон → 409,
+    # чужое место или зона → 404; каждый отказ — рядом с положительной половиной.
+    "internal-specialist-service-locations": (
+        "tenants/tests/test_master_places_1803.py::TestSubject"
+    ),
+    "internal-specialist-service-location": (
+        "tenants/tests/test_master_places_1803.py::TestSubject"
+    ),
 }
 
 _SPECIALIST_ROUTE_RE = re.compile(
