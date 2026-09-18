@@ -31,7 +31,8 @@ from django.conf import settings
 from django.db.models import Sum
 from django.db.models.functions import TruncDate
 
-from nutrition.models import FoodLog
+from nutrition.models import FoodLog, NutritionProfile
+from nutrition.services.targets_state import calories_confirmed
 from nutrition.services.water_service import WaterService
 
 
@@ -154,11 +155,21 @@ class NutritionSummaryService:
         # показать «0 из 0 ккал · 0 %». Это не «ориентира нет», это
         # ориентир ноль. Отсутствие доезжает отсутствием (§65, §82).
         #
-        # Профиль умеет считать калории сам (``daily_kcal`` от BMR), но
-        # подставить ЕГО тоже нельзя: методика утверждена только
-        # 09.09.2026 (§85 — Миффлин — Сан Жеор, ±10%), и её реализация
-        # это отдельный срез со своими стоп-сценариями.
+        # Профиль умеет считать калории сам (``daily_kcal``), и с DRF-2097
+        # считает по утверждённой методике §85 (``mifflin_st_jeor_v2``).
+        # DRF-1844 (F1): ориентир уезжает в сводку ТОЛЬКО под предикатом
+        # происхождения по виду — ``calories_confirmed`` (F1(б), DRF-1929:
+        # ``ayla_calculated`` / ``user_entered``), тем же, каким читается
+        # ориентир по жидкости. Предложение (``ayla_proposed``), «нет» и
+        # ``unknown_legacy`` — по-прежнему отсутствие: человек ещё ничего не
+        # подтверждал, и показать ему «осталось N» от неподтверждённого
+        # числа значило бы подтвердить за него. Число — из профиля, не
+        # константа: сторож ``test_targets_stay_absent`` подстановку числа
+        # запрещает, а чтение под предикатом происхождения — нет.
         calories_goal: int | None = None
+        profile = NutritionProfile.objects.filter(user_id=user_id).first()
+        if calories_confirmed(profile) and profile is not None and profile.daily_kcal:
+            calories_goal = int(profile.daily_kcal)
 
         ai_comment: str | None = None
         if with_comment:
