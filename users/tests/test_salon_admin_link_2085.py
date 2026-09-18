@@ -386,6 +386,75 @@ class TestTenantIsolation:
         assert first.created and _fresh_users() == 1 and _turs(other_salon) == 0
 
 
+# ─── удаление аккаунта ──────────────────────────────────────────────────────
+
+
+class _BotOk:
+    def confirm(self, **kw):
+        from users.deletion_executor import BotConfirmation
+
+        return BotConfirmation(True, {"all_ok": True, "steps": ["memory_delete"], "flag_cleared": True})
+
+
+class TestAccountDeletion:
+    def test_d1_deleting_the_admin_account_keeps_the_audit_row_without_the_person(self, client, salon):
+        """Реестр удаления: users.SalonAdminLinkRequest.user — ANONYMISE. Строка остаётся
+        (след операции оператора), user → NULL, MAX-идентификатор переименован вместе с прокси."""
+        from users.deletion_executor import execute, undecided_pointers
+        from users.deletion_requests import ensure_deletion_request
+
+        assert undecided_pointers() == {}  # новая таблица решена, пайплайн не закрыт
+        r = client.post(_url(salon.slug), _body(), format="json")
+        assert r.status_code == 201, r.content
+        admin_user = User.objects.get(id=r.json()["data"]["ayla_user_id"])
+        proxy = User.objects.get(username=EXTERNAL)
+        row = SalonAdminLinkRequest.objects.get()
+        assert row.user_id == admin_user.id and row.external_user_id == EXTERNAL
+
+        out = execute(ensure_deletion_request(admin_user, initiator="bot").request, bot_client=_BotOk())
+
+        assert out.completed, out.failure_reason
+        assert out.steps["anonymised"]["users.SalonAdminLinkRequest.user"] == 1
+        assert out.steps["anonymised"]["users.SalonAdminLinkRequest.external_user_id"] == 1
+        row.refresh_from_db()
+        assert row.user_id is None
+        assert row.external_user_id == f"deleted:{proxy.pk}" and "2085001" not in row.external_user_id
+        assert (row.tenant_id, row.actor, row.correlation_id, row.result) == (
+            salon.id, ACTOR, "corr-2085-1", "created",
+        )
+        proxy.refresh_from_db()
+        assert proxy.username == f"deleted:{proxy.pk}" and proxy.linked_user_id is None
+        assert not TenantUserRelationship.objects.filter(user=admin_user, is_active=True).exists()
+
+    def test_d2_a_row_left_pointing_at_the_person_is_incomplete_and_rolls_back(self, client, salon, monkeypatch):
+        """Положительный сторож полноты: шаг «забыл» снять указатель — FAILED, не COMPLETED."""
+        from django.db.models import QuerySet
+
+        from users.deletion_executor import execute
+        from users.deletion_requests import ensure_deletion_request
+        from users.models import DeletionRequest
+
+        assert client.post(_url(salon.slug), _body(), format="json").status_code == 201
+        admin_user = User.objects.get(username__startswith=USERNAME_PREFIX)
+        real_update = QuerySet.update
+
+        def _skip_for_link_rows(self, **kwargs):
+            if self.model is SalonAdminLinkRequest:
+                return 0
+            return real_update(self, **kwargs)
+
+        monkeypatch.setattr(QuerySet, "update", _skip_for_link_rows)
+        req = ensure_deletion_request(admin_user, initiator="bot").request
+        out = execute(req, bot_client=_BotOk())
+
+        req.refresh_from_db()
+        assert out.status == req.status == DeletionRequest.Status.FAILED
+        assert "SalonAdminLinkRequest" in req.failure_reason
+        assert SalonAdminLinkRequest.objects.get().user_id == admin_user.id  # откат: ничего не стёрто
+        admin_user.refresh_from_db()
+        assert admin_user.username.startswith(USERNAME_PREFIX)
+
+
 # ─── стражи ─────────────────────────────────────────────────────────────────
 
 
