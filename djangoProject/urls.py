@@ -99,6 +99,12 @@ urlpatterns = [
     # DRF-1344 — wellness-context read для решающего слоя бота: только
     # коды состояний (никогда значения наблюдений), fail-closed через
     # гейты wellness/services.py. Аддитивная поверхность.
+    # DRF-2101 — Plan Lite (§49): писатель плана из действий; чтение — полем
+    # plan_lite в wellness-context. Под флагом PLAN_LITE_ENABLED.
+    path(
+        'api/v1/internal/me/plan-lite/',
+        include('wellness.plan_lite_urls'),
+    ),
     path(
         'api/v1/internal/me/wellness-context/',
         include('wellness.urls'),

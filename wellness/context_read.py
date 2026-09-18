@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .models import DesiredOutcome, PersonalPlan, PlanOutcomeLink
+from .plan_lite import plan_lite_payload
 from .progress import compute_outcome_progress
 from .services import Purpose, body_observation_gate, goal_intention_gate
 
@@ -66,11 +67,19 @@ def build_wellness_context(user: User) -> dict[str, Any]:
     gate_d = goal_intention_gate(None, purpose=Purpose.PROCESSING)
     gate_o = body_observation_gate(None, purpose=Purpose.PROCESSING)
 
+    # DRF-2101 — Plan Lite стоит РЯДОМ с гейтами, не за ними: план из
+    # действий без наблюдений тела (гейт O не про него — хранить нечего) и
+    # без DesiredOutcome (гейт D не про него — результат не пишется). В
+    # документе — ключ цели и факты действий за текущее ведро, ни текста,
+    # ни значений. Флаг выключен или плана нет → null.
+    plan_lite = plan_lite_payload(user)
+
     if not (gate_d.allowed and gate_o.allowed):
         return {
             "plan": None,
             "outcomes": [],
             "gated": {"gate_d": gate_d.reason_code, "gate_o": gate_o.reason_code},
+            "plan_lite": plan_lite,
         }
 
     outcomes = DesiredOutcome.objects.filter(
@@ -80,4 +89,5 @@ def build_wellness_context(user: User) -> dict[str, Any]:
         "plan": _plan_payload(user),
         "outcomes": [_outcome_payload(outcome) for outcome in outcomes],
         "gated": None,
+        "plan_lite": plan_lite,
     }
