@@ -1154,3 +1154,64 @@ class CrossDomainShownRule(models.Model):
 
     def __str__(self) -> str:
         return f"{self.rule.rule_id} → user {self.user_id} ({self.user_action})"
+
+
+class SavedMeal(models.Model):
+    """Избранное блюдо — серверный источник, не устройство (DRF-2092, F12).
+
+    Строка принадлежит человеку (``user``) и переживает переустановку
+    приложения: тот же внешний идентификатор из новой сессии читает тот же
+    список. Хранится снимок оценки на момент сохранения (порция в граммах и
+    калории/БЖУ), а не ссылка на справочник: справочник может измениться, а
+    «то, что я сохранил» — нет.
+
+    ``source_food_log`` — запись дневника, из которой блюдо сохранили
+    («сохранить в избранное» из записи); ``SET_NULL`` — запись живёт своей
+    жизнью (правка, удаление в окне), избранное её не держит.
+
+    Удаление мягкое (``deleted_at``): строка скрыта из списка, а не стёрта.
+    Стирает её только erasure-исполнитель вместе с личностью
+    (``users.deletion_executor``, реестр ``DELETE``) — включая мягко
+    удалённые: «скрыта» не значит «забыта».
+
+    Повтор того же блюда с той же порцией — не дубль: частичная уникальность
+    среди живых строк, а ручка возвращает существующую.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="saved_meals",
+    )
+    dish_name = models.CharField(max_length=200)
+    #: Порция в граммах — как её видит человек, не множитель базовых 100 г.
+    portion_g = models.FloatField()
+    calories = models.FloatField(default=0.0)
+    protein_g = models.FloatField(null=True, blank=True)
+    fat_g = models.FloatField(null=True, blank=True)
+    carbs_g = models.FloatField(null=True, blank=True)
+    source_food_log = models.ForeignKey(
+        FoodLog,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="saved_meals",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Saved Meal"
+        verbose_name_plural = "Saved Meals"
+        indexes = [models.Index(fields=["user", "deleted_at", "-created_at"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "dish_name", "portion_g"],
+                condition=models.Q(deleted_at__isnull=True),
+                name="uq_saved_meal_live_dish_portion",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.dish_name} {self.portion_g:g} г (user {self.user_id})"
