@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import date, time, timedelta
 
 from django import forms
-from django.conf import settings
 from django.contrib import admin, messages
 from django.contrib.admin import helpers as admin_helpers
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
@@ -318,7 +317,9 @@ def _invalidate_specialist_slots(specialist_id) -> None:
 
     from users.schedule_api import _invalidate_slots
 
-    max_ahead = getattr(settings, 'BOOKING_MAX_AHEAD_DAYS', 60)
+    from appointments.domain.booking_window import booking_horizon_days
+
+    max_ahead = booking_horizon_days()
     today = date.today()
     _invalidate_slots(specialist_id, today, today + timedelta(days=max_ahead))
 

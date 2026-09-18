@@ -292,6 +292,7 @@ def compute_specialist_day_slots(
     from appointments.application.services.availability_query_service import (
         AvailabilityQueryService,
     )
+    from appointments.domain.booking_window import booking_horizon_end
 
     if not service_id:
         return None, {
@@ -352,6 +353,18 @@ def compute_specialist_day_slots(
             'message': 'date must be YYYY-MM-DD',
         }
 
+    # DRF-2081: горизонт бронирования — тот же источник и то же мгновение, что
+    # у политики создания записи. День целиком за горизонтом не считается и
+    # отвечает пустотой С ПРИЧИНОЙ: пустой день без причины читался бы как
+    # выходной, а 4xx ломал бы 14-дневный фан-аут бота и экран мобильного.
+    horizon_end = booking_horizon_end()
+    if slot_date > horizon_end.astimezone(specialist_tz).date():
+        return {
+            'date': slot_date.isoformat(),
+            'slots': [],
+            'unavailable_reason': 'beyond_booking_horizon',
+        }, None
+
     result = AvailabilityQueryService().get_day_availability(
         GetAvailabilityDTO(
             specialist_id=specialist.pk,
@@ -367,9 +380,12 @@ def compute_specialist_day_slots(
     if not result.is_working_day:
         available: list[str] = []
     else:
+        # Граничный день: слот позже мгновения горизонта запись всё равно
+        # отказала бы (``DefaultBookingWindowPolicy``) — не показываем.
         available = [
             slot.start_at.astimezone(specialist_tz).isoformat()
             for slot in result.slots
+            if slot.start_at <= horizon_end
         ]
 
     return {'date': slot_date.isoformat(), 'slots': available}, None
