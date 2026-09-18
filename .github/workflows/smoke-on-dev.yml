@@ -47,8 +47,9 @@ name: Smoke tests on dev VPS
 # rather than cancels (`cancel-in-progress: false`).
 #
 # Cron-only triggers respect the workflow definition on the default
-# branch (master), so changes here reach the schedule only after the
-# dev→master sync.
+# branch — which is `dev` (`gh repo view`, 18.09.2026; master lags dev by
+# hundreds of commits and takes no part), so a merge into dev reaches the
+# schedule directly.
 
 on:
   workflow_dispatch:
