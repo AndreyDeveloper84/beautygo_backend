@@ -5,8 +5,12 @@
 
 * ``deploy.sh`` (руками, runbook §1.1) — ``docker compose up -d``, а entrypoint
   web-контейнера сам делает ``migrate`` при старте;
-* ``.github/workflows/smoke-on-dev.yml`` (каждое утро 04:00 UTC) — явный
-  ``migrate`` после ``git reset --hard origin/dev``;
+* ``.github/workflows/smoke-on-dev.yml`` (каждое утро 04:00 UTC) — ДО
+  DRF-2088 делал явный ``migrate`` после ``git reset --hard origin/dev``, то
+  есть применял схему невыложенного кода к базе пилота под видом проверки.
+  С DRF-2088 smoke схему не трогает и дерево хоста не двигает — проверка не
+  меняет то, что проверяет; узел ниже держит именно это отсутствие, а не
+  снимок, который стал бы точкой отката для действия, которого больше нет;
 * job ``deploy`` внутри ``.github/workflows/ci.yml`` (push в dev, DRF-1363) —
   ``up -d --force-recreate web`` в шаге 3/4, и entrypoint мигрирует при старте.
   Первый замер этот путь пропустил: искал ``deploy*.yml``, а выкладка живёт
@@ -64,17 +68,29 @@ def test_deploy_sh_snapshots_before_the_containers_come_up() -> None:
     assert snap < up, f"снимок ({snap}) стоит ПОСЛЕ up -d ({up}) — entrypoint уже смигрировал"
 
 
-def test_the_smoke_workflow_snapshots_before_migrate() -> None:
+def test_the_smoke_workflow_neither_migrates_nor_moves_the_host_tree() -> None:
+    """DRF-2088: smoke только читает — схема принадлежит выкладке.
+
+    ПРИСУТСТВИЕ впереди: шаг по ssh есть и зовёт pytest в контейнере —
+    иначе «нет migrate» было бы зелено и на пустом workflow. ОТСУТСТВИЕ на
+    том же шаге: ни ``manage.py migrate``, ни ``git reset --hard``, ни
+    ``docker compose cp`` исходников, ни ``seed_beverages`` — каждое из них
+    делало состояние пилота продуктом проверки (18.09: overlay из dev поверх
+    образа дал 69 красных одним ModuleNotFoundError).
+    """
     doc = yaml.safe_load(SMOKE.read_text(encoding="utf-8"))
     steps = doc["jobs"]["smoke"]["steps"]
-    host = next((s for s in steps if "pg_snapshot_before_deploy.sh" in str(s.get("with", {}))), None)
-    assert host is not None, "smoke-on-dev не зовёт снимок — утренний migrate идёт без точки отката"
+    host = next((s for s in steps if "pytest" in str(s.get("with", {}).get("script", ""))), None)
+    assert host is not None, "в smoke-on-dev не осталось шага, зовущего pytest — проверять нечего"
 
     lines = _code(host["with"]["script"])
-    snap = _index(lines, "pg_snapshot_before_deploy.sh")
-    migrate = _index(lines, "manage.py migrate")
-    assert migrate != -1, "шаг перестал мигрировать — проверять нечего"
-    assert snap < migrate, f"снимок ({snap}) стоит ПОСЛЕ migrate ({migrate})"
+    assert _index(lines, "docker compose exec -T web pytest") != -1
+    for forbidden in ("manage.py migrate", "git reset --hard", "docker compose cp", "seed_beverages"):
+        assert _index(lines, forbidden) == -1, f"smoke снова делает «{forbidden}» — проверка меняет то, что проверяет"
+    # Гейт деплоя: та же группа concurrency, что у job deploy в ci.yml —
+    # smoke не идёт поверх пересоздания контейнеров.
+    assert doc["jobs"]["smoke"]["concurrency"]["group"] == "deploy-dev-vps"
+    assert doc["jobs"]["smoke"]["concurrency"]["cancel-in-progress"] is False
 
 
 CI = REPO / ".github" / "workflows" / "ci.yml"
