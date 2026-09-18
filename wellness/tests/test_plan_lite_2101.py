@@ -343,3 +343,29 @@ class TestLegacyAdherenceOnPlanLite:
 
         assert {r.action_type for r in rows} == {"log_food", "book_service"}
         assert all(r.fulfilled_count == 0 for r in rows)
+
+
+# ─── PR-1b: goal_id необязателен — берётся активная цель вызывающего ─────────
+
+
+class TestGoalIdOptional:
+    def test_post_without_goal_id_uses_the_callers_active_goal(self, owner, goal) -> None:
+        resp = _api().post(PLAN_URL, {"actions": [FOOD_3_PER_WEEK]}, format="json")
+
+        assert resp.status_code == 201, resp.content[:400]
+        plan = PersonalPlan.objects.get(user=owner)
+        assert plan.goal_id == goal.id and plan.goal_key == "tone_up"
+        assert resp.json()["data"]["goal_key"] == "tone_up"
+
+    def test_post_without_goal_id_and_without_an_active_goal_is_404(self, owner) -> None:
+        resp = _api().post(PLAN_URL, {"actions": [FOOD_3_PER_WEEK]}, format="json")
+
+        assert resp.status_code == 404, resp.content[:400]
+        assert resp.json()["error"]["code"] == "NOT_FOUND"
+        assert PersonalPlan.objects.count() == 0
+
+    def test_post_with_a_malformed_goal_id_is_still_400(self, owner, goal) -> None:
+        resp = _api().post(PLAN_URL, {"goal_id": "not-a-uuid", "actions": [FOOD_3_PER_WEEK]}, format="json")
+
+        assert resp.status_code == 400
+        assert PersonalPlan.objects.count() == 0
