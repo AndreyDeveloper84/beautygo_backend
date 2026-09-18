@@ -55,18 +55,18 @@ from typing import Any
 from django.db import transaction
 
 from nutrition.models import NutritionProfile
-from nutrition.services.nutrition_profile_service import (
+from nutrition.services.nutrition_profile_service import (  # noqa: F401 — re-exported names
+    CALORIES_HARD_FLOOR_KCAL,
+    CALORIES_WARN_BELOW_KCAL,
     DEFAULT_ACTIVITY,
+    MAINTENANCE_DEVIATION_RATIO,
+    WARN_CALORIES_LOW,
     ProfileInputs,
     compute_norms,
 )
 
-#: §85: ниже — отказ, значение не сохраняется.
-CALORIES_HARD_FLOOR_KCAL = 1000
-#: §85: ``[1000, 1200)`` — предупреждение.
-CALORIES_WARN_BELOW_KCAL = 1200
-#: §85: отклонение от поддержания более чем на столько — подтверждение.
-MAINTENANCE_DEVIATION_RATIO = 0.30
+# Пороги калорий — из ``nutrition_profile_service`` (DRF-2097): один источник
+# для ручного значения и для расчёта; здесь — прежние имена для читателей.
 #: §85 раздел 4: вне диапазона — предупреждение и повторное подтверждение.
 WATER_MIN_ML = 1000
 WATER_MAX_ML = 5000
@@ -86,7 +86,6 @@ _SNAPSHOT_SOURCES = (
     NutritionProfile.TargetsSource.AYLA_CALCULATED,
 )
 
-WARN_CALORIES_LOW = "calories_low"
 WARN_WATER_OUT_OF_RANGE = "water_out_of_range"
 
 

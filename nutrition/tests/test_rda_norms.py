@@ -280,11 +280,12 @@ class TestRDABackwardsCompat:
     def test_macros_unchanged(self, adult_female_inputs):
         # Adult woman 40/165/70, maintain → Mifflin-St-Jeor:
         # 10×70 + 6.25×165 − 5×40 − 161 = 1370.25.
-        # daily_kcal = 1370 × 1.4 × 1.0 = 1918.
+        # DRF-2097 (§85, v2): activity 1.4 normalises to 1.375 →
+        # 1370.25 × 1.375 = 1884 → rounded to 10 = 1880.
         # protein 1.4 g/kg × 70 = 98.
         norms = compute_norms(adult_female_inputs)
         assert 1350 <= norms.bmr <= 1400
-        assert 1900 <= norms.daily_kcal <= 2100
+        assert 1850 <= norms.daily_kcal <= 2100
         # Protein floor: 1.4 g/kg for maintain.
         assert 95 <= norms.daily_protein_g <= 105
 

@@ -136,7 +136,7 @@ class TestRefusalWritesNull:
         """Был расчёт; следующий POST снял вес — старое число не лежит."""
         _post({"consent": CONSENT, **FULL_INPUTS}, headers)
         p = NutritionProfile.objects.get(user=proxy_user)
-        assert p.daily_kcal == 2669  # 1906.25 × 1.4 = 2668.75
+        assert p.daily_kcal == 2620  # DRF-2097 v2: 1906.25 × 1.375 (1.4 → набор) = 2621 → до 10
 
         # Тело с параметрами тела и утверждением: вес обнулён явно.
         with patch.object(
@@ -267,7 +267,7 @@ class TestThirdWindowIsClosed:
         # Отмытое число приходит ПРЕДЛОЖЕНИЕМ (§5.1) — но приходит: окно
         # открыто. Сторож закрывает именно это.
         assert p.targets_source == Source.AYLA_PROPOSED
-        assert p.daily_kcal == 2669
+        assert p.daily_kcal == 2620
 
     def test_unknown_legacy_is_not_laundered_into_ayla_calculated(
         self, proxy_user, headers,
@@ -349,15 +349,15 @@ class TestGuardLetsGroundedRecomputeThrough:
         p = NutritionProfile.objects.get(user=proxy_user)
         assert p.targets_source == Source.AYLA_PROPOSED  # §5.1: расчёт — предложение
         assert p.bmr == 1906
-        assert p.daily_kcal == 2669
+        assert p.daily_kcal == 2620
         assert p.targets_input_snapshot["weight_kg"] == 95.0
         assert p.targets_method_versions == {
-            "calories": "mifflin_st_jeor_v1",
+            "calories": "mifflin_st_jeor_v2",  # DRF-2097
             "fluids": "adult_beverages_reference_v1",
         }
         assert p.targets_computed_at is not None
         assert _refusals(p) == []
-        assert resp.json()["data"]["norms"]["daily_kcal"] == 2669
+        assert resp.json()["data"]["norms"]["daily_kcal"] == 2620
 
     def test_health_flag_change_on_ayla_calculated_recomputes_without_attestation(
         self, proxy_user, headers,
@@ -420,7 +420,7 @@ class TestGuardLetsGroundedRecomputeThrough:
         # Отмытое число приходит ПРЕДЛОЖЕНИЕМ (§5.1) — но приходит: окно
         # открыто. Сторож закрывает именно это.
         assert p.targets_source == Source.AYLA_PROPOSED
-        assert p.daily_kcal == 2669
+        assert p.daily_kcal == 2620
         # Состоявшийся пересчёт пишет аудит заново — отказа в нём нет.
         assert _refusals(p) == []
         assert isinstance(p.targets_computed_at, datetime)

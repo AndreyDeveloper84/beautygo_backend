@@ -195,6 +195,12 @@ class TestAssumedInputsMarker:
 # ===========================================================================
 
 
+# DRF-2097 (§85 утверждена, ``mifflin_st_jeor_v2``): числа снимка пересняты
+# под новую методику — коэффициент 1.4/1.0/1.5 нормализуется к набору
+# (след ``activity_normalised``), поправка на цель ≤ ±10 %, ``daily_kcal``
+# до 10 ккал, окно 1000–1199 — след ``calories_low``. Предмет файла прежний:
+# правка DRF-1339 (снятие подстановки веса) числа НЕ двигала; их двигает
+# только смена методики, и она названа здесь.
 _SNAPSHOT = {
     "all_known_maintain": {
         "inputs": ProfileInputs(
@@ -202,14 +208,18 @@ _SNAPSHOT = {
             activity_coefficient=1.4, goal="maintain", pace="moderate",
         ),
         "expected": {
-            "bmr": 1370, "daily_kcal": 1918, "daily_protein_g": 98,
-            "daily_fat_g": 64, "daily_carbs_g": 238,
+            "bmr": 1370, "daily_kcal": 1880, "daily_protein_g": 98,
+            "daily_fat_g": 63, "daily_carbs_g": 231,
             "goal": "maintain", "pace": "moderate", "goal_overridden_by": "",
             "daily_vitamin_d_iu": 600, "daily_vitamin_b12_mcg": 2.4,
             "daily_vitamin_c_mg": 75, "daily_iron_mg": 18,
             "daily_calcium_mg": 1000, "daily_magnesium_mg": 310,
             "daily_omega3_g": 1.1, "daily_fiber_g": 25,
-            "overrides_applied": [],
+            "overrides_applied": [
+                {"reason": "activity_normalised",
+                 "from": {"activity_coefficient": 1.4},
+                 "to": {"activity_coefficient": 1.375}},
+            ],
         },
     },
     "unknown_weight_maintain": {
@@ -256,8 +266,8 @@ _SNAPSHOT = {
             activity_coefficient=1.0, goal="lose", pace="moderate",
         ),
         "expected": {
-            "bmr": 876, "daily_kcal": 876, "daily_protein_g": 63,
-            "daily_fat_g": 29, "daily_carbs_g": 90,
+            "bmr": 876, "daily_kcal": 1050, "daily_protein_g": 63,
+            "daily_fat_g": 35, "daily_carbs_g": 121,
             "goal": "maintain", "pace": "gentle",
             "goal_overridden_by": "bmr_floor",
             "daily_vitamin_d_iu": 800, "daily_vitamin_b12_mcg": 2.4,
@@ -265,10 +275,14 @@ _SNAPSHOT = {
             "daily_calcium_mg": 1200, "daily_magnesium_mg": 320,
             "daily_omega3_g": 1.1, "daily_fiber_g": 21,
             "overrides_applied": [
+                {"reason": "activity_normalised",
+                 "from": {"activity_coefficient": 1.0},
+                 "to": {"activity_coefficient": 1.2}},
                 {"reason": "bmr_floor",
                  "from": {"pace": "moderate"}, "to": {"pace": "gentle"}},
                 {"reason": "bmr_floor",
                  "from": {"goal": "lose"}, "to": {"goal": "maintain"}},
+                {"reason": "calories_low", "daily_kcal": 1050},
             ],
         },
     },
@@ -349,14 +363,18 @@ _SNAPSHOT = {
             activity_coefficient=1.5, goal="tone", pace="gentle",
         ),
         "expected": {
-            "bmr": 1774, "daily_kcal": 2416, "daily_protein_g": 128,
-            "daily_fat_g": 81, "daily_carbs_g": 295,
+            "bmr": 1774, "daily_kcal": 2500, "daily_protein_g": 128,
+            "daily_fat_g": 83, "daily_carbs_g": 310,
             "goal": "tone", "pace": "gentle", "goal_overridden_by": "",
             "daily_vitamin_d_iu": 600, "daily_vitamin_b12_mcg": 2.4,
             "daily_vitamin_c_mg": 90, "daily_iron_mg": 8,
             "daily_calcium_mg": 1000, "daily_magnesium_mg": 400,
             "daily_omega3_g": 1.6, "daily_fiber_g": 38,
-            "overrides_applied": [],
+            "overrides_applied": [
+                {"reason": "activity_normalised",
+                 "from": {"activity_coefficient": 1.5},
+                 "to": {"activity_coefficient": 1.55}},
+            ],
         },
     },
     "unknown_weight_gain": {

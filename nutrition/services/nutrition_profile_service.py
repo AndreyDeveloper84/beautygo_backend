@@ -75,7 +75,27 @@ REQUIRED_INPUTS: tuple[str, ...] = ("gender", "age", "height_cm", "weight_kg")
 #: Строка, сохранённая рядом с ориентиром, — единственное, что позволит
 #: через полгода сказать, по какой формуле посчитано число, которое
 #: человек видит на экране.
-CALORIES_METHOD_VERSION: str = "mifflin_st_jeor_v1"
+#: DRF-2097 (решение владельца 18.09, §48 п.3 — методика §85 утверждена):
+#: ``v2`` — коэффициенты активности только из набора
+#: :data:`ACTIVITY_COEFFICIENTS`, поправка на цель не более ±10 %,
+#: округление ``daily_kcal`` до 10 ккал, пороги OD-NUT-3 на расчётном пути.
+#: Профили с ``v1`` не пересчитываются молча: новая версия — при следующем
+#: расчёте (upsert), как и любой другой пересчёт (§85 раздел 3.4).
+CALORIES_METHOD_VERSION: str = "mifflin_st_jeor_v2"
+
+#: §85 раздел 3.3 — четыре утверждённых коэффициента активности (ответ в
+#: анкете → коэффициент). Значение вне набора к расчёту не допускается как
+#: есть: :func:`_normalise_activity` подводит его к ближайшему из набора и
+#: оставляет след ``activity_normalised`` в ``overrides_applied``.
+#:
+#: Почему нормализация, а не отказ (решение в PR DRF-2097): анкета бота
+#: шлёт ``1.4`` безусловно (``apps/skills/nutrition_anketa/skill.py``, шага
+#: активности пока нет) — отказ обнулил бы расчёт всему пилоту до
+#: появления шага в боте. ``1.4`` → ``1.375`` (ближайший), и в
+#: ``input_snapshot`` едет именно нормализованное значение — то, по чему
+#: считали. Правило подвода: **ближайший по модулю, при равном расстоянии —
+#: меньший** (1.4 → 1.375, |0.025| < |0.15|; 1.4625 → 1.375, не 1.55).
+ACTIVITY_COEFFICIENTS: tuple[float, ...] = (1.2, 1.375, 1.55, 1.725)
 
 #: Входы, уходящие в снимок вместе с результатом. Список ШИРЕ, чем
 #: ``REQUIRED_INPUTS``: активность, цель и темп на результат влияют, и без
@@ -110,12 +130,38 @@ DEFAULT_ACTIVITY = 1.4
 BMR_FLOOR_MARGIN_KCAL = 100
 
 # Goal multipliers applied to TDEE = BMR × activity_coefficient.
+#
+# §85 раздел 3.3 (DRF-2097): поправка на цель в пилоте — не более ±10 %.
+# ``lose`` стоял 0.80 (−20 %) — вдвое больше разрешённого; теперь −10 %.
+# ``tone`` — мягкий дефицит внутри границы. Границу держит
+# ``GOAL_FACTOR_LIMIT`` и тест-перепись: новое значение вне ±10 % не
+# пройдёт молча.
+GOAL_FACTOR_LIMIT = 0.10
 GOAL_FACTORS = {
-    "lose": 0.80,        # ~20% deficit
+    "lose": 0.90,        # −10 % — максимум по §85
     "tone": 0.90,        # mild deficit + protein priority
     "maintain": 1.00,
-    "gain": 1.10,        # ~10% surplus
+    "gain": 1.10,        # +10 % — максимум по §85
 }
+
+#: §85 раздел 3.3: результат округляется до ближайших 10 ккал.
+KCAL_ROUNDING = 10
+
+# Пороги проверки калорий — OD-NUT-3 (§85 раздел 7.2), ОДИН источник и для
+# ручного значения (``manual_targets_service`` импортирует отсюда), и для
+# расчёта (DRF-2097). Владелец оговорил: продуктовые пороги проверки, не
+# медицинские границы.
+#: ниже — жёсткий отказ, значение не сохраняется.
+CALORIES_HARD_FLOOR_KCAL = 1000
+#: ``[1000, 1200)`` — предупреждение ``calories_low``, значение сохраняется.
+CALORIES_WARN_BELOW_KCAL = 1200
+#: отклонение от поддержания более чем на столько — подтверждение. На
+#: расчётном пути недостижимо по построению (поправка ≤ ±10 %) — это
+#: доказывает тест, а не проверяет код.
+MAINTENANCE_DEVIATION_RATIO = 0.30
+WARN_CALORIES_LOW = "calories_low"
+#: Имя отказа расчёта ниже жёсткого порога.
+REFUSAL_CALORIES_BELOW_FLOOR = "calories_below_floor"
 
 PACE_FACTORS = {
     "gentle": 0.92,      # softer effective deficit/surplus
@@ -269,7 +315,9 @@ def _missing_inputs(inputs: ProfileInputs) -> list[str]:
     return missing
 
 
-def _input_snapshot(inputs: ProfileInputs, *, goal: str, pace: str) -> dict[str, Any]:
+def _input_snapshot(
+    inputs: ProfileInputs, *, goal: str, pace: str, activity: float | None = None
+) -> dict[str, Any]:
     """Снимок входов состоявшегося расчёта — §85, воспроизводимость.
 
     Собирается по :data:`SNAPSHOT_INPUTS`, а не перечислением полей
@@ -285,6 +333,10 @@ def _input_snapshot(inputs: ProfileInputs, *, goal: str, pace: str) -> dict[str,
         snapshot[name] = getattr(inputs, name, None)
     snapshot["goal"] = goal
     snapshot["pace"] = pace
+    if activity is not None:
+        # DRF-2097: в снимок — коэффициент, ПО КОТОРОМУ считали (после
+        # нормализации к набору §85), а не тот, что прислали.
+        snapshot["activity_coefficient"] = activity
     return snapshot
 
 
@@ -360,11 +412,21 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
     assert age is not None and height_cm is not None and weight_kg is not None
 
     bmr = _mifflin_st_jeor(gender, age, height_cm, weight_kg)
-    activity = inputs.activity_coefficient or DEFAULT_ACTIVITY
     goal = inputs.goal or "maintain"
     pace = inputs.pace or "moderate"
     overrides: list[dict] = []
     overridden_by = ""
+
+    # §85 / DRF-2097: коэффициент активности — только из утверждённого
+    # набора. Чужое значение (в том числе умолчание схемы 1.4) подводится к
+    # ближайшему, и это видно в ``overrides_applied`` и в снимке.
+    activity, normalised_from = _normalise_activity(inputs.activity_coefficient)
+    if normalised_from is not None:
+        overrides.append({
+            "reason": "activity_normalised",
+            "from": {"activity_coefficient": normalised_from},
+            "to": {"activity_coefficient": activity},
+        })
 
     # Лестницы «РПП → maintain» и «беременность → maintain + бонус» здесь
     # больше нет: при этих флагах расчёт отказал выше (§5.1). Осталась
@@ -394,6 +456,23 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
             overridden_by = overridden_by or "bmr_floor"
             daily_kcal = _kcal_from_goal(bmr, activity, goal, pace)
 
+    # §85 раздел 3.3: до ближайших 10 ккал — и макросы от округлённого
+    # числа, чтобы то, что на экране, и то, из чего считались Б/Ж/У, были
+    # одним числом.
+    daily_kcal = _round_kcal(daily_kcal)
+
+    # OD-NUT-3 на расчётном пути (DRF-2097). Ниже жёсткого порога — отказ по
+    # имени, значение не сохраняется (все ориентиры ``None``, как у прочих
+    # отказов); в окне предупреждения — считаем и сохраняем, но след
+    # ``calories_low`` едет рядом с результатом.
+    if daily_kcal < CALORIES_HARD_FLOOR_KCAL:
+        return _refusal(inputs, [
+            *overrides,
+            {"reason": REFUSAL_CALORIES_BELOW_FLOOR, "daily_kcal": daily_kcal},
+        ])
+    if daily_kcal < CALORIES_WARN_BELOW_KCAL:
+        overrides.append({"reason": WARN_CALORIES_LOW, "daily_kcal": daily_kcal})
+
     protein_g, fat_g, carbs_g = _macros_split(daily_kcal, weight_kg, goal)
 
     # RDA: ветки беременности/кормления внутри ``compute_rda`` до этой точки
@@ -407,7 +486,7 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
 
     return ComputedNorms(
         bmr=int(round(bmr)),
-        daily_kcal=int(round(daily_kcal)),
+        daily_kcal=int(daily_kcal),
         daily_protein_g=int(round(protein_g)),
         daily_fat_g=int(round(fat_g)),
         daily_carbs_g=int(round(carbs_g)),
@@ -425,7 +504,7 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
             "calories": CALORIES_METHOD_VERSION,
             "fluids": FLUIDS_METHOD_VERSION,
         },
-        input_snapshot=_input_snapshot(inputs, goal=goal, pace=pace),
+        input_snapshot=_input_snapshot(inputs, goal=goal, pace=pace, activity=activity),
         # Раздел 4: справочник по полу. Пол здесь — уже проверенный вход
         # (``REQUIRED_INPUTS``), иначе расчёт отказал бы выше.
         daily_water_ml=FLUIDS_REFERENCE_ML[gender],
@@ -444,6 +523,26 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
 # ---------------------------------------------------------------------------
 # Math helpers
 # ---------------------------------------------------------------------------
+
+
+def _normalise_activity(value: float | None) -> tuple[float, float | None]:
+    """Коэффициент из набора §85 и исходное значение, если его пришлось подвести.
+
+    ``None``/``0`` — умолчание схемы (``DEFAULT_ACTIVITY``), и оно тоже вне
+    набора. Ближайший по модулю; при равном расстоянии — меньший
+    (консервативно). Возвращает ``(activity, None)``, когда значение уже в
+    наборе.
+    """
+    raw = float(value or DEFAULT_ACTIVITY)
+    if raw in ACTIVITY_COEFFICIENTS:
+        return raw, None
+    nearest = min(ACTIVITY_COEFFICIENTS, key=lambda c: (abs(c - raw), c))
+    return nearest, raw
+
+
+def _round_kcal(value: float) -> int:
+    """§85: до ближайших 10 ккал (половина — вверх, как у ``round`` в быту)."""
+    return int((value + KCAL_ROUNDING / 2) // KCAL_ROUNDING * KCAL_ROUNDING)
 
 
 def _mifflin_st_jeor(gender: str, age: int, height_cm: int, weight_kg: float) -> float:
