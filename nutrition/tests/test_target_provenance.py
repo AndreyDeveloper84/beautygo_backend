@@ -79,8 +79,11 @@ class TestTheCalculationCarriesItsOwnProvenance:
         """
         # §5.1: РПП теперь отказ, лестница здесь — только пол BMR: очень
         # лёгкий человек с целью lose упирается в него, и цель переписывается.
+        # DRF-2097: при поправке −10 % пол достижим только на активности 1.2
+        # (BMR × 0.08 < 100 ⇔ BMR < 1250); на 1.375 −10 % всегда выше пола.
         norms = compute_norms(_full_inputs(
             goal="lose", pace="moderate", weight_kg=40.0, height_cm=150, age=60,
+            activity_coefficient=1.2,
         ))
 
         assert norms.computed, norms.overrides_applied
