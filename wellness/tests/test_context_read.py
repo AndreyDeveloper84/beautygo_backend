@@ -181,6 +181,9 @@ class TestGatedDocument:
                 "gate_d": goal_intention_gate(None, Purpose.PROCESSING).reason_code,
                 "gate_o": body_observation_gate(None, Purpose.PROCESSING).reason_code,
             },
+            # DRF-2101 — Plan Lite стоит рядом с гейтами: флаг выключен /
+            # плана нет → null, ключ присутствует всегда.
+            "plan_lite": None,
         }
 
     def test_existing_rows_do_not_open_the_document(
@@ -209,7 +212,7 @@ class TestGatedDocument:
 class TestOpenDocument:
     def test_no_plan_no_outcomes(self, token, customer, open_gates):
         doc = _api().get(CTX_URL).json()["data"]
-        assert doc == {"plan": None, "outcomes": [], "gated": None}
+        assert doc == {"plan": None, "outcomes": [], "gated": None, "plan_lite": None}
 
     def test_full_projection_codes_only(
         self, token, customer, outcome, plan, link, open_gates,

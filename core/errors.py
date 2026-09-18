@@ -232,6 +232,12 @@ class ErrorCode(str, Enum):
     # DRF-1796 (M4) — публикация недоступна этому workspace (салон, нет
     # тенанта) или ключ команды занят другим мастером; причина — details.reason.
     PUBLICATION_REFUSED = "PUBLICATION_REFUSED"
+    # DRF-2101 — Plan Lite выключен флагом PLAN_LITE_ENABLED: 404 по замыслу,
+    # не 5xx (общий breaker бота считает постоянный 5xx аварией).
+    PLAN_LITE_DISABLED = "PLAN_LITE_DISABLED"
+    # DRF-2101 — у человека уже есть активный план (0..1 ACTIVE, OD-GOAL-4):
+    # сменить план можно только закрыв прежний (DELETE), не поверх.
+    PLAN_LITE_ALREADY_ACTIVE = "PLAN_LITE_ALREADY_ACTIVE"
     # DRF-1699 D2 (§7 свода) — у человека живая заявка на удаление:
     # персонализация и новая обработка данных прекращены. Один код на все
     # три класса читателей (память, рекомендации, проактив), чтобы бот ловил

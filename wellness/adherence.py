@@ -80,7 +80,10 @@ def compute_plan_adherence(
         buckets = _buckets(action.cadence, start, end)
         fulfilled = sum(
             min(
-                count_facts(action.action_type, plan.user_id, b_start, b_end),
+                count_facts(
+                    action.action_type, plan.user_id, b_start, b_end,
+                    goal_key=plan.goal_key or None,
+                ),
                 action.target_count,
             )
             for b_start, b_end in buckets
