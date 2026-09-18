@@ -48,6 +48,8 @@ from nutrition.serializers import (
     NutritionSummaryResponseSerializer,
     PatternDetectionResponseSerializer,
     ReturningSuccessResponseSerializer,
+    SavedMealCreateSerializer,
+    SavedMealSerializer,
     ScanRequestSerializer,
     WaterEntryCreateSerializer,
     WaterEntryResponseSerializer,
@@ -1941,3 +1943,128 @@ class InternalBodyParametersEraseView(InternalProfileView):
             "targets_cleared": outcome.targets_cleared,
             "profile_existed": outcome.profile_existed,
         })
+
+
+# ---------------------------------------------------------------------------
+# Избранные блюда — DRF-2092 (дневник F12)
+# ---------------------------------------------------------------------------
+
+
+class InternalSavedMealsView(APIView):
+    """GET/POST /api/v1/nutrition/internal/saved-meals/ — избранное под субъектом.
+
+    Серверный источник: тот же ``X-External-User-ID`` из новой сессии видит
+    тот же список — избранное переживает переустановку. Чужого здесь не
+    видно по построению: каждый запрос отфильтрован по субъекту.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+    serializer_class = SavedMealCreateSerializer
+
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: inline_serializer(
+                name="InternalSavedMealsListResponse",
+                fields={"items": SavedMealSerializer(many=True)},
+            ),
+        },
+    )
+    def get(self, request: Request) -> Response:
+        from nutrition.services.saved_meal_service import SavedMealService
+
+        user, refusal = _food_log_actor(request)
+        if refusal is not None:
+            return refusal
+        items = SavedMealService().list_for(user)
+        return success_response({"items": SavedMealSerializer(items, many=True).data})
+
+    @extend_schema(
+        tags=["internal"],
+        request=SavedMealCreateSerializer,
+        responses={
+            201: SavedMealSerializer,
+            200: OpenApiResponse(description="То же блюдо с той же порцией уже сохранено"),
+            400: OpenApiResponse(description="Validation"),
+            404: OpenApiResponse(description="food_log_id не принадлежит субъекту"),
+        },
+    )
+    def post(self, request: Request) -> Response:
+        from nutrition.services.saved_meal_service import (
+            SavedMealService,
+            SourceFoodLogNotFoundError,
+        )
+
+        user, refusal = _food_log_actor(request)
+        if refusal is not None:
+            return refusal
+        serializer = SavedMealCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return error_response(
+                "VALIDATION_ERROR", "Невалидные данные", details=serializer.errors,
+            )
+        data = serializer.validated_data
+        service = SavedMealService()
+        try:
+            if data.get("food_log_id") is not None:
+                outcome = service.save_from_food_log(user, data["food_log_id"])
+            else:
+                outcome = service.save(
+                    user,
+                    dish_name=data["dish_name"],
+                    portion_g=data["portion_g"],
+                    calories=data.get("calories", 0.0),
+                    protein_g=data.get("protein_g"),
+                    fat_g=data.get("fat_g"),
+                    carbs_g=data.get("carbs_g"),
+                )
+        except SourceFoodLogNotFoundError:
+            # «Не найдено», а не «чужое»: по коду нельзя перебирать чужие id.
+            return error_response(
+                "NOT_FOUND", "Запись не найдена", status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return success_response(
+            SavedMealSerializer(outcome.meal).data,
+            status_code=status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK,
+        )
+
+
+class InternalSavedMealDetailView(APIView):
+    """DELETE /api/v1/nutrition/internal/saved-meals/{id}/ — скрыть из списка."""
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    @extend_schema(
+        tags=["internal"],
+        request=None,
+        responses={
+            200: inline_serializer(
+                name="InternalSavedMealDeleteResponse",
+                fields={
+                    "id": drf_serializers.UUIDField(),
+                    "deleted": drf_serializers.BooleanField(),
+                },
+            ),
+            404: OpenApiResponse(description="Нет такой живой строки у субъекта"),
+        },
+    )
+    def delete(self, request: Request, pk: UUID) -> Response:
+        from nutrition.services.saved_meal_service import (
+            SavedMealNotFoundError,
+            SavedMealService,
+        )
+
+        user, refusal = _food_log_actor(request)
+        if refusal is not None:
+            return refusal
+        try:
+            meal = SavedMealService().soft_delete(user, pk)
+        except SavedMealNotFoundError:
+            return error_response(
+                "NOT_FOUND", "Запись не найдена", status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return success_response({"id": str(meal.id), "deleted": True})

@@ -173,6 +173,7 @@ def person(master, service):
         FoodScan,
         NutritionProfile,
         ProfileIdempotencyKey,
+        SavedMeal,
         WaterEntry,
         WaterLog,
     )
@@ -259,6 +260,11 @@ def person(master, service):
     )
     ProfileIdempotencyKey.objects.create(
         key="d3-key", user=u, response={"x": 1}, expires_at=now + timedelta(hours=1)
+    )
+    # избранные блюда (DRF-2092) — живая и мягко удалённая: стираются обе
+    SavedMeal.objects.create(user=u, dish_name="борщ", portion_g=250.0, calories=125.0)
+    SavedMeal.objects.create(
+        user=u, dish_name="омлет", portion_g=150.0, calories=230.0, deleted_at=now
     )
 
     # цели и планы

@@ -164,6 +164,7 @@ DELETE: dict[str, str] = {
     "nutrition.WaterLog.user": "строки",
     "nutrition.CrossDomainShownRule.user": "строки (производное от дневника)",
     "nutrition.ProfileIdempotencyKey.user": "строки (кэш тел ответов профиля)",
+    "nutrition.SavedMeal.user": "строки, включая мягко удалённые (избранные блюда, DRF-2092)",
     # цели, планы, наблюдения — §7 «цели и планы будут удалены»
     "goals.ClientGoal.client": "строки",
     "goals.GoalAnketaRun.client": "строки (+ответы каскадом)",
@@ -495,6 +496,7 @@ def _erase_catalog(user) -> dict:
         FoodScan,
         NutritionProfile,
         ProfileIdempotencyKey,
+        SavedMeal,
         WaterEntry,
         WaterLog,
     )
@@ -555,6 +557,8 @@ def _erase_catalog(user) -> dict:
     _delete("nutrition.WaterLog", WaterLog.objects.filter(user=user))
     _delete("nutrition.CrossDomainShownRule", CrossDomainShownRule.objects.filter(user=user))
     _delete("nutrition.ProfileIdempotencyKey", ProfileIdempotencyKey.objects.filter(user=user))
+    # Избранные блюда — вместе с мягко удалёнными: «скрыта» не значит «забыта».
+    _delete("nutrition.SavedMeal", SavedMeal.objects.filter(user=user))
 
     # 3. Цели и планы. PROTECT между собственными строками человека:
     # связи план↔цель снимаются первыми, наблюдения удаляются набором.
@@ -818,6 +822,7 @@ def _residue(user) -> dict[str, int]:
         FoodScan,
         NutritionProfile,
         ProfileIdempotencyKey,
+        SavedMeal,
         WaterEntry,
         WaterLog,
     )
@@ -854,6 +859,7 @@ def _residue(user) -> dict[str, int]:
         "nutrition.WaterLog": WaterLog.objects.filter(user=user),
         "nutrition.CrossDomainShownRule": CrossDomainShownRule.objects.filter(user=user),
         "nutrition.ProfileIdempotencyKey": ProfileIdempotencyKey.objects.filter(user=user),
+        "nutrition.SavedMeal": SavedMeal.objects.filter(user=user),
         "goals.ClientGoal": ClientGoal.objects.filter(client=user),
         "goals.GoalAnketaRun": GoalAnketaRun.objects.filter(client=user),
         "wellness.DesiredOutcome": DesiredOutcome.objects.filter(user=user),

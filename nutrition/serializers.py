@@ -8,7 +8,7 @@ from __future__ import annotations
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from nutrition.models import Beverage, FoodLog, FoodScan, NutritionProfile, WaterLog
+from nutrition.models import Beverage, FoodLog, FoodScan, NutritionProfile, SavedMeal, WaterLog
 
 
 #: Поля-ОРИЕНТИРЫ. Их отсутствие обязано доезжать до потребителя
@@ -725,3 +725,51 @@ class BeverageCatalogItemSerializer(serializers.ModelSerializer):
             "default_serving_label",
         ]
         read_only_fields = fields
+
+
+# ---------------------------------------------------------------------------
+# Избранные блюда (DRF-2092, F12)
+# ---------------------------------------------------------------------------
+
+
+class SavedMealSerializer(serializers.ModelSerializer):
+    """Строка избранного как её видит клиент: снимок, порция в граммах."""
+
+    source_food_log_id = serializers.UUIDField(read_only=True)
+
+    class Meta:
+        model = SavedMeal
+        fields = [
+            "id",
+            "dish_name",
+            "portion_g",
+            "calories",
+            "protein_g",
+            "fat_g",
+            "carbs_g",
+            "source_food_log_id",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+
+class SavedMealCreateSerializer(serializers.Serializer):
+    """Два входа: снимок словами (dish_name + portion_g + БЖУ) или запись
+    дневника (food_log_id) — снимок тогда берётся из записи субъекта."""
+
+    food_log_id = serializers.UUIDField(required=False)
+    dish_name = serializers.CharField(required=False, max_length=200, trim_whitespace=True)
+    portion_g = serializers.FloatField(required=False, min_value=1.0, max_value=5000.0)
+    calories = serializers.FloatField(required=False, min_value=0.0, default=0.0)
+    protein_g = serializers.FloatField(required=False, allow_null=True, min_value=0.0)
+    fat_g = serializers.FloatField(required=False, allow_null=True, min_value=0.0)
+    carbs_g = serializers.FloatField(required=False, allow_null=True, min_value=0.0)
+
+    def validate(self, attrs):
+        if attrs.get("food_log_id") is not None:
+            return attrs
+        if not attrs.get("dish_name") or attrs.get("portion_g") is None:
+            raise serializers.ValidationError(
+                "нужны dish_name и portion_g — или food_log_id записи дневника"
+            )
+        return attrs

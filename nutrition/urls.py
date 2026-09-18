@@ -27,6 +27,8 @@ from nutrition.views import (
     InternalProfileTargetsManualView,
     InternalProfileView,
     InternalReturningSuccessView,
+    InternalSavedMealDetailView,
+    InternalSavedMealsView,
     InternalSummaryView,
     InternalWaterCreateView,
     InternalWaterDeleteView,
@@ -79,6 +81,17 @@ urlpatterns = [
         "internal/food-log/<uuid:pk>/",
         InternalFoodLogDetailView.as_view(),
         name="internal-food-log-detail",
+    ),
+    # DRF-2092 (F12) — избранные блюда под субъектом; серверный источник.
+    path(
+        "internal/saved-meals/",
+        InternalSavedMealsView.as_view(),
+        name="internal-saved-meals",
+    ),
+    path(
+        "internal/saved-meals/<uuid:pk>/",
+        InternalSavedMealDetailView.as_view(),
+        name="internal-saved-meal-detail",
     ),
     path(
         "internal/summary/",
