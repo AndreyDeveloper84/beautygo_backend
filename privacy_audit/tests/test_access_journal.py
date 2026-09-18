@@ -346,6 +346,9 @@ class TestServedOperationsDoNotStopTheProduct:
             op.REVIEW_READ,
             # DRF-1984 — статус стирания: состояние строки без значений, не раскрывает и не разрушает.
             op.ERASURE_STATUS_READ,
+            # DRF-1803 — место мастера: чтение и запись полей, не разрушение и не
+            # раскрытие; закрытый список политики не расширяется по аналогии.
+            op.READ_SERVICE_LOCATION, op.WRITE_SERVICE_LOCATION,
         ):
             assert not policy.stops_when_unauditable(served)
 
@@ -729,6 +732,9 @@ class TestGuardCoversTheWholeSurface:
         "/api/v1/internal/specialists/{subject}/portfolio/{request_id}/",
         "/api/v1/internal/specialists/{subject}/reviews/",  # DRF-1857 — «Мои отзывы»
         "/api/v1/internal/users/{subject}/personal-data/erasure-status/",  # DRF-1984 — readback стирания
+        # DRF-1803 (M11) — место работы мастера: своё место выгружается и стирается.
+        "/api/v1/internal/specialists/{subject}/service-locations/",
+        "/api/v1/internal/specialists/{subject}/service-locations/{request_id}/",
     ]
 
     def test_the_list_above_is_every_guarded_view_not_a_hand_picked_subset(self):
@@ -779,6 +785,7 @@ class TestGuardCoversTheWholeSurface:
             "internal_canon_gap_api",  # DRF-1801 — canon gap requests under the subject
             "internal_address_suggest_api",  # DRF-1804 — address suggestions for the master's place
             "internal_specialist_profile_api",  # DRF-1813 — the master's profile, avatar, portfolio
+            "internal_service_locations_api",  # DRF-1803 — the master's own place and travel zone
         ):
             mod = __import__(f"users.{module}", fromlist=["x"])
             for obj in vars(mod).values():
@@ -796,7 +803,8 @@ class TestGuardCoversTheWholeSurface:
             "guarded_not_listed": sorted(c.__name__ for c in guarded - listed),
             "listed_not_guarded": sorted(c.__name__ for c in listed - guarded),
         }
-        assert len(guarded) == 16
+        # 16 на dev (DRF-1984) + 2 маршрута места (DRF-1803) = 18.
+        assert len(guarded) == 18
 
     @pytest.mark.parametrize("template", ROUTES)
     def test_route_is_audited(self, template):

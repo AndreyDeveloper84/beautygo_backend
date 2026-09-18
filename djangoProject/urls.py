@@ -32,6 +32,10 @@ from users.internal_specialist_profile_api import (
     InternalSpecialistPortfolioView,
     InternalSpecialistProfileView,
 )
+from users.internal_service_locations_api import (
+    InternalSpecialistServiceLocationView,
+    InternalSpecialistServiceLocationsView,
+)
 from users.internal_reviews_api import InternalSpecialistReviewsView
 from users.internal_schedule_api import (
     InternalSpecialistAvailabilityView,
@@ -256,6 +260,17 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/publication/',
         InternalSpecialistPublicationView.as_view(),
         name='internal-specialist-publication',
+    ),
+    # DRF-1803 (M11) — место работы соло-мастера под субъектом и журналом §96.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/service-locations/',
+        InternalSpecialistServiceLocationsView.as_view(),
+        name='internal-specialist-service-locations',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/service-locations/<uuid:item_id>/',
+        InternalSpecialistServiceLocationView.as_view(),
+        name='internal-specialist-service-location',
     ),
     path(
         'api/v1/internal/specialists/',
