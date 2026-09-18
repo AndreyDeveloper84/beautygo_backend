@@ -117,14 +117,21 @@ def _active_plan(user) -> PersonalPlan | None:
     )
 
 
-def create_plan(user, *, goal_id: UUID, actions: list[ActionSpec]) -> PersonalPlan:
+def create_plan(
+    user, *, actions: list[ActionSpec], goal_id: UUID | None = None,
+) -> PersonalPlan:
+    """``goal_id`` необязателен (PR-1b): без него план строится от АКТИВНОЙ
+    цели вызывающего — у клиента она одна по схеме
+    (``clientgoal_one_active_per_client``), и экран Mini App её id не видит
+    (decision-context отдаёт ключ и текст, не id). Нет активной цели —
+    «не найдено»: план без цели не бывает. С ``goal_id`` — как прежде:
+    он обязан быть активной целью вызывающего."""
     if not plan_lite_enabled():
         raise PlanLiteDisabled()
-    goal = ClientGoal.objects.filter(
-        client=user, pk=goal_id, state=ClientGoal.State.ACTIVE,
-    ).first()
+    goals = ClientGoal.objects.filter(client=user, state=ClientGoal.State.ACTIVE)
+    goal = (goals.filter(pk=goal_id) if goal_id is not None else goals).first()
     if goal is None:
-        raise GoalNotFound(str(goal_id))
+        raise GoalNotFound(str(goal_id) if goal_id is not None else "no_active_goal")
     with transaction.atomic():
         if _active_plan(user) is not None:
             raise PlanAlreadyActive()
