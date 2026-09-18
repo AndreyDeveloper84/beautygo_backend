@@ -2068,3 +2068,80 @@ class InternalSavedMealDetailView(APIView):
                 "NOT_FOUND", "Запись не найдена", status_code=status.HTTP_404_NOT_FOUND,
             )
         return success_response({"id": str(meal.id), "deleted": True})
+
+
+# ---------------------------------------------------------------------------
+# Дневник по дням за период — DRF-2099 (F10, §48 п.7)
+# ---------------------------------------------------------------------------
+
+
+class InternalDiaryDaysView(APIView):
+    """GET /api/v1/nutrition/internal/diary/days/?from=&to= — «N из 7 дней».
+
+    Одна строка на каждый день периода, пустые — явно; ≤ 28 дней; без
+    параметров — семь дней до сегодня по поясу человека. Пояс называется в
+    ответе, чтобы бот и экран не гадали, чьи это сутки. Ретеншн-механики
+    (напоминания, стрики, «пропущено») здесь нет по решению владельца.
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: inline_serializer(
+                name="InternalDiaryDaysResponse",
+                fields={
+                    "timezone": drf_serializers.CharField(),
+                    "from": drf_serializers.DateField(),
+                    "to": drf_serializers.DateField(),
+                    "days": inline_serializer(
+                        name="InternalDiaryDayRow",
+                        fields={
+                            "date": drf_serializers.DateField(),
+                            "meals_count": drf_serializers.IntegerField(),
+                            "kcal": drf_serializers.FloatField(allow_null=True),
+                            "has_entries": drf_serializers.BooleanField(),
+                        },
+                        many=True,
+                    ),
+                },
+            ),
+            400: OpenApiResponse(description="Bad from/to or span over 28 days"),
+        },
+    )
+    def get(self, request: Request) -> Response:
+        from nutrition.services.diary_days_service import (
+            BadPeriod,
+            SpanTooLong,
+            default_period,
+            diary_days,
+            person_timezone,
+            timezone_name,
+        )
+
+        user, refusal = _food_log_actor(request)
+        if refusal is not None:
+            return refusal
+        tz = person_timezone(user.pk)
+        raw_from = request.query_params.get("from")
+        raw_to = request.query_params.get("to")
+        try:
+            if raw_from is None and raw_to is None:
+                date_from, date_to = default_period(tz)
+            else:
+                if raw_from is None or raw_to is None:
+                    raise BadPeriod("from and to go together")
+                date_from = datetime.strptime(raw_from, "%Y-%m-%d").date()
+                date_to = datetime.strptime(raw_to, "%Y-%m-%d").date()
+            rows = diary_days(user, date_from=date_from, date_to=date_to, tz=tz)
+        except (ValueError, BadPeriod, SpanTooLong) as exc:
+            return error_response("VALIDATION_ERROR", f"Невалидный период: {exc}")
+        return success_response({
+            "timezone": timezone_name(tz),
+            "from": date_from.isoformat(),
+            "to": date_to.isoformat(),
+            "days": [row.as_dict() for row in rows],
+        })

@@ -112,12 +112,17 @@ class NutritionSummaryService:
     def summary(
         self, *, user_id: int, day: date, with_comment: bool = False,
     ) -> NutritionSummary:
-        start = datetime.combine(day, time.min, tzinfo=timezone.utc)
-        end = datetime.combine(day, time.max, tzinfo=timezone.utc)
+        # DRF-2099 — сутки по поясу человека (NutritionProfile.timezone,
+        # иначе UTC): одно определение суток с недельным списком
+        # (diary_days_service) и водой v3, иначе «открыть день» с недели
+        # показывал бы не те записи. Без пояса — UTC, как было.
+        from nutrition.services.diary_days_service import day_window, person_timezone
+
+        start, end = day_window(day, person_timezone(user_id))
 
         qs = (
             FoodLog.objects
-            .filter(user_id=user_id, logged_at__gte=start, logged_at__lte=end)
+            .filter(user_id=user_id, logged_at__gte=start, logged_at__lt=end)
             .order_by("logged_at")
         )
 
