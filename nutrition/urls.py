@@ -16,6 +16,7 @@ from nutrition.views import (
     InternalCrossDomainSeenView,
     InternalCrossDomainView,
     InternalDeficitsView,
+    InternalDiaryDaysView,
     InternalFoodEstimateView,
     InternalFoodLogDetailView,
     InternalFoodLogRestoreView,
@@ -97,6 +98,13 @@ urlpatterns = [
         "internal/summary/",
         InternalSummaryView.as_view(),
         name="internal-nutrition-summary",
+    ),
+    # DRF-2099 (F10) — неделя по дням: одна строка на день, ≤ 28 дней,
+    # сутки по поясу человека; без ретеншн-механики (§48 п.7).
+    path(
+        "internal/diary/days/",
+        InternalDiaryDaysView.as_view(),
+        name="internal-diary-days",
     ),
     path(
         "internal/deficits/",
