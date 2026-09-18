@@ -1,31 +1,55 @@
 name: Smoke tests on dev VPS
 
 # One-shot remote-runner: SSHes into the dev box and runs the Phase 3
-# smoke suite against the deployed `web` container.
+# smoke suite against the deployed `web` container — the code that is
+# actually running, not the head of `dev`.
 #
-# Why we don't build (or install) anything here:
+# Why we don't build, install, sync or migrate anything here (DRF-2088):
 # - A check must not change what it checks. Anything this workflow writes
 #   into the pilot makes the pilot's state a product of the smoke run,
 #   and hides the very drift the run exists to catch.
+# - Until 18.09.2026 this job did `git reset --hard origin/dev` on the
+#   host checkout, `docker compose cp` of five source dirs into the RUNNING
+#   container, `migrate --noinput` and `seed_beverages`. Three consequences,
+#   all measured in the run logs:
+#     * 18.09 (run 35326587771): `tenants/` from dev was overlaid onto an
+#       image that did not yet carry `users.internal_salon_admin_api`
+#       (#503 merged two minutes earlier, deploy still running) →
+#       ModuleNotFoundError on URL import → 69 of 84 tests red. Not a
+#       deploy-window accident: any morning where dev is ahead of the
+#       deployed image and a change touches both an overlaid and a
+#       non-overlaid dir reproduces it. The overlay tested a tree that
+#       existed nowhere.
+#     * `migrate` applied migrations of UNDEPLOYED code to the pilot DB
+#       every morning ("code behind schema") — the schema belongs to the
+#       deploy, never to a check. Decision of the main window 18.09.
+#     * `seed_beverages` wrote 59 rows a day. Preconditions are the
+#       deploy's job; a missing seed is a finding, not something to paper
+#       over here.
+#   The subject under test is now the deployed SHA: the container's
+#   SENTRY_RELEASE (written by ci.yml step 1/4 from `github.sha`) must
+#   equal the host checkout HEAD (deploy leaves it there); the image
+#   carries `nutrition/tests/smoke` itself (`COPY . .`, .dockerignore does
+#   not exclude tests), so nothing is copied in. "dev moved ahead" is a
+#   notice with both SHAs printed, not a failure.
+# - 12–16.09 (five red runs): pytest died in `pytest_configure` on
+#   `PermissionError: /app/test_results.log` (pytest.ini `log_file` inside
+#   the image) before collecting a single test — fixed 16.09 by
+#   `-o log_file=/tmp/test_results.log` below; 17.09 green confirmed it.
 #
-# The dep-auth gap this header used to describe is CLOSED, twice over.
-# ayla-ai-core is a PUBLIC repo (owner's decision 04.09.2026, recorded in
-# OPEN_DECISIONS.md §22 in the workspace root, outside this repo), so the
-# pinned SHA clones with no credential at all; and where a token does
-# exist the machinery still uses it — the
-# Dockerfile takes `ARG GH_DEPLOY_TOKEN` and rewrites the github.com git
-# URL when it is non-empty, docker-compose.yml forwards it into
-# `web.build.args`, and ci.yml step "2/4 Build application images" runs
-# `docker compose build` on the VPS. The deployed image therefore carries
-# `ayla-ai-core` at the requirements.txt pin either way, and already
-# carries git (Dockerfile installs it explicitly).
+# Deploy gate (DRF-2088): this job shares the `deploy-dev-vps` concurrency
+# group with ci.yml's `deploy` job. GitHub serialises the two — a smoke
+# that starts while a deploy is in progress WAITS (pending, its own sign)
+# and then runs against the freshly deployed contour, instead of racing
+# `docker compose build` / container recreation. No API polling, no
+# check-then-act window. A deploy that starts during a smoke waits for
+# the smoke (minutes) — acceptable, and the deploy job already queues
+# rather than cancels (`cancel-in-progress: false`).
 #
-# STILL OUTSTANDING (DRF-1444 follow-up, deliberately not changed here):
-# the `git reset --hard origin/dev` + `docker cp` sync block and the
-# `migrate --noinput` / `seed_beverages` steps below are writes into the
-# pilot too. They rest on the same "the image lags the host repo"
-# assumption that no longer holds, but removing them changes what the
-# suite covers, so it needs its own decision.
+# Cron-only triggers respect the workflow definition on the default
+# branch — which is `dev` (`gh repo view`, 18.09.2026; master lags dev by
+# hundreds of commits and takes no part), so a merge into dev reaches the
+# schedule directly.
 
 on:
   workflow_dispatch:
@@ -37,17 +61,20 @@ on:
   schedule:
     # Daily at 04:00 UTC (07:00 MSK) — runs an hour after the
     # nutrition.purge_water_entries Celery beat (03:00 UTC), so any
-    # purge regression surfaces in the same morning report.
-    # Cron-only triggers respect the workflow definition on the default
-    # branch (master), so this duplicates to master via the sync PR.
+    # purge regression surfaces in the same morning report. GitHub
+    # delays scheduled runs under load — observed 08:50–09:40 UTC.
     - cron: '0 4 * * *'
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
     environment: dev
+    # Same group as ci.yml → deploy: never interleave with a deploy.
+    concurrency:
+      group: deploy-dev-vps
+      cancel-in-progress: false
     steps:
-      - name: Run smoke suite on dev VPS
+      - name: Run smoke suite on dev VPS (deployed SHA, read-only)
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -60,74 +87,30 @@ jobs:
           script: |
             set -o pipefail
             cd /home/taximeter/beautygo/dev
-
-            echo "=== branch + commit on host (before sync) ==="
-            git rev-parse --abbrev-ref HEAD
-            git rev-parse --short HEAD
+            echo "=== subject under test: the deployed SHA ==="
+            # The deploy (ci.yml 1/4) leaves the host checkout at DEPLOY_SHA and
+            # writes SENTRY_RELEASE=DEPLOY_SHA into .env, which the container
+            # inherits. The two must agree; the host tree is NOT moved here.
+            HOST_HEAD="$(git rev-parse HEAD)"
+            DEPLOYED="$(docker compose exec -T web printenv SENTRY_RELEASE 2>/dev/null | tr -d '\r')"
+            git fetch -q origin dev || true
+            DEV_HEAD="$(git rev-parse origin/dev 2>/dev/null || echo unknown)"
+            echo "host checkout: $HOST_HEAD"
+            echo "container SENTRY_RELEASE: ${DEPLOYED:-<empty>}"
+            echo "dev head: $DEV_HEAD"
+            if ! printf '%s' "$DEPLOYED" | grep -Eq '^[0-9a-f]{40}$'; then
+              echo "::error::the web container does not name its release (SENTRY_RELEASE='${DEPLOYED}') — cannot tell what is under test; redeploy (ci.yml), do not patch the container"
+              exit 1
+            fi
+            if [ "$HOST_HEAD" != "$DEPLOYED" ]; then
+              echo "::error::host checkout $HOST_HEAD ≠ deployed $DEPLOYED — someone moved the host tree after the deploy; the smoke tests only what is deployed. Redeploy or reset the host tree to the deployed SHA."
+              exit 1
+            fi
+            if [ "$DEV_HEAD" != "$DEPLOYED" ]; then
+              echo "::notice::dev head $DEV_HEAD is ahead of the deployed $DEPLOYED — testing what is deployed; the head gets its own smoke after its own deploy"
+            fi
             echo
-
-            echo "=== git pull origin/dev (host repo) ==="
-            git fetch origin dev
-            git reset --hard origin/dev
-            git rev-parse --short HEAD
-            echo
-
-            echo "=== docker cp host → container (sync source under test) ==="
-            # The Dockerfile-built image lags the host repo because rebuild
-            # fails on private-dep auth (see workflow header). Push every
-            # path the smoke suite touches into the running container:
-            #
-            # - nutrition/        — models, services, views, admin, migrations,
-            #                        the smoke tests themselves
-            # - djangoProject/    — settings/ (CELERY_BEAT_SCHEDULE additions
-            #                        for DRF-302/306, MIDDLEWARE for DRF-242.4)
-            # - ai/, tenants/     — peripheral models the smoke tests'
-            #                        request-resolution path imports
-            # - analytics/        — DRF-160 added to INSTALLED_APPS;
-            #                        Django startup imports it before
-            #                        any request runs. Without this the
-            #                        whole web container ImportErrors.
-            #
-            # Strip __pycache__/.pyc on the host side first so we don't
-            # ship stale bytecode into the container.
-            find ./nutrition ./djangoProject ./ai ./tenants ./analytics \
-              -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
-            # Trailing /. means "copy contents of src into dst" (overwrite
-            # dst's contents). Without it, when dst exists as a dir docker
-            # cp creates dst/<src-basename>/ instead — last run silently
-            # produced /app/nutrition/nutrition/tests/smoke/ rather than
-            # overwriting /app/nutrition/.
-            docker compose cp ./nutrition/.     web:/app/nutrition
-            docker compose cp ./djangoProject/. web:/app/djangoProject
-            docker compose cp ./ai/.            web:/app/ai
-            docker compose cp ./tenants/.       web:/app/tenants
-            # `analytics/` doesn't exist in the running image — create
-            # the dir before cp'ing into it (cp -L wouldn't help).
-            docker compose exec -T web mkdir -p /app/analytics
-            docker compose cp ./analytics/.     web:/app/analytics
-            echo
-
-            echo "=== verify ayla-ai-core matches the requirements.txt pin ==="
-            # DRF-1444. This step used to run, inside the live `web`
-            # container:
-            #     pip install --upgrade "ayla-ai-core @ git+...@v0.6.0"
-            # That is a write into the pilot, not a check, and it was
-            # actively harmful: requirements.txt has pinned v0.9.0
-            # (f773e7d) since 2026-07-19, so every nightly run rolled the
-            # library back 11 commits / 6 releases. Observed on the pilot
-            # on 2026-09-03: `web` had 0.6.0 while celery_worker and
-            # celery_beat — same image, never touched by this workflow —
-            # had 0.9.0. The nightly was the sole cause of that split.
-            #
-            # The comment it hid behind ("image pre-dates DRF-241 Slice A",
-            # "build-time git auth not plumbed yet") is stale; see the
-            # workflow header. The `apt-get install git` that preceded it is
-            # gone for the same reason — the Dockerfile installs git.
-            #
-            # What replaces it is the check that would have caught the
-            # drift: compare the commit pip actually installed (PEP 610
-            # direct_url.json) against the SHA pinned in the host checkout,
-            # which the `git reset --hard origin/dev` above just refreshed.
+            echo "=== verify ayla-ai-core matches the requirements.txt pin (host tree = deployed SHA) ==="
             PINNED_REF="$(grep -m1 '^ayla-ai-core @ git+' requirements.txt | sed 's/.*[.]git@//; s/[[:space:]#].*//')"
             if [ -z "$PINNED_REF" ]; then
               echo "::error::could not read the ayla-ai-core pin from requirements.txt"
@@ -141,58 +124,29 @@ jobs:
               exit 1
             fi
             echo
-
-            echo "=== container view of smoke dir ==="
+            echo "=== container view of smoke dir (from the image, nothing copied in) ==="
             docker compose exec -T web ls -la nutrition/tests/smoke/ | tail -10
             echo
-
-            echo "=== run any pending migrations ==="
-            # DRF-1664: снимок ДО migrate — этот шаг меняет схему пилота
-            # каждое утро, и до сегодня делал это без точки отката.
-            echo "=== snapshot before migrate ==="
-            bash scripts/pg_snapshot_before_deploy.sh
-            docker compose exec -T web python manage.py migrate --noinput
-            echo
-
-            echo "=== migrations status ==="
+            echo "=== migrations status (read-only; the deploy migrates, the smoke never does) ==="
             docker compose exec -T web python manage.py showmigrations nutrition | tail -12
             echo
-
-            echo "=== ensure beverages seeded ==="
-            docker compose exec -T web python manage.py seed_beverages
-            echo
-
             echo "=== storage backend pytest will inherit (env DJANGO_SETTINGS_MODULE wins over pytest.ini; DRF-1663) ==="
             docker compose exec -T web python manage.py shell -c "import os; from django.conf import settings; print('DJANGO_SETTINGS_MODULE=' + str(os.environ.get('DJANGO_SETTINGS_MODULE')), 'STORAGES.default.BACKEND=' + settings.STORAGES['default']['BACKEND'])"
             echo
-
-            echo "=== smoke suite ==="
-            # Two-step resolution for PYTEST_ARGS: previously this was a
-            # single ${PYTEST_ARGS:-"-v --tb=short"} on the docker-exec line.
-            # Cron-triggered runs have empty PYTEST_ARGS (no inputs context),
-            # and somewhere in the GH Actions → appleboy/ssh-action → remote
-            # bash chain the literal `-v` was getting consumed as a flag,
-            # producing `pytest: unrecognized arguments: - --tb=short` and
-            # making smoke unrunnable on the cron schedule. Resolving into
-            # a plain variable first sidesteps the chain.
+            echo "=== smoke suite (deployed $DEPLOYED) ==="
             PYTEST_ARGS_RESOLVED="${PYTEST_ARGS:-}"
             if [ -z "$PYTEST_ARGS_RESOLVED" ]; then
               PYTEST_ARGS_RESOLVED="-v --tb=short"
             fi
+            # `log_file` из pytest.ini указывает в /app образа, куда пользователь
+            # контейнера писать не может — pytest падал INTERNALERROR до сбора
+            # тестов: PermissionError на '/app/test_results.log' (12–16.09).
             set +e
-            # DRF-1677 (класс DRF-1646) перевёл web на `user:` 11.09 17:34, и уже
-            # следующий ночной прогон 12.09 08:28 упал INTERNALERROR'ом ДО сбора
-            # тестов: PermissionError на '/app/test_results.log'. `log_file` в
-            # pytest.ini относительный, WORKDIR образа — /app, а сам файл остался
-            # там от эпохи root-контейнера (*.log в .dockerignore, значит не из
-            # сборки). Журнал уводится из /app; консольный (`log_cli = true`) не
-            # трогается, файл никто не читает — во всём репозитории два вхождения:
-            # .gitignore и pytest.ini.
             docker compose exec -T web pytest nutrition/tests/smoke \
               -o log_file=/tmp/test_results.log $PYTEST_ARGS_RESOLVED
             PYTEST_RC=$?
             set -e
-            echo "pytest exit=$PYTEST_RC"
+            echo "pytest exit=$PYTEST_RC (deployed $DEPLOYED, dev head $DEV_HEAD)"
 
             # Telegram alert moved off the VPS — RKN egress filtering
             # blocks api.telegram.org from RU hosts (curl: 7 connection
