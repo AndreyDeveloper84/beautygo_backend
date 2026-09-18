@@ -992,3 +992,50 @@ class SpecialistPublicationRequest(models.Model):
 
     def __str__(self) -> str:
         return f"{self.specialist_id} {self.outcome} {self.command_id}"
+
+
+class SalonAdminLinkRequest(models.Model):
+    """One accepted «привязать администратора салона» request from the bot (DRF-2085).
+
+    OWNER RULING 18.09 (вариант А), пункты 8 и 10: повтор с тем же
+    ``idempotency_key`` не создаёт дублей, и в каталоге остаётся аудит —
+    actor, target identity, tenant, operation, result, timestamp,
+    correlation_id. Эта строка и есть оба: ключ уникален, поэтому второй
+    запрос с тем же ключом находит её и возвращает те же id, а по ней же
+    оператор каталога видит, кто, когда и для какого салона завёл учётку.
+
+    Пишется ТОЛЬКО на успех и только внутри транзакции, которая заводит
+    учётку, TUR и связь, — отказ строки не оставляет (при отказе ничего не
+    создано; причина уходит в лог с correlation_id). Персональных данных
+    здесь нет: внешний id — тот же ``bot:max:<id>``, что уже лежит в
+    ``User.username`` прокси-строки; ``actor`` — служебная метка оператора
+    бота (``django_admin:user=<pk>``), не имя.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.CharField(max_length=64, unique=True)
+    tenant = models.ForeignKey(
+        "tenants.Tenant", on_delete=models.PROTECT, related_name="salon_admin_link_requests",
+    )
+    external_user_id = models.CharField(max_length=200, db_index=True)
+    user = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="salon_admin_link_requests",
+        help_text="The FRESH salon-administrator account this request created.",
+    )
+    actor = models.CharField(
+        max_length=200, help_text="Operator label from the bot's Django Admin (no name, no phone).",
+    )
+    correlation_id = models.CharField(max_length=64, blank=True, default="")
+    result = models.CharField(max_length=32, default="created")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Salon admin link request"
+        verbose_name_plural = "Salon admin link requests"
+        indexes = [
+            models.Index(fields=["tenant", "created_at"], name="salonadminlink_tenant_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.tenant_id} {self.external_user_id} {self.result}"

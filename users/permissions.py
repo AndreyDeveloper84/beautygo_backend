@@ -364,6 +364,52 @@ class IsTenantProvisioningBearer(permissions.BasePermission):
         return True
 
 
+class IsSalonAdminLinkBearer(permissions.BasePermission):
+    """The one-endpoint Bearer for ``POST /api/v1/internal/tenants/<slug>/salon-admins/`` (DRF-2085).
+
+    OWNER RULING 18.09 (вариант А): the bot's operator action may create a
+    FRESH salon-administrator account in the catalog, its ``admin`` TUR in
+    the named salon, and bind the chosen MAX identity to it — behind «an
+    S2S credential for this handle only». So this class matches
+    ``settings.AYLA_SALON_ADMIN_LINK_TOKEN`` and nothing else:
+
+    * empty setting — the route is closed (fails closed, no fallback to any
+      sibling secret);
+    * a value equal to the general Bearer or to either provisioning secret is
+      refused per request as well as at boot (``users.E004``) — equal
+      secrets would be one power again, and §151/§153 п.6 stay in force: the
+      bot holds no identity token, no provisioning token, no general write
+      into identity.
+
+    Endpoint-scoped in both directions: the sibling permissions compare
+    against their own settings, so this token opens none of their routes,
+    and this class accepts none of theirs.
+    """
+
+    message = "Salon admin link auth required"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        expected = getattr(settings, "AYLA_SALON_ADMIN_LINK_TOKEN", "") or ""
+        if not expected:
+            return False
+        for sibling in (
+            "AYLA_INTERNAL_API_TOKEN",
+            "AYLA_IDENTITY_PROVISIONING_TOKEN",
+            "AYLA_TENANT_PROVISIONING_TOKEN",
+        ):
+            other = getattr(settings, sibling, "") or ""
+            if other and compare_digest(expected, other):
+                return False
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        prefix = "Bearer "
+        if not auth_header.startswith(prefix):
+            return False
+        provided = auth_header[len(prefix):].strip()
+        if not provided or not compare_digest(provided, expected):
+            return False
+        return True
+
+
 class ServiceCredentialIsReadOnly(permissions.BasePermission):
     """A request authenticated by the Ayla service Bearer may only read.
 

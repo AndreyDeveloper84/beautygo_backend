@@ -204,6 +204,10 @@ ANONYMISE: dict[str, str] = {
     "billing.SpecialistSubscription.user": "payment_method_id/card_brand стереть сразу (D8)",
     "billing.BillingConsent.user": "revoked_at=now",
     "analytics.AnalyticsEvent.actor": "NULL (события без значений — счётчики, AMD-010)",
+    "users.SalonAdminLinkRequest.user": (
+        "NULL; external_user_id → deleted:<pk прокси> — аудит операции (кто, когда, какой салон) "
+        "остаётся, MAX-идентификатор не переживает удаление личности (DRF-2085)"
+    ),
 }
 
 #: Хранить без изменений. Значение — основание и срок.
@@ -504,6 +508,7 @@ def _erase_catalog(user) -> dict:
         DeviceToken,
         FavoriteSpecialist,
         Profile,
+        SalonAdminLinkRequest,
         SocialAccount,
         SpecialistPortfolio,
         SpecialistProfile,
@@ -657,6 +662,24 @@ def _erase_catalog(user) -> dict:
     user.user_permissions.clear()
     deleted["token_blacklist.OutstandingToken"] = _revoke_tokens(user)
 
+    # 7-. Аудит привязки администратора салона (DRF-2085): строка остаётся —
+    # это след операции оператора, — но указатель на человека снимается, а
+    # MAX-идентификатор в ней переименовывается ВМЕСТЕ с прокси: после
+    # удаления в таблице нет ни ``user``, ни ``bot:max:<id>``. До переименования
+    # username ниже — иначе прежний внешний id уже не по чему найти.
+    anonymised["users.SalonAdminLinkRequest.user"] = SalonAdminLinkRequest.objects.filter(
+        user=user
+    ).update(user=None)
+    anonymised["users.SalonAdminLinkRequest.external_user_id"] = (
+        SalonAdminLinkRequest.objects.filter(external_user_id=user.username).update(
+            external_user_id=f"deleted:{user.pk}"
+        )
+    )
+    if SalonAdminLinkRequest.objects.filter(
+        Q(user=user) | Q(external_user_id=user.username)
+    ).exists():
+        raise IncompleteErasure("users.SalonAdminLinkRequest still names the person")
+
     user.phone = None
     user.email = ""
     user.first_name = ERASED_NAME
@@ -805,6 +828,7 @@ def _residue(user) -> dict[str, int]:
         DeviceToken,
         FavoriteSpecialist,
         Profile,
+        SalonAdminLinkRequest,
         SocialAccount,
         SpecialistProfile,
         TenantUserRelationship,
@@ -861,6 +885,7 @@ def _residue(user) -> dict[str, int]:
             user=user, is_active=True
         ),
         "analytics.AnalyticsEvent.actor": AnalyticsEvent.objects.filter(actor=user),
+        "users.SalonAdminLinkRequest.user": SalonAdminLinkRequest.objects.filter(user=user),
         "users.Profile.pii": Profile.objects.filter(user=user).exclude(
             full_name=ERASED_NAME, bio="", city="",
             default_location_lat=None, default_location_lng=None,

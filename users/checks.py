@@ -31,6 +31,37 @@ def identity_provisioning_token_check(app_configs, **kwargs):
 
 
 @register("security")
+def salon_admin_link_token_check(app_configs, **kwargs):
+    """DRF-2085: the salon-admin-link secret must differ from ALL THREE others.
+
+    The ruling grants the bot's operator action exactly one identity power —
+    «fresh salon administrator account + TUR + MAX link» — behind a
+    credential of its own. Equal to the general Bearer, the runtime could
+    mint salon administrators; equal to either provisioning secret, one
+    value would carry two powers. Refuse at boot, where the misconfiguration
+    is visible; ``IsSalonAdminLinkBearer`` refuses per request as well.
+    """
+    link = getattr(settings, "AYLA_SALON_ADMIN_LINK_TOKEN", "") or ""
+    if not link:
+        return []
+    siblings = (
+        ("AYLA_INTERNAL_API_TOKEN", "the general bot credential would mint salon administrators"),
+        ("AYLA_IDENTITY_PROVISIONING_TOKEN", "one value would carry bind-external AND salon-admin linking"),
+        ("AYLA_TENANT_PROVISIONING_TOKEN", "one value would carry salon creation AND salon-admin linking"),
+    )
+    errors = []
+    for name, consequence in siblings:
+        other = getattr(settings, name, "") or ""
+        if other and link == other:
+            errors.append(Error(
+                f"AYLA_SALON_ADMIN_LINK_TOKEN equals {name} — {consequence}. "
+                "Provision a DISTINCT secret (OWNER RULING 18.09, DRF-2085).",
+                id="users.E004",
+            ))
+    return errors
+
+
+@register("security")
 def tenant_provisioning_token_check(app_configs, **kwargs):
     """DRF-1695 (C1): the tenant-provisioning secret must differ from BOTH
     the general bot Bearer and the identity-provisioning secret.
