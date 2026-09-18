@@ -10,9 +10,10 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 
-from django.conf import settings
 from django.db import transaction
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+
+from appointments.domain.booking_window import booking_horizon_days
 from rest_framework import permissions, serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -234,7 +235,7 @@ def replace_weekly_schedule(specialist, schedule_data: list[dict]) -> list[dict]
                 for item in schedule_data
             ])
 
-    max_ahead = getattr(settings, 'BOOKING_MAX_AHEAD_DAYS', 60)
+    max_ahead = booking_horizon_days()
     today = date.today()
     _invalidate_slots(specialist.id, today, today + timedelta(days=max_ahead))
 
@@ -400,7 +401,7 @@ class ScheduleView(APIView):
                 status_code=409,
             )
 
-        max_ahead = getattr(settings, 'BOOKING_MAX_AHEAD_DAYS', 60)
+        max_ahead = booking_horizon_days()
         today = date.today()
         _invalidate_slots(specialist.id, today, today + timedelta(days=max_ahead))
 

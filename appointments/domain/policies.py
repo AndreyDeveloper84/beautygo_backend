@@ -17,6 +17,7 @@ from typing import Protocol, runtime_checkable
 
 from django.conf import settings
 
+from .booking_window import booking_horizon_days, booking_horizon_end
 from .exceptions import (
     BookingWindowError,
     CancellationNotAllowedError,
@@ -301,11 +302,13 @@ class DefaultBookingWindowPolicy:
 
     def validate_booking_window(self, requested_start_at: datetime) -> None:
         min_ahead = int(getattr(settings, 'BOOKING_MIN_AHEAD_MINUTES', 60))
-        max_ahead = int(getattr(settings, 'BOOKING_MAX_AHEAD_DAYS', 60))
+        # DRF-2081: горизонт — из одного источника с отдачей слотов; сравнение
+        # с тем же мгновением, которым слот-компьютер отсекает граничный день.
+        max_ahead = booking_horizon_days()
 
         now = datetime.now(tz=timezone.utc)
         min_allowed = now + timedelta(minutes=min_ahead)
-        max_allowed = now + timedelta(days=max_ahead)
+        max_allowed = booking_horizon_end(now)
 
         if requested_start_at < min_allowed:
             raise BookingWindowError(
