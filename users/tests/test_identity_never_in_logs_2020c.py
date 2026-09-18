@@ -78,6 +78,10 @@ MODULES = {
     "nutrition/views.py": "nutrition.views",
     "users/identity_events.py": "users.identity.events",
     "users/internal_users_api.py": "users.internal_users_api",
+    # DRF-2085: привязка администратора салона из админки бота — логирует
+    # slug, pk и correlation_id, внешний id — никогда (пункт 10 ruling'а).
+    "users/internal_salon_admin_api.py": "users.internal_salon_admin_api",
+    "users/salon_admin_linking.py": "users.salon_admin_linking",
     "users/services.py": "users.services",
     "users/social_auth.py": "users.social_auth",
 }

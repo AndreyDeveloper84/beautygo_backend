@@ -156,6 +156,10 @@ REST_FRAMEWORK = {
         # cut the 14 to 1 and let this drop to the neighbours' 60/min —
         # scoped out of DRF-1446, owner decides.
         'slots_internal': '240/min',
+        # Scoped: POST /api/v1/internal/tenants/<slug>/salon-admins/ (DRF-2085).
+        # One operator click per salon administrator — a human pace, and the
+        # ruling asks for a rate limit on the linking capability specifically.
+        'salon_admin_link': '10/min',
         'water': '60/min',           # Scoped: water tracker tap-buttons; user can't tap faster than this
         # Scoped: POST /analytics/event/. Mobile may batch-emit on session
         # foreground/background; higher than `user` so analytics doesn't
@@ -831,6 +835,22 @@ AYLA_IDENTITY_PROVISIONING_TOKEN = os.environ.get(
 # ручка тенантов выключена, экран бота отвечает SETUP_PENDING.
 AYLA_TENANT_PROVISIONING_TOKEN = os.environ.get(
     "AYLA_TENANT_PROVISIONING_TOKEN", "",
+)
+
+# DRF-2085 (OWNER RULING 18.09, вариант А) — ЧЕТВЁРТЫЙ секрет, одна ручка.
+# ``POST /api/v1/internal/tenants/<slug>/salon-admins/`` заводит СВЕЖУЮ
+# учётку администратора салона, TUR role=admin в названном салоне и
+# связывает с ней MAX-личность (``bot:max:<id>``). Это единственное место,
+# где бот (операторское действие ``platform_operations`` в его Django
+# Admin, не рантайм) касается личности, и потому credential — свой:
+# не общий Bearer (§151), не identity-provisioning (bind-external к
+# существующим учёткам — запрещено явно), не tenant-provisioning
+# (заводить салоны — другая сила). Каталог требует, чтобы все четыре
+# значения различались (users.E004 при старте; сторож отказывает и на
+# запросе). Пусто — ручка выключена, бот отвечает отказом по имени.
+# Ротируется независимо; в логи и в клиентский код не попадает.
+AYLA_SALON_ADMIN_LINK_TOKEN = os.environ.get(
+    "AYLA_SALON_ADMIN_LINK_TOKEN", "",
 )
 
 # S3C — YClients catalog intake (read-only pull of the pilot salon's

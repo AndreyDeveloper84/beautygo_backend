@@ -18,7 +18,7 @@ from django.utils.html import format_html
 from appointments.admin import SpecialistWorkingHoursInline
 
 from .models import (
-    DeletionRequest, DeviceToken, OTPCode, Profile, SocialAccount,
+    DeletionRequest, DeviceToken, OTPCode, Profile, SalonAdminLinkRequest, SocialAccount,
     SpecialistProfile, User,
 )
 
@@ -714,6 +714,36 @@ class SocialAccountAdmin(admin.ModelAdmin):
     search_fields = ('user__phone', 'user__username', 'provider_uid')
     readonly_fields = ('created_at', 'extra_data')
     raw_id_fields = ('user',)
+
+
+@admin.register(SalonAdminLinkRequest)
+class SalonAdminLinkRequestAdmin(admin.ModelAdmin):
+    """Аудит привязок администраторов из админки бота — только чтение (DRF-2085).
+
+    Строка пишется сервисом ``users.salon_admin_linking`` внутри той же
+    транзакции, что учётка, TUR и связь; править её рукой значило бы
+    переписать историю, а завести — «связать» без связывания. Снять
+    связь или доступ — операциями каталога (``unlink_external_identity``,
+    отзыв TUR), не удалением этой строки.
+    """
+
+    list_display = ("created_at", "tenant", "external_user_id", "user", "actor", "result", "correlation_id")
+    list_filter = ("result", "tenant")
+    search_fields = ("external_user_id", "correlation_id", "idempotency_key", "user__username")
+    readonly_fields = (
+        "id", "idempotency_key", "tenant", "external_user_id", "user", "actor",
+        "correlation_id", "result", "created_at",
+    )
+    raw_id_fields = ("user",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(DeletionRequest)
