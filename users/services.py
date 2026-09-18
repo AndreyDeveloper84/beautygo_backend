@@ -280,6 +280,12 @@ BIND_TARGET_ROLES_OPERATOR: tuple[str, ...] = ("specialist", "admin")
 #: provisioning bearer called the endpoint" without parsing anything.
 INITIATOR_ADMIN_LINK_SOLO_MASTER = "admin_link_solo_master"
 INITIATOR_ADMIN_LINK_SALON_ADMIN = "admin_link_salon_admin"
+#: DRF-2085 (OWNER RULING 18.09): the bot's operator action linked a MAX
+#: identity to a FRESH salon-administrator account through
+#: ``users.salon_admin_linking``. Its own name, so audit queries can tell
+#: it from the catalog operator's «Связать с Ayla» (above) and from the
+#: provisioning bearer — three initiators, three different authorities.
+INITIATOR_BOT_SALON_ADMIN_LINK = "bot_salon_admin_link"
 
 
 def bindable_target_q(target_roles: tuple[str, ...]) -> Q:
