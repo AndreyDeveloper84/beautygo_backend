@@ -4,10 +4,11 @@
 wellness-context (DRF-1344): Bearer service token + X-External-User-ID,
 разрешённый в ``request.user`` через ``IsBotServiceWithVerifiedClient``.
 
-- ``POST`` — составить план: ``{goal_id, actions:[{action_type, cadence,
-  target_count}]}`` (1–3 действия). 201 — создан; 409
+- ``POST`` — составить план: ``{goal_id?, actions:[{action_type, cadence,
+  target_count}]}`` (1–3 действия; ``goal_id`` необязателен — без него
+  активная цель вызывающего, PR-1b). 201 — создан; 409
   ``PLAN_LITE_ALREADY_ACTIVE`` — активный уже есть; 404 ``NOT_FOUND`` —
-  цель не у этого человека или не активна; 400 — форма.
+  цель не у этого человека / не активна / активной цели нет; 400 — форма.
 - ``DELETE`` — закрыть активный план (append-only). 404 — активного нет.
 - Флаг выключен → 404 ``PLAN_LITE_DISABLED`` по замыслу, не 5xx.
 
@@ -65,10 +66,12 @@ class PlanLiteView(APIView):
     )
     def post(self, request: Request) -> Response:
         raw_goal = request.data.get("goal_id") if isinstance(request.data, dict) else None
-        try:
-            goal_id = UUID(str(raw_goal))
-        except (TypeError, ValueError):
-            return error_response("VALIDATION_ERROR", "goal_id must be a UUID")
+        goal_id: UUID | None = None
+        if raw_goal not in (None, ""):
+            try:
+                goal_id = UUID(str(raw_goal))
+            except (TypeError, ValueError):
+                return error_response("VALIDATION_ERROR", "goal_id must be a UUID")
         try:
             actions = parse_actions(request.data.get("actions"))
         except InvalidActions as exc:
@@ -79,7 +82,10 @@ class PlanLiteView(APIView):
             return _disabled()
         except GoalNotFound:
             return error_response(
-                "NOT_FOUND", "Цель не найдена", status_code=status.HTTP_404_NOT_FOUND,
+                "NOT_FOUND",
+                "Активная цель не найдена",
+                details={"reason": "no_active_goal" if goal_id is None else "goal_not_found"},
+                status_code=status.HTTP_404_NOT_FOUND,
             )
         except PlanAlreadyActive:
             return error_response(
