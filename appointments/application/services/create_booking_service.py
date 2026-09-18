@@ -17,6 +17,7 @@ from django.conf import settings
 from django.db import transaction
 
 from appointments.application.dto import CreateBookingDTO, BookingResultDTO
+from appointments.domain.booking_window import booking_horizon_days, booking_horizon_end
 from appointments.domain.exceptions import (
     BookingWindowError,
     ExternalSlotTakenError,
@@ -313,13 +314,14 @@ class CreateBookingService:
         explicitly and with a reason, never as a side effect of which
         endpoint the caller reached.
         """
-        max_ahead = int(getattr(settings, "BOOKING_MAX_AHEAD_DAYS", 60))
         now = _now_utc()
         if start_at < now:
             raise BookingWindowError("Booking cannot be created in the past")
-        if start_at > now + timedelta(days=max_ahead):
+        # DRF-2081: тот же источник и то же мгновение, что у клиентского окна
+        # и у отдачи слотов — не второе чтение настройки.
+        if start_at > booking_horizon_end(now):
             raise BookingWindowError(
-                f"Booking cannot be more than {max_ahead} days in advance"
+                f"Booking cannot be more than {booking_horizon_days()} days in advance"
             )
 
     @transaction.atomic
