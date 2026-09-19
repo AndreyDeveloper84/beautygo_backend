@@ -718,3 +718,152 @@ class TestGuardCoversItsSubject:
         tested.add("/api/v1/internal/users/{subject}/recommendations/<uuid:set_id>/")
         tested.add("/api/v1/internal/users/{subject}/recommendations/<uuid:recommendation_id>/events/")
         assert guarded <= tested, f"маршруты без отрицательного теста: {sorted(guarded - tested)}"
+
+
+# ---------------------------------------------------------------------------
+# DRF-2117 — субъект в URL может быть не человеком, а САЛОНОМ (по slug)
+# ---------------------------------------------------------------------------
+
+#: Маршруты с ``<slug:slug>`` живут в двух конфах под ``/internal/``.
+SALON_URLS = [
+    Path(__file__).resolve().parents[2] / "tenants" / "internal_urls.py",
+    Path(__file__).resolve().parents[2] / "tenants" / "internal_salon_urls.py",
+]
+
+#: Салонные маршруты, охраняемые иначе — с названной причиной.
+GUARDED_OTHERWISE_SALON: dict[str, str] = {
+    "internal-salon-admin-link": (
+        "IsSalonAdminLinkBearer — endpoint-scoped credential оператора (DRF-2085, "
+        "OWNER RULING 18.09 вариант А); зовущий — оператор, не субъект"
+    ),
+}
+
+#: Салонные маршруты с субъектным сторожем, чьи отрицательные тесты живут рядом
+#: с положительной половиной.
+SALON_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
+    "internal-salon-readiness": "tenants/tests/test_salon_readiness_2117.py::TestSubject",
+}
+
+_SALON_ROUTE_RE = re.compile(
+    r'path\(\s*"([^"]*<slug:(slug)>[^"]*)",.*?name="([^"]+)"', re.S,
+)
+
+#: Один маршрут этой поверхности, прогнанный здесь через те же отрицательные
+#: формы, что и человеческие: сторож — подкласс того же класса, и подкласс
+#: обязан отказывать там же, где база.
+SALON_READINESS = ("get", "/api/v1/internal/salons/{subject}/readiness/")
+
+
+def _salon_subject_routes() -> list[tuple[str, str, str, str]]:
+    """(name, kwarg, template, mount) для маршрутов с ``<slug:slug>``."""
+    mounts = {
+        "internal_urls.py": "/api/v1/internal/tenants/",
+        "internal_salon_urls.py": "/api/v1/internal/salons/",
+    }
+    out = []
+    for conf in SALON_URLS:
+        text = conf.read_text(encoding="utf-8")
+        for m in _SALON_ROUTE_RE.finditer(text):
+            out.append((m.group(3), m.group(2), m.group(1), mounts[conf.name]))
+    return out
+
+
+class TestSalonSubjectGuardCoversItsSurface:
+    def test_the_salon_surface_is_enumerated(self):
+        names = {n for n, _, _, _ in _salon_subject_routes()}
+        assert {"internal-salon-admin-link", "internal-salon-readiness"} <= names, names
+
+    @pytest.mark.parametrize("route", _salon_subject_routes(), ids=lambda r: r[0])
+    def test_every_salon_route_carries_the_check_or_a_named_reason(self, route):
+        name, kwarg, template, mount = route
+        if name in GUARDED_OTHERWISE_SALON:
+            assert GUARDED_OTHERWISE_SALON[name].strip(), f"{name}: причина пустая"
+            return
+        sample = template.replace(f"<slug:{kwarg}>", "some-salon")
+        view_cls = resolve(mount + sample).func.view_class
+        assert _has_subject_guard(view_cls), f"{name}: салон в URL, а проверки субъекта нет"
+        assert getattr(view_cls, "subject_url_kwarg", None) == kwarg, (
+            f"{name}: subject_url_kwarg={getattr(view_cls, 'subject_url_kwarg', None)!r}"
+        )
+        assert name in SALON_ROUTES_TESTED_ELSEWHERE, (
+            f"{name}: салонный маршрут без отрицательных тестов"
+        )
+
+
+@pytest.fixture
+def salon_of_alice(alice):
+    """Салон, которым Алиса управляет (TUR admin); Боб — нет."""
+    from tenants.models import Tenant
+    from users.models import TenantUserRelationship
+
+    alice_user, _ = alice
+    tenant = Tenant.objects.create(slug="authz-salon-a", name="Салон А")
+    TenantUserRelationship.objects.create(
+        user=alice_user, tenant=tenant, role=TenantUserRelationship.Role.ADMIN, is_active=True,
+    )
+    return tenant
+
+
+class TestSalonSubjectRoute:
+    """Те же отрицательные формы, что у человеческих маршрутов, на салонном."""
+
+    def test_admin_reaches_her_salon(self, alice, salon_of_alice):
+        _, alice_id = alice
+        resp = _call(_client(actor=alice_id), SALON_READINESS, salon_of_alice.slug)
+        assert resp.status_code == 200, resp.content
+
+    def test_foreign_salon_is_not_confirmed(self, alice, bob, salon_of_alice):
+        """Не 403, а 404: slug чужого тенанта не подтверждается (DRF-1036)."""
+        _, bob_id = bob
+        resp = _call(_client(actor=bob_id), SALON_READINESS, salon_of_alice.slug)
+        assert resp.status_code == 404, resp.content
+        assert "Салон А" not in resp.content.decode()
+
+    def test_provisioning_credential_is_refused(self, alice, salon_of_alice):
+        _, alice_id = alice
+        resp = _call(
+            _client(bearer=PROVISIONING_TOKEN, actor=alice_id), SALON_READINESS, salon_of_alice.slug,
+        )
+        assert resp.status_code in (401, 403)
+
+    def test_no_header_means_no_access(self, alice, salon_of_alice):
+        resp = _call(_client(actor=None), SALON_READINESS, salon_of_alice.slug)
+        assert resp.status_code == 403
+        assert "X-External-User-ID" in resp.json()["error"]["message"]
+
+    def test_invalid_token_denied(self, alice, salon_of_alice):
+        resp = _call(_client(bearer="nope"), SALON_READINESS, salon_of_alice.slug)
+        assert resp.status_code in (401, 403)
+
+    def test_unknown_actor_is_refused_without_provisioning_a_row(self, alice, salon_of_alice):
+        before = User.objects.count()
+        resp = _call(_client(actor="bot:telegram:404405"), SALON_READINESS, salon_of_alice.slug)
+        assert resp.status_code == 403
+        assert User.objects.count() == before
+
+    def test_inactive_actor(self, alice, salon_of_alice):
+        user, actor = alice
+        _deactivate(user, deleted=False)
+        resp = _call(_client(actor=actor), SALON_READINESS, salon_of_alice.slug)
+        _expect_refused(resp, SALON_READINESS, "inactive")
+
+    def test_deleted_after_d3(self, alice, salon_of_alice):
+        user, actor = alice
+        _as_after_d3(user)
+        resp = _call(_client(actor=actor), SALON_READINESS, salon_of_alice.slug)
+        _expect_refused(resp, SALON_READINESS, "deleted-after-d3")
+
+    def test_tombstone_actor(self, salon_of_alice):
+        from users.deletion_executor import tombstone_user
+        from users.models import TenantUserRelationship
+
+        tomb = tombstone_user()
+        TenantUserRelationship.objects.create(
+            user=tomb, tenant=salon_of_alice, role=TenantUserRelationship.Role.ADMIN, is_active=True,
+        )
+        User.objects.create(
+            username="bot:telegram:7008", role="client", is_proxy=True, is_guest=False,
+            linked_user=tomb,
+        )
+        resp = _call(_client(actor="bot:telegram:7008"), SALON_READINESS, salon_of_alice.slug)
+        _expect_refused(resp, SALON_READINESS, "tombstone")
