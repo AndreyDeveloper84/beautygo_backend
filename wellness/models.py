@@ -132,6 +132,14 @@ class PersonalPlan(models.Model):
         default="",
         help_text="Снимок ClientGoal.goal_key на момент составления плана (Plan Lite)",
     )
+    # DRF-2123 (§51) — откуда план: ``manual`` или ``template:<goal_key>:v<N>``
+    # при составлении по предложенному шаблону. Строка, не FK: шаблон —
+    # курируемые данные, они версионируются и не удаляются; ПДн нет.
+    source = models.CharField(
+        max_length=96,
+        default="manual",
+        help_text="manual | template:<goal_key>:v<N> — по какому шаблону составлен (Plan Lite)",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     closed_at = models.DateTimeField(null=True, blank=True)
 
@@ -406,6 +414,9 @@ class PlanAction(models.Model):
     class Cadence(models.TextChoices):
         PER_DAY = "per_day", "Раз в день"
         PER_WEEK = "per_week", "Раз в неделю"
+        # DRF-2123 (§51): ведро — 14 дней ОТ СОЗДАНИЯ ПЛАНА (текущее
+        # содержит «сейчас»), не календарная неделя.
+        PER_2_WEEKS = "per_2_weeks", "Раз в две недели"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     plan = models.ForeignKey(
@@ -424,7 +435,7 @@ class PlanAction(models.Model):
     )
     target_count = models.PositiveSmallIntegerField(
         default=1,
-        help_text="Сколько раз за ведро каденса (день для per_day, неделя для per_week)",
+        help_text="Сколько раз за ведро каденса (день для per_day, неделя для per_week, 14 дней для per_2_weeks)",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -439,3 +450,53 @@ class PlanAction(models.Model):
             f"PlanAction<plan={self.plan_id}> {self.action_type}"
             f" {self.target_count}x {self.cadence}"
         )
+
+
+class PlanTemplate(models.Model):
+    """Шаблон Plan Lite по цели — таблица владельца §51 как ДАННЫЕ (DRF-2123).
+
+    Курируемая строка «цель → 1–3 обязательства + почему»: правится в
+    админке, кладётся сидом ``seed_plan_templates`` (идемпотентно; изменение
+    текста — новая ``version``, старая ``is_active=False``). Ровно одна
+    активная на ``goal_key`` (частичная уникальность), версии не удаляются:
+    ``PersonalPlan.source`` ссылается на них строкой.
+
+    Не персональные данные: ни указателя на человека, ни строкового
+    субъекта — в реестр стирания (``users/deletion_executor.py``) не входит.
+
+    Категория для ``book_service`` здесь НЕ хранится — выводится из цели на
+    стороне подбора (``goals.wiring.goal_category_ids_for_key``).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    goal_key = models.SlugField(
+        max_length=64,
+        help_text="Ключ курируемой цели (services.GoalOption.key)",
+    )
+    actions = models.JSONField(
+        default=list,
+        help_text="[{action_type, cadence, target_count}] — 1–3 обязательства в форме PlanAction",
+    )
+    why_text = models.TextField(
+        help_text="Слово владельца «почему такой план» — показывается человеку дословно",
+    )
+    version = models.PositiveIntegerField(default=1)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["goal_key", "-version"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["goal_key"],
+                condition=models.Q(is_active=True),
+                name="plantemplate_one_active_per_goal_key",
+            ),
+            models.UniqueConstraint(
+                fields=["goal_key", "version"],
+                name="plantemplate_goal_key_version_unique",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"PlanTemplate<{self.goal_key} v{self.version}{'' if self.is_active else ' inactive'}>"
