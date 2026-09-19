@@ -216,6 +216,88 @@ tenant being synced, exactly as `upsert_master_services` already does for edges
 
 ---
 
+## 2b. Salon readiness — по мастерам поимённо (DRF-2117, §50 п.4)
+
+```
+GET /api/v1/internal/salons/<slug>/readiness/
+Authorization: Bearer <AYLA_INTERNAL_API_TOKEN>
+X-External-User-ID: <actor>        # владелец / администратор, от чьего имени читает бот
+```
+
+Сторож — `users.permissions.IsInternalBearerForSalonSubject` (подкласс
+субъектного сторожа DRF-1617): runtime-bearer (provisioning-credential →
+отказ), заголовок обязателен, актор резолвится **без создания строк**, должен
+быть активен и держать активную TUR `admin` в активном тенанте `<slug>`.
+Чужой, неизвестный или выключенный салон → **404** (slug чужого тенанта не
+подтверждается, DRF-1036), не 403. Перепись —
+`users/tests/test_internal_subject_authorization.py` (салонные маршруты),
+отрицательные тесты — `tenants/tests/test_salon_readiness_2117.py::TestSubject`.
+
+**Что это за половина.** Каталог НЕ знает §83 (`schedule_confirmed_at`),
+`catalog_specialist_id`, `SoloIdentityLink` и `MasterService.sellable` — эти
+столбцы живут в зеркале бота (`apps/catalog/master_state.py::sale_block`).
+Бот накладывает их на этот ответ сам; `ready` здесь означает «каталог не
+видит препятствий», и бот вправе сузить. Список у бота **длиннее при
+включённом `MASTER_SCHEDULE_CONFIRMATION_REQUIRED`** (§83 → `schedule_unconfirmed`);
+здесь `schedule` — только «есть рабочий день с началом и концом».
+
+```jsonc
+200 {
+  "data": {
+    "salon": {"slug": "formula-tela", "name": "Формула тела"},
+    "ready": false,                     // только при пустом problems И без unknown
+    "checked_at": "2026-09-20T09:00:00+00:00",
+    "horizon_days": 7,
+    "masters": [
+      {
+        "id": "<SpecialistProfile.id>",  // = CatalogMaster.catalog_specialist_id в боте
+        "user_id": "<User.id>",          // = CatalogMaster.ayla_user_id в боте
+        "name": "Анна",                  // первое слово display_name
+        "checks": {                      // ok | problem | unknown | skipped
+          "publication": "ok", "schedule": "problem", "services": "ok",
+          "catalog_link": "ok", "slots": "skipped"
+        },
+        "problems": [{"code": "schedule_missing", "text": "Анна — не настроен график"}]
+      }
+    ],
+    "problems": [                        // плоский список по всем мастерам, в порядке masters
+      {"master": {"id": "…", "name": "Анна"}, "code": "schedule_missing",
+       "text": "Анна — не настроен график"}
+    ],
+    "limits": ["…"]                      // названные пределы, как есть
+  }
+}
+```
+
+| check | code | когда |
+|---|---|---|
+| publication | `not_published` | профиль не опубликован (`users.sellable.is_published`) |
+| publication | `hidden_from_catalog` | опубликован, `is_available=false` |
+| publication | `booking_paused` | опубликован, `is_booking_enabled=false` |
+| schedule | `schedule_missing` | нет рабочего дня с началом и концом (`SpecialistWorkingHours`) |
+| services | `services_missing` | ни одного продаваемого ребра этого тенанта (`services.offer_sellable.sellable_offer_q`: активно, услуга активна, цена ≥ 1 ₽) |
+| services | `service_duration_missing` | у первого продаваемого ребра нет длительности (услуга / ребро / шаблон) — путь записи такую откажет |
+| catalog_link | `identity_not_linked` | MAX-личность не привязана к аккаунту мастера (`users.publication.is_linked`) |
+| slots | `no_free_slots` | ни одного окна на `horizon_days` дней (`AvailabilityQueryService`, по длительности первой продаваемой услуги) |
+| slots | `slots_unknown` | вычислитель упал — **это проблема**, класс исключения в логе `salon_readiness.slots_unknown` |
+| салон | `no_masters` | ни одного мастера — `problems[].master = null`, `ready=false` |
+
+`slots` = `skipped`, пока `schedule` или `services` не `ok` (окон нет по
+построению; второе слово о том же — шум). `unknown` никогда не читается как
+«ок»: `ready=false`. Тексты — константы по коду (`tenants/salon_readiness.py::TEXTS`),
+бот держит свою таблицу по тем же кодам; имена без склонений («Анна — …»,
+предел назван).
+
+Мастера — `SpecialistProfile` тенанта с активным неудалённым аккаунтом, в
+порядке `display_name`. Салон без мастеров — `masters: []`, `ready: false`,
+одна проблема уровня салона `no_masters` с `master: null` (три мастера с
+выключенными аккаунтами — это ноль мастеров, и «готов» тут был бы ложью).
+
+**Предел слотов (до DRF-1637):** только «есть/нет», одна услуга на мастера,
+7 дней от сегодня в поясе мастера, горизонт брони `booking_horizon_end()`.
+Стоимость — до 7 вычислений окон на мастера за вызов: это кнопка, не цикл.
+Кэш окон 60 с (`SlotCacheService`) — правка графика видна не сразу.
+
 ## 3. Stable-ID contract
 
 - All ids are immutable `UUIDv4`, stable across catalog syncs.
@@ -248,6 +330,8 @@ Additive-only within S3A. New fields may be appended; existing field names /
 types will not change without bumping this contract and notifying S3B.
 
 **Changelog**
+- 2026-09-20 — `GET /api/v1/internal/salons/<slug>/readiness/` (DRF-2117, §2b): салонная
+  готовность поимённо под субъектным сторожем салона; чужой салон → 404.
 - 2026-08-23 — `/api/v1/internal/specialists/` accepts `?tenant=<uuid>` and every
   row now carries `tenant` (both additive). The masters mirror was the only one of
   the three catalog pulls without a tenant scope; see §2a (DRF-1313).

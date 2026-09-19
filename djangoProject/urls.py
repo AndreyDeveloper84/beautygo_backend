@@ -124,6 +124,12 @@ urlpatterns = [
         'api/v1/internal/tenants/',
         include('tenants.internal_urls'),
     ),
+    # DRF-2117 — салонная готовность поимённо: салон по slug, подтверждённый
+    # TUR ``admin`` актора (IsInternalBearerForSalonSubject), чужой → 404.
+    path(
+        'api/v1/internal/salons/',
+        include('tenants.internal_salon_urls'),
+    ),
     # #1016 S2 — internal Bearer REST surface the Ayla bot reads/writes
     # (slots + catalog mirror + booking create/cancel/reschedule).
     # Contract co-owned with S1: ai-bot-platform/docs/architecture/.

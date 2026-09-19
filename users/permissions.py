@@ -687,6 +687,30 @@ class IsInternalBearerForSubject(permissions.BasePermission):
         return None
 
     def has_permission(self, request: Any, view: Any) -> bool:
+        resolved = self._resolve_named_actor(request, view)
+        if isinstance(resolved, bool):
+            # Verdict already published: refused, or a provisioned workspace
+            # let an unseen identity through (DRF-1829).
+            return resolved
+        purpose, subject_id, actor, external_user_id = resolved
+        return self._subject_verdict(
+            request, purpose=purpose, subject_id=subject_id, actor=actor,
+            external_user_id=external_user_id,
+        )
+
+    def _resolve_named_actor(
+        self, request: Any, view: Any,
+    ) -> bool | tuple[str, str, Any, str]:
+        """Steps 1–2 and the actor half of step 3: purpose, named, resolved
+        without creating a row, active.
+
+        Returns ``(purpose, subject_id, actor, external_user_id)`` for :meth:`_subject_verdict`
+        to compare, or a final ``bool`` when the verdict is already known —
+        every refusal here has published its reason. Split out (DRF-2117) so
+        a surface whose URL names something other than a person — a salon by
+        slug — reuses the same actor resolution and changes only what the
+        actor is compared against.
+        """
         from users.services import resolve_external_user_readonly
 
         purpose = _credential_purpose(request)
@@ -773,6 +797,17 @@ class IsInternalBearerForSubject(permissions.BasePermission):
             )
             return False
 
+        return purpose, subject_id, actor, external_user_id
+
+    def _subject_verdict(
+        self, request: Any, *, purpose: str, subject_id: str, actor: Any,
+        external_user_id: str,
+    ) -> bool:
+        """Step 3, the comparison: the URL subject must be the actor's own.
+
+        ``external_user_id`` — the header as sent, for the provisioned-workspace
+        claim (DRF-1829) of a LINKED-but-profileless actor.
+        """
         actor_subject = self.subject_of(actor)
         if actor_subject is None:
             if self._allow_provisioned_workspace(
@@ -867,6 +902,68 @@ class IsInternalBearerForSpecialistSubject(IsInternalBearerForSubject):
             .first()
         )
         return profile.user if profile is not None else None
+
+
+class IsInternalBearerForSalonSubject(IsInternalBearerForSubject):
+    """Same gate, URL names a SALON by slug the actor administers (DRF-2117).
+
+    For ``/internal/salons/<slug>/…`` reads the salon bot makes on behalf of
+    the owner / administrator it serves. The actor is resolved exactly as
+    above — runtime bearer, named, followed through the LINKED binding,
+    active — and then compared not to a UUID but to a **relationship**:
+    an active ``admin``-role ``TenantUserRelationship`` in the active
+    tenant with that slug. The same second factor ``IsTenantAdmin`` applies
+    on ``/tenants/me/…`` (owner ruling OD-B5-1: attribution to a human, not a
+    second shared secret), lifted onto the subject gate so the census in
+    ``users/tests/test_internal_subject_authorization.py`` sees one guard,
+    not a view that remembered to check.
+
+    A salon the actor does not administer, an inactive salon, a slug nobody
+    owns — all answer **404**, not 403: the UUID/slug of a foreign tenant is
+    not confirmed, the same rule as ``GUARDED_OTHERWISE_SPECIALIST``
+    (DRF-1036). Raised from here rather than returned as ``False`` because
+    DRF turns ``False`` into 403, and a 403 says «this salon exists and is
+    not yours».
+
+    ``subject_of`` is not meaningful for a relationship and is left
+    unused; :meth:`_subject_verdict` is the whole difference. The view
+    declares ``subject_url_kwarg = "slug"`` — the base reads it from the
+    view, as for every other subject surface.
+    """
+
+    def _subject_verdict(
+        self, request: Any, *, purpose: str, subject_id: str, actor: Any,
+        external_user_id: str,
+    ) -> bool:
+        from rest_framework.exceptions import NotFound
+
+        from tenants.models import Tenant
+        from users.models import TenantUserRelationship
+
+        # ``Tenant.objects`` hides ``is_active=False`` — an inactive salon is
+        # «not found» here by construction, not by a second check.
+        tenant = Tenant.objects.filter(slug=subject_id).first()
+        administers = tenant is not None and TenantUserRelationship.objects.filter(
+            user=actor,
+            tenant=tenant,
+            role=TenantUserRelationship.Role.ADMIN,
+            is_active=True,
+        ).exists()
+        if not administers:
+            # No PII: an actor UUID, a slug and a path.
+            logger.warning(
+                "internal.subject_authz.salon_mismatch path=%s salon=%s actor=%s",
+                request.path, subject_id, actor.pk,
+            )
+            _publish_verdict(
+                request, purpose=purpose, actor=actor, actor_named=True,
+                allowed=False, reason="salon_mismatch",
+            )
+            raise NotFound("Salon not found.")
+
+        request.salon_tenant = tenant
+        _publish_verdict(request, purpose=purpose, actor=actor, actor_named=True, allowed=True)
+        return True
 
 
 def _publish_verdict(
