@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 _CADENCE_BUCKET_DAYS = {
     PlanAction.Cadence.PER_DAY: 1,
     PlanAction.Cadence.PER_WEEK: 7,
+    PlanAction.Cadence.PER_2_WEEKS: 14,  # DRF-2123
 }
 
 
@@ -50,8 +51,8 @@ class ActionAdherence:
 
 def _buckets(cadence: str, start: date, end: date) -> list[tuple[datetime, datetime]]:
     """Вёдра каденса внутри [start, end): день для per_day, 7 дней для
-    per_week. Неполный хвост периода не считается (сознательно: метрика
-    существует для полных единиц обязательства)."""
+    per_week, 14 дней для per_2_weeks. Неполный хвост периода не считается
+    (сознательно: метрика существует для полных единиц обязательства)."""
     step = _CADENCE_BUCKET_DAYS[cadence]
     buckets: list[tuple[datetime, datetime]] = []
     current = start
