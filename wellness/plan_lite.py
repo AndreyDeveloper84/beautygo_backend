@@ -24,6 +24,11 @@
 (канонический поток DRF-1968), не здесь: план лишь называет обязательство.
 
 Флаг ``PLAN_LITE_ENABLED`` (default false) читают и писатель, и чтение.
+
+DRF-2123 (§51, План-A): предложение плана по активной цели из курируемого
+шаблона (``wellness.PlanTemplate`` — данные, не код; ``propose_plan``), и
+``template_version`` в писателе → ``PersonalPlan.source``. Каденс
+``per_2_weeks``: ведро 14 дней от создания плана.
 """
 from __future__ import annotations
 
@@ -40,6 +45,7 @@ from goals.models import ClientGoal
 
 from .fact_providers import count_fact_days, count_facts
 from .models import PersonalPlan, PlanAction
+from .plan_lite_templates import active_template_for, template_version_exists
 
 MIN_ACTIONS = 1
 MAX_ACTIONS = 3
@@ -73,6 +79,15 @@ class NoActivePlan(PlanLiteError):
 
 class InvalidActions(PlanLiteError):
     """1–3 действия, курируемый ключ, каденс, положительный target."""
+
+
+class TemplateNotFound(PlanLiteError):
+    """Нет активного шаблона для цели (DRF-2123) — 404 ``no_template``,
+    НЕ пустой план: предложение без обязательств ничего не предлагает."""
+
+
+class InvalidTemplateVersion(PlanLiteError):
+    """``template_version`` не целое ≥ 1 или такой версии у цели нет — 400."""
 
 
 @dataclass(frozen=True)
@@ -117,27 +132,54 @@ def _active_plan(user) -> PersonalPlan | None:
     )
 
 
+def parse_template_version(raw: Any) -> int | None:
+    """``template_version`` необязателен; если дан — целое ≥ 1 (bool — не
+    целое), иначе отказ формы."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        raise InvalidTemplateVersion("template_version must be an integer >= 1")
+    return raw
+
+
 def create_plan(
-    user, *, actions: list[ActionSpec], goal_id: UUID | None = None,
+    user,
+    *,
+    actions: list[ActionSpec],
+    goal_id: UUID | None = None,
+    template_version: int | None = None,
 ) -> PersonalPlan:
     """``goal_id`` необязателен (PR-1b): без него план строится от АКТИВНОЙ
     цели вызывающего — у клиента она одна по схеме
     (``clientgoal_one_active_per_client``), и экран Mini App её id не видит
     (decision-context отдаёт ключ и текст, не id). Нет активной цели —
     «не найдено»: план без цели не бывает. С ``goal_id`` — как прежде:
-    он обязан быть активной целью вызывающего."""
+    он обязан быть активной целью вызывающего.
+
+    ``template_version`` (DRF-2123): версия шаблона этой цели, по которому
+    человек согласился на предложение — любая существующая (и снятая: план
+    по прежней версии помечен законно); иначе ``InvalidTemplateVersion``.
+    Действия при этом всё равно приходят телом запроса — шаблон только
+    источник, не приказ: бот мог дать человеку убрать одно из трёх."""
     if not plan_lite_enabled():
         raise PlanLiteDisabled()
     goals = ClientGoal.objects.filter(client=user, state=ClientGoal.State.ACTIVE)
     goal = (goals.filter(pk=goal_id) if goal_id is not None else goals).first()
     if goal is None:
         raise GoalNotFound(str(goal_id) if goal_id is not None else "no_active_goal")
+    source = "manual"
+    if template_version is not None:
+        if not template_version_exists(goal.goal_key, template_version):
+            raise InvalidTemplateVersion(
+                f"no template version {template_version} for goal {goal.goal_key!r}"
+            )
+        source = f"template:{goal.goal_key}:v{template_version}"
     with transaction.atomic():
         if _active_plan(user) is not None:
             raise PlanAlreadyActive()
         try:
             plan = PersonalPlan.objects.create(
-                user=user, goal=goal, goal_key=goal.goal_key or "",
+                user=user, goal=goal, goal_key=goal.goal_key or "", source=source,
             )
         except IntegrityError as exc:  # гонка двух POST — ловит частичная уникальность
             raise PlanAlreadyActive() from exc
@@ -169,14 +211,55 @@ def close_plan(user) -> PersonalPlan:
     return plan
 
 
+# ─── предложение плана из шаблона (DRF-2123) ─────────────────────────────────
+
+
+def propose_plan(user) -> dict[str, Any]:
+    """Предложение по активной цели вызывающего из активного шаблона
+    (``PlanTemplate``). Ничего не создаёт и не пишет. Нет цели —
+    ``GoalNotFound``; нет активного шаблона — ``TemplateNotFound`` (не
+    пустой план)."""
+    if not plan_lite_enabled():
+        raise PlanLiteDisabled()
+    goal = ClientGoal.objects.filter(client=user, state=ClientGoal.State.ACTIVE).first()
+    if goal is None:
+        raise GoalNotFound("no_active_goal")
+    template = active_template_for(goal.goal_key)
+    if template is None:
+        raise TemplateNotFound(goal.goal_key or "")
+    return {
+        "goal_key": template.goal_key,
+        "why": template.why_text,
+        "template_version": template.version,
+        "actions": [
+            {
+                "action_type": a["action_type"],
+                "cadence": a["cadence"],
+                "target_count": a["target_count"],
+            }
+            for a in template.actions
+        ],
+    }
+
+
 # ─── чтение: adherence за текущее ведро ──────────────────────────────────────
 
+_TWO_WEEKS = 14
 
-def _current_bucket(cadence: str, today: date) -> tuple[date, date]:
-    """[start, end) текущего ведра: день для per_day, неделя пн–вс для per_week."""
+
+def _current_bucket(cadence: str, today: date, *, anchor: date | None = None) -> tuple[date, date]:
+    """[start, end) текущего ведра: день для per_day, неделя пн–вс для
+    per_week, 14 дней от ``anchor`` (дата создания плана) для per_2_weeks —
+    k-е ведро, содержащее «сейчас». Без ``anchor`` per_2_weeks отсчитывается
+    от ``today``."""
     if cadence == PlanAction.Cadence.PER_WEEK:
         start = today - timedelta(days=today.weekday())
         return start, start + timedelta(days=7)
+    if cadence == PlanAction.Cadence.PER_2_WEEKS:
+        anchor = anchor or today
+        k = (today - anchor).days // _TWO_WEEKS
+        start = anchor + timedelta(days=k * _TWO_WEEKS)
+        return start, start + timedelta(days=_TWO_WEEKS)
     return today, today + timedelta(days=1)
 
 
@@ -187,12 +270,13 @@ def _aware(day: date) -> datetime:
 def _done_count(action: PlanAction, user_id: UUID, goal_key: str, start: date, end: date) -> int:
     """Только факты действий, не больше target: «3 из 3», не «7 из 3».
 
-    per_week для журналов — ДНИ с записью (семь записей в один день — один
-    день); per_day — записи за день; брони — по провайдеру (созданные в ведре).
+    per_week / per_2_weeks для журналов — ДНИ с записью (семь записей в один
+    день — один день); per_day — записи за день; брони — по провайдеру
+    (созданные в ведре).
     """
     b_start, b_end = _aware(start), _aware(end)
     if (
-        action.cadence == PlanAction.Cadence.PER_WEEK
+        action.cadence != PlanAction.Cadence.PER_DAY
         and action.action_type in (PlanAction.ActionType.LOG_FOOD, PlanAction.ActionType.LOG_WATER)
     ):
         facts = count_fact_days(action.action_type, user_id, b_start, b_end)
@@ -210,9 +294,10 @@ def plan_lite_payload(user, *, today: date | None = None) -> dict[str, Any] | No
     if plan is None:
         return None
     today = today or timezone.localdate()
+    anchor = timezone.localdate(plan.created_at)
     actions = []
     for action in plan.actions.all():
-        start, end = _current_bucket(action.cadence, today)
+        start, end = _current_bucket(action.cadence, today, anchor=anchor)
         actions.append({
             "action_type": action.action_type,
             "cadence": action.cadence,
