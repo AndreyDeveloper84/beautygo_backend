@@ -28,6 +28,10 @@ catalog_link    identity_not_linked      MAX-личность не привяз�
 slots           no_free_slots            ни одного окна на ближайшие
                                          :data:`HORIZON_DAYS` дней
                 slots_unknown            вычислитель упал — проблема, не «ок»
+services        service_duration_missing у первого продаваемого ребра нет
+                                         длительности ни на услуге, ни на ребре,
+                                         ни на шаблоне — путь записи такую откажет
+салон           no_masters               ни одного мастера — ``ready`` ложь
 ==============  =======================  ==========================================
 
 **UNKNOWN = проблема.** Отказ вычислителя не превращается в «всё хорошо»:
@@ -95,6 +99,9 @@ SERVICES_MISSING = "services_missing"
 IDENTITY_NOT_LINKED = "identity_not_linked"
 NO_FREE_SLOTS = "no_free_slots"
 SLOTS_UNKNOWN = "slots_unknown"
+SERVICE_DURATION_MISSING = "service_duration_missing"
+#: Уровень салона: ни одного мастера — «готов» здесь был бы ложью.
+NO_MASTERS = "no_masters"
 
 #: Текст причины по коду — «{name} — …». Бот держит свою таблицу по тем же
 #: кодам и падает на этот текст только для незнакомого кода.
@@ -107,6 +114,8 @@ TEXTS: dict[str, str] = {
     IDENTITY_NOT_LINKED: "{name} — не привязана личность MAX",
     NO_FREE_SLOTS: "{name} — нет свободных окон на ближайшие {days} дней",
     SLOTS_UNKNOWN: "{name} — не удалось проверить свободные окна",
+    SERVICE_DURATION_MISSING: "{name} — у услуги не задана длительность",
+    NO_MASTERS: "В салоне нет ни одного мастера",
 }
 
 #: Какая проверка выдаёт какой код — для ``checks`` в ответе.
@@ -119,6 +128,7 @@ CODE_CHECK: dict[str, str] = {
     IDENTITY_NOT_LINKED: CHECK_CATALOG_LINK,
     NO_FREE_SLOTS: CHECK_SLOTS,
     SLOTS_UNKNOWN: CHECK_SLOTS,
+    SERVICE_DURATION_MISSING: CHECK_SERVICES,
 }
 
 #: Названные пределы — уезжают в ответ как есть.
@@ -131,22 +141,25 @@ LIMITS: tuple[str, ...] = (
     "catalog_link: здесь — привязка MAX-личности к аккаунту мастера; "
     "связь строки зеркала с каталогом (catalog_specialist_id) знает только бот",
     "имена без склонений: «Анна — не настроен график»",
+    "стоимость: до 7 вычислений окон на мастера за вызов — кнопка, не цикл",
+    "slots: кэш окон 60 с (SlotCacheService) — правка графика видна не сразу",
 )
 
 
 @dataclass(frozen=True)
 class Problem:
-    master_id: str
+    #: ``None`` — проблема уровня салона (``no_masters``), не мастера.
+    master_id: str | None
     master_name: str
     code: str
     text: str
 
     def as_dict(self) -> dict[str, Any]:
-        return {
-            "master": {"id": self.master_id, "name": self.master_name},
-            "code": self.code,
-            "text": self.text,
-        }
+        master = (
+            None if self.master_id is None
+            else {"id": self.master_id, "name": self.master_name}
+        )
+        return {"master": master, "code": self.code, "text": self.text}
 
 
 @dataclass(frozen=True)
@@ -176,6 +189,8 @@ class SalonReadiness:
 
     @property
     def problems(self) -> tuple[Problem, ...]:
+        if not self.masters:
+            return (Problem(None, "", NO_MASTERS, TEXTS[NO_MASTERS]),)
         return tuple(p for m in self.masters for p in m.problems)
 
     @property
@@ -243,14 +258,26 @@ def _has_working_day(profile: SpecialistProfile) -> bool:
 def _first_sellable_edge(profile: SpecialistProfile) -> SpecialistService | None:
     return (
         SpecialistService.objects
-        .filter(sellable_offer_q(), specialist=profile)
+        # Тот же предикат, что у пути записи (``services.service_resolver``):
+        # ребро продаётся И его услуга — этого тенанта.
+        .filter(sellable_offer_q(), specialist=profile, salon_service__tenant_id=profile.tenant_id)
         .select_related("salon_service")
         .order_by("created_at", "id")
         .first()
     )
 
 
-def _has_free_slot(profile: SpecialistProfile, edge: SpecialistService, *, today: date) -> bool:
+def _edge_duration(edge: SpecialistService) -> int | None:
+    """Длительность, как её резолвит путь записи: услуга салона, иначе каскад ребра."""
+    salon = edge.salon_service
+    if salon.duration_minutes is not None:
+        return salon.duration_minutes
+    return edge.resolved_duration()
+
+
+def _has_free_slot(
+    profile: SpecialistProfile, edge: SpecialistService, duration: int, *, today: date,
+) -> bool:
     """Есть ли хоть одно окно на ``HORIZON_DAYS`` дней — тем же вычислителем,
     что и путь записи (``users.specialists_api.compute_specialist_day_slots``)."""
     from appointments.application.dto import GetAvailabilityDTO
@@ -260,9 +287,6 @@ def _has_free_slot(profile: SpecialistProfile, edge: SpecialistService, *, today
     from appointments.domain.booking_window import booking_horizon_end
 
     salon = edge.salon_service
-    duration = (
-        salon.duration_minutes if salon.duration_minutes is not None else edge.resolved_duration()
-    )
     horizon_end = booking_horizon_end()
     service = AvailabilityQueryService()
     for offset in range(HORIZON_DAYS):
@@ -301,17 +325,22 @@ def master_readiness(profile: SpecialistProfile, *, today: date | None = None) -
         problem(SCHEDULE_MISSING)
 
     edge = _first_sellable_edge(profile)
-    if edge is not None:
-        checks[CHECK_SERVICES] = OK
-    else:
+    duration = _edge_duration(edge) if edge is not None else None
+    if edge is None:
         problem(SERVICES_MISSING)
+    elif duration is None:
+        # Вычислитель без длительности ушёл бы в маркетплейс-ветку и упал
+        # ``DoesNotExist`` — «не удалось проверить» вместо починяемого факта.
+        problem(SERVICE_DURATION_MISSING)
+    else:
+        checks[CHECK_SERVICES] = OK
 
     if is_linked(profile):
         checks[CHECK_CATALOG_LINK] = OK
     else:
         problem(IDENTITY_NOT_LINKED)
 
-    if not schedule_ok or edge is None:
+    if not schedule_ok or edge is None or duration is None:
         checks[CHECK_SLOTS] = SKIPPED
     else:
         if today is None:
@@ -320,7 +349,7 @@ def master_readiness(profile: SpecialistProfile, *, today: date | None = None) -
             except Exception:  # noqa: BLE001 — незнакомый пояс не должен ронять проверку
                 today = datetime.now(tz=timezone.utc).date()
         try:
-            has_slot = _has_free_slot(profile, edge, today=today)
+            has_slot = _has_free_slot(profile, edge, duration, today=today)
         except Exception as exc:  # noqa: BLE001 — UNKNOWN = проблема, класс — в лог
             logger.warning(
                 "salon_readiness.slots_unknown specialist=%s tenant=%s exc=%s",
@@ -360,10 +389,12 @@ __all__ = [
     "LIMITS",
     "NOT_PUBLISHED",
     "NO_FREE_SLOTS",
+    "NO_MASTERS",
     "OK",
     "PROBLEM",
     "SCHEDULE_MISSING",
     "SERVICES_MISSING",
+    "SERVICE_DURATION_MISSING",
     "SKIPPED",
     "SLOTS_UNKNOWN",
     "TEXTS",

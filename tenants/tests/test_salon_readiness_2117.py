@@ -211,10 +211,14 @@ class TestTheSheet:
         after = _client().get(_url(salon.slug)).json()
         assert _codes(after) == [("Иван", sr.SCHEDULE_MISSING)]
 
-    def test_salon_without_masters_is_ready_by_construction_and_says_so(self, salon, owner):
+    def test_salon_without_masters_is_not_ready_and_says_why(self, salon, owner):
+        """Три мастера с выключенными аккаунтами = ни одного: «готов» здесь — ложь."""
         body = _client().get(_url(salon.slug)).json()["data"]
-        assert body["masters"] == [] and body["problems"] == []
-        assert body["ready"] is True
+        assert body["masters"] == []
+        assert body["ready"] is False
+        assert body["problems"] == [
+            {"master": None, "code": sr.NO_MASTERS, "text": "В салоне нет ни одного мастера"},
+        ]
 
 
 # ─── публикация, сокрытие, пауза ────────────────────────────────────────────
@@ -257,6 +261,30 @@ class TestServices:
         _link(sp, "bot:max:2117302")
         _service(sp, active=False)
         assert _codes(_client().get(_url(salon.slug)).json()) == [("Иван", sr.SERVICES_MISSING)]
+
+    def test_edge_from_another_tenant_does_not_count(self, salon, other_salon, owner):
+        """Тот же предикат, что у пути записи: услуга должна быть этого тенанта."""
+        sp = _master(salon, "Иван")
+        _hours(sp)
+        _link(sp, "bot:max:2117304")
+        edge = _service(sp)
+        SalonService.objects.filter(pk=edge.salon_service_id).update(tenant=other_salon)
+        assert _codes(_client().get(_url(salon.slug)).json()) == [("Иван", sr.SERVICES_MISSING)]
+
+    def test_edge_without_any_duration_is_named_not_unknown(self, salon, owner):
+        """Без длительности вычислитель упал бы — это починяемый факт, не «не удалось»."""
+        sp = _master(salon, "Иван")
+        _hours(sp)
+        _link(sp, "bot:max:2117305")
+        edge = _service(sp)
+        SalonService.objects.filter(pk=edge.salon_service_id).update(duration_minutes=None)
+        SpecialistService.objects.filter(pk=edge.pk).update(duration_minutes=None)
+        body = _client().get(_url(salon.slug)).json()["data"]
+        assert [(p["master"]["name"], p["code"]) for p in body["problems"]] == [
+            ("Иван", sr.SERVICE_DURATION_MISSING),
+        ]
+        assert body["masters"][0]["checks"]["services"] == "problem"
+        assert body["masters"][0]["checks"]["slots"] == "skipped"
 
     def test_working_day_without_times_is_not_a_schedule(self, salon, owner):
         sp = _master(salon, "Анна")
@@ -421,12 +449,13 @@ class TestContract:
         assert set(master["checks"]) == set(sr.CHECKS)
 
     def test_every_code_has_a_text_and_a_check(self):
-        codes = {
+        master_codes = {
             sr.NOT_PUBLISHED, sr.HIDDEN_FROM_CATALOG, sr.BOOKING_PAUSED, sr.SCHEDULE_MISSING,
-            sr.SERVICES_MISSING, sr.IDENTITY_NOT_LINKED, sr.NO_FREE_SLOTS, sr.SLOTS_UNKNOWN,
+            sr.SERVICES_MISSING, sr.SERVICE_DURATION_MISSING, sr.IDENTITY_NOT_LINKED,
+            sr.NO_FREE_SLOTS, sr.SLOTS_UNKNOWN,
         }
-        assert set(sr.TEXTS) == codes
-        assert set(sr.CODE_CHECK) == codes
+        assert set(sr.TEXTS) == master_codes | {sr.NO_MASTERS}
+        assert set(sr.CODE_CHECK) == master_codes
         assert set(sr.CODE_CHECK.values()) == set(sr.CHECKS)
-        for code, text in sr.TEXTS.items():
-            assert "{name}" in text, code
+        for code in master_codes:
+            assert "{name}" in sr.TEXTS[code], code

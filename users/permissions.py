@@ -926,10 +926,10 @@ class IsInternalBearerForSalonSubject(IsInternalBearerForSubject):
     not yours».
 
     ``subject_of`` is not meaningful for a relationship and is left
-    unused; :meth:`_subject_verdict` is the whole difference.
+    unused; :meth:`_subject_verdict` is the whole difference. The view
+    declares ``subject_url_kwarg = "slug"`` — the base reads it from the
+    view, as for every other subject surface.
     """
-
-    subject_url_kwarg = "slug"
 
     def _subject_verdict(
         self, request: Any, *, purpose: str, subject_id: str, actor: Any,

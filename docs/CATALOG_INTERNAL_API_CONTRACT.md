@@ -275,10 +275,12 @@ X-External-User-ID: <actor>        # владелец / администрато
 | publication | `hidden_from_catalog` | опубликован, `is_available=false` |
 | publication | `booking_paused` | опубликован, `is_booking_enabled=false` |
 | schedule | `schedule_missing` | нет рабочего дня с началом и концом (`SpecialistWorkingHours`) |
-| services | `services_missing` | ни одного продаваемого ребра (`services.offer_sellable.sellable_offer_q`: активно, услуга активна, цена ≥ 1 ₽) |
+| services | `services_missing` | ни одного продаваемого ребра этого тенанта (`services.offer_sellable.sellable_offer_q`: активно, услуга активна, цена ≥ 1 ₽) |
+| services | `service_duration_missing` | у первого продаваемого ребра нет длительности (услуга / ребро / шаблон) — путь записи такую откажет |
 | catalog_link | `identity_not_linked` | MAX-личность не привязана к аккаунту мастера (`users.publication.is_linked`) |
 | slots | `no_free_slots` | ни одного окна на `horizon_days` дней (`AvailabilityQueryService`, по длительности первой продаваемой услуги) |
 | slots | `slots_unknown` | вычислитель упал — **это проблема**, класс исключения в логе `salon_readiness.slots_unknown` |
+| салон | `no_masters` | ни одного мастера — `problems[].master = null`, `ready=false` |
 
 `slots` = `skipped`, пока `schedule` или `services` не `ok` (окон нет по
 построению; второе слово о том же — шум). `unknown` никогда не читается как
@@ -287,10 +289,14 @@ X-External-User-ID: <actor>        # владелец / администрато
 предел назван).
 
 Мастера — `SpecialistProfile` тенанта с активным неудалённым аккаунтом, в
-порядке `display_name`. Салон без мастеров — `masters: []`, `ready: true`.
+порядке `display_name`. Салон без мастеров — `masters: []`, `ready: false`,
+одна проблема уровня салона `no_masters` с `master: null` (три мастера с
+выключенными аккаунтами — это ноль мастеров, и «готов» тут был бы ложью).
 
 **Предел слотов (до DRF-1637):** только «есть/нет», одна услуга на мастера,
 7 дней от сегодня в поясе мастера, горизонт брони `booking_horizon_end()`.
+Стоимость — до 7 вычислений окон на мастера за вызов: это кнопка, не цикл.
+Кэш окон 60 с (`SlotCacheService`) — правка графика видна не сразу.
 
 ## 3. Stable-ID contract
 
