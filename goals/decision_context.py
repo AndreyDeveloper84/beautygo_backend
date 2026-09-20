@@ -39,11 +39,35 @@ DRF-1451 — версия 2: анкета
 - намерение ``start_anketa`` — вход в анкету для того, кто УЖЕ с целью
   (DRF-1225 / C-4: проходить сколько угодно раз).
 
-Анкета — не ворота (условие C-2). ``suggestions`` и ``formulate_own``
-остаются в документе на каждом шаге: назвать услугу и уйти к подбору
-можно, не ответив ни на один вопрос. И названная услуга **признаётся
-готовой целью** — ``_goal_is_resolved`` ниже — чтобы не уронить человека
-обратно в уточнение.
+Анкета — не ворота (условие C-2). ``formulate_own`` остаётся в документе
+на каждом шаге: назвать услугу и уйти к подбору можно, не ответив ни на
+один вопрос. И названная услуга **признаётся готовой целью** —
+``_goal_is_resolved`` ниже — чтобы не уронить человека обратно в
+уточнение.
+
+DRF-2177 — C03 в живой путь (макет DRF-1178, решение владельца §60)
+---------------------------------------------------------------------
+
+Замер 20.09: у человека с целью документ вопросов не нёс — их клали только
+при открытом проходе или без цели; вместо вопросов — семь чипов и «Найти
+услугу». Теперь:
+
+- цель есть, а сужающие шаги под неё не отвечены → первый сужающий шаг
+  сразу (C03.2), шаг цели считается отвеченным самой целью; ответ создаёт
+  проход, привязанный к активной цели;
+- ``suggestions`` при активной цели пусты — семь целей только за
+  «Изменить» (``start_anketa`` → шаг цели с опциями);
+- ``next``: пока есть вопросы — ``None`` (честное молчание, а не кнопка в
+  никуда); контекст собран — ``return_to_chat`` (C03.5 «Спасибо! Этого
+  достаточно…» → чат). ``browse_catalog`` («Найти услугу») документ при
+  включённой анкете больше не несёт — отступление от буквы C-2 по §60,
+  вынесено владельцу; по сути C-2 держится: экран не корень (вход с H01,
+  каталог в одном тапе назад), свободный ввод и «Не знаю» — на каждом шаге,
+  названная услуга — контекст собран без единого вопроса.
+
+Чат → вопросы («консьерж открывает вопросы при нехватке контекста») —
+целевой UX-контракт, не runtime (ruling §61): вычисления «нехватки
+контекста» нет, и здесь оно не изобретается. Входы — H01 и меню.
 
 Флаг ``GOAL_ANKETA_ENABLED`` (умолчание ON) выключает анкету и
 возвращает ровно документ DRF-1190.
@@ -85,7 +109,8 @@ INTENT_START_ANKETA = "start_anketa"
 
 _INTENTS: list[dict[str, str]] = [
     {"id": INTENT_CHOOSE_SUGGESTED, "label": "Выбрать из предложенного"},
-    {"id": INTENT_FORMULATE_OWN, "label": "Сформулирую своими словами"},
+    # DRF-2177 — подпись по макету C03 (DRF-1178): «Рассказать своими словами».
+    {"id": INTENT_FORMULATE_OWN, "label": "Рассказать своими словами"},
     {"id": INTENT_NEED_GUIDANCE, "label": "Не понимаю, чего хочу"},
 ]
 
@@ -99,6 +124,13 @@ INTENT_START_ANKETA_LABEL = "Пройти анкету заново"
 # ``_ROUTE_MAP``), и сервер не обязан знать имена экранов мини-аппа.
 NEXT_BROWSE_CATALOG = "browse_catalog"
 NEXT_BROWSE_CATALOG_LABEL = "Найти услугу"
+
+# DRF-2177 — контекст собран: назад в чат (макет C03.5, авто-переход к C04).
+# Кадр «Спасибо! Этого достаточно, чтобы подобрать тебе подходящий шаг» —
+# константа экрана (он знает этот id); ``label`` — для потребителя, который
+# новый id ещё не знает и рисует ``next`` кнопкой.
+NEXT_RETURN_TO_CHAT = "return_to_chat"
+NEXT_RETURN_TO_CHAT_LABEL = "Вернуться в чат"
 
 MISSING_GOAL = "goal"
 MISSING_GOAL_CLARIFICATION = "goal_clarification"
@@ -225,10 +257,42 @@ def known_value_of(step: anketa.AnketaStep, row: GoalAnketaAnswer) -> dict[str, 
 
 
 def answered_step_keys(run: GoalAnketaRun | None) -> set[str]:
-    """Ключи отвеченных шагов прохода; без прохода — пусто."""
+    """Ключи отвеченных шагов прохода; без прохода — пусто.
+
+    DRF-2177: проход, привязанный к цели (``run.goal``), считает шаг цели
+    отвеченным — целью он и отвечен. Иначе проход «от цели» (первый
+    сужающий вопрос при уже выбранной цели) не завершился бы никогда:
+    ``next_step`` снова и снова просил бы цель, которая есть.
+    """
     if run is None:
         return set()
-    return set(run.answers.values_list("step_key", flat=True))
+    keys = set(run.answers.values_list("step_key", flat=True))
+    if run.goal_id is not None:
+        keys.add(anketa.GOAL_STEP_KEY)
+    return keys
+
+
+def goal_context_collected(goal: ClientGoal) -> bool:
+    """Собран ли контекст ПОД ЭТУ цель — то есть спрашивать больше нечего.
+
+    Да, когда все сужающие шаги отвечены в завершённом проходе этой цели
+    (ответ «Не знаю» — тоже ответ, DRF-1747), либо когда в тексте цели
+    названа услуга (C-2: «назвал услугу — к подбору», вопросов не было и
+    не будет). Прямой выбор цели чипом закрывает открытый проход
+    (`api._close_open_run`) БЕЗ сужающих ответов — поэтому «завершённый
+    проход есть» само по себе ничего не значит, считаются ответы.
+
+    Под цель, а не под человека: сменил цель — вопросы задаются снова
+    (прошлые ответы приходят подтверждением, DRF-1745).
+    """
+    text = (goal.goal_text or "").strip()
+    if text and match_named_service(text) is not None:
+        return True
+    answered = set(
+        GoalAnketaAnswer.objects.filter(run__goal=goal, run__completed_at__isnull=False)
+        .values_list("step_key", flat=True)
+    )
+    return all(step.key in answered for step in anketa.ANKETA_STEPS)
 
 
 def next_anketa_step(run: GoalAnketaRun | None) -> anketa.AnketaStep | None:
@@ -353,6 +417,21 @@ def build_decision_context(
                 goal_text=(active_goal.goal_text or "")[:200],
             ),
         })
+    elif anketa_on and not goal_context_collected(active_goal):
+        # DRF-2177 — C03.2 «первый вопрос — показываем сразу». Цель есть
+        # (выбрана чипом или названа), прохода нет, сужающие шаги под неё
+        # не отвечены: шаг цели считается отвеченным самой целью, и человек
+        # видит первый сужающий вопрос. Проход появится на первом ответе
+        # (GET не пишет в БД) и привяжется к этой цели (`api._answer_anketa`).
+        step = anketa.next_step({anketa.GOAL_STEP_KEY})
+        if step is not None:
+            previous = previous_answers(client).get(step.key)
+            missing.append(anketa.as_missing_item(
+                step,
+                answered_keys={anketa.GOAL_STEP_KEY},
+                goal_key=active_goal.goal_key,
+                known_value=known_value_of(step, previous) if previous is not None else None,
+            ))
 
     intents = list(_INTENTS)
     if anketa_on and run is None and active_goal is not None:
@@ -383,10 +462,20 @@ def build_decision_context(
     # Формулировка нарочно ничего не обещает про подбор ПОД ЦЕЛЬ:
     # GOAL_RESOLUTION_ENABLED на пилоте выключен, и обещание было бы
     # ложью до его включения. «Найти услугу» правдиво в обоих случаях.
-    next_step_hint: dict[str, str] = {
-        "id": NEXT_BROWSE_CATALOG,
-        "label": NEXT_BROWSE_CATALOG_LABEL,
-    }
+    #
+    # DRF-2177 (§60) — абзац выше описывает документ при ВЫКЛЮЧЕННОЙ
+    # анкете, он не тронут. При включённой «Найти услугу» с экрана уходит:
+    # пока есть вопросы — `next` молчит честно (`None`, не кнопка в
+    # никуда; выход человека — «назад» на H01, свободный ввод, «Не знаю»);
+    # контекст собран — `return_to_chat` (C03.5). Отступление от буквы
+    # C-2 по §60 — вынесено владельцу.
+    next_step_hint: dict[str, str] | None
+    if not anketa_on:
+        next_step_hint = {"id": NEXT_BROWSE_CATALOG, "label": NEXT_BROWSE_CATALOG_LABEL}
+    elif missing:
+        next_step_hint = None
+    else:
+        next_step_hint = {"id": NEXT_RETURN_TO_CHAT, "label": NEXT_RETURN_TO_CHAT_LABEL}
 
     # На шаге цели сам шаг УЖЕ несёт курируемые цели своими options —
     # из того же queryset, что и suggestions. Оставить обе секции
@@ -394,13 +483,18 @@ def build_decision_context(
     # одинаковыми подписями, отправляющих разные тела с одинаковым
     # исходом. Выход при этом не теряется: чипы шага создают цель ровно
     # так же, и свободный ввод на шаге цели открыт.
+    #
+    # DRF-2177 (§60): при активной цели ряд целей тоже скрыт — «семь целей
+    # только за „Изменить"» (start_anketa → шаг цели с теми же опциями).
+    # Экран с целью — про вопросы под неё, не про выбор другой цели.
     on_goal_step = bool(missing) and missing[0].get("step") == anketa.GOAL_STEP_KEY
+    hide_suggestions = on_goal_step or (anketa_on and active_goal is not None)
 
     return {
         "version": 2,
         "known": known,
         "missing": missing,
-        "suggestions": [] if on_goal_step else _suggestions(),
+        "suggestions": [] if hide_suggestions else _suggestions(),
         "intents": intents,
         "next": next_step_hint,
     }
