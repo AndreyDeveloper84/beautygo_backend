@@ -168,3 +168,174 @@ class TestResolveTargetDate:
         assert deadline.resolve_target_date(None, "20 сентября 2028", today=TODAY) == date(2028, 9, 20)
         with pytest.raises(deadline.DeadlineError):
             deadline.resolve_target_date(None, "21 сентября 2028", today=TODAY)
+
+
+# ---------------------------------------------------------------------------
+# Шаг анкеты ``deadline`` — через API (после слияния К-2 перебазируется)
+# ---------------------------------------------------------------------------
+
+from rest_framework.test import APIClient  # noqa: E402
+
+from goals import anketa  # noqa: E402
+from goals.models import GoalAnketaAnswer, GoalAnketaRun  # noqa: E402
+from services.models import GoalOption  # noqa: E402
+
+VALID_TOKEN = "test-ayla-internal-token-2173"
+SELECT_URL = "/api/v1/internal/me/goals/select/"
+CTX_URL = "/api/v1/internal/me/decision-context/"
+
+
+@pytest.fixture
+def token(settings):
+    settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+    settings.GOAL_ANKETA_ENABLED = True
+
+
+@pytest.fixture
+def goal_options(db):
+    return [GoalOption.objects.create(key="relax", label="Расслабиться", sort_order=10)]
+
+
+def _api():
+    c = APIClient()
+    c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {VALID_TOKEN}"
+    c.defaults["HTTP_X_EXTERNAL_USER_ID"] = "bot:goals-2173"
+    return c
+
+
+def _answer(api, step: str, **kwargs):
+    return api.post(
+        SELECT_URL,
+        {"answer": {"step": step, **kwargs}, "source_channel": "miniapp"},
+        format="json",
+    )
+
+
+def _first_option(step: anketa.AnketaStep) -> dict:
+    key = step.options[0][0]
+    return {"option_keys": [key]} if step.mode == anketa.MODE_MULTI else {"option_key": key}
+
+
+def _walk_to_deadline(api):
+    """Цель + все сужающие шаги до ``deadline``; возвращает документ с ним в missing."""
+    doc = _answer(api, anketa.GOAL_STEP_KEY, option_key="relax").json()["data"]
+    for step in anketa.ANKETA_STEPS:
+        if step.key == deadline.DEADLINE_STEP_KEY:
+            break
+        doc = _answer(api, step.key, **_first_option(step)).json()["data"]
+    assert doc["missing"][0]["step"] == deadline.DEADLINE_STEP_KEY
+    return doc
+
+
+@pytest.mark.django_db
+class TestDeadlineStep:
+    def test_step_is_last_optional_and_carries_no_schedule_words(self, customer, token, goal_options):
+        """Шаг последний; «без срока» — среди вариантов; сторож C03 (DRF-1751) чист."""
+        assert anketa.ANKETA_STEPS[-1].key == deadline.DEADLINE_STEP_KEY
+        assert anketa.c03_boundary_violations(anketa.ANKETA_STEPS) == []
+        doc = _walk_to_deadline(_api())
+        item = doc["missing"][0]
+        assert item["progress"]["is_last"] is True
+        assert item["allow_free_text"] is True
+        assert [o["key"] for o in item["options"]] == ["in_month", "by_summer", "no_deadline"]
+        assert item["prompt"].startswith("К какому сроку хочешь? Можно пропустить")
+
+    def test_no_deadline_completes_the_pass_and_leaves_the_goal_without_a_date(
+        self, customer, token, goal_options,
+    ):
+        api = _api()
+        _walk_to_deadline(api)
+        doc = _answer(api, deadline.DEADLINE_STEP_KEY, option_key=deadline.NO_DEADLINE).json()["data"]
+
+        assert doc["missing"] == []
+        assert doc["known"]["goal"]["target_date"] is None
+        assert GoalAnketaRun.objects.get(client=customer).completed_at is not None
+
+    def test_free_text_date_lands_on_the_goal(self, customer, token, goal_options):
+        api = _api()
+        _walk_to_deadline(api)
+        resp = _answer(api, deadline.DEADLINE_STEP_KEY, text="до 1 ноября")
+        assert resp.status_code == 200, resp.content
+
+        goal = ClientGoal.objects.get(client=customer, state="active")
+        assert goal.target_date is not None
+        assert (goal.target_date.month, goal.target_date.day) == (11, 1)
+        assert resp.json()["data"]["known"]["goal"]["target_date"] == goal.target_date.isoformat()
+        # Дословный ввод сохранён как ответ шага (корпус OD-2), не нормализован.
+        assert GoalAnketaAnswer.objects.get(
+            run__client=customer, step_key=deadline.DEADLINE_STEP_KEY,
+        ).answer_text == "до 1 ноября"
+
+    def test_chip_in_month_sets_a_date_a_month_ahead(self, customer, token, goal_options):
+        api = _api()
+        _walk_to_deadline(api)
+        _answer(api, deadline.DEADLINE_STEP_KEY, option_key=deadline.IN_MONTH)
+        goal = ClientGoal.objects.get(client=customer, state="active")
+        assert goal.target_date == deadline.resolve_target_date(deadline.IN_MONTH, None)
+
+    @pytest.mark.parametrize("text", ["вчера", "1 сентября 2020", "через 5 лет", "когда-нибудь потом"])
+    def test_refused_text_is_400_with_words_and_nothing_written(self, customer, token, goal_options, text):
+        api = _api()
+        _walk_to_deadline(api)
+        resp = _answer(api, deadline.DEADLINE_STEP_KEY, text=text)
+
+        assert resp.status_code == 400, resp.content
+        body = resp.json()
+        words = str(body)
+        assert "срок" in words.casefold() or "дат" in words.casefold()  # словами, не кодом
+        assert not GoalAnketaAnswer.objects.filter(
+            run__client=customer, step_key=deadline.DEADLINE_STEP_KEY,
+        ).exists()
+        assert GoalAnketaRun.objects.get(client=customer).completed_at is None
+        assert ClientGoal.objects.get(client=customer, state="active").target_date is None
+
+    def test_second_pass_changes_the_date(self, customer, token, goal_options):
+        """Правка срока — повторный проход («Пройти анкету заново» / «Изменить»):
+        шаг спрашивается снова, подтверждение или новый ответ — без отдельной ручки."""
+        api = _api()
+        _walk_to_deadline(api)
+        _answer(api, deadline.DEADLINE_STEP_KEY, option_key=deadline.NO_DEADLINE)
+        assert ClientGoal.objects.get(client=customer, state="active").target_date is None
+
+        resp = api.post(SELECT_URL, {"intent": "start_anketa", "source_channel": "miniapp"}, format="json")
+        assert resp.status_code == 200, resp.content
+        doc = _answer(api, anketa.GOAL_STEP_KEY, option_key="relax").json()["data"]
+        while doc["missing"][0]["step"] != deadline.DEADLINE_STEP_KEY:
+            item = doc["missing"][0]
+            resp = _answer(api, item["step"], confirm=True)
+            assert resp.status_code == 200, resp.content
+            doc = resp.json()["data"]
+        item = doc["missing"][0]
+        assert item["mode"] == anketa.MODE_CONFIRM  # прошлый ответ «без срока» известен
+        assert item["known_value"]["option_key"] == deadline.NO_DEADLINE
+
+        resp = _answer(api, deadline.DEADLINE_STEP_KEY, text="до 1 ноября")
+        assert resp.status_code == 200, resp.content
+        goal = ClientGoal.objects.get(client=customer, state="active")
+        assert (goal.target_date.month, goal.target_date.day) == (11, 1)
+
+    def test_revise_inside_an_open_pass_is_refused_for_the_closing_step(self, customer, token, goal_options):
+        """Ответ на deadline закрывает проход — «Изменить» в нём же невозможно (409, как у любого
+        закрытого прохода); правка — повторным проходом (узел выше)."""
+        api = _api()
+        _walk_to_deadline(api)
+        _answer(api, deadline.DEADLINE_STEP_KEY, option_key=deadline.NO_DEADLINE)
+        resp = _answer(api, deadline.DEADLINE_STEP_KEY, text="до 1 ноября", revise=True)
+        assert resp.status_code == 409
+
+    def test_goal_text_survives_the_deadline_answer(self, customer, token):
+        """§48 «оставь как в чате»: свободная цель + срок — текст цели дословен."""
+        api = _api()
+        doc = _answer(api, anketa.GOAL_STEP_KEY, text="хочу похудеть к отпуску").json()["data"]
+        while doc["missing"] and doc["missing"][0]["step"] != deadline.DEADLINE_STEP_KEY:
+            item = doc["missing"][0]
+            step = anketa.narrowing_step(item["step"])
+            if step is None:
+                pytest.skip("проход ушёл в уточнение цели — не про срок")
+            doc = _answer(api, step.key, **_first_option(step)).json()["data"]
+        if not doc["missing"]:
+            pytest.skip("проход завершился без шага срока")
+        _answer(api, deadline.DEADLINE_STEP_KEY, text="через месяц")
+        goal = ClientGoal.objects.get(client=customer, state="active")
+        assert goal.goal_text == "хочу похудеть к отпуску"
+        assert goal.target_date is not None

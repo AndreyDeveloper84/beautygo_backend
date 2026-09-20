@@ -30,6 +30,7 @@ from users.permissions import IsBotServiceWithVerifiedClient
 from users.response import error_response, success_response
 
 from . import anketa
+from .deadline import DEADLINE_STEP_KEY, DeadlineError, apply_target_date, resolve_target_date
 from .lifecycle import (
     GOAL_ANOTHER_ACTIVE,
     GOAL_TRANSITION_NOT_ALLOWED,
@@ -90,6 +91,20 @@ def _validated_answer_shape(step: anketa.AnketaStep, answer: dict) -> list[str]:
                 {"answer": {"text": f"At most {anketa.TEXT_ANSWER_LIMIT} characters."}}
             )
     return []
+
+
+def _resolved_deadline(step: anketa.AnketaStep, option_key, text):
+    """Срок для шага ``deadline`` (DRF-2173); у прочих шагов — ``None``.
+
+    Отказ разбора — 400 словами человека (``DeadlineError.message``), в том
+    же поле ``answer.text``, где пришёл ввод.
+    """
+    if step.key != DEADLINE_STEP_KEY:
+        return None
+    try:
+        return resolve_target_date(option_key, text)
+    except DeadlineError as exc:
+        raise serializers.ValidationError({"answer": {"text": exc.message}}) from exc
 
 
 class AnketaAnswerSerializer(serializers.Serializer):
@@ -395,10 +410,13 @@ class GoalSelectView(APIView):
             raise serializers.ValidationError(
                 {"answer": {"text": "This step does not accept free text."}}
             )
+        target_date = _resolved_deadline(step, option_key, text)
         existing.option_key = option_key
         existing.answer_text = text
         existing.option_keys = option_keys
         existing.save(update_fields=["option_key", "answer_text", "option_keys"])
+        if step.key == DEADLINE_STEP_KEY and run.goal_id:
+            apply_target_date(run.goal, target_date)
         logger.info(
             "goals.anketa_revised user_id=%s run_id=%s step=%s",
             client.id, run.id, step.key,
@@ -498,6 +516,9 @@ class GoalSelectView(APIView):
             raise serializers.ValidationError(
                 {"answer": {"text": "This step does not accept free text."}}
             )
+        # DRF-2173 — срок разбирается ДО записи: непонятое/прошлое/слишком
+        # далёкое — 400 словами, ответ не пишется.
+        target_date = _resolved_deadline(expected, option_key, text)
 
         # Проверки пройдены — только теперь можно писать.
         if run is None:
@@ -519,6 +540,9 @@ class GoalSelectView(APIView):
                 "option_keys": option_keys,
             },
         )
+        if expected.key == DEADLINE_STEP_KEY and run.goal_id:
+            # DRF-2173 — срок живёт на цели; текст цели не трогается (§48).
+            apply_target_date(run.goal, target_date)
 
         if expected.key == anketa.GOAL_STEP_KEY:
             # DRF-1764: цель — первый шаг, и она создаётся СРАЗУ: на
