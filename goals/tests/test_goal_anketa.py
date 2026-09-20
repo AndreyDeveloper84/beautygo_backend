@@ -23,7 +23,7 @@ from goals.decision_context import (
     INTENT_START_ANKETA,
     MISSING_GOAL,
     MISSING_GOAL_CLARIFICATION,
-    NEXT_BROWSE_CATALOG,
+    NEXT_RETURN_TO_CHAT,
     build_decision_context,
 )
 from goals.models import ClientGoal, GoalAnketaAnswer, GoalAnketaRun
@@ -209,7 +209,8 @@ class TestAnketaFormsAGoal:
 
         assert doc["known"]["goal"]["goal_key"] == "relax"
         assert doc["missing"] == []
-        assert doc["next"] == {"id": NEXT_BROWSE_CATALOG, "label": "Найти услугу"}
+        # DRF-2177 (§60): контекст собран → в чат (C03.5), не в каталог.
+        assert doc["next"]["id"] == NEXT_RETURN_TO_CHAT
 
         run = GoalAnketaRun.objects.get(client=customer)
         assert run.completed_at is not None
@@ -275,13 +276,16 @@ class TestAnketaFormsAGoal:
             client=customer, goal_key="relax", source_channel="bot",
         )
         api = _api()
-        first = anketa.ANKETA_STEPS[0]
-        resp = _answer(api, first.key, option_key=first.options[0][0])
+        # DRF-2177: при уже выбранной цели сервер ждёт первый сужающий шаг,
+        # а протухший экран отвечает на шаг ЦЕЛИ — его и отвергаем.
+        resp = _answer(api, anketa.GOAL_STEP_KEY, option_key="relax")
         assert resp.status_code == 409
 
         assert GoalAnketaRun.objects.count() == 0
-        # И следующее открытие приложения вопросов не показывает.
-        assert build_decision_context(customer)["missing"] == []
+        # И следующее открытие приложения показывает ровно то, что ждётся:
+        # первый сужающий вопрос под цель, а не анкету с начала.
+        doc = build_decision_context(customer)
+        assert doc["missing"][0]["step"] == anketa.ANKETA_STEPS[0].key
 
     def test_step_mismatch_uses_the_registered_error_code(self, customer, token):
         api = _api()
@@ -374,7 +378,7 @@ class TestAnketaIsNotAGate:
         # Цель готова, спрашивать нечего, сервер называет следующий шаг.
         assert doc["known"]["goal"]["goal_text"] == "хочу маникюр"
         assert doc["missing"] == []
-        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
+        assert doc["next"]["id"] == NEXT_RETURN_TO_CHAT
 
         # Ни одного ответа на вопрос анкеты — это и есть суть теста.
         assert GoalAnketaAnswer.objects.count() == 0
@@ -382,9 +386,12 @@ class TestAnketaIsNotAGate:
         # И следующий GET не роняет обратно в вопросы.
         assert api.get(CTX_URL).json()["data"]["missing"] == []
 
-    def test_suggestion_chip_reaches_the_catalog_with_zero_answers(
+    def test_suggestion_chip_forms_the_goal_and_asks_the_first_narrowing_step(
         self, customer, token, goal_options,
     ):
+        """DRF-2177 (§60, макет C03.2): чип — цель, и сразу первый вопрос
+        под неё. Раньше — «Найти услугу» без вопросов; ответов по-прежнему
+        ноль, пока человек не ответил сам."""
         api = _api()
         api.get(CTX_URL)
         doc = api.post(
@@ -394,8 +401,8 @@ class TestAnketaIsNotAGate:
         ).json()["data"]
 
         assert doc["known"]["goal"]["goal_key"] == "relax"
-        assert doc["missing"] == []
-        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
+        assert doc["missing"][0]["step"] == anketa.ANKETA_STEPS[0].key
+        assert doc["next"] is None
         assert GoalAnketaAnswer.objects.count() == 0
 
     def test_leaving_mid_anketa_closes_the_run_instead_of_dragging_back(
@@ -448,6 +455,16 @@ class TestAnketaIsNotAGate:
     ):
         """`next` есть ВСЕГДА — иначе анкета ворота, и не в теории.
 
+        DRF-2177 (§60, ruling 20.09): «Найти услугу» с экрана уходит —
+        `browse_catalog` документ больше не несёт, пока анкета включена.
+        Выход человека с любого кадра — «назад» на H01 (экран не корень,
+        DRF-1493), где каталог в одном тапе, плюс свободный ввод и «Не
+        знаю» на каждом шаге. Отступление от буквы C-2 по §60, ждёт
+        подтверждения владельца. Здесь проверяется то, что осталось
+        обязанностью документа: на состояниях с вопросом `next` молчит
+        ЧЕСТНО (`None`, не кнопка в никуда), на собранном контексте —
+        `return_to_chat`.
+
         Поверхность цели монтируется на корне. Кнопки «назад» там нет
         (её там и не должно быть), нижней навигации у клиента нет тоже.
         Пока `next` молчал при непустом `missing`, уйти с экрана было
@@ -473,37 +490,35 @@ class TestAnketaIsNotAGate:
         # 1. Первый вопрос анкеты, цели нет вообще.
         doc = api.get(CTX_URL).json()["data"]
         assert doc["missing"], "предусловие: вопрос на экране есть"
-        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
+        assert doc["next"] is None
 
         # 2. Середина анкеты (цель уже выбрана, идут сужающие вопросы).
         doc = _answer_goal(api).json()["data"]
         assert doc["missing"]
-        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
+        assert doc["next"] is None
         first = anketa.ANKETA_STEPS[0]
         doc = _answer(api, first.key, option_key=first.options[0][0]).json()["data"]
         assert doc["missing"]
-        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
+        assert doc["next"] is None
 
-        # 3. Услуга НЕ названа — уточнение, и выход рядом с ним.
+        # 3. Услуга НЕ названа — уточнение прежде вопросов.
         doc = api.post(
             SELECT_URL,
             {"goal_text": "хочу что-то для рук", "source_channel": "miniapp"},
             format="json",
         ).json()["data"]
         assert _kinds(doc) == [MISSING_GOAL_CLARIFICATION]
-        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG, (
-            "уточнение не должно быть тупиком"
-        )
+        assert doc["next"] is None
 
         # 3a. Тот самый падеж (DRF-1461): распознан, уточнения нет,
-        # выход всё равно на месте.
+        # контекст собран — в чат.
         doc = api.post(
             SELECT_URL,
             {"goal_text": "хочу маникюра", "source_channel": "miniapp"},
             format="json",
         ).json()["data"]
         assert doc["missing"] == [], "родительный падеж обязан распознаваться"
-        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
+        assert doc["next"]["id"] == NEXT_RETURN_TO_CHAT
 
         # 4. Состояние ведения.
         doc = api.post(
@@ -512,7 +527,7 @@ class TestAnketaIsNotAGate:
             format="json",
         ).json()["data"]
         assert _kinds(doc) == ["goal_guidance"]
-        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
+        assert doc["next"] is None
 
     def test_goal_step_does_not_duplicate_its_own_chips_as_suggestions(
         self, customer, token, goal_options,
@@ -591,7 +606,7 @@ class TestAnketaIsNotAGate:
 
         Отрицательная половина обязана существовать и здесь, иначе
         предыдущая проверка неотличима от «распознаём всё подряд».
-        Человек получает уточнение и выход «Найти услугу».
+        Человек получает уточнение; `next` при вопросе молчит (DRF-2177).
         """
         other = Tenant.objects.create(slug="penza-anketa-c", name="Penza C")
         SalonService.objects.create(
@@ -603,7 +618,7 @@ class TestAnketaIsNotAGate:
             format="json",
         ).json()["data"]
         assert _kinds(doc) == [MISSING_GOAL_CLARIFICATION]
-        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
+        assert doc["next"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -622,13 +637,13 @@ class TestOldPathsSurvive:
         # намерения и выход — на месте.
         ids = [i["id"] for i in doc["intents"]]
         assert {"choose_suggested", "formulate_own", "need_guidance"} <= set(ids)
-        assert doc["next"]["id"] == NEXT_BROWSE_CATALOG, "выход обязан быть всегда"
+        assert doc["next"] is None  # DRF-2177: при вопросе `next` молчит честно
         doc = _answer_goal(api).json()["data"]
         for _ in anketa.ANKETA_STEPS:
             ids = [i["id"] for i in doc["intents"]]
             assert {"choose_suggested", "formulate_own", "need_guidance"} <= set(ids)
             assert doc["suggestions"], "чипы обязаны стоять рядом с вопросами"
-            assert doc["next"]["id"] == NEXT_BROWSE_CATALOG, "выход обязан быть всегда"
+            assert doc["next"] is None  # DRF-2177: при вопросе `next` молчит честно
             step = doc["missing"][0]["step"]
             expected = next(s for s in anketa.ANKETA_STEPS if s.key == step)
             doc = _answer(api, step, **_first_option(expected)).json()["data"]
@@ -660,7 +675,8 @@ class TestRepeatPass:
             client=customer, goal_key="relax", source_channel="bot",
         )
         doc = _api().get(CTX_URL).json()["data"]
-        assert doc["missing"] == []
+        # DRF-2177: с целью — первый сужающий вопрос под неё; «пройти заново» рядом.
+        assert doc["missing"][0]["step"] == anketa.ANKETA_STEPS[0].key
         assert INTENT_START_ANKETA in [i["id"] for i in doc["intents"]]
 
     def test_start_anketa_reopens_the_questions_without_losing_the_goal(

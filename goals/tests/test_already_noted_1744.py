@@ -98,7 +98,8 @@ class TestKnownAnketa:
             "prompt": AREA.prompt,
             "option_key": AREA.options[1][0],
             "label": AREA.options[1][1],
-            "options": [{"key": k, "label": lbl} for k, lbl in AREA.options],
+            # DRF-2177: «Не знаю» — на каждом сужающем шаге, последним и с ролью.
+            "options": anketa._wire_options(AREA),
             "revisable": True,
             # DRF-1746 — тип ответа и массив для multi (пустой у single).
             "mode": anketa.MODE_SINGLE,

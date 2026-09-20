@@ -40,7 +40,7 @@ import pytest
 
 from goals.decision_context import (
     MISSING_GOAL_CLARIFICATION,
-    NEXT_BROWSE_CATALOG,
+    NEXT_RETURN_TO_CHAT,
     build_decision_context,
 )
 from goals.models import ClientGoal
@@ -133,11 +133,16 @@ def _recognized(user, phrase: str) -> bool:
     )
     doc = build_decision_context(user)
     kinds = {item.get("kind") for item in doc["missing"]}
-    assert kinds <= {MISSING_GOAL_CLARIFICATION}, kinds
-    # Выход «Найти услугу» обязан быть в документе в ОБОИХ исходах —
-    # нераспознанный не должен оказаться заперт на уточнении.
-    assert doc["next"]["id"] == NEXT_BROWSE_CATALOG
-    return not doc["missing"]
+    # DRF-2177: распознанная цель без сужающих ответов получает первый
+    # вопрос анкеты (`goal_anketa`) — это не уточнение, а C03.
+    assert kinds <= {MISSING_GOAL_CLARIFICATION, "goal_anketa"}, kinds
+    # `next` по состоянию (§60): есть вопрос — молчит честно; названная
+    # услуга — контекст собран, назад в чат.
+    if doc["missing"]:
+        assert doc["next"] is None
+    else:
+        assert doc["next"]["id"] == NEXT_RETURN_TO_CHAT
+    return MISSING_GOAL_CLARIFICATION not in kinds
 
 
 # ---------------------------------------------------------------------------

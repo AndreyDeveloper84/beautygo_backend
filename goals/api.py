@@ -42,6 +42,7 @@ from .decision_context import (
     previous_answers,
     INTENT_NEED_GUIDANCE,
     INTENT_START_ANKETA,
+    asks_from_goal,
     build_decision_context,
     next_anketa_step,
     open_anketa_run,
@@ -441,8 +442,24 @@ class GoalSelectView(APIView):
         if answer.get("revise"):
             return self._revise_answer(client, run=run, answer=answer)
 
+        # DRF-2177 — проход «от цели»: прохода нет, а цель есть, и документ
+        # задал первый сужающий шаг под неё. Условие — ТО ЖЕ, что у
+        # документа (`asks_from_goal`): иначе протухший ответ на сужающий
+        # шаг после собранного контекста заводил бы новый проход вместо
+        # 409. Без цели и без прохода — как прежде, первым ждётся цель.
+        active_goal = (
+            ClientGoal.objects.filter(client=client, state=ClientGoal.State.ACTIVE)
+            .order_by("-selected_at")
+            .first()
+            if run is None
+            else None
+        )
+        from_goal = run is None and asks_from_goal(client, active_goal)
+
         # Сверки — ДО любой записи.
-        expected = next_anketa_step(run)
+        expected = (
+            anketa.next_step({anketa.GOAL_STEP_KEY}) if from_goal else next_anketa_step(run)
+        )
         if expected is None or answer["step"] != expected.key:
             return error_response(
                 ErrorCode.ANKETA_STEP_MISMATCH,
@@ -485,6 +502,13 @@ class GoalSelectView(APIView):
         # Проверки пройдены — только теперь можно писать.
         if run is None:
             run, _ = GoalAnketaRun.objects.get_or_create(client=client, completed_at=None)
+            if from_goal and active_goal is not None and run.goal_id is None:
+                # DRF-2177 — проход «от цели» принадлежит этой цели с первого
+                # ответа: по нему считается, собран ли контекст под неё
+                # (`goal_context_collected`), и им же шаг цели признаётся
+                # отвеченным (`answered_step_keys`).
+                run.goal = active_goal
+                run.save(update_fields=["goal"])
 
         GoalAnketaAnswer.objects.update_or_create(
             run=run,

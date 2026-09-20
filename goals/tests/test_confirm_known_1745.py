@@ -126,7 +126,10 @@ class TestSecondPassConfirms:
         assert item["prompt"] == "Раньше ты выбирала «Лицо и кожа». Всё ещё так?"
         # Обычный вопрос — рядом, для «Изменилось»; варианты — как у шага.
         assert item["question"] == anketa.shown_prompt(AREA, "relax")
-        assert [o["key"] for o in item["options"]] == [k for k, _ in AREA.options]
+        # DRF-2177: «Не знаю» замыкает и этот шаг.
+        assert [o["key"] for o in item["options"]] == [
+            *(k for k, _ in AREA.options), anketa.UNKNOWN_OPTION_KEY
+        ]
 
     def test_yes_copies_the_value_and_moves_on(self, customer, token, goal_options):
         api = _api()

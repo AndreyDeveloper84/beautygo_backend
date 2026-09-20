@@ -159,13 +159,16 @@ class TestDecisionContext:
         assert [m["kind"] for m in doc["missing"]] == [MISSING_GOAL]
         assert doc["missing"][0]["prompt"]
 
-    def test_goal_with_key_no_missing(self, customer, goal_option):
+    def test_goal_with_key_asks_the_first_narrowing_step(self, customer, goal_option):
+        """DRF-2177 (§60, макет C03.2): цель по ключу — готова, и под неё
+        сразу первый сужающий вопрос; уточнения (`goal_clarification`) нет."""
         ClientGoal.objects.create(
             client=customer, goal_key="relax", source_channel="bot",
         )
         doc = build_decision_context(customer)
         assert doc["known"]["goal"]["goal_key"] == "relax"
-        assert doc["missing"] == []
+        assert [m["kind"] for m in doc["missing"]] == ["goal_anketa"]
+        assert doc["missing"][0]["step"] == "area"
 
     def test_text_only_goal_needs_clarification(self, customer):
         ClientGoal.objects.create(
@@ -243,7 +246,8 @@ class TestGoalSelect:
         assert goal.source_channel == "miniapp"
         doc = r.json()["data"]
         assert doc["known"]["goal"]["goal_key"] == "relax"
-        assert doc["missing"] == []
+        # DRF-2177: цель есть → сразу первый сужающий вопрос под неё (§60).
+        assert [m["kind"] for m in doc["missing"]] == ["goal_anketa"]
 
     def test_select_text_stored_verbatim(self, token, customer):
         r = _api().post(
