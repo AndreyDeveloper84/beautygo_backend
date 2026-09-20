@@ -86,6 +86,7 @@ from nutrition.services.food_log_service import (
     MANUAL_DISH_BASELINE_G,
     ScanNotOwnedError,
 )
+from nutrition.services import food_scan_budget
 from nutrition.services.food_scanner_router import (
     AllProvidersFailedError,
     FoodScannerRouter,
@@ -108,6 +109,43 @@ from nutrition.services.water_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _budget_refusal(user) -> Response | None:
+    """DRF-2145: занять попытку распознавания или отказать по имени.
+
+    429 ``FOOD_SCAN_DAILY_LIMIT`` — личный потолок, ``retry_after`` до полуночи
+    UTC; 503 ``FOOD_SCAN_BUDGET_EXHAUSTED`` — общий. Тексты для человека
+    говорит бот / Mini App по коду; здесь — код и числа. Лог — без
+    идентификатора человека.
+    """
+    try:
+        food_scan_budget.reserve(user)
+    except food_scan_budget.DailyLimitExceeded as exc:
+        logger.info("nutrition.scan.budget_refused code=%s used=%s", exc.code, exc.used)
+        return error_response(
+            exc.code,
+            "Дневной лимит распознавания фото исчерпан",
+            details=exc.details,
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+    except food_scan_budget.BudgetExhausted as exc:
+        logger.info("nutrition.scan.budget_refused code=%s used=%s", exc.code, exc.used)
+        return error_response(
+            exc.code,
+            "Дневной бюджет распознавания фото исчерпан",
+            details=exc.details,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return None
+
+
+def _record_provider_cost(scan: FoodScan, result) -> None:
+    """DRF-2145: токены как пришли, стоимость — по ценам настроек или null."""
+    usage = dict(getattr(result, "usage", None) or {})
+    scan.provider_usage = usage
+    scan.provider_cost_usd = food_scan_budget.cost_usd(usage)
+    food_scan_budget.record_cost(scan.provider_cost_usd)
 
 
 class FoodScanView(APIView):
@@ -144,6 +182,11 @@ class FoodScanView(APIView):
         # streams from request body so we must materialise before two
         # reads. 10 MiB cap is enforced in the serializer.
         image_bytes = image_file.read()
+
+        # DRF-2145: бюджет — до строки и до провайдера; попытка считается.
+        refusal = _budget_refusal(request.user)
+        if refusal is not None:
+            return refusal
 
         scan = FoodScan(user=request.user)
         scan.image.save(
@@ -205,6 +248,7 @@ class FoodScanView(APIView):
             else ""
         )
         scan.latency_ms = outcome.result.latency_ms
+        _record_provider_cost(scan, outcome.result)
         scan.raw_response = outcome.result.raw_response
 
         # Slice 3a: seed-only lookup. Misses leave nutrition=null and the
@@ -276,6 +320,11 @@ class InternalFoodScanView(APIView):
 
         image_bytes = image_file.read()
 
+        # DRF-2145: бюджет — до строки и до провайдера; попытка считается.
+        refusal = _budget_refusal(user)
+        if refusal is not None:
+            return refusal
+
         scan = FoodScan(user=user)
         scan.image.save(
             f"{scan.id}.jpg",
@@ -328,6 +377,7 @@ class InternalFoodScanView(APIView):
             else ""
         )
         scan.latency_ms = outcome.result.latency_ms
+        _record_provider_cost(scan, outcome.result)
         scan.raw_response = outcome.result.raw_response
 
         facts = NutritionLookup().lookup(

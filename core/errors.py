@@ -187,6 +187,10 @@ class ErrorCode(str, Enum):
     FOOD_NOT_RECOGNIZED = "FOOD_NOT_RECOGNIZED"
     FOOD_API_UNAVAILABLE = "FOOD_API_UNAVAILABLE"
     SCAN_NOT_FOUND = "SCAN_NOT_FOUND"
+    # DRF-2145 — бюджет распознавания: личный потолок за день (429, с
+    # retry_after до полуночи UTC) и общий дневной потолок (503).
+    FOOD_SCAN_DAILY_LIMIT = "FOOD_SCAN_DAILY_LIMIT"
+    FOOD_SCAN_BUDGET_EXHAUSTED = "FOOD_SCAN_BUDGET_EXHAUSTED"
 
     # --- File upload (spec §Файл изображения) ---
     FILE_TOO_LARGE = "FILE_TOO_LARGE"
