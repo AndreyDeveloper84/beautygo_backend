@@ -11,6 +11,7 @@ is enough.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import logging
 import time
@@ -133,8 +134,10 @@ class OpenAIVisionProvider(FoodScannerProvider):
             )
             raise ProviderUnavailable("OpenAI returned non-JSON content")
 
-        result = self._build_result(parsed, latency_ms, portion_multiplier)
-        result.usage = _usage_dict(getattr(completion, "usage", None))
+        result = dataclasses.replace(
+            self._build_result(parsed, latency_ms, portion_multiplier),
+            usage=_usage_dict(getattr(completion, "usage", None)),
+        )
         if result.confidence < self.confidence_threshold:
             raise LowConfidenceError(
                 f"openai confidence {result.confidence:.2f} < {self.confidence_threshold}",

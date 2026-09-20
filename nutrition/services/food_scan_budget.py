@@ -21,6 +21,11 @@
   когда личный пропустил.
 * **Пороги — из листа** (§55): ``FOOD_SCAN_DAILY_PER_USER`` 20,
   ``FOOD_SCAN_DAILY_TOTAL`` 500, оба через env. Своих чисел здесь нет.
+* **Счётчики живут в кэше, а кэш — вытесняемый** (Redis db 1 общий с
+  остальным кэшем): ``cache.clear()``, FLUSHDB при выкладке или eviction
+  по ``maxmemory`` обнуляют дневные счётчики и метки dedup сигнала (сигнал
+  может прозвучать второй раз). Принятый риск: бюджет защищает дневник от
+  разорения, а не деньги до цента.
 * **Fail-open при недоступном кэше** (умолчание главного окна 20.09):
   бюджет защищает деньги, но потеря Redis не должна закрыть дневник; в лог
   — ``nutrition.food_scan.budget_unavailable``. ``django_redis`` с
@@ -121,7 +126,8 @@ def _incr(key: str, ttl: int) -> int | None:
         value = cache.incr(key)
     except ValueError:
         # ``incr`` на ключе, которого нет (кэш выключен / ключ не лёг): не
-        # считаем — и говорим об этом.
+        # считаем — и говорим об этом тем же словом, что и про потерю кэша.
+        logger.warning("nutrition.food_scan.budget_unavailable op=incr err=ValueError")
         return None
     except Exception as exc:  # noqa: BLE001 — потеря кэша не закрывает дневник
         logger.warning("nutrition.food_scan.budget_unavailable op=incr err=%s", type(exc).__name__)
@@ -178,10 +184,14 @@ def _price(name: str) -> Decimal | None:
     if raw in (None, ""):
         return None
     try:
-        return Decimal(str(raw))
+        price = Decimal(str(raw))
     except (InvalidOperation, ValueError):
         logger.warning("nutrition.food_scan.price_invalid setting=%s", name)
         return None
+    if price < 0:
+        logger.warning("nutrition.food_scan.price_invalid setting=%s", name)
+        return None
+    return price
 
 
 def cost_usd(usage: dict[str, Any] | None) -> Decimal | None:
@@ -220,11 +230,13 @@ def record_cost(amount: Decimal | None) -> None:
 
 
 def _daily_cost_text(day: str) -> str:
+    """Справка в сигнале; любая порча значения — «n/a», не исключение из
+    ``reserve`` (сигнал никогда не важнее скана)."""
     try:
         current = cache.get(_KEY_COST.format(day=day))
-    except Exception:  # noqa: BLE001
-        current = None
-    return f"{Decimal(str(current)):.4f}" if current is not None else "n/a"
+        return f"{Decimal(str(current)):.4f}" if current is not None else "n/a"
+    except Exception:  # noqa: BLE001 — InvalidOperation / потеря кэша
+        return "n/a"
 
 
 # ─── сигнал ───────────────────────────────────────────────────────────────

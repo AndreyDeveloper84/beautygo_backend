@@ -212,7 +212,7 @@ class TestB6OperatorSignal:
         router = _router()
         with (
             patch.object(budget, "_send_signal", return_value=True) as sender,
-            caplog.at_level(logging.WARNING, logger="nutrition.services.food_scan_budget"),
+            caplog.at_level(logging.INFO),
         ):
             for i in range(5):
                 _post_scan(router, f"bot:{i}")
@@ -223,8 +223,10 @@ class TestB6OperatorSignal:
         messages = [str(c.args[-1]) if c.args else str(c.kwargs.get("message")) for c in sender.call_args_list]
         assert "4/5" in messages[0] and "5/5" in messages[1]
         assert all("usd" in m.lower() for m in messages)
-        # Лог — без идентификатора человека.
-        assert not any("bot:" in r.getMessage() for r in caplog.records)
+        # Лог — без идентификатора человека (и строки view об отказе тоже).
+        ours = [r for r in caplog.records if r.name.startswith("nutrition.")]
+        assert any("budget" in r.getMessage() for r in ours)  # присутствие
+        assert not any("bot:" in r.getMessage() for r in ours)
 
     def test_signal_failure_does_not_break_the_scan(self, now, settings) -> None:
         settings.FOOD_SCAN_DAILY_PER_USER = 100
@@ -303,3 +305,109 @@ class TestB9Service:
         with pytest.raises(budget.BudgetExhausted):
             budget.reserve(b)
         assert cache.get(f"food_scan:user:{b.pk}:2026-09-21") in (None, 0)
+
+
+# ─── ревью #519 ───────────────────────────────────────────────────────────
+
+
+class TestR1ProviderUsageWiring:
+    def test_openai_result_carries_usage_end_to_end(self, settings) -> None:
+        """Блокер ревью: ``ScanResult`` — frozen dataclass; присваивание
+        ``usage`` роняло каждый успешный скан. Здесь — провайдер целиком."""
+        import json
+        from types import SimpleNamespace
+
+        from nutrition.providers.openai_vision import OpenAIVisionProvider
+
+        settings.OPENAI_API_KEY = "test-key"
+        completion = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps(
+                            {"dish_name": "Борщ", "confidence": 0.92, "portion_g": 320, "ingredients": []}
+                        )
+                    )
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=1000, completion_tokens=100, total_tokens=1100),
+        )
+        client = MagicMock()
+        client.chat.completions.create.return_value = completion
+        with patch("nutrition.providers.openai_vision.get_openai_client", return_value=client):
+            result = OpenAIVisionProvider().scan(b"\xff\xd8\xff")
+        assert result.dish_name == "Борщ"
+        assert result.usage == {"prompt_tokens": 1000, "completion_tokens": 100, "total_tokens": 1100}
+
+    def test_no_usage_on_the_completion_is_an_empty_dict(self, settings) -> None:
+        import json
+        from types import SimpleNamespace
+
+        from nutrition.providers.openai_vision import OpenAIVisionProvider
+
+        settings.OPENAI_API_KEY = "test-key"
+        completion = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=json.dumps({"dish_name": "Борщ", "confidence": 0.92, "portion_g": 320})
+                    )
+                )
+            ]
+        )
+        client = MagicMock()
+        client.chat.completions.create.return_value = completion
+        with patch("nutrition.providers.openai_vision.get_openai_client", return_value=client):
+            result = OpenAIVisionProvider().scan(b"\xff\xd8\xff")
+        assert result.dish_name == "Борщ"
+        assert result.usage == {}
+
+
+class TestR2FailOpen:
+    def test_cache_returning_none_does_not_refuse(self, now, caplog) -> None:
+        """django_redis с IGNORE_EXCEPTIONS при лежащем Redis отдаёт None."""
+        user = User.objects.create(username="bot:9", role="client", is_proxy=True)
+        fake = MagicMock()
+        fake.add.return_value = None
+        fake.incr.return_value = None
+        with patch.object(budget, "cache", fake), caplog.at_level(logging.WARNING):
+            for _ in range(30):
+                budget.reserve(user)  # ни одного отказа
+        assert any("budget_unavailable" in r.getMessage() for r in caplog.records)
+
+    def test_incr_on_a_missing_key_is_fail_open_and_loud(self, now, caplog) -> None:
+        user = User.objects.create(username="bot:10", role="client", is_proxy=True)
+        fake = MagicMock()
+        fake.add.return_value = True
+        fake.incr.side_effect = ValueError("key missing")
+        with patch.object(budget, "cache", fake), caplog.at_level(logging.WARNING):
+            budget.reserve(user)
+        assert any("err=ValueError" in r.getMessage() for r in caplog.records)
+
+
+class TestR3TtlIsToMidnight:
+    def test_counters_and_dedup_keys_get_the_midnight_ttl(self, now, settings) -> None:
+        settings.FOOD_SCAN_DAILY_TOTAL = 1
+        user = User.objects.create(username="bot:11", role="client", is_proxy=True)
+        with patch.object(budget.cache, "add", wraps=budget.cache.add) as add:
+            with patch.object(budget, "_send_signal", return_value=True):
+                budget.reserve(user)
+        timeouts = {c.args[0]: c.kwargs.get("timeout") for c in add.call_args_list}
+        assert timeouts[f"food_scan:user:{user.pk}:2026-09-21"] == 14 * 3600
+        assert timeouts["food_scan:total:2026-09-21"] == 14 * 3600
+        assert timeouts["food_scan:signal:2026-09-21:error"] == 14 * 3600
+
+
+class TestR4SignalNeverBreaksTheScan:
+    def test_garbage_cost_value_is_na(self, now, settings) -> None:
+        settings.FOOD_SCAN_DAILY_TOTAL = 1
+        cache.set("food_scan:cost_usd:2026-09-21", "garbage", timeout=3600)
+        router = _router()
+        with patch.object(budget, "_send_signal", return_value=True) as sender:
+            assert _post_scan(router).status_code == 200
+        assert "cost_usd=n/a" in sender.call_args.args[-1]
+
+    def test_negative_price_is_ignored(self, now, settings) -> None:
+        settings.FOOD_SCAN_PRICE_INPUT_USD_PER_1M = "-2.50"
+        settings.FOOD_SCAN_PRICE_OUTPUT_USD_PER_1M = "10.00"
+        assert budget.cost_usd({"prompt_tokens": 1000, "completion_tokens": 100}) is None
