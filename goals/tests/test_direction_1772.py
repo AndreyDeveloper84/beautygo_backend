@@ -86,7 +86,9 @@ def _pick(api, key="self_care"):
 
 def _collect(api, area="face"):
     _answer(api, AREA.key, option_key=area)
-    return _answer(api, FEELING.key, option_keys=[FEELING.options[0][0]])
+    _answer(api, FEELING.key, option_keys=[FEELING.options[0][0]])
+    # DRF-2173: проход закрывает необязательный шаг срока («без срока»).
+    return _answer(api, "deadline", option_key="no_deadline")
 
 
 @pytest.mark.django_db
@@ -126,7 +128,8 @@ class TestDirection:
         api = _api()
         _pick(api)
         _answer(api, AREA.key, option_key=anketa.UNKNOWN_OPTION_KEY)
-        doc = _answer(api, FEELING.key, option_keys=[FEELING.options[0][0]])
+        _answer(api, FEELING.key, option_keys=[FEELING.options[0][0]])
+        doc = _answer(api, "deadline", option_key="no_deadline")  # DRF-2173: закрывает проход
         assert doc["known"]["goal"]["direction"]["what"] == "Общее направление"
 
     def test_direction_is_present_before_answers_too(self, customer, token, directions):
@@ -144,7 +147,7 @@ class TestCollectedAnswers:
         _pick(api)
         doc = _collect(api, area="face")
         answers = doc["known"]["goal"]["answers"]
-        assert [a["step"] for a in answers] == [AREA.key, FEELING.key]
+        assert [a["step"] for a in answers] == [AREA.key, FEELING.key, "deadline"]
         assert answers[0]["label"] == "Лицо и кожа"
         assert answers[0]["origin"] == anketa.ORIGIN_ANKETA
         # Открытого прохода нет — «Уже учла» пуст, а причины карточке есть откуда взять.
