@@ -72,15 +72,35 @@ def answers_for_goal(goal: ClientGoal) -> list[dict[str, Any]]:
     ]
 
 
-def direction_for(goal: ClientGoal, answers: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
-    """Направление под цель: строка (цель × область), иначе (цель, ''), иначе ``None``.
+#: Сколько направлений едет в документ: основной + не больше двух других
+#: (макет C04.3, R05 «≤2 meaningful alternatives»). Третьего нет — и это
+#: предел ВЫДАЧИ, а не данных: строк под цель может быть больше.
+MAX_DIRECTIONS = 3
 
-    Цель без ключа (свободный текст) направления не имеет — курируемой
-    строки под неё быть не может; это честный ``None``, а не подбор по
-    близости (OD-1).
+
+def _as_payload(row: GoalDirection) -> dict[str, Any]:
+    return {
+        "what": row.what,
+        "subline": row.subline,
+        "area_key": row.area_key or None,
+    }
+
+
+def directions_for(
+    goal: ClientGoal, answers: list[dict[str, Any]] | None = None
+) -> list[dict[str, Any]]:
+    """Основной вариант и до двух других подходов — курируемые строки под цель.
+
+    Порядок: основной первым (строка под названную область, иначе
+    запасная под цель), затем остальные по ``sort_order``. Альтернативы —
+    ТЕ ЖЕ строки, ничего не придумывается: пустая таблица даёт пустой
+    список, как и отсутствие направления (OD_C04 §2 у потребителя).
+
+    Цель свободным текстом направлений не имеет — курируемой строки под
+    неё быть не может, и подбор по близости запрещён (OD-1).
     """
     if not goal.goal_key:
-        return None
+        return []
     if answers is None:
         answers = answers_for_goal(goal)
     area_key = next(
@@ -93,18 +113,31 @@ def direction_for(goal: ClientGoal, answers: list[dict[str, Any]] | None = None)
     )
     rows = list(
         GoalDirection.objects.filter(
-            goal_option__key=goal.goal_key,
-            is_active=True,
-            area_key__in=[area_key, ""] if area_key else [""],
-        ).order_by("sort_order")
+            goal_option__key=goal.goal_key, is_active=True
+        ).order_by("sort_order", "area_key")
     )
-    chosen = next((r for r in rows if r.area_key == area_key), None) if area_key else None
-    if chosen is None:
-        chosen = next((r for r in rows if r.area_key == ""), None)
-    if chosen is None:
-        return None
-    return {
-        "what": chosen.what,
-        "subline": chosen.subline,
-        "area_key": chosen.area_key or None,
-    }
+    if not rows:
+        return []
+    primary = next((r for r in rows if r.area_key == area_key), None) if area_key else None
+    if primary is None:
+        primary = next((r for r in rows if r.area_key == ""), None)
+    if primary is None:
+        # Под названную область строки нет и запасной нет: показывать
+        # «другие подходы» без основного нечестно — это не выбор, а
+        # подмена того, о чём человек сказал.
+        return []
+    others = [r for r in rows if r.pk != primary.pk]
+    return [_as_payload(r) for r in [primary, *others][:MAX_DIRECTIONS]]
+
+
+def direction_for(
+    goal: ClientGoal, answers: list[dict[str, Any]] | None = None
+) -> dict[str, Any] | None:
+    """Основное направление под цель или ``None``.
+
+    Остаётся рядом с :func:`directions_for` намеренно: потребитель, не
+    знающий про альтернативы (бот до выкладки N4), продолжает читать одно
+    поле и работать как раньше.
+    """
+    directions = directions_for(goal, answers)
+    return directions[0] if directions else None

@@ -83,7 +83,7 @@ from django.db.models.functions import Lower
 from services.models import GoalOption
 
 from . import anketa
-from .direction import answers_for_goal, direction_for
+from .direction import answers_for_goal, direction_for, directions_for
 from .lifecycle import OPEN_STATES
 from .models import ClientGoal, GoalAnketaAnswer, GoalAnketaRun
 from .service_match import match_named_service
@@ -186,6 +186,10 @@ def _goal_payload(
         # курируемой таблицы владельца (``services.GoalDirection``), ``None``
         # — направления нет, карточки не будет (C04.4 механически).
         "direction": direction_for(goal, collected),
+        # DRF-1770 (К-3 N4, макет C04.3) — основной вариант первым и до двух
+        # других подходов теми же полями. ``direction`` остаётся рядом:
+        # потребитель, не знающий про альтернативы, работает как раньше.
+        "directions": directions_for(goal, collected),
         "answers": collected,
         "selected_at": goal.selected_at.isoformat(),
         "source_channel": goal.source_channel,

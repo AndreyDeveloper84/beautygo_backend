@@ -51,6 +51,13 @@ def self_care(db):
 
 
 @pytest.fixture
+def directions_single(self_care):
+    GoalDirection.objects.create(
+        goal_option=self_care, area_key="", what="Общее направление", subline="Под цель целиком",
+    )
+
+
+@pytest.fixture
 def directions(self_care):
     GoalDirection.objects.create(
         goal_option=self_care, area_key="", what="Общее направление", subline="Под цель целиком",
@@ -138,6 +145,65 @@ class TestDirection:
         doc = _pick(_api())
         assert doc["known"]["goal"]["direction"]["what"] == "Общее направление"
         assert doc["known"]["goal"]["answers"] == []
+
+
+@pytest.mark.django_db
+class TestAlternatives:
+    """C04.3 (DRF-1770): основной вариант + до двух других подходов.
+
+    Альтернативы — ТЕ ЖЕ курируемые строки под цель (другие области и
+    запасная); кодом ничего не придумывается, и на пустой таблице их нет,
+    как нет и направления.
+    """
+
+    def test_primary_first_then_up_to_two_others(self, customer, token, self_care):
+        GoalDirection.objects.create(
+            goal_option=self_care, area_key="", what="Общее", sort_order=30
+        )
+        GoalDirection.objects.create(
+            goal_option=self_care, area_key="face", what="Лицо", sort_order=10
+        )
+        GoalDirection.objects.create(
+            goal_option=self_care, area_key="body", what="Тело", sort_order=20
+        )
+        GoalDirection.objects.create(
+            goal_option=self_care, area_key="hair", what="Волосы", sort_order=40
+        )
+        api = _api()
+        _pick(api)
+        doc = _collect(api, area="face")
+
+        goal = doc["known"]["goal"]
+        assert goal["direction"]["what"] == "Лицо"  # основной — под область
+        assert [d["what"] for d in goal["directions"]] == ["Лицо", "Тело", "Общее"]
+        assert len(goal["directions"]) == 3  # primary + ровно две
+
+    def test_a_single_row_gives_one_element(self, customer, token, directions_single):
+        api = _api()
+        _pick(api)
+        doc = _collect(api)
+        goal = doc["known"]["goal"]
+        assert goal["direction"]["what"] == "Общее направление"
+        assert [d["what"] for d in goal["directions"]] == ["Общее направление"]
+
+    def test_empty_table_has_neither(self, customer, token, self_care):
+        api = _api()
+        _pick(api)
+        doc = _collect(api)
+        goal = doc["known"]["goal"]
+        assert goal["label"] == "Привести себя в порядок"  # присутствие: цель есть
+        assert goal["direction"] is None
+        assert goal["directions"] == []
+
+    def test_inactive_rows_are_not_alternatives(self, customer, token, self_care):
+        GoalDirection.objects.create(goal_option=self_care, area_key="", what="Общее")
+        GoalDirection.objects.create(
+            goal_option=self_care, area_key="body", what="Выключено", is_active=False
+        )
+        api = _api()
+        _pick(api)
+        doc = _collect(api, area="hands")
+        assert [d["what"] for d in doc["known"]["goal"]["directions"]] == ["Общее"]
 
 
 @pytest.mark.django_db
