@@ -84,6 +84,9 @@ def _complete_first_pass(api, *, feeling: str = "calmer") -> None:
         else:
             resp = _answer(api, step, option_key=key)
         assert resp.status_code == 200, resp.content
+    # DRF-2173: последний шаг — необязательный срок; «без срока» закрывает проход.
+    resp = _answer(api, "deadline", option_key="no_deadline")
+    assert resp.status_code == 200, resp.content
     assert not GoalAnketaRun.objects.filter(completed_at__isnull=True).exists()
 
 
