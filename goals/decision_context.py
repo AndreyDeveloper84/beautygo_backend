@@ -83,6 +83,7 @@ from django.db.models.functions import Lower
 from services.models import GoalOption
 
 from . import anketa
+from .direction import answers_for_goal, direction_for
 from .lifecycle import OPEN_STATES
 from .models import ClientGoal, GoalAnketaAnswer, GoalAnketaRun
 from .service_match import match_named_service
@@ -167,6 +168,7 @@ def _goal_payload(
         hints = _nutrition_goal_hints()
     if labels is None:
         labels = {s["key"]: s["label"] for s in _suggestions()}
+    collected = answers_for_goal(goal)
     return {
         # DRF-1660: id и состояние — чтобы у цели был адрес для перехода
         # (``POST /goals/state/`` требует goal_id) и чтобы пауза была видна.
@@ -179,6 +181,12 @@ def _goal_payload(
         # зависела от того, показан ли ряд целей. Ряд при цели теперь
         # скрыт (§60), а подпись обязана остаться.
         "label": _goal_label(goal, labels),
+        # DRF-1772 (К-3) — WHAT карточки C04 и собранные ответы под эту цель
+        # (WHY — grounded-пересказ, OD_C04 §1). ``direction`` — из
+        # курируемой таблицы владельца (``services.GoalDirection``), ``None``
+        # — направления нет, карточки не будет (C04.4 механически).
+        "direction": direction_for(goal, collected),
+        "answers": collected,
         "selected_at": goal.selected_at.isoformat(),
         "source_channel": goal.source_channel,
         # DRF-2124 — едет РЯДОМ с целью, к которой относится: читатель (анкета
