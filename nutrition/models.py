@@ -70,6 +70,12 @@ class FoodScan(models.Model):
     )
     latency_ms = models.IntegerField(default=0)
     raw_response = models.JSONField(default=dict, blank=True)
+    # DRF-2145 — расход провайдера: токены как пришли и стоимость по ценам
+    # настроек; null — провайдер usage не отдал или цены не заданы (не 0).
+    provider_usage = models.JSONField(default=dict, blank=True)
+    provider_cost_usd = models.DecimalField(
+        max_digits=10, decimal_places=6, null=True, blank=True,
+    )
 
     # Failure tracking (when no provider returned a confident result).
     error_code = models.CharField(max_length=64, blank=True, default="")

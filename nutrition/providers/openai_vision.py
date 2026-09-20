@@ -11,6 +11,7 @@ is enough.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import logging
 import time
@@ -133,7 +134,10 @@ class OpenAIVisionProvider(FoodScannerProvider):
             )
             raise ProviderUnavailable("OpenAI returned non-JSON content")
 
-        result = self._build_result(parsed, latency_ms, portion_multiplier)
+        result = dataclasses.replace(
+            self._build_result(parsed, latency_ms, portion_multiplier),
+            usage=_usage_dict(getattr(completion, "usage", None)),
+        )
         if result.confidence < self.confidence_threshold:
             raise LowConfidenceError(
                 f"openai confidence {result.confidence:.2f} < {self.confidence_threshold}",
@@ -182,6 +186,21 @@ class OpenAIVisionProvider(FoodScannerProvider):
 # ---------------------------------------------------------------------------
 # helpers (module level — easy to monkeypatch in tests)
 # ---------------------------------------------------------------------------
+
+
+def _usage_dict(usage: Any) -> dict[str, Any]:
+    """``completion.usage`` → ``{prompt_tokens, completion_tokens, total_tokens}``
+    как целые; нет ``usage`` — пустой словарь (DRF-2145)."""
+    if usage is None:
+        return {}
+    out: dict[str, Any] = {}
+    for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = getattr(usage, name, None)
+        if value is None and isinstance(usage, dict):
+            value = usage.get(name)
+        if isinstance(value, int) and not isinstance(value, bool):
+            out[name] = value
+    return out
 
 
 def _safe_json(content: str) -> dict[str, Any] | None:

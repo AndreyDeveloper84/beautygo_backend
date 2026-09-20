@@ -42,6 +42,9 @@ class ScanResult:
     provider: str = ""               # "openai" / "yandex" / "vit-self-host"
     latency_ms: int = 0
     raw_response: dict[str, Any] = field(default_factory=dict)  # debug/audit
+    #: DRF-2145 — ``usage`` ответа провайдера как пришёл (токены), пусто —
+    #: провайдер не отдал. Стоимость считает каталог по ценам настроек.
+    usage: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
