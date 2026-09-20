@@ -292,14 +292,21 @@ def _done_count(action: PlanAction, user_id: UUID, goal_key: str, start: date, e
 
 
 def _within_target_count(action: PlanAction, user_id: UUID, start: date, end: date) -> int | None:
-    """DRF-2124 — дни ведра с записями еды, чья сумма ≤ действующему ориентиру
-    по калориям; ``None`` — ориентира нет (§103: не 0). Обрезается тем же
-    ``target_count``, что и ``done_count``: «в ориентире 6 из 5» не бывает.
-    Только для ``log_food`` — у воды и записи такого факта нет."""
+    """DRF-2124 — ДНИ ведра с записями еды, чья сумма ≤ действующему ориентиру
+    по калориям; ``None`` — ориентира нет (§103: не 0). Только для ``log_food``
+    — у воды и записи такого факта нет.
+
+    Единица — всегда день. Для недельных вёдер она совпадает с ``done_count``
+    (там тоже дни) и обрезается тем же ``target_count``: «в ориентире 6 из 5»
+    не бывает. Для ``per_day`` ``done_count`` считает ЗАПИСИ, а здесь ведро —
+    один день, поэтому значение ∈ {0, 1}: «сегодня в ориентире» или нет; трёх
+    записей по 300 ккал это не делает «3 в ориентире».
+    """
     within = count_days_within_calorie_target(user_id, _aware(start), _aware(end))
     if within is None:
         return None
-    return min(within, action.target_count)
+    cap = 1 if action.cadence == PlanAction.Cadence.PER_DAY else action.target_count
+    return min(within, cap)
 
 
 def plan_lite_payload(user, *, today: date | None = None) -> dict[str, Any] | None:

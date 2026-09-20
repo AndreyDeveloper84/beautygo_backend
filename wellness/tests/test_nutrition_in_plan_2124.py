@@ -156,13 +156,43 @@ class TestHintIsTemplateData:
         assert report.created == 0 and report.deactivated == 0
         assert report.unchanged == len(HINTS_BY_GOAL_KEY)
 
-    def test_hint_values_are_anketa_goals_only(self, db) -> None:
-        """Подсказка говорит на языке анкеты питания (lose/maintain/gain) — и только."""
+    @pytest.mark.parametrize("bad", [["slim"], ["lose", "lose"], "lose"], ids=["опечатка", "дубль", "не-список"])
+    def test_hint_values_are_anketa_goals_only(self, db, bad) -> None:
+        """Подсказка говорит на языке анкеты питания (lose/maintain/gain) — и только.
+        Остальные поля валидны, чтобы ошибка была именно про подсказку."""
         from django.core.exceptions import ValidationError
 
-        t = PlanTemplate(goal_key="x", actions=[], why_text="w", nutrition_goal_hint=["slim"])
-        with pytest.raises(ValidationError):
+        t = PlanTemplate(
+            goal_key="x", actions=[{"action_type": "log_water", "cadence": "per_day", "target_count": 1}],
+            why_text="w", nutrition_goal_hint=bad,
+        )
+        with pytest.raises(ValidationError) as ei:
             t.full_clean()
+        assert set(ei.value.message_dict) == {"nutrition_goal_hint"}
+
+    def test_a_valid_hint_passes_the_same_clean(self, db) -> None:
+        """Положительная стража валидатора: правильная подсказка не падает."""
+        t = PlanTemplate(
+            goal_key="x", actions=[{"action_type": "log_water", "cadence": "per_day", "target_count": 1}],
+            why_text="w", nutrition_goal_hint=["lose", "maintain"],
+        )
+        t.full_clean()
+
+    def test_a_seed_row_with_a_typo_fails_before_touching_the_table(self, seeded) -> None:
+        """Сид с опечаткой падает целиком: прежние активные версии на месте."""
+        from django.core.exceptions import ValidationError
+
+        from wellness import plan_lite_templates
+
+        rows = [dict(r) for r in plan_lite_templates.PLAN_TEMPLATES_SEED]
+        next(r for r in rows if r["goal_key"] == "relax")["nutrition_goal_hint"] = ["slim"]
+        before = dict(PlanTemplate.objects.filter(is_active=True).values_list("goal_key", "version"))
+
+        with pytest.raises(ValidationError):
+            plan_lite_templates.seed_plan_templates(rows)
+
+        after = dict(PlanTemplate.objects.filter(is_active=True).values_list("goal_key", "version"))
+        assert after == before and len(after) == len(HINTS_BY_GOAL_KEY)
 
 
 # ─── 2. подсказка — рядом с активной целью в decision-context ────────────────
@@ -302,6 +332,26 @@ class TestWithinTargetCount:
 
         assert food["done_count"] == 5  # не больше target_count
         assert food["within_target_count"] <= food["done_count"]
+
+    def test_per_day_food_counts_the_day_not_the_entries(self, seeded, owner) -> None:
+        """Единица — день: при ``per_day`` три записи в ориентире — «сегодня в ориентире» (1), не 3."""
+        _goal(owner, "body_shape")
+        resp = _api().post(
+            PLAN_URL,
+            {"actions": [{"action_type": "log_food", "cadence": "per_day", "target_count": 3}],
+             "template_version": 1},
+            format="json",
+        )
+        assert resp.status_code == 201, resp.content[:400]
+        _confirmed_profile(owner, 1600)
+        today = timezone.localdate()
+        for hour in (9, 13, 19):
+            _log(owner, today, 300, hour=hour)
+
+        food = _food_action(_plan_lite(_api()))
+
+        assert food["done_count"] == 3  # записи
+        assert food["within_target_count"] == 1  # день
 
     def test_water_and_booking_carry_no_within_target(self, plan, owner) -> None:
         """Факт про калории — только у ``log_food``; у воды и записи ключа нет."""

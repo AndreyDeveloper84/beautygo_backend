@@ -37,7 +37,8 @@ def count_days_within_calorie_target(user_id: UUID, start: datetime, end: dateti
     с записью в wellness (``count_fact_days``), чтобы числа были сравнимы.
     """
     profile = NutritionProfile.objects.filter(user_id=user_id).first()
-    if not calories_confirmed(profile) or profile is None or not profile.daily_kcal:
+    # ``calories_confirmed(None)`` — False, так что после проверки профиль есть.
+    if not calories_confirmed(profile) or not profile.daily_kcal:
         return None
     target = float(profile.daily_kcal)
     per_day = (
@@ -46,4 +47,5 @@ def count_days_within_calorie_target(user_id: UUID, start: datetime, end: dateti
         .values("day")
         .annotate(total=Sum("calories"))
     )
-    return sum(1 for row in per_day if row["total"] is not None and row["total"] <= target)
+    # В группе ≥ 1 строка с non-null calories — Sum не бывает None.
+    return sum(1 for row in per_day if row["total"] <= target)
