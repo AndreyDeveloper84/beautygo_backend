@@ -156,6 +156,17 @@ def nutrition_goal_hint_for(goal_key: str | None) -> list[str] | None:
     return list(template.nutrition_goal_hint)
 
 
+def nutrition_goal_hints() -> dict[str, list[str]]:
+    """Все непустые подсказки активных шаблонов одним запросом — для документов,
+    которые печатают несколько целей разом (decision-context: ``known.goal`` +
+    ``known.goals``). Ключа нет — подсказки нет."""
+    return {
+        t.goal_key: list(t.nutrition_goal_hint)
+        for t in PlanTemplate.objects.filter(is_active=True).only("goal_key", "nutrition_goal_hint")
+        if t.nutrition_goal_hint
+    }
+
+
 def template_version_exists(goal_key: str | None, version: int) -> bool:
     """Любая версия этой цели, активная или снятая: план, составленный по
     прежней версии, остаётся законно помеченным."""

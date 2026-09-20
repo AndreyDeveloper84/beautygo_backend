@@ -228,6 +228,26 @@ class TestHintTravelsWithTheActiveGoal:
         assert goal["goal_key"] == "body_shape"
         assert goal["nutrition_goal_hint"] is None
 
+    def test_hints_cost_one_query_per_document_not_per_goal(self, seeded, owner) -> None:
+        """Активная цель + цели на паузе — подсказки одним запросом к PlanTemplate."""
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        active = _goal(owner, "body_shape")
+        paused = ClientGoal.objects.create(
+            client=owner, goal_key="recharge", source_channel="miniapp",
+            state=ClientGoal.State.PAUSED,
+        )
+        assert active.pk != paused.pk
+
+        with CaptureQueriesContext(connection) as ctx:
+            doc = _api().get(DECISION_URL).json()["data"]
+
+        template_queries = [q["sql"] for q in ctx.captured_queries if "wellness_plantemplate" in q["sql"]]
+        assert len(template_queries) == 1, template_queries
+        by_key = {g["goal_key"]: g["nutrition_goal_hint"] for g in doc["known"]["goals"]}
+        assert by_key == {"body_shape": ["lose", "maintain"], "recharge": ["maintain"]}
+
     def test_the_hint_is_a_hint_not_the_anketa_goal(self, seeded, owner) -> None:
         """Связать, не слить (В-4): подсказка не пишет ``NutritionProfile.goal``."""
         _goal(owner, "body_shape")
