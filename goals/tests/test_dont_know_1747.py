@@ -79,6 +79,15 @@ def multi_escape(monkeypatch):
     _install(monkeypatch, (MULTI_ESCAPE, AREA))
 
 
+PLAIN = anketa.AnketaStep(key="plain", prompt="?", options=(("a", "A"), ("b", "B")))
+
+
+@pytest.fixture
+def plain_first(monkeypatch):
+    """Шаг без «Не знаю» первым — сегодняшние шаги его больше не дают (DRF-2177)."""
+    _install(monkeypatch, (PLAIN, AREA))
+
+
 def _api():
     c = APIClient()
     c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {VALID_TOKEN}"
@@ -121,9 +130,13 @@ class TestContract:
         assert [o["key"] for o in regular] == [k for k, _ in FEELING.options]
 
     def test_step_without_escape_is_unchanged(self):
-        assert AREA.escape is False
-        item = anketa.as_missing_item(AREA, answered_keys={"goal"})
-        assert [o["key"] for o in item["options"]] == [k for k, _ in AREA.options]
+        # DRF-2177: «Не знаю» теперь на каждом сужающем шаге (макет C03:
+        # «всегда доступно»), поэтому контракт «шаг без escape не
+        # меняется» держится на синтетическом шаге, а не на ``area``.
+        plain = anketa.AnketaStep(key="plain", prompt="?", options=(("a", "A"), ("b", "B")))
+        assert plain.escape is False
+        item = anketa.as_missing_item(plain, answered_keys={"goal"})
+        assert [o["key"] for o in item["options"]] == ["a", "b"]
         assert all("role" not in o for o in item["options"])
 
     def test_todays_steps_pass_the_guard(self):
@@ -168,15 +181,17 @@ class TestDurableUnknown:
         ]
 
     def test_unknown_on_a_step_without_escape_is_refused(
-        self, customer, token, goal_options
+        self, customer, token, goal_options, plain_first
     ):
+        # DRF-2177: ``area`` получил «Не знаю» (макет C03), отказ проверяется
+        # на синтетическом шаге без escape — контракт тот же.
         api = _api()
         _open(api)
-        resp = _answer(api, AREA.key, option_key=anketa.UNKNOWN_OPTION_KEY)
+        resp = _answer(api, PLAIN.key, option_key=anketa.UNKNOWN_OPTION_KEY)
         assert resp.status_code == 400, resp.content
-        assert not GoalAnketaAnswer.objects.filter(step_key=AREA.key).exists()
+        assert not GoalAnketaAnswer.objects.filter(step_key=PLAIN.key).exists()
         # Положительная стража: обычный вариант на том же шаге — как прежде.
-        assert _answer(api, AREA.key, option_key="face").status_code == 200
+        assert _answer(api, PLAIN.key, option_key="a").status_code == 200
 
     def test_unknown_on_multi_replaces_the_array(
         self, customer, token, goal_options, multi_escape
