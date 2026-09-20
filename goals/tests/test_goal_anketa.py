@@ -642,9 +642,7 @@ class TestOldPathsSurvive:
         for _ in anketa.ANKETA_STEPS:
             ids = [i["id"] for i in doc["intents"]]
             assert {"choose_suggested", "formulate_own", "need_guidance"} <= set(ids)
-            # DRF-2177 (§60): при активной цели ряд целей скрыт — семь целей
-            # только за «Изменить». Свободный ввод (formulate_own) на месте.
-            assert doc["suggestions"] == []
+            assert doc["suggestions"], "чипы обязаны стоять рядом с вопросами"
             assert doc["next"] is None  # DRF-2177: при вопросе `next` молчит честно
             step = doc["missing"][0]["step"]
             expected = next(s for s in anketa.ANKETA_STEPS if s.key == step)

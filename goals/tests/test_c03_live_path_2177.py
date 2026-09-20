@@ -127,12 +127,21 @@ class TestFirstQuestionComesFromTheGoal:
         # Проход GET не создаёт — как и прежде.
         assert not GoalAnketaRun.objects.filter(client=customer, completed_at__isnull=True).exists()
 
-    def test_seven_goals_are_hidden_behind_change(self, customer, token, goal_options):
+    def test_goal_carries_its_own_label_and_change_is_offered(self, customer, token, goal_options):
+        """Семь целей при цели скрывает экран (§60); документ даёт ему
+        подпись цели рядом с целью, а не через ряд ``suggestions``."""
         api = _api()
         doc = _pick_goal(api)
-        assert doc["suggestions"] == []
-        # «Изменить» = start_anketa — предложен; сам ряд целей вернётся шагом цели.
+        assert doc["known"]["goal"]["label"] == "Привести себя в порядок"
+        # «Изменить» = start_anketa — предложен; ряд целей вернётся шагом цели.
         assert INTENT_START_ANKETA in [i["id"] for i in doc["intents"]]
+
+    def test_free_text_goal_label_is_the_persons_words(self, customer, token, catalog):
+        api = _api()
+        doc = api.post(
+            SELECT_URL, {"goal_text": "хочу маникюр", "source_channel": "miniapp"}, format="json"
+        ).json()["data"]
+        assert doc["known"]["goal"]["label"] == "хочу маникюр"
 
     def test_find_service_is_gone_while_questions_remain(self, customer, token, goal_options):
         doc = _pick_goal(_api())
@@ -191,7 +200,50 @@ class TestAnswersBindToTheGoalAndFinish:
         doc = api.get(CTX_URL).json()["data"]
         assert doc["next"]["id"] == NEXT_RETURN_TO_CHAT
         assert doc["missing"] == []
-        assert doc["suggestions"] == []
+
+    def test_stale_narrowing_answer_after_collected_context_is_refused(
+        self, customer, token, goal_options
+    ):
+        """C-1 держится: контекст собран → протухший ответ на сужающий шаг —
+        409, нового прохода нет (по ревью: условие API = условию документа)."""
+        api = _api()
+        _pick_goal(api)
+        _answer(api, AREA.key, **_first_option(AREA))
+        _answer(api, FEELING.key, **_first_option(FEELING))
+
+        resp = _answer(api, AREA.key, **_first_option(AREA))
+        assert resp.status_code == 409, resp.content
+        assert GoalAnketaRun.objects.filter(client=customer).count() == 1
+        assert not GoalAnketaRun.objects.filter(client=customer, completed_at__isnull=True).exists()
+
+    def test_unresolved_text_goal_does_not_accept_a_narrowing_answer(
+        self, customer, token, goal_options
+    ):
+        """Уточнение прежде вопросов — и в API: пока цель не разрешена,
+        ответ на сужающий шаг не привязывает проход к неясной цели."""
+        api = _api()
+        api.post(
+            SELECT_URL, {"goal_text": "хочу что-то для рук", "source_channel": "miniapp"}, format="json"
+        )
+        resp = _answer(api, AREA.key, **_first_option(AREA))
+        assert resp.status_code == 409, resp.content
+        assert GoalAnketaRun.objects.count() == 0
+
+    def test_chip_mid_run_rebinds_and_asks_the_new_goal_to_the_end(
+        self, customer, token, goal_options
+    ):
+        """Сторож от вечных вопросов: чип посреди прохода закрывает его новой
+        целью; под неё — вопросы (первый подтверждением), проход завершается."""
+        api = _api()
+        _pick_goal(api, "self_care")
+        _answer(api, AREA.key, **_first_option(AREA))
+        doc = _pick_goal(api, "relax")
+        assert doc["missing"][0]["step"] == AREA.key
+        assert doc["missing"][0]["mode"] == "confirm"
+        assert _answer(api, AREA.key, confirm=True).status_code == 200
+        doc = _answer(api, FEELING.key, **_first_option(FEELING)).json()["data"]
+        assert doc["next"]["id"] == NEXT_RETURN_TO_CHAT
+        assert doc["missing"] == []
 
     def test_a_new_goal_asks_its_own_questions(self, customer, token, goal_options):
         """Контекст собран ПОД ЦЕЛЬ, не под человека: сменил цель — вопросы снова."""

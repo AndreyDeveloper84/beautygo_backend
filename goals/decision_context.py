@@ -55,8 +55,9 @@ DRF-2177 — C03 в живой путь (макет DRF-1178, решение в�
 - цель есть, а сужающие шаги под неё не отвечены → первый сужающий шаг
   сразу (C03.2), шаг цели считается отвеченным самой целью; ответ создаёт
   проход, привязанный к активной цели;
-- ``suggestions`` при активной цели пусты — семь целей только за
-  «Изменить» (``start_anketa`` → шаг цели с опциями);
+- семь целей при активной цели скрывает экран — только за «Изменить»
+  (``start_anketa`` → шаг цели с опциями); документ несёт ``suggestions``
+  ради подписи цели у прежних читателей и ``known.goal.label`` для новых;
 - ``next``: пока есть вопросы — ``None`` (честное молчание, а не кнопка в
   никуда); контекст собран — ``return_to_chat`` (C03.5 «Спасибо! Этого
   достаточно…» → чат). ``browse_catalog`` («Найти услугу») документ при
@@ -147,9 +148,25 @@ def _nutrition_goal_hints() -> dict[str, list[str]]:
     return nutrition_goal_hints()
 
 
-def _goal_payload(goal: ClientGoal, hints: dict[str, list[str]] | None = None) -> dict[str, Any]:
+def _goal_label(goal: ClientGoal, labels: dict[str, str]) -> str:
+    """Человеческая подпись цели: свои слова, иначе label курируемой цели,
+    иначе ключ — тот же порядок, что у экрана и главного (DRF-2177)."""
+    if goal.goal_text:
+        return goal.goal_text
+    if goal.goal_key:
+        return labels.get(goal.goal_key, goal.goal_key)
+    return ""
+
+
+def _goal_payload(
+    goal: ClientGoal,
+    hints: dict[str, list[str]] | None = None,
+    labels: dict[str, str] | None = None,
+) -> dict[str, Any]:
     if hints is None:
         hints = _nutrition_goal_hints()
+    if labels is None:
+        labels = {s["key"]: s["label"] for s in _suggestions()}
     return {
         # DRF-1660: id и состояние — чтобы у цели был адрес для перехода
         # (``POST /goals/state/`` требует goal_id) и чтобы пауза была видна.
@@ -157,6 +174,11 @@ def _goal_payload(goal: ClientGoal, hints: dict[str, list[str]] | None = None) -
         "state": goal.state,
         "goal_key": goal.goal_key,
         "goal_text": goal.goal_text,
+        # DRF-2177 — подпись цели едет С ЦЕЛЬЮ: до этого экран и главный
+        # выводили её из ``suggestions[].label`` по ключу, то есть подпись
+        # зависела от того, показан ли ряд целей. Ряд при цели теперь
+        # скрыт (§60), а подпись обязана остаться.
+        "label": _goal_label(goal, labels),
         "selected_at": goal.selected_at.isoformat(),
         "source_channel": goal.source_channel,
         # DRF-2124 — едет РЯДОМ с целью, к которой относится: читатель (анкета
@@ -295,6 +317,22 @@ def goal_context_collected(goal: ClientGoal) -> bool:
     return all(step.key in answered for step in anketa.ANKETA_STEPS)
 
 
+def asks_from_goal(client: User, active_goal: ClientGoal | None) -> bool:
+    """Задаёт ли документ первый сужающий шаг «от цели» (DRF-2177).
+
+    Одно условие для документа и для API: цель есть, она разрешена
+    (не ждёт уточнения) и контекст под неё не собран. Считай API его
+    шире — протухший ответ на сужающий шаг после собранного контекста
+    создавал бы новый проход вместо 409 (C-1: последовательность
+    серверная, протухший экран получает отказ).
+    """
+    if active_goal is None or not _anketa_enabled():
+        return False
+    if not _goal_is_resolved(active_goal, service_match=True):
+        return False
+    return not goal_context_collected(active_goal)
+
+
 def next_anketa_step(run: GoalAnketaRun | None) -> anketa.AnketaStep | None:
     """Какой шаг задавать сейчас. ``run is None`` — проход ещё не начат;
     результат ``None`` — спрашивать больше нечего."""
@@ -374,9 +412,11 @@ def build_decision_context(
     run = open_anketa_run(client) if anketa_on else None
 
     hints = _nutrition_goal_hints()  # DRF-2124 — один запрос на документ
+    suggestions = _suggestions()  # один запрос: и ряд целей, и подписи
+    labels = {s["key"]: s["label"] for s in suggestions}
     known: dict[str, Any] = {
-        "goal": _goal_payload(active_goal, hints) if active_goal else None,
-        "goals": [_goal_payload(goal, hints) for goal in open_goals],
+        "goal": _goal_payload(active_goal, hints, labels) if active_goal else None,
+        "goals": [_goal_payload(goal, hints, labels) for goal in open_goals],
         # DRF-1744: что человек уже сказал в этом проходе — аддитивно.
         "anketa": known_anketa_answers(run),
     }
@@ -417,7 +457,7 @@ def build_decision_context(
                 goal_text=(active_goal.goal_text or "")[:200],
             ),
         })
-    elif anketa_on and not goal_context_collected(active_goal):
+    elif asks_from_goal(client, active_goal):
         # DRF-2177 — C03.2 «первый вопрос — показываем сразу». Цель есть
         # (выбрана чипом или названа), прохода нет, сужающие шаги под неё
         # не отвечены: шаг цели считается отвеченным самой целью, и человек
@@ -484,17 +524,20 @@ def build_decision_context(
     # исходом. Выход при этом не теряется: чипы шага создают цель ровно
     # так же, и свободный ввод на шаге цели открыт.
     #
-    # DRF-2177 (§60): при активной цели ряд целей тоже скрыт — «семь целей
-    # только за „Изменить"» (start_anketa → шаг цели с теми же опциями).
-    # Экран с целью — про вопросы под неё, не про выбор другой цели.
+    # DRF-2177 (§60): «семь целей только за „Изменить"» при активной цели
+    # держит ЭКРАН (он знает, что цель известна), а не документ: ряд
+    # остаётся в документе, потому что по нему потребители — этот экран и
+    # главный бота — до сих пор выводят подпись цели по ключу; обнули мы
+    # его здесь, у цели на главном вылез бы сырой ключ до выкладки бота.
+    # Подпись теперь едет и в ``known.goal.label`` — когда все читатели
+    # перейдут на неё, ряд при цели можно снять и здесь.
     on_goal_step = bool(missing) and missing[0].get("step") == anketa.GOAL_STEP_KEY
-    hide_suggestions = on_goal_step or (anketa_on and active_goal is not None)
 
     return {
         "version": 2,
         "known": known,
         "missing": missing,
-        "suggestions": [] if hide_suggestions else _suggestions(),
+        "suggestions": [] if on_goal_step else suggestions,
         "intents": intents,
         "next": next_step_hint,
     }
