@@ -156,7 +156,9 @@ class TestHintIsTemplateData:
         assert report.created == 0 and report.deactivated == 0
         assert report.unchanged == len(HINTS_BY_GOAL_KEY)
 
-    @pytest.mark.parametrize("bad", [["slim"], ["lose", "lose"], "lose"], ids=["опечатка", "дубль", "не-список"])
+    @pytest.mark.parametrize(
+        "bad", [["slim"], ["lose", "lose"], {"lose": 1}], ids=["опечатка", "дубль", "не-список"],
+    )
     def test_hint_values_are_anketa_goals_only(self, db, bad) -> None:
         """Подсказка говорит на языке анкеты питания (lose/maintain/gain) — и только.
         Остальные поля валидны, чтобы ошибка была именно про подсказку."""
@@ -169,6 +171,10 @@ class TestHintIsTemplateData:
         with pytest.raises(ValidationError) as ei:
             t.full_clean()
         assert set(ei.value.message_dict) == {"nutrition_goal_hint"}
+        if not isinstance(bad, list):
+            # Не-список отвергается ДО перебора значений — иначе {"lose": 1}
+            # прошёл бы как «одно известное значение».
+            assert "must be a list" in ei.value.message_dict["nutrition_goal_hint"][0]
 
     def test_a_valid_hint_passes_the_same_clean(self, db) -> None:
         """Положительная стража валидатора: правильная подсказка не падает."""
@@ -351,7 +357,7 @@ class TestWithinTargetCount:
         food = _food_action(_plan_lite(_api()))
 
         assert food["done_count"] == 5  # не больше target_count
-        assert food["within_target_count"] <= food["done_count"]
+        assert food["within_target_count"] == 5  # семь дней в ориентире, обрезано тем же target
 
     def test_per_day_food_counts_the_day_not_the_entries(self, seeded, owner) -> None:
         """Единица — день: при ``per_day`` три записи в ориентире — «сегодня в ориентире» (1), не 3."""
@@ -372,6 +378,114 @@ class TestWithinTargetCount:
 
         assert food["done_count"] == 3  # записи
         assert food["within_target_count"] == 1  # день
+
+    def test_only_this_buckets_days_count_and_an_empty_bucket_is_zero_not_null(
+        self, plan, owner,
+    ) -> None:
+        """Окно ведра [start, end): прошлое воскресенье и следующий понедельник —
+        не это ведро. Ориентир подтверждён, а в ведре пусто → 0, не null (§103:
+        null — про отсутствие ориентира, не про отсутствие записей)."""
+        _confirmed_profile(owner, 1600)
+        monday = _monday_of_this_week()
+        _log(owner, monday - timedelta(days=1), 1000, hour=23)  # воскресенье до ведра
+        _log(owner, monday + timedelta(days=7), 1000, hour=1)  # понедельник после ведра
+
+        food = _food_action(_plan_lite(_api()))
+        assert food["done_count"] == 0
+        assert food["within_target_count"] == 0
+
+        _log(owner, monday, 1000, hour=0)  # ровно начало ведра — внутри
+        food = _food_action(_plan_lite(_api()))
+        assert food["done_count"] == 1
+        assert food["within_target_count"] == 1
+
+    def test_a_strangers_diary_does_not_count(self, plan, owner) -> None:
+        """Чужие записи в ориентире — не мои дни: фильтр по владельцу плана."""
+        stranger = User.objects.create_user(
+            username="bot:nutrition-in-plan-stranger", password="x", role="client",
+            phone="+79995002125", is_proxy=True,
+        )
+        _confirmed_profile(owner, 1600)
+        monday = _monday_of_this_week()
+        for i in range(4):
+            _log(stranger, monday + timedelta(days=i), 300)
+        _log(owner, monday, 1000)
+
+        food = _food_action(_plan_lite(_api()))
+
+        assert food["done_count"] == 1
+        assert food["within_target_count"] == 1
+
+    def test_confirmed_source_without_a_number_is_null_not_500(self, plan, owner) -> None:
+        """Подтверждённый источник, но daily_kcal пуст — ориентира как числа нет → null."""
+        NutritionProfile.objects.create(
+            user=owner,
+            targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,
+            calories_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,
+            daily_kcal=None,
+            **FULL_INPUTS,
+        )
+        _log(owner, _monday_of_this_week(), 1000)
+
+        food = _food_action(_plan_lite(_api()))
+
+        assert food["done_count"] == 1
+        assert food["within_target_count"] is None
+
+    def test_days_are_local_moscow_days_not_utc(self, plan, owner) -> None:
+        """01:00 понедельника по Москве — ещё воскресенье по UTC. Две записи одного
+        московского дня (01:00 и 12:00) в сумме 1700 > 1600 — день НЕ в ориентире.
+        Группировка по UTC разнесла бы их на два дня по 900 и 800 и дала «2 в
+        ориентире» — день обязан быть московским, как у done_count."""
+        _confirmed_profile(owner, 1600)
+        monday = _monday_of_this_week()
+        _log(owner, monday, 900, hour=1)  # понедельник 01:00 МСК = воскресенье 22:00 UTC
+        _log(owner, monday, 800, hour=12)
+
+        food = _food_action(_plan_lite(_api()))
+
+        assert food["done_count"] == 1
+        assert food["within_target_count"] == 0
+
+    def test_per_2_weeks_food_counts_days_of_the_fortnight(self, seeded, owner) -> None:
+        """Ведро в 14 дней от даты плана: дни в ориентире считаются по нему, обрезка — target."""
+        _goal(owner, "body_shape")
+        resp = _api().post(
+            PLAN_URL,
+            {"actions": [{"action_type": "log_food", "cadence": "per_2_weeks", "target_count": 6}],
+             "template_version": 1},
+            format="json",
+        )
+        assert resp.status_code == 201, resp.content[:400]
+        _confirmed_profile(owner, 5000)
+        today = timezone.localdate()
+        for i in range(4):
+            _log(owner, today + timedelta(days=i), 300)
+
+        food = _food_action(_plan_lite(_api()))
+
+        assert food["cadence"] == "per_2_weeks"
+        assert food["done_count"] == 4
+        assert food["within_target_count"] == 4
+
+    @pytest.mark.parametrize(
+        "sources",
+        [
+            {"targets_source": "ayla_calculated", "calories_source": "ayla_calculated"},
+            {"targets_source": "user_entered", "calories_source": "user_entered"},
+            # Строка до DRF-1929: по-видового происхождения нет — читается общее.
+            {"targets_source": "user_entered", "calories_source": None},
+        ],
+        ids=["ayla_calculated", "user_entered", "legacy-fallback"],
+    )
+    def test_every_confirmed_source_counts(self, plan, owner, sources) -> None:
+        """plan_facts спрашивает предикат calories_confirmed, не одно значение источника."""
+        NutritionProfile.objects.create(user=owner, daily_kcal=1600, **sources, **FULL_INPUTS)
+        _log(owner, _monday_of_this_week(), 1000)
+
+        food = _food_action(_plan_lite(_api()))
+
+        assert food["within_target_count"] == 1
 
     def test_water_and_booking_carry_no_within_target(self, plan, owner) -> None:
         """Факт про калории — только у ``log_food``; у воды и записи ключа нет."""
