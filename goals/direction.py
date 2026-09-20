@@ -73,7 +73,7 @@ def answers_for_goal(goal: ClientGoal) -> list[dict[str, Any]]:
 
 
 #: Сколько направлений едет в документ: основной + не больше двух других
-#: (макет C04.3, R05 «≤2 meaningful alternatives»). Третьего нет — и это
+#: (макет C04.2, R05 «≤2 meaningful alternatives»). Третьего нет — и это
 #: предел ВЫДАЧИ, а не данных: строк под цель может быть больше.
 MAX_DIRECTIONS = 3
 
