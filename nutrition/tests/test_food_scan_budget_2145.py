@@ -319,7 +319,7 @@ class TestR1ProviderUsageWiring:
 
         from nutrition.providers.openai_vision import OpenAIVisionProvider
 
-        settings.OPENAI_API_KEY = "test-key"
+        settings.OPENAI_API_KEY = "test-key"  # pragma: allowlist secret
         completion = SimpleNamespace(
             choices=[
                 SimpleNamespace(
@@ -345,7 +345,7 @@ class TestR1ProviderUsageWiring:
 
         from nutrition.providers.openai_vision import OpenAIVisionProvider
 
-        settings.OPENAI_API_KEY = "test-key"
+        settings.OPENAI_API_KEY = "test-key"  # pragma: allowlist secret
         completion = SimpleNamespace(
             choices=[
                 SimpleNamespace(
