@@ -105,6 +105,16 @@ MISSING_GOAL_CLARIFICATION = "goal_clarification"
 MISSING_GOAL_GUIDANCE = "goal_guidance"
 
 
+def _nutrition_goal_hint(goal_key: str | None) -> list[str] | None:
+    """DRF-2124 (План-B, В-4) — подсказка анкете питания под курируемую цель:
+    данные шаблона плана (``wellness.PlanTemplate.nutrition_goal_hint``), не
+    решение. ``None`` — подсказки нет (§103). Импорт ленивый: wellness уже
+    зависит от goals (FK плана на цель), обратная связь — только на вызов."""
+    from wellness.plan_lite_templates import nutrition_goal_hint_for
+
+    return nutrition_goal_hint_for(goal_key)
+
+
 def _goal_payload(goal: ClientGoal) -> dict[str, Any]:
     return {
         # DRF-1660: id и состояние — чтобы у цели был адрес для перехода
@@ -115,6 +125,10 @@ def _goal_payload(goal: ClientGoal) -> dict[str, Any]:
         "goal_text": goal.goal_text,
         "selected_at": goal.selected_at.isoformat(),
         "source_channel": goal.source_channel,
+        # DRF-2124 — едет РЯДОМ с целью, к которой относится: читатель (анкета
+        # питания в боте) подсвечивает вариант, не предвыбирает и не пропускает
+        # шаг (§7.1/§5.1). Не гейтится PLAN_LITE_ENABLED — это данные о цели.
+        "nutrition_goal_hint": _nutrition_goal_hint(goal.goal_key),
     }
 
 

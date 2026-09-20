@@ -53,6 +53,9 @@ STRANGER = "bot:plan-lite-stranger"
 #: Ключи, которые plan_lite вправе нести (В-5): факты и форма обязательства.
 PLAN_LITE_KEYS = {"plan_id", "goal_key", "actions"}
 ACTION_KEYS = {"action_type", "cadence", "target_count", "done_count", "bucket"}
+#: DRF-2124 — у ``log_food`` ещё один ФАКТ: дни в ориентире (целое или null),
+#: по-прежнему без производных; у воды и записи этого ключа нет.
+FOOD_ACTION_KEYS = ACTION_KEYS | {"within_target_count"}
 #: Слова результата, которых в документе быть не может ни в одном ключе.
 FORBIDDEN_KEY_WORDS = ("percent", "progress", "achiev", "score", "weight", "result")
 
@@ -294,7 +297,8 @@ class TestRead:
         assert set(plan_lite) == PLAN_LITE_KEYS
         assert plan_lite["actions"], "пустой список — сторож ничего не проверил"
         for action in plan_lite["actions"]:
-            assert set(action) == ACTION_KEYS
+            expected = FOOD_ACTION_KEYS if action["action_type"] == "log_food" else ACTION_KEYS
+            assert set(action) == expected, action["action_type"]
         flat = " ".join(set(plan_lite) | {k for a in plan_lite["actions"] for k in a}).lower()
         assert not any(word in flat for word in FORBIDDEN_KEY_WORDS), flat
 

@@ -43,6 +43,12 @@ from django.utils import timezone
 
 from goals.models import ClientGoal
 
+# DRF-2124 (План-B) — «день в ориентире» нуждается в ориентире, а ориентир
+# — профиль питания, которого этот модуль не читает (В-1, перепись импортов
+# ``plan_lite*.py``). Факт приходит ФУНКЦИЕЙ из ``nutrition`` (В-2), без
+# имени модели здесь.
+from nutrition.services.plan_facts import count_days_within_calorie_target
+
 from .fact_providers import count_fact_days, count_facts
 from .models import PersonalPlan, PlanAction
 from .plan_lite_templates import active_template_for, template_version_exists
@@ -285,9 +291,22 @@ def _done_count(action: PlanAction, user_id: UUID, goal_key: str, start: date, e
     return min(facts, action.target_count)
 
 
+def _within_target_count(action: PlanAction, user_id: UUID, start: date, end: date) -> int | None:
+    """DRF-2124 — дни ведра с записями еды, чья сумма ≤ действующему ориентиру
+    по калориям; ``None`` — ориентира нет (§103: не 0). Обрезается тем же
+    ``target_count``, что и ``done_count``: «в ориентире 6 из 5» не бывает.
+    Только для ``log_food`` — у воды и записи такого факта нет."""
+    within = count_days_within_calorie_target(user_id, _aware(start), _aware(end))
+    if within is None:
+        return None
+    return min(within, action.target_count)
+
+
 def plan_lite_payload(user, *, today: date | None = None) -> dict[str, Any] | None:
     """Документ ``plan_lite`` для wellness-context: ``None`` — плана нет или
-    флаг выключен. Ключи — только форма обязательства и факты (В-5)."""
+    флаг выключен. Ключи — только форма обязательства и факты (В-5); у
+    ``log_food`` — ещё ``within_target_count`` (DRF-2124), тоже факт: целое
+    или ``null``, без производных."""
     if not plan_lite_enabled():
         return None
     plan = _active_plan(user)
@@ -298,11 +317,14 @@ def plan_lite_payload(user, *, today: date | None = None) -> dict[str, Any] | No
     actions = []
     for action in plan.actions.all():
         start, end = _current_bucket(action.cadence, today, anchor=anchor)
-        actions.append({
+        payload: dict[str, Any] = {
             "action_type": action.action_type,
             "cadence": action.cadence,
             "target_count": action.target_count,
             "done_count": _done_count(action, plan.user_id, plan.goal_key, start, end),
             "bucket": {"start": start.isoformat(), "end": end.isoformat()},
-        })
+        }
+        if action.action_type == PlanAction.ActionType.LOG_FOOD:
+            payload["within_target_count"] = _within_target_count(action, plan.user_id, start, end)
+        actions.append(payload)
     return {"plan_id": str(plan.id), "goal_key": plan.goal_key or None, "actions": actions}
