@@ -452,6 +452,28 @@ class PlanAction(models.Model):
         )
 
 
+#: Значения ``NutritionProfile.goal`` анкеты питания — язык, на котором говорит
+#: подсказка (DRF-2124, В-4). Строки, не импорт из ``nutrition``: wellness не
+#: тянет профиль питания (В-1), а словарь анкеты закрыт решением владельца §85.
+NUTRITION_GOAL_HINT_VALUES: tuple[str, ...] = ("lose", "maintain", "gain")
+
+
+def validate_nutrition_goal_hint(value: object) -> None:
+    """Подсказка — список значений анкеты, без повторов. Сид с опечаткой падает
+    здесь, а не доезжает до человека как «обычно выбирают slim»."""
+    from django.core.exceptions import ValidationError
+
+    if not isinstance(value, list):
+        raise ValidationError("nutrition_goal_hint must be a list")
+    unknown = [v for v in value if v not in NUTRITION_GOAL_HINT_VALUES]
+    if unknown:
+        raise ValidationError(
+            f"nutrition_goal_hint: unknown values {unknown!r}; allowed {list(NUTRITION_GOAL_HINT_VALUES)}"
+        )
+    if len(set(value)) != len(value):
+        raise ValidationError("nutrition_goal_hint: duplicate values")
+
+
 class PlanTemplate(models.Model):
     """Шаблон Plan Lite по цели — таблица владельца §51 как ДАННЫЕ (DRF-2123).
 
@@ -479,6 +501,17 @@ class PlanTemplate(models.Model):
     )
     why_text = models.TextField(
         help_text="Слово владельца «почему такой план» — показывается человеку дословно",
+    )
+    # DRF-2124 (План-B, В-4) — ПОДСКАЗКА анкете питания: какой ``goal``
+    # (lose/maintain/gain) обычно выбирают под эту курируемую цель. Список,
+    # потому что у body_shape их две («lose или maintain» — выбор человека);
+    # пустой — подсказки нет. Связь трёх понятий цели, не слияние: сюда не
+    # пишется ничего из профиля, отсюда ничего не предвыбирается.
+    nutrition_goal_hint = models.JSONField(
+        default=list,
+        blank=True,
+        validators=[validate_nutrition_goal_hint],
+        help_text="Подсказка анкете питания: [] | [lose|maintain|gain, …] — что обычно выбирают под цель",
     )
     version = models.PositiveIntegerField(default=1)
     is_active = models.BooleanField(default=True)
