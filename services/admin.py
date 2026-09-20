@@ -15,6 +15,7 @@ from .models import (
     DraftSalonService,
     ExternalBusyInterval,
     ExternalSourceMapping,
+    GoalDirection,
     GoalOption,
     GoalOptionCategory,
     RegionalPricing,
@@ -572,6 +573,13 @@ class GoalOptionCategoryInline(admin.TabularInline):
     ordering = ('sort_order',)
 
 
+class GoalDirectionInline(admin.TabularInline):
+    model = GoalDirection
+    extra = 0
+    fields = ('area_key', 'what', 'subline', 'sort_order', 'is_active')
+    ordering = ('sort_order', 'area_key')
+
+
 @admin.register(GoalOption)
 class GoalOptionAdmin(admin.ModelAdmin):
     list_display = ('key', 'label', 'sort_order', 'is_active')
@@ -579,7 +587,15 @@ class GoalOptionAdmin(admin.ModelAdmin):
     search_fields = ('key', 'label')
     list_editable = ('sort_order', 'is_active')
     ordering = ('sort_order', 'key')
-    inlines = [GoalOptionCategoryInline]
+    inlines = [GoalOptionCategoryInline, GoalDirectionInline]
+
+
+@admin.register(GoalDirection)
+class GoalDirectionAdmin(admin.ModelAdmin):
+    list_display = ('goal_option', 'area_key', 'what', 'sort_order', 'is_active')
+    list_filter = ('is_active', 'goal_option')
+    search_fields = ('goal_option__key', 'goal_option__label', 'what')
+    ordering = ('goal_option', 'sort_order', 'area_key')
 
 
 @admin.register(GoalOptionCategory)

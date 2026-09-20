@@ -1526,3 +1526,56 @@ class GoalOptionCategory(models.Model):
 
     def __str__(self) -> str:
         return f"{self.goal_option.key} → {self.category.name}"
+
+
+class GoalDirection(models.Model):
+    """Курируемое НАПРАВЛЕНИЕ под цель — WHAT карточки C04 (DRF-1772, К-3).
+
+    Решение владельца §60/§61: «направление» — объект ответа C04, и его
+    источник — данные владельца, как ``GoalOption`` (не модель, не имя
+    услуги). Ключ — цель × область из анкеты (``area``); строка без области
+    — запасная под цель целиком. Таблица пустая → направления нет →
+    карточки нет → C04.4 (механически, OD_C04 §2). Фразы не выдумываются
+    кодом: они приходят от владельца миграцией данных.
+
+    Здесь только WHAT и его подстрока. Услуга, мастер, цена, слот — не
+    здесь и не в карточке (B2/B3: Recommendation = WHAT; execution — C05).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    goal_option = models.ForeignKey(
+        GoalOption,
+        on_delete=models.CASCADE,
+        related_name='directions',
+    )
+    area_key = models.SlugField(
+        max_length=64,
+        blank=True,
+        default='',
+        help_text=(
+            "Ключ ответа шага «area» анкеты (face/body/hair/hands/overall); "
+            "пусто — запасное направление под цель целиком"
+        ),
+    )
+    what = models.CharField(
+        max_length=200,
+        help_text="Направление одной фразой (макет C04.1: «Уменьшить утреннюю отёчность…»)",
+    )
+    subline = models.CharField(
+        max_length=300,
+        blank=True,
+        default='',
+        help_text="Подстрока под направлением (макет: «Сфокусируемся на этом — …»)",
+    )
+    sort_order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('goal_option', 'area_key')]
+        ordering = ['goal_option', 'sort_order', 'area_key']
+
+    def __str__(self) -> str:
+        scope = self.area_key or '*'
+        return f"{self.goal_option.key} × {scope}: {self.what}"
