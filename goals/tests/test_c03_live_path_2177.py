@@ -169,7 +169,9 @@ class TestAnswersBindToTheGoalAndFinish:
         # Следующий вопрос — второй сужающий; «Уже учла» несёт первый ответ.
         assert doc["missing"][0]["step"] == FEELING.key
         assert [a["step"] for a in doc["known"]["anketa"]] == [AREA.key]
-        assert doc["missing"][0]["progress"]["is_last"] is True
+        # DRF-2173: за feeling — необязательный срок; последний теперь он.
+        assert doc["missing"][0]["progress"]["is_last"] is False
+        assert anketa.ANKETA_STEPS[-1].key == "deadline"
 
     def test_last_answer_closes_the_run_and_sends_the_person_back_to_chat(
         self, customer, token, goal_options
@@ -177,7 +179,9 @@ class TestAnswersBindToTheGoalAndFinish:
         api = _api()
         _pick_goal(api)
         assert _answer(api, AREA.key, **_first_option(AREA)).status_code == 200
-        resp = _answer(api, FEELING.key, **_first_option(FEELING))
+        assert _answer(api, FEELING.key, **_first_option(FEELING)).status_code == 200
+        # DRF-2173: проход закрывает необязательный шаг срока («без срока»).
+        resp = _answer(api, "deadline", option_key="no_deadline")
         assert resp.status_code == 200, resp.content
         doc = resp.json()["data"]
 
@@ -185,7 +189,7 @@ class TestAnswersBindToTheGoalAndFinish:
         assert run.completed_at is not None
         assert run.goal is not None and run.goal.goal_key == "self_care"
         assert set(GoalAnketaAnswer.objects.filter(run=run).values_list("step_key", flat=True)) == {
-            AREA.key, FEELING.key
+            AREA.key, FEELING.key, "deadline"
         }
         assert doc["missing"] == []
         assert doc["next"]["id"] == NEXT_RETURN_TO_CHAT
@@ -196,6 +200,7 @@ class TestAnswersBindToTheGoalAndFinish:
         _pick_goal(api)
         _answer(api, AREA.key, **_first_option(AREA))
         _answer(api, FEELING.key, **_first_option(FEELING))
+        assert _answer(api, "deadline", option_key="no_deadline").status_code == 200
 
         doc = api.get(CTX_URL).json()["data"]
         assert doc["next"]["id"] == NEXT_RETURN_TO_CHAT
@@ -210,6 +215,7 @@ class TestAnswersBindToTheGoalAndFinish:
         _pick_goal(api)
         _answer(api, AREA.key, **_first_option(AREA))
         _answer(api, FEELING.key, **_first_option(FEELING))
+        assert _answer(api, "deadline", option_key="no_deadline").status_code == 200
 
         resp = _answer(api, AREA.key, **_first_option(AREA))
         assert resp.status_code == 409, resp.content
@@ -241,7 +247,8 @@ class TestAnswersBindToTheGoalAndFinish:
         assert doc["missing"][0]["step"] == AREA.key
         assert doc["missing"][0]["mode"] == "confirm"
         assert _answer(api, AREA.key, confirm=True).status_code == 200
-        doc = _answer(api, FEELING.key, **_first_option(FEELING)).json()["data"]
+        assert _answer(api, FEELING.key, **_first_option(FEELING)).status_code == 200
+        doc = _answer(api, "deadline", option_key="no_deadline").json()["data"]
         assert doc["next"]["id"] == NEXT_RETURN_TO_CHAT
         assert doc["missing"] == []
 
@@ -251,6 +258,7 @@ class TestAnswersBindToTheGoalAndFinish:
         _pick_goal(api, "self_care")
         _answer(api, AREA.key, **_first_option(AREA))
         _answer(api, FEELING.key, **_first_option(FEELING))
+        assert _answer(api, "deadline", option_key="no_deadline").status_code == 200
 
         doc = _pick_goal(api, "relax")
         assert doc["missing"][0]["step"] == AREA.key

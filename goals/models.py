@@ -130,6 +130,16 @@ class ClientGoal(models.Model):
         blank=True,
         help_text="Момент последнего перехода состояния; NULL у legacy-строк",
     )
+    # DRF-2173 — срок цели («До 1 ноября 2026» на главном экране). Необязателен,
+    # по умолчанию его нет; ставится ответом на шаг анкеты ``deadline``
+    # (``goals/deadline.py``: разбор детерминированный, границы — не раньше
+    # сегодня и не дальше двух лет). Напоминаний, процентов «времени прошло»
+    # и пересчёта плана по сроку нет по решению владельца (§49/§82).
+    target_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Срок цели, названный клиентом; NULL — без срока (умолчание)",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

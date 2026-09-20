@@ -194,7 +194,17 @@ def _goal_payload(
         # шаг (§7.1/§5.1). Не гейтится PLAN_LITE_ENABLED — это данные о цели.
         # ``None`` — подсказки нет (§103), не пустой список.
         "nutrition_goal_hint": hints.get(goal.goal_key) if goal.goal_key else None,
+        # DRF-2173 — срок цели: ISO-дата или null («без срока», §103 — строки на
+        # экране нет). «Срок прошёл» — факт сервера, экран с календарём не сверяет.
+        "target_date": goal.target_date.isoformat() if goal.target_date else None,
+        "target_date_passed": _target_date_passed(goal),
     }
+
+
+def _target_date_passed(goal: ClientGoal) -> bool:
+    from .deadline import target_date_passed
+
+    return target_date_passed(goal)
 
 
 def _suggestions() -> list[dict[str, Any]]:

@@ -116,9 +116,11 @@ def _current(doc) -> dict:
 class TestContract:
     def test_todays_step_modes_pass_the_guard(self):
         assert anketa.step_contract_errors(anketa.ANKETA_STEPS) == []
-        # DRF-1759: результат (feeling) — мультивыбор, область (area) — один ответ.
+        # DRF-1759: результат (feeling) — мультивыбор, область (area) — один ответ;
+        # DRF-2173: срок (deadline) — один ответ или свободный текст.
         assert {s.key: s.mode for s in anketa.ANKETA_STEPS} == {
             "area": anketa.MODE_SINGLE, "feeling": anketa.MODE_MULTI,
+            "deadline": anketa.MODE_SINGLE,
         }
 
     def test_single_item_carries_mode_and_nothing_scale_or_text(self):

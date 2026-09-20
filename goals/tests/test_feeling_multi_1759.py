@@ -105,7 +105,9 @@ class TestFeelingIsMulti:
         row = _feeling_row()
         assert row.option_keys == ["rested", "calmer"]
         assert row.option_key is None
-        # Шаг последний — проход закрыт, цель сформирована одним ответом.
+        # DRF-2173: за feeling теперь идёт необязательный шаг срока — проход
+        # закрывается им («без срока» — умолчание), не feeling.
+        assert _answer(api, "deadline", option_key="no_deadline").status_code == 200
         assert not GoalAnketaRun.objects.filter(completed_at__isnull=True).exists()
 
     def test_a_single_key_is_refused(self, customer, token, goal_options):
@@ -139,6 +141,8 @@ class TestSecondPassConfirmsTheArray:
         api = _api()
         _to_feeling(api)
         assert _answer(api, FEELING.key, option_keys=["rested", "calmer"]).status_code == 200
+        # DRF-2173: проход закрывает шаг срока.
+        assert _answer(api, "deadline", option_key="no_deadline").status_code == 200
 
         resp = api.post(
             SELECT_URL, {"intent": "start_anketa", "source_channel": "miniapp"}, format="json",
