@@ -510,6 +510,68 @@ class TestDetailEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# Price is the booking-time snapshot (DRF-2172)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.django_db
+class TestPriceIsBookingTimeSnapshot:
+    """DRF-2172: ``price`` в me/bookings — цена на момент записи, не текущий прайс.
+
+    Главная Mini App рисует «3 200 ₽» из этого поля (через зеркало бота,
+    ``booking.created.price_total`` = тот же снимок). Салон поднял прайс
+    после записи — человеку показывают то, о чём договорились, а не новую
+    цену. Сторож на список и карточку; положительная пара — новая запись
+    после смены прайса несёт новую цену.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
+    def test_price_survives_a_service_price_change_in_list_and_detail(
+        self, customer, tenant_a, category,
+    ):
+        spec = _make_specialist(tenant_a, suffix="00071", name="PR")
+        svc = _make_service(spec, category)  # 1500.00 at booking time
+        appt = _book(
+            customer=customer, specialist_profile=spec, service=svc,
+            start_at=_future(3),
+        )
+        Service.objects.filter(id=svc.id).update(price=Decimal("3200.00"))
+
+        listed = _api().get(LIST_URL + "?section=upcoming").json()["data"]["items"]
+        item = next(it for it in listed if it["id"] == str(appt.id))
+        assert Decimal(item["price"]) == Decimal("1500.00")
+
+        detail = _api().get(_detail_url(appt.id)).json()["data"]
+        assert Decimal(detail["price"]) == Decimal("1500.00")
+
+        # Положительная пара: запись ПОСЛЕ смены прайса — по новой цене.
+        svc.refresh_from_db()
+        later = _book(
+            customer=customer, specialist_profile=spec, service=svc,
+            start_at=_future(5),
+        )
+        later_detail = _api().get(_detail_url(later.id)).json()["data"]
+        assert Decimal(later_detail["price"]) == Decimal("3200.00")
+
+    def test_price_is_never_null_or_zero_for_a_priced_service(
+        self, customer, tenant_a, category,
+    ):
+        """Экран рисует строку только при цене; у платной услуги она есть всегда."""
+        spec = _make_specialist(tenant_a, suffix="00072", name="PZ")
+        svc = _make_service(spec, category)
+        appt = _book(
+            customer=customer, specialist_profile=spec, service=svc,
+            start_at=_future(3),
+        )
+        detail = _api().get(_detail_url(appt.id)).json()["data"]
+        assert detail["price"] is not None
+        assert Decimal(detail["price"]) > 0
+
+
+# ---------------------------------------------------------------------------
 # Repeat-intent
 # ---------------------------------------------------------------------------
 
