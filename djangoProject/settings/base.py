@@ -790,6 +790,18 @@ GEOCODING_REQUIRE_LIVE_REVERSE = (
 FOOD_SCANNER_PRIMARY = os.environ.get("FOOD_SCANNER_PRIMARY", "openai")
 FOOD_SCANNER_FALLBACK = os.environ.get("FOOD_SCANNER_FALLBACK", "yandex")
 
+# DRF-2145 — бюджет распознавания фото (решение владельца 20.09, В1): попыток
+# на человека в день и общий дневной потолок; числа — из листа (§55). Счётчики
+# живут в CACHES (Redis, db 1) по дню в UTC. Сигнал операторам на 80/100 %
+# общего — nutrition/services/food_scan_budget.py.
+FOOD_SCAN_DAILY_PER_USER = int(os.environ.get("FOOD_SCAN_DAILY_PER_USER", "20"))
+FOOD_SCAN_DAILY_TOTAL = int(os.environ.get("FOOD_SCAN_DAILY_TOTAL", "500"))
+# Цены токенов провайдера (USD за 1M) для FoodScan.provider_cost_usd — БЕЗ
+# умолчания: в листе их нет, а выдуманная цена — выдуманный расход. Не
+# заданы → стоимость null, токены (provider_usage) хранятся.
+FOOD_SCAN_PRICE_INPUT_USD_PER_1M = os.environ.get("FOOD_SCAN_PRICE_INPUT_USD_PER_1M") or None
+FOOD_SCAN_PRICE_OUTPUT_USD_PER_1M = os.environ.get("FOOD_SCAN_PRICE_OUTPUT_USD_PER_1M") or None
+
 # Service-to-service token for /api/v1/nutrition/internal/* endpoints (DRF-246).
 # Used by the MAX bot to call nutrition API on behalf of a BotUser. Empty
 # value disables internal endpoints (IsServiceAccount fails closed) — set

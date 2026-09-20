@@ -267,12 +267,11 @@ class TestB8PublicPathSharesTheCounter:
         router = _router()
         assert _post_scan(router, "bot:77").status_code == 200
         c = APIClient()
+        c.defaults["HTTP_X_APP_TYPE"] = "client"
         c.force_authenticate(user=proxy)
         with (
             patch("nutrition.views.FoodScannerRouter", return_value=router),
             patch("nutrition.views.NutritionLookup", return_value=MagicMock(lookup=lambda *a, **kw: None)),
-            patch("nutrition.views.IsClientApp.has_permission", return_value=True),
-            patch("nutrition.views.IsClient.has_permission", return_value=True),
         ):
             second = c.post(PUBLIC_URL, {"image": _upload()}, format="multipart")
             third = c.post(PUBLIC_URL, {"image": _upload()}, format="multipart")
