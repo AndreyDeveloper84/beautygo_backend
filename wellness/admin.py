@@ -19,4 +19,8 @@ class PlanTemplateAdmin(admin.ModelAdmin):
     search_fields = ("goal_key", "why_text")
     ordering = ("goal_key", "-version")
     readonly_fields = ("created_at",)
-    fields = ("goal_key", "version", "is_active", "actions", "why_text", "created_at")
+    fields = (
+        "goal_key", "version", "is_active", "actions", "why_text",
+        "nutrition_goal_hint",  # DRF-2124 — колонка таблицы §51, правится вместе со строкой
+        "created_at",
+    )

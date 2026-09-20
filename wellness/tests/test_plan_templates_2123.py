@@ -48,6 +48,8 @@ OWNER = "bot:plan-templates-owner"
 
 #: Таблица владельца §51 — ДОСЛОВНО (снимок в тесте, вторая копия — в коде).
 #: (goal_key, book_service cadence, log_food per_week, log_water per_day, why_text)
+#: Колонка подсказки анкете питания (DRF-2124) — во второй копии
+#: ``test_nutrition_in_plan_2124.HINTS_BY_GOAL_KEY``, сверяется там же.
 OWNER_TABLE_51: list[tuple[str, str, int | None, int | None, str]] = [
     (
         "body_shape", "per_week", 5, 6,

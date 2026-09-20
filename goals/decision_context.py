@@ -105,7 +105,19 @@ MISSING_GOAL_CLARIFICATION = "goal_clarification"
 MISSING_GOAL_GUIDANCE = "goal_guidance"
 
 
-def _goal_payload(goal: ClientGoal) -> dict[str, Any]:
+def _nutrition_goal_hints() -> dict[str, list[str]]:
+    """DRF-2124 (План-B, В-4) — подсказки анкете питания под курируемые цели:
+    данные шаблона плана (``wellness.PlanTemplate.nutrition_goal_hint``), не
+    решение; один запрос на документ, не на цель. Импорт ленивый: wellness уже
+    зависит от goals (FK плана на цель), обратная связь — только на вызов."""
+    from wellness.plan_lite_templates import nutrition_goal_hints
+
+    return nutrition_goal_hints()
+
+
+def _goal_payload(goal: ClientGoal, hints: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    if hints is None:
+        hints = _nutrition_goal_hints()
     return {
         # DRF-1660: id и состояние — чтобы у цели был адрес для перехода
         # (``POST /goals/state/`` требует goal_id) и чтобы пауза была видна.
@@ -115,6 +127,11 @@ def _goal_payload(goal: ClientGoal) -> dict[str, Any]:
         "goal_text": goal.goal_text,
         "selected_at": goal.selected_at.isoformat(),
         "source_channel": goal.source_channel,
+        # DRF-2124 — едет РЯДОМ с целью, к которой относится: читатель (анкета
+        # питания в боте) подсвечивает вариант, не предвыбирает и не пропускает
+        # шаг (§7.1/§5.1). Не гейтится PLAN_LITE_ENABLED — это данные о цели.
+        # ``None`` — подсказки нет (§103), не пустой список.
+        "nutrition_goal_hint": hints.get(goal.goal_key) if goal.goal_key else None,
     }
 
 
@@ -292,9 +309,10 @@ def build_decision_context(
     anketa_on = _anketa_enabled()
     run = open_anketa_run(client) if anketa_on else None
 
+    hints = _nutrition_goal_hints()  # DRF-2124 — один запрос на документ
     known: dict[str, Any] = {
-        "goal": _goal_payload(active_goal) if active_goal else None,
-        "goals": [_goal_payload(goal) for goal in open_goals],
+        "goal": _goal_payload(active_goal, hints) if active_goal else None,
+        "goals": [_goal_payload(goal, hints) for goal in open_goals],
         # DRF-1744: что человек уже сказал в этом проходе — аддитивно.
         "anketa": known_anketa_answers(run),
     }
