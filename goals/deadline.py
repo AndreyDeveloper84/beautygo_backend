@@ -198,7 +198,9 @@ def resolve_target_date(option_key: str | None, text: str | None, *, today: date
     Вариант имеет приоритет над текстом: экран шлёт одно из двух.
     """
     today = today or date.today()
-    if option_key == NO_DEADLINE:
+    if option_key in (NO_DEADLINE, "unknown"):
+        # «без срока» (лист) и «Не знаю» (макет C03, роль escape) — одно и то
+        # же: срока нет. Ключ escape — ``anketa.UNKNOWN_OPTION_KEY``.
         return None
     if option_key == IN_MONTH:
         return _add_months(today, 1)

@@ -237,7 +237,9 @@ class TestDeadlineStep:
         item = doc["missing"][0]
         assert item["progress"]["is_last"] is True
         assert item["allow_free_text"] is True
-        assert [o["key"] for o in item["options"]] == ["in_month", "by_summer", "no_deadline"]
+        # + «Не знаю» ролью escape (макет C03, К-2) — значит то же, что «без срока».
+        assert [o["key"] for o in item["options"]] == ["in_month", "by_summer", "no_deadline", "unknown"]
+        assert item["options"][-1]["role"] == anketa.OPTION_ROLE_ESCAPE
         assert item["prompt"].startswith("К какому сроку хочешь? Можно пропустить")
 
     def test_no_deadline_completes_the_pass_and_leaves_the_goal_without_a_date(
@@ -265,6 +267,13 @@ class TestDeadlineStep:
         assert GoalAnketaAnswer.objects.get(
             run__client=customer, step_key=deadline.DEADLINE_STEP_KEY,
         ).answer_text == "до 1 ноября"
+
+    def test_dont_know_means_no_deadline(self, customer, token, goal_options):
+        api = _api()
+        _walk_to_deadline(api)
+        doc = _answer(api, deadline.DEADLINE_STEP_KEY, option_key=anketa.UNKNOWN_OPTION_KEY).json()["data"]
+        assert doc["missing"] == []
+        assert ClientGoal.objects.get(client=customer, state="active").target_date is None
 
     def test_chip_in_month_sets_a_date_a_month_ahead(self, customer, token, goal_options):
         api = _api()

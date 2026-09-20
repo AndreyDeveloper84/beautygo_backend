@@ -396,6 +396,9 @@ ANKETA_STEPS: tuple[AnketaStep, ...] = (
             ("no_deadline", "без срока"),
         ),
         allow_free_text=True,
+        # Макет C03: «Не знаю» — на каждом сужающем шаге (К-2, DRF-2177).
+        # Здесь оно значит то же, что «без срока»: срока нет.
+        escape=True,
     ),
 )
 
