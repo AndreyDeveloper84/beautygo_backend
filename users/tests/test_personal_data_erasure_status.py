@@ -87,7 +87,12 @@ class TestVerdict:
     def test_a_live_account_that_holds_values_is_not_erased(self, api, user):
         _with_values(user)
         data = _status(api, user)
-        assert _account(data) == {"kind": "account", "context_row": "holds_values", "erased": False, "remembered_rows": 0}
+        assert _account(data) == {
+            "kind": "account",
+            "context_row": "holds_values",
+            "erased": False,
+            "remembered_rows": 0,
+        }
         assert data["erased"] is False
 
     def test_after_the_delete_the_account_is_a_tombstone_and_erased(self, api, user):
@@ -126,7 +131,12 @@ class TestVerdict:
         user.deleted_at = timezone.now()
         user.save(update_fields=["deleted_at"])
         data = _status(api, user)
-        assert _account(data) == {"kind": "account", "context_row": "holds_values", "erased": False, "remembered_rows": 0}
+        assert _account(data) == {
+            "kind": "account",
+            "context_row": "holds_values",
+            "erased": False,
+            "remembered_rows": 0,
+        }
         assert data["erased"] is False
 
     def test_a_linked_proxy_with_values_keeps_the_subject_unerased_until_the_delete(self, api, user):
@@ -145,12 +155,22 @@ class TestVerdict:
         # Аккаунт + прокси бота (name_subject) + прокси с данными до привязки.
         assert kinds == ["account", "linked_identity", "linked_identity"], before
         assert _account(before) == {"kind": "account", "context_row": "tombstone", "erased": True, "remembered_rows": 0}
-        assert {"kind": "linked_identity", "context_row": "holds_values", "erased": False, "remembered_rows": 0} in before["identities"]
+        assert {
+            "kind": "linked_identity",
+            "context_row": "holds_values",
+            "erased": False,
+            "remembered_rows": 0,
+        } in before["identities"]
         assert before["erased"] is False
 
         assert api.delete(DELETE_URL.format(user_id=user.pk)).status_code == 200
         after = _status(api, user)
-        assert {"kind": "linked_identity", "context_row": "tombstone", "erased": True, "remembered_rows": 0} in after["identities"]
+        assert {
+            "kind": "linked_identity",
+            "context_row": "tombstone",
+            "erased": True,
+            "remembered_rows": 0,
+        } in after["identities"]
         assert after["erased"] is True
 
 
@@ -179,7 +199,12 @@ class TestVerdictEdges:
         UserPersonalContext.objects.create(user=proxy)
         data = _status(api, user)
         assert _account(data)["erased"] is True
-        assert {"kind": "linked_identity", "context_row": "not_erased", "erased": False, "remembered_rows": 0} in data["identities"]
+        assert {
+            "kind": "linked_identity",
+            "context_row": "not_erased",
+            "erased": False,
+            "remembered_rows": 0,
+        } in data["identities"]
         assert data["erased"] is False
 
     def test_a_deleted_linked_proxy_with_a_tombstone_is_not_erased(self, api, user):
@@ -194,7 +219,12 @@ class TestVerdictEdges:
         proxy.deleted_at = timezone.now()
         proxy.save(update_fields=["deleted_at"])
         data = _status(api, user)
-        assert {"kind": "linked_identity", "context_row": "tombstone", "erased": False, "remembered_rows": 0} in data["identities"]
+        assert {
+            "kind": "linked_identity",
+            "context_row": "tombstone",
+            "erased": False,
+            "remembered_rows": 0,
+        } in data["identities"]
         assert data["erased"] is False
 
     @pytest.mark.parametrize("field", ["last_asked_at", "skipped_questions"])
