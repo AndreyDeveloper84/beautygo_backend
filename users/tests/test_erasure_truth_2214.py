@@ -247,3 +247,47 @@ class TestErasureStatusSeesTheRest:
         assert status["identities"][0]["remembered_rows"] > 0  # наличие: есть что считать
         assert GOAL_TEXT not in repr(status)
         assert "Борщ" not in repr(status)
+
+
+class TestTheVocabularyIsClosed:
+    def test_every_erased_key_has_a_word(self, user) -> None:  # noqa: F811
+        """Новая модель в стирании без слова журнала упадёт здесь, а не молча."""
+        from users.forget_all_catalog import REMEMBERED_SCOPE, SCOPE_ORDER, erase_remembered_catalog
+
+        _seed_everything(user)
+
+        counts = erase_remembered_catalog(user, initiator="test")
+
+        assert any(counts.values())  # наличие: было что стереть
+        assert set(counts) <= set(REMEMBERED_SCOPE), set(counts) - set(REMEMBERED_SCOPE)
+        assert set(REMEMBERED_SCOPE.values()) == set(SCOPE_ORDER)
+
+    def test_the_residue_counts_what_the_erasure_erases(self, user) -> None:  # noqa: F811
+        """C5.3 считает той же меркой: наборы остатка = ключи стирания (кроме файлов)."""
+        from users.forget_all_catalog import (
+            _remembered_querysets,
+            erase_remembered_catalog,
+            remembered_residue,
+        )
+
+        _seed_everything(user)
+        assert remembered_residue(user) > 0  # наличие
+
+        counts = erase_remembered_catalog(user, initiator="test")
+
+        assert set(_remembered_querysets(user)) == set(counts) - {"files"}
+        assert remembered_residue(user) == 0
+
+    def test_the_vocabulary_agrees_with_the_census_guard(self) -> None:
+        """Слова журнала и сверка DRF-2226 видят один и тот же список стирания.
+
+        Сторож #539 разбирает ключи ``_delete`` в ``erase_remembered_catalog``
+        (AST); словарь обязан назвать ровно их — плюс счёт файлов.
+        """
+        from users.forget_all_catalog import REMEMBERED_SCOPE
+        from users.tests.test_forget_all_vs_deletion_census_2226 import _forget_all
+
+        keys = _forget_all()
+        assert keys  # наличие: разбор видит ключи
+
+        assert set(REMEMBERED_SCOPE) - {"files"} == keys
