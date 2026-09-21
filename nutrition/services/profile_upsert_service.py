@@ -29,6 +29,12 @@ from nutrition.services.nutrition_profile_service import (
     compute_norms,
 )
 from nutrition.services.outbox_service import enqueue_profile_updated
+from nutrition.services.targets_state import (
+    KIND_CALORIES,
+    KIND_FLUIDS,
+    kind_confirmed,
+    kind_source,
+)
 from nutrition.services.targets_recompute_gate import (
     RECOMPUTE_REFUSED_NO_CONSENT,
     recompute_permitted,
@@ -161,6 +167,30 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
         profile.disclaimer_acked = payload["disclaimer_acked"]
 
 
+#: Поля ориентира по виду (DRF-1929). Калории — всё, что выведено из
+#: расчёта энергии: макросы, ``bmr`` и RDA; жидкость — вода.
+KIND_FIELDS: dict[str, tuple[str, ...]] = {
+    KIND_CALORIES: (
+        "bmr", "daily_kcal", "daily_protein_g", "daily_fat_g", "daily_carbs_g",
+        "daily_vitamin_d_iu", "daily_vitamin_b12_mcg", "daily_vitamin_c_mg",
+        "daily_iron_mg", "daily_calcium_mg", "daily_magnesium_mg",
+        "daily_omega3_g", "daily_fiber_g",
+    ),
+    KIND_FLUIDS: ("daily_water_ml",),
+}
+
+#: Вид → (поле подписи, поле подтверждения).
+_KIND_STAMPS: dict[str, tuple[str, str]] = {
+    KIND_CALORIES: ("calories_source", "calories_confirmed_at"),
+    KIND_FLUIDS: ("fluids_source", "fluids_confirmed_at"),
+}
+
+
+def _kind_is_active(profile: NutritionProfile, kind: str) -> bool:
+    """Действует ли вид сейчас — тот же предикат, что у читателей."""
+    return kind_confirmed(profile, kind)
+
+
 def _recompute_and_persist(profile: NutritionProfile) -> None:
     norms = compute_norms(ProfileInputs(
         gender=profile.gender or "female",
@@ -172,85 +202,101 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
         pace=profile.pace or "moderate",
         health_flags=profile.health_flags or {},
     ))
-    profile.bmr = norms.bmr
-    profile.daily_kcal = norms.daily_kcal
-    profile.daily_protein_g = norms.daily_protein_g
-    profile.daily_fat_g = norms.daily_fat_g
-    profile.daily_carbs_g = norms.daily_carbs_g
-    # Ориентир по жидкости — справочный по полу (раздел 4 решения 09.09,
-    # ``FLUIDS_REFERENCE_ML``), пишется тем же расчётом и с той же судьбой:
-    # предложение до подтверждения, ``None`` при отказе. Формулы 30 × вес
-    # здесь нет — её остатки у старых строк стирает команда
-    # ``clear_targets_without_provenance``.
-    profile.daily_water_ml = norms.daily_water_ml
-    # DRF-265: micronutrient RDA — recomputed on every upsert.
-    profile.daily_vitamin_d_iu = norms.daily_vitamin_d_iu
-    profile.daily_vitamin_b12_mcg = norms.daily_vitamin_b12_mcg
-    profile.daily_vitamin_c_mg = norms.daily_vitamin_c_mg
-    profile.daily_iron_mg = norms.daily_iron_mg
-    profile.daily_calcium_mg = norms.daily_calcium_mg
-    profile.daily_magnesium_mg = norms.daily_magnesium_mg
-    profile.daily_omega3_g = norms.daily_omega3_g
-    profile.daily_fiber_g = norms.daily_fiber_g
-    profile.goal = norms.goal
-    profile.pace = norms.pace
-    profile.goal_overridden_by = norms.goal_overridden_by
-    # DRF-1339 добавлял сюда ``{"reason": "assumed_input", "field":
-    # "weight_kg"}`` — маркер того, что нормы посчитаны от
-    # ``DEFAULT_WEIGHT_KG``, а не от названного человеком веса. Маркер
-    # снят вместе с подстановкой: он был ПРИЗНАНИЕМ, а не отказом, и
-    # число всё равно считалось, уезжало в профиль и показывалось.
-    #
-    # Теперь недостающий вход отменяет расчёт, и запись об этом делает
-    # сам ``compute_norms``: ``{"reason": "insufficient_inputs",
-    # "fields": [...]}``. Одно имя вместо двух, и оно означает «расчёта
-    # нет», а не «расчёт есть, но входы чужие».
+    # DRF-1339: недостающий вход отменяет расчёт, и запись об этом делает
+    # сам ``compute_norms`` (``insufficient_inputs``). Аудит пишется всегда:
+    # он про этот запрос, а не про то, что стало действующим.
     profile.last_overrides_applied = list(norms.overrides_applied)
 
-    # ── Происхождение (DRF-1623 N-d) ────────────────────────────────────
+    # ── Действующее не заменяется (DRF-2192, DRF-2193; §63, 21.09.2026) ──
     #
-    # Пишется на КАЖДОМ пересчёте, вместе со значением, а не отдельным
-    # вызовом: разъехаться они не должны. Ориентир, у которого значение
-    # новое, а происхождение старое, хуже, чем ориентир без происхождения
-    # — он выглядит объяснённым.
+    # До этой правки пересчёт писал новые числа ПОВЕРХ действующих,
+    # ставил ``ayla_proposed`` всем видам и стирал ``confirmed_at``: между
+    # «вес изменился» и «человек подтвердил» у него не было ориентира
+    # вовсе, а ручная норма пропадала от простого «мой вес 61».
     #
-    # Отказ (нехватка входов) не выдаётся за расчёт: снимок пуст, версий
-    # нет, источник — «ориентира нет». Прежнее происхождение при этом
-    # СТИРАЕТСЯ намеренно: значения обнулены строкой выше, и оставить
-    # рядом с нулями объяснение прошлого расчёта значило бы объяснить
-    # число, которого больше нет.
+    # Теперь решение принимается ПО ВИДАМ (DRF-1929):
     #
-    # Состоявшийся расчёт — ПРЕДЛОЖЕНИЕ, а не действующий ориентир
-    # (§5.1, 11.09.2026): ``ayla_proposed`` до тех пор, пока человек не
-    # подтвердит его через ``confirm_targets``. Каждый новый расчёт —
-    # новое предложение: прежнее подтверждение относилось к прежним
-    # числам, и переносить его на новые значило бы подтвердить за
-    # человека то, чего он не видел. Поэтому ``targets_confirmed_at``
-    # стирается вместе с пересчётом, а не только при отказе.
-    #
-    # DRF-1929 (F1(б)): расчёт считает ОБА вида сразу (калории — Миффлин
-    # — Сан Жеор, жидкость — справочник), поэтому подпись получают оба, и
-    # подтверждение снимается у обоих: предложение новое у обоих.
-    if norms.computed:
-        profile.targets_source = NutritionProfile.TargetsSource.AYLA_PROPOSED
-        profile.calories_source = NutritionProfile.TargetsSource.AYLA_PROPOSED
-        profile.fluids_source = NutritionProfile.TargetsSource.AYLA_PROPOSED
-        profile.targets_method_versions = dict(norms.method_versions)
-        profile.targets_input_snapshot = dict(norms.input_snapshot)
-        profile.targets_computed_at = datetime.now(dt_tz.utc)
-        profile.targets_confirmed_at = None
-        profile.calories_confirmed_at = None
-        profile.fluids_confirmed_at = None
+    # * вид НЕ действует (``none`` / ``ayla_proposed`` / ``unknown_legacy``)
+    #   — пересчёт пишется на место, как раньше: предложение до
+    #   подтверждения (§5.1), а при отказе — «ориентира нет»;
+    # * вид действует по расчёту (``ayla_calculated``) — действующие числа,
+    #   подпись и ``confirmed_at`` остаются; новое предложение ложится
+    #   рядом, в ``pending_proposal``, и ``confirm_targets`` его забирает;
+    # * вид задан рукой (``user_entered``) — не трогается и предложения
+    #   рядом не получает (вариант (i) GO): предложить расчёт поверх
+    #   ориентира, который человек назвал сам — часто со слов врача, —
+    #   значило бы дать непрошеный совет, от которого ручной режим и
+    #   существует. Вес при этом записан — это делает ``_apply_patch``.
+    kept = [k for k in KIND_FIELDS if _kind_is_active(profile, k)]
+    in_place = [k for k in KIND_FIELDS if k not in kept]
+    stash = [
+        k for k in kept
+        if (kind_source(profile, k) or profile.targets_source)
+        == NutritionProfile.TargetsSource.AYLA_CALCULATED
+    ]
+
+    for kind in in_place:
+        source_field, stamp_field = _KIND_STAMPS[kind]
+        for name in KIND_FIELDS[kind]:
+            setattr(profile, name, getattr(norms, name))
+        setattr(
+            profile,
+            source_field,
+            NutritionProfile.TargetsSource.AYLA_PROPOSED
+            if norms.computed
+            else NutritionProfile.TargetsSource.NONE,
+        )
+        setattr(profile, stamp_field, None)
+
+    if norms.computed and stash:
+        profile.pending_proposal = {
+            "kinds": list(stash),
+            "values": {
+                name: getattr(norms, name) for kind in stash for name in KIND_FIELDS[kind]
+            },
+            "input_snapshot": dict(norms.input_snapshot),
+            "method_versions": dict(norms.method_versions),
+            "computed_at": datetime.now(dt_tz.utc).isoformat(),
+            "goal": norms.goal,
+            "pace": norms.pace,
+            "goal_overridden_by": norms.goal_overridden_by,
+        }
     else:
-        profile.targets_source = NutritionProfile.TargetsSource.NONE
-        profile.calories_source = NutritionProfile.TargetsSource.NONE
-        profile.fluids_source = NutritionProfile.TargetsSource.NONE
-        profile.targets_method_versions = {}
-        profile.targets_input_snapshot = {}
-        profile.targets_computed_at = None
+        # Прежнее предложение относилось к прежним входам; нового рядом нет
+        # (всё легло на место, или расчёт отказал) — старое не держим.
+        profile.pending_proposal = None
+
+    # ── Происхождение расчёта (DRF-1623 N-d) ─────────────────────────────
+    #
+    # Снимок входов, версии методик, цель и темп описывают расчёт
+    # КАЛОРИЙ — у справочной воды методики нет. Поэтому они пишутся тогда,
+    # когда калории легли на место, и остаются как лежат, когда калории
+    # действуют (их новые значения ждут в ``pending_proposal``).
+    # Происхождение пишется вместе со значением: ориентир с новым числом и
+    # старым происхождением выглядит объяснённым. Отказ не выдаётся за
+    # расчёт — снимок пуст, версий нет.
+    if KIND_CALORIES in in_place:
+        profile.goal = norms.goal
+        profile.pace = norms.pace
+        profile.goal_overridden_by = norms.goal_overridden_by
+        if norms.computed:
+            profile.targets_method_versions = dict(norms.method_versions)
+            profile.targets_input_snapshot = dict(norms.input_snapshot)
+            profile.targets_computed_at = datetime.now(dt_tz.utc)
+        else:
+            profile.targets_method_versions = {}
+            profile.targets_input_snapshot = {}
+            profile.targets_computed_at = None
+
+    if not kept:
+        # Ничего не действовало — общая подпись, как раньше: предложение
+        # до подтверждения (§5.1) или «ориентира нет».
+        profile.targets_source = (
+            NutritionProfile.TargetsSource.AYLA_PROPOSED
+            if norms.computed
+            else NutritionProfile.TargetsSource.NONE
+        )
         profile.targets_confirmed_at = None
-        profile.calories_confirmed_at = None
-        profile.fluids_confirmed_at = None
 
 
 def _refuse_recompute(profile: NutritionProfile) -> None:
@@ -462,6 +508,11 @@ def _serialize(
             # строк, поставленных до введения подтверждения.
             "confirmed_at": _strip_microseconds(profile.targets_confirmed_at),
             "input_snapshot": dict(profile.targets_input_snapshot or {}),
+            # DRF-2192: новое предложение, лежащее РЯДОМ с действующим
+            # ориентиром до подтверждения; ``None`` — рядом ничего нет.
+            # Ключ добавлен, а не заменяет прежние: бот, не знающий его,
+            # читает действующее как раньше.
+            "pending_proposal": _pending_block(profile),
             # DRF-1929 (F1(б)): происхождение ПО ВИДАМ. Ключ ``by_kind``
             # добавлен рядом, а не вместо ``source``: бот держит СВОЮ
             # копию множества действующих источников
@@ -489,6 +540,25 @@ def _serialize(
         ),
         "created_at": _strip_microseconds(profile.created_at),
         "updated_at": _strip_microseconds(profile.updated_at),
+    }
+
+
+def _pending_block(profile: NutritionProfile) -> dict[str, Any] | None:
+    """Предложение рядом с действующим — в форме, которую покажут человеку.
+
+    Числа — те же имена, что в ``norms``; снимок входов — как у
+    действующего (§5.1: «методика и использованные данные показываются»).
+    """
+    pending = profile.pending_proposal
+    if not pending:
+        return None
+    values = pending.get("values") or {}
+    return {
+        "kinds": list(pending.get("kinds") or []),
+        **{name: values.get(name) for name in values},
+        "input_snapshot": dict(pending.get("input_snapshot") or {}),
+        "method_versions": dict(pending.get("method_versions") or {}),
+        "computed_at": pending.get("computed_at"),
     }
 
 
@@ -557,29 +627,59 @@ def confirm_targets(*, user, external_user_id: str) -> tuple[dict, str]:
         )
         if profile is None:
             raise NothingToConfirm(NutritionProfile.TargetsSource.NONE)
+        Source = NutritionProfile.TargetsSource
         source = profile.targets_source
-        if source == NutritionProfile.TargetsSource.AYLA_CALCULATED:
-            return _serialize(profile, external_user_id, exists=True), "already_confirmed"
-        if source != NutritionProfile.TargetsSource.AYLA_PROPOSED:
-            raise NothingToConfirm(source)
+        pending = profile.pending_proposal or None
+        # Виды, у которых предложение лежит НА МЕСТЕ (действующего не было).
+        proposed_in_place = [
+            k for k in KIND_FIELDS if kind_source(profile, k) == Source.AYLA_PROPOSED
+        ]
+        if not pending and not proposed_in_place:
+            if source == Source.AYLA_CALCULATED:
+                return _serialize(profile, external_user_id, exists=True), "already_confirmed"
+            # Строка до DRF-1929 (подписи по видам нет): решает общая.
+            if source != Source.AYLA_PROPOSED:
+                raise NothingToConfirm(source)
+
         now = datetime.now(dt_tz.utc)
-        profile.targets_source = NutritionProfile.TargetsSource.AYLA_CALCULATED
+
+        # DRF-2192: предложение, лежавшее РЯДОМ с действующим расчётом,
+        # становится действующим. Подтверждается то, что человек видел:
+        # значения, снимок и версии — из предложения, а не пересчёт заново.
+        # Вид, заданный рукой, не переподписывается расчётом никогда.
+        if pending:
+            applied = [
+                k for k in pending.get("kinds", [])
+                if (kind_source(profile, k) or source) == Source.AYLA_CALCULATED
+            ]
+            values = pending.get("values") or {}
+            for kind in applied:
+                for name in KIND_FIELDS[kind]:
+                    setattr(profile, name, values.get(name))
+                setattr(profile, _KIND_STAMPS[kind][1], now)
+            if KIND_CALORIES in applied:
+                profile.targets_input_snapshot = dict(pending.get("input_snapshot") or {})
+                profile.targets_method_versions = dict(pending.get("method_versions") or {})
+                computed_at = pending.get("computed_at")
+                profile.targets_computed_at = (
+                    datetime.fromisoformat(computed_at) if computed_at else now
+                )
+                profile.goal = pending.get("goal") or profile.goal
+                profile.pace = pending.get("pace") or profile.pace
+                profile.goal_overridden_by = pending.get("goal_overridden_by") or ""
+            profile.pending_proposal = None
+
+        # DRF-1929 (F1(б)): подтверждение — по виду. Подтверждается каждый
+        # вид, стоящий на ``ayla_proposed``; вид, заданный рукой
+        # (``user_entered``), не трогается — он уже подписан человеком.
+        for kind in proposed_in_place:
+            source_field, stamp_field = _KIND_STAMPS[kind]
+            setattr(profile, source_field, Source.AYLA_CALCULATED)
+            setattr(profile, stamp_field, now)
+        # Общая подпись — ради читателей до DRF-1929: из предложения — в
+        # расчёт; ручная общая подпись остаётся ручной.
+        if source == Source.AYLA_PROPOSED:
+            profile.targets_source = Source.AYLA_CALCULATED
         profile.targets_confirmed_at = now
-        # DRF-1929 (F1(б)): подтверждение — по виду. Подтверждается
-        # каждый вид, стоящий на ``ayla_proposed``; вид, который человек
-        # задал рукой (``user_entered``), НЕ трогается — он уже подписан
-        # человеком, и переподписать его расчётом значило бы отменить его
-        # решение. Селектора вида у ручки нет намеренно: владелец решил
-        # «подтверждение по видам», а не «кнопка на каждый вид», и лишний
-        # параметр контракта — это объём, которого мне не давали.
-        updated = ["targets_source", "targets_confirmed_at", "updated_at"]
-        for kind_field, stamp_field in (
-            ("calories_source", "calories_confirmed_at"),
-            ("fluids_source", "fluids_confirmed_at"),
-        ):
-            if getattr(profile, kind_field) == NutritionProfile.TargetsSource.AYLA_PROPOSED:
-                setattr(profile, kind_field, NutritionProfile.TargetsSource.AYLA_CALCULATED)
-                setattr(profile, stamp_field, now)
-                updated += [kind_field, stamp_field]
-        profile.save(update_fields=updated)
+        profile.save()
     return _serialize(profile, external_user_id, exists=True), "confirmed"

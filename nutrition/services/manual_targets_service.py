@@ -258,6 +258,18 @@ def set_manual_targets(
         profile.targets_input_snapshot = {}
         profile.targets_computed_at = None
         profile.targets_confirmed_at = now
+        # DRF-2193, вариант (i): рядом с ручным видом предложения нет. Если
+        # оно лежало (вид был расчётом, человек заменил его своим числом),
+        # вид из него снимается — иначе подтверждение потом переписало бы
+        # число человека расчётом, которое он только что отверг.
+        profile.pending_proposal = _without_kinds(
+            profile.pending_proposal,
+            {
+                kind
+                for kind, given in (("calories", calories_kcal), ("fluids", water_ml))
+                if given is not None
+            },
+        )
         profile.goal_overridden_by = ""
         # Аудит: что задано рукой и с какими предупреждениями — дописывается,
         # прежние записи (отказы, лестница) не стираются.
@@ -271,3 +283,20 @@ def set_manual_targets(
         profile.save()
 
     return profile, {"warnings": warnings, "deviation": deviation, "set": set_fields}
+
+
+def _without_kinds(pending: dict[str, Any] | None, kinds: set[str]) -> dict[str, Any] | None:
+    """Предложение без названных видов; ``None``, если видов не осталось."""
+    if not pending or not kinds:
+        return pending
+    remaining = [k for k in pending.get("kinds", []) if k not in kinds]
+    if not remaining:
+        return None
+    from nutrition.services.profile_upsert_service import KIND_FIELDS
+
+    keep = {name for kind in remaining for name in KIND_FIELDS[kind]}
+    return {
+        **pending,
+        "kinds": remaining,
+        "values": {k: v for k, v in (pending.get("values") or {}).items() if k in keep},
+    }

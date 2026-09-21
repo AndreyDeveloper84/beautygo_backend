@@ -101,29 +101,52 @@ class TestComputationIsAProposal:
         assert body["targets_provenance"]["confirmed_at"] is None
         assert body["targets_provenance"]["input_snapshot"]["weight_kg"] == 67.0
 
-    def test_a_recompute_on_a_confirmed_row_is_a_new_proposal(self, proxy_user, headers):
-        """Подтверждение относится к числам, которые человек видел."""
+    def test_a_recompute_on_a_confirmed_row_is_a_new_proposal_beside_it(
+        self, proxy_user, headers
+    ):
+        """Подтверждение относится к числам, которые человек видел.
+
+        До DRF-2192 этот тест пинил обратное — новое предложение ставилось
+        ВМЕСТО подтверждённого и стирало ``confirmed_at``. Владелец этот
+        контракт отменил (§63, 21.09.2026): «старый подтверждённый ориентир
+        не исчезает до подтверждения нового».
+        """
         _compute(proxy_user, headers)
         assert _confirm(headers).status_code == status.HTTP_200_OK
         p = NutritionProfile.objects.get(user=proxy_user)
         assert p.targets_source == Source.AYLA_CALCULATED
-        assert p.targets_confirmed_at is not None
+        confirmed_at = p.targets_confirmed_at
+        assert confirmed_at is not None
 
         # Смена темпа (открытое поле, сценарий (б) сторожа — пересчёт без
-        # утверждения разрешён); результат — НОВОЕ предложение.
+        # утверждения разрешён); результат — НОВОЕ предложение, но рядом.
         kcal_before = p.daily_kcal
         resp = _post({"pace": "gentle"}, headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
         p.refresh_from_db()
-        assert p.targets_source == Source.AYLA_PROPOSED
-        assert p.targets_confirmed_at is None
-        assert p.daily_kcal != kcal_before  # пересчёт состоялся
-        assert p.targets_input_snapshot["pace"] == "gentle"
+        assert p.targets_source == Source.AYLA_CALCULATED
+        assert p.targets_confirmed_at == confirmed_at
+        assert p.daily_kcal == kcal_before  # действующее не тронуто
+        pending = resp.json()["data"]["targets_provenance"]["pending_proposal"]
+        assert pending["daily_kcal"] != kcal_before  # пересчёт состоялся — рядом
+        # Снимок действующего описывает действующие числа (темп прежний);
+        # новый темп — в снимке предложения рядом.
+        assert p.targets_input_snapshot["pace"] == "moderate"
+        assert pending["input_snapshot"]["pace"] == "gentle"
 
-    def test_a_refusal_clears_confirmation_too(self, proxy_user, headers):
-        """Расчёт снят (входа не хватило) — подтверждение снято вместе с ним."""
+    def test_a_refusal_does_not_put_out_a_confirmed_target(self, proxy_user, headers):
+        """Расчёту не хватило входа — это отказ пересчёта, а не отмена
+        подтверждённого.
+
+        До DRF-2192 тест назывался «a refusal clears confirmation too» и
+        пинил обратное: отказ гасил действующий ориентир в ``none``.
+        Владелец этот контракт отменил (§63, 21.09.2026): подтверждённый
+        ориентир не исчезает, пока человек не подтвердил новый.
+        """
         _compute(proxy_user, headers)
         _confirm(headers)
+        before = NutritionProfile.objects.get(user=proxy_user)
+        assert before.daily_kcal and before.targets_confirmed_at is not None
         # Сериализатор не пропускает ``weight_kg: null``; вес снимается так
         # же, как в ``test_targets_recompute_gate``: подменой патча.
         with patch.object(
@@ -133,9 +156,14 @@ class TestComputationIsAProposal:
             resp = _post({"goal": "maintain", "consent": CONSENT}, headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
         p = NutritionProfile.objects.get(user=proxy_user)
-        assert p.targets_source == Source.NONE
-        assert p.targets_confirmed_at is None
-        assert p.daily_kcal is None
+        assert p.targets_source == Source.AYLA_CALCULATED
+        assert p.targets_confirmed_at == before.targets_confirmed_at
+        assert p.daily_kcal == before.daily_kcal
+        # Отказ назван в аудите и предложения рядом не оставил.
+        assert any(
+            e.get("reason") == "insufficient_inputs" for e in p.last_overrides_applied
+        )
+        assert p.pending_proposal is None
 
     def test_a_partial_post_on_a_proposal_recomputes_and_stays_a_proposal(
         self, proxy_user, headers,
