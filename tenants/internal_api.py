@@ -42,9 +42,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.errors import ErrorCode
+from tenants.models import Tenant
 from tenants.provisioning import TenantNameMismatch, ensure_tenant
 from tenants.solo_provisioning import SoloProvisioningRefused, provision_solo_workspace
-from users.permissions import IsTenantProvisioningBearer
+from users.permissions import IsInternalBearer, IsTenantProvisioningBearer
 from users.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
@@ -243,3 +244,48 @@ class InternalSoloWorkspaceView(APIView):
             },
             status_code=status.HTTP_201_CREATED if workspace.created else status.HTTP_200_OK,
         )
+
+
+# ─── DRF-2254: вид тенанта — единственный источник «чьё место и кто ведёт услуги» ───
+
+
+class _TenantKindResponseSerializer(serializers.Serializer):
+    id = serializers.UUIDField()
+    kind = serializers.ChoiceField(choices=Tenant.Kind.choices)
+
+
+class InternalTenantKindView(APIView):
+    """``GET /internal/tenants/<uuid>/kind/`` — вид тенанта для бота (DRF-2254).
+
+    Бот решал «соло» подсчётом людей в тенанте (``is_solo_provider``), каталог
+    — этим признаком; экраны самообслуживания мастера (место, услуги) бот
+    открывал по первому, а каталог разрешал или отказывал по второму. Источник
+    один — ``Tenant.kind``: бот читает его здесь и отдаёт в ``/me`` как
+    ``workspace_kind``.
+
+    Только чтение и только под общим внутренним токеном бота: provisioning-токен
+    здесь не принимается (чтение не должно давать права заводить тенанты), а
+    общий токен не принимают ручки provisioning выше.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearer]
+    http_method_names = ["get", "head", "options"]
+
+    @extend_schema(
+        operation_id="internal_tenants_kind",
+        tags=["internal"],
+        responses={
+            200: _TenantKindResponseSerializer,
+            401: OpenApiResponse(description="Bearer token missing or invalid"),
+            404: OpenApiResponse(description="No tenant with this UUID"),
+        },
+        description="Вид тенанта (salon | solo) — единственный источник для гейта экранов самообслуживания мастера.",
+    )
+    def get(self, request: Request, tenant_id) -> Response:
+        tenant = Tenant.all_objects.filter(pk=tenant_id).only("id", "kind").first()
+        if tenant is None:
+            return error_response(
+                ErrorCode.TENANT_NOT_FOUND, "Tenant not found.", status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return success_response({"id": str(tenant.id), "kind": tenant.kind})

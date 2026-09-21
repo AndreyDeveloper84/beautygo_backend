@@ -86,6 +86,8 @@ class ErrorCode(str, Enum):
 
     # --- Specialists & services (spec §Мастера и услуги) ---
     SPECIALIST_NOT_FOUND = "SPECIALIST_NOT_FOUND"
+    # DRF-2254 — чтение вида тенанта ботом: тенанта с этим UUID в каталоге нет.
+    TENANT_NOT_FOUND = "TENANT_NOT_FOUND"
     SERVICE_NOT_FOUND = "SERVICE_NOT_FOUND"
     CATEGORY_NOT_FOUND = "CATEGORY_NOT_FOUND"
     SERVICE_INACTIVE = "SERVICE_INACTIVE"
