@@ -20,7 +20,12 @@
 * g2 — без цели: то же с полем ``goal``;
 * g3 — отказ не записывает в профиль выдуманную цель «maintain»;
 * g4 — пол и цель названы: расчёт есть (присутствие — сторож не отказывает
-  всем подряд).
+  всем подряд);
+* g5 — ПРИНЯТОЕ последствие (§63): строка, посчитанная раньше от выдуманного
+  пола (``gender=""``, подпись ``ayla_calculated``), на следующем пересчёте
+  получает честное «не хватает данных» — расчётный вид гаснет (правило
+  отказа из #525), предложения рядом нет, подтверждать нечего; ручной вид
+  на смешанной строке остаётся.
 """
 
 from __future__ import annotations
@@ -32,6 +37,8 @@ from rest_framework.test import APIClient
 from nutrition.models import NutritionProfile
 from nutrition.services.personal_calculation_consent import PERSONAL_CALCULATION
 from users.models import User
+
+URL_CONFIRM = "/api/v1/nutrition/internal/profile/targets/confirm/"
 
 pytestmark = pytest.mark.django_db
 
@@ -107,3 +114,61 @@ class TestNoInventedGenderOrGoal:
         assert p.daily_kcal and p.daily_kcal > 0
         assert p.targets_input_snapshot["gender"] == "male"
         assert p.targets_input_snapshot["goal"] == "maintain"
+
+
+def _calculated_without_gender(proxy_user, *, water_ml: int | None = None) -> NutritionProfile:
+    """Строка, какой её оставил расчёт ДО этой правки: посчитана как «женщина»
+    при ``gender=""`` и подтверждена. Прямой записью — нынешний API такую
+    строку создать уже не может, и в этом весь смысл правки."""
+    fluids_manual = water_ml is not None
+    return NutritionProfile.objects.create(
+        user=proxy_user,
+        gender="",
+        age=36,
+        height_cm=170,
+        weight_kg=67.0,
+        activity_coefficient=1.375,
+        goal="maintain",
+        bmr=1400,
+        daily_kcal=1900,
+        daily_protein_g=95,
+        daily_fat_g=60,
+        daily_carbs_g=220,
+        daily_water_ml=water_ml if fluids_manual else 2200,
+        targets_source=Source.USER_ENTERED if fluids_manual else Source.AYLA_CALCULATED,
+        calories_source=Source.AYLA_CALCULATED,
+        fluids_source=Source.USER_ENTERED if fluids_manual else Source.AYLA_CALCULATED,
+        targets_input_snapshot={"gender": "female", "age": 36, "goal": "maintain"},
+        targets_method_versions={"calories": "mifflin_st_jeor_v2"},
+    )
+
+
+class TestTheAcceptedConsequence:
+    def test_a_row_computed_from_an_invented_gender_goes_out_on_recompute(
+        self, proxy_user, headers
+    ):
+        before = _calculated_without_gender(proxy_user)
+        # Присутствие: до пересчёта ориентир действует.
+        assert before.daily_kcal == 1900
+
+        _post({"weight_kg": 61.0}, headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+
+        assert p.calories_source == Source.NONE
+        assert p.daily_kcal is None
+        assert "gender" in _missing(p)
+        assert p.pending_proposal is None
+        assert p.targets_input_snapshot == {}
+        resp = APIClient().post(URL_CONFIRM, {}, format="json", **headers)
+        assert resp.status_code == status.HTTP_409_CONFLICT
+
+    def test_the_persons_own_water_survives(self, proxy_user, headers):
+        before = _calculated_without_gender(proxy_user, water_ml=2000)
+        assert before.fluids_source == Source.USER_ENTERED
+
+        _post({"weight_kg": 61.0}, headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+
+        assert p.calories_source == Source.NONE
+        assert p.fluids_source == Source.USER_ENTERED
+        assert p.daily_water_ml == 2000
