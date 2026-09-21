@@ -34,11 +34,14 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
+from unittest import mock
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.db import DatabaseError
 from django.utils import timezone
 
+from analytics.models import AnalyticsEvent
 from appointments.models import Appointment
 from goals.models import ClientGoal, GoalAnketaAnswer, GoalAnketaRun
 from nutrition.models import NutritionProfile
@@ -195,6 +198,9 @@ BOTH_PATHS = pytest.mark.parametrize(
 class TestWhatWasRememberedIsForgotten:
     @BOTH_PATHS
     def test_every_remembered_store_is_empty(self, remembered, forget) -> None:
+        before = _remembered_counts(remembered)
+        assert all(n >= 1 for n in before.values()), before
+
         forget(remembered)
 
         after = _remembered_counts(remembered)
@@ -203,6 +209,9 @@ class TestWhatWasRememberedIsForgotten:
     @BOTH_PATHS
     def test_the_verbatim_words_are_gone(self, remembered, forget) -> None:
         """Сердце листа: дословная цель и свободный ответ анкеты не переживают."""
+        assert ClientGoal.objects.filter(goal_text=GOAL_TEXT).exists()
+        assert GoalAnketaAnswer.objects.filter(answer_text=ANSWER_TEXT).exists()
+
         forget(remembered)
 
         assert not ClientGoal.objects.filter(goal_text=GOAL_TEXT).exists()
@@ -254,8 +263,57 @@ class TestOnlyThePersonsRowsGo:
 
 
 class TestIdempotent:
-    def test_a_second_forget_is_harmless(self, remembered) -> None:
-        _forget_via_bot(remembered)
-        _forget_via_bot(remembered)  # не падает: 200 и пусто
+    @BOTH_PATHS
+    def test_a_second_forget_is_harmless(self, remembered, forget) -> None:
+        before = _remembered_counts(remembered)
+        assert all(n >= 1 for n in before.values()), before
 
-        assert _remembered_counts(remembered) == {k: 0 for k in _remembered_counts(remembered)}
+        forget(remembered)
+        forget(remembered)  # не падает: успех и пусто
+
+        after = _remembered_counts(remembered)
+        assert after == {k: 0 for k in after}, after
+
+
+#: Путь → модуль, в котором вид зовёт ``erase_personal_context``.
+PATHS_WITH_MODULE = pytest.mark.parametrize(
+    "forget, view_module",
+    [
+        (_forget_via_bot, "users.internal_personal_context_api"),
+        (_forget_via_app, "users.personal_context_views"),
+    ],
+    ids=["бот", "приложение"],
+)
+
+
+class TestAllOrNothing:
+    """Одна транзакция: стёрто всё или ничего — и ответ не врёт об исходе."""
+
+    @PATHS_WITH_MODULE
+    def test_a_failed_profile_erasure_keeps_everything(self, remembered, forget, view_module) -> None:
+        """Профиль не стёрся — не стёрто и остальное; человек не остаётся с половиной."""
+        before = _remembered_counts(remembered)
+        assert all(n >= 1 for n in before.values()), before
+
+        with mock.patch(f"{view_module}.erase_personal_context", side_effect=RuntimeError("boom")):
+            with pytest.raises(RuntimeError):
+                forget(remembered)
+
+        assert _remembered_counts(remembered) == before
+
+    @BOTH_PATHS
+    def test_a_failed_analytics_insert_does_not_undo_the_erasure(self, remembered, forget) -> None:
+        """Сбой записи аналитики не откатывает стирание молча под ответом «успех».
+
+        ``_emit`` глотает любую ошибку. Без своей точки сохранения ошибка БД
+        внутри него помечает ВНЕШНЮЮ транзакцию к откату — и стирание
+        откатывалось бы, а ответ всё равно говорил бы «стёрто».
+        """
+        before = _remembered_counts(remembered)
+        assert all(n >= 1 for n in before.values()), before
+
+        with mock.patch.object(AnalyticsEvent, "_do_insert", side_effect=DatabaseError("boom")):
+            forget(remembered)  # ответ — успех
+
+        after = _remembered_counts(remembered)
+        assert after == {k: 0 for k in after}, after
