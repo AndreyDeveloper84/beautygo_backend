@@ -104,7 +104,6 @@ def _load_nutrition_context(user_id: int) -> NutritionContext:
     любое его чтение эту формулу применяет.
     """
     from nutrition.models import NutritionProfile  # local import to avoid cycle
-    from nutrition.services.targets_state import fluids_confirmed
 
     try:
         # DRF-1929: ``fluids_source`` обязан быть в ``only`` — предикат его
@@ -138,12 +137,9 @@ def _load_nutrition_context(user_id: int) -> NutritionContext:
     # DRF-1929 (F1(б)): спрашивается происхождение ЖИДКОСТИ. До разделения
     # здесь стоял предикат набора, и ручные калории делали воду «числом
     # человека» — или её приходилось гасить, чтобы не соврать.
-    fluid_target: int | None = None
-    if fluids_confirmed(profile) and profile.daily_water_ml:
-        fluid_target = int(profile.daily_water_ml)
     return NutritionContext(
         timezone=tz,
-        fluid_target_ml=fluid_target,
+        fluid_target_ml=fluid_target_ml(profile),
         pregnant=bool(flags.get("pregnant")),
         eating_disorder=bool(flags.get("eating_disorder")),
     )
@@ -679,6 +675,27 @@ def purge_deleted_water_entries(older_than_days: int = 90) -> int:
 # ---------------------------------------------------------------------------
 # Day-bound helpers (TZ-aware)
 # ---------------------------------------------------------------------------
+
+
+def fluid_target_ml(profile) -> int | None:
+    """ДЕЙСТВУЮЩИЙ ориентир воды человека — один источник для экрана воды и
+    сводки дня (DRF-2257). ``None`` — ориентира нет.
+
+    Методика §85, раздел 4: ``daily_water_ml`` читается только под
+    предикатом происхождения ЖИДКОСТИ ``fluids_confirmed`` — справочник по
+    полу, подтверждённый человеком (``ayla_calculated``), или число, которое
+    он назвал сам (``user_entered``). Предложение (``ayla_proposed``),
+    ``unknown_legacy`` (остаток снятой формулы 30 мл × вес) и «нет» —
+    отсутствие: признак — происхождение, не значение.
+    """
+    from nutrition.services.targets_state import fluids_confirmed
+
+    # Положительная форма намеренно: чтение столбца стоит ВНУТРИ условия,
+    # которое называет предикат происхождения — так его видит сторож
+    # переписи чтений (``test_targets_stay_absent``).
+    if profile is not None and fluids_confirmed(profile) and profile.daily_water_ml:
+        return int(profile.daily_water_ml)
+    return None
 
 
 def water_total_ml(user_id: int, start: datetime, end: datetime) -> int:
