@@ -129,7 +129,9 @@ class TestTheTwoWaysOfSayingItDoNotDrift:
             (
                 {
                     "consent": CONSENT,
+                    # DRF-2219: цель названа — без неё расчёт отказывает.
                     "gender": "female", "age": 30, "height_cm": 168, "weight_kg": 62,
+                    "goal": "maintain",
                 },
                 True,
             ),
