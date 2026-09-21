@@ -37,6 +37,7 @@ from nutrition.services.targets_state import (
     effective_kind_source,
     kind_source,
     overall_source,
+    snapshot_as_named,
 )
 from nutrition.services.targets_recompute_gate import (
     RECOMPUTE_REFUSED_NO_CONSENT,
@@ -288,7 +289,16 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
     # старым происхождением выглядит объяснённым. Отказ не выдаётся за
     # расчёт — снимок пуст, версий нет.
     if KIND_CALORIES in in_place:
-        profile.goal = norms.goal
+        # DRF-2241 (§63, В-4 «связать, не слить»): ``profile.goal`` — цель,
+        # которую НАЗВАЛ человек, вход расчёта. Расчётная цель после
+        # лестницы (``bmr_floor``: lose → maintain) живёт в снимке
+        # (``input_snapshot["goal"]``) и в ``goal_overridden_by``. Здесь
+        # стояло ``profile.goal = norms.goal``: результат писался во вход, и
+        # следующий пересчёт — уже без нужды в ступени — шёл от
+        # «поддержания», а названная цель пропадала навсегда.
+        #
+        # Темп — та же перезапись (ступень moderate → gentle), но темп ждёт
+        # решения владельца (вопрос 59) и здесь не меняется.
         profile.pace = norms.pace
         profile.goal_overridden_by = norms.goal_overridden_by
         if norms.computed:
@@ -522,7 +532,9 @@ def _serialize(
             # ``ayla_proposed`` (ещё не подтверждено), при ``none`` и у
             # строк, поставленных до введения подтверждения.
             "confirmed_at": _strip_microseconds(profile.targets_confirmed_at),
-            "input_snapshot": dict(profile.targets_input_snapshot or {}),
+            # DRF-2241: пол, которого человек не называл (снимки до #527),
+            # «использованными данными» не показывается; в базе снимок как был.
+            "input_snapshot": snapshot_as_named(profile),
             # DRF-2192: новое предложение, лежащее РЯДОМ с действующим
             # ориентиром до подтверждения; ``None`` — рядом ничего нет.
             # Ключ добавлен, а не заменяет прежние: бот, не знающий его,
@@ -690,7 +702,8 @@ def confirm_targets(*, user, external_user_id: str) -> tuple[dict, str]:
                 profile.targets_input_snapshot = dict(pending.get("input_snapshot") or {})
                 profile.targets_method_versions = dict(pending.get("method_versions") or {})
                 profile.targets_computed_at = now
-                profile.goal = pending.get("goal") or profile.goal
+                # DRF-2241: названная цель не заменяется расчётной и при
+                # подтверждении — расчётная уже в снимке, выше.
                 profile.pace = pending.get("pace") or profile.pace
                 profile.goal_overridden_by = pending.get("goal_overridden_by") or ""
                 profile.last_overrides_applied = list(pending.get("overrides_applied") or [])
