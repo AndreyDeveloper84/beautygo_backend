@@ -57,6 +57,7 @@ from users.models import Profile, SpecialistPortfolio, SpecialistProfile, User, 
 from privacy_audit.mixins import AuditedPersonalDataAccess
 from privacy_audit.models import PersonalDataAccessLog
 from users.forget_all_catalog import erase_remembered_catalog
+from users.scan_file_erasure import remove_scan_files, scan_file_names
 from users.permissions import IsInternalBearerForSubject
 from users.personal_context_erasure import (
     context_row_state,
@@ -354,9 +355,21 @@ class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
         # может не быть строки профиля, но быть дневник. Одна транзакция —
         # стёрто всё или ничего. Форма ответа не меняется (PR-3).
         scope: list[str] = []
+        # DRF-2256 — файлы фото сканера всех личностей: имена и снятие пачкой
+        # (S3 ``delete_objects``) до транзакции стирания и до любой блокировки
+        # строк. Открыта здесь только транзакция журнала доступа
+        # (``privacy_audit.mixins``, §96) — она строк не держит. «Файл раньше
+        # строки» сохранён: строки стираются транзакцией ниже; их откат (и
+        # откат журнала) оставит строку без файла — повтор дочистит. Стойкий
+        # сбой хранилища — ``IncompleteErasure`` отсюда: 500, в базе не стёрто
+        # ничего.
+        identities = subject_users(user)
+        names = scan_file_names(identities)
+        remove_scan_files(names)
+        removed = set(names)
         with transaction.atomic():
-            for identity in subject_users(user):
-                erase_remembered_catalog(identity, initiator="internal_api")
+            for identity in identities:
+                erase_remembered_catalog(identity, initiator="internal_api", removed_files=removed)
                 if identity is not user and not UserPersonalContext.objects.filter(
                     user=identity
                 ).exists():

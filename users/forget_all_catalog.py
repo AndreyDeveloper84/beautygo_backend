@@ -116,7 +116,9 @@ KEPT_BY_FORGET_ALL: dict[str, str] = {
 }
 
 
-def erase_remembered_catalog(user, *, initiator: str) -> dict[str, int]:
+def erase_remembered_catalog(
+    user, *, initiator: str, removed_files: set[str] | None = None
+) -> dict[str, int]:
     """Стереть цели, анкету цели, план и wellness, профиль питания, дневник с фото.
 
     Идемпотентно. Файл фото, который не снялся с носителя, — ``IncompleteErasure``
@@ -178,8 +180,15 @@ def erase_remembered_catalog(user, *, initiator: str) -> dict[str, int]:
 
     # 3. Дневник (§66) — шаг 2 D3: файлы сканов раньше строк (см. докстринг
     #    модуля), затем строки; избранные блюда — вместе с мягко удалёнными.
+    #    DRF-2256: вызывающий мог снять файлы пачкой ДО транзакции
+    #    (``users.scan_file_erasure``) и передать их имена — тогда здесь
+    #    снимаются только файлы сканов, появившихся после пачки. Счёт
+    #    ``files`` — только снятые здесь: пачка не говорит, какие файлы
+    #    существовали (отсутствующий ключ S3 — не ошибка).
     files_deleted = 0
     for scan in FoodScan.objects.filter(user=user).only("id", "image"):
+        if removed_files is not None and scan.image.name in removed_files:
+            continue
         files_deleted += _delete_file(scan.image)
     _delete("nutrition.FoodScan", FoodScan.objects.filter(user=user))
     _delete("nutrition.FoodLog", FoodLog.objects.filter(user=user))
