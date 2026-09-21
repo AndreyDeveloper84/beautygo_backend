@@ -19,6 +19,8 @@ from uuid import UUID
 from django.core.files.base import ContentFile
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
+
+from core.deprecation import DeprecatedAliasMixin
 from rest_framework import permissions, serializers as drf_serializers, status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.request import Request
@@ -857,15 +859,27 @@ class NutritionSummaryView(APIView):
 # ---------------------------------------------------------------------------
 
 
-class WaterLogCreateView(APIView):
-    """POST /api/v1/nutrition/water/ — log a glass of water."""
+#: DRF-2269 — публичные маршруты кнопочного ``WaterLog`` устарели: бот и Mini App
+#: пишут в ``WaterEntry`` через ``internal/water/*``, других вызывающих в видимых
+#: репозиториях нет; мобильный клиент BeautyGO не виден — поэтому маршруты не
+#: сняты, а помечены (заголовки, строка лога на вызов, OpenAPI ``deprecated``).
+#: Снятие — отдельным листом после недели нулевых вызовов на стенде. Дата —
+#: предложение, её назначает владелец.
+WATERLOG_SUNSET = "Sat, 31 Oct 2026 23:59:59 GMT"
 
+
+class WaterLogCreateView(DeprecatedAliasMixin, APIView):
+    """POST /api/v1/nutrition/water/ — log a glass of water. УСТАРЕЛ (DRF-2269)."""
+
+    deprecated_path = "/api/v1/nutrition/water/"
+    sunset_date = WATERLOG_SUNSET
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "water"
     serializer_class = WaterLogCreateSerializer
 
     @extend_schema(
+        deprecated=True,
         request=WaterLogCreateSerializer,
         responses={
             200: WaterLogResponseSerializer,
@@ -898,19 +912,22 @@ class WaterLogCreateView(APIView):
         )
 
 
-class WaterLogDeleteView(APIView):
-    """DELETE /api/v1/nutrition/water/{id}/ — undo a glass.
+class WaterLogDeleteView(DeprecatedAliasMixin, APIView):
+    """DELETE /api/v1/nutrition/water/{id}/ — undo a glass. УСТАРЕЛ (DRF-2269).
 
     Returns the same WaterLogResponse shape so the mobile UI can
     update its progress ring without a follow-up GET.
     """
 
+    deprecated_path = "/api/v1/nutrition/water/<id>/"
+    sunset_date = WATERLOG_SUNSET
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "water"
     serializer_class = WaterLogResponseSerializer
 
     @extend_schema(
+        deprecated=True,
         request=None,
         responses={
             200: WaterLogResponseSerializer,
@@ -943,15 +960,17 @@ class WaterLogDeleteView(APIView):
         )
 
 
-class WaterTodayView(APIView):
-    """GET /api/v1/nutrition/water/today/ — list today's glasses."""
+class WaterTodayView(DeprecatedAliasMixin, APIView):
+    """GET /api/v1/nutrition/water/today/ — list today's glasses. УСТАРЕЛ (DRF-2269)."""
 
+    deprecated_path = "/api/v1/nutrition/water/today/"
+    sunset_date = WATERLOG_SUNSET
     permission_classes = [permissions.IsAuthenticated, IsClientApp, IsClient]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "water"
     serializer_class = WaterTodayResponseSerializer
 
-    @extend_schema(responses={200: WaterTodayResponseSerializer})
+    @extend_schema(deprecated=True, responses={200: WaterTodayResponseSerializer})
     def get(self, request: Request) -> Response:
         today = WaterService().today_logs(request.user.id)
         return success_response(
