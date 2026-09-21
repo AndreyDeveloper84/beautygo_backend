@@ -9,6 +9,7 @@ from django.contrib.admin import helpers as admin_helpers
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.forms import AdminUserCreationForm
 from django.core.exceptions import ValidationError
+from django.forms.models import construct_instance
 from django.db import transaction
 from django.shortcuts import render
 from django.urls import reverse
@@ -334,6 +335,49 @@ class ProfileInline(admin.StackedInline):
     fields = ('full_name', 'city', 'avatar', 'bio')
 
 
+def bind_profile_form_to_signal_profile(formset) -> None:
+    """Блок «Профиль клиента» при ДОБАВЛЕНИИ пишет в профиль из сигнала (DRF-2231).
+
+    ``users/signals.py::create_user_profile`` на ``post_save`` создаёт
+    ``Profile`` для ролей ``client`` / ``specialist`` — раньше, чем админка
+    сохраняет инлайн. Инлайн же на странице добавления — новая строка, и
+    заполненный блок вставлял ВТОРОЙ профиль того же человека: уникальность
+    ``user_id`` отказывала, «Сохранить» отвечал 500 (стенд, 21.09, шесть раз
+    подряд на «+» из формы салона).
+
+    Правка — вариант (а) листа: форма блока привязывается к уже созданному
+    профилю, и сохранение становится обновлением. Вариант (б) — сигнал не
+    создаёт профиль при сохранении из админки — отброшен: профиль появлялся
+    бы из двух мест по двум правилам, и роль «без блока» осталась бы без
+    профиля там, где сигнал его обещает.
+
+    Форма накладывается НА строку из базы (``construct_instance``), а не
+    переносит ей только ключ: поля, которых в блоке нет (стаж, координаты,
+    аватар без загрузки), остаются как лежат, а не сбрасываются к
+    умолчаниям. Сегодня строка сигнала — одни умолчания, но если сигнал
+    когда-нибудь начнёт её заполнять, копирование ключа молча стёрло бы это.
+
+    В истории объекта запись будет «добавлен профиль»: для админки блок
+    новый (``formset.new_objects``), хотя строка — сигнала. С точки зрения
+    оператора это верно — он профиль заполнил впервые; «чинить» не надо.
+
+    Роли, у которых сигнал профиля не создаёт (``admin``), идут прежним путём:
+    заполненный блок создаёт профиль, пустой — нет.
+    """
+    parent = formset.instance
+    if parent is None or parent.pk is None:
+        return
+    existing = Profile.objects.filter(user_id=parent.pk).first()
+    if existing is None:
+        return
+    for inline_form in formset.forms:
+        if not inline_form.instance._state.adding or not inline_form.has_changed():
+            continue
+        inline_form.instance = construct_instance(
+            inline_form, existing, fields=inline_form._meta.fields
+        )
+
+
 class TenantMasterInlineForm(forms.ModelForm):
     """Строка блока мастеров подхватывает профиль, а не дублирует его.
 
@@ -553,6 +597,13 @@ class UserAddForm(AdminUserCreationForm):
 class UserAdmin(BaseUserAdmin):
     inlines = [ProfileInline]
     actions = [block_users, unblock_users]
+
+    def save_formset(self, request, form, formset, change):
+        # DRF-2231: профиль из сигнала уже есть — блок его обновляет, а не
+        # вставляет второй (см. ``bind_profile_form_to_signal_profile``).
+        if formset.model is Profile:
+            bind_profile_form_to_signal_profile(formset)
+        super().save_formset(request, form, formset, change)
 
     list_display = (
         'phone', 'get_full_name_display', 'role',
