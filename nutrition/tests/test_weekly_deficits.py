@@ -40,7 +40,13 @@ def _profile(user, *, protein_g: int = 80) -> NutritionProfile:
     ``test_without_an_anketa_there_is_no_percentage`` держит вторую
     половину: без анкеты знаменателя нет и сигнал не выдаётся.
     """
-    return NutritionProfile.objects.create(user=user, daily_protein_g=protein_g)
+    # DRF-2215 (T-3): процент считается только от ДЕЙСТВУЮЩЕГО ориентира —
+    # подпись калорий обязана быть подтверждённой (белок выведен из них).
+    return NutritionProfile.objects.create(
+        user=user,
+        daily_protein_g=protein_g,
+        calories_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,
+    )
 
 
 @pytest.fixture
@@ -78,15 +84,16 @@ class TestWeeklyDeficitsService:
         assert d.protein_avg_pct_goal is None
         assert d.protein_low_streak_days == 0
 
-    def test_streak_counts_consecutive_low_days_to_today(self, proxy_user):
+    def test_streak_counts_consecutive_low_days_to_yesterday(self, proxy_user):
         _profile(proxy_user)
         # Goal=80, threshold 0.6 → low if <48g.
-        # Days -3, -2, -1, 0 all at 30g → streak = 4
+        # Days -3, -2, -1, 0 all at 30g → streak = 3: сегодня не закрыт и
+        # в серию не идёт (DRF-2215, T-3).
         for offset in (3, 2, 1, 0):
             _log_meal(proxy_user, day_offset=offset, protein_g=30)
         d = NutritionSummaryService().weekly_deficits(user_id=proxy_user.id)
-        assert d.days_observed == 4
-        assert d.protein_low_streak_days == 4
+        assert d.days_observed == 3
+        assert d.protein_low_streak_days == 3
         # All days below threshold → avg pct ≈ 30/80 = 0.375
         assert 0.36 < d.protein_avg_pct_goal < 0.39
 
@@ -97,18 +104,19 @@ class TestWeeklyDeficitsService:
         _log_meal(proxy_user, day_offset=1, protein_g=30)
         _log_meal(proxy_user, day_offset=0, protein_g=30)
         d = NutritionSummaryService().weekly_deficits(user_id=proxy_user.id)
-        assert d.days_observed == 4
-        # Trailing streak: today + yesterday = 2 (day -2 is at goal, breaks)
-        assert d.protein_low_streak_days == 2
+        assert d.days_observed == 3
+        # Trailing streak: yesterday = 1 (day -2 is at goal, breaks; today
+        # is not closed — DRF-2215)
+        assert d.protein_low_streak_days == 1
 
     def test_streak_breaks_on_missing_day(self, proxy_user):
         _profile(proxy_user)
-        # Day -1 has no log → streak ends at today only.
+        # Day -1 has no log → no streak; today is not closed (DRF-2215).
         _log_meal(proxy_user, day_offset=2, protein_g=30)
         _log_meal(proxy_user, day_offset=0, protein_g=30)
         d = NutritionSummaryService().weekly_deficits(user_id=proxy_user.id)
-        assert d.days_observed == 2
-        assert d.protein_low_streak_days == 1
+        assert d.days_observed == 1
+        assert d.protein_low_streak_days == 0
 
     def test_without_an_anketa_there_is_no_percentage(self, proxy_user):
         """Нет анкеты — нет знаменателя, и выдумывать его нечем.
@@ -128,8 +136,8 @@ class TestWeeklyDeficitsService:
 
         d = NutritionSummaryService().weekly_deficits(user_id=proxy_user.id)
 
-        # POSITIVE: записи прочитаны, выдача не пуста.
-        assert d.days_observed == 3
+        # POSITIVE: записи прочитаны, выдача не пуста (сегодня не закрыт).
+        assert d.days_observed == 2
         # NEGATIVE: процента нет, и серии «не хватает подряд» тоже —
         # она считается от того же знаменателя.
         assert d.protein_avg_pct_goal is None
@@ -212,7 +220,7 @@ class TestInternalDeficitsView:
         )
         assert resp.status_code == status.HTTP_200_OK
         body = resp.json()["data"]
-        assert body["protein_low_streak_days"] == 4
+        assert body["protein_low_streak_days"] == 3  # сегодня не закрыт (DRF-2215)
         assert body["fired_keys"] == ["protein_low_streak"]
         assert "белок" in body["hint"].lower()
 
@@ -240,3 +248,66 @@ class TestInternalDeficitsView:
         assert body["protein_avg_pct_goal"] is None
         assert body["protein_low_streak_days"] == 0
         assert body["hint"] == ""
+
+
+# ---------------------------------------------------------------------------
+# DRF-2215 (T-3, безопасная форма) — дефицит только от действующего
+# ориентира и только по закрытым дням
+# ---------------------------------------------------------------------------
+
+
+class TestDRF2215SafeForm:
+    @pytest.mark.parametrize(
+        "source",
+        [
+            NutritionProfile.TargetsSource.AYLA_PROPOSED,
+            NutritionProfile.TargetsSource.NONE,
+        ],
+    )
+    def test_an_unconfirmed_target_yields_no_deficit(self, proxy_user, source):
+        """Предложенный (не подтверждённый) ориентир — не знаменатель: число
+        в профиле есть, но человек его не принял, и «от ориентира» было бы
+        неправдой."""
+        NutritionProfile.objects.create(
+            user=proxy_user, daily_protein_g=80, calories_source=source
+        )
+        for offset in (3, 2, 1):
+            _log_meal(proxy_user, day_offset=offset, protein_g=30)
+
+        d = NutritionSummaryService().weekly_deficits(user_id=proxy_user.id)
+
+        assert d.days_observed == 3  # положительно: записи прочитаны
+        assert d.protein_avg_pct_goal is None
+        assert d.protein_low_streak_days == 0
+
+    def test_a_manual_target_is_a_confirmed_one(self, proxy_user):
+        """Контроль: ручной ориентир действует — сигнал есть."""
+        NutritionProfile.objects.create(
+            user=proxy_user,
+            daily_protein_g=80,
+            calories_source=NutritionProfile.TargetsSource.USER_ENTERED,
+        )
+        for offset in (3, 2, 1):
+            _log_meal(proxy_user, day_offset=offset, protein_g=30)
+        d = NutritionSummaryService().weekly_deficits(user_id=proxy_user.id)
+        assert d.protein_avg_pct_goal is not None
+        assert d.protein_low_streak_days == 3
+
+    def test_today_alone_is_not_a_streak_or_an_average(self, proxy_user):
+        """Незакрытый сегодня — ни в серию, ни в среднее: утренний перекус
+        не «белка не хватает»."""
+        _profile(proxy_user)
+        _log_meal(proxy_user, day_offset=0, protein_g=5)
+        d = NutritionSummaryService().weekly_deficits(user_id=proxy_user.id)
+        assert d.days_observed == 0
+        assert d.protein_avg_pct_goal is None
+        assert d.protein_low_streak_days == 0
+
+    def test_todays_meal_does_not_move_the_average(self, proxy_user):
+        _profile(proxy_user)
+        _log_meal(proxy_user, day_offset=1, protein_g=80)
+        before = NutritionSummaryService().weekly_deficits(user_id=proxy_user.id)
+        _log_meal(proxy_user, day_offset=0, protein_g=5)
+        after = NutritionSummaryService().weekly_deficits(user_id=proxy_user.id)
+        assert before.protein_avg_pct_goal == 1.0  # положительно: вчерашний день посчитан
+        assert after.protein_avg_pct_goal == before.protein_avg_pct_goal
