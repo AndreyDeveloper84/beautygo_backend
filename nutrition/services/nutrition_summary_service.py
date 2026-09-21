@@ -223,27 +223,36 @@ class NutritionSummaryService:
         0.0`` переводит его в ноль ТОЛЬКО здесь, внутри модуля, где
         вызывающий проверяет знаменатель на положительность и наружу
         число не отдаёт. Профиля нет вовсе — тот же ответ.
+
+        DRF-2215 (T-3, безопасная форма): норма — только ДЕЙСТВУЮЩАЯ.
+        Белок выведен из калорий, поэтому спрашивается подпись калорий
+        (:func:`nutrition.services.targets_state.calories_confirmed`):
+        предложенный, но не подтверждённый ориентир — число, которое
+        человек не принимал, и «N% от ориентира» от него было бы неправдой.
         """
         from nutrition.models import NutritionProfile
+        from nutrition.services.targets_state import calories_confirmed
 
-        row = (
-            NutritionProfile.objects
-            .filter(user_id=user_id)
-            .values_list("daily_protein_g", flat=True)
-            .first()
-        )
-        return float(row or 0.0)
+        profile = NutritionProfile.objects.filter(user_id=user_id).first()
+        if not calories_confirmed(profile):
+            return 0.0
+        return float(profile.daily_protein_g or 0.0)
 
     def weekly_deficits(self, *, user_id, days: int = 7) -> WeeklyDeficits:
         """Compute trailing-N-day deficit signals for cross-domain bridge (DRF-248).
 
-        Window is ``days`` UTC calendar days ending today. Pure DB aggregation
-        — single query, indexed scan on FoodLog.(user, -logged_at).
+        Window is ``days`` UTC calendar days ending YESTERDAY. Pure DB
+        aggregation — single query, indexed scan on FoodLog.(user, -logged_at).
+
+        DRF-2215 (T-3, безопасная форма): сегодня не закрыт — утренний
+        перекус не «белка не хватает». Незакрытый день не входит ни в серию,
+        ни в среднее, ни в число наблюдённых дней.
         """
         today = datetime.now(timezone.utc).date()
-        window_start = today - timedelta(days=days - 1)
+        last_closed = today - timedelta(days=1)
+        window_start = last_closed - timedelta(days=days - 1)
         start_dt = datetime.combine(window_start, time.min, tzinfo=timezone.utc)
-        end_dt = datetime.combine(today, time.max, tzinfo=timezone.utc)
+        end_dt = datetime.combine(last_closed, time.max, tzinfo=timezone.utc)
 
         per_day = (
             FoodLog.objects
@@ -296,10 +305,11 @@ class NutritionSummaryService:
         }
         avg_pct = sum(protein_pcts.values()) / len(protein_pcts)
 
-        # Streak: walk backward from today; break on first day that is
-        # either missing (no logs that day) or above threshold.
+        # Streak: walk backward from the last CLOSED day (DRF-2215); break on
+        # first day that is either missing (no logs that day) or above
+        # threshold.
         streak = 0
-        cursor = today
+        cursor = last_closed
         while cursor >= window_start:
             pct = protein_pcts.get(cursor)
             if pct is None or pct >= threshold_pct:
