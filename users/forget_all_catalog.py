@@ -1,9 +1,18 @@
 """DRF-2214 — «забудь всё» в каталоге стирает то, что запомнено о человеке.
 
-До этого листа оба пути «забудь всё» (бот — ``internal_personal_context_api``,
-приложение — ``personal_context_views``) звали только
+До этого листа все пути «забудь всё» звали только
 :func:`users.personal_context_erasure.erase_personal_context` — одну строку
-``UserPersonalContext``. Цель с дословным ``goal_text``, анкета цели со
+``UserPersonalContext``. Пути три, и зовут эту функцию все:
+
+- **бот** — C5.2 ``users.personal_data_api.InternalPersonalDataDeleteView``
+  (ai-bot-platform ``apps/identity/services/personal_context.py`` — «The ONE
+  erase verb»), по каждой личности субъекта; его же зовут задание повтора
+  DRF-1950, отзыв согласия на хранение, удаление аккаунта и мини-апп;
+- **приложение** — ``users.personal_context_views``;
+- ``users.internal_personal_context_api`` (``DELETE …/personal-context/``) —
+  живой эндпоинт, но бот его НЕ зовёт. #526 ошибочно назвал его путём бота и
+  правил только его и приложение; настоящий путь бота закрыт следующим PR.
+ Цель с дословным ``goal_text``, анкета цели со
 свободными ответами, план и wellness вокруг него, профиль питания с весом,
 ростом и ``health_flags`` оставались лежать. Удаление аккаунта (D3,
 :func:`users.deletion_executor._erase_catalog`) всё это стирает; «забудь всё»
