@@ -9,7 +9,7 @@ from django.urls import path
 
 from users.internal_salon_admin_api import InternalSalonAdminLinkView
 
-from .internal_api import InternalEnsureTenantView, InternalSoloWorkspaceView
+from .internal_api import InternalEnsureTenantView, InternalSoloWorkspaceView, InternalTenantKindView
 
 urlpatterns = [
     path("", InternalEnsureTenantView.as_view(), name="internal-tenants-ensure"),
@@ -18,6 +18,12 @@ urlpatterns = [
         "solo-workspaces/",
         InternalSoloWorkspaceView.as_view(),
         name="internal-solo-workspace-provision",
+    ),
+    # DRF-2254: вид тенанта — только чтение, под общим внутренним токеном бота.
+    path(
+        "<uuid:tenant_id>/kind/",
+        InternalTenantKindView.as_view(),
+        name="internal-tenant-kind",
     ),
     # DRF-2085 (OWNER RULING 18.09, вариант А): свежий администратор
     # салона + TUR + связь с MAX-личностью — под СВОИМ credential

@@ -216,6 +216,8 @@ class ErrorCode(str, Enum):
     # другим названием. Не общий CONFLICT: оператору нужно имя занявшего,
     # а боту — отличить «опечатка в названии» от «Ayla недоступна».
     TENANT_SLUG_TAKEN = "TENANT_SLUG_TAKEN"
+    # DRF-2254 — чтение вида тенанта ботом: активного тенанта с этим UUID нет.
+    TENANT_NOT_FOUND = "TENANT_NOT_FOUND"
     # DRF-1828 — provisioning solo-workspace отказал: slug/UUID занят
     # другим тенантом или claim заведён под другим workspace. Причина —
     # в details.reason машинным именем; ничего не создано.
