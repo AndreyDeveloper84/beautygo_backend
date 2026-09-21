@@ -34,12 +34,19 @@ D3 — удаление аккаунта: он обезличивает запи
 остаются указывать на стёртые строки. Не падает и сам UUID — не персональные
 данные, но это расхождение с D3; закрывается в PR-3 вместе с рекомендациями.
 
-# Дневник — не здесь
+# Дневник — по слову владельца (CURRENT_DECISIONS §66)
 
-``FoodLog``, ``WaterEntry``, ``SavedMeal``, ``FoodScan`` с фото — вопрос к
-владельцу: по букве текста они тоже уходят, но человек вносил их сам и может не
-ждать, что пропадут вместе с «разговорами». Добавляются отдельным коммитом по
-ответу.
+«а — стирать дневник вместе со всем». ``FoodLog``, ``FoodScan`` с фото,
+``WaterEntry`` и ``SavedMeal`` (с мягко удалёнными), и соседи из того же шага D3:
+``DeletedFoodLog`` (снимок на окно восстановления — иначе «восстановить» вернёт
+стёртое), ``WaterLog`` (старый дневник воды), ``ProfileIdempotencyKey``
+(суточный кэш ответа с профилем питания), ``CrossDomainShownRule`` (история
+показанных подсказок). Шаг — строка в строку шаг 2 D3.
+
+Фото сканера снимаются с носителя РАНЬШЕ строк, внутри транзакции, — как у D3.
+Откат оставляет строку без файла: повтор найдёт её и дочистит (отсутствующий
+файл — не ошибка). Файл без строки — а его дало бы удаление после коммита,
+упавшее уже после ответа «стёрто», — не нашёл бы никто.
 
 # Что вызывающий обязан
 
@@ -62,10 +69,21 @@ def erase_remembered_catalog(user, *, initiator: str) -> dict[str, int]:
     выводятся нигде (AMD-010: аудит без персональных данных).
     """
     from goals.models import ClientGoal, GoalAnketaRun
-    from nutrition.models import NutritionProfile
+    from nutrition.models import (
+        CrossDomainShownRule,
+        DeletedFoodLog,
+        FoodLog,
+        FoodScan,
+        NutritionProfile,
+        ProfileIdempotencyKey,
+        SavedMeal,
+        WaterEntry,
+        WaterLog,
+    )
     from nutrition.services.personal_calculation_withdrawal import (
         erase_personal_calculation_inputs,
     )
+    from users.deletion_executor import _delete_file
     from wellness.models import (
         DesiredOutcome,
         PersonalPlan,
@@ -100,6 +118,21 @@ def erase_remembered_catalog(user, *, initiator: str) -> dict[str, int]:
     #    своим удалением, затем сама строка.
     erase_personal_calculation_inputs(user)
     _delete("nutrition.NutritionProfile", NutritionProfile.objects.filter(user=user))
+
+    # 3. Дневник (§66) — шаг 2 D3: файлы сканов раньше строк (см. докстринг
+    #    модуля), затем строки; избранные блюда — вместе с мягко удалёнными.
+    files_deleted = 0
+    for scan in FoodScan.objects.filter(user=user).only("id", "image"):
+        files_deleted += _delete_file(scan.image)
+    _delete("nutrition.FoodScan", FoodScan.objects.filter(user=user))
+    _delete("nutrition.FoodLog", FoodLog.objects.filter(user=user))
+    _delete("nutrition.DeletedFoodLog", DeletedFoodLog.objects.filter(user=user))
+    _delete("nutrition.WaterEntry", WaterEntry.objects.filter(user=user))
+    _delete("nutrition.WaterLog", WaterLog.objects.filter(user=user))
+    _delete("nutrition.CrossDomainShownRule", CrossDomainShownRule.objects.filter(user=user))
+    _delete("nutrition.ProfileIdempotencyKey", ProfileIdempotencyKey.objects.filter(user=user))
+    _delete("nutrition.SavedMeal", SavedMeal.objects.filter(user=user))
+    deleted["files"] = files_deleted
 
     logger.info(
         "forget_all.catalog.erased user=%s initiator=%s counts=%s",

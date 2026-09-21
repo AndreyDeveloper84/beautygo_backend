@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
+from django.db import transaction
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers
@@ -49,6 +50,7 @@ from tenants.models import Tenant
 from users.models import Profile, SpecialistPortfolio, SpecialistProfile, User, UserPersonalContext
 from privacy_audit.mixins import AuditedPersonalDataAccess
 from privacy_audit.models import PersonalDataAccessLog
+from users.forget_all_catalog import erase_remembered_catalog
 from users.permissions import IsInternalBearerForSubject
 from users.personal_context_erasure import (
     context_row_state,
@@ -332,15 +334,26 @@ class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
         # DRF-1038: the account always; a linked proxy only when it holds a
         # context row — an erasure never CREATES a tombstone (and an audit
         # event) for an identity that had nothing.
+        #
+        # DRF-2214 — это настоящий путь «забудь всё» бота (ai-bot-platform
+        # ``apps/identity/services/personal_context.py`` — «The ONE erase verb»)
+        # и задания повтора DRF-1950; его же зовут отзыв согласия на хранение,
+        # удаление аккаунта и удаление из мини-аппа. Поэтому здесь же — всё,
+        # что каталог запомнил вне профиля (цели, план, профиль питания,
+        # дневник с фото), по КАЖДОЙ личности субъекта, как D3: у прокси
+        # может не быть строки профиля, но быть дневник. Одна транзакция —
+        # стёрто всё или ничего. Форма ответа не меняется (PR-3).
         scope: list[str] = []
-        for identity in subject_users(user):
-            if identity is not user and not UserPersonalContext.objects.filter(
-                user=identity
-            ).exists():
-                continue
-            for item in erase_personal_context(identity, initiator="internal_api"):
-                if item not in scope:
-                    scope.append(item)
+        with transaction.atomic():
+            for identity in subject_users(user):
+                erase_remembered_catalog(identity, initiator="internal_api")
+                if identity is not user and not UserPersonalContext.objects.filter(
+                    user=identity
+                ).exists():
+                    continue
+                for item in erase_personal_context(identity, initiator="internal_api"):
+                    if item not in scope:
+                        scope.append(item)
         logger.info(
             "internal.personal_data.deleted user_id=%s scope=%s request_id=%s",
             user_id, scope, getattr(request, "request_id", "-"),
