@@ -143,9 +143,29 @@ def _budget_refusal(user) -> Response | None:
 def _record_provider_cost(scan: FoodScan, result) -> None:
     """DRF-2145: токены как пришли, стоимость — по ценам настроек или null."""
     usage = dict(getattr(result, "usage", None) or {})
+    _record_usage(scan, usage)
+
+
+def _record_usage(scan: FoodScan, usage: dict) -> None:
     scan.provider_usage = usage
     scan.provider_cost_usd = food_scan_budget.cost_usd(usage)
     food_scan_budget.record_cost(scan.provider_cost_usd)
+
+
+def _settle_not_recognized(scan: FoodScan, exc: AllProvidersFailedError, user) -> None:
+    """DRF-2218, §63: «не еда» — вернуть ЛИЧНУЮ попытку дня; вызов(ы)
+    провайдера оплачены — их стоимость записывается (``partial`` каждого
+    провайдера, ответившего «низкая уверенность»), общий потолок не
+    возвращается. Зовётся только при ``is_low_confidence_only``.
+    """
+    summed: dict[str, int] = {}
+    for err in (exc.primary_err, exc.fallback_err):
+        usage = getattr(getattr(err, "partial", None), "usage", None) or {}
+        for name, value in usage.items():
+            if isinstance(value, int) and not isinstance(value, bool):
+                summed[name] = summed.get(name, 0) + value
+    _record_usage(scan, summed)
+    food_scan_budget.refund_personal(user)
 
 
 class FoodScanView(APIView):
@@ -221,6 +241,7 @@ class FoodScanView(APIView):
                 error_code = "FOOD_NOT_RECOGNIZED"
                 http_status = status.HTTP_400_BAD_REQUEST
                 msg = "Не удалось распознать блюдо на фото"
+                _settle_not_recognized(scan, exc, request.user)
             else:
                 error_code = "FOOD_API_UNAVAILABLE"
                 http_status = status.HTTP_503_SERVICE_UNAVAILABLE
@@ -352,6 +373,7 @@ class InternalFoodScanView(APIView):
                 error_code = "FOOD_NOT_RECOGNIZED"
                 http_status = status.HTTP_400_BAD_REQUEST
                 msg = "Не удалось распознать блюдо на фото"
+                _settle_not_recognized(scan, exc, user)
             else:
                 error_code = "FOOD_API_UNAVAILABLE"
                 http_status = status.HTTP_503_SERVICE_UNAVAILABLE

@@ -41,6 +41,11 @@
   идентификаторов людей.
 * **Текстовый путь** (``food-estimate``) бюджетом не ограничивается — он и
   провайдера не зовёт.
+* **«Не еда» возвращает ЛИЧНУЮ попытку** (DRF-2218, §63): на заведомо
+  неподходящем фото человек лимит дня не тратит — :func:`refund_personal`.
+  Общий потолок и стоимость — нет: вызов провайдера оплачен, денежный учёт
+  дня не стирается. Сбой провайдера (503) попытку не возвращает — возврат
+  только когда все провайдеры ответили «низкая уверенность».
 """
 
 from __future__ import annotations
@@ -145,6 +150,23 @@ def _decr(key: str) -> None:
         cache.decr(key)
     except Exception:  # noqa: BLE001 — откат счётчика — лучшее усилие
         logger.warning("nutrition.food_scan.budget_unavailable op=decr")
+
+
+def refund_personal(user: Any) -> None:
+    """DRF-2218: вернуть ЛИЧНУЮ попытку дня — «не еда» (все провайдеры ответили,
+    уверенность низкая). Общий счётчик не трогается: за вызов заплачено.
+
+    Ниже нуля не уходит: ключа нет (полночь, вытеснение) или уже ноль — ничего
+    не делаем. Лучшее усилие: потеря кэша — строка в лог, не исключение.
+    """
+    key = _KEY_USER.format(user_id=getattr(user, "pk", user), day=_day())
+    try:
+        current = cache.get(key)
+        if not isinstance(current, int) or current <= 0:
+            return
+        cache.decr(key)
+    except Exception as exc:  # noqa: BLE001 — возврат не важнее ответа человеку
+        logger.warning("nutrition.food_scan.budget_unavailable op=refund err=%s", type(exc).__name__)
 
 
 def reserve(user: Any) -> None:
@@ -383,6 +405,7 @@ __all__ = [
     "DailyLimitExceeded",
     "cost_usd",
     "record_cost",
+    "refund_personal",
     "reserve",
     "seconds_until_midnight",
 ]
