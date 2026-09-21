@@ -12,8 +12,9 @@
 только потом — транзакция со строками. Порядок «файл раньше строки» сохранён.
 
 * b1 — бюджет: 500 сканов — ОДИН вызов ``delete_objects``, ни одного ``exists``;
-* b2 — файлы снимаются вне транзакции (блокировка профиля ещё не взята) и
-  раньше строк: в момент вызова хранилища строки сканов на месте;
+* b2 — файлы снимаются до транзакции стирания и до любой блокировки строк
+  (открыта только транзакция журнала доступа, §96) и раньше строк: в момент
+  вызова хранилища строки сканов на месте;
 * b3 — стойкий сбой хранилища (``Errors`` в ответе пачки) → 500 от
   ``IncompleteErasure``, в базе не стёрто ничего; повтор бота (DRF-1950)
   повторит всё;
@@ -28,8 +29,9 @@ from types import SimpleNamespace
 
 import pytest
 from django.db import connection
+from django.test.utils import CaptureQueriesContext
 
-from nutrition.models import FoodScan
+from nutrition.models import FoodScan, NutritionProfile
 from users.tests.test_forget_all_diary_2214 import _bot_url
 from users.tests.test_memory_erasure_matrix import (  # noqa: F401 — фикстуры по имени
     _internal,
@@ -47,7 +49,11 @@ class _FakeBucket:
 
     def delete_objects(self, Delete: dict) -> dict:  # noqa: N803 — имя параметра boto3
         self.owner.calls.append(("delete_objects", len(Delete["Objects"])))
-        self.owner.in_atomic.append(connection.in_atomic_block)
+        # Глубина вложенности транзакций: тест django_db сам идёт внутри
+        # atomic(), поэтому признак in_atomic_block здесь всегда True.
+        self.owner.atomic_depth.append(len(connection.atomic_blocks))
+        if self.owner.queries is not None:
+            self.owner.queries_at_call.append(len(self.owner.queries.captured_queries))
         self.owner.rows_at_call.append(FoodScan.objects.count())
         if self.errors:
             return {"Errors": self.errors}
@@ -62,7 +68,9 @@ class _FakeS3:
     def __init__(self, names: set[str], *, errors: list[dict] | None = None) -> None:
         self.files = set(names)
         self.calls: list[tuple] = []
-        self.in_atomic: list[bool] = []
+        self.atomic_depth: list[int] = []
+        self.queries = None  # CaptureQueriesContext, если тест следит за блокировками
+        self.queries_at_call: list[int] = []
         self.rows_at_call: list[int] = []
         self.bucket = _FakeBucket(self, errors)
 
@@ -112,9 +120,26 @@ class TestB1Budget:
 class TestB2OutsideTheTransactionAndBeforeRows:
     def test_files_go_first_and_outside_atomic(self, user, fake_storage) -> None:  # noqa: F811
         names = _seed_scans(user, 3)
+        # Профиль питания — строка, которую стирание блокирует (DRF-2256).
+        NutritionProfile.objects.create(
+            user=user, weight_kg=60, height_cm=165, age=30, gender="female",
+            activity_coefficient=1.6, goal="lose", daily_kcal=1800,
+        )
         storage = fake_storage(_FakeS3(set(names)))
-        _internal().delete(_bot_url(user))
-        assert storage.in_atomic == [False]
+        outer = len(connection.atomic_blocks)  # транзакция самого теста
+        with CaptureQueriesContext(connection) as queries:
+            storage.queries = queries
+            assert _internal().delete(_bot_url(user)).status_code == 200
+        # Открыта ровно одна транзакция — журнала доступа
+        # (``privacy_audit.mixins``: запись журнала и стирание — одна
+        # транзакция, §96); своя транзакция вью ещё не открыта.
+        assert storage.atomic_depth == [outer + 1]
+        # Ни одной блокировки строк до пачки; после — есть (профиль питания),
+        # иначе проверка «до» была бы пустой.
+        (at_call,) = storage.queries_at_call
+        sql = [q["sql"].upper() for q in queries.captured_queries]
+        assert any("FOR UPDATE" in q for q in sql[at_call:])
+        assert not any("FOR UPDATE" in q for q in sql[:at_call])
         assert storage.rows_at_call == [3]  # строки ещё на месте — файл раньше строки
 
 
