@@ -11,8 +11,11 @@ Spec: Notion API Spec v2.0 §FOOD SCANNER+NUTRITION
 Slice 3c implements the food side of this. Two stubs are intentional
 and call out the next slices:
 
-- ``water_ml`` / ``water_goal_ml``: stubs (0 / settings default 2000ml)
-  until Slice 4 ships ``WaterLog`` and the +water/-water endpoints.
+- ``water_ml``: DRF-2217 — из ``WaterEntry`` (то, что пишут бот и Mini App),
+  в мл самих записей, за сутки человека (см. ``water_entry_service.
+  water_total_ml``). До DRF-2217 читался ``WaterLog`` кнопочного трекера
+  Slice 4, куда никто уже не пишет, — отсюда «0 мл» в сводке и комментарии.
+  ``water_goal_ml`` — отсутствие: методики ориентира нет (§85).
 - ``vitamin_deficits``: empty dict until Slice 3a' brings OFF/USDA
   vitamin data into the seed lookup.
 
@@ -33,7 +36,6 @@ from django.db.models.functions import TruncDate
 
 from nutrition.models import FoodLog, NutritionProfile
 from nutrition.services.targets_state import calories_confirmed
-from nutrition.services.water_service import WaterService
 
 
 @dataclass(frozen=True)
@@ -106,9 +108,6 @@ class ProgressiveSummary:
 class NutritionSummaryService:
     """Aggregates FoodLog rows for one user on one calendar day."""
 
-    def __init__(self, water_service: WaterService | None = None) -> None:
-        self._water_service = water_service or WaterService()
-
     def summary(
         self, *, user_id: int, day: date, with_comment: bool = False,
     ) -> NutritionSummary:
@@ -141,8 +140,11 @@ class NutritionSummaryService:
             carbs_g=_round1(agg["carbs_g"]),
         )
 
-        # Slice 4: water aggregate now lives — drops the stub.
-        water = self._water_service.aggregate_for_day(user_id, day)
+        # DRF-2217 — вода из ``WaterEntry`` за те же сутки, что еда выше.
+        from nutrition.services.water_entry_service import water_total_ml
+        from nutrition.services.water_service import WaterAggregate
+
+        water = WaterAggregate(water_ml=water_total_ml(user_id, start, end))
         entries = list(qs)
         # Ориентира по калориям НЕТ, и наружу это уезжает отсутствием
         # ключа (``None`` → сериализатор выкидывает поле).
