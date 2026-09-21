@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 
+from django.db import transaction
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
@@ -43,6 +44,7 @@ from users.personal_context_events import (
     emit_question_answered,
     emit_question_skipped,
 )
+from users.forget_all_catalog import erase_remembered_catalog
 from users.personal_context_erasure import (
     erase_personal_context,
     mark_field_erased,
@@ -190,7 +192,13 @@ class UserPersonalContextView(APIView):
         # fields from booking history. The shared verb leaves a tombstone
         # instead — same empty context on the wire, but inference now
         # refuses to write into it.
-        erase_personal_context(request.user, initiator="app")
+        #
+        # DRF-2214 — и то, что каталог запомнил вне профиля: цели, анкету
+        # цели, план, профиль питания. В одной транзакции с профилем — либо
+        # стёрто всё, либо ничего.
+        with transaction.atomic():
+            erase_remembered_catalog(request.user, initiator="app")
+            erase_personal_context(request.user, initiator="app")
         logger.info(
             "personal_context.wiped user=%s reason=152-fz",
             request.user.pk,
