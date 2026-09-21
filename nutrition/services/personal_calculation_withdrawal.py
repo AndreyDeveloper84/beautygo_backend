@@ -52,6 +52,7 @@ from nutrition.management.commands.purge_unconsented_body_parameters import (
     _strip_purged,
 )
 from nutrition.models import NutritionProfile
+from nutrition.services.targets_state import KIND_SOURCE_FIELD, KIND_STAMP_FIELD
 
 #: Шесть параметров §2 = четыре столбца §144 + активность и цель.
 WITHDRAWN_FIELDS: tuple[str, ...] = (*PURGED_FIELDS, "activity_coefficient", "goal")
@@ -95,6 +96,18 @@ def erase_personal_calculation_inputs(user) -> WithdrawalOutcome:
         p.targets_method_versions = {}
         p.targets_input_snapshot = {}
         p.targets_computed_at = None
+        # DRF-2192: предложение рядом несёт снимок входов — вес, рост,
+        # возраст, пол. Отзыв обязан стереть и его, иначе параметры остались
+        # бы в строке, ушли наружу в ``pending_proposal`` и вернулись бы в
+        # действующее первым же подтверждением.
+        p.pending_proposal = None
+        # Подписи по видам — тоже: иначе после отзыва калории читались бы
+        # «действующим расчётом» при ``daily_kcal = NULL``, и следующий
+        # расчёт ушёл бы в предложение рядом вместо места.
+        for field in KIND_SOURCE_FIELD.values():
+            setattr(p, field, NutritionProfile.TargetsSource.NONE)
+        for field in KIND_STAMP_FIELD.values():
+            setattr(p, field, None)
 
         # 2. Входы.
         for f in WITHDRAWN_FIELDS:
@@ -102,7 +115,11 @@ def erase_personal_calculation_inputs(user) -> WithdrawalOutcome:
         p.targets_input_snapshot = _strip_purged(p.targets_input_snapshot)
 
         p.save(
-            update_fields=[*TARGET_FIELDS, *PROVENANCE_FIELDS, *WITHDRAWN_FIELDS, "updated_at"]
+            update_fields=[
+                *TARGET_FIELDS, *PROVENANCE_FIELDS, *WITHDRAWN_FIELDS,
+                *KIND_SOURCE_FIELD.values(), *KIND_STAMP_FIELD.values(),
+                "updated_at",
+            ]
         )
 
         # 3. Полнота — по перечитанной строке, внутри транзакции.
@@ -110,6 +127,8 @@ def erase_personal_calculation_inputs(user) -> WithdrawalOutcome:
         residual_targets = [f for f in TARGET_FIELDS if getattr(p, f) is not None]
         residual_inputs = [f for f in WITHDRAWN_FIELDS if getattr(p, f) != _EMPTY_BY_FIELD[f]]
         left_in_snapshot = _names_left_in(p.targets_input_snapshot)
+        if p.pending_proposal is not None:
+            left_in_snapshot = [*left_in_snapshot, "pending_proposal"]
         if residual_targets or residual_inputs or left_in_snapshot:
             raise IncompleteErasure(
                 f"targets={residual_targets} inputs={residual_inputs} snapshot={left_in_snapshot}"

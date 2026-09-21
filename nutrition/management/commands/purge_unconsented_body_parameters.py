@@ -331,9 +331,13 @@ class Command(BaseCommand):
                 p.targets_input_snapshot = _strip_purged(
                     p.targets_input_snapshot
                 )
+                # DRF-2192: предложение рядом несёт те же параметры в своём
+                # снимке; входы стёрты — предложение от них тоже снимается.
+                p.pending_proposal = None
                 p.save(
                     update_fields=[
-                        *PURGED_FIELDS, "targets_input_snapshot", "updated_at",
+                        *PURGED_FIELDS, "targets_input_snapshot",
+                        "pending_proposal", "updated_at",
                     ]
                 )
 

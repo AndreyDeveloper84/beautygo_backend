@@ -31,9 +31,12 @@ from nutrition.services.nutrition_profile_service import (
 from nutrition.services.outbox_service import enqueue_profile_updated
 from nutrition.services.targets_state import (
     KIND_CALORIES,
-    KIND_FLUIDS,
-    kind_confirmed,
+    KIND_FIELDS,
+    KIND_SOURCE_FIELD,
+    KIND_STAMP_FIELD,
+    effective_kind_source,
     kind_source,
+    overall_source,
 )
 from nutrition.services.targets_recompute_gate import (
     RECOMPUTE_REFUSED_NO_CONSENT,
@@ -117,7 +120,7 @@ def upsert_profile(
         if recompute_permitted(profile, payload):
             _recompute_and_persist(profile)
         else:
-            _refuse_recompute(profile)
+            _refuse_recompute(profile, payload)
         _flip_lifecycle_markers(profile, payload)
         profile.save()
 
@@ -167,31 +170,16 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
         profile.disclaimer_acked = payload["disclaimer_acked"]
 
 
-#: Поля ориентира по виду (DRF-1929). Калории — всё, что выведено из
-#: расчёта энергии: макросы, ``bmr`` и RDA; жидкость — вода.
-KIND_FIELDS: dict[str, tuple[str, ...]] = {
-    KIND_CALORIES: (
-        "bmr", "daily_kcal", "daily_protein_g", "daily_fat_g", "daily_carbs_g",
-        "daily_vitamin_d_iu", "daily_vitamin_b12_mcg", "daily_vitamin_c_mg",
-        "daily_iron_mg", "daily_calcium_mg", "daily_magnesium_mg",
-        "daily_omega3_g", "daily_fiber_g",
-    ),
-    KIND_FLUIDS: ("daily_water_ml",),
-}
-
-#: Вид → (поле подписи, поле подтверждения).
-_KIND_STAMPS: dict[str, tuple[str, str]] = {
-    KIND_CALORIES: ("calories_source", "calories_confirmed_at"),
-    KIND_FLUIDS: ("fluids_source", "fluids_confirmed_at"),
-}
-
-
-def _kind_is_active(profile: NutritionProfile, kind: str) -> bool:
-    """Действует ли вид сейчас — тот же предикат, что у читателей."""
-    return kind_confirmed(profile, kind)
+#: Входы расчёта: запрос, трогающий любой из них, делает лежащее рядом
+#: предложение устаревшим (оно посчитано от прежних).
+_CALCULATION_INPUTS: frozenset[str] = frozenset({
+    "gender", "age", "height_cm", "weight_kg", "weight_range",
+    "activity_coefficient", "goal", "pace", "health_flags", "_skipped_fields",
+})
 
 
 def _recompute_and_persist(profile: NutritionProfile) -> None:
+    Source = NutritionProfile.TargetsSource
     norms = compute_norms(ProfileInputs(
         gender=profile.gender or "female",
         age=profile.age,
@@ -202,77 +190,97 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
         pace=profile.pace or "moderate",
         health_flags=profile.health_flags or {},
     ))
-    # DRF-1339: недостающий вход отменяет расчёт, и запись об этом делает
-    # сам ``compute_norms`` (``insufficient_inputs``). Аудит пишется всегда:
-    # он про этот запрос, а не про то, что стало действующим.
-    profile.last_overrides_applied = list(norms.overrides_applied)
 
     # ── Действующее не заменяется (DRF-2192, DRF-2193; §63, 21.09.2026) ──
     #
-    # До этой правки пересчёт писал новые числа ПОВЕРХ действующих,
-    # ставил ``ayla_proposed`` всем видам и стирал ``confirmed_at``: между
-    # «вес изменился» и «человек подтвердил» у него не было ориентира
-    # вовсе, а ручная норма пропадала от простого «мой вес 61».
-    #
-    # Теперь решение принимается ПО ВИДАМ (DRF-1929):
+    # До этой правки пересчёт писал новые числа ПОВЕРХ действующих, ставил
+    # ``ayla_proposed`` всем видам и стирал ``confirmed_at``: между «вес
+    # изменился» и «человек подтвердил» ориентира не было вовсе, а ручная
+    # норма пропадала от простого «мой вес 61». Решение — ПО ВИДАМ
+    # (DRF-1929):
     #
     # * вид НЕ действует (``none`` / ``ayla_proposed`` / ``unknown_legacy``)
-    #   — пересчёт пишется на место, как раньше: предложение до
-    #   подтверждения (§5.1), а при отказе — «ориентира нет»;
-    # * вид действует по расчёту (``ayla_calculated``) — действующие числа,
-    #   подпись и ``confirmed_at`` остаются; новое предложение ложится
-    #   рядом, в ``pending_proposal``, и ``confirm_targets`` его забирает;
-    # * вид задан рукой (``user_entered``) — не трогается и предложения
-    #   рядом не получает (вариант (i) GO): предложить расчёт поверх
-    #   ориентира, который человек назвал сам — часто со слов врача, —
-    #   значило бы дать непрошеный совет, от которого ручной режим и
-    #   существует. Вес при этом записан — это делает ``_apply_patch``.
-    kept = [k for k in KIND_FIELDS if _kind_is_active(profile, k)]
-    in_place = [k for k in KIND_FIELDS if k not in kept]
-    stash = [
-        k for k in kept
-        if (kind_source(profile, k) or profile.targets_source)
-        == NutritionProfile.TargetsSource.AYLA_CALCULATED
+    #   — пересчёт ложится на место, как раньше: предложение до
+    #   подтверждения (§5.1) или «ориентира нет» при отказе;
+    # * вид действует по расчёту (``ayla_calculated``) и расчёт СОСТОЯЛСЯ —
+    #   числа, подпись и ``confirmed_at`` остаются, новое предложение
+    #   ложится в ``pending_proposal``; ``confirm_targets`` его забирает;
+    # * вид задан рукой (``user_entered``) — не трогается никогда и
+    #   предложения рядом не получает (вариант (i) GO): предлагать расчёт
+    #   поверх ориентира, который человек назвал сам — часто со слов
+    #   врача, — непрошеный совет, от которого ручной режим и существует.
+    #
+    # ОТКАЗ расчёта — другое дело. Он значит, что методика больше не стоит
+    # за числом: беременность, кормление, РПП, несовершеннолетие, жёсткий
+    # пол калорий, нехватка входа. Расчётный вид при отказе гаснет, как и
+    # до этой правки: §63 говорит о новом ВЕСЕ, а не о том, чтобы держать
+    # дефицит для человека, только что назвавшего беременность. Ручной вид
+    # — число человека, а не расчёт, — остаётся и здесь.
+    manual_kept = [
+        k for k in KIND_FIELDS if effective_kind_source(profile, k) == Source.USER_ENTERED
     ]
+    calculated_kept = (
+        [k for k in KIND_FIELDS if effective_kind_source(profile, k) == Source.AYLA_CALCULATED]
+        if norms.computed
+        else []
+    )
+    kept = manual_kept + calculated_kept
+    in_place = [k for k in KIND_FIELDS if k not in kept]
 
     for kind in in_place:
-        source_field, stamp_field = _KIND_STAMPS[kind]
         for name in KIND_FIELDS[kind]:
             setattr(profile, name, getattr(norms, name))
         setattr(
             profile,
-            source_field,
-            NutritionProfile.TargetsSource.AYLA_PROPOSED
-            if norms.computed
-            else NutritionProfile.TargetsSource.NONE,
+            KIND_SOURCE_FIELD[kind],
+            Source.AYLA_PROPOSED if norms.computed else Source.NONE,
         )
-        setattr(profile, stamp_field, None)
+        setattr(profile, KIND_STAMP_FIELD[kind], None)
 
-    if norms.computed and stash:
+    if calculated_kept:
+        # Всё, что человек увидит и подтвердит, лежит в предложении целиком:
+        # числа, снимок, версии, цель и темп расчёта и его переопределения.
         profile.pending_proposal = {
-            "kinds": list(stash),
+            "kinds": list(calculated_kept),
             "values": {
-                name: getattr(norms, name) for kind in stash for name in KIND_FIELDS[kind]
+                name: getattr(norms, name)
+                for kind in calculated_kept
+                for name in KIND_FIELDS[kind]
             },
             "input_snapshot": dict(norms.input_snapshot),
             "method_versions": dict(norms.method_versions),
-            "computed_at": datetime.now(dt_tz.utc).isoformat(),
+            "computed_at": _strip_microseconds(datetime.now(dt_tz.utc)),
             "goal": norms.goal,
             "pace": norms.pace,
             "goal_overridden_by": norms.goal_overridden_by,
+            "overrides_applied": list(norms.overrides_applied),
         }
     else:
-        # Прежнее предложение относилось к прежним входам; нового рядом нет
-        # (всё легло на место, или расчёт отказал) — старое не держим.
+        # Прежнее предложение посчитано от прежних входов, а нового рядом
+        # нет (всё легло на место, расчёт отказал или вид ручной) — старое
+        # не держим: подтверждение применило бы устаревшее.
         profile.pending_proposal = None
+
+    # ── Аудит ────────────────────────────────────────────────────────────
+    #
+    # Переопределения — про числа, которые легли на место. Если на место
+    # не легло ничего, аудит действующего не трогается: переопределения
+    # отложенного расчёта едут в предложении. Запись ручного писателя
+    # (``user_entered`` с предупреждениями) у ручного вида сохраняется —
+    # его обещание «прежние записи не стираются» держится и здесь.
+    if in_place:
+        manual_audit = [
+            e for e in (profile.last_overrides_applied or [])
+            if manual_kept and isinstance(e, dict) and e.get("reason") == "user_entered"
+        ]
+        profile.last_overrides_applied = manual_audit + list(norms.overrides_applied)
 
     # ── Происхождение расчёта (DRF-1623 N-d) ─────────────────────────────
     #
-    # Снимок входов, версии методик, цель и темп описывают расчёт
-    # КАЛОРИЙ — у справочной воды методики нет. Поэтому они пишутся тогда,
-    # когда калории легли на место, и остаются как лежат, когда калории
-    # действуют (их новые значения ждут в ``pending_proposal``).
-    # Происхождение пишется вместе со значением: ориентир с новым числом и
+    # Снимок входов, версии, цель и темп описывают расчёт КАЛОРИЙ — у
+    # справочной воды методики нет. Пишутся, когда калории легли на место;
+    # когда калории действуют, остаются как лежат (новые ждут в
+    # предложении). Происхождение идёт вместе со значением: новое число со
     # старым происхождением выглядит объяснённым. Отказ не выдаётся за
     # расчёт — снимок пуст, версий нет.
     if KIND_CALORIES in in_place:
@@ -288,18 +296,15 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
             profile.targets_input_snapshot = {}
             profile.targets_computed_at = None
 
-    if not kept:
-        # Ничего не действовало — общая подпись, как раньше: предложение
-        # до подтверждения (§5.1) или «ориентира нет».
-        profile.targets_source = (
-            NutritionProfile.TargetsSource.AYLA_PROPOSED
-            if norms.computed
-            else NutritionProfile.TargetsSource.NONE
-        )
+    # Общая подпись — выводом из видов, а не «как лежала»: иначе строка с
+    # ручной водой и калориями-предложением читалась бы ботом (он читает
+    # общую подпись до перехода на ``by_kind``) как действующая целиком.
+    profile.targets_source = overall_source(profile)
+    if profile.targets_source not in (Source.AYLA_CALCULATED, Source.USER_ENTERED):
         profile.targets_confirmed_at = None
 
 
-def _refuse_recompute(profile: NutritionProfile) -> None:
+def _refuse_recompute(profile: NutritionProfile, payload: dict[str, Any]) -> None:
     """Пересчёта не было — и это ВИДНО, а не подразумевается.
 
     Ориентиры, происхождение, снимок и версии остаются как лежат:
@@ -325,6 +330,12 @@ def _refuse_recompute(profile: NutritionProfile) -> None:
     ]
     audit.append(refusal_record(profile))
     profile.last_overrides_applied = audit
+    # DRF-2192: запрос тронул вход расчёта, а пересчёта не было — лежащее
+    # рядом предложение посчитано от прежних входов. Держать его значило
+    # бы, что подтверждение вернёт старые цель и темп поверх новых или
+    # применит расчёт к человеку, только что назвавшему беременность.
+    if profile.pending_proposal and _CALCULATION_INPUTS & set(payload):
+        profile.pending_proposal = None
     logger.warning(
         "nutrition.targets.recompute_refused user=%s source=%s",
         profile.user_id,
@@ -544,10 +555,13 @@ def _serialize(
 
 
 def _pending_block(profile: NutritionProfile) -> dict[str, Any] | None:
-    """Предложение рядом с действующим — в форме, которую покажут человеку.
+    """Предложение рядом с действующим — всё, что подтверждение применит.
 
-    Числа — те же имена, что в ``norms``; снимок входов — как у
+    Числа — под теми же именами, что в ``norms``; снимок входов — как у
     действующего (§5.1: «методика и использованные данные показываются»).
+    Цель, темп и переопределения — тоже: подтверждение применяет их, и
+    человек должен видеть, например, что расчёт перевёл «похудеть» в
+    «поддержание» по полу BMR, до того как это подтвердит.
     """
     pending = profile.pending_proposal
     if not pending:
@@ -559,6 +573,10 @@ def _pending_block(profile: NutritionProfile) -> dict[str, Any] | None:
         "input_snapshot": dict(pending.get("input_snapshot") or {}),
         "method_versions": dict(pending.get("method_versions") or {}),
         "computed_at": pending.get("computed_at"),
+        "goal": pending.get("goal"),
+        "pace": pending.get("pace"),
+        "goal_overridden_by": pending.get("goal_overridden_by") or None,
+        "overrides_applied": list(pending.get("overrides_applied") or []),
     }
 
 
@@ -586,7 +604,7 @@ def _strip_microseconds(value):
 
 
 class NothingToConfirm(Exception):
-    """Подтверждать нечего: ориентир не в состоянии ``ayla_proposed``.
+    """Подтверждать нечего: нет предложения ни на месте, ни рядом.
 
     Несёт текущий источник, чтобы вызывающий отличил «ещё не считали»
     (``none``) от «поставлено рукой» (``user_entered``) и от строк без
@@ -604,7 +622,9 @@ class NothingToConfirm(Exception):
 
 
 def confirm_targets(*, user, external_user_id: str) -> tuple[dict, str]:
-    """Человек подтверждает предложенный ориентир: ``ayla_proposed`` → ``ayla_calculated``.
+    """Человек подтверждает предложенный ориентир — лежащий на месте
+    (``ayla_proposed`` → ``ayla_calculated``) или рядом с действующим
+    (``pending_proposal``, DRF-2192).
 
     Возвращает ``(ответ профиля, исход)``, где исход — ``"confirmed"``
     либо ``"already_confirmed"``. Второй — на повтор подтверждения уже
@@ -612,74 +632,85 @@ def confirm_targets(*, user, external_user_id: str) -> tuple[dict, str]:
     событие — ``targets_confirmed_at`` не переписывается, иначе повтор
     выглядел бы как более позднее решение.
 
-    Подтверждается ТО, что предложено: значения не пересчитываются, снимок
-    и версия остаются теми же — человек подтверждает число, которое видел,
-    а не то, что получилось бы сейчас. Если входы изменились, пересчёт
-    уже перевёл строку обратно в ``ayla_proposed`` (см.
-    ``_recompute_and_persist``), и подтверждать нужно заново.
+    Подтверждается ТО, что предложено: значения не пересчитываются, снимок,
+    версии, цель и темп берутся из предложения — человек подтверждает
+    число, которое видел, а не то, что получилось бы сейчас. Если входы
+    изменились после предложения, пересчёт положил новое (или снял
+    устаревшее, если пересчёта не было), и подтверждать нужно заново.
 
-    ``none`` / ``unknown_legacy`` / ``user_entered`` — отказ с именем
-    (:class:`NothingToConfirm`): подтвердить можно только предложение.
+    Вид, заданный рукой (``user_entered``), не переподписывается расчётом
+    никогда. Подтверждать нечего — отказ с именем (:class:`NothingToConfirm`).
     """
+    Source = NutritionProfile.TargetsSource
+    outcome: str | None = None
     with transaction.atomic():
         profile = (
             NutritionProfile.objects.select_for_update().filter(user=user).first()
         )
         if profile is None:
-            raise NothingToConfirm(NutritionProfile.TargetsSource.NONE)
-        Source = NutritionProfile.TargetsSource
+            raise NothingToConfirm(Source.NONE)
         source = profile.targets_source
         pending = profile.pending_proposal or None
         # Виды, у которых предложение лежит НА МЕСТЕ (действующего не было).
         proposed_in_place = [
             k for k in KIND_FIELDS if kind_source(profile, k) == Source.AYLA_PROPOSED
         ]
-        if not pending and not proposed_in_place:
+        # Строка до DRF-1929: подписей по видам нет, решает общая.
+        legacy_whole = (
+            not proposed_in_place
+            and all(kind_source(profile, k) is None for k in KIND_FIELDS)
+            and source == Source.AYLA_PROPOSED
+        )
+        # Из лежащего рядом применяется только то, что всё ещё расчёт.
+        applied = [
+            k for k in (pending or {}).get("kinds", [])
+            if effective_kind_source(profile, k) == Source.AYLA_CALCULATED
+        ]
+
+        if not (applied or proposed_in_place or legacy_whole):
+            if pending:
+                # Рядом лежит то, что применить уже некуда (вид стал ручным):
+                # убираем, не выдавая уборку за подтверждение.
+                profile.pending_proposal = None
+                profile.save(update_fields=["pending_proposal", "updated_at"])
             if source == Source.AYLA_CALCULATED:
-                return _serialize(profile, external_user_id, exists=True), "already_confirmed"
-            # Строка до DRF-1929 (подписи по видам нет): решает общая.
-            if source != Source.AYLA_PROPOSED:
-                raise NothingToConfirm(source)
-
-        now = datetime.now(dt_tz.utc)
-
-        # DRF-2192: предложение, лежавшее РЯДОМ с действующим расчётом,
-        # становится действующим. Подтверждается то, что человек видел:
-        # значения, снимок и версии — из предложения, а не пересчёт заново.
-        # Вид, заданный рукой, не переподписывается расчётом никогда.
-        if pending:
-            applied = [
-                k for k in pending.get("kinds", [])
-                if (kind_source(profile, k) or source) == Source.AYLA_CALCULATED
-            ]
-            values = pending.get("values") or {}
+                outcome = "already_confirmed"
+        else:
+            now = datetime.now(dt_tz.utc)
+            values = (pending or {}).get("values") or {}
             for kind in applied:
                 for name in KIND_FIELDS[kind]:
                     setattr(profile, name, values.get(name))
-                setattr(profile, _KIND_STAMPS[kind][1], now)
+                setattr(profile, KIND_STAMP_FIELD[kind], now)
             if KIND_CALORIES in applied:
                 profile.targets_input_snapshot = dict(pending.get("input_snapshot") or {})
                 profile.targets_method_versions = dict(pending.get("method_versions") or {})
-                computed_at = pending.get("computed_at")
-                profile.targets_computed_at = (
-                    datetime.fromisoformat(computed_at) if computed_at else now
-                )
+                profile.targets_computed_at = now
                 profile.goal = pending.get("goal") or profile.goal
                 profile.pace = pending.get("pace") or profile.pace
                 profile.goal_overridden_by = pending.get("goal_overridden_by") or ""
+                profile.last_overrides_applied = list(pending.get("overrides_applied") or [])
             profile.pending_proposal = None
 
-        # DRF-1929 (F1(б)): подтверждение — по виду. Подтверждается каждый
-        # вид, стоящий на ``ayla_proposed``; вид, заданный рукой
-        # (``user_entered``), не трогается — он уже подписан человеком.
-        for kind in proposed_in_place:
-            source_field, stamp_field = _KIND_STAMPS[kind]
-            setattr(profile, source_field, Source.AYLA_CALCULATED)
-            setattr(profile, stamp_field, now)
-        # Общая подпись — ради читателей до DRF-1929: из предложения — в
-        # расчёт; ручная общая подпись остаётся ручной.
-        if source == Source.AYLA_PROPOSED:
-            profile.targets_source = Source.AYLA_CALCULATED
-        profile.targets_confirmed_at = now
-        profile.save()
+            # DRF-1929 (F1(б)): подтверждение — по виду. Вид на
+            # ``ayla_proposed`` становится расчётом; ручной не трогается.
+            for kind in proposed_in_place:
+                setattr(profile, KIND_SOURCE_FIELD[kind], Source.AYLA_CALCULATED)
+                setattr(profile, KIND_STAMP_FIELD[kind], now)
+
+            profile.targets_source = (
+                Source.AYLA_CALCULATED if legacy_whole else overall_source(profile)
+            )
+            # Общая отметка — про расчёт. У строки с ручным видом общая
+            # подпись ``user_entered``, и её отметку ставил человек сам —
+            # подтверждение расчёта её не переписывает.
+            if profile.targets_source == Source.AYLA_CALCULATED:
+                profile.targets_confirmed_at = now
+            profile.save()
+            outcome = "confirmed"
+
+    if outcome is None:
+        raise NothingToConfirm(source)
+    if outcome == "already_confirmed":
+        return _serialize(profile, external_user_id, exists=True), outcome
     return _serialize(profile, external_user_id, exists=True), "confirmed"

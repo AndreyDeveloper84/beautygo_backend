@@ -113,6 +113,9 @@ PROVENANCE_FIELDS: tuple[str, ...] = (
     "targets_method_versions",
     "targets_input_snapshot",
     "targets_computed_at",
+    # DRF-2192: предложение рядом — тоже происхождение (со своим снимком
+    # входов); строка без ориентира не держит и его.
+    "pending_proposal",
 )
 
 #: Входы, о которых печатается только «есть/нет». Значения — не здесь.
@@ -182,6 +185,7 @@ def _clear_row(p: NutritionProfile) -> None:
     p.targets_method_versions = {}
     p.targets_input_snapshot = {}
     p.targets_computed_at = None
+    p.pending_proposal = None
     p.save(update_fields=[*TARGET_FIELDS, *PROVENANCE_FIELDS, "updated_at"])
 
 

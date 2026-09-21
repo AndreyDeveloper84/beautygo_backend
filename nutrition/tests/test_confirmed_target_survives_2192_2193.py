@@ -24,6 +24,21 @@
   подпись на месте;
 * m2 — смешанная строка (калории посчитаны и подтверждены, вода задана
   рукой): новый вес не трогает ни один действующий вид.
+
+Узлы ревью (граница правила):
+
+* r1 — отказ расчёта по здоровью (беременность) гасит расчётный вид, как
+  до DRF-2192: §63 про вес, а не про то, чтобы держать дефицит;
+* r2 — отзыв согласия стирает и предложение рядом (в нём снимок входов),
+  подписи по видам уходят в ``none``, и следующий расчёт ложится на место;
+* r3 — запрос без пересчёта, тронувший вход, снимает устаревшее
+  предложение: подтверждение не вернёт старый темп поверх нового;
+* r4 — ручная вода, затем анкета: калории — предложение на месте, и общая
+  подпись говорит «предложено», а не «действует» (бот читает её);
+* r5 — подтверждение на смешанной строке не переписывает отметку, которую
+  ставил человек, и повтор — «нечего подтверждать», а не новое событие;
+* r6 — предложение рядом несёт цель, темп и переопределения: человек видит
+  всё, что подтверждение применит.
 """
 
 from __future__ import annotations
@@ -34,6 +49,9 @@ from rest_framework.test import APIClient
 
 from nutrition.models import NutritionProfile
 from nutrition.services.personal_calculation_consent import PERSONAL_CALCULATION
+from nutrition.services.personal_calculation_withdrawal import (
+    erase_personal_calculation_inputs,
+)
 from nutrition.services.targets_state import calories_confirmed, fluids_confirmed
 from users.models import User
 
@@ -186,3 +204,134 @@ class TestManualTargetSurvivesANewWeight:
         assert p.fluids_source == Source.USER_ENTERED
         assert p.calories_source == Source.AYLA_CALCULATED
         assert p.daily_kcal == before.daily_kcal
+
+
+# ===========================================================================
+# Узлы ревью — граница правила
+# ===========================================================================
+
+
+class TestTheRuleIsAboutWeightNotAboutSafety:
+    def test_a_health_refusal_still_puts_out_a_calculated_target(self, proxy_user, headers):
+        before = _confirmed_calculation(proxy_user, headers)
+        assert before.daily_kcal is not None
+
+        _post({"health_flags": {"pregnant": True}}, headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+
+        assert p.calories_source == Source.NONE
+        assert p.daily_kcal is None
+        assert p.calories_confirmed_at is None
+        assert p.pending_proposal is None
+        assert any(
+            e.get("reason") == "health_factor_pregnant" for e in p.last_overrides_applied
+        )
+
+    def test_a_health_refusal_keeps_the_persons_own_number(self, proxy_user, headers):
+        _post({**FULL_INPUTS, "consent": CONSENT}, headers)
+        _manual({"calories_kcal": 1800}, headers)
+
+        _post({"health_flags": {"pregnant": True}, "consent": CONSENT}, headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+
+        # Ручное число — не расчёт: отказ методики его не отменяет.
+        assert p.calories_source == Source.USER_ENTERED
+        assert p.daily_kcal == 1800
+
+
+class TestWithdrawalErasesTheProposalToo:
+    def test_withdrawal_leaves_no_proposal_and_the_next_calculation_lands_in_place(
+        self, proxy_user, headers
+    ):
+        _confirmed_calculation(proxy_user, headers)
+        pending = _new_weight(headers)["targets_provenance"]["pending_proposal"]
+        # Присутствие: предложение рядом лежит — и несёт вес.
+        assert pending["input_snapshot"]["weight_kg"] == 61.0
+
+        erase_personal_calculation_inputs(proxy_user)
+        p = NutritionProfile.objects.get(user=proxy_user)
+        assert p.pending_proposal is None
+        assert p.calories_source == Source.NONE
+        assert p.fluids_source == Source.NONE
+        assert p.calories_confirmed_at is None
+
+        body = _post({**FULL_INPUTS, "consent": CONSENT}, headers)
+        p.refresh_from_db()
+        assert p.calories_source == Source.AYLA_PROPOSED
+        assert p.daily_kcal is not None
+        assert body["targets_provenance"]["pending_proposal"] is None
+
+
+class TestAStaleProposalDoesNotSurvive:
+    def test_a_refused_patch_that_touched_an_input_drops_the_proposal(
+        self, proxy_user, headers
+    ):
+        _confirmed_calculation(proxy_user, headers)
+        _manual({"water_ml": 2000}, headers)
+        # Смешанная строка: общая подпись — ручная, сторож без утверждения
+        # пересчёт не пустит.
+        _new_weight(headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+        assert p.pending_proposal is not None
+
+        _post({"pace": "gentle"}, headers)  # без утверждения — отказ
+        p.refresh_from_db()
+
+        assert p.pace == "gentle"
+        assert p.pending_proposal is None
+        resp = APIClient().post(URL_CONFIRM, {}, format="json", **headers)
+        # Подтверждать нечего: старое предложение не вернёт прежний темп.
+        assert resp.status_code == status.HTTP_409_CONFLICT
+        p.refresh_from_db()
+        assert p.pace == "gentle"
+
+
+class TestTheOverallLabelTellsTheTruth:
+    def test_manual_water_then_a_questionnaire_reads_as_proposed(self, proxy_user, headers):
+        _manual({"water_ml": 2000}, headers)
+        body = _post({**FULL_INPUTS, "consent": CONSENT}, headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+
+        assert p.fluids_source == Source.USER_ENTERED and p.daily_water_ml == 2000
+        assert p.calories_source == Source.AYLA_PROPOSED
+        # Бот читает общую подпись: калории-предложение не должны читаться
+        # как действующий ориентир (§6).
+        assert body["targets_provenance"]["source"] == "ayla_proposed"
+        assert p.targets_confirmed_at is None
+
+
+class TestConfirmOnAMixedRow:
+    def test_confirm_takes_calories_and_leaves_the_persons_stamp(self, proxy_user, headers):
+        _confirmed_calculation(proxy_user, headers)
+        _manual({"water_ml": 2000}, headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+        manual_stamp = p.targets_confirmed_at
+        fluids_stamp = p.fluids_confirmed_at
+        proposed = _new_weight(headers)["targets_provenance"]["pending_proposal"]
+
+        _confirm(headers)
+        p.refresh_from_db()
+
+        assert p.daily_kcal == proposed["daily_kcal"]
+        assert p.daily_water_ml == 2000
+        assert p.fluids_source == Source.USER_ENTERED
+        assert p.fluids_confirmed_at == fluids_stamp
+        assert p.targets_source == Source.USER_ENTERED
+        assert p.targets_confirmed_at == manual_stamp
+
+        # Повтор — не новое событие: подтверждать нечего.
+        resp = APIClient().post(URL_CONFIRM, {}, format="json", **headers)
+        assert resp.status_code == status.HTTP_409_CONFLICT
+
+
+class TestTheProposalShowsWhatConfirmationApplies:
+    def test_goal_pace_and_overrides_ride_with_the_proposal(self, proxy_user, headers):
+        _confirmed_calculation(proxy_user, headers)
+        pending = _post(
+            {"weight_kg": 61.0, "pace": "gentle", "consent": CONSENT}, headers
+        )["targets_provenance"]["pending_proposal"]
+
+        assert pending["pace"] == "gentle"
+        assert pending["goal"] == "lose"
+        assert "overrides_applied" in pending
+        assert isinstance(pending["computed_at"], str) and pending["computed_at"].endswith("Z")

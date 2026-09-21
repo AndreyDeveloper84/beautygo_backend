@@ -134,19 +134,15 @@ class TestComputationIsAProposal:
         assert p.targets_input_snapshot["pace"] == "moderate"
         assert pending["input_snapshot"]["pace"] == "gentle"
 
-    def test_a_refusal_does_not_put_out_a_confirmed_target(self, proxy_user, headers):
-        """Расчёту не хватило входа — это отказ пересчёта, а не отмена
-        подтверждённого.
+    def test_a_refusal_clears_confirmation_too(self, proxy_user, headers):
+        """Расчёт снят (входа не хватило) — подтверждение снято вместе с ним.
 
-        До DRF-2192 тест назывался «a refusal clears confirmation too» и
-        пинил обратное: отказ гасил действующий ориентир в ``none``.
-        Владелец этот контракт отменил (§63, 21.09.2026): подтверждённый
-        ориентир не исчезает, пока человек не подтвердил новый.
+        DRF-2192 этот тест НЕ переворачивает: §63 держит подтверждённый
+        ориентир при новом ВЕСЕ, а отказ значит, что методика за числом
+        больше не стоит (тот же путь у беременности и РПП).
         """
         _compute(proxy_user, headers)
         _confirm(headers)
-        before = NutritionProfile.objects.get(user=proxy_user)
-        assert before.daily_kcal and before.targets_confirmed_at is not None
         # Сериализатор не пропускает ``weight_kg: null``; вес снимается так
         # же, как в ``test_targets_recompute_gate``: подменой патча.
         with patch.object(
@@ -156,13 +152,9 @@ class TestComputationIsAProposal:
             resp = _post({"goal": "maintain", "consent": CONSENT}, headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
         p = NutritionProfile.objects.get(user=proxy_user)
-        assert p.targets_source == Source.AYLA_CALCULATED
-        assert p.targets_confirmed_at == before.targets_confirmed_at
-        assert p.daily_kcal == before.daily_kcal
-        # Отказ назван в аудите и предложения рядом не оставил.
-        assert any(
-            e.get("reason") == "insufficient_inputs" for e in p.last_overrides_applied
-        )
+        assert p.targets_source == Source.NONE
+        assert p.targets_confirmed_at is None
+        assert p.daily_kcal is None
         assert p.pending_proposal is None
 
     def test_a_partial_post_on_a_proposal_recomputes_and_stays_a_proposal(
