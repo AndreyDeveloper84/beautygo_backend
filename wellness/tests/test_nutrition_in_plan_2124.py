@@ -225,7 +225,9 @@ class TestHintTravelsWithTheActiveGoal:
         assert goal["nutrition_goal_hint"] is None
 
     def test_no_template_means_null_too(self, owner) -> None:
-        """Сид не прогнан — таблицы нет — подсказки нет, а не 500."""
+        """Шаблонов нет — подсказки нет, а не 500. С DRF-2229 миграция кладёт
+        шаблоны §51 в любую базу — пустота создаётся здесь явно."""
+        PlanTemplate.objects.all().delete()
         _goal(owner, "body_shape")
         assert not PlanTemplate.objects.exists()
 
