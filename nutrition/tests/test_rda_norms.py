@@ -85,14 +85,14 @@ class TestRDAMaleAdult:
         # Men's iron RDA is 8 mg vs women's 18 — period of monthly loss
         # accounts for the bulk of the gap.
         norms = compute_norms(ProfileInputs(
-            gender="male", age=35, height_cm=180, weight_kg=80.0,
+            gender="male", age=35, height_cm=180, weight_kg=80.0, goal="maintain",
         ))
         assert norms.daily_iron_mg == 8
 
     def test_male_magnesium_higher_than_female(self):
         # Magnesium scales with body mass; reference 400 vs 310.
         norms = compute_norms(ProfileInputs(
-            gender="male", age=35, height_cm=180, weight_kg=80.0,
+            gender="male", age=35, height_cm=180, weight_kg=80.0, goal="maintain",
         ))
         assert norms.daily_magnesium_mg == 400
 
@@ -104,7 +104,7 @@ class TestRDAPregnancy:
         # §5.1: через compute_norms беременность — отказ, RDA не считается.
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=70.0,
-            health_flags={"pregnant": True},
+            health_flags={"pregnant": True}, goal="maintain",
         ))
         assert norms.daily_iron_mg is None
         assert [o["reason"] for o in norms.overrides_applied] == ["health_factor_pregnant"]
@@ -125,7 +125,7 @@ class TestRDABreastfeeding:
         # §5.1: через compute_norms кормление — отказ, RDA не считается.
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=70.0,
-            health_flags={"breastfeeding": True},
+            health_flags={"breastfeeding": True}, goal="maintain",
         ))
         assert norms.daily_calcium_mg is None
         assert [o["reason"] for o in norms.overrides_applied] == ["health_factor_breastfeeding"]
@@ -143,7 +143,7 @@ class TestRDAVegan:
     def test_vegan_b12_doubled(self):
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=65.0,
-            health_flags={"vegan": True},
+            health_flags={"vegan": True}, goal="maintain",
         ))
         # 2.4 → ~4.0 (4x, NIH guidance for plant-based diets without
         # supplementation; we use 4.0 mcg as a conservative target).
@@ -152,7 +152,7 @@ class TestRDAVegan:
     def test_vegan_iron_18x18(self):
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=65.0,
-            health_flags={"vegan": True},
+            health_flags={"vegan": True}, goal="maintain",
         ))
         # 18 × 1.8 = 32.4 → rounded to 32 (display-friendly integer).
         assert norms.daily_iron_mg == 32
@@ -161,7 +161,7 @@ class TestRDAVegan:
         # Vegan can also be expressed via diet_preference="vegan".
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=65.0,
-            health_flags={"vegetarian": True},
+            health_flags={"vegetarian": True}, goal="maintain",
         ))
         # Vegetarian eats dairy & eggs → b12 still gets a smaller bump.
         # 2.4 → 3.0 (50% bump for partial dietary restriction).
@@ -178,7 +178,7 @@ class TestRDAAdolescent:
 
     def test_minor_is_refused_through_compute_norms(self):
         norms = compute_norms(ProfileInputs(
-            gender="female", age=16, height_cm=165, weight_kg=55.0,
+            gender="female", age=16, height_cm=165, weight_kg=55.0, goal="maintain",
         ))
         assert norms.daily_calcium_mg is None and norms.daily_iron_mg is None
         assert [o["reason"] for o in norms.overrides_applied] == ["health_factor_minor"]
@@ -199,13 +199,13 @@ class TestRDASenior:
 
     def test_senior_vitamin_d_800(self):
         norms = compute_norms(ProfileInputs(
-            gender="female", age=68, height_cm=160, weight_kg=65.0,
+            gender="female", age=68, height_cm=160, weight_kg=65.0, goal="maintain",
         ))
         assert norms.daily_vitamin_d_iu == 800
 
     def test_senior_female_calcium_1200(self):
         norms = compute_norms(ProfileInputs(
-            gender="female", age=68, height_cm=160, weight_kg=65.0,
+            gender="female", age=68, height_cm=160, weight_kg=65.0, goal="maintain",
         ))
         # Postmenopausal women need 1200 mg/day for bone preservation.
         assert norms.daily_calcium_mg == 1200

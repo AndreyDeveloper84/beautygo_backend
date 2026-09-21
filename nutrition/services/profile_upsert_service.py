@@ -180,13 +180,17 @@ _CALCULATION_INPUTS: frozenset[str] = frozenset({
 
 def _recompute_and_persist(profile: NutritionProfile) -> None:
     Source = NutritionProfile.TargetsSource
+    # DRF-2219 (§63): пол и цель — только названные человеком. Не назван —
+    # расчёт отказывает с именем поля (``insufficient_inputs``), а не
+    # считает по женской формуле на «поддержание». Темп и активность пока с
+    # умолчаниями — ждут решения владельца (вопрос 59).
     norms = compute_norms(ProfileInputs(
-        gender=profile.gender or "female",
+        gender=profile.gender or "",
         age=profile.age,
         height_cm=profile.height_cm,
         weight_kg=profile.weight_kg,
         activity_coefficient=profile.activity_coefficient or DEFAULT_ACTIVITY,
-        goal=profile.goal or "maintain",
+        goal=profile.goal or "",
         pace=profile.pace or "moderate",
         health_flags=profile.health_flags or {},
     ))
