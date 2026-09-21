@@ -62,6 +62,11 @@ _KEY_USER = "food_scan:user:{user_id}:{day}"
 _KEY_TOTAL = "food_scan:total:{day}"
 _KEY_COST = "food_scan:cost_usd:{day}"
 _KEY_SIGNAL = "food_scan:signal:{day}:{level}"
+#: DRF-2196 — у события свой ключ дедупа, а не общий с Sentry: при сбое
+#: публикации его можно вернуть (следующий скан переспросит), не заставив
+#: Sentry прозвучать второй раз. Дубликат события боту не страшен — у ядра
+#: бота свой дедуп по суткам и порогу.
+_KEY_EVENT = "food_scan:event:{day}:{level}"
 
 #: Токены ``usage`` OpenAI, из которых складывается стоимость.
 _USAGE_PROMPT = "prompt_tokens"
@@ -266,14 +271,44 @@ def _signal_if_crossed(used: int, limit: int, day: str, ttl: int) -> None:
             _send_signal(level, message)
         except Exception as exc:  # noqa: BLE001 — сигнал не важнее скана
             logger.warning("nutrition.food_scan.budget_signal_failed err=%s", type(exc).__name__)
-        # DRF-2196 — тот же дедуп по суткам, тот же порог: событие уходит
-        # ровно тогда, когда и прежний сигнал, не своим отдельным счётом.
+        # DRF-2196 — событие уходит на том же пересечении, но со СВОИМ
+        # ключом суток: при сбое публикации ключ возвращается, и следующий
+        # скан переспросит. Иначе один сбой INSERT крал бы единственное
+        # оповещение за сутки — ключ сигнала уже занят выше.
+        _emit_budget_event_once(level=level, used=used, limit=limit, day=day, ttl=ttl)
+
+
+def _emit_budget_event_once(*, level: str, used: int, limit: int, day: str, ttl: int) -> None:
+    """Опубликовать событие не более одного раза за сутки на порог — и вернуть счёт при сбое.
+
+    Никогда не бросает: сигнал не важнее скана. Отказ публикации пишет строку
+    в лог и освобождает ключ суток, чтобы следующий скан попробовал снова.
+    """
+    key = _KEY_EVENT.format(day=day, level=level)
+    try:
+        first = cache.add(key, 1, timeout=ttl)
+    except Exception:  # noqa: BLE001 — потеря кэша: молчание, а не шквал
+        first = False
+    if not first:
+        return
+    try:
+        _emit_budget_event(level=level, used=used, limit=limit, day=day)
+    except Exception as exc:  # noqa: BLE001 — сигнал не важнее скана
+        logger.warning("nutrition.food_scan.budget_event_failed err=%s", type(exc).__name__)
         try:
-            _emit_budget_event(level=level, used=used, limit=limit, day=day)
-        except Exception as exc:  # noqa: BLE001 — сигнал не важнее скана
-            logger.warning(
-                "nutrition.food_scan.budget_event_failed err=%s", type(exc).__name__
-            )
+            cache.delete(key)
+        except Exception:  # noqa: BLE001 — возврат счёта — лучшее усилие
+            logger.warning("nutrition.food_scan.budget_unavailable op=event_release")
+
+
+def _daily_cost_or_none(day: str) -> str | None:
+    """Суточная стоимость строкой для события, или ``None`` — «не посчитано».
+
+    Не ``"n/a"``: ядро бота понимает ``None`` как «стоимость не посчитана» и
+    говорит это оператору словами, а строку вывело бы буквально — «USD: n/a».
+    """
+    text = _daily_cost_text(day)
+    return None if text == "n/a" else text
 
 
 def _emit_budget_event(*, level: str, used: int, limit: int, day: str) -> None:
@@ -294,24 +329,36 @@ def _emit_budget_event(*, level: str, used: int, limit: int, day: str) -> None:
     """
     # Локальный импорт: `envelope` тянет `appointments.models`, а этот модуль
     # грузится из `nutrition.views` при старте приложения.
+    from django.db import transaction
+
     from appointments.infrastructure.outbox.envelope import emit_outbox_event
 
-    emit_outbox_event(
-        topic="system.module.health.degraded",
-        data={
-            "module_name": "nutrition.food_scan",
-            "severity": level,
-            "metric": {
-                "used": used,
-                "limit": limit,
-                "day": day,
-                "cost_usd": _daily_cost_text(day),
+    # Savepoint. `emit_outbox_event` по докстрингу ждёт, что его зовут внутри
+    # транзакции доменного изменения; у системного сигнала доменного
+    # изменения нет, и сегодня скан-запрос не атомарен — INSERT коммитится
+    # сразу. Но если `reserve()` когда-нибудь позовут внутри `atomic()`,
+    # проглоченная выше `DatabaseError` без savepoint сломала бы внешнюю
+    # транзакцию, и упал бы уже `scan.save()` — сигнал уронил бы скан.
+    with transaction.atomic():
+        emit_outbox_event(
+            topic="system.module.health.degraded",
+            data={
+                "module_name": "nutrition.food_scan",
+                "severity": level,
+                # `metric` здесь объект; внутренние эмиттеры бота шлют его
+                # строкой. Словарь бота требует только наличия ключа; две
+                # формы у одного имени записаны в контракт (PR бота).
+                "metric": {
+                    "used": used,
+                    "limit": limit,
+                    "day": day,
+                    "cost_usd": _daily_cost_or_none(day),
+                },
             },
-        },
-        actor="system",
-        user_id=None,
-        tenant_id=None,
-    )
+            actor="system",
+            user_id=None,
+            tenant_id=None,
+        )
 
 
 def _send_signal(level: str, message: str) -> bool:

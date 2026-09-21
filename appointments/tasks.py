@@ -84,6 +84,16 @@ EVENT_HANDLERS: dict[str, EventHandler] = {
     OutboxEvent.Topic.BILLING_FEE_CHARGED: _log_handler(
         "billing.fee_charged",
     ),
+    # DRF-2196 — системный сигнал нужен только внешнему потребителю (боту),
+    # но локальный обработчик ОБЯЗАН быть: `dispatch_outbox_events` выбирает
+    # все строки с `processed_at IS NULL` независимо от
+    # `external_delivery_enabled`. Без обработчика строка навсегда осталась бы
+    # необработанной, и проверка отставания писала бы `outbox.lag_breach` на
+    # каждом тике — вечная ложная тревога, за которой не видно настоящего
+    # отставания по записям. Payload без людей, в лог писать можно.
+    OutboxEvent.Topic.SYSTEM_MODULE_HEALTH_DEGRADED: _log_handler(
+        "system.module.health.degraded",
+    ),
 }
 
 

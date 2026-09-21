@@ -30,6 +30,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from django.db import DatabaseError
 
 from appointments.infrastructure.outbox.envelope import EVENT_VERSIONS
 from appointments.models import OutboxEvent
@@ -86,6 +87,11 @@ class TestTheEventLeavesOnTheCrossing:
         assert data["severity"] == "warning"
         assert data["metric"]["used"] == 4
         assert data["metric"]["limit"] == 5
+        # Половина полезной нагрузки для оператора — сутки и стоимость.
+        assert data["metric"]["day"] == "2026-09-21"
+        # Цены не заданы → «не посчитано» = JSON null, не строка "n/a":
+        # ядро бота говорит оператору «не посчитана», а "n/a" вывело бы как есть.
+        assert data["metric"]["cost_usd"] is None
 
     def test_100_percent_emits_an_error_event(self, five_total) -> None:
         router = _router()
@@ -134,27 +140,95 @@ class TestTheEnvelopeHasNoPerson:
         assert envelope["tenant_id"] is None
 
     def test_the_data_names_no_one(self, five_total) -> None:
+        """Точные наборы ключей: любое лишнее поле — красное.
+
+        Проверка подстроками («нет `bot:`») не срабатывала бы никогда:
+        `used` и `limit` внешнего id не содержат, а новое поле с человеком
+        прошло бы мимо. Точное равенство ключей ловит именно это.
+        """
         router = _router()
         with patch.object(budget, "_send_signal", return_value=True):
             for i in range(4):
                 _post_scan(router, f"bot:{i}")
 
-        text = str(_events()[0].payload)
-        assert "nutrition.food_scan" in text  # наличие
-        assert "bot:" not in text
-        assert "user" not in _events()[0].payload["data"]["metric"]
+        data = _events()[0].payload["data"]
+        assert set(data) == {"module_name", "severity", "metric"}
+        assert set(data["metric"]) == {"used", "limit", "day", "cost_usd"}
 
 
 class TestTheEventNeverBreaksTheScan:
     def test_a_failing_emit_does_not_break_the_scan(self, five_total) -> None:
+        """Настоящий путь: ошибка БД из `emit_outbox_event`, а не подменённая обёртка."""
         router = _router()
         with (
-            patch.object(budget, "_send_signal", return_value=True),
-            patch.object(budget, "_emit_budget_event", side_effect=RuntimeError("db down")),
+            patch.object(budget, "_send_signal", return_value=True) as sentry,
+            patch(
+                "appointments.infrastructure.outbox.envelope.emit_outbox_event",
+                side_effect=DatabaseError("insert failed"),
+            ),
         ):
             responses = [_post_scan(router, f"bot:{i}") for i in range(4)]
 
         assert all(r.status_code == 200 for r in responses)
+        # И прежний сигнал своё отработал — отказ одного канала не глушит другой.
+        assert sentry.call_count == 1
+
+    def test_a_failing_sentry_does_not_stop_the_event(self, five_total) -> None:
+        """Обратное направление: Sentry упал — событие всё равно ушло.
+
+        Без этого узла эмит можно было бы спрятать внутрь `try` Sentry, и
+        первый же сбой Sentry глушил бы единственный живой канал.
+        """
+        router = _router()
+        with patch.object(budget, "_send_signal", side_effect=RuntimeError("sentry down")):
+            for i in range(4):
+                _post_scan(router, f"bot:{i}")
+
+        assert len(_events()) == 1
+
+    def test_a_failed_emit_is_retried_on_the_next_crossing_scan(self, five_total) -> None:
+        """Сбой публикации возвращает счёт суток — следующий скан переспросит.
+
+        Ключ прежнего сигнала занят ДО публикации, поэтому без своего ключа
+        и его возврата один сбой INSERT крал бы единственное оповещение за
+        сутки.
+        """
+        router = _router()
+        calls = {"n": 0}
+        real = __import__(
+            "appointments.infrastructure.outbox.envelope", fromlist=["emit_outbox_event"]
+        ).emit_outbox_event
+
+        def flaky(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise DatabaseError("insert failed once")
+            return real(**kwargs)
+
+        with (
+            patch.object(budget, "_send_signal", return_value=True),
+            patch("appointments.infrastructure.outbox.envelope.emit_outbox_event", flaky),
+        ):
+            for i in range(4):
+                _post_scan(router, f"bot:{i}")  # 80 % — первая попытка падает
+            assert _events() == []
+            budget._emit_budget_event_once(
+                level="warning", used=4, limit=5, day="2026-09-21", ttl=3600
+            )
+
+        assert len(_events()) == 1
+
+    def test_positive_pair_a_delivered_event_is_not_repeated(self, five_total) -> None:
+        """Иначе возврат счёта выродился бы в «дедупа нет»."""
+        router = _router()
+        with patch.object(budget, "_send_signal", return_value=True):
+            for i in range(4):
+                _post_scan(router, f"bot:{i}")
+            budget._emit_budget_event_once(
+                level="warning", used=4, limit=5, day="2026-09-21", ttl=3600
+            )
+
+        assert len(_events()) == 1
 
 
 class TestTheOwnerHoldsTheFlip:
