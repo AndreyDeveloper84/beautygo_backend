@@ -681,6 +681,33 @@ def purge_deleted_water_entries(older_than_days: int = 90) -> int:
 # ---------------------------------------------------------------------------
 
 
+def water_total_ml(user_id: int, start: datetime, end: datetime) -> int:
+    """Вода человека за окно ``[start, end)`` — в мл самих записей (DRF-2217).
+
+    Единственный агрегат воды для сводки дня: те же ``WaterEntry``, что пишут
+    бот и Mini App (``internal/water/``), то же правило, что у экрана воды
+    (:meth:`WaterEntryService.today`): отменённые не считаются, итог не ниже
+    нуля. Миллилитры берутся из записей, а не «стаканов × 250»: размер
+    стакана настраиваемый (W-1, CD §67), и новый размер действует только для
+    будущих записей — старые хранят свои мл.
+
+    Окно задаёт вызывающий: у сводки это сутки человека, те же, что у еды
+    (``diary_days_service.day_window``), — вода и еда одного дня не спорят
+    о границе суток.
+    """
+    total = (
+        WaterEntry.objects
+        .filter(
+            user_id=user_id,
+            ts__gte=start,
+            ts__lt=end,
+            deleted_at__isnull=True,
+        )
+        .aggregate(s=Sum("water_ml"))["s"]
+    )
+    return max(0, int(total or 0))
+
+
 def _day_start(day: date, tz: dt_tz) -> datetime:
     return datetime.combine(day, time.min, tzinfo=tz)
 
