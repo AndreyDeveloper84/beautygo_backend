@@ -55,6 +55,7 @@ from typing import Any
 from django.db import transaction
 
 from nutrition.models import NutritionProfile
+from nutrition.services.targets_state import KIND_FIELDS, KIND_SOURCE_FIELD
 from nutrition.services.nutrition_profile_service import (  # noqa: F401 — re-exported names
     CALORIES_HARD_FLOOR_KCAL,
     CALORIES_WARN_BELOW_KCAL,
@@ -244,6 +245,13 @@ def set_manual_targets(
             setattr(profile, name, None)
 
         now = datetime.now(dt_tz.utc)
+        # DRF-2192: у строки до DRF-1929 подписи по видам нет, и нетронутый
+        # вид читается через общую подпись. Сменить общую на
+        # ``user_entered``, не закрепив прежнюю за нетронутым видом, значило
+        # бы молча объявить ручным расчёт, который человек не трогал.
+        for kind, field in KIND_SOURCE_FIELD.items():
+            if getattr(profile, field) is None:
+                setattr(profile, field, profile.targets_source)
         # Общая подпись остаётся ради читателей до-DRF-1929 и внешнего
         # контракта; истина теперь по видам, и меняется ТОЛЬКО тот вид,
         # который человек действительно задал.
@@ -258,6 +266,18 @@ def set_manual_targets(
         profile.targets_input_snapshot = {}
         profile.targets_computed_at = None
         profile.targets_confirmed_at = now
+        # DRF-2193, вариант (i): рядом с ручным видом предложения нет. Если
+        # оно лежало (вид был расчётом, человек заменил его своим числом),
+        # вид из него снимается — иначе подтверждение потом переписало бы
+        # число человека расчётом, которое он только что отверг.
+        profile.pending_proposal = _without_kinds(
+            profile.pending_proposal,
+            {
+                kind
+                for kind, given in (("calories", calories_kcal), ("fluids", water_ml))
+                if given is not None
+            },
+        )
         profile.goal_overridden_by = ""
         # Аудит: что задано рукой и с какими предупреждениями — дописывается,
         # прежние записи (отказы, лестница) не стираются.
@@ -271,3 +291,18 @@ def set_manual_targets(
         profile.save()
 
     return profile, {"warnings": warnings, "deviation": deviation, "set": set_fields}
+
+
+def _without_kinds(pending: dict[str, Any] | None, kinds: set[str]) -> dict[str, Any] | None:
+    """Предложение без названных видов; ``None``, если видов не осталось."""
+    if not pending or not kinds:
+        return pending
+    remaining = [k for k in pending.get("kinds", []) if k not in kinds]
+    if not remaining:
+        return None
+    keep = {name for kind in remaining for name in KIND_FIELDS[kind]}
+    return {
+        **pending,
+        "kinds": remaining,
+        "values": {k: v for k, v in (pending.get("values") or {}).items() if k in keep},
+    }

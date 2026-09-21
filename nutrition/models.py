@@ -714,6 +714,21 @@ class NutritionProfile(models.Model):
             "Подтверждение — по виду, не одной кнопкой на весь набор."
         ),
     )
+    # DRF-2192 (§63, 21.09.2026): «старый подтверждённый ориентир не
+    # исчезает до подтверждения нового». Пересчёт на виде с действующим
+    # расчётом (``ayla_calculated``) кладёт новые числа СЮДА, а не поверх
+    # действующих; ``confirm_targets`` забирает их. Вид, заданный рукой
+    # (``user_entered``), сюда не попадает вовсе (DRF-2193, вариант (i)).
+    pending_proposal = models.JSONField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Предложение, ожидающее подтверждения, рядом с действующим "
+            "ориентиром: {kinds, values, input_snapshot, method_versions, "
+            "computed_at, goal, pace, goal_overridden_by}. NULL — нет."
+        ),
+    )
 
     # Override audit
     goal_overridden_by = models.CharField(max_length=24, blank=True, default="")

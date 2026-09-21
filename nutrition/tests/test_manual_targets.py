@@ -328,12 +328,26 @@ class TestWaterThresholds:
 
 
 class TestInteractions:
-    def test_recompute_with_attestation_replaces_manual_with_a_proposal(self, proxy_user, headers):
+    def test_recompute_with_attestation_keeps_manual_and_proposes_nothing(
+        self, proxy_user, headers
+    ):
+        """Ручная норма переживает пересчёт с утверждением (DRF-2193).
+
+        До DRF-2193 тест назывался «replaces manual with a proposal» и пинил
+        обратное: полная анкета с утверждением заменяла число человека
+        расчётом. Владелец этот контракт отменил (§63, 21.09.2026): «вес
+        может обновляться без уничтожения ручного ориентира». Предложения
+        рядом тоже нет (вариант (i)): предлагать расчёт поверх ориентира,
+        который человек назвал сам, — непрошеный совет.
+        """
         _manual({"calories_kcal": 1800}, headers)
-        _compute(headers)
+        body = _compute(headers)
         p = NutritionProfile.objects.get(user=proxy_user)
-        assert p.targets_source == Source.AYLA_PROPOSED
-        assert p.daily_kcal != 1800
+        assert p.calories_source == Source.USER_ENTERED
+        assert p.daily_kcal == 1800
+        assert p.weight_kg == 67.0  # входы записаны
+        assert p.pending_proposal is None
+        assert body["targets_provenance"]["pending_proposal"] is None
 
     def test_partial_post_without_attestation_leaves_manual_intact(self, proxy_user, headers):
         _manual({"calories_kcal": 1800}, headers)
