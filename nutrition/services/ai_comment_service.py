@@ -207,7 +207,11 @@ _SYSTEM_PROMPT = """\
 
 
 def _build_prompt(profile: NutritionProfile | None, facts: SummaryFacts) -> str:
-    goal = (profile.goal if profile else "") or "maintain"
+    # DRF-2269: цель — только НАЗВАННАЯ человеком. Здесь стояло
+    # ``goal or "maintain"``: у того, кто цели не называл, модель получала
+    # «Цель пользователя: maintain» — выдуманную цель, из которой она
+    # вправе делать выводы. Нет цели — нет строки цели, тон нейтральный.
+    goal = (profile.goal if profile else "") or ""
     flags = (profile.health_flags or {}) if profile else {}
 
     tone_hint = {
@@ -216,6 +220,11 @@ def _build_prompt(profile: NutritionProfile | None, facts: SummaryFacts) -> str:
         "tone": "сфокусируйся на белке, фокус на формулу и настроение",
         "maintain": "нейтральный поддерживающий тон, без целей по весу",
     }.get(goal, "нейтральный поддерживающий тон")
+    goal_line = (
+        f"Цель пользователя: {goal} (тон: {tone_hint}).\n"
+        if goal
+        else f"Тон: {tone_hint}.\n"
+    )
 
     flag_notes = []
     if flags.get("pregnant"):
@@ -235,8 +244,8 @@ def _build_prompt(profile: NutritionProfile | None, facts: SummaryFacts) -> str:
     )
 
     return (
-        f"Цель пользователя: {goal} (тон: {tone_hint}).\n"
-        f"{flags_block}\n\n"
+        goal_line
+        + f"{flags_block}\n\n"
         f"Факты дня:\n"
         # Цель уходит в промпт, ТОЛЬКО когда она есть. Ноль означает «цели
         # нет» (nutrition_summary_service, water_entry_service), а «из 0
