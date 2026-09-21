@@ -81,7 +81,21 @@ def _code_identifiers(paths: tuple[str, ...]) -> set[str]:
             and isinstance(node.body[0].value, ast.Constant)
             and isinstance(node.body[0].value.value, str)
         }
+        # Сам список исключений — не «упоминание кодом стирания»: иначе запись
+        # в нём засчитывала бы модель стёртой.
+        exclusion_nodes = {
+            id(sub)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and any(
+                getattr(t, "id", "") == "NOT_ERASED_ON_DELETION"
+                for t in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            )
+            for sub in ast.walk(node)
+        }
         for n in ast.walk(tree):
+            if id(n) in exclusion_nodes:
+                continue
             if isinstance(n, ast.Name):
                 names.add(n.id)
             elif isinstance(n, ast.Attribute):
@@ -101,6 +115,10 @@ def _person_linked_models() -> set[str]:
     out: set[str] = set()
     for model in apps.get_models():
         if model._meta.app_label in {"auth", "admin", "contenttypes", "sessions", "token_blacklist"}:
+            continue
+        # Прокси-модель — та же таблица, что у её конкретной модели
+        # (``users.PendingExternalIdentity`` — строки ``User``): считаем хранение.
+        if model._meta.proxy:
             continue
         for f in model._meta.get_fields():
             if not getattr(f, "concrete", False):
