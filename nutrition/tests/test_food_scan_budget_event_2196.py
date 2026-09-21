@@ -34,11 +34,14 @@ import pytest
 from appointments.infrastructure.outbox.envelope import EVENT_VERSIONS
 from appointments.models import OutboxEvent
 from nutrition.services import food_scan_budget as budget
-from nutrition.tests.test_food_scan_budget_2145 import (  # переиспользуем стенд
+# Стенд переиспользован: `_settings` — autouse (токен, потолки, пустой кэш),
+# `now` — фикстура суток 2026-09-21 UTC. Фикстуры импортируются по имени, и
+# flake8 видит их «неиспользуемыми» — pytest находит их именно так.
+from nutrition.tests.test_food_scan_budget_2145 import (  # noqa: F401
     _post_scan,
     _router,
-    _settings,  # noqa: F401 — autouse: токен, потолки, пустой кэш
-    now,  # noqa: F401 — фикстура: сутки 2026-09-21 UTC
+    _settings,
+    now,
 )
 
 pytestmark = pytest.mark.django_db
@@ -51,7 +54,7 @@ def _events() -> list[OutboxEvent]:
 
 
 @pytest.fixture()
-def five_total(now, settings):
+def five_total(now, settings):  # noqa: F811 — фикстура по имени, см. импорт
     """Потолок 5 на всех — 80 % на четвёртом, 100 % на пятом снимке."""
     settings.FOOD_SCAN_DAILY_PER_USER = 100
     settings.FOOD_SCAN_DAILY_TOTAL = 5

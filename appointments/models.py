@@ -904,6 +904,15 @@ class OutboxEvent(models.Model):
         SUBSCRIPTION_ACTIVATED = "subscription.activated", "Подписка активирована"
         SUBSCRIPTION_PAST_DUE = "subscription.past_due", "Подписка просрочена"
         BILLING_FEE_CHARGED = "billing.fee_charged", "Комиссия за запись начислена"
+        # DRF-2196 (вариант а1, решение владельца §64) — системный сигнал
+        # здоровья модуля. Первый эмиттер — бюджет распознавания фото
+        # (80 / 100 % общего суточного потолка). Конверт БЕЗ пользователя и
+        # без тенанта: это сигнал системы, а не событие о человеке; контракт
+        # бота ослаблен ровно для `system.*` тем же решением.
+        SYSTEM_MODULE_HEALTH_DEGRADED = (
+            "system.module.health.degraded",
+            "Модуль деградировал (системный сигнал)",
+        )
 
     class BotDeliveryStatus(models.TextChoices):
         # Default — publisher has not attempted delivery yet.

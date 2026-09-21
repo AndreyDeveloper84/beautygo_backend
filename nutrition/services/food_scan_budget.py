@@ -266,6 +266,52 @@ def _signal_if_crossed(used: int, limit: int, day: str, ttl: int) -> None:
             _send_signal(level, message)
         except Exception as exc:  # noqa: BLE001 — сигнал не важнее скана
             logger.warning("nutrition.food_scan.budget_signal_failed err=%s", type(exc).__name__)
+        # DRF-2196 — тот же дедуп по суткам, тот же порог: событие уходит
+        # ровно тогда, когда и прежний сигнал, не своим отдельным счётом.
+        try:
+            _emit_budget_event(level=level, used=used, limit=limit, day=day)
+        except Exception as exc:  # noqa: BLE001 — сигнал не важнее скана
+            logger.warning(
+                "nutrition.food_scan.budget_event_failed err=%s", type(exc).__name__
+            )
+
+
+def _emit_budget_event(*, level: str, used: int, limit: int, day: str) -> None:
+    """Сигнал бюджета — боту событием ``system.module.health.degraded`` (DRF-2196).
+
+    До этого листа единственным «сигналом человеку» был Sentry, а на пилоте
+    ``SENTRY_DSN`` пуст — то есть сигнала не было. Работающий канал к
+    операторам — MAX — живёт в боте (``alerting.page``), и у бота есть ядро,
+    которое решает, звучать ли странице. Вариант (а1), решение владельца §64:
+    через outbox — HMAC, ретраи, dead-letter и ручной реплей уже есть.
+
+    Конверт без пользователя и без тенанта: каталог считает снимки, а не
+    тех, кто их прислал. В ``metric`` — только числа и сутки.
+
+    Строка уходит боту только когда тема названа в
+    ``OUTBOX_EXTERNAL_DELIVERY_TOPICS`` (флажок держит владелец, пока
+    потребитель бота не зелёный «в оба конца»); иначе остаётся локальной.
+    """
+    # Локальный импорт: `envelope` тянет `appointments.models`, а этот модуль
+    # грузится из `nutrition.views` при старте приложения.
+    from appointments.infrastructure.outbox.envelope import emit_outbox_event
+
+    emit_outbox_event(
+        topic="system.module.health.degraded",
+        data={
+            "module_name": "nutrition.food_scan",
+            "severity": level,
+            "metric": {
+                "used": used,
+                "limit": limit,
+                "day": day,
+                "cost_usd": _daily_cost_text(day),
+            },
+        },
+        actor="system",
+        user_id=None,
+        tenant_id=None,
+    )
 
 
 def _send_signal(level: str, message: str) -> bool:

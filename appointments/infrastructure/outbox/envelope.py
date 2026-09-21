@@ -84,6 +84,9 @@ EVENT_VERSIONS: dict[str, int] = {
     "subscription.activated": 1,
     "subscription.past_due": 1,
     "billing.fee_charged": 1,
+    # DRF-2196 (а1, §64) — системный сигнал; user_id и tenant_id = null.
+    # data: {module_name, severity, metric}; людей нет по построению.
+    "system.module.health.degraded": 1,
 }
 
 
