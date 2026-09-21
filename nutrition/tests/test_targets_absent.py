@@ -142,13 +142,13 @@ class TestTheWaterFormulaIsGone:
         )
 
         light = compute_norms(ProfileInputs(
-            gender="female", age=30, height_cm=170, weight_kg=50.0,
+            gender="female", age=30, height_cm=170, weight_kg=50.0, goal="maintain",
         ))
         heavy = compute_norms(ProfileInputs(
-            gender="female", age=30, height_cm=170, weight_kg=90.0,
+            gender="female", age=30, height_cm=170, weight_kg=90.0, goal="maintain",
         ))
         male = compute_norms(ProfileInputs(
-            gender="male", age=30, height_cm=180, weight_kg=80.0,
+            gender="male", age=30, height_cm=180, weight_kg=80.0, goal="maintain",
         ))
         assert light.daily_water_ml == heavy.daily_water_ml == 2200
         assert male.daily_water_ml == 3000
@@ -179,7 +179,7 @@ class TestTheWaterFormulaIsGone:
         for flag in ("pregnant", "breastfeeding"):
             norms = compute_norms(ProfileInputs(
                 gender="female", age=30, height_cm=170, weight_kg=70.0,
-                health_flags={flag: True},
+                health_flags={flag: True}, goal="maintain",
             ))
             # N-g: health-фактор — отказ; воды нет вместе со всем, и
             # версии методики жидкости у отказа нет.
@@ -297,7 +297,8 @@ class TestNobodyGetsSomeoneElsesBody:
     должно быть имя, а не сноска под подставленным значением.
     """
 
-    REQUIRED = ("gender", "age", "height_cm", "weight_kg")
+    # DRF-2219: цель — пятый обязательный вход (§63).
+    REQUIRED = ("gender", "age", "height_cm", "weight_kg", "goal")
 
     def test_the_median_body_constants_are_gone(self) -> None:
         from nutrition.services import nutrition_profile_service as mod
@@ -322,11 +323,11 @@ class TestNobodyGetsSomeoneElsesBody:
 
         complete = {
             "gender": "female", "age": 30,
-            "height_cm": 170, "weight_kg": 70.0,
+            "height_cm": 170, "weight_kg": 70.0, "goal": "maintain",
         }
         for field_name in self.REQUIRED:
             kwargs = dict(complete)
-            kwargs[field_name] = None if field_name != "gender" else ""
+            kwargs[field_name] = "" if field_name in ("gender", "goal") else None
             norms = compute_norms(ProfileInputs(**kwargs))
             # ``None``, не ноль (§103): отказ — отсутствие, а не число.
             assert norms.bmr is None, f"{field_name}: bmr={norms.bmr}"
@@ -359,7 +360,7 @@ class TestNobodyGetsSomeoneElsesBody:
         )
 
         norms = compute_norms(ProfileInputs(
-            gender="female", age=30, height_cm=170, weight_kg=70.0,
+            gender="female", age=30, height_cm=170, weight_kg=70.0, goal="maintain",
         ))
         assert norms.bmr > 0
         assert norms.daily_kcal > 0

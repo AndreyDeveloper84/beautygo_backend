@@ -63,8 +63,11 @@ from typing import Any
 # воспроизводимость ломает молча.
 
 #: Входы, без которых расчёта нет. Пол, возраст, рост и вес — ровно те
-#: четыре, что стоят в формуле Миффлина — Сан Жеора.
-REQUIRED_INPUTS: tuple[str, ...] = ("gender", "age", "height_cm", "weight_kg")
+#: четыре, что стоят в формуле Миффлина — Сан Жеора; цель — поправка к ней
+#: (DRF-2219, §63: «никакого расчёта от выдуманных параметров»). Цель
+#: «поддержание» за человека, не назвавшего цель, — такой же выдуманный
+#: вход, как женская формула за человека, не назвавшего пол.
+REQUIRED_INPUTS: tuple[str, ...] = ("gender", "age", "height_cm", "weight_kg", "goal")
 
 #: Версия методики расчёта калорий — §85, решение владельца 09.09.2026:
 #: Миффлин — Сан Жеор с коэффициентом активности и поправкой на цель.
@@ -98,7 +101,7 @@ CALORIES_METHOD_VERSION: str = "mifflin_st_jeor_v2"
 ACTIVITY_COEFFICIENTS: tuple[float, ...] = (1.2, 1.375, 1.55, 1.725)
 
 #: Входы, уходящие в снимок вместе с результатом. Список ШИРЕ, чем
-#: ``REQUIRED_INPUTS``: активность, цель и темп на результат влияют, и без
+#: ``REQUIRED_INPUTS``: активность и темп на результат влияют, и без
 #: них расчёт не воспроизвести.
 #:
 #: ``health_flags`` в снимок НЕ входят намеренно. Это спецкатегория
@@ -231,7 +234,10 @@ class ProfileInputs:
     height_cm: int | None = None
     weight_kg: float | None = None
     activity_coefficient: float = DEFAULT_ACTIVITY
-    goal: str = "maintain"
+    # DRF-2219: цели по умолчанию нет — вызывающий называет её сам (или
+    # расчёт отказывает с именем ``goal``). Темп и активность пока с
+    # умолчаниями: решение владельца (вопрос 59).
+    goal: str = ""
     pace: str = "moderate"
     health_flags: dict = field(default_factory=dict)
 
@@ -363,7 +369,8 @@ def _refusal(inputs: ProfileInputs, overrides_applied: list[dict]) -> ComputedNo
         daily_protein_g=None,
         daily_fat_g=None,
         daily_carbs_g=None,
-        goal=inputs.goal or "maintain",
+        # Отказ не выдумывает цель: пусто так и остаётся пусто (DRF-2219).
+        goal=inputs.goal,
         pace=inputs.pace or "moderate",
         goal_overridden_by="",
         overrides_applied=overrides_applied,
@@ -412,7 +419,8 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
     assert age is not None and height_cm is not None and weight_kg is not None
 
     bmr = _mifflin_st_jeor(gender, age, height_cm, weight_kg)
-    goal = inputs.goal or "maintain"
+    # Цель названа — иначе расчёт отказал выше (``REQUIRED_INPUTS``).
+    goal = inputs.goal
     pace = inputs.pace or "moderate"
     overrides: list[dict] = []
     overridden_by = ""

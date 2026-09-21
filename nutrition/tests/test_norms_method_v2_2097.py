@@ -62,7 +62,7 @@ CONSENT = {"type": "personal_calculation", "document_version": "v1"}
 
 #: Сетка входов — взрослые, без health-факторов; на ней все узлы-свойства.
 GRID = [
-    ProfileInputs(gender=g, age=a, height_cm=h, weight_kg=w, activity_coefficient=act)
+    ProfileInputs(gender=g, age=a, height_cm=h, weight_kg=w, activity_coefficient=act, goal="maintain")
     for g in ("female", "male")
     for a in (20, 35, 55)
     for h in (155, 170, 185)
@@ -91,7 +91,14 @@ class TestActivitySet:
     )
     def test_a1_out_of_set_is_normalised_to_the_nearest_lower_on_ties(self, raw, expected):
         norms = compute_norms(
-            ProfileInputs(gender="female", age=30, height_cm=165, weight_kg=60, activity_coefficient=raw)
+            ProfileInputs(
+                gender="female",
+                age=30,
+                height_cm=165,
+                weight_kg=60,
+                activity_coefficient=raw,
+                goal="maintain",
+            )
         )
 
         assert norms.computed
@@ -106,7 +113,14 @@ class TestActivitySet:
     @pytest.mark.parametrize("coefficient", ACTIVITY_COEFFICIENTS)
     def test_a2_a_value_from_the_set_is_used_as_is(self, coefficient):
         norms = compute_norms(
-            ProfileInputs(gender="male", age=40, height_cm=180, weight_kg=80, activity_coefficient=coefficient)
+            ProfileInputs(
+                gender="male",
+                age=40,
+                height_cm=180,
+                weight_kg=80,
+                activity_coefficient=coefficient,
+                goal="maintain",
+            )
         )
         assert norms.computed
         assert [o for o in norms.overrides_applied if o["reason"] == "activity_normalised"] == []
@@ -137,7 +151,14 @@ class TestGoalAdjustment:
         assert seen >= 500  # нижняя граница: сетка не пуста
 
     def test_g2_a_twenty_percent_deficit_never_happens(self):
-        base = ProfileInputs(gender="male", age=30, height_cm=180, weight_kg=85, activity_coefficient=1.55)
+        base = ProfileInputs(
+            gender="male",
+            age=30,
+            height_cm=180,
+            weight_kg=85,
+            activity_coefficient=1.55,
+            goal="maintain",
+        )
         maintenance = _maintenance(base)
         for goal, pace in itertools.product(GOAL_FACTORS, PACE_FACTORS):
             norms = compute_norms(_with(base, goal=goal, pace=pace))
