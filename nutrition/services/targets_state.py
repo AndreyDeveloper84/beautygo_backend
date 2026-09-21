@@ -43,6 +43,25 @@ KIND_SOURCE_FIELD: dict[str, str] = {
 }
 
 
+#: Поля ориентира по виду. Калории — всё, что выведено из расчёта энергии:
+#: макросы, ``bmr`` и RDA; жидкость — вода (DRF-1929, DRF-2192).
+KIND_FIELDS: dict[str, tuple[str, ...]] = {
+    KIND_CALORIES: (
+        "bmr", "daily_kcal", "daily_protein_g", "daily_fat_g", "daily_carbs_g",
+        "daily_vitamin_d_iu", "daily_vitamin_b12_mcg", "daily_vitamin_c_mg",
+        "daily_iron_mg", "daily_calcium_mg", "daily_magnesium_mg",
+        "daily_omega3_g", "daily_fiber_g",
+    ),
+    KIND_FLUIDS: ("daily_water_ml",),
+}
+
+#: Вид → поле подтверждения (пара к ``KIND_SOURCE_FIELD``).
+KIND_STAMP_FIELD: dict[str, str] = {
+    KIND_CALORIES: "calories_confirmed_at",
+    KIND_FLUIDS: "fluids_confirmed_at",
+}
+
+
 def kind_source(profile: NutritionProfile | None, kind: str) -> str | None:
     """Происхождение ОДНОГО вида — или ``None``, если по видам не писалось.
 
@@ -95,3 +114,30 @@ def targets_confirmed(profile: NutritionProfile | None) -> bool:
     if profile is None:
         return False
     return calories_confirmed(profile) or fluids_confirmed(profile)
+
+
+def effective_kind_source(profile: NutritionProfile, kind: str) -> str:
+    """Подпись вида с тем же откатом на общую, что у ``kind_confirmed``."""
+    return kind_source(profile, kind) or profile.targets_source
+
+
+#: Порядок, в котором общая подпись выводится из подписей видов. Первым —
+#: предложение: пока хоть один вид — неподтверждённое предложение, читатель
+#: общей подписи (бот до перехода на ``by_kind``) обязан видеть «не
+#: подтверждено», а не «действует» (§6). Так же вела себя строка до
+#: DRF-2192, когда пересчёт переводил в предложение все виды разом.
+_OVERALL_PRIORITY: tuple[str, ...] = (
+    NutritionProfile.TargetsSource.AYLA_PROPOSED,
+    NutritionProfile.TargetsSource.USER_ENTERED,
+    NutritionProfile.TargetsSource.AYLA_CALCULATED,
+    NutritionProfile.TargetsSource.UNKNOWN_LEGACY,
+)
+
+
+def overall_source(profile: NutritionProfile) -> str:
+    """Общая подпись, выведенная из подписей видов (DRF-2192)."""
+    sources = {effective_kind_source(profile, kind) for kind in KIND_FIELDS}
+    for source in _OVERALL_PRIORITY:
+        if source in sources:
+            return source
+    return NutritionProfile.TargetsSource.NONE

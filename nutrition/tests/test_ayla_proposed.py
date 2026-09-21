@@ -101,27 +101,46 @@ class TestComputationIsAProposal:
         assert body["targets_provenance"]["confirmed_at"] is None
         assert body["targets_provenance"]["input_snapshot"]["weight_kg"] == 67.0
 
-    def test_a_recompute_on_a_confirmed_row_is_a_new_proposal(self, proxy_user, headers):
-        """Подтверждение относится к числам, которые человек видел."""
+    def test_a_recompute_on_a_confirmed_row_is_a_new_proposal_beside_it(
+        self, proxy_user, headers
+    ):
+        """Подтверждение относится к числам, которые человек видел.
+
+        До DRF-2192 этот тест пинил обратное — новое предложение ставилось
+        ВМЕСТО подтверждённого и стирало ``confirmed_at``. Владелец этот
+        контракт отменил (§63, 21.09.2026): «старый подтверждённый ориентир
+        не исчезает до подтверждения нового».
+        """
         _compute(proxy_user, headers)
         assert _confirm(headers).status_code == status.HTTP_200_OK
         p = NutritionProfile.objects.get(user=proxy_user)
         assert p.targets_source == Source.AYLA_CALCULATED
-        assert p.targets_confirmed_at is not None
+        confirmed_at = p.targets_confirmed_at
+        assert confirmed_at is not None
 
         # Смена темпа (открытое поле, сценарий (б) сторожа — пересчёт без
-        # утверждения разрешён); результат — НОВОЕ предложение.
+        # утверждения разрешён); результат — НОВОЕ предложение, но рядом.
         kcal_before = p.daily_kcal
         resp = _post({"pace": "gentle"}, headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
         p.refresh_from_db()
-        assert p.targets_source == Source.AYLA_PROPOSED
-        assert p.targets_confirmed_at is None
-        assert p.daily_kcal != kcal_before  # пересчёт состоялся
-        assert p.targets_input_snapshot["pace"] == "gentle"
+        assert p.targets_source == Source.AYLA_CALCULATED
+        assert p.targets_confirmed_at == confirmed_at
+        assert p.daily_kcal == kcal_before  # действующее не тронуто
+        pending = resp.json()["data"]["targets_provenance"]["pending_proposal"]
+        assert pending["daily_kcal"] != kcal_before  # пересчёт состоялся — рядом
+        # Снимок действующего описывает действующие числа (темп прежний);
+        # новый темп — в снимке предложения рядом.
+        assert p.targets_input_snapshot["pace"] == "moderate"
+        assert pending["input_snapshot"]["pace"] == "gentle"
 
     def test_a_refusal_clears_confirmation_too(self, proxy_user, headers):
-        """Расчёт снят (входа не хватило) — подтверждение снято вместе с ним."""
+        """Расчёт снят (входа не хватило) — подтверждение снято вместе с ним.
+
+        DRF-2192 этот тест НЕ переворачивает: §63 держит подтверждённый
+        ориентир при новом ВЕСЕ, а отказ значит, что методика за числом
+        больше не стоит (тот же путь у беременности и РПП).
+        """
         _compute(proxy_user, headers)
         _confirm(headers)
         # Сериализатор не пропускает ``weight_kg: null``; вес снимается так
@@ -136,6 +155,7 @@ class TestComputationIsAProposal:
         assert p.targets_source == Source.NONE
         assert p.targets_confirmed_at is None
         assert p.daily_kcal is None
+        assert p.pending_proposal is None
 
     def test_a_partial_post_on_a_proposal_recomputes_and_stays_a_proposal(
         self, proxy_user, headers,
