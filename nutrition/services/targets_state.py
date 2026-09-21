@@ -141,3 +141,18 @@ def overall_source(profile: NutritionProfile) -> str:
         if source in sources:
             return source
     return NutritionProfile.TargetsSource.NONE
+
+
+def snapshot_as_named(profile: NutritionProfile) -> dict:
+    """Снимок входов расчёта без пола, которого человек НЕ называл (DRF-2241).
+
+    Строки, посчитанные до #527 (DRF-2219), несут в снимке ``gender=
+    "female"``: тогда расчёт подставлял его сам. Снимок — история, и в базе
+    он остаётся как есть; но читать его как «использованные данные» (§5.1)
+    или как вход проверки ручной нормы можно только там, где пол совпадает
+    с названным в профиле. Иначе ключ отбрасывается.
+    """
+    snapshot = dict(profile.targets_input_snapshot or {})
+    if "gender" in snapshot and snapshot.get("gender") != (profile.gender or None):
+        snapshot.pop("gender")
+    return snapshot

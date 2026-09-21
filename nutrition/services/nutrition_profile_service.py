@@ -321,6 +321,22 @@ def _missing_inputs(inputs: ProfileInputs) -> list[str]:
     return missing
 
 
+def _invalid_inputs(inputs: ProfileInputs) -> list[str]:
+    """Названные пол и цель, которых нет в закрытых списках модели (DRF-2241).
+
+    Списки — ``NutritionProfile.Gender`` / ``Goal``, не копия здесь: новое
+    значение в модели не должно разойтись с расчётом. Импорт ленивый —
+    модуль остаётся чистым и не тянет модели на уровне импорта.
+    """
+    from nutrition.models import NutritionProfile
+
+    allowed = {
+        "gender": set(NutritionProfile.Gender.values),
+        "goal": set(NutritionProfile.Goal.values),
+    }
+    return [name for name, values in allowed.items() if getattr(inputs, name) not in values]
+
+
 def _input_snapshot(
     inputs: ProfileInputs, *, goal: str, pace: str, activity: float | None = None
 ) -> dict[str, Any]:
@@ -410,6 +426,18 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
         return _refusal(inputs, [{
             "reason": "insufficient_inputs",
             "fields": missing,
+        }])
+
+    # DRF-2241: названо — ещё не значит допустимо. Пол и цель — закрытые
+    # списки модели. Без этой проверки неизвестный пол ронял расчёт
+    # ``KeyError`` в справочнике жидкости (→ 500 на пересчёте и на проверке
+    # ручной нормы), а неизвестная цель молча считалась «поддержанием» —
+    # выдуманный вход под другим именем.
+    invalid = _invalid_inputs(inputs)
+    if invalid:
+        return _refusal(inputs, [{
+            "reason": "invalid_inputs",
+            "fields": invalid,
         }])
 
     gender = inputs.gender
@@ -513,8 +541,10 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
             "fluids": FLUIDS_METHOD_VERSION,
         },
         input_snapshot=_input_snapshot(inputs, goal=goal, pace=pace, activity=activity),
-        # Раздел 4: справочник по полу. Пол здесь — уже проверенный вход
-        # (``REQUIRED_INPUTS``), иначе расчёт отказал бы выше.
+        # Раздел 4: справочник по полу. Пол здесь — проверенный вход: его
+        # наличие (``REQUIRED_INPUTS``) и допустимость (``_invalid_inputs``,
+        # DRF-2241) проверены выше. До DRF-2241 проверялось только наличие,
+        # и неизвестный пол падал здесь ``KeyError``.
         daily_water_ml=FLUIDS_REFERENCE_ML[gender],
         # DRF-265: RDA layer — independent of macro override ladder.
         daily_vitamin_d_iu=rda["vitamin_d_iu"],

@@ -55,7 +55,7 @@ from typing import Any
 from django.db import transaction
 
 from nutrition.models import NutritionProfile
-from nutrition.services.targets_state import KIND_FIELDS, KIND_SOURCE_FIELD
+from nutrition.services.targets_state import KIND_FIELDS, KIND_SOURCE_FIELD, snapshot_as_named
 from nutrition.services.nutrition_profile_service import (  # noqa: F401 — re-exported names
     CALORIES_HARD_FLOOR_KCAL,
     CALORIES_WARN_BELOW_KCAL,
@@ -140,7 +140,10 @@ def maintenance_kcal(profile: NutritionProfile) -> int | None:
     """
     if profile.targets_source not in _SNAPSHOT_SOURCES:
         return None
-    snapshot = dict(profile.targets_input_snapshot or {})
+    # DRF-2241: пол снимка читается, только если он совпадает с НАЗВАННЫМ —
+    # снимки до #527 несут выдуманный «female». Не совпал — пола нет,
+    # расчёт отказывает, и проверка отклонения честно «unavailable».
+    snapshot = snapshot_as_named(profile)
     if not snapshot:
         return None
     norms = compute_norms(ProfileInputs(

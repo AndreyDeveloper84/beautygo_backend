@@ -177,7 +177,10 @@ class TestAssumedInputsMarker:
         # этой половины отрицание выше прошло бы и в мире, где вердикт
         # не выносится никому.
         assert body_real["goal_overridden_by"] == "bmr_floor"
-        assert body_real["goal"] == "maintain"
+        # DRF-2241: названная цель во входе не заменяется расчётной — она
+        # «похудеть»; по чему посчитали («поддержание») — в снимке.
+        assert body_real["goal"] == "lose"
+        assert body_real["targets_provenance"]["input_snapshot"]["goal"] == "maintain"
         assert body_real["norms"]["daily_kcal"] > 0
 
         # Маркер подстановки пуст в обоих случаях: подставлять нечего.
