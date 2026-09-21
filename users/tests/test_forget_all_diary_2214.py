@@ -9,8 +9,9 @@ erase verb: DELETE /internal/users/{id}/personal-data/») и задание по
 DRF-1950 (``apps/identity/services/ayla_erasure.py:285``) идут в C5.2 —
 ``InternalPersonalDataDeleteView``. Здесь URL собран так же, как его собирает
 клиент бота (``apps/integrations/ayla/personal_context_client.py`` —
-``f"internal/users/{ayla_user_id}/personal-data/"`` от базы ``/api/v1/``), и
-узел ``test_the_bot_erase_url_is_the_c52_view`` не даст подменить путь второй раз.
+``f"internal/users/{ayla_user_id}/personal-data/"`` от базы ``/api/v1/``): все
+узлы пути бота бьют в тот же URL, а ``test_the_bot_erase_url_is_the_c52_view``
+держит, что он разрешается в C5.2. Дрейф клиента бота отсюда не виден.
 
 # Дневник — по слову владельца (CURRENT_DECISIONS §66: «а — стирать дневник вместе со всем»)
 
@@ -52,6 +53,7 @@ from nutrition.models import (
     WaterEntry,
     WaterLog,
 )
+from users.deletion_executor import IncompleteErasure
 from users.models import UserPersonalContext
 from users.personal_data_api import InternalPersonalDataDeleteView
 from users.tests.test_forget_all_catalog_2214 import (
@@ -185,7 +187,11 @@ def diary(user):  # noqa: F811 — фикстура по имени
 
 class TestTheBotsRealPath:
     def test_the_bot_erase_url_is_the_c52_view(self, user) -> None:  # noqa: F811
-        """Непропускаемый: URL клиента бота разрешается в C5.2, а не в ``personal-context``."""
+        """URL клиента бота разрешается в C5.2, а не в ``personal-context``.
+
+        Сторож, не красный узел: ловит смену URLconf каталога. Дрейф самого
+        клиента бота он не видит — URL здесь копия его f-строки со ссылкой.
+        """
         match = resolve(_bot_url(user))
         assert match.func.view_class is InternalPersonalDataDeleteView
 
@@ -256,6 +262,20 @@ class TestTheWholeSubject:
         assert _all_zero(_remembered_counts(proxy)), _remembered_counts(proxy)
         assert not _photo_exists(scan)
 
+    def test_a_proxy_without_a_profile_row_gets_no_tombstone(self, user) -> None:  # noqa: F811
+        """Дневник прокси стёрт, а надгробие профиля ему не создано (DRF-1038)."""
+        proxy = User.objects.create(
+            username="bot:max:fa2214-bare", role="client", is_proxy=True, linked_user=user
+        )
+        _seed_diary(proxy, tag="b")
+        assert _all_present(_diary_counts(proxy))
+        assert not UserPersonalContext.objects.filter(user=proxy).exists()
+
+        _forget_via_bot(user)
+
+        assert _all_zero(_diary_counts(proxy)), _diary_counts(proxy)
+        assert not UserPersonalContext.objects.filter(user=proxy).exists()
+
     def test_a_neighbour_and_an_unlinked_proxy_are_untouched(self, diary) -> None:
         """Положительная пара: стирается только этот субъект — и его фото, не чужое."""
         u, _ = diary
@@ -321,3 +341,37 @@ class TestAllOrNothing:
         forget(u)  # повтор дочищает строку
 
         assert not FoodScan.objects.filter(pk=scan.pk).exists()
+
+    def test_a_photo_that_stays_on_storage_is_a_500_and_nothing_is_erased(self, diary) -> None:
+        """Файл не снялся (носитель сказал «удалён», а он на месте) — честный 500, не «стёрто»."""
+        u, scan = diary
+        _seed_remembered(u)
+        remembered_before, diary_before = _remembered_counts(u), _diary_counts(u)
+        assert _all_present(remembered_before) and _all_present(diary_before)
+        assert _photo_exists(scan)
+
+        storage = scan.image.storage
+        storage_cls = type(getattr(storage, "_wrapped", storage))
+        client = _internal()
+        client.raise_request_exception = False
+        with mock.patch.object(storage_cls, "delete", return_value=None):
+            resp = client.delete(_bot_url(u))
+
+        assert resp.status_code == 500
+        assert _remembered_counts(u) == remembered_before
+        assert _diary_counts(u) == diary_before
+        assert UserPersonalContext.objects.get(user=u).diet_type == "keto"
+        assert _photo_exists(scan)
+
+    def test_incomplete_erasure_is_what_a_stuck_photo_raises(self, diary) -> None:
+        """Пара к узлу выше: 500 — именно от ``IncompleteErasure``, а не от чего попало."""
+        u, scan = diary
+        assert _photo_exists(scan)
+
+        storage = scan.image.storage
+        storage_cls = type(getattr(storage, "_wrapped", storage))
+        with mock.patch.object(storage_cls, "delete", return_value=None):
+            with pytest.raises(IncompleteErasure):
+                _forget_via_bot(u)
+
+        assert _photo_exists(scan)
