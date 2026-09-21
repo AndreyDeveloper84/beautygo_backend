@@ -141,10 +141,17 @@ class NutritionSummaryService:
         )
 
         # DRF-2217 — вода из ``WaterEntry`` за те же сутки, что еда выше.
-        from nutrition.services.water_entry_service import water_total_ml
+        # DRF-2257 — и ориентир воды тот же, что у экрана воды: одна функция
+        # ``water_entry_service.fluid_target_ml`` (§85 п.4 под
+        # ``fluids_confirmed``); до этого сводка отдавала отсутствие всегда.
+        from nutrition.services import water_entry_service
         from nutrition.services.water_service import WaterAggregate
 
-        water = WaterAggregate(water_ml=water_total_ml(user_id, start, end))
+        profile = NutritionProfile.objects.filter(user_id=user_id).first()
+        water = WaterAggregate(
+            water_ml=water_entry_service.water_total_ml(user_id, start, end),
+            water_goal_ml=water_entry_service.fluid_target_ml(profile),
+        )
         entries = list(qs)
         # Ориентира по калориям НЕТ, и наружу это уезжает отсутствием
         # ключа (``None`` → сериализатор выкидывает поле).
@@ -174,7 +181,6 @@ class NutritionSummaryService:
         # константа: сторож ``test_targets_stay_absent`` подстановку числа
         # запрещает, а чтение под предикатом происхождения — нет.
         calories_goal: int | None = None
-        profile = NutritionProfile.objects.filter(user_id=user_id).first()
         if calories_confirmed(profile) and profile is not None and profile.daily_kcal:
             calories_goal = int(profile.daily_kcal)
 
