@@ -143,12 +143,15 @@ class TestTheWaterFormulaIsGone:
 
         light = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=170, weight_kg=50.0, goal="maintain",
+            activity_coefficient=1.375,
         ))
         heavy = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=170, weight_kg=90.0, goal="maintain",
+            activity_coefficient=1.375,
         ))
         male = compute_norms(ProfileInputs(
             gender="male", age=30, height_cm=180, weight_kg=80.0, goal="maintain",
+            activity_coefficient=1.375,
         ))
         assert light.daily_water_ml == heavy.daily_water_ml == 2200
         assert male.daily_water_ml == 3000
@@ -180,6 +183,7 @@ class TestTheWaterFormulaIsGone:
             norms = compute_norms(ProfileInputs(
                 gender="female", age=30, height_cm=170, weight_kg=70.0,
                 health_flags={flag: True}, goal="maintain",
+                activity_coefficient=1.375,
             ))
             # N-g: health-фактор — отказ; воды нет вместе со всем, и
             # версии методики жидкости у отказа нет.
@@ -361,6 +365,7 @@ class TestNobodyGetsSomeoneElsesBody:
 
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=170, weight_kg=70.0, goal="maintain",
+            activity_coefficient=1.375,
         ))
         assert norms.bmr > 0
         assert norms.daily_kcal > 0

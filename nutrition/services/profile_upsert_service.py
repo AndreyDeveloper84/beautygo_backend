@@ -24,7 +24,6 @@ from django.db import transaction
 
 from nutrition.models import NutritionProfile, ProfileIdempotencyKey
 from nutrition.services.nutrition_profile_service import (
-    DEFAULT_ACTIVITY,
     ProfileInputs,
     compute_norms,
 )
@@ -110,10 +109,8 @@ def upsert_profile(
         return cached
 
     with transaction.atomic():
-        profile, _ = NutritionProfile.objects.select_for_update().get_or_create(
-            user=user,
-            defaults={"activity_coefficient": DEFAULT_ACTIVITY},
-        )
+        # Вопрос 59: строка не рождается с активностью — её называет человек.
+        profile, _ = NutritionProfile.objects.select_for_update().get_or_create(user=user)
         _apply_patch(profile, payload)
         # §103 N-b: пересчёт — только с основанием. Довод и три сценария
         # — в докстринге ``targets_recompute_gate``. Здесь важно одно:
@@ -165,6 +162,27 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
     for field in skipped:
         flags[f"{field}_skipped"] = True
 
+    # Вопрос 59 (CD §72): upsert частичный — поле, которого нет в теле,
+    # остаётся как лежало. «Не знаю» про активность приходит пропуском, а не
+    # числом, и без этого человек, повторивший анкету, считался бы от
+    # активности, которую сейчас назвать не смог. Пропуск — значит «не
+    # названа»: NULL, и расчёт отказывает с именем поля.
+    # Тело с числом И пропуском одновременно — противоречие; побеждает
+    # пропуск: число за человека, сказавшего «не знаю», не берём.
+    if "activity" in skipped:
+        profile.activity_coefficient = None
+    elif "activity_coefficient" in payload:
+        # Названа — прежняя пометка пропуска больше не правда.
+        flags.pop("activity_skipped", None)
+
+    # Тот же класс для темпа: пришла цель, которой темп не нужен, — прежний
+    # темп (от другой цели, возможно давний) больше не вход. Пришла цель с
+    # темпом без самого темпа — прежний не переносится молча: расчёт
+    # откажет с именем ``pace``. Прочие пропуски (пол, цель) по-прежнему
+    # только помечаются: их «не названо» и так пусто в строке.
+    if "goal" in payload and "pace" not in payload:
+        profile.pace = ""
+
     profile.health_flags = flags
 
     if "disclaimer_acked" in payload:
@@ -181,18 +199,18 @@ _CALCULATION_INPUTS: frozenset[str] = frozenset({
 
 def _recompute_and_persist(profile: NutritionProfile) -> None:
     Source = NutritionProfile.TargetsSource
-    # DRF-2219 (§63): пол и цель — только названные человеком. Не назван —
-    # расчёт отказывает с именем поля (``insufficient_inputs``), а не
-    # считает по женской формуле на «поддержание». Темп и активность пока с
-    # умолчаниями — ждут решения владельца (вопрос 59).
+    # DRF-2219 (§63) и вопрос 59 (§72): пол, цель, активность и темп —
+    # только названные человеком. Не назван — расчёт отказывает с именем
+    # поля (``insufficient_inputs``), а не считает по женской формуле на
+    # «поддержание» со средней активностью и средним темпом.
     norms = compute_norms(ProfileInputs(
         gender=profile.gender or "",
         age=profile.age,
         height_cm=profile.height_cm,
         weight_kg=profile.weight_kg,
-        activity_coefficient=profile.activity_coefficient or DEFAULT_ACTIVITY,
+        activity_coefficient=profile.activity_coefficient,
         goal=profile.goal or "",
-        pace=profile.pace or "moderate",
+        pace=profile.pace or "",
         health_flags=profile.health_flags or {},
     ))
 
@@ -297,9 +315,10 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
         # следующий пересчёт — уже без нужды в ступени — шёл от
         # «поддержания», а названная цель пропадала навсегда.
         #
-        # Темп — та же перезапись (ступень moderate → gentle), но темп ждёт
-        # решения владельца (вопрос 59) и здесь не меняется.
-        profile.pace = norms.pace
+        # Темп — та же перезапись (ступень moderate → gentle), и с вопросом
+        # 59 (CD §72) он тоже вход, который называет человек: расчётный темп
+        # после ступени живёт в снимке и в ``goal_overridden_by``, а
+        # ``profile.pace`` остаётся названным.
         profile.goal_overridden_by = norms.goal_overridden_by
         if norms.computed:
             profile.targets_method_versions = dict(norms.method_versions)
@@ -346,8 +365,8 @@ def _refuse_recompute(profile: NutritionProfile, payload: dict[str, Any]) -> Non
     profile.last_overrides_applied = audit
     # DRF-2192: запрос тронул вход расчёта, а пересчёта не было — лежащее
     # рядом предложение посчитано от прежних входов. Держать его значило
-    # бы, что подтверждение вернёт старые цель и темп поверх новых или
-    # применит расчёт к человеку, только что назвавшему беременность.
+    # бы, что подтверждение применит расчёт от устаревших входов — например,
+    # к человеку, только что назвавшему беременность.
     if profile.pending_proposal and _CALCULATION_INPUTS & set(payload):
         profile.pending_proposal = None
     logger.warning(
@@ -704,7 +723,8 @@ def confirm_targets(*, user, external_user_id: str) -> tuple[dict, str]:
                 profile.targets_computed_at = now
                 # DRF-2241: названная цель не заменяется расчётной и при
                 # подтверждении — расчётная уже в снимке, выше.
-                profile.pace = pending.get("pace") or profile.pace
+                # Вопрос 59: названный темп не заменяется расчётным — он в
+                # снимке, выше.
                 profile.goal_overridden_by = pending.get("goal_overridden_by") or ""
                 profile.last_overrides_applied = list(pending.get("overrides_applied") or [])
             profile.pending_proposal = None

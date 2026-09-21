@@ -117,6 +117,9 @@ LOW_WEIGHT = {
     "weight_kg": 40.0,
     "activity_coefficient": 1.2,
     "goal": "lose",
+    # Вопрос 59: темп назван — лестница пола BMR (moderate → gentle →
+    # maintain) проверяется от названного, а не от умолчания.
+    "pace": "moderate",
 }
 
 

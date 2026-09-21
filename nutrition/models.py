@@ -488,7 +488,11 @@ class NutritionProfile(models.Model):
     timezone = models.CharField(max_length=64, blank=True, default="UTC")
 
     # Goals
-    activity_coefficient = models.FloatField(default=1.4)
+    # CD §72 (вопрос 59): активность называет человек — у колонки нет
+    # умолчания. NULL — «не названа», и расчёт отказывает с именем поля.
+    # Строки, записанные до правки, хранят прежние числа (1.4 умолчания
+    # схемы в том числе) — данные не переписываются: решение (а1).
+    activity_coefficient = models.FloatField(null=True, blank=True, default=None)
     goal = models.CharField(
         max_length=12, choices=Goal.choices, blank=True, default="",
     )

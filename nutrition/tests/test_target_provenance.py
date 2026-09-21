@@ -199,6 +199,8 @@ class TestProvenanceIsStoredAndLeavesTheService:
                 "height_cm": 168,
                 "weight_kg": 62,
                 "goal": "maintain",
+                # Вопрос 59: активность названа — без неё расчёта нет.
+                "activity_coefficient": 1.375,
             },
         )
         assert first["targets_provenance"]["source"] == "ayla_proposed"

@@ -66,7 +66,8 @@ Source = NutritionProfile.TargetsSource
 
 FULL_INPUTS = {
     "gender": "female", "age": 36, "height_cm": 170, "weight_kg": 67.0,
-    "activity_coefficient": 1.4, "goal": "lose",
+    # Вопрос 59: при «похудеть» темп называется — умолчания больше нет.
+    "activity_coefficient": 1.4, "goal": "lose", "pace": "moderate",
 }
 
 

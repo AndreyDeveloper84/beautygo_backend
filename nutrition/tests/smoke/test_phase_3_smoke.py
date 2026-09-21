@@ -172,7 +172,8 @@ class TestSection2Profile:
         resp = client_api.post(URL_PROFILE, {
             "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165,
-            "weight_kg": 70.0, "goal": "maintain",
+            # Вопрос 59: активность названа — без неё расчёта нет.
+            "weight_kg": 70.0, "goal": "maintain", "activity_coefficient": 1.4,
         }, format="json", **headers)
         body = resp.json()["data"]
         assert resp.status_code == status.HTTP_200_OK
@@ -266,15 +267,20 @@ class TestSection2Profile:
             "goal": "lose", "pace": "moderate",
         }, format="json", **headers)
         body = resp.json()["data"]
+        # Расчётные цель и темп после ступени — в снимке; названные человеком
+        # остаются в профиле (DRF-2241 для цели, вопрос 59 для темпа). До них
+        # тест читал результат ступени из полей профиля — из ВХОДА.
+        snap = body["targets_provenance"]["input_snapshot"]
+        assert body["goal"] == "lose" and body["pace"] == "moderate"
         # At least one of: pace softened OR goal flipped to maintain via BMR floor.
-        if body["goal"] == "lose":
-            assert body["pace"] == "gentle"
+        if snap["goal"] == "lose":
+            assert snap["pace"] == "gentle"
             assert any(
                 o["reason"] == "bmr_floor"
                 for o in body["overrides_applied"]
             )
         else:
-            assert body["goal"] == "maintain"
+            assert snap["goal"] == "maintain"
             assert any(
                 o["reason"] == "bmr_floor" and o["to"].get("goal") == "maintain"
                 for o in body["overrides_applied"]
@@ -1370,7 +1376,7 @@ class TestSection8CrossFeature:
         client_api.post(URL_PROFILE, {
             "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
-            "goal": "maintain",
+            "goal": "maintain", "activity_coefficient": 1.4,
         }, format="json", **headers)
         row_before = NutritionProfile.objects.get(user=proxy_user)
         before_water = row_before.daily_water_ml
@@ -1381,7 +1387,8 @@ class TestSection8CrossFeature:
 
         client_api.post(
             URL_PROFILE,
-            {"consent": CONSENT, "weight_kg": 80.0, "goal": "lose"},
+            # Вопрос 59: «похудеть» без темпа не считается — темп назван.
+            {"consent": CONSENT, "weight_kg": 80.0, "goal": "lose", "pace": "moderate"},
             format="json", **headers,
         )
         row_after = NutritionProfile.objects.get(user=proxy_user)

@@ -86,6 +86,7 @@ class TestRDAMaleAdult:
         # accounts for the bulk of the gap.
         norms = compute_norms(ProfileInputs(
             gender="male", age=35, height_cm=180, weight_kg=80.0, goal="maintain",
+            activity_coefficient=1.375,
         ))
         assert norms.daily_iron_mg == 8
 
@@ -93,6 +94,7 @@ class TestRDAMaleAdult:
         # Magnesium scales with body mass; reference 400 vs 310.
         norms = compute_norms(ProfileInputs(
             gender="male", age=35, height_cm=180, weight_kg=80.0, goal="maintain",
+            activity_coefficient=1.375,
         ))
         assert norms.daily_magnesium_mg == 400
 
@@ -105,6 +107,7 @@ class TestRDAPregnancy:
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=70.0,
             health_flags={"pregnant": True}, goal="maintain",
+            activity_coefficient=1.375,
         ))
         assert norms.daily_iron_mg is None
         assert [o["reason"] for o in norms.overrides_applied] == ["health_factor_pregnant"]
@@ -126,6 +129,7 @@ class TestRDABreastfeeding:
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=70.0,
             health_flags={"breastfeeding": True}, goal="maintain",
+            activity_coefficient=1.375,
         ))
         assert norms.daily_calcium_mg is None
         assert [o["reason"] for o in norms.overrides_applied] == ["health_factor_breastfeeding"]
@@ -144,6 +148,7 @@ class TestRDAVegan:
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=65.0,
             health_flags={"vegan": True}, goal="maintain",
+            activity_coefficient=1.375,
         ))
         # 2.4 → ~4.0 (4x, NIH guidance for plant-based diets without
         # supplementation; we use 4.0 mcg as a conservative target).
@@ -153,6 +158,7 @@ class TestRDAVegan:
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=65.0,
             health_flags={"vegan": True}, goal="maintain",
+            activity_coefficient=1.375,
         ))
         # 18 × 1.8 = 32.4 → rounded to 32 (display-friendly integer).
         assert norms.daily_iron_mg == 32
@@ -162,6 +168,7 @@ class TestRDAVegan:
         norms = compute_norms(ProfileInputs(
             gender="female", age=30, height_cm=165, weight_kg=65.0,
             health_flags={"vegetarian": True}, goal="maintain",
+            activity_coefficient=1.375,
         ))
         # Vegetarian eats dairy & eggs → b12 still gets a smaller bump.
         # 2.4 → 3.0 (50% bump for partial dietary restriction).
@@ -179,6 +186,7 @@ class TestRDAAdolescent:
     def test_minor_is_refused_through_compute_norms(self):
         norms = compute_norms(ProfileInputs(
             gender="female", age=16, height_cm=165, weight_kg=55.0, goal="maintain",
+            activity_coefficient=1.375,
         ))
         assert norms.daily_calcium_mg is None and norms.daily_iron_mg is None
         assert [o["reason"] for o in norms.overrides_applied] == ["health_factor_minor"]
@@ -200,12 +208,14 @@ class TestRDASenior:
     def test_senior_vitamin_d_800(self):
         norms = compute_norms(ProfileInputs(
             gender="female", age=68, height_cm=160, weight_kg=65.0, goal="maintain",
+            activity_coefficient=1.375,
         ))
         assert norms.daily_vitamin_d_iu == 800
 
     def test_senior_female_calcium_1200(self):
         norms = compute_norms(ProfileInputs(
             gender="female", age=68, height_cm=160, weight_kg=65.0, goal="maintain",
+            activity_coefficient=1.375,
         ))
         # Postmenopausal women need 1200 mg/day for bone preservation.
         assert norms.daily_calcium_mg == 1200
@@ -256,7 +266,8 @@ class TestProfileUpsertWritesRDA:
             "consent": CONSENT,
             "gender": "female", "age": 40,
             "height_cm": 165, "weight_kg": 70.0,
-            "goal": "maintain",
+            # Вопрос 59: активность названа — без неё расчёта нет.
+            "goal": "maintain", "activity_coefficient": 1.375,
         })
         assert resp.status_code in (200, 201), resp.content
 

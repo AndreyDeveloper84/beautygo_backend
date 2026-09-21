@@ -62,7 +62,7 @@ def full_profile(api, proxy_user, headers):
             "height_cm": 165,
             "weight_kg": 60,
             "activity_coefficient": 1.6,
-            "goal": "lose",
+            "goal": "lose", "pace": "moderate",
         },
         format="json",
         **headers,
@@ -102,7 +102,8 @@ class TestErasureIsCompleteAndKeepsTheDiary:
         }
         p = NutritionProfile.objects.get(pk=full_profile.pk)
         assert (p.weight_kg, p.height_cm, p.age, p.gender) == (None, None, None, "")
-        assert p.activity_coefficient == 1.4
+        # Вопрос 59: «пусто» активности — NULL («не названа»), не 1.4.
+        assert p.activity_coefficient is None
         assert p.goal == ""
         assert p.daily_kcal is None and p.bmr is None and p.daily_water_ml is None
         assert p.targets_source == NutritionProfile.TargetsSource.NONE
