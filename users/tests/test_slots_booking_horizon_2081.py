@@ -30,6 +30,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from freezegun import freeze_time
 from rest_framework.test import APIClient
 
 from appointments.domain.exceptions import BookingWindowError
@@ -46,20 +47,28 @@ INTERNAL_URL = "/api/v1/internal/specialists/"
 PUBLIC_URL = "/api/v1/specialists/"
 
 
-def _midday_zone() -> str:
-    """Часовой пояс, в котором мгновение горизонта приходится на ~12:00 местного.
+#: Часы — молчаливый параметр узла h3: граничный день делится мгновением
+#: ``now + N дней`` на «до» и «после», и обе половины обязаны быть непусты.
+#: Прежде пояс подбирался по часу UTC ПРИ СБОРЕ модуля, а мгновение считалось
+#: по часам ПРИ ВЫПОЛНЕНИИ — на границе часа посылка ломалась (флейк DRF-2197,
+#: пойман дважды). Теперь фиксировано ВРЕМЯ (``FROZEN_NOW``, заморожено на
+#: каждый тест фикстурой ниже), а пояс — константа: 07:00 UTC в ``Etc/GMT-5``
+#: (= UTC+5, знак в этих зонах обратный; IANA, проходит
+#: ``validate_iana_timezone``) — ровно полдень местного. Сборка и запуск в
+#: любой час дают один и тот же узел; сторож — ``test_slots_booking_horizon_clock_2197``.
+FROZEN_NOW = datetime(2026, 9, 21, 7, 0, tzinfo=timezone.utc)
+TZ = "Etc/GMT-5"
 
-    Часы — молчаливый параметр узла h3: граничный день делится мгновением
-    ``now + N дней`` на «до» и «после», и обе половины обязаны быть непусты.
-    Вместо фиксированного пояса (в 23:30 по Москве половина «после» пуста)
-    пояс выбирается по текущему часу UTC. ``Etc/GMT-5`` = UTC+5 (знак в этих
-    зонах обратный) — все они IANA и проходят ``validate_iana_timezone``.
-    """
-    offset = 12 - datetime.now(tz=timezone.utc).hour  # в [-11, 12]
-    return "Etc/GMT" if offset == 0 else f"Etc/GMT{'-' if offset > 0 else '+'}{abs(offset)}"
 
+@pytest.fixture(autouse=True)
+def _frozen_clock():
+    # Модуль троттлинга DRF берёт ``timer = time.time`` атрибутом класса при
+    # импорте; импортированный ВНУТРИ заморозки, он получил бы подменную
+    # функцию, и та связалась бы с экземпляром как метод. Импорт — до заморозки.
+    import rest_framework.throttling  # noqa: F401
 
-TZ = _midday_zone()
+    with freeze_time(FROZEN_NOW):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -125,7 +134,8 @@ def _get(client: APIClient, base: str, specialist, service, day) -> dict:
 
 
 def _horizon_end_local() -> datetime:
-    return (datetime.now(tz=timezone.utc) + timedelta(days=60)).astimezone(ZoneInfo(TZ))
+    """Мгновение горизонта от ЗАМОРОЖЕННОГО «сейчас», не от часов сборки или запуска."""
+    return (FROZEN_NOW + timedelta(days=60)).astimezone(ZoneInfo(TZ))
 
 
 class TestTheHorizonIsOneForSlotsAndBookings:
@@ -151,7 +161,7 @@ class TestTheHorizonIsOneForSlotsAndBookings:
         end_local = _horizon_end_local()
         # Мгновение горизонта не должно упираться в край рабочего дня: иначе
         # одна из двух половин (до/после) пуста и узел ничего не отсекает.
-        # Пояс подобран под полдень (``_midday_zone``), проверка — положительная стража.
+        # Время заморожено на полдень местного (``FROZEN_NOW``), проверка — положительная стража.
         assert time(11, 0) <= end_local.time() < time(13, 0), (TZ, end_local)
         day = end_local.date()
 
