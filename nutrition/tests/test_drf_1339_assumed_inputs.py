@@ -274,7 +274,9 @@ _SNAPSHOT = {
         "expected": {
             "bmr": 876, "daily_kcal": 1050, "daily_protein_g": 63,
             "daily_fat_g": 35, "daily_carbs_g": 121,
-            "goal": "maintain", "pace": "gentle",
+            # Вопрос 59: ступень перевела в «поддержание» — темп расчётом не
+            # используется и в результат не идёт; шаг темпа — в аудите ниже.
+            "goal": "maintain", "pace": "",
             "goal_overridden_by": "bmr_floor",
             "daily_vitamin_d_iu": 800, "daily_vitamin_b12_mcg": 2.4,
             "daily_vitamin_c_mg": 75, "daily_iron_mg": 8,

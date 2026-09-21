@@ -505,6 +505,9 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
                 "to": {"goal": "maintain"},
             })
             goal = "maintain"
+            # При «поддержании» темп расчётом не используется — в снимок он не
+            # идёт (§5.1: «использованные данные»); шаг ступени назван в аудите.
+            pace = ""
             overridden_by = overridden_by or "bmr_floor"
             daily_kcal = _kcal_from_goal(bmr, activity, goal, pace)
 
@@ -587,7 +590,8 @@ def _normalise_activity(value: float | None) -> tuple[float, float | None]:
     равном расстоянии — меньший (консервативно). Возвращает
     ``(activity, None)``, когда значение уже в наборе.
     """
-    assert value, "активность не названа — расчёт должен был отказать выше"
+    if not value:
+        raise ValueError("активность не названа — расчёт должен был отказать выше")
     raw = float(value)
     if raw in ACTIVITY_COEFFICIENTS:
         return raw, None

@@ -154,7 +154,8 @@ def maintenance_kcal(profile: NutritionProfile) -> int | None:
         # «unavailable», как уже названо), а не 1.4 за человека.
         activity_coefficient=snapshot.get("activity_coefficient"),
         goal="maintain",
-        pace="moderate",
+        # Темп при «поддержании» расчётом не используется (вопрос 59).
+        pace="",
         health_flags={},
     ))
     return norms.daily_kcal if norms.computed else None

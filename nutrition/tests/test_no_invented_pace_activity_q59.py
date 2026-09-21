@@ -155,8 +155,27 @@ class TestPartialUpsertDoesNotKeepWhatWasNotNamed:
         assert p.targets_source == Source.AYLA_PROPOSED
         assert "activity_skipped" not in p.health_flags
 
-    def test_the_bmr_floor_does_not_overwrite_the_named_pace(self, proxy_user, headers):
-        # Малый вес при «похудеть»: ступень moderate → gentle срабатывает.
+    def test_the_pace_step_does_not_overwrite_the_named_pace(self, proxy_user, headers):
+        # Только шаг темпа (moderate → gentle), цель остаётся «похудеть».
+        _post(
+            {
+                "gender": "female", "age": 30, "height_cm": 165, "weight_kg": 40.0,
+                "activity_coefficient": 1.2, "goal": "lose", "pace": "moderate",
+            },
+            headers,
+        )
+        p = NutritionProfile.objects.get(user=proxy_user)
+        assert {
+            "reason": "bmr_floor",
+            "from": {"pace": "moderate"},
+            "to": {"pace": "gentle"},
+        } in p.last_overrides_applied  # присутствие: шаг темпа сработал
+        assert p.targets_input_snapshot["goal"] == "lose"
+        assert p.targets_input_snapshot["pace"] == "gentle"
+        assert p.pace == "moderate"
+
+    def test_a_goal_flip_to_maintain_carries_no_pace(self, proxy_user, headers):
+        # Оба шага: lose → gentle → maintain.
         _post(
             {
                 "gender": "female", "age": 30, "height_cm": 160, "weight_kg": 40.0,
@@ -165,9 +184,19 @@ class TestPartialUpsertDoesNotKeepWhatWasNotNamed:
             headers,
         )
         p = NutritionProfile.objects.get(user=proxy_user)
-        assert p.goal_overridden_by  # присутствие: ступень сработала
-        assert p.pace == "moderate"
-        assert p.targets_input_snapshot["pace"] in ("gentle", "moderate")
+        assert p.targets_input_snapshot["goal"] == "maintain"  # присутствие
+        assert p.targets_input_snapshot.get("pace") in (None, "")
+        assert p.goal == "lose" and p.pace == "moderate"
+
+    def test_a_goal_without_pace_does_not_reuse_an_old_pace(self, proxy_user, headers):
+        _post({**BODY, "goal": "lose", "pace": "gentle", "activity_coefficient": 1.55}, headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+        assert p.pace == "gentle"  # присутствие
+
+        _post({**BODY, "goal": "gain", "activity_coefficient": 1.55}, headers)
+        p.refresh_from_db()
+        assert p.pace == ""
+        assert "pace" in _missing(p)
 
     def test_maintain_does_not_carry_an_old_pace_into_the_snapshot(self, proxy_user, headers):
         _post({**BODY, "goal": "lose", "pace": "gentle", "activity_coefficient": 1.55}, headers)

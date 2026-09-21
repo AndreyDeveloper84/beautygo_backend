@@ -3,6 +3,13 @@
 from django.db import migrations, models
 
 
+# Вопрос 59 (CD §72): колонка без умолчания, данные не переписываются
+# (решение (а1)). ОТКАТ НЕ БЕЗОБИДЕН: обратный AlterField (NULL → NOT NULL
+# с default=1.4) выполнит UPDATE … SET 1.4 WHERE NULL и превратит каждое
+# «не названа» в выдуманные 1.4, неотличимые от названных. Откатывать
+# только вместе с решением владельца.
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
