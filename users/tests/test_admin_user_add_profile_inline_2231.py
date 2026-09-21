@@ -103,6 +103,36 @@ def test_filled_profile_block_saves_one_profile_with_the_owners_input(role):
     assert len(profiles) == 1
     assert profiles[0].full_name == "Анна Петрова"
     assert profiles[0].city == "Москва"
+    # Форма салона берёт из закрытия окна id нового человека — он там.
+    new_id = str(User.objects.get(username=f"drf2231-{role}").pk)
+    assert new_id in resp.context["popup_response_data"]
+
+
+def test_fields_outside_the_block_are_kept_not_reset():
+    """Форма ложится поверх строки сигнала, а не заменяет её умолчаниями."""
+    from unittest.mock import patch
+
+    from users import signals
+
+    original = signals.Profile.objects.create
+
+    def _prefilled(**kwargs):
+        # Сигнал, который когда-нибудь заполнит профиль сам.
+        return original(**kwargs, experience_years=7)
+
+    client = _admin_client()
+    with patch.object(signals.Profile.objects, "create", side_effect=_prefilled):
+        resp = _add(
+            client,
+            username="drf2231-kept",
+            role="specialist",
+            profile={"full_name": "Анна Петрова"},
+        )
+
+    assert _closed_popup(resp), resp.content[:2000]
+    profile = Profile.objects.get(user__username="drf2231-kept")
+    assert profile.full_name == "Анна Петрова"
+    assert profile.experience_years == 7
 
 
 def test_empty_profile_block_keeps_the_signal_profile():

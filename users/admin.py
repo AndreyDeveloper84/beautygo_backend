@@ -9,6 +9,7 @@ from django.contrib.admin import helpers as admin_helpers
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.auth.forms import AdminUserCreationForm
 from django.core.exceptions import ValidationError
+from django.forms.models import construct_instance
 from django.db import transaction
 from django.shortcuts import render
 from django.urls import reverse
@@ -350,6 +351,16 @@ def bind_profile_form_to_signal_profile(formset) -> None:
     бы из двух мест по двум правилам, и роль «без блока» осталась бы без
     профиля там, где сигнал его обещает.
 
+    Форма накладывается НА строку из базы (``construct_instance``), а не
+    переносит ей только ключ: поля, которых в блоке нет (стаж, координаты,
+    аватар без загрузки), остаются как лежат, а не сбрасываются к
+    умолчаниям. Сегодня строка сигнала — одни умолчания, но если сигнал
+    когда-нибудь начнёт её заполнять, копирование ключа молча стёрло бы это.
+
+    В истории объекта запись будет «добавлен профиль»: для админки блок
+    новый (``formset.new_objects``), хотя строка — сигнала. С точки зрения
+    оператора это верно — он профиль заполнил впервые; «чинить» не надо.
+
     Роли, у которых сигнал профиля не создаёт (``admin``), идут прежним путём:
     заполненный блок создаёт профиль, пустой — нет.
     """
@@ -360,11 +371,11 @@ def bind_profile_form_to_signal_profile(formset) -> None:
     if existing is None:
         return
     for inline_form in formset.forms:
-        instance = inline_form.instance
-        if not instance._state.adding or not inline_form.has_changed():
+        if not inline_form.instance._state.adding or not inline_form.has_changed():
             continue
-        instance.pk = existing.pk
-        instance._state.adding = False
+        inline_form.instance = construct_instance(
+            inline_form, existing, fields=inline_form._meta.fields
+        )
 
 
 class TenantMasterInlineForm(forms.ModelForm):
