@@ -3,17 +3,22 @@
 Spec: docs/plans/maxbot-phase3-ayla-spec.md §4.2.
 Acceptance: docs/plans/maxbot-phase3-linear-issues.md DRF-303.
 
-Two paths:
+Three paths:
 - ``eating_disorder=true`` → return a fixed supportive template with no
   numeric calorie cues. Never calls the LLM.
-- otherwise → gpt-4o-mini, tone tied to ``goal`` + relevant
-  ``health_flags``. Output validated to ≤3 sentences, ≤220 chars; on
-  validation failure we re-prompt once with an explicit length warning
-  and fall back to a neutral template if that also fails.
+- any other truthy health flag → a neutral local text, no assessment, no
+  numbers. Never calls the LLM (DT-1, owner decision CD §67: «при любом
+  флаге здоровья внешняя LLM не вызывается»).
+- otherwise → gpt-4o-mini, tone tied to ``goal``. Output validated to ≤3
+  sentences, ≤220 chars; on validation failure we re-prompt once with an
+  explicit length warning and fall back to a neutral text without
+  assessment if that also fails (DRF-2227).
 
 Server-side cache: 6 hours per user-per-day in Django's cache framework.
 The bot's ``/день`` button can fire repeatedly without re-spending LLM
-tokens.
+tokens. Any create / edit / delete of food or water bumps the person's
+cache version (``nutrition/signals.py``, DRF-2227), so the comment never
+outlives the numbers it was written for.
 
 Cost guard: an in-process counter logs ``ai_comment.daily_cost_warning``
 when daily LLM calls exceed ``settings.NUTRITION_AI_COMMENT_DAILY_LIMIT``
@@ -82,6 +87,24 @@ def _eating_disorder_comment(day: date) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Any health flag — no external LLM (DT-1, CD §67)
+# ---------------------------------------------------------------------------
+
+#: DT-1 (решение владельца, CD §67): «при любом флаге здоровья внешняя LLM не
+#: вызывается». Нейтральный текст без оценки, без чисел и без совета — ЧЕРНОВИК
+#: до слова владельца по формулировке.
+HEALTH_FLAG_COMMENT = (
+    "Записи за день сохранены. Если захочешь — расскажи, как ты себя чувствуешь."
+)
+
+
+def _has_health_flag(flags: dict) -> bool:
+    """Любой флаг с истинным значением — не перечень: новый флаг каталога
+    модель не открывает. ``{"pregnant": false}`` — флага нет."""
+    return any(bool(value) for value in (flags or {}).values())
+
+
+# ---------------------------------------------------------------------------
 # Public surface
 # ---------------------------------------------------------------------------
 
@@ -116,6 +139,11 @@ class AICommentService:
             comment = _eating_disorder_comment(day)
             cache.set(cache_key, comment, CACHE_TTL_SECONDS)
             return comment
+
+        if _has_health_flag(flags):
+            # DT-1: ни одного вызова внешней модели при флаге здоровья.
+            cache.set(cache_key, HEALTH_FLAG_COMMENT, CACHE_TTL_SECONDS)
+            return HEALTH_FLAG_COMMENT
 
         comment = self._llm_comment(profile, facts)
         cache.set(cache_key, comment, CACHE_TTL_SECONDS)
@@ -252,19 +280,50 @@ def _validate(text: str) -> str | None:
     return text
 
 
+#: Запасной текст, когда модель отказала (DRF-2227). Без оценки и совета:
+#: «почти в норме» / «попробуй больше белка» — суждение о дне, которого
+#: никто не выносил, — модели не было, расчёта тоже. ЧЕРНОВИК до слова
+#: владельца по формулировке.
+NEUTRAL_FALLBACK_TEXT = "Записи за день сохранены. Завтра продолжим, если захочешь."
+
+
 def _neutral_fallback(facts: SummaryFacts) -> str:
     if facts.entries_count == 0:
         return "Сегодня записей пока нет — попробуем завтра. Я рядом."
-    # Сравнение с ориентиром — только когда ориентир ЕСТЬ. Без него
-    # ``None * 0.7`` уронило бы фолбэк, а ``0 * 0.7`` сделало бы совет
-    # про воду недостижимым: любой человек «не отстаёт» от нуля.
-    if facts.water_goal_ml and facts.water_ml < facts.water_goal_ml * 0.7:
-        return "Хороший день. Завтра попробуй чуть больше воды — это поддержит самочувствие."
-    return "Хороший день — почти в норме. Завтра попробуй немного больше белка с утра."
+    return NEUTRAL_FALLBACK_TEXT
+
+
+# ---------------------------------------------------------------------------
+# Cache (DRF-2227)
+# ---------------------------------------------------------------------------
+#
+# Ключ несёт ВЕРСИЮ дневника человека. Любая запись, правка или удаление еды
+# или воды поднимает версию (``nutrition/signals.py``), и следующий запрос
+# идёт мимо прежнего комментария. По человеку, а не по дню: правка может
+# перенести запись на другой день, а день ключа — в часовом поясе человека;
+# сброс «всех его дней» дешевле и не ошибается. Прежние записи кэша просто
+# доживают свои шесть часов непрочитанными.
+
+_VERSION_KEY_PREFIX = "nutrition.ai_comment.version"
+
+
+def _version(user_id: int) -> int:
+    return int(cache.get(f"{_VERSION_KEY_PREFIX}:{user_id}") or 0)
+
+
+def invalidate_comment_cache(user_id: int) -> None:
+    """Сбросить AI-комментарий человека — дневник изменился (DRF-2227)."""
+    key = f"{_VERSION_KEY_PREFIX}:{user_id}"
+    try:
+        cache.incr(key)
+    except ValueError:
+        # Без срока: истёкшая версия вернула бы ключ к нулю и открыла бы
+        # комментарий, посчитанный до правки.
+        cache.set(key, 1, None)
 
 
 def _cache_key(user_id: int, day: date) -> str:
-    return f"nutrition.ai_comment:{user_id}:{day.isoformat()}"
+    return f"nutrition.ai_comment:{user_id}:v{_version(user_id)}:{day.isoformat()}"
 
 
 def _bump_cost_counter() -> int:
