@@ -15,23 +15,30 @@
 * b2 — файлы снимаются до транзакции стирания и до любой блокировки строк
   (открыта только транзакция журнала доступа, §96) и раньше строк: в момент
   вызова хранилища строки сканов на месте;
-* b3 — стойкий сбой хранилища (``Errors`` в ответе пачки) → 500 от
-  ``IncompleteErasure``, в базе не стёрто ничего; повтор бота (DRF-1950)
-  повторит всё;
-* b4 — ответ «стёрто» после пачки: строки сканов и остальное удалены;
+* b3 — стойкий сбой хранилища (``Errors`` в ответе пачки, в т.ч. во второй
+  пачке) → 500 от ``IncompleteErasure``, в базе не стёрто ничего; в журнале —
+  число, не ключи; повтор бота (DRF-1950) повторит всё;
+* b4 — ответ «стёрто» после пачки: строки сканов удалены;
 * b5 — скан, появившийся между пачкой и транзакцией, не оставляет файла:
-  его файл снимается старым путём внутри транзакции.
+  его файл снимается старым путём внутри транзакции;
+* b6 — 1001 скан — две пачки: 1000 и 1;
+* b7 — сканы связанного прокси идут в ту же пачку;
+* b8 — настоящий ``S3Boto3Storage`` (``Stubber``): ключ — с префиксом
+  ``location``, ровно как у ``S3Storage.delete``.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
 from nutrition.models import FoodScan, NutritionProfile
+from users.models import User
+from users.scan_file_erasure import S3_BATCH_LIMIT
 from users.tests.test_forget_all_diary_2214 import _bot_url
 from users.tests.test_memory_erasure_matrix import (  # noqa: F401 — фикстуры по имени
     _internal,
@@ -43,9 +50,10 @@ pytestmark = pytest.mark.django_db
 
 
 class _FakeBucket:
-    def __init__(self, owner: "_FakeS3", errors: list[dict] | None = None) -> None:
+    def __init__(self, owner: "_FakeS3", errors: list[dict] | None, errors_on_call: int) -> None:
         self.owner = owner
         self.errors = errors or []
+        self.errors_on_call = errors_on_call
 
     def delete_objects(self, Delete: dict) -> dict:  # noqa: N803 — имя параметра boto3
         self.owner.calls.append(("delete_objects", len(Delete["Objects"])))
@@ -55,6 +63,8 @@ class _FakeBucket:
         if self.owner.queries is not None:
             self.owner.queries_at_call.append(len(self.owner.queries.captured_queries))
         self.owner.rows_at_call.append(FoodScan.objects.count())
+        if self.errors_on_call and len(self.owner.calls) == self.errors_on_call:
+            return {"Errors": [{"Key": Delete["Objects"][0]["Key"], "Code": "InternalError"}]}
         if self.errors:
             return {"Errors": self.errors}
         for obj in Delete["Objects"]:
@@ -65,14 +75,16 @@ class _FakeBucket:
 class _FakeS3:
     """Хранилище в форме S3Boto3Storage: ``bucket.delete_objects`` и ``exists``."""
 
-    def __init__(self, names: set[str], *, errors: list[dict] | None = None) -> None:
+    def __init__(
+        self, names: set[str], *, errors: list[dict] | None = None, errors_on_call: int = 0
+    ) -> None:
         self.files = set(names)
         self.calls: list[tuple] = []
         self.atomic_depth: list[int] = []
         self.queries = None  # CaptureQueriesContext, если тест следит за блокировками
         self.queries_at_call: list[int] = []
         self.rows_at_call: list[int] = []
-        self.bucket = _FakeBucket(self, errors)
+        self.bucket = _FakeBucket(self, errors, errors_on_call)
 
     def _normalize_name(self, name: str) -> str:
         return name
@@ -92,6 +104,14 @@ def _seed_scans(u, n: int) -> list[str]:
         [FoodScan(user=u, dish_name="x", provider_used=FoodScan.Provider.OPENAI, image=name) for name in names]
     )
     return names
+
+
+def _seed_profile(u) -> None:
+    # Профиль питания — строка, которую стирание блокирует (select_for_update).
+    NutritionProfile.objects.create(
+        user=u, weight_kg=60, height_cm=165, age=30, gender="female",
+        activity_coefficient=1.6, goal="lose", daily_kcal=1800,
+    )
 
 
 @pytest.fixture
@@ -120,11 +140,7 @@ class TestB1Budget:
 class TestB2OutsideTheTransactionAndBeforeRows:
     def test_files_go_first_and_outside_atomic(self, user, fake_storage) -> None:  # noqa: F811
         names = _seed_scans(user, 3)
-        # Профиль питания — строка, которую стирание блокирует (DRF-2256).
-        NutritionProfile.objects.create(
-            user=user, weight_kg=60, height_cm=165, age=30, gender="female",
-            activity_coefficient=1.6, goal="lose", daily_kcal=1800,
-        )
+        _seed_profile(user)
         storage = fake_storage(_FakeS3(set(names)))
         outer = len(connection.atomic_blocks)  # транзакция самого теста
         with CaptureQueriesContext(connection) as queries:
@@ -144,14 +160,30 @@ class TestB2OutsideTheTransactionAndBeforeRows:
 
 
 class TestB3PersistentStorageFailure:
-    def test_errors_in_the_batch_are_a_500_and_nothing_is_erased(self, user, fake_storage) -> None:  # noqa: F811
+    def test_errors_in_the_batch_are_a_500_and_nothing_is_erased(
+        self, user, fake_storage  # noqa: F811
+    ) -> None:
         names = _seed_scans(user, 3)
+        _seed_profile(user)
         fake_storage(_FakeS3(set(names), errors=[{"Key": names[0], "Code": "InternalError"}]))
         client = _internal()
         client.raise_request_exception = False
-        resp = client.delete(_bot_url(user))
+        with mock.patch("users.scan_file_erasure.logger") as log:
+            resp = client.delete(_bot_url(user))
         assert resp.status_code == 500
         assert FoodScan.objects.filter(user=user).count() == 3
+        assert NutritionProfile.objects.filter(user=user).count() == 1  # не только сканы
+        log.warning.assert_called_once_with("forget_all.scan_files.batch_failed errors=%d", 1)
+        assert not any(n in str(log.mock_calls) for n in names)  # ключ несёт идентификатор человека
+
+    def test_errors_in_the_second_chunk_leave_every_row(self, user, fake_storage) -> None:  # noqa: F811
+        names = _seed_scans(user, S3_BATCH_LIMIT + 1)
+        storage = fake_storage(_FakeS3(set(names), errors_on_call=2))
+        client = _internal()
+        client.raise_request_exception = False
+        assert client.delete(_bot_url(user)).status_code == 500
+        assert storage.calls == [("delete_objects", S3_BATCH_LIMIT), ("delete_objects", 1)]
+        assert FoodScan.objects.filter(user=user).count() == S3_BATCH_LIMIT + 1
 
 
 class TestB4RowsAreGoneAfterTheBatch:
@@ -184,3 +216,55 @@ class TestB5LateScanLeavesNoFile:
         assert _internal().delete(_bot_url(user)).status_code == 200
         assert storage.files == set()
         assert FoodScan.objects.filter(user=user).count() == 0
+
+
+class TestB6Chunks:
+    def test_1001_scans_are_two_calls_of_1000_and_1(self, user, fake_storage) -> None:  # noqa: F811
+        names = _seed_scans(user, S3_BATCH_LIMIT + 1)
+        storage = fake_storage(_FakeS3(set(names)))
+        assert _internal().delete(_bot_url(user)).status_code == 200
+        assert storage.calls == [("delete_objects", S3_BATCH_LIMIT), ("delete_objects", 1)]
+        assert storage.files == set()
+
+
+class TestB7LinkedProxyScansAreInTheBatch:
+    def test_a_proxys_scan_goes_in_the_same_batch(self, user, fake_storage) -> None:  # noqa: F811
+        proxy = User.objects.create(
+            username="bot:max:c52-2256-proxy", role="client", is_proxy=True, linked_user=user
+        )
+        names = _seed_scans(user, 2) + _seed_scans(proxy, 2)
+        storage = fake_storage(_FakeS3(set(names)))
+        assert _internal().delete(_bot_url(user)).status_code == 200
+        assert storage.calls == [("delete_objects", 4)]
+        assert storage.files == set()
+        assert FoodScan.objects.filter(user=proxy).count() == 0
+
+
+class TestB8KeyIsTheOneS3StorageDeleteUses:
+    """Настоящий ``S3Boto3Storage`` со ``Stubber``: ключ с префиксом ``location``,
+    ровно как у ``S3Storage.delete`` (``_normalize_name(clean_name(name))``)."""
+
+    def test_real_storage_sends_location_prefixed_keys(self) -> None:
+        from botocore.stub import Stubber
+        from storages.backends.s3boto3 import S3Boto3Storage
+
+        from users.scan_file_erasure import remove_scan_files
+
+        storage = S3Boto3Storage(
+            bucket_name="scans",
+            location="media",
+            region_name="us-east-1",
+            access_key="test",
+            secret_key="test",  # pragma: allowlist secret
+        )
+        names = ["food-scans/1/a.jpg", "food-scans/1/b.jpg"]
+        keys = [{"Key": f"media/{n}"} for n in names]
+        with Stubber(storage.connection.meta.client) as stub:
+            stub.add_response(
+                "delete_objects",
+                {"Deleted": keys},
+                {"Bucket": "scans", "Delete": {"Objects": keys, "Quiet": True}},
+            )
+            with mock.patch("users.scan_file_erasure._storage", return_value=storage):
+                assert remove_scan_files(names) == 2
+            stub.assert_no_pending_responses()

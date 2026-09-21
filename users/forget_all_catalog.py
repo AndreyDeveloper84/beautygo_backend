@@ -140,11 +140,12 @@ def erase_remembered_catalog(
     #    модуля), затем строки; избранные блюда — вместе с мягко удалёнными.
     #    DRF-2256: вызывающий мог снять файлы пачкой ДО транзакции
     #    (``users.scan_file_erasure``) и передать их имена — тогда здесь
-    #    снимаются только файлы сканов, появившихся после пачки.
+    #    снимаются только файлы сканов, появившихся после пачки. Счёт
+    #    ``files`` — только снятые здесь: пачка не говорит, какие файлы
+    #    существовали (отсутствующий ключ S3 — не ошибка).
     files_deleted = 0
     for scan in FoodScan.objects.filter(user=user).only("id", "image"):
         if removed_files is not None and scan.image.name in removed_files:
-            files_deleted += 1
             continue
         files_deleted += _delete_file(scan.image)
     _delete("nutrition.FoodScan", FoodScan.objects.filter(user=user))

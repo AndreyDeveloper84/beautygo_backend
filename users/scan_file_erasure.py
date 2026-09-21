@@ -68,11 +68,15 @@ def remove_scan_files(names: list[str]) -> int:
     storage = _storage()
     bucket = getattr(storage, "bucket", None)
     if bucket is not None and hasattr(bucket, "delete_objects"):
+        from storages.utils import clean_name
+
+        # Ключ — ровно как у ``S3Storage.delete`` (django-storages 1.14):
+        # ``_normalize_name(clean_name(name))`` — с префиксом ``location``.
         normalize = getattr(storage, "_normalize_name", lambda n: n)
         for start in range(0, len(names), S3_BATCH_LIMIT):
             chunk = names[start:start + S3_BATCH_LIMIT]
             response = bucket.delete_objects(
-                Delete={"Objects": [{"Key": normalize(n)} for n in chunk], "Quiet": True}
+                Delete={"Objects": [{"Key": normalize(clean_name(n))} for n in chunk], "Quiet": True}
             )
             errors = (response or {}).get("Errors") or []
             if errors:
