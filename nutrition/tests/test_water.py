@@ -311,12 +311,18 @@ class TestToday:
 
 
 class TestSummaryIntegration:
-    def test_summary_water_now_reflects_water_logs(
+    def test_summary_water_reflects_water_entries(
         self, auth_client, client_user,
     ):
-        # Make sure today's water is summed by the summary endpoint.
-        _make_water(user=client_user, amount=250)
-        _make_water(user=client_user, amount=350)
+        # DRF-2217: сводка суммирует ``WaterEntry`` — то, что пишут бот и
+        # Mini App. Здесь раньше стояли ``WaterLog`` кнопочного трекера:
+        # тест закреплял ровно тот источник, из-за которого в сводке было
+        # «0 мл» при записанной воде. Подробно — test_summary_water_from_entries_2217.
+        from nutrition.models import WaterEntry
+
+        now = datetime.now(dt_tz.utc)
+        for ml in (250, 350):
+            WaterEntry.objects.create(user=client_user, ts=now, ml=ml, water_ml=float(ml))
         today_iso = datetime.now(dt_tz.utc).date().isoformat()
         resp = auth_client.get(
             "/api/v1/nutrition/summary/", {"date": today_iso},
