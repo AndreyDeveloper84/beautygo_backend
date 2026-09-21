@@ -356,7 +356,11 @@ class TestProposal:
     def test_proposal_without_a_template_is_404_no_template_not_an_empty_plan(
         self, owner, goal,
     ) -> None:
-        """Сид не запускался — шаблона нет; ответ 404, не пустой список."""
+        """Шаблона нет — ответ 404, не пустой список. С DRF-2229 миграция кладёт
+        шаблоны §51 в любую базу — пустота создаётся здесь явно."""
+        from wellness.models import PlanTemplate
+
+        PlanTemplate.objects.all().delete()
         resp = _api().get(PROPOSAL_URL)
 
         assert resp.status_code == 404, resp.content[:400]
