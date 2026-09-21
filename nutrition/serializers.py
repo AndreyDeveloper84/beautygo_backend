@@ -610,7 +610,8 @@ class NutritionProfileResponseSerializer(serializers.Serializer):
     height_cm = serializers.IntegerField(allow_null=True)
     weight_kg = serializers.FloatField(allow_null=True)
     weight_range = serializers.CharField(allow_null=True, allow_blank=True)
-    activity_coefficient = serializers.FloatField()
+    # Вопрос 59: NULL — «не названа», умолчания нет.
+    activity_coefficient = serializers.FloatField(allow_null=True)
     goal = serializers.CharField(allow_null=True, allow_blank=True)
     pace = serializers.CharField(allow_null=True, allow_blank=True)
     diet_preference = serializers.CharField()

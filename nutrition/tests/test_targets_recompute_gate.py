@@ -113,7 +113,8 @@ class TestRefusalWritesNull:
         resp = _post({
             "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165,
-            "goal": "maintain",
+            # Вопрос 59: активность названа — отказ здесь только про вес.
+            "goal": "maintain", "activity_coefficient": 1.375,
         }, headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
 
@@ -384,7 +385,9 @@ class TestGuardLetsGroundedRecomputeThrough:
         self, proxy_user, headers,
     ):
         """Сценарий (б), положительная сторона: открытое поле пересчитывает."""
-        _post({"consent": CONSENT, **FULL_INPUTS}, headers)
+        # Вопрос 59: темп входит в расчёт (и в снимок) только при цели, где
+        # он меняет число, — свидетелем служит строка «похудеть».
+        _post({"consent": CONSENT, **FULL_INPUTS, "goal": "lose"}, headers)
         p = NutritionProfile.objects.get(user=proxy_user)
         first_at = p.targets_computed_at
         assert p.targets_input_snapshot["pace"] == "moderate"
@@ -394,8 +397,7 @@ class TestGuardLetsGroundedRecomputeThrough:
 
         p.refresh_from_db()
         assert p.targets_source == Source.AYLA_PROPOSED  # §5.1: расчёт — предложение
-        # Пересчёт состоялся: снимок несёт новый темп (при goal=maintain
-        # само число от темпа не зависит — свидетель здесь снимок, не ккал).
+        # Пересчёт состоялся: снимок несёт новый темп.
         assert p.targets_input_snapshot["pace"] == "gentle"
         assert p.targets_computed_at >= first_at
         assert _refusals(p) == []

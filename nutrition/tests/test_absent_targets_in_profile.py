@@ -70,6 +70,8 @@ class TestAbsentTargetsLeaveNoZeroBehind:
                 "height_cm": 168,
                 "weight_kg": 62,
                 "goal": "maintain",
+                # Вопрос 59: активность названа — без неё расчёта нет.
+                "activity_coefficient": 1.375,
             },
         )
 
@@ -94,6 +96,7 @@ class TestAbsentTargetsLeaveNoZeroBehind:
             {
                 "consent": CONSENT,
                 "age": 30, "height_cm": 168, "weight_kg": 62, "goal": "maintain",
+                "activity_coefficient": 1.375,
             },
         )
         assert computed["norms"]["daily_kcal"] > 0, "стража: расчёт состоялся"
@@ -132,6 +135,7 @@ class TestTheTwoWaysOfSayingItDoNotDrift:
                     # DRF-2219: цель названа — без неё расчёт отказывает.
                     "gender": "female", "age": 30, "height_cm": 168, "weight_kg": 62,
                     "goal": "maintain",
+                    "activity_coefficient": 1.375,
                 },
                 True,
             ),

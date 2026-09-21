@@ -67,7 +67,15 @@ from typing import Any
 #: (DRF-2219, §63: «никакого расчёта от выдуманных параметров»). Цель
 #: «поддержание» за человека, не назвавшего цель, — такой же выдуманный
 #: вход, как женская формула за человека, не назвавшего пол.
-REQUIRED_INPUTS: tuple[str, ...] = ("gender", "age", "height_cm", "weight_kg", "goal")
+REQUIRED_INPUTS: tuple[str, ...] = (
+    "gender", "age", "height_cm", "weight_kg", "goal", "activity_coefficient",
+)
+
+#: Цели, у которых поправка ненулевая (``GOAL_FACTORS`` ≠ 1.0), — только для
+#: них темп меняет число и потому обязателен (CD §72, вопрос 59). При
+#: «поддержании» темп расчёт не использует, и требовать его значило бы
+#: требовать вход, которого формула не читает.
+PACE_GOALS: frozenset[str] = frozenset({"lose", "gain", "tone"})
 
 #: Версия методики расчёта калорий — §85, решение владельца 09.09.2026:
 #: Миффлин — Сан Жеор с коэффициентом активности и поправкой на цель.
@@ -119,12 +127,9 @@ SNAPSHOT_INPUTS: tuple[str, ...] = (
     "pace",
 )
 
-# ``DEFAULT_ACTIVITY`` оставлен и НЕ снят здесь намеренно. Он того же
-# класса — умолчание, равное осмысленному значению, — но живёт ещё и в
-# схеме: ``NutritionProfile.activity_coefficient = FloatField(default=1.4)``.
-# Снять его значит тронуть колонку, то есть миграцию существующих
-# клиентов, а это отдельный срез. Названо главному окну строкой.
-DEFAULT_ACTIVITY = 1.4
+# ``DEFAULT_ACTIVITY = 1.4`` снят вместе с умолчанием колонки (CD §72,
+# вопрос 59): активность называет человек, иначе расчёт отказывает с
+# именем поля. Прежний срез оставлял его «до миграции колонки» — она здесь.
 
 # BMR floor margin — daily_kcal must stay at least this far above BMR
 # before we accept a deficit. Anything tighter would mean eating less
@@ -233,12 +238,13 @@ class ProfileInputs:
     age: int | None = None
     height_cm: int | None = None
     weight_kg: float | None = None
-    activity_coefficient: float = DEFAULT_ACTIVITY
+    # CD §72 (вопрос 59): ни активности, ни темпа по умолчанию нет — их
+    # называет человек, иначе расчёт отказывает с именем поля.
+    activity_coefficient: float | None = None
     # DRF-2219: цели по умолчанию нет — вызывающий называет её сам (или
-    # расчёт отказывает с именем ``goal``). Темп и активность пока с
-    # умолчаниями: решение владельца (вопрос 59).
+    # расчёт отказывает с именем ``goal``).
     goal: str = ""
-    pace: str = "moderate"
+    pace: str = ""
     health_flags: dict = field(default_factory=dict)
 
 
@@ -316,8 +322,13 @@ def _missing_inputs(inputs: ProfileInputs) -> list[str]:
     missing = []
     for name in REQUIRED_INPUTS:
         value = getattr(inputs, name, None)
-        if value is None or value == "":
+        # ``0`` у активности — тоже «не названа»: коэффициента 0 не бывает,
+        # и прежний ``_normalise_activity`` так его и читал.
+        if value is None or value == "" or (name == "activity_coefficient" and not value):
             missing.append(name)
+    # Темп обязателен там, где он меняет число (вопрос 59).
+    if inputs.goal in PACE_GOALS and not inputs.pace:
+        missing.append("pace")
     return missing
 
 
@@ -385,9 +396,10 @@ def _refusal(inputs: ProfileInputs, overrides_applied: list[dict]) -> ComputedNo
         daily_protein_g=None,
         daily_fat_g=None,
         daily_carbs_g=None,
-        # Отказ не выдумывает цель: пусто так и остаётся пусто (DRF-2219).
+        # Отказ не выдумывает ни цель, ни темп: пусто остаётся пусто
+        # (DRF-2219, вопрос 59).
         goal=inputs.goal,
-        pace=inputs.pace or "moderate",
+        pace=inputs.pace,
         goal_overridden_by="",
         overrides_applied=overrides_applied,
     )
@@ -447,9 +459,13 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
     assert age is not None and height_cm is not None and weight_kg is not None
 
     bmr = _mifflin_st_jeor(gender, age, height_cm, weight_kg)
-    # Цель названа — иначе расчёт отказал выше (``REQUIRED_INPUTS``).
+    # Цель названа — иначе расчёт отказал выше (``REQUIRED_INPUTS``); темп
+    # назван там, где он нужен (``PACE_GOALS``), — иначе тоже отказ выше.
     goal = inputs.goal
-    pace = inputs.pace or "moderate"
+    # Темп — только там, где он меняет число. При «поддержании» прежний темп
+    # (от прошлой цели) расчётом не используется и в снимок не попадает:
+    # иначе «использованные данные» (§5.1) назвали бы то, от чего не считали.
+    pace = inputs.pace if goal in PACE_GOALS else ""
     overrides: list[dict] = []
     overridden_by = ""
 
@@ -489,6 +505,9 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
                 "to": {"goal": "maintain"},
             })
             goal = "maintain"
+            # При «поддержании» темп расчётом не используется — в снимок он не
+            # идёт (§5.1: «использованные данные»); шаг ступени назван в аудите.
+            pace = ""
             overridden_by = overridden_by or "bmr_floor"
             daily_kcal = _kcal_from_goal(bmr, activity, goal, pace)
 
@@ -566,12 +585,14 @@ def compute_norms(inputs: ProfileInputs) -> ComputedNorms:
 def _normalise_activity(value: float | None) -> tuple[float, float | None]:
     """Коэффициент из набора §85 и исходное значение, если его пришлось подвести.
 
-    ``None``/``0`` — умолчание схемы (``DEFAULT_ACTIVITY``), и оно тоже вне
-    набора. Ближайший по модулю; при равном расстоянии — меньший
-    (консервативно). Возвращает ``(activity, None)``, когда значение уже в
-    наборе.
+    Значение названо — иначе расчёт отказал выше (``REQUIRED_INPUTS``,
+    вопрос 59): умолчания за человека больше нет. Ближайший по модулю; при
+    равном расстоянии — меньший (консервативно). Возвращает
+    ``(activity, None)``, когда значение уже в наборе.
     """
-    raw = float(value or DEFAULT_ACTIVITY)
+    if not value:
+        raise ValueError("активность не названа — расчёт должен был отказать выше")
+    raw = float(value)
     if raw in ACTIVITY_COEFFICIENTS:
         return raw, None
     nearest = min(ACTIVITY_COEFFICIENTS, key=lambda c: (abs(c - raw), c))

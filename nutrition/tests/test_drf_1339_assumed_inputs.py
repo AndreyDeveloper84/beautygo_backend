@@ -90,7 +90,8 @@ class TestAssumedInputsMarker:
         resp = c.post(URL, {
             "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165,
-            "goal": "maintain", "pace": "moderate",
+            # Вопрос 59: активность названа — отказ здесь только про вес.
+            "goal": "maintain", "pace": "moderate", "activity_coefficient": 1.375,
         }, format="json", **headers)
         assert resp.status_code == status.HTTP_200_OK, resp.json()
         body = resp.json()["data"]
@@ -213,7 +214,9 @@ _SNAPSHOT = {
         "expected": {
             "bmr": 1370, "daily_kcal": 1880, "daily_protein_g": 98,
             "daily_fat_g": 63, "daily_carbs_g": 231,
-            "goal": "maintain", "pace": "moderate", "goal_overridden_by": "",
+            # Вопрос 59: при «поддержании» темп расчётом не используется и в
+            # результат не попадает — числа от этого не сдвинулись.
+            "goal": "maintain", "pace": "", "goal_overridden_by": "",
             "daily_vitamin_d_iu": 600, "daily_vitamin_b12_mcg": 2.4,
             "daily_vitamin_c_mg": 75, "daily_iron_mg": 18,
             "daily_calcium_mg": 1000, "daily_magnesium_mg": 310,
@@ -271,7 +274,9 @@ _SNAPSHOT = {
         "expected": {
             "bmr": 876, "daily_kcal": 1050, "daily_protein_g": 63,
             "daily_fat_g": 35, "daily_carbs_g": 121,
-            "goal": "maintain", "pace": "gentle",
+            # Вопрос 59: ступень перевела в «поддержание» — темп расчётом не
+            # используется и в результат не идёт; шаг темпа — в аудите ниже.
+            "goal": "maintain", "pace": "",
             "goal_overridden_by": "bmr_floor",
             "daily_vitamin_d_iu": 800, "daily_vitamin_b12_mcg": 2.4,
             "daily_vitamin_c_mg": 75, "daily_iron_mg": 8,

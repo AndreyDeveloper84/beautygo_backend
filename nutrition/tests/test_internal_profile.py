@@ -69,6 +69,7 @@ class TestMifflinStJeor:
         norms = compute_norms(ProfileInputs(
             gender="female", age=40, height_cm=165, weight_kg=70.0,
             goal="maintain", pace="moderate",
+            activity_coefficient=1.375,
         ))
         # Mifflin: 10×70 + 6.25×165 - 5×40 - 161 = 700 + 1031.25 - 200 - 161 = 1370.25
         assert norms.bmr == 1370
@@ -77,6 +78,7 @@ class TestMifflinStJeor:
         norms = compute_norms(ProfileInputs(
             gender="male", age=30, height_cm=180, weight_kg=80.0,
             goal="maintain", pace="moderate",
+            activity_coefficient=1.375,
         ))
         # 10×80 + 6.25×180 - 5×30 + 5 = 800 + 1125 - 150 + 5 = 1780
         assert norms.bmr == 1780
@@ -99,7 +101,7 @@ class TestSkippedFieldsCancelTheCalculation:
     """
 
     def test_all_fields_missing_yields_no_norms_at_all(self):
-        norms = compute_norms(ProfileInputs(goal="maintain", pace="moderate"))
+        norms = compute_norms(ProfileInputs(goal="maintain", pace="moderate", activity_coefficient=1.375))
         # ``None``, не ноль (§103): отказ — отсутствие, а не число.
         assert norms.bmr is None
         assert norms.daily_kcal is None
@@ -115,6 +117,7 @@ class TestSkippedFieldsCancelTheCalculation:
         norms = compute_norms(ProfileInputs(
             gender="female", age=40, height_cm=165, weight_kg=70.0,
             goal="maintain", pace="moderate",
+            activity_coefficient=1.375,
         ))
         assert norms.bmr > 0
         assert norms.daily_kcal > 0
@@ -140,6 +143,7 @@ class TestHealthFactorsRefuse:
             gender="female", age=30, height_cm=165, weight_kg=65.0,
             goal="lose", pace="moderate",
             health_flags={flag: True},
+            activity_coefficient=1.375,
         ))
         assert norms.computed is False
         assert norms.daily_kcal is None and norms.bmr is None
@@ -153,6 +157,7 @@ class TestHealthFactorsRefuse:
             gender="female", age=30, height_cm=165, weight_kg=65.0,
             goal="lose", pace="moderate",
             health_flags={"eating_disorder": True, "pregnant": True},
+            activity_coefficient=1.375,
         ))
         assert norms.daily_kcal is None
         assert [o["reason"] for o in norms.overrides_applied] == [
@@ -214,7 +219,7 @@ class TestGetProfile:
         c.post(URL, {
             "consent": CONSENT,
             "gender": "female", "age": 40, "height_cm": 165, "weight_kg": 70.0,
-            "goal": "maintain", "pace": "moderate",
+            "goal": "maintain", "pace": "moderate", "activity_coefficient": 1.375,
         }, format="json", **headers)
         resp = c.get(URL, **headers)
         body = resp.json()["data"]
