@@ -546,8 +546,8 @@ def _erase_catalog(user) -> dict:
     erase_personal_calculation_inputs(user)
     _delete("nutrition.NutritionProfile", NutritionProfile.objects.filter(user=user))
 
-    # 2. Дневники (D6) — файлы сканов раньше строк: строка без файла хуже
-    # файла без строки (повтор найдёт файл по имени только через строку).
+    # 2. Дневники (D6) — файлы сканов раньше строк: файл без строки хуже
+    # строки без файла (повтор найдёт файл по имени только через строку).
     scans = list(FoodScan.objects.filter(user=user).only("id", "image"))
     for scan in scans:
         files_deleted += _delete_file(scan.image)

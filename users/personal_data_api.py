@@ -7,8 +7,12 @@ PILOT_CONTRACTS_2026-08-15 v1.3.0:
   (declared prefs). The bot (W3) aggregates this with bot-side data into
   the customer-facing export.
 - **C5.2 / AMD-006** ``DELETE /api/v1/internal/users/{ayla_user_id}/personal-data/``
-  — Ayla-side cascade of the customer delete: wipes UserPersonalContext.
-  Idempotent: a repeat request returns 200 with an empty scope.
+  — Ayla-side cascade of the customer delete: wipes UserPersonalContext and
+  (DRF-2214) everything the catalog remembered outside it — goals, the goal
+  questionnaire, the plan, the nutrition profile, the food diary with scan
+  photos (``users.forget_all_catalog``) — for every identity of the subject,
+  in one transaction. This is the bot's «забудь всё». Idempotent: a repeat
+  request returns 200 with an empty scope.
 - **AMD-010** — deletion audit via ``AnalyticsEvent`` (actor, scope,
   initiator), NEVER the deleted personal values.
 - **C5.3 / AMD-020** ``GET /api/v1/internal/users/{ayla_user_id}/personal-data/erasure-status/``
@@ -23,9 +27,11 @@ Subject (DRF-1038): the account AND its linked proxies
 portfolio for every identity that has one; delete erases the personal context of every linked
 proxy that holds one. One journal row per request, under the URL subject.
 
-Pilot scope (C5.2): personal context only. Transactional records
-(bookings, payments) follow statutory retention; anonymization is
-post-pilot and explicitly out of this contract.
+Scope (C5.2): personal context and the remembered catalog stores above
+(DRF-2214; the ``deleted`` scope still names only the personal context —
+reporting the new composition is a separate change). Transactional records
+(bookings, payments) follow statutory retention and are NOT touched;
+anonymization belongs to account deletion (D3).
 
 Auth: service-to-service Bearer **restricted to the caller's own subject**
 (``IsInternalBearerForSubject``, DRF-1617 / B-2.1): ``X-External-User-ID`` is
@@ -38,6 +44,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
+from django.db import transaction
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers
@@ -49,6 +56,7 @@ from tenants.models import Tenant
 from users.models import Profile, SpecialistPortfolio, SpecialistProfile, User, UserPersonalContext
 from privacy_audit.mixins import AuditedPersonalDataAccess
 from privacy_audit.models import PersonalDataAccessLog
+from users.forget_all_catalog import erase_remembered_catalog
 from users.permissions import IsInternalBearerForSubject
 from users.personal_context_erasure import (
     context_row_state,
@@ -313,7 +321,11 @@ class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
         },
         description=(
             "152-ФЗ personal-data delete (C5.2): wipes the Ayla-side "
-            "personal context. Idempotent — a repeat DELETE returns 200 "
+            "personal context and (DRF-2214) goals, the plan, the nutrition "
+            "profile and the food diary with scan photos, for every identity "
+            "of the subject, in one transaction; bookings and payments stay. "
+            "The `deleted` scope still names the personal context only. "
+            "Idempotent — a repeat DELETE returns 200 "
             "with an empty scope, and so does a DELETE for an account that "
             "was already deleted from the app (DRF-1368). Every call writes "
             "an AnalyticsEvent audit record (AMD-010) without personal values."
@@ -332,15 +344,26 @@ class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
         # DRF-1038: the account always; a linked proxy only when it holds a
         # context row — an erasure never CREATES a tombstone (and an audit
         # event) for an identity that had nothing.
+        #
+        # DRF-2214 — это настоящий путь «забудь всё» бота (ai-bot-platform
+        # ``apps/identity/services/personal_context.py`` — «The ONE erase verb»)
+        # и задания повтора DRF-1950; его же зовут отзыв согласия на хранение,
+        # удаление аккаунта и удаление из мини-аппа. Поэтому здесь же — всё,
+        # что каталог запомнил вне профиля (цели, план, профиль питания,
+        # дневник с фото), по КАЖДОЙ личности субъекта, как D3: у прокси
+        # может не быть строки профиля, но быть дневник. Одна транзакция —
+        # стёрто всё или ничего. Форма ответа не меняется (PR-3).
         scope: list[str] = []
-        for identity in subject_users(user):
-            if identity is not user and not UserPersonalContext.objects.filter(
-                user=identity
-            ).exists():
-                continue
-            for item in erase_personal_context(identity, initiator="internal_api"):
-                if item not in scope:
-                    scope.append(item)
+        with transaction.atomic():
+            for identity in subject_users(user):
+                erase_remembered_catalog(identity, initiator="internal_api")
+                if identity is not user and not UserPersonalContext.objects.filter(
+                    user=identity
+                ).exists():
+                    continue
+                for item in erase_personal_context(identity, initiator="internal_api"):
+                    if item not in scope:
+                        scope.append(item)
         logger.info(
             "internal.personal_data.deleted user_id=%s scope=%s request_id=%s",
             user_id, scope, getattr(request, "request_id", "-"),
