@@ -266,6 +266,11 @@ class InternalTenantKindView(APIView):
     Только чтение и только под общим внутренним токеном бота: provisioning-токен
     здесь не принимается (чтение не должно давать права заводить тенанты), а
     общий токен не принимают ручки provisioning выше.
+
+    Чтение «по каталогу», без проверки субъекта: явный ``tenant_id`` — UUID в
+    адресе; ответ — только ``{id, kind}``, без персональных данных.
+    Деактивированный тенант — 404, как у ``IsInternalBearerForSalonSubject``:
+    для мёртвого пространства бот не открывает экраны по его виду.
     """
 
     authentication_classes: list = []
@@ -277,13 +282,17 @@ class InternalTenantKindView(APIView):
         tags=["internal"],
         responses={
             200: _TenantKindResponseSerializer,
-            401: OpenApiResponse(description="Bearer token missing or invalid"),
-            404: OpenApiResponse(description="No tenant with this UUID"),
+            403: OpenApiResponse(
+                description="Missing / invalid bot internal bearer token "
+                            "(the provisioning token is NOT accepted; "
+                            "an empty token disables the endpoint)",
+            ),
+            404: OpenApiResponse(description="No active tenant with this UUID"),
         },
         description="Вид тенанта (salon | solo) — единственный источник для гейта экранов самообслуживания мастера.",
     )
     def get(self, request: Request, tenant_id) -> Response:
-        tenant = Tenant.all_objects.filter(pk=tenant_id).only("id", "kind").first()
+        tenant = Tenant.objects.filter(pk=tenant_id).only("id", "kind").first()
         if tenant is None:
             return error_response(
                 ErrorCode.TENANT_NOT_FOUND, "Tenant not found.", status_code=status.HTTP_404_NOT_FOUND,

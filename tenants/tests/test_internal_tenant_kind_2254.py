@@ -7,7 +7,7 @@
 ``workspace_kind``.
 
 * k1 — соло-workspace → ``kind=solo``; салон → ``kind=salon``;
-* k2 — тенанта нет → 404 ``TENANT_NOT_FOUND``;
+* k2 — тенанта нет или он деактивирован → 404 ``TENANT_NOT_FOUND``;
 * k3 — только общий внутренний токен бота: без токена, с чужим и с
   токеном provisioning — отказ (чтение не даёт права заводить тенанты, и
   наоборот);
@@ -75,13 +75,21 @@ class TestK2Unknown:
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "TENANT_NOT_FOUND"
 
+    def test_a_deactivated_tenant_is_404(self, salon) -> None:
+        Tenant.all_objects.filter(pk=salon.pk).update(is_active=False)
+        resp = _client().get(URL.format(tid=salon.pk))
+        assert resp.status_code == 404
+        assert resp.json()["error"]["code"] == "TENANT_NOT_FOUND"
+
 
 class TestK3OnlyTheBotsInternalToken:
     @pytest.mark.parametrize("token", [None, "wrong", PROVISIONING_TOKEN])
     def test_other_credentials_are_refused(self, salon, token) -> None:
         resp = _client(token).get(URL.format(tid=salon.pk))
-        assert resp.status_code in (401, 403)
-        assert "kind" not in resp.content.decode()
+        assert resp.status_code == 403
+        body = resp.json()
+        assert "data" not in body
+        assert "salon" not in resp.content.decode()
 
 
 class TestK4ReadOnly:
