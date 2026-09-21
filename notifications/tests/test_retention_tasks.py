@@ -15,8 +15,14 @@ from notifications.tasks import (
     dispatch_beauty_insights,
     dispatch_water_reminders,
 )
-from nutrition.models import FoodLog, NutritionProfile, WaterLog
+from nutrition.models import FoodLog, NutritionProfile, WaterEntry
 from users.models import User
+
+
+def _water(user, ml: int, at) -> WaterEntry:
+    """DRF-2257: активность для напоминания — ``WaterEntry`` (пишут бот и
+    Mini App), а не кнопочный трекер."""
+    return WaterEntry.objects.create(user=user, ml=ml, water_ml=float(ml), ts=at)
 
 
 pytestmark = pytest.mark.django_db
@@ -106,9 +112,7 @@ class TestDispatchWaterReminders:
         без имени.
         """
         _own_norm(client_user)
-        WaterLog.objects.create(
-            user=client_user, amount_ml=250, logged_at=_now_utc(),
-        )
+        _water(client_user, 250, _now_utc())
         result = dispatch_water_reminders()
         assert result["queued"] == 0
         assert result["skipped"] == 1
@@ -125,9 +129,7 @@ class TestDispatchWaterReminders:
         Дедуп вернётся вместе с ориентиром — код рассылки цел.
         """
         _own_norm(client_user)
-        WaterLog.objects.create(
-            user=client_user, amount_ml=250, logged_at=_now_utc(),
-        )
+        _water(client_user, 250, _now_utc())
         dispatch_water_reminders()
         result = dispatch_water_reminders()
         assert result["queued"] == 0
@@ -136,9 +138,9 @@ class TestDispatchWaterReminders:
         ).count() == 0
 
     def test_dormant_users_excluded(self, db, client_user):
-        # WaterLog 30 days ago — outside the 7-day active window.
+        # WaterEntry 30 days ago — outside the 7-day active window.
         old = _now_utc() - timedelta(days=30)
-        WaterLog.objects.create(user=client_user, amount_ml=250, logged_at=old)
+        _water(client_user, 250, old)
         result = dispatch_water_reminders()
         assert result == {"queued": 0, "skipped": 0}
 
@@ -148,12 +150,8 @@ class TestDispatchWaterReminders:
         _own_norm(client_user)
         _own_norm(other_active_client)
         # client_user is at 250 (behind), other user is past goal.
-        WaterLog.objects.create(
-            user=client_user, amount_ml=250, logged_at=_now_utc(),
-        )
-        WaterLog.objects.create(
-            user=other_active_client, amount_ml=2200, logged_at=_now_utc(),
-        )
+        _water(client_user, 250, _now_utc())
+        _water(other_active_client, 2200, _now_utc())
         result = dispatch_water_reminders()
         # Оба активны, обоим не пишут: ориентира нет ни у кого. Тест
         # сторожил, что чужая вода не считается за свою; проверять это
@@ -281,9 +279,7 @@ class TestWaterReminderDoesNotInventANorm:
     """
 
     def test_no_anketa_means_no_reminder(self, client_user):
-        WaterLog.objects.create(
-            user=client_user, amount_ml=250, logged_at=_now_utc(),
-        )
+        _water(client_user, 250, _now_utc())
         result = dispatch_water_reminders()
         assert result["queued"] == 0
         assert not Notification.objects.filter(
@@ -302,9 +298,7 @@ class TestWaterReminderDoesNotInventANorm:
         не считаем, старым считаем».
         """
         NutritionProfile.objects.create(user=client_user, daily_water_ml=1500)
-        WaterLog.objects.create(
-            user=client_user, amount_ml=250, logged_at=_now_utc(),
-        )
+        _water(client_user, 250, _now_utc())
         assert dispatch_water_reminders()["queued"] == 0
         assert not Notification.objects.filter(
             user=client_user, template_id="water_reminder",

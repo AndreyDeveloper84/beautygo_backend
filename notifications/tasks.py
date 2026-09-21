@@ -255,8 +255,9 @@ def dispatch_post_visit_aftercare() -> dict:
 def dispatch_water_reminders() -> dict:
     """Push the water reminder to active clients who are behind on goal.
 
-    Active = at least one WaterLog in the last
-    ``WATER_REMINDER_ACTIVE_WINDOW_DAYS`` days. Behind = today's
+    Active = at least one (not deleted) WaterEntry in the last
+    ``WATER_REMINDER_ACTIVE_WINDOW_DAYS`` days — the rows the bot and the
+    Mini App write (DRF-2257; it used to read the legacy button ``WaterLog``). Behind = today's
     water_ml < HIS OWN norm × ``WATER_REMINDER_BEHIND_PCT``. Idempotent
     per-user-per-window via Notification existence check on
     (user, template_id='water_reminder', date(created_at)=today).
@@ -286,7 +287,7 @@ def dispatch_water_reminders() -> dict:
 
     from django.conf import settings as dj_settings
 
-    from nutrition.models import WaterLog
+    from nutrition.models import WaterEntry
 
     today = datetime.now(dt_tz.utc).date()
     today_start = datetime.combine(today, datetime.min.time(), tzinfo=dt_tz.utc)
@@ -294,11 +295,12 @@ def dispatch_water_reminders() -> dict:
         days=dj_settings.WATER_REMINDER_ACTIVE_WINDOW_DAYS,
     )
 
-    # Active users: distinct user_ids with any WaterLog in the lookback
-    # window. Bounded by the active-user count, not the total user table.
+    # Active users: distinct user_ids with any live WaterEntry in the
+    # lookback window (DRF-2257: the rows bot and Mini App write; WaterLog
+    # is the legacy button tracker). Bounded by the active-user count.
     active_user_ids = list(
-        WaterLog.objects
-        .filter(logged_at__gte=active_since)
+        WaterEntry.objects
+        .filter(ts__gte=active_since, deleted_at__isnull=True)
         .values_list("user_id", flat=True).distinct()
     )
 
