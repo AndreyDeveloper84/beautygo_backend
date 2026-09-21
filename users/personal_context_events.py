@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import logging
 
+from django.db import transaction
+
 from analytics import event_catalogue
 
 
@@ -31,18 +33,24 @@ def _emit(user, event_name: str, payload: dict) -> None:
     UUID for ``client_event_id`` (no idempotency duplicate on
     server-generated events) and ``app_type=client`` (Pro app has no
     path to write personal-context, so the constant is safe).
+
+    DRF-2214 — своя точка сохранения. Ошибка БД внутри ``create`` помечает
+    окружающую транзакцию к откату; проглоченная без точки сохранения, она
+    молча откатила бы вызывающего — например, «забудь всё» — под ответом
+    «успех». С точкой сохранения откатывается только строка аналитики.
     """
     import uuid
 
     try:
         from analytics.models import AnalyticsEvent
-        AnalyticsEvent.objects.create(
-            actor=user,
-            event_name=event_name,
-            payload=payload or {},
-            app_type=AnalyticsEvent.AppType.CLIENT,
-            client_event_id=uuid.uuid4(),
-        )
+        with transaction.atomic():
+            AnalyticsEvent.objects.create(
+                actor=user,
+                event_name=event_name,
+                payload=payload or {},
+                app_type=AnalyticsEvent.AppType.CLIENT,
+                client_event_id=uuid.uuid4(),
+            )
     except Exception as exc:  # pragma: no cover - belt + suspenders
         logger.warning(
             "personalization.event_emit_failed event=%s user=%s err=%s",

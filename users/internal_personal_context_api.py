@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import uuid as uuid_mod
 
+from django.db import transaction
 from rest_framework import serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -54,6 +55,7 @@ from users.deletion_requests import (
 from privacy_audit.mixins import AuditedPersonalDataAccess
 from privacy_audit.models import PersonalDataAccessLog
 from users.permissions import IsInternalBearerForSubject
+from users.forget_all_catalog import erase_remembered_catalog
 from users.personal_context_erasure import erase_personal_context
 from users.personal_context_views import _GREEN_ZONE_FIELDS
 from users.response import error_response, success_response
@@ -209,7 +211,14 @@ class InternalPersonalContextView(AuditedPersonalDataAccess, APIView):
         if user is None:
             return error_response("USER_NOT_FOUND", "User not found.", status_code=404)
 
-        scope = erase_personal_context(user, initiator="bot_forget_all")
+        # DRF-2214 — «забудь всё» стирает и то, что каталог запомнил вне
+        # профиля: цели, анкету цели, план, профиль питания. В одной
+        # транзакции с профилем — либо стёрто всё, либо ничего. Форма ответа
+        # (`erased`) прежняя: бот её разбирает, новый состав ему сообщается
+        # отдельно (DRF-2214 PR-3).
+        with transaction.atomic():
+            erase_remembered_catalog(user, initiator="bot_forget_all")
+            scope = erase_personal_context(user, initiator="bot_forget_all")
         ctx, _ = UserPersonalContext.objects.get_or_create(user=user)
         return success_response({
             "ayla_user_id": str(user.id),
