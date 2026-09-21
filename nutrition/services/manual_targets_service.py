@@ -59,7 +59,6 @@ from nutrition.services.targets_state import KIND_FIELDS, KIND_SOURCE_FIELD, sna
 from nutrition.services.nutrition_profile_service import (  # noqa: F401 — re-exported names
     CALORIES_HARD_FLOOR_KCAL,
     CALORIES_WARN_BELOW_KCAL,
-    DEFAULT_ACTIVITY,
     MAINTENANCE_DEVIATION_RATIO,
     WARN_CALORIES_LOW,
     ProfileInputs,
@@ -151,7 +150,9 @@ def maintenance_kcal(profile: NutritionProfile) -> int | None:
         age=snapshot.get("age"),
         height_cm=snapshot.get("height_cm"),
         weight_kg=snapshot.get("weight_kg"),
-        activity_coefficient=float(snapshot.get("activity_coefficient") or DEFAULT_ACTIVITY),
+        # Вопрос 59: активности в снимке нет — поддержания нет (сравнение
+        # «unavailable», как уже названо), а не 1.4 за человека.
+        activity_coefficient=snapshot.get("activity_coefficient"),
         goal="maintain",
         pace="moderate",
         health_flags={},
@@ -217,7 +218,7 @@ def set_manual_targets(
 
     with transaction.atomic():
         profile, _ = NutritionProfile.objects.select_for_update().get_or_create(
-            user=user, defaults={"activity_coefficient": DEFAULT_ACTIVITY},
+            user=user,
         )
 
         warnings: list[str] = []

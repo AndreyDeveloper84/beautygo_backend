@@ -24,6 +24,15 @@
 * q3 — без активности: расчёта нет, отказ называет ``activity_coefficient``;
 * q4 — новая строка профиля не рождается с выдуманной активностью;
 * q5 — всё названо: расчёт есть (присутствие).
+
+Узлы ревью (upsert частичный — поле, которого нет в теле, остаётся):
+
+* r1 — повторная анкета с «Не знаю» про активность (бот шлёт пропуск, не
+  число): прежняя активность снимается, расчёта нет; названная затем —
+  пометка пропуска снимается, расчёт есть;
+* r2 — ступень пола BMR (moderate → gentle) не переписывает названный темп
+  в профиле — расчётный темп в снимке;
+* r3 — смена цели на «поддерживать»: прежний темп в снимок не попадает.
 """
 
 from __future__ import annotations
@@ -125,3 +134,47 @@ class TestEverythingNamed:
         assert p.daily_kcal and p.daily_kcal > 0
         assert p.targets_input_snapshot["pace"] == "gentle"
         assert p.targets_input_snapshot["activity_coefficient"] == 1.55
+
+
+class TestPartialUpsertDoesNotKeepWhatWasNotNamed:
+    def test_unknown_activity_on_a_retake_clears_the_old_one(self, proxy_user, headers):
+        _post({**BODY, "goal": "maintain", "activity_coefficient": 1.725}, headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+        # Присутствие: первый проход посчитан от названной активности.
+        assert p.targets_source == Source.AYLA_PROPOSED
+
+        _post({**BODY, "goal": "maintain", "_skipped_fields": ["activity"]}, headers)
+        p.refresh_from_db()
+        assert p.activity_coefficient is None
+        assert p.targets_source == Source.NONE
+        assert "activity_coefficient" in _missing(p)
+        assert p.health_flags.get("activity_skipped") is True
+
+        _post({**BODY, "goal": "maintain", "activity_coefficient": 1.2}, headers)
+        p.refresh_from_db()
+        assert p.targets_source == Source.AYLA_PROPOSED
+        assert "activity_skipped" not in p.health_flags
+
+    def test_the_bmr_floor_does_not_overwrite_the_named_pace(self, proxy_user, headers):
+        # Малый вес при «похудеть»: ступень moderate → gentle срабатывает.
+        _post(
+            {
+                "gender": "female", "age": 30, "height_cm": 160, "weight_kg": 40.0,
+                "activity_coefficient": 1.2, "goal": "lose", "pace": "moderate",
+            },
+            headers,
+        )
+        p = NutritionProfile.objects.get(user=proxy_user)
+        assert p.goal_overridden_by  # присутствие: ступень сработала
+        assert p.pace == "moderate"
+        assert p.targets_input_snapshot["pace"] in ("gentle", "moderate")
+
+    def test_maintain_does_not_carry_an_old_pace_into_the_snapshot(self, proxy_user, headers):
+        _post({**BODY, "goal": "lose", "pace": "gentle", "activity_coefficient": 1.55}, headers)
+        p = NutritionProfile.objects.get(user=proxy_user)
+        assert p.targets_input_snapshot["pace"] == "gentle"  # присутствие
+
+        _post({**BODY, "goal": "maintain", "activity_coefficient": 1.55}, headers)
+        p.refresh_from_db()
+        assert p.targets_input_snapshot["goal"] == "maintain"
+        assert p.targets_input_snapshot.get("pace") in (None, "")

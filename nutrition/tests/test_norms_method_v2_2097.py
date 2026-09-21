@@ -87,7 +87,10 @@ def _maintenance(base: ProfileInputs) -> int:
 class TestActivitySet:
     @pytest.mark.parametrize(
         ("raw", "expected"),
-        [(1.4, 1.375), (1.4625, 1.375), (1.0, 1.2), (2.5, 1.725), (1.6, 1.55), (None, 1.375)],
+        # Случай (None, 1.375) снят (вопрос 59, CD §72): он пинил умолчание
+        # активности за человека. Теперь «не названа» — отказ с именем поля,
+        # это держит test_no_invented_pace_activity_q59.
+        [(1.4, 1.375), (1.4625, 1.375), (1.0, 1.2), (2.5, 1.725), (1.6, 1.55)],
     )
     def test_a1_out_of_set_is_normalised_to_the_nearest_lower_on_ties(self, raw, expected):
         norms = compute_norms(
@@ -264,7 +267,8 @@ class TestMethodVersion:
         user = django_user_model.objects.create(username="drf2097-v1")
         profile = NutritionProfile.objects.create(
             user=user, gender="female", age=30, height_cm=165, weight_kg=60,
-            activity_coefficient=1.4, goal="lose", daily_kcal=1450,
+            # Вопрос 59: темп назван — «похудеть» без темпа не считается.
+            activity_coefficient=1.4, goal="lose", pace="moderate", daily_kcal=1450,
             # Строка до этого листа: происхождение v1, предложение не обновлялось.
             # Гейт пересчёта (§103 N-b) без основания её не трогает — v1 остаётся.
             targets_source=NutritionProfile.TargetsSource.UNKNOWN_LEGACY,
@@ -296,7 +300,8 @@ class TestLadderAndCensus:
         """−10 % при активности 1.2 ниже BMR + 100: лестница уводит в gentle, затем в maintain."""
         norms = compute_norms(
             ProfileInputs(
-                gender="female", age=30, height_cm=160, weight_kg=55, activity_coefficient=1.2, goal="lose"
+                gender="female", age=30, height_cm=160, weight_kg=55, activity_coefficient=1.2, goal="lose",
+                pace="moderate",
             )
         )
         assert norms.computed
@@ -308,7 +313,8 @@ class TestLadderAndCensus:
         # Вторая ступень: и gentle ниже пола → цель уходит в maintain.
         small = compute_norms(
             ProfileInputs(
-                gender="female", age=50, height_cm=150, weight_kg=45, activity_coefficient=1.2, goal="lose"
+                gender="female", age=50, height_cm=150, weight_kg=45, activity_coefficient=1.2, goal="lose",
+                pace="moderate",
             )
         )
         assert small.computed
