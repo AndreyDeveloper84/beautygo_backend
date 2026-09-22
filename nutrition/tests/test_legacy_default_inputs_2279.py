@@ -20,12 +20,19 @@
   весь, двумя счётчиками: при цели без темпа и при цели с темпом;
 * **темп «gentle»** расчёт не подставлял никогда — не трогается.
 
-Пометка — ``health_flags["legacy_default"]``: список имён входов, рядом с
-``activity_skipped`` той же природы; схема не меняется. Помеченный вход —
-«не назван»: расчёт отказывает с его именем, а не считает молча. Названное
-значение (в том числе то же самое — это и есть подтверждение) снимает
-пометку. Пометку ставит только команда — входящие ``health_flags`` её не
-несут (бот шлёт флаги обратно целиком).
+Пометка — отдельное поле ``legacy_default_inputs`` (JSON-список имён
+входов), аддитивная миграция. НЕ ``health_flags`` (главное окно, 22.09):
+решение DT-1 (§67) — «при ЛЮБОМ флаге здоровья внешняя LLM не вызывается»,
+#534 исполняет его правилом «любой истинный ключ», и пометка в флагах
+выключила бы модель всем помеченным; к тому же это не данные о здоровье.
+Поле выгружается по ст. 14 (реестр полей #544): человек видит, какие
+значения в его профиле не его ответы.
+
+Помеченный вход — «не назван»: расчёт отказывает с его именем, а не считает
+молча. Темп — только при цели с темпом (у «поддерживать» он в расчёт не
+входит). Названное значение (в том числе то же самое — это и есть
+подтверждение) снимает пометку. Пометку ставит только команда: через upsert
+её не записать.
 
 Команда ``mark_legacy_default_inputs``: без ``--apply`` только печатает.
 
@@ -34,8 +41,11 @@
   не тронуты; повтор — «Метить нечего»;
 * c1 — помеченная активность / темп: расчёта нет, отказ называет поле;
 * c2 — подтверждение (то же значение) снимает пометку, расчёт есть;
-* c3 — входящие ``health_flags`` пометку не ставят и не снимают;
-* d1 — ответ профиля называет помеченные входы (``legacy_default_inputs``).
+* c3 — пометка через upsert не пишется и не снимается; ``health_flags``
+  команда не трогает (DT-1);
+* c4 — помеченный темп при «поддерживать» расчёт не останавливает;
+* d1 — ответ профиля называет помеченные входы (``legacy_default_inputs``);
+* d2 — выгрузка по ст. 14 несёт поле.
 """
 
 from __future__ import annotations
@@ -59,7 +69,6 @@ SERVICE_TOKEN = "svc-token-2279"
 Source = NutritionProfile.TargetsSource
 
 BODY = {"gender": "female", "age": 36, "height_cm": 170, "weight_kg": 67.0}
-MARK = "legacy_default"
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +83,7 @@ def _user(name: str) -> User:
 def _profile(name: str, **fields) -> NutritionProfile:
     """A row as the database holds it — written before #543, by hand."""
     base = dict(BODY, goal="lose", pace="", activity_coefficient=None, health_flags={})
+    base.setdefault("legacy_default_inputs", [])
     base.update(fields)
     return NutritionProfile.objects.create(user=_user(name), **base)
 
@@ -99,7 +109,7 @@ def _missing(profile: NutritionProfile) -> list[str]:
 
 def _marks(profile: NutritionProfile) -> set[str]:
     profile.refresh_from_db()
-    return set((profile.health_flags or {}).get(MARK) or [])
+    return set(profile.legacy_default_inputs or [])
 
 
 def _run(*args: str) -> str:
@@ -177,15 +187,30 @@ class TestCalculation:
         _post("a14", {"activity_coefficient": 1.55})
         assert _marks(NutritionProfile.objects.get(user__username="bot:a14")) == set()
 
-    def test_incoming_health_flags_neither_set_nor_clear_the_mark(self, legacy_rows):
+    def test_upsert_neither_writes_nor_clears_the_mark(self, legacy_rows):
         _run("--apply")
-        row = legacy_rows["pace_lose"]
-        _post("pace_lose", {"health_flags": {MARK: []}, "weight_kg": 66.0})
-        assert _marks(row) == {"pace"}
+        _post("pace_lose", {"legacy_default_inputs": [], "weight_kg": 66.0})
+        assert _marks(legacy_rows["pace_lose"]) == {"pace"}
 
-        named = legacy_rows["named"]
-        _post("named", {"health_flags": {MARK: ["pace"]}})
-        assert _marks(named) == set()
+        _post("named", {"legacy_default_inputs": ["pace"]})
+        assert _marks(legacy_rows["named"]) == set()
+
+    def test_the_command_leaves_health_flags_alone(self, legacy_rows):
+        # DT-1: any health flag switches the external model off (#534).
+        _run("--apply")
+        a14 = legacy_rows["a14"]
+        a14.refresh_from_db()
+        assert a14.health_flags == {}
+        skipped = legacy_rows["skipped"]
+        skipped.refresh_from_db()
+        assert skipped.health_flags == {"activity_skipped": True}
+
+    def test_a_marked_pace_does_not_stop_maintain(self, legacy_rows):
+        _run("--apply")
+        _post("pace_maintain", {"weight_kg": 66.0})
+        p = NutritionProfile.objects.get(user__username="bot:pace_maintain")
+        assert _marks(p) == {"pace"}
+        assert p.daily_kcal and p.daily_kcal > 0
 
 
 class TestProfileSaysWhatIsUnconfirmed:
@@ -200,3 +225,9 @@ class TestProfileSaysWhatIsUnconfirmed:
         data = resp.json()["data"]
         assert data["legacy_default_inputs"] == ["pace"]
         assert data["pace"] == "moderate"
+
+    def test_the_article_14_export_carries_the_field(self, legacy_rows):
+        from users.remembered_export import FIELDS
+
+        exported, _excluded = FIELDS["nutrition.NutritionProfile"]
+        assert exported.get("legacy_default_inputs") == "legacy_default_inputs"
