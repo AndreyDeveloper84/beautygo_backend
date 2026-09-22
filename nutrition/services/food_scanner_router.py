@@ -21,6 +21,7 @@ from django.conf import settings
 from nutrition.providers.base import (
     FoodScannerProvider,
     LowConfidenceError,
+    ProviderPermanentlyUnavailable,
     ProviderTimeout,
     ProviderUnavailable,
     ScanResult,
@@ -73,6 +74,18 @@ class AllProvidersFailedError(Exception):
             f"primary={type(primary_err).__name__}({primary_err}) "
             f"fallback={type(fallback_err).__name__ if fallback_err else 'not_attempted'}"
         )
+
+    @property
+    def permanent_reason(self) -> str | None:
+        """DRF-2318: причина, если ВСЕ опрошенные провайдеры отказали стойко, иначе ``None``.
+
+        Хоть один временный отказ (5xx, сеть, низкая уверенность) — отказ
+        временный: через минуту может получиться.
+        """
+        errors = [self.primary_err] + ([self.fallback_err] if self.fallback_err else [])
+        if all(isinstance(err, ProviderPermanentlyUnavailable) for err in errors):
+            return self.primary_err.reason  # type: ignore[attr-defined]
+        return None
 
     @property
     def is_low_confidence_only(self) -> bool:
@@ -142,6 +155,7 @@ class FoodScannerRouter:
             )
         except self.FALLBACKABLE as exc:
             primary_err = exc
+            _signal_if_permanent(self._primary_name, exc)
             logger.info(
                 "food_scanner.fallback primary=%s err=%s",
                 self._primary_name, type(exc).__name__,
@@ -167,6 +181,11 @@ class FoodScannerRouter:
                 primary_failed_with=type(primary_err).__name__,
             )
         except self.FALLBACKABLE as fallback_err:
+            # Резерв сигналит только вместе со стойким основным: ненастроенный
+            # резерв при временном сбое основного — не страница каждый час
+            # (ревью #549); когда стойко отказали оба — звучат оба.
+            if isinstance(primary_err, ProviderPermanentlyUnavailable):
+                _signal_if_permanent(self._fallback_name, fallback_err)
             logger.warning(
                 "food_scanner.both_failed primary=%s fallback=%s",
                 type(primary_err).__name__, type(fallback_err).__name__,
@@ -185,3 +204,15 @@ class FoodScannerRouter:
                 f"{list(self._registry.keys())})"
             ) from exc
         return cls()
+
+
+def _signal_if_permanent(provider: str, exc: Exception) -> None:
+    """DRF-2318: стойкий отказ провайдера — сигнал операторам (дедуп по часу).
+
+    Звучит и когда резерв спас скан: неоплаченный основной провайдер — всё
+    равно поломка, которую чинит человек.
+    """
+    if isinstance(exc, ProviderPermanentlyUnavailable):
+        from nutrition.services.food_scan_health import signal_provider_down
+
+        signal_provider_down(provider=provider, reason=exc.reason)

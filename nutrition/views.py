@@ -154,6 +154,17 @@ def _record_usage(scan: FoodScan, usage: dict) -> None:
     food_scan_budget.record_cost(scan.provider_cost_usd)
 
 
+def _unavailable_details(exc: AllProvidersFailedError) -> dict | None:
+    """DRF-2318: стойкий отказ распознавателя — ``details`` для 503.
+
+    Код ответа прежний (``FOOD_API_UNAVAILABLE``), чтобы прежние читатели не
+    сломались; бот по ``permanent`` не обещает «через минуту». Причина —
+    закрытое слово, текста провайдера в ответе нет.
+    """
+    reason = exc.permanent_reason
+    return {"permanent": True, "reason": reason} if reason else None
+
+
 def _settle_not_recognized(scan: FoodScan, exc: AllProvidersFailedError, user) -> None:
     """DRF-2218, §63: «не еда» — вернуть ЛИЧНУЮ попытку дня; вызов(ы)
     провайдера оплачены — их стоимость записывается (``partial`` каждого
@@ -258,6 +269,7 @@ class FoodScanView(APIView):
             )
             return error_response(
                 error_code, msg, status_code=http_status,
+                details=None if exc.is_low_confidence_only else _unavailable_details(exc),
             )
 
         scan.dish_name = outcome.result.dish_name
@@ -388,7 +400,10 @@ class InternalFoodScanView(APIView):
                 "nutrition.internal_scan.all_providers_failed user=%s code=%s err=%s",
                 user.id, error_code, exc,
             )
-            return error_response(error_code, msg, status_code=http_status)
+            return error_response(
+                error_code, msg, status_code=http_status,
+                details=None if exc.is_low_confidence_only else _unavailable_details(exc),
+            )
 
         scan.dish_name = outcome.result.dish_name
         scan.confidence = outcome.result.confidence
