@@ -16,6 +16,9 @@ echo "=== Snapshot of the database before anything touches the schema ==="
 bash scripts/pg_snapshot_before_deploy.sh
 
 echo "=== Building and restarting containers ==="
+# DRF-2272 — логи web/celery в journald хоста (см. x-app-logging в compose).
+export CATALOG_LOG_DRIVER=journald
+[ -d /var/log/journal ] || echo "WARNING: DRF-2272: /var/log/journal нет — журнал не постоянный"
 docker compose build
 docker compose up -d
 
