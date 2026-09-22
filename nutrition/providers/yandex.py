@@ -32,6 +32,7 @@ from nutrition.providers.base import (
     FoodScannerProvider,
     LowConfidenceError,
     ProviderTimeout,
+    ProviderPermanentlyUnavailable,
     ProviderUnavailable,
     ScanResult,
 )
@@ -76,8 +77,9 @@ class YandexVisionProvider(FoodScannerProvider):
         api_key = getattr(settings, "YANDEX_VISION_API_KEY", "")
         folder_id = getattr(settings, "YANDEX_VISION_FOLDER_ID", "")
         if not api_key or not folder_id:
-            raise ProviderUnavailable(
-                "YANDEX_VISION_API_KEY / YANDEX_VISION_FOLDER_ID not configured"
+            raise ProviderPermanentlyUnavailable(
+                "YANDEX_VISION_API_KEY / YANDEX_VISION_FOLDER_ID not configured",
+                reason="not_configured",
             )
 
         b64 = base64.b64encode(image_bytes).decode("ascii")
@@ -111,6 +113,11 @@ class YandexVisionProvider(FoodScannerProvider):
         if response.status_code >= 500:
             raise ProviderUnavailable(
                 f"yandex 5xx: {response.status_code} {response.text[:200]}"
+            )
+        if response.status_code in (401, 403):
+            # DRF-2318: ключ или каталог отвергнут — стойко, чинит человек.
+            raise ProviderPermanentlyUnavailable(
+                f"yandex {response.status_code}: {response.text[:200]}", reason="auth_rejected"
             )
         if response.status_code >= 400:
             # 4xx is usually a config bug (bad key / wrong folder) —

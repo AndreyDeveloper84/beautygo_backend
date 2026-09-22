@@ -12,8 +12,9 @@
 * v* — ручка бота: 503 ``FOOD_API_UNAVAILABLE`` с ``details.permanent`` и
   ``details.reason`` — код прежний, прежние читатели не ломаются;
 * s* — стойкий отказ провайдера → сигнал операторам
-  ``system.module.health.degraded`` / ``nutrition.food_scan``, как сигнал
-  бюджета, один на (провайдер, причина) за час; временный — без сигнала.
+  ``system.module.health.degraded`` / ``nutrition.food_scan.provider`` (своё
+  имя: под ``nutrition.food_scan`` бот читает метрику бюджета), рельсом
+  сигнала бюджета, один на (провайдер, причина) за час; временный — без сигнала.
 """
 from __future__ import annotations
 
@@ -62,8 +63,7 @@ def openai_client(settings):
 def _signals() -> list[OutboxEvent]:
     return [
         e for e in OutboxEvent.objects.filter(topic=TOPIC)
-        if (e.payload.get("data") or e.payload).get("module_name") == "nutrition.food_scan"
-        and "provider" in ((e.payload.get("data") or e.payload).get("metric") or {})
+        if (e.payload.get("data") or e.payload).get("module_name") == "nutrition.food_scan.provider"
     ]
 
 
