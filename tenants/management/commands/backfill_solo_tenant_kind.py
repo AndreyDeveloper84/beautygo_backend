@@ -21,6 +21,14 @@ sha256 от ``канал:id``) и отдаёт совпавшие. Эта ком
 через ``ensure_tenant(slug=…)`` со своим ключом; общий UUID есть только у
 solo-workspace, заведённых самим provisioning.
 
+# Порядок: сначала разбор, потом отчёт, запись — последней
+
+Отчёт печатается ЦЕЛИКОМ до первой записи, а записи идут одной транзакцией.
+Иначе падение на сороковом слаге из пятидесяти оставило бы тридцать девять
+переведённых строк и НИ ОДНОЙ строки отчёта — владелец не узнал бы, что
+именно записано. Порядок тот же, что у соседней команды переноса места
+(``promote_tenant_location``: план печатается, запись — в конце).
+
 # Что команда НЕ делает
 
 * **Не пишет без ``--apply``.** Сухой прогон — умолчание: сначала отчёт
@@ -28,36 +36,50 @@ solo-workspace, заведённых самим provisioning.
 * **Не переводит тенанта с двумя и более живыми мастерами** (решение главного
   окна): у ``kind=solo`` самообслуживание местом и услугами открыто каждому
   профилю этого тенанта, а не только владельцу (случай B замера DRF-2254).
-  Такие называются отдельной строкой и числом — что с ними делать, решает
-  владелец.
+* **Не переводит тенанта БЕЗ живых мастеров.** Ноль мастеров — признак
+  служебного (например, маркетплейсного) тенанта: на этом свойстве
+  ``service_location.tenant_has_no_masters`` держит сразу две защиты, а вид
+  ``solo`` снимает их обе — ``deletion_executor._erase_own_place`` начинает
+  стирать место такого тенанта, а ``personal_data_api._works_at`` начинает
+  отдавать адрес организации как личные данные человека. И сам отказ
+  DRF-2254 там некому получить: отказ получает мастер, а мастера нет.
+* **Не переводит неактивного тенанта и тенанта неизвестного вида.** Оба —
+  решение владельца, а не умолчание команды; оба названы в отчёте числом.
 * **Не заводит тенантов и не трогает тех, кого нет в списке.**
 * **Не печатает людей.** В отчёте — слаги тенантов и числа: ни имён, ни
   логинов, ни идентификаторов.
-
-Живой мастер — профиль, чей пользователь не удалён: тот же предикат, что у
-исполнителя удаления аккаунта (``deletion_executor._other_live_masters``).
 """
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass, field
+from typing import NoReturn
 
 from django.core.management.base import BaseCommand
 from django.db import transaction
+from django.utils import timezone
 
 from core.measurement_subject import gather_pulse, subject_lines
 from tenants.models import Tenant
+from tenants.service_location import live_master_count
 
 #: Столько живых мастеров уже делают тенант командой, а не соло-workspace.
 TEAM_FROM = 2
 
 
-def _live_masters(tenant: Tenant) -> int:
-    """Мастера тенанта, чей аккаунт не удалён — предикат D3, одним счётом."""
-    from users.models import SpecialistProfile
+@dataclass
+class Plan:
+    """Разбор списка ДО записи: числа отчёта и числа записи — из одного места."""
 
-    return SpecialistProfile.objects.filter(
-        tenant=tenant, user__deleted_at__isnull=True
-    ).count()
+    lines: int = 0
+    slugs: list[str] = field(default_factory=list)
+    convert: list[tuple[str, int]] = field(default_factory=list)
+    already: list[str] = field(default_factory=list)
+    team: list[tuple[str, int]] = field(default_factory=list)
+    no_masters: list[str] = field(default_factory=list)
+    inactive: list[str] = field(default_factory=list)
+    unknown_kind: list[str] = field(default_factory=list)
+    missing: list[str] = field(default_factory=list)
 
 
 class Command(BaseCommand):
@@ -76,34 +98,117 @@ class Command(BaseCommand):
             "--apply", action="store_true", help="Записать. Без флага — сухой прогон."
         )
 
-    def _fail(self, msg: str) -> None:
+    def _fail(self, msg: str) -> NoReturn:
         self.stderr.write(self.style.ERROR(msg))
         raise SystemExit(2)
 
-    def _slugs(self, options) -> list[str]:
+    def _read_list(self, options) -> str:
         path = options["from_file"]
         if path:
             try:
-                with open(path, encoding="utf-8") as fh:
-                    raw = fh.read()
+                # utf-8-sig: список, сохранённый блокнотом Windows, несёт BOM,
+                # и первый слаг иначе тихо попал бы в «нет в каталоге».
+                with open(path, encoding="utf-8-sig") as fh:
+                    return fh.read()
             except OSError as exc:
-                self._fail(f"не читается файл списка: {type(exc).__name__}")
-        else:
-            raw = sys.stdin.read()
+                # Путь — не идентификатор человека; без него опечатка в имени
+                # файла неотличима от запрета доступа.
+                self._fail(f"не читается файл списка {path!r}: {type(exc).__name__}")
+        if sys.stdin.isatty():
+            self._fail(
+                "список не передан: укажите --from-file или подайте слаги в канал "
+                "(команда не спрашивает список у терминала — молчаливое ожидание "
+                "ввода на стенде выглядит как зависание)."
+            )
+        return sys.stdin.read()
+
+    def _slugs(self, raw: str) -> tuple[int, list[str]]:
+        """Строки списка и уникальные слаги: отчёт называет оба числа.
+
+        Владелец сверяет отчёт с тем, что отдал бот; одно число «в списке»
+        после дедупликации сверить не с чем.
+        """
+        lines = 0
         seen: list[str] = []
         for line in raw.splitlines():
             slug = line.strip()
-            if not slug or slug.startswith("#") or slug in seen:
+            if not slug or slug.startswith("#"):
                 continue
-            seen.append(slug)
-        return seen
+            lines += 1
+            if slug not in seen:
+                seen.append(slug)
+        return lines, seen
+
+    def _classify(self, slugs: list[str], lines: int) -> Plan:
+        plan = Plan(lines=lines, slugs=slugs)
+        for slug in slugs:
+            tenant = Tenant.all_objects.filter(slug=slug).first()
+            if tenant is None:
+                plan.missing.append(slug)
+            elif tenant.kind == Tenant.Kind.SOLO:
+                plan.already.append(slug)
+            elif tenant.kind != Tenant.Kind.SALON:
+                plan.unknown_kind.append(slug)
+            elif not tenant.is_active:
+                plan.inactive.append(slug)
+            else:
+                masters = live_master_count(tenant)
+                if masters >= TEAM_FROM:
+                    plan.team.append((slug, masters))
+                elif masters == 0:
+                    plan.no_masters.append(slug)
+                else:
+                    plan.convert.append((slug, masters))
+        return plan
+
+    def _report(self, plan: Plan, *, apply: bool) -> None:
+        mode = "ЗАПИСЬ (--apply)" if apply else "сухой прогон (без --apply ничего не записано)"
+        self.stdout.write(f"Режим: {mode}")
+        self.stdout.write(f"строк от бота: {plan.lines}")
+        self.stdout.write(f"в списке бота (без повторов): {len(plan.slugs)}")
+        self.stdout.write(f"будет переведено: {len(plan.convert)}")
+        for slug, masters in plan.convert:
+            self.stdout.write(f"  salon → solo, живых мастеров {masters}: {slug}")
+        self.stdout.write(f"уже solo: {len(plan.already)}")
+        for slug in plan.already:
+            self.stdout.write(f"  без изменений: {slug}")
+        self.stdout.write(f"с командой ({TEAM_FROM}+ мастера), пропущено: {len(plan.team)}")
+        for slug, masters in plan.team:
+            self.stdout.write(f"  пропущен, живых мастеров {masters}: {slug}")
+        self.stdout.write(f"без живых мастеров, пропущено: {len(plan.no_masters)}")
+        for slug in plan.no_masters:
+            self.stdout.write(f"  пропущен, живых мастеров 0 (служебный?): {slug}")
+        self.stdout.write(f"неактивен, пропущено: {len(plan.inactive)}")
+        for slug in plan.inactive:
+            self.stdout.write(f"  пропущен, is_active=False: {slug}")
+        self.stdout.write(f"вид, которого код не знает, пропущено: {len(plan.unknown_kind)}")
+        for slug in plan.unknown_kind:
+            self.stdout.write(f"  пропущен, kind не salon и не solo: {slug}")
+        self.stdout.write(f"нет в каталоге: {len(plan.missing)}")
+        for slug in plan.missing:
+            self.stdout.write(f"  не найден: {slug}")
+
+    def _write(self, plan: Plan) -> int:
+        """Записать разобранное — одной транзакцией, считая РЕАЛЬНЫЕ строки."""
+        written = 0
+        now = timezone.now()
+        with transaction.atomic():
+            for slug, _masters in plan.convert:
+                # kind=SALON в условии: строку, которую между разбором и записью
+                # сменил кто-то другой, мы не перетираем. update() минует
+                # auto_now — updated_at пишем явно, иначе у переведённой строки
+                # не остаётся следа, по которому её отличают и откатывают.
+                written += Tenant.all_objects.filter(slug=slug, kind=Tenant.Kind.SALON).update(
+                    kind=Tenant.Kind.SOLO, updated_at=now
+                )
+        return written
 
     def handle(self, *args, **options) -> None:
         for line in subject_lines(pulses=gather_pulse()):
             self.stdout.write(line)
         self.stdout.write("")
 
-        slugs = self._slugs(options)
+        lines, slugs = self._slugs(self._read_list(options))
         if not slugs:
             self._fail(
                 "список слагов пуст: команда переводит только то, что названо ботом "
@@ -112,40 +217,19 @@ class Command(BaseCommand):
             )
 
         apply = bool(options["apply"])
-        missing: list[str] = []
-        already: list[str] = []
-        team: list[tuple[str, int]] = []
-        changed: list[str] = []
+        plan = self._classify(slugs, lines)
+        self._report(plan, apply=apply)
+        if not apply:
+            return
 
-        for slug in slugs:
-            tenant = Tenant.all_objects.filter(slug=slug).first()
-            if tenant is None:
-                missing.append(slug)
-                continue
-            if tenant.kind == Tenant.Kind.SOLO:
-                already.append(slug)
-                continue
-            masters = _live_masters(tenant)
-            if masters >= TEAM_FROM:
-                team.append((slug, masters))
-                continue
-            changed.append(slug)
-            if apply:
-                with transaction.atomic():
-                    Tenant.all_objects.filter(pk=tenant.pk).update(kind=Tenant.Kind.SOLO)
-
-        mode = "ЗАПИСЬ (--apply)" if apply else "сухой прогон (без --apply ничего не записано)"
-        self.stdout.write(f"Режим: {mode}")
-        self.stdout.write(f"в списке бота: {len(slugs)}")
-        self.stdout.write(f"переведено: {len(changed)}" if apply else f"будет переведено: {len(changed)}")
-        for slug in changed:
-            self.stdout.write(f"  salon → solo: {slug}")
-        self.stdout.write(f"уже solo: {len(already)}")
-        for slug in already:
-            self.stdout.write(f"  без изменений: {slug}")
-        self.stdout.write(f"с командой ({TEAM_FROM}+ мастера), пропущено: {len(team)}")
-        for slug, masters in team:
-            self.stdout.write(f"  пропущен, живых мастеров {masters}: {slug}")
-        self.stdout.write(f"нет в каталоге: {len(missing)}")
-        for slug in missing:
-            self.stdout.write(f"  не найден: {slug}")
+        written = self._write(plan)
+        self.stdout.write(f"переведено: {written}")
+        if written != len(plan.convert):
+            # Число записи ниже числа плана — строку сменили между разбором и
+            # записью. Молчать здесь значило бы отчитаться о записи, которой нет.
+            self.stdout.write(
+                self.style.WARNING(
+                    f"  не переведено: {len(plan.convert) - written} — "
+                    "строка сменилась между разбором и записью, повторите прогон"
+                )
+            )

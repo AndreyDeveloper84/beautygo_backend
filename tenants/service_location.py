@@ -106,6 +106,33 @@ def tenant_master_count(tenant) -> int:
     return SpecialistProfile._base_manager.filter(tenant=tenant).count()
 
 
+def live_master_count(tenant) -> int:
+    """Сколько у тенанта ЖИВЫХ мастеров — третий счёт рядом с двумя, намеренно.
+
+    ``tenant_master_count`` считает всех: ему нужен признак «месту некому
+    служить», и удалённый аккаунт этот признак не меняет. Здесь вопрос
+    другой — «кого отказ задевает сегодня»: у команды вида (DRF-2325) вид
+    ``solo`` открывает самообслуживание каждому живому профилю тенанта, а
+    профиль удалённого аккаунта не откроет ничего.
+
+    Предикат живости тот же, что у исполнителя удаления
+    (``users/deletion_executor._other_live_masters``): ``deleted_at`` пуст.
+    Копия условия живёт здесь, а не у вызывающего, по причине из докстринга
+    соседа: разошлись бы копии молча.
+
+    Счёт через ``_base_manager`` — по той же причине, что у соседа: появись
+    у менеджера по умолчанию фильтр, счёт молча обнулился бы у всех, и
+    сторож «2+ мастера» испарился бы разом.
+    """
+    from users.models import SpecialistProfile
+
+    if tenant is None:
+        return 0
+    return (
+        SpecialistProfile._base_manager.filter(tenant=tenant, user__deleted_at__isnull=True).count()
+    )
+
+
 class LocationStatus(models.TextChoices):
     """Подтверждено ли место — §9 дословно, три исхода."""
 
