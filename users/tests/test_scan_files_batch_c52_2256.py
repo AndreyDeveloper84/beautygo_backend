@@ -212,7 +212,8 @@ class TestB5LateScanLeavesNoFile:
             )
             return removed
 
-        monkeypatch.setattr("users.personal_data_api.remove_scan_files", _then_a_late_scan)
+        # DRF-2305 — пачка снимается в общем глаголе ``users.forget_all_subject``.
+        monkeypatch.setattr("users.forget_all_subject.remove_scan_files", _then_a_late_scan)
         assert _internal().delete(_bot_url(user)).status_code == 200
         assert storage.files == set()
         assert FoodScan.objects.filter(user=user).count() == 0

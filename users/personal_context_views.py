@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import logging
 
-from django.db import transaction
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
@@ -44,11 +43,8 @@ from users.personal_context_events import (
     emit_question_answered,
     emit_question_skipped,
 )
-from users.forget_all_catalog import erase_remembered_catalog, remembered_scope
-from users.personal_context_erasure import (
-    erase_personal_context,
-    mark_field_erased,
-)
+from users.forget_all_subject import erase_remembered_for_subject
+from users.personal_context_erasure import mark_field_erased
 from users.personalization_engine import mark_skipped
 
 logger = logging.getLogger("users.personal_context")
@@ -196,11 +192,11 @@ class UserPersonalContextView(APIView):
         # DRF-2214 — и то, что каталог запомнил вне профиля: цели, анкету
         # цели, план, профиль питания. В одной транзакции с профилем — либо
         # стёрто всё, либо ничего.
-        with transaction.atomic():
-            counts = erase_remembered_catalog(request.user, initiator="app")
-            erase_personal_context(
-                request.user, initiator="app", also_erased=remembered_scope(counts)
-            )
+        #
+        # DRF-2305 — по всем личностям субъекта (аккаунт + связанные прокси
+        # ``bot:…``), тем же глаголом, что C5.2: у прокси бывает дневник, цели и
+        # outbox питания без строки профиля. Файлы фото — до транзакции.
+        erase_remembered_for_subject(request.user, initiator="app")
         logger.info(
             "personal_context.wiped user=%s reason=152-fz",
             request.user.pk,
