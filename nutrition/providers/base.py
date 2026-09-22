@@ -72,6 +72,24 @@ class ProviderUnavailable(ProviderError):
     failure (e.g. 'model overloaded')."""
 
 
+class ProviderPermanentlyUnavailable(ProviderUnavailable):
+    """Стойкий отказ (DRF-2318): ретрай через минуту не поможет — чинит человек.
+
+    ``reason`` — закрытое слово: ``billing_not_active`` (счёт не активен),
+    ``quota_exhausted`` (квота исчерпана), ``invalid_api_key`` /
+    ``auth_rejected`` (ключ отвергнут), ``not_configured`` (ключа нет).
+    Подкласс ``ProviderUnavailable``: роутер по-прежнему пробует резерв.
+    """
+
+    REASONS = frozenset(
+        {"billing_not_active", "quota_exhausted", "invalid_api_key", "auth_rejected", "not_configured"}
+    )
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason if reason in self.REASONS else "auth_rejected"
+
+
 class LowConfidenceError(ProviderError):
     """Provider returned a result but confidence is below threshold —
     router should try fallback before showing the user 'not recognised'."""

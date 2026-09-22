@@ -23,6 +23,7 @@ from ai.services.llm_client import get_openai_client
 from nutrition.providers.base import (
     FoodScannerProvider,
     LowConfidenceError,
+    ProviderPermanentlyUnavailable,
     ProviderTimeout,
     ProviderUnavailable,
     ScanResult,
@@ -75,7 +76,9 @@ class OpenAIVisionProvider(FoodScannerProvider):
         caption: str = "",
     ) -> ScanResult:
         if not getattr(settings, "OPENAI_API_KEY", ""):
-            raise ProviderUnavailable("OPENAI_API_KEY is not configured")
+            raise ProviderPermanentlyUnavailable(
+                "OPENAI_API_KEY is not configured", reason="not_configured"
+            )
 
         b64 = base64.b64encode(image_bytes).decode("ascii")
         image_url = f"data:image/jpeg;base64,{b64}"
@@ -122,6 +125,9 @@ class OpenAIVisionProvider(FoodScannerProvider):
             )
             if _is_timeout(exc):
                 raise ProviderTimeout(str(exc)) from exc
+            reason = _permanent_reason(exc)
+            if reason is not None:
+                raise ProviderPermanentlyUnavailable(str(exc), reason=reason) from exc
             raise ProviderUnavailable(str(exc)) from exc
 
         latency_ms = int((time.monotonic() - started) * 1000)
@@ -215,3 +221,32 @@ def _is_timeout(exc: BaseException) -> bool:
     """Distinguish OpenAI/httpx timeouts from generic 5xx for the router."""
     name = type(exc).__name__.lower()
     return "timeout" in name or "timedout" in name
+
+
+#: DRF-2318 — коды ошибок OpenAI, после которых ретрай не поможет: чинит человек.
+#: ``rate_limit_exceeded`` (тоже 429) сюда НЕ входит — он проходит сам.
+_PERMANENT_CODES = {
+    "billing_not_active": "billing_not_active",
+    "insufficient_quota": "quota_exhausted",
+    "invalid_api_key": "invalid_api_key",  # pragma: allowlist secret — код ошибки, не ключ
+    "account_deactivated": "auth_rejected",
+}
+
+
+def _permanent_reason(exc: Exception) -> str | None:
+    """Закрытое слово стойкого отказа по ошибке SDK OpenAI — или ``None``."""
+    code = getattr(exc, "code", None)
+    if not isinstance(code, str):
+        body = getattr(exc, "body", None)
+        error = body.get("error") if isinstance(body, dict) else None
+        code = error.get("code") if isinstance(error, dict) else None
+        if code is None and isinstance(body, dict):
+            code = body.get("code")
+    if isinstance(code, str) and code in _PERMANENT_CODES:
+        return _PERMANENT_CODES[code]
+    # Только 401: 403 без известного кода — не «ключ отвергнут». Прод ходит в
+    # OpenAI через прокси (гео-блок РФ), и 403 гео-запрета или CDN при смене
+    # выхода прокси — временная поломка сети, а не ключа (ревью #549).
+    if getattr(exc, "status_code", None) == 401:
+        return "auth_rejected"
+    return None
