@@ -32,6 +32,8 @@ from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
+from django.db import DatabaseError
+from django.db.models import QuerySet
 
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
@@ -57,10 +59,16 @@ def _run(*args, stdin_text: str | None = None, **kw):
 
 
 def _counts(out: str) -> dict[str, str]:
-    """Числовые строки отчёта: «ключ: N» без строк-перечислений (они с отступа)."""
+    """Числовые строки ОТЧЁТА: «ключ: N» без строк-перечислений (они с отступа).
+
+    Предмет замера печатается до отчёта и отделён пустой строкой; его строки
+    тоже содержат двоеточие и несут возраст В МИНУТАХ — попади они сюда,
+    сравнение двух прогонов ломалось бы на смене минуты.
+    """
+    report = out.split("\n\n", 1)[-1]
     return {
         line.split(":")[0]: line.split(":", 1)[1].strip()
-        for line in out.splitlines()
+        for line in report.splitlines()
         if ":" in line and not line.startswith(" ")
     }
 
@@ -177,7 +185,7 @@ class TestB4MasterCountDecides:
 
         assert code == 0
         assert "без живых мастеров, пропущено: 1" in out
-        assert "живых мастеров 0" in out
+        assert "живых мастеров нет (служебный тенант" in out
         service.refresh_from_db()
         assert service.kind == Tenant.Kind.SALON
 
@@ -220,7 +228,9 @@ class TestB5TheListCanComeFromAFile:
         code, out, _ = _run("--from-file", str(path), "--apply")
 
         assert code == 0
-        assert "переведено: 1" in out
+        assert _counts(out)["переведено"] == "1"
+        solo_tenant.refresh_from_db()
+        assert solo_tenant.kind == Tenant.Kind.SOLO
 
     def test_an_unreadable_file_refuses_and_names_the_path(self, tmp_path) -> None:
         missing = tmp_path / "нет-такого.txt"
@@ -294,7 +304,9 @@ class TestB8TheNumbersAreHonest:
             if key == "Режим":
                 continue
             assert _counts(wet)[key] == value, key
-        assert "переведено: 1" in wet
+        # Не подстрокой: «переведено: 1» входит и в «будет переведено: 1», и
+        # проверка прошла бы, даже если запись вернула ноль.
+        assert _counts(wet)["переведено"] == "1"
 
     def test_a_row_changed_between_the_plan_and_the_write_is_told(self, solo_tenant) -> None:
         """«переведено» считает реальные строки: намерение о них не отчитывается."""
@@ -308,5 +320,31 @@ class TestB8TheNumbersAreHonest:
             code, out, _ = _run("--apply", stdin_text=f"{SOLO_SLUG}\n")
 
         assert code == 0
-        assert "переведено: 0" in out
+        assert _counts(out)["переведено"] == "0"
         assert "не переведено: 1" in out
+
+    def test_a_failure_midway_leaves_nothing_written(self) -> None:
+        """Записи идут одной транзакцией: падение на второй строке не оставляет
+        переведённой первую. Ради этого отчёт печатается ДО записи, а `atomic()`
+        охватывает весь список, а не отдельную строку."""
+        first = _tenant("solo-max-2325r1")
+        _master(first, "15")
+        second = _tenant("solo-max-2325r2")
+        _master(second, "16")
+        calls = {"n": 0}
+        real_update = QuerySet.update
+
+        def boom(self, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise DatabaseError("связь оборвалась на второй строке")
+            return real_update(self, **kwargs)
+
+        with patch.object(QuerySet, "update", boom), pytest.raises(DatabaseError):
+            _run("--apply", stdin_text=f"{first.slug}\n{second.slug}\n")
+
+        assert calls["n"] == 2  # наличие: до второй строки запись дошла
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert first.kind == Tenant.Kind.SALON
+        assert second.kind == Tenant.Kind.SALON

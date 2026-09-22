@@ -164,7 +164,7 @@ class Command(BaseCommand):
     def _report(self, plan: Plan, *, apply: bool) -> None:
         mode = "ЗАПИСЬ (--apply)" if apply else "сухой прогон (без --apply ничего не записано)"
         self.stdout.write(f"Режим: {mode}")
-        self.stdout.write(f"строк от бота: {plan.lines}")
+        self.stdout.write(f"содержательных строк от бота: {plan.lines}")
         self.stdout.write(f"в списке бота (без повторов): {len(plan.slugs)}")
         self.stdout.write(f"будет переведено: {len(plan.convert)}")
         for slug, masters in plan.convert:
@@ -177,7 +177,14 @@ class Command(BaseCommand):
             self.stdout.write(f"  пропущен, живых мастеров {masters}: {slug}")
         self.stdout.write(f"без живых мастеров, пропущено: {len(plan.no_masters)}")
         for slug in plan.no_masters:
-            self.stdout.write(f"  пропущен, живых мастеров 0 (служебный?): {slug}")
+            # Причина названа предикатом, а не догадкой: у тенанта до G4
+            # профиль мастера мог не получить tenant при заливке
+            # (`backfill_tenants`) или принадлежать удалённому аккаунту —
+            # «служебный» было бы неправдой.
+            self.stdout.write(
+                f"  пропущен, живых мастеров нет (служебный тенант, "
+                f"непривязанный профиль или удалённый аккаунт): {slug}"
+            )
         self.stdout.write(f"неактивен, пропущено: {len(plan.inactive)}")
         for slug in plan.inactive:
             self.stdout.write(f"  пропущен, is_active=False: {slug}")
