@@ -156,7 +156,8 @@ class TestN5AppAiChat:
 
         counts = erase_remembered_catalog(user, initiator="test")
 
-        assert counts["ai.Conversation"] == 2
+        # Две беседы и сообщение каскадом: счёт ``delete()`` включает каскад, как у D3.
+        assert counts["ai.Conversation"] == 3
         assert not Conversation.all_objects.filter(user=user).exists()
         assert not Message.objects.filter(conversation_id=live.pk).exists()
 
