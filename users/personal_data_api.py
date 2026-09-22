@@ -46,7 +46,6 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from django.db import transaction
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers
@@ -58,21 +57,12 @@ from tenants.models import Tenant
 from users.models import Profile, SpecialistPortfolio, SpecialistProfile, User, UserPersonalContext
 from privacy_audit.mixins import AuditedPersonalDataAccess
 from privacy_audit.models import PersonalDataAccessLog
-from users.forget_all_catalog import (
-    erase_remembered_catalog,
-    remembered_residue,
-    remembered_scope,
-)
-from users.scan_file_erasure import remove_scan_files, scan_file_names
+from users.forget_all_catalog import remembered_residue
 from users.permissions import IsInternalBearerForSubject
 from users.remembered_export import export_remembered
-from users.personal_context_erasure import (
-    context_row_state,
-    erase_personal_context,
-    identity_is_erased,
-)
-from users.personal_context_events import emit_personal_data_deleted
+from users.personal_context_erasure import context_row_state, identity_is_erased
 from users.personal_context_views import UserPersonalContextSerializer
+from users.forget_all_subject import erase_remembered_for_subject
 from users.subject_identities import subject_users
 from users.response import error_response, success_response
 
@@ -377,40 +367,14 @@ class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
         # профиля надгробия по-прежнему не получает, но его стирание пишется
         # в журнал, если было что стереть. Бот тело C5.2 не разбирает
         # (``delete_personal_data -> None``), правду о стирании он читает в C5.3.
-        scope: list[str] = []
         # DRF-2256 — файлы фото сканера всех личностей: имена и снятие пачкой
         # (S3 ``delete_objects``) до транзакции стирания и до любой блокировки
         # строк. Открыта здесь только транзакция журнала доступа
-        # (``privacy_audit.mixins``, §96) — она строк не держит. «Файл раньше
-        # строки» сохранён: строки стираются транзакцией ниже; их откат (и
-        # откат журнала) оставит строку без файла — повтор дочистит. Стойкий
-        # сбой хранилища — ``IncompleteErasure`` отсюда: 500, в базе не стёрто
-        # ничего.
-        identities = subject_users(user)
-        names = scan_file_names(identities)
-        remove_scan_files(names)
-        removed = set(names)
-        with transaction.atomic():
-            for identity in identities:
-                counts = erase_remembered_catalog(
-                    identity, initiator="internal_api", removed_files=removed
-                )
-                also = remembered_scope(counts)
-                if identity is not user and not UserPersonalContext.objects.filter(
-                    user=identity
-                ).exists():
-                    if also:
-                        emit_personal_data_deleted(
-                            identity, scope=also, initiator="internal_api"
-                        )
-                    identity_scope = also
-                else:
-                    identity_scope = erase_personal_context(
-                        identity, initiator="internal_api", also_erased=also
-                    )
-                for item in identity_scope:
-                    if item not in scope:
-                        scope.append(item)
+        # (``privacy_audit.mixins``, §96) — она строк не держит. Стойкий сбой
+        # хранилища — ``IncompleteErasure``: 500, в базе не стёрто ничего.
+        # DRF-2305 — тело вынесено в ``users.forget_all_subject``: тот же глагол
+        # теперь зовут кнопка приложения и internal ``personal-context``.
+        scope = erase_remembered_for_subject(user, initiator="internal_api")
         logger.info(
             "internal.personal_data.deleted user_id=%s scope=%s request_id=%s",
             user_id, scope, getattr(request, "request_id", "-"),
