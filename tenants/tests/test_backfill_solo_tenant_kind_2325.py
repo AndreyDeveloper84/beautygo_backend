@@ -23,7 +23,9 @@ solo-workspace; миграция 0007 поставила всем прежним
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from io import StringIO
+from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
@@ -40,10 +42,12 @@ TEAM_SLUG = "solo-max-2325team"
 def _run(*args, stdin_text: str | None = None, **kw):
     out, err = StringIO(), StringIO()
     code = 0
-    if stdin_text is not None:
-        kw["stdin"] = StringIO(stdin_text)
+    patcher = (
+        patch("sys.stdin", StringIO(stdin_text)) if stdin_text is not None else nullcontext()
+    )
     try:
-        call_command("backfill_solo_tenant_kind", *args, stdout=out, stderr=err, **kw)
+        with patcher:
+            call_command("backfill_solo_tenant_kind", *args, stdout=out, stderr=err, **kw)
     except SystemExit as exc:
         code = exc.code
     return code, out.getvalue(), err.getvalue()
