@@ -1,6 +1,7 @@
 """Integration tests for POST /api/v1/nutrition/scan/."""
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -187,11 +188,11 @@ class TestSuccess:
         assert scan.nutrition["matched_dish"] == "борщ"
         assert scan.nutrition["source"] == "seed_ru"
 
-    def test_nutrition_null_when_all_totals_are_null(self, auth_client, client_user):
-        # If lookup matched a dish but per-portion totals are null
-        # (provider didn't estimate portion_g), serializer collapses to
-        # null instead of {calories: null, protein_g: null, ...} so the
-        # mobile UI cleanly prompts manual entry.
+    def test_per_100g_survives_when_all_totals_are_null(self, auth_client, client_user):
+        # DRF-2335: раньше пустые итоги схлопывали ответ в null целиком —
+        # вместе с числами на 100 г, которые в строке есть. Теперь итоги
+        # остаются пустыми (49 ккал на 100 г ≠ 49 ккал за тарелку), а
+        # числа на 100 г доходят до человека отдельной вложенностью.
         scan = FoodScan.objects.create(
             user=client_user, dish_name="борщ",
             confidence=0.9, portion_g=None,
@@ -205,11 +206,17 @@ class TestSuccess:
             },
         )
         body = FoodScanResponseSerializer(scan).data
-        assert body["nutrition"] is None
+        assert body["nutrition"]["per_100g"] == {
+            "calories": 49, "protein_g": 1.6, "fat_g": 2.2, "carbs_g": 6.7,
+        }
+        assert body["nutrition"]["calories"] is None
+        assert body["nutrition"]["protein_g"] is None
 
-    def test_nutrition_null_when_dish_not_in_seed(self, auth_client):
+    def test_nutrition_null_when_dish_not_in_seed(self, auth_client, caplog):
         # Provider returns a dish we have no entry for → nutrition stays
-        # null, scan still 200 (mobile shows "уточните вручную").
+        # null: чисел нет вовсе, отдавать нечего. DRF-2335: молчать при
+        # этом нельзя — причина пустоты называется в журнале, иначе
+        # «почему у карточки нет калорий» выясняется только выборкой по БД.
         router_mock = MagicMock()
         router_mock.scan.return_value = RouterResult(
             result=_scan_result(dish="суши с лососем"),
@@ -218,12 +225,14 @@ class TestSuccess:
         with patch(
             "nutrition.views.FoodScannerRouter",
             return_value=router_mock,
-        ):
+        ), caplog.at_level(logging.INFO, logger="nutrition.views"):
             resp = auth_client.post(
                 SCAN_URL, {"image": _upload()}, format="multipart",
             )
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["data"]["nutrition"] is None
+        assert "nutrition.scan.no_nutrition" in caplog.text
+        assert "reason=dish_not_found" in caplog.text
 
     def test_fallback_records_primary_in_provider_fallback_from(
         self, auth_client,
