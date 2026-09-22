@@ -228,7 +228,7 @@ def _is_timeout(exc: BaseException) -> bool:
 _PERMANENT_CODES = {
     "billing_not_active": "billing_not_active",
     "insufficient_quota": "quota_exhausted",
-    "invalid_api_key": "invalid_api_key",
+    "invalid_api_key": "invalid_api_key",  # pragma: allowlist secret — код ошибки, не ключ
     "account_deactivated": "auth_rejected",
 }
 
