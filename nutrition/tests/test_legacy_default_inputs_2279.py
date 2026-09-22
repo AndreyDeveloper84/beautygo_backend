@@ -46,6 +46,20 @@
 * c4 — помеченный темп при «поддерживать» расчёт не останавливает;
 * d1 — ответ профиля называет помеченные входы (``legacy_default_inputs``);
 * d2 — выгрузка по ст. 14 несёт поле.
+
+Узлы ревью:
+
+* r1 — предложение, посчитанное до пометки, не подтверждается: отказ по
+  имени (``LEGACY_DEFAULT_UNCONFIRMED``), иначе подставленное стало бы
+  подтверждённым ответом человека — ровно то, что решение запрещает;
+* r2 — ``activity_skipped`` со значением НЕ 1.375 не метится: до #543 флаг
+  не снимался при названной активности, и такая строка — названный ответ
+  под старым флагом; печатается отдельной строкой отчёта;
+* r3 — цель без темпа и пропуск активности снимают пометку вместе со
+  значением;
+* r4 — предел, названный владельцу: у подтверждённого расчёта запрос
+  только с весом после пометки отказывает, и расчётные виды гаснут (общее
+  правило отказа пересчёта), пока человек не ответит.
 """
 
 from __future__ import annotations
@@ -231,3 +245,77 @@ class TestProfileSaysWhatIsUnconfirmed:
 
         exported, _excluded = FIELDS["nutrition.NutritionProfile"]
         assert exported.get("legacy_default_inputs") == "legacy_default_inputs"
+
+
+class TestReviewFindings:
+    def test_a_proposal_computed_before_the_mark_is_not_confirmed(self, client, owner=None):
+        _profile(
+            "proposed",
+            goal="lose",
+            pace="moderate",
+            activity_coefficient=1.4,
+            targets_source=NutritionProfile.TargetsSource.AYLA_PROPOSED,
+            daily_kcal=1800,
+        )
+        _run("--apply")
+
+        resp = APIClient().post(
+            "/api/v1/nutrition/internal/profile/targets/confirm/",
+            {},
+            format="json",
+            HTTP_X_SERVICE_TOKEN=SERVICE_TOKEN,
+            HTTP_X_EXTERNAL_USER_ID="bot:proposed",
+        )
+        assert resp.status_code == status.HTTP_409_CONFLICT, resp.json()
+        body = resp.json()["error"]
+        assert body["code"] == "LEGACY_DEFAULT_UNCONFIRMED"
+        assert set(body["details"]["fields"]) == {"activity_coefficient", "pace"}
+        p = NutritionProfile.objects.get(user__username="bot:proposed")
+        assert p.targets_source == NutritionProfile.TargetsSource.AYLA_PROPOSED
+        assert p.targets_confirmed_at is None
+
+    def test_a_skipped_flag_over_a_named_value_is_not_a_mark(self, client=None):
+        named_later = _profile(
+            "named_later",
+            activity_coefficient=1.55,
+            pace="gentle",
+            health_flags={"activity_skipped": True},
+        )
+        out = _run()
+        # Reported, so the owner sees the group exists — but not marked:
+        # before #543 the flag was not cleared when activity was named.
+        assert "activity_skipped_other_value" in out
+        _run("--apply")
+        assert _marks(named_later) == set()
+
+    def test_a_skip_and_a_goal_without_pace_clear_the_mark(self, legacy_rows):
+        _run("--apply")
+        _post("a14", {"_skipped_fields": ["activity"]})
+        a = NutritionProfile.objects.get(user__username="bot:a14")
+        assert _marks(a) == set()
+        assert a.activity_coefficient is None
+
+        _post("pace_lose", {"goal": "maintain"})
+        p = NutritionProfile.objects.get(user__username="bot:pace_lose")
+        assert _marks(p) == set()
+        assert p.pace == ""
+
+    def test_a_confirmed_target_goes_dark_until_the_person_answers(self):
+        row = _profile(
+            "confirmed",
+            goal="lose",
+            pace="moderate",
+            activity_coefficient=1.55,
+            targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,
+            calories_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,
+            daily_kcal=1800,
+        )
+        _run("--apply")
+        assert _marks(row) == {"pace"}  # присутствие пометки
+
+        _post("confirmed", {"weight_kg": 66.0})
+        row.refresh_from_db()
+        # Именованный предел: отказ пересчёта гасит расчётные виды (общее
+        # правило), пока темп не подтверждён. Бот спрашивает до отправки.
+        assert row.daily_kcal is None
+        assert "pace" in _missing(row)

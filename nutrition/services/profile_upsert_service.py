@@ -652,6 +652,25 @@ def _strip_microseconds(value):
 # ---------------------------------------------------------------------------
 
 
+class LegacyDefaultUnconfirmed(Exception):
+    """Подтверждать нечем: в расчёте есть прежнее умолчание (DRF-2279).
+
+    Предложение, посчитанное до пометки, стоит на подставленных входах.
+    Подтвердить его значило бы записать подставленное как ответ человека —
+    ровно то, что решение владельца (CD §76, №32) запрещает. Отказ несёт
+    ИМЕНА входов: спрашивающая сторона (бот) знает, о чём спросить.
+    """
+
+    code = "LEGACY_DEFAULT_UNCONFIRMED"
+
+    def __init__(self, fields: list[str]) -> None:
+        self.fields = list(fields)
+        super().__init__(
+            "в расчёте есть прежние умолчания, не подтверждённые человеком: "
+            + ", ".join(self.fields)
+        )
+
+
 class NothingToConfirm(Exception):
     """Подтверждать нечего: нет предложения ни на месте, ни рядом.
 
@@ -668,6 +687,21 @@ class NothingToConfirm(Exception):
             f"Подтверждать нечего: ориентир в состоянии {source!r}, "
             "а не 'ayla_proposed'."
         )
+
+
+def _legacy_in_play(profile: NutritionProfile) -> list[str]:
+    """Помеченные входы, участвующие в расчёте этой строки (DRF-2279).
+
+    Темп — только при цели с темпом: у «поддерживать» он в число не входит,
+    и подтверждать по нему нечего.
+    """
+    from nutrition.services.nutrition_profile_service import PACE_GOALS
+
+    marks = set(profile.legacy_default_inputs or [])
+    in_play = {"activity_coefficient"}
+    if profile.goal in PACE_GOALS:
+        in_play.add("pace")
+    return sorted(marks & in_play)
 
 
 def confirm_targets(*, user, external_user_id: str) -> tuple[dict, str]:
@@ -698,6 +732,11 @@ def confirm_targets(*, user, external_user_id: str) -> tuple[dict, str]:
         )
         if profile is None:
             raise NothingToConfirm(Source.NONE)
+        # DRF-2279: раньше всего остального — подтверждать посчитанное на
+        # подставленном нельзя; сначала человек называет вход.
+        unconfirmed = _legacy_in_play(profile)
+        if unconfirmed:
+            raise LegacyDefaultUnconfirmed(unconfirmed)
         source = profile.targets_source
         pending = profile.pending_proposal or None
         # Виды, у которых предложение лежит НА МЕСТЕ (действующего не было).
