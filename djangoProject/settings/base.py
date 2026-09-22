@@ -1098,6 +1098,10 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 
 CELERY_BROKER_URL = f"{REDIS_URL}/0"
 CELERY_RESULT_BACKEND = f"{REDIS_URL}/0"
+# DRF-2272 — Celery 5 по умолчанию снимает root-обработчики в воркере и ставит
+# свой: логгеры, идущие в root, теряли бы фильтр ПДн (LOGGING ниже). Логи
+# уходят в постоянный журнал — root остаётся нашим.
+CELERY_WORKER_HIJACK_ROOT_LOGGER = False
 CELERY_TASK_ALWAYS_EAGER = (
     os.environ.get("CELERY_TASK_ALWAYS_EAGER", "False").lower() == "true"
 )
@@ -1345,6 +1349,12 @@ LOGGING = {
         "request_id": {
             "()": "core.log_filters.RequestIDFilter",
         },
+        # DRF-2272 — логи уходят в постоянный журнал хоста (journald) и
+        # живут дольше выкладки: телефон, e-mail и карта маскируются до
+        # формата, на единственном обработчике `console`.
+        "pii_redactor": {
+            "()": "core.pii_log_filter.PIIRedactingFilter",
+        },
     },
     "formatters": {
         "human": {
@@ -1365,7 +1375,7 @@ LOGGING = {
         "console": {
             "class": "logging.StreamHandler",
             "formatter": LOGGING_FORMATTER,
-            "filters": ["request_id"],
+            "filters": ["pii_redactor", "request_id"],
         },
     },
     "root": {
@@ -1388,5 +1398,11 @@ LOGGING = {
         "services": {"handlers": ["console"], "level": LOG_LEVEL, "propagate": False},
         # Pre-wire celery — PR3 starts firing tasks immediately.
         "celery": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        # DRF-2272 — gunicorn ставит свои обработчики (`--access-logfile -`),
+        # и access-строка «метод путь?query статус» шла мимо фильтра ПДн.
+        # Django применяет этот конфиг при загрузке приложения в воркере —
+        # после gunicorn, поэтому его логгеры переводятся на `console`.
+        "gunicorn.error": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "gunicorn.access": {"handlers": ["console"], "level": "INFO", "propagate": False},
     },
 }
