@@ -22,6 +22,9 @@
 * n6 — outbox питания связанного прокси стёрт путём бота C5.2;
 * n7 — журнал и ответ называют стёртое словами, C5.3 считает остаток;
 * d1 — D3 стирает outbox по имени прокси ДО переименования, остатка нет.
+* r1–r5 (ревью #545) — повтор ничего не пишет; маркер в очереди доставки —
+  SKIPPED, пустого пуша нет; в ленте маркера нет, он прочитан; маркер чужой
+  записи и маркер закрытого окна ухода — история.
 """
 from __future__ import annotations
 
@@ -217,3 +220,82 @@ class TestD1DeletionErasesTheOutbox:
 
         assert steps["deleted"]["nutrition.NutritionOutboxEvent"] == 1
         assert not NutritionOutboxEvent.objects.filter(external_user_id=PROXY).exists()
+
+
+# ─── ревью #545 ──────────────────────────────────────────────────────────────
+
+
+def _open_reminder_marker(u, service, *, status=Notification.Status.SENT):
+    appt = _appointment(u, service, start_in_min=REMINDER_LEAD_MINUTES)
+    row = _notification(u, REMINDER_TEMPLATE_ID, appt)
+    Notification.objects.filter(pk=row.pk).update(status=status)
+    return appt, row
+
+
+class TestR1RepeatIsIdempotent:
+    def test_a_second_forget_reports_nothing_for_the_marker(self, user, service) -> None:  # noqa: F811
+        _open_reminder_marker(user, service)
+        first = erase_remembered_catalog(user, initiator="test")
+        assert first["notifications.Notification"] == 1  # наличие: маркер обезличен
+
+        second = erase_remembered_catalog(user, initiator="test")
+
+        assert second["notifications.Notification"] == 0
+        assert "notification_history" not in remembered_scope(second)
+
+
+class TestR2PendingMarkerIsNotDeliveredEmpty:
+    def test_a_queued_marker_becomes_skipped_and_delivery_sends_nothing(self, user, service) -> None:  # noqa: F811
+        from unittest.mock import patch
+
+        from notifications.services.dispatcher import NotificationService
+
+        _appt, row = _open_reminder_marker(user, service, status=Notification.Status.PENDING)
+
+        erase_remembered_catalog(user, initiator="test")
+
+        row.refresh_from_db()
+        assert row.status == Notification.Status.SKIPPED
+        with patch.object(NotificationService, "_dispatch_by_channel") as send:
+            NotificationService().deliver(row)
+        send.assert_not_called()
+
+
+class TestR3FeedHidesTheMarker:
+    def test_the_blank_marker_is_not_in_the_feed_and_is_read(self, user, service) -> None:  # noqa: F811
+        from notifications.views import _user_notifications
+
+        _open_reminder_marker(user, service)
+        _notification(user, "promo_digest")
+        assert _user_notifications(user).count() == 2  # наличие: лента видит обе
+
+        erase_remembered_catalog(user, initiator="test")
+        _notification(user, "appointment_confirmed")  # новое после «забудь всё»
+
+        feed = list(_user_notifications(user))
+        assert [n.template_id for n in feed] == ["appointment_confirmed"]
+        (marker,) = Notification.objects.filter(user=user, template_id=REMINDER_TEMPLATE_ID)
+        assert marker.is_read is True
+
+
+class TestR4MarkerOfSomeoneElsesVisitIsHistory:
+    def test_it_is_erased(self, user, service) -> None:  # noqa: F811
+        other = User.objects.create_user(username="other2277", password="x", role="client")
+        theirs = _appointment(other, service, start_in_min=REMINDER_LEAD_MINUTES)
+        _notification(user, REMINDER_TEMPLATE_ID, theirs)
+        assert Notification.objects.filter(user=user).count() == 1
+
+        erase_remembered_catalog(user, initiator="test")
+
+        assert not Notification.objects.filter(user=user).exists()
+
+
+class TestR5ClosedAftercareWindowIsHistory:
+    def test_an_old_aftercare_is_erased(self, user, service) -> None:  # noqa: F811
+        old = _appointment(user, service, start_in_min=-(60 + 6 * 60), status=Appointment.Status.COMPLETED)
+        _notification(user, AFTERCARE_TEMPLATE_ID, old)
+        assert Notification.objects.filter(user=user).count() == 1
+
+        erase_remembered_catalog(user, initiator="test")
+
+        assert not Notification.objects.filter(user=user).exists()

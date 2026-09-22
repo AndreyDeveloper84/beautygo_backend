@@ -172,8 +172,25 @@ def _beat_markers() -> tuple[str, str]:
 
 
 def _blank_marker_q() -> Q:
-    """Обезличенный маркер бита — не остаток: текста о человеке в нём нет."""
+    """Обезличенный маркер бита — не остаток: текста о человеке в нём нет.
+
+    Тот же предикат прячет маркер из ленты уведомлений
+    (``notifications.views._user_notifications``): пустая карточка — не
+    уведомление.
+    """
     return Q(template_id__in=_beat_markers(), **{f: "" for f in _NOTIFICATION_TEXT_FIELDS})
+
+
+def _beat_period(name: str):
+    """Период бита из ``CELERY_BEAT_SCHEDULE`` — запас окна на такт, который
+    стартовал раньше «забудь всё» (ревью #545). Нет записи — запаса нет."""
+    from datetime import timedelta
+
+    from django.conf import settings
+
+    entry = getattr(settings, "CELERY_BEAT_SCHEDULE", {}).get(name) or {}
+    seconds = entry.get("schedule")
+    return timedelta(seconds=seconds) if isinstance(seconds, (int, float)) else timedelta(0)
 
 
 def _open_window_markers(user) -> list:
@@ -185,7 +202,8 @@ def _open_window_markers(user) -> list:
     ``now - LAG - WINDOW``. Оба бита шлют, только если строки
     ``(user, template_id, data.appointment_id)`` нет, — стерев её в открытом
     окне, «забудь всё» прислало бы то же напоминание второй раз. Окна — из
-    констант битов.
+    констант битов, с запасом в один такт бита (его период из
+    ``CELERY_BEAT_SCHEDULE``): такт, начатый чуть раньше, видит окно шире.
     """
     from datetime import timedelta
 
@@ -196,11 +214,15 @@ def _open_window_markers(user) -> list:
     from notifications.models import Notification
 
     now = timezone.now()
-    reminder_open_from = now + timedelta(
-        minutes=beats.REMINDER_LEAD_MINUTES - beats.REMINDER_WINDOW_MINUTES // 2
+    reminder_open_from = (
+        now
+        + timedelta(minutes=beats.REMINDER_LEAD_MINUTES - beats.REMINDER_WINDOW_MINUTES // 2)
+        - _beat_period("dispatch-appointment-reminders")
     )
-    aftercare_open_from = now - timedelta(
-        hours=beats.AFTERCARE_LAG_HOURS, minutes=beats.AFTERCARE_WINDOW_MINUTES
+    aftercare_open_from = (
+        now
+        - timedelta(hours=beats.AFTERCARE_LAG_HOURS, minutes=beats.AFTERCARE_WINDOW_MINUTES)
+        - _beat_period("dispatch-post-visit-aftercare")
     )
     visits = Appointment.objects.filter(client=user)
     open_ids = {
@@ -213,13 +235,14 @@ def _open_window_markers(user) -> list:
             for pk in visits.filter(end_datetime__gte=aftercare_open_from).values_list("pk", flat=True)
         },
     }
-    rows = Notification.objects.filter(user=user, template_id__in=_beat_markers())
-    return [
-        row
-        for row in rows
-        if isinstance(row.data, dict)
-        and str(row.data.get("appointment_id") or "") in open_ids[row.template_id]
-    ]
+    # Отбор в базе: только строки с appointment_id из открытых окон.
+    rows = Notification.objects.filter(user=user).filter(
+        Q(template_id=beats.REMINDER_TEMPLATE_ID,
+          data__appointment_id__in=list(open_ids[beats.REMINDER_TEMPLATE_ID]))
+        | Q(template_id=beats.AFTERCARE_TEMPLATE_ID,
+            data__appointment_id__in=list(open_ids[beats.AFTERCARE_TEMPLATE_ID]))
+    )
+    return [row for row in rows if isinstance(row.data, dict)]
 
 
 def _remembered_querysets(user) -> dict:
@@ -377,15 +400,22 @@ def erase_remembered_catalog(
     #    ОТКРЫТЫХ окон двух битов не стираются, а обезличиваются (см.
     #    :func:`_open_window_markers`); в счёт идут только те, где был текст, —
     #    повтор даёт ноль (контракт идемпотентности C5.2).
+    #    Маркер ещё в очереди доставки (PENDING) уходит в терминальный SKIPPED:
+    #    ``deliver()`` шлёт только PENDING, иначе человек получил бы пустой пуш
+    #    (ревью #545). Прочитан — чтобы не висел непрочитанным.
     markers = _open_window_markers(user)
     blanked = 0
     for row in markers:
         data = {"appointment_id": str(row.data.get("appointment_id"))}
-        if row.data != data or any(getattr(row, f) for f in _NOTIFICATION_TEXT_FIELDS):
-            blanked += 1
-        Notification.objects.filter(pk=row.pk).update(
-            data=data, **{f: "" for f in _NOTIFICATION_TEXT_FIELDS}
-        )
+        pending = row.status == Notification.Status.PENDING
+        had_text = row.data != data or any(getattr(row, f) for f in _NOTIFICATION_TEXT_FIELDS)
+        if not (had_text or pending or not row.is_read):
+            continue  # уже обезличен — повтор ничего не пишет
+        blanked += int(had_text)
+        fields = {f: "" for f in _NOTIFICATION_TEXT_FIELDS}
+        if pending:
+            fields["status"] = Notification.Status.SKIPPED
+        Notification.objects.filter(pk=row.pk).update(data=data, is_read=True, **fields)
     _delete(
         "notifications.Notification",
         Notification.objects.filter(user=user).exclude(pk__in=[row.pk for row in markers]),
