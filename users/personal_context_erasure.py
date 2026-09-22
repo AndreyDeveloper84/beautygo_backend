@@ -36,6 +36,7 @@ too much beats quietly keeping something the subject asked us to forget.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 
 from users.models import UserPersonalContext
 from users.personal_context_events import emit_personal_data_deleted
@@ -107,12 +108,17 @@ def _tombstone(ctx: UserPersonalContext) -> None:
     ctx.save()
 
 
-def erase_personal_context(user, *, initiator: str) -> list[str]:
+def erase_personal_context(
+    user, *, initiator: str, also_erased: Sequence[str] = ()
+) -> list[str]:
     """Erase everything Ayla holds about ``user`` in the personal context.
 
     Idempotent. Returns the audit scope — ``["personal_context"]`` when a
-    declared value was actually removed, ``[]`` when there was nothing left
-    to remove. Every call is audited via AMD-010 (``AnalyticsEvent``),
+    declared value was actually removed, followed by ``also_erased``: what
+    the caller erased in the same transaction outside the profile
+    (DRF-2214 — ``users.forget_all_catalog.remembered_scope``: goals, plan,
+    nutrition profile, food diary). ``[]`` only when nothing at all was
+    left to remove. Every call is audited via AMD-010 (``AnalyticsEvent``),
     repeats included, and never with the erased values.
 
     ``initiator`` names the caller for the audit trail: ``"app"`` (the
@@ -145,7 +151,7 @@ def erase_personal_context(user, *, initiator: str) -> list[str]:
             ctx, _ = UserPersonalContext.objects.get_or_create(user=user)
         _tombstone(ctx)
 
-    scope = ["personal_context"] if had_data else []
+    scope = (["personal_context"] if had_data else []) + list(also_erased)
     emit_personal_data_deleted(user, scope=scope, initiator=initiator)
     logger.info(
         "personal_context.erased user=%s scope=%s initiator=%s account_gone=%s",

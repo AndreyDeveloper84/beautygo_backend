@@ -44,7 +44,7 @@ from users.personal_context_events import (
     emit_question_answered,
     emit_question_skipped,
 )
-from users.forget_all_catalog import erase_remembered_catalog
+from users.forget_all_catalog import erase_remembered_catalog, remembered_scope
 from users.personal_context_erasure import (
     erase_personal_context,
     mark_field_erased,
@@ -197,8 +197,10 @@ class UserPersonalContextView(APIView):
         # цели, план, профиль питания. В одной транзакции с профилем — либо
         # стёрто всё, либо ничего.
         with transaction.atomic():
-            erase_remembered_catalog(request.user, initiator="app")
-            erase_personal_context(request.user, initiator="app")
+            counts = erase_remembered_catalog(request.user, initiator="app")
+            erase_personal_context(
+                request.user, initiator="app", also_erased=remembered_scope(counts)
+            )
         logger.info(
             "personal_context.wiped user=%s reason=152-fz",
             request.user.pk,

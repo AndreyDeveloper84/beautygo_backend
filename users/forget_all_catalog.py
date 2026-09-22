@@ -63,13 +63,20 @@ D3 — удаление аккаунта: он обезличивает запи
 # Что вызывающий обязан
 
 Звать в одной транзакции с ``erase_personal_context`` — либо стёрто всё, либо
-ничего. Форму ответа бота и ``scope`` события ``personal_data_deleted`` эта
-функция не трогает: и ответ, и событие разбирают потребители, и новый состав
-им сообщается отдельно (DRF-2214 PR-3), а не тихой сменой формы.
+ничего — и передать ему ``also_erased=remembered_scope(counts)``: журнал AMD-010
+и ответ называют стёртое закрытым словарём :data:`REMEMBERED_SCOPE`. Без этого
+стёртые цели и дневник за уже стёртым профилем журнал звал «нечего было
+стирать» (DRF-2214). У личности без строки профиля (связанный прокси)
+вызывающий пишет событие сам, если :func:`remembered_scope` не пуст.
+
+C5.3 ``erasure-status`` считает остаток той же меркой —
+:func:`remembered_residue`, только число.
 """
 from __future__ import annotations
 
 import logging
+
+from django.db.models import Q
 
 logger = logging.getLogger("users.forget_all.catalog")
 
@@ -114,6 +121,98 @@ KEPT_BY_FORGET_ALL: dict[str, str] = {
         "ИИ-чат приложения (каталог) им не назван; до решения — остаётся"
     ),
 }
+
+#: Ключ счёта :func:`erase_remembered_catalog` → слово журнала AMD-010 и ответа.
+#: Закрытый словарь: сторож (``users/tests/test_erasure_truth_2214.py``) держит,
+#: что каждый ключ, который функция возвращает, здесь назван.
+REMEMBERED_SCOPE: dict[str, str] = {
+    "goals.ClientGoal": "goals",
+    "goals.GoalAnketaRun": "goals",
+    "wellness.PlanOutcomeLink": "wellness_plan",
+    "wellness.PlanAction": "wellness_plan",
+    "wellness.PersonalPlan": "wellness_plan",
+    "wellness.DesiredOutcome": "wellness_plan",
+    "wellness.ProgressObservation": "wellness_plan",
+    "nutrition.NutritionProfile": "nutrition_profile",
+    # Суточный кэш ответа с профилем питания внутри — это профиль.
+    "nutrition.ProfileIdempotencyKey": "nutrition_profile",
+    "nutrition.FoodScan": "food_diary",
+    "nutrition.FoodLog": "food_diary",
+    "nutrition.DeletedFoodLog": "food_diary",
+    "nutrition.WaterEntry": "food_diary",
+    "nutrition.WaterLog": "food_diary",
+    "nutrition.SavedMeal": "food_diary",
+    "files": "food_diary",
+    "nutrition.CrossDomainShownRule": "shown_hints",
+}
+
+#: Порядок слов в scope — стабильный, от целей к дневнику.
+SCOPE_ORDER: tuple[str, ...] = (
+    "goals", "wellness_plan", "nutrition_profile", "food_diary", "shown_hints",
+)
+
+
+def remembered_scope(counts: dict[str, int]) -> list[str]:
+    """Слова журнала для того, что :func:`erase_remembered_catalog` сняло.
+
+    Только группы, где снято хоть что-то: повтор — пустой список, как у
+    профиля (контракт идемпотентности C5.2).
+    """
+    hit = {REMEMBERED_SCOPE[key] for key, n in counts.items() if n}
+    return [word for word in SCOPE_ORDER if word in hit]
+
+
+def _remembered_querysets(user) -> dict:
+    """Строки, которые стирает :func:`erase_remembered_catalog`, — для счёта остатка."""
+    from goals.models import ClientGoal, GoalAnketaRun
+    from nutrition.models import (
+        CrossDomainShownRule,
+        DeletedFoodLog,
+        FoodLog,
+        FoodScan,
+        NutritionProfile,
+        ProfileIdempotencyKey,
+        SavedMeal,
+        WaterEntry,
+        WaterLog,
+    )
+    from wellness.models import (
+        DesiredOutcome,
+        PersonalPlan,
+        PlanAction,
+        PlanOutcomeLink,
+        ProgressObservation,
+    )
+
+    return {
+        "goals.ClientGoal": ClientGoal.objects.filter(client=user),
+        "goals.GoalAnketaRun": GoalAnketaRun.objects.filter(client=user),
+        "wellness.PlanOutcomeLink": PlanOutcomeLink.objects.filter(
+            Q(plan__user=user) | Q(outcome__user=user)
+        ),
+        "wellness.PlanAction": PlanAction.objects.filter(plan__user=user),
+        "wellness.PersonalPlan": PersonalPlan.objects.filter(user=user),
+        "wellness.DesiredOutcome": DesiredOutcome.objects.filter(user=user),
+        "wellness.ProgressObservation": ProgressObservation.objects.filter(user=user),
+        "nutrition.NutritionProfile": NutritionProfile.objects.filter(user=user),
+        "nutrition.ProfileIdempotencyKey": ProfileIdempotencyKey.objects.filter(user=user),
+        "nutrition.FoodScan": FoodScan.objects.filter(user=user),
+        "nutrition.FoodLog": FoodLog.objects.filter(user=user),
+        "nutrition.DeletedFoodLog": DeletedFoodLog.objects.filter(user=user),
+        "nutrition.WaterEntry": WaterEntry.objects.filter(user=user),
+        "nutrition.WaterLog": WaterLog.objects.filter(user=user),
+        "nutrition.SavedMeal": SavedMeal.objects.filter(user=user),
+        "nutrition.CrossDomainShownRule": CrossDomainShownRule.objects.filter(user=user),
+    }
+
+
+def remembered_residue(user) -> int:
+    """Сколько запомненных строк у ``user`` осталось — только число (C5.3).
+
+    Ничего не создаёт и значений не читает: ``count()`` по тем же наборам,
+    что стирает :func:`erase_remembered_catalog`.
+    """
+    return sum(qs.count() for qs in _remembered_querysets(user).values())
 
 
 def erase_remembered_catalog(
