@@ -55,7 +55,7 @@ from users.deletion_requests import (
 from privacy_audit.mixins import AuditedPersonalDataAccess
 from privacy_audit.models import PersonalDataAccessLog
 from users.permissions import IsInternalBearerForSubject
-from users.forget_all_catalog import erase_remembered_catalog
+from users.forget_all_catalog import erase_remembered_catalog, remembered_scope
 from users.personal_context_erasure import erase_personal_context
 from users.personal_context_views import _GREEN_ZONE_FIELDS
 from users.response import error_response, success_response
@@ -212,13 +212,15 @@ class InternalPersonalContextView(AuditedPersonalDataAccess, APIView):
             return error_response("USER_NOT_FOUND", "User not found.", status_code=404)
 
         # DRF-2214 — «забудь всё» стирает и то, что каталог запомнил вне
-        # профиля: цели, анкету цели, план, профиль питания. В одной
-        # транзакции с профилем — либо стёрто всё, либо ничего. Форма ответа
-        # (`erased`) прежняя: бот её разбирает, новый состав ему сообщается
-        # отдельно (DRF-2214 PR-3).
+        # профиля: цели, анкету цели, план, профиль питания, дневник с фото.
+        # В одной транзакции с профилем — либо стёрто всё, либо ничего.
+        # ``erased`` и журнал называют стёртое (``remembered_scope``).
+        # Бот этот эндпоинт не зовёт — его путь C5.2 (``personal_data_api``).
         with transaction.atomic():
-            erase_remembered_catalog(user, initiator="bot_forget_all")
-            scope = erase_personal_context(user, initiator="bot_forget_all")
+            counts = erase_remembered_catalog(user, initiator="bot_forget_all")
+            scope = erase_personal_context(
+                user, initiator="bot_forget_all", also_erased=remembered_scope(counts)
+            )
         ctx, _ = UserPersonalContext.objects.get_or_create(user=user)
         return success_response({
             "ayla_user_id": str(user.id),

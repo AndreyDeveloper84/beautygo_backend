@@ -87,20 +87,25 @@ class TestVerdict:
     def test_a_live_account_that_holds_values_is_not_erased(self, api, user):
         _with_values(user)
         data = _status(api, user)
-        assert _account(data) == {"kind": "account", "context_row": "holds_values", "erased": False}
+        assert _account(data) == {
+            "kind": "account",
+            "context_row": "holds_values",
+            "erased": False,
+            "remembered_rows": 0,
+        }
         assert data["erased"] is False
 
     def test_after_the_delete_the_account_is_a_tombstone_and_erased(self, api, user):
         _with_values(user)
         assert api.delete(DELETE_URL.format(user_id=user.pk)).status_code == 200
         data = _status(api, user)
-        assert _account(data) == {"kind": "account", "context_row": "tombstone", "erased": True}
+        assert _account(data) == {"kind": "account", "context_row": "tombstone", "erased": True, "remembered_rows": 0}
         assert data["erased"] is True
 
     def test_a_live_account_with_no_row_was_never_erased(self, api, user):
         """«Строки нет» у живого — не «стёрто»: стирание оставило бы tombstone."""
         data = _status(api, user)
-        assert _account(data) == {"kind": "account", "context_row": "absent", "erased": False}
+        assert _account(data) == {"kind": "account", "context_row": "absent", "erased": False, "remembered_rows": 0}
         assert data["erased"] is False
 
     def test_an_empty_row_that_was_never_erased_is_not_a_tombstone(self, api, user):
@@ -109,7 +114,7 @@ class TestVerdict:
         стирание, которого не было."""
         UserPersonalContext.objects.create(user=user)
         data = _status(api, user)
-        assert _account(data) == {"kind": "account", "context_row": "not_erased", "erased": False}
+        assert _account(data) == {"kind": "account", "context_row": "not_erased", "erased": False, "remembered_rows": 0}
         assert data["erased"] is False
 
     def test_a_soft_deleted_account_after_the_delete_has_no_row_and_is_erased(self, api, user):
@@ -118,7 +123,7 @@ class TestVerdict:
         user.save(update_fields=["deleted_at"])
         assert api.delete(DELETE_URL.format(user_id=user.pk)).status_code == 200
         data = _status(api, user)
-        assert _account(data) == {"kind": "account", "context_row": "absent", "erased": True}
+        assert _account(data) == {"kind": "account", "context_row": "absent", "erased": True, "remembered_rows": 0}
         assert data["erased"] is True
 
     def test_a_soft_deleted_account_whose_row_survived_is_not_erased(self, api, user):
@@ -126,7 +131,12 @@ class TestVerdict:
         user.deleted_at = timezone.now()
         user.save(update_fields=["deleted_at"])
         data = _status(api, user)
-        assert _account(data) == {"kind": "account", "context_row": "holds_values", "erased": False}
+        assert _account(data) == {
+            "kind": "account",
+            "context_row": "holds_values",
+            "erased": False,
+            "remembered_rows": 0,
+        }
         assert data["erased"] is False
 
     def test_a_linked_proxy_with_values_keeps_the_subject_unerased_until_the_delete(self, api, user):
@@ -144,13 +154,23 @@ class TestVerdict:
         kinds = sorted(item["kind"] for item in before["identities"])
         # Аккаунт + прокси бота (name_subject) + прокси с данными до привязки.
         assert kinds == ["account", "linked_identity", "linked_identity"], before
-        assert _account(before) == {"kind": "account", "context_row": "tombstone", "erased": True}
-        assert {"kind": "linked_identity", "context_row": "holds_values", "erased": False} in before["identities"]
+        assert _account(before) == {"kind": "account", "context_row": "tombstone", "erased": True, "remembered_rows": 0}
+        assert {
+            "kind": "linked_identity",
+            "context_row": "holds_values",
+            "erased": False,
+            "remembered_rows": 0,
+        } in before["identities"]
         assert before["erased"] is False
 
         assert api.delete(DELETE_URL.format(user_id=user.pk)).status_code == 200
         after = _status(api, user)
-        assert {"kind": "linked_identity", "context_row": "tombstone", "erased": True} in after["identities"]
+        assert {
+            "kind": "linked_identity",
+            "context_row": "tombstone",
+            "erased": True,
+            "remembered_rows": 0,
+        } in after["identities"]
         assert after["erased"] is True
 
 
@@ -166,7 +186,7 @@ class TestVerdictEdges:
         user.deleted_at = timezone.now()
         user.save(update_fields=["deleted_at"])
         data = _status(api, user)
-        assert _account(data) == {"kind": "account", "context_row": "tombstone", "erased": False}
+        assert _account(data) == {"kind": "account", "context_row": "tombstone", "erased": False, "remembered_rows": 0}
         assert data["erased"] is False
 
     def test_a_linked_proxy_with_an_empty_unmarked_row_keeps_the_subject_unerased(self, api, user):
@@ -179,7 +199,12 @@ class TestVerdictEdges:
         UserPersonalContext.objects.create(user=proxy)
         data = _status(api, user)
         assert _account(data)["erased"] is True
-        assert {"kind": "linked_identity", "context_row": "not_erased", "erased": False} in data["identities"]
+        assert {
+            "kind": "linked_identity",
+            "context_row": "not_erased",
+            "erased": False,
+            "remembered_rows": 0,
+        } in data["identities"]
         assert data["erased"] is False
 
     def test_a_deleted_linked_proxy_with_a_tombstone_is_not_erased(self, api, user):
@@ -194,7 +219,12 @@ class TestVerdictEdges:
         proxy.deleted_at = timezone.now()
         proxy.save(update_fields=["deleted_at"])
         data = _status(api, user)
-        assert {"kind": "linked_identity", "context_row": "tombstone", "erased": False} in data["identities"]
+        assert {
+            "kind": "linked_identity",
+            "context_row": "tombstone",
+            "erased": False,
+            "remembered_rows": 0,
+        } in data["identities"]
         assert data["erased"] is False
 
     @pytest.mark.parametrize("field", ["last_asked_at", "skipped_questions"])
@@ -205,7 +235,7 @@ class TestVerdictEdges:
         erase_personal_context(user, initiator="app")
         UserPersonalContext.objects.filter(user=user).update(**{field: {"diet_type": "2026-09-15"}})
         data = _status(api, user)
-        assert _account(data) == {"kind": "account", "context_row": "not_erased", "erased": False}
+        assert _account(data) == {"kind": "account", "context_row": "not_erased", "erased": False, "remembered_rows": 0}
 
     def test_a_tombstone_missing_one_erased_mark_is_not_a_tombstone(self, api, user):
         """Частичная пометка (как после ``mark_field_erased`` одного поля или нового поля модели)."""
@@ -217,7 +247,7 @@ class TestVerdictEdges:
         sources.pop(declared_fields()[0])
         UserPersonalContext.objects.filter(user=user).update(data_sources=sources)
         data = _status(api, user)
-        assert _account(data) == {"kind": "account", "context_row": "not_erased", "erased": False}
+        assert _account(data) == {"kind": "account", "context_row": "not_erased", "erased": False, "remembered_rows": 0}
 
 
 class TestWhatTheReadDoesNot:

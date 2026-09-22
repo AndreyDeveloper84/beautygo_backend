@@ -56,7 +56,11 @@ from tenants.models import Tenant
 from users.models import Profile, SpecialistPortfolio, SpecialistProfile, User, UserPersonalContext
 from privacy_audit.mixins import AuditedPersonalDataAccess
 from privacy_audit.models import PersonalDataAccessLog
-from users.forget_all_catalog import erase_remembered_catalog
+from users.forget_all_catalog import (
+    erase_remembered_catalog,
+    remembered_residue,
+    remembered_scope,
+)
 from users.scan_file_erasure import remove_scan_files, scan_file_names
 from users.permissions import IsInternalBearerForSubject
 from users.personal_context_erasure import (
@@ -64,6 +68,7 @@ from users.personal_context_erasure import (
     erase_personal_context,
     identity_is_erased,
 )
+from users.personal_context_events import emit_personal_data_deleted
 from users.personal_context_views import UserPersonalContextSerializer
 from users.subject_identities import subject_users
 from users.response import error_response, success_response
@@ -353,7 +358,14 @@ class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
         # что каталог запомнил вне профиля (цели, план, профиль питания,
         # дневник с фото), по КАЖДОЙ личности субъекта, как D3: у прокси
         # может не быть строки профиля, но быть дневник. Одна транзакция —
-        # стёрто всё или ничего. Форма ответа не меняется (PR-3).
+        # стёрто всё или ничего.
+        #
+        # DRF-2214 — ``deleted`` и журнал AMD-010 называют и стёртое вне
+        # профиля (``remembered_scope``): иначе стёртые цели и дневник за уже
+        # стёртым профилем звались «нечего стирать». Прокси без строки
+        # профиля надгробия по-прежнему не получает, но его стирание пишется
+        # в журнал, если было что стереть. Бот тело C5.2 не разбирает
+        # (``delete_personal_data -> None``), правду о стирании он читает в C5.3.
         scope: list[str] = []
         # DRF-2256 — файлы фото сканера всех личностей: имена и снятие пачкой
         # (S3 ``delete_objects``) до транзакции стирания и до любой блокировки
@@ -369,12 +381,23 @@ class InternalPersonalDataDeleteView(AuditedPersonalDataAccess, APIView):
         removed = set(names)
         with transaction.atomic():
             for identity in identities:
-                erase_remembered_catalog(identity, initiator="internal_api", removed_files=removed)
+                counts = erase_remembered_catalog(
+                    identity, initiator="internal_api", removed_files=removed
+                )
+                also = remembered_scope(counts)
                 if identity is not user and not UserPersonalContext.objects.filter(
                     user=identity
                 ).exists():
-                    continue
-                for item in erase_personal_context(identity, initiator="internal_api"):
+                    if also:
+                        emit_personal_data_deleted(
+                            identity, scope=also, initiator="internal_api"
+                        )
+                    identity_scope = also
+                else:
+                    identity_scope = erase_personal_context(
+                        identity, initiator="internal_api", also_erased=also
+                    )
+                for item in identity_scope:
                     if item not in scope:
                         scope.append(item)
         logger.info(
@@ -420,8 +443,10 @@ class InternalPersonalDataErasureStatusView(AuditedPersonalDataAccess, APIView):
         description=(
             "Readback of the C5.2 erasure (C5.3, DRF-1984): for every identity "
             "of the subject — kind (account | linked_identity), context_row "
-            "(absent | tombstone | holds_values | not_erased) and erased; plus "
-            "the overall verdict. No personal values, no external ids; reads "
+            "(absent | tombstone | holds_values | not_erased), remembered_rows "
+            "(DRF-2214: how many goal / plan / nutrition-profile / food-diary "
+            "rows remain — a count only) and erased (requires remembered_rows "
+            "== 0); plus the overall verdict. No personal values, no external ids; reads "
             "a deleted subject too; creates nothing."
         ),
     )
@@ -430,14 +455,20 @@ class InternalPersonalDataErasureStatusView(AuditedPersonalDataAccess, APIView):
         if user is None:
             return _not_found(request, user_id)
 
+        # DRF-2214 — «стёрто» требует ещё, чтобы запомненного вне профиля
+        # (цели, план, профиль питания, дневник) не осталось: C5.2 стирает и
+        # это, и бот пишет человеку «удалено» по этому чтению. Только число.
         identities = []
         for identity in subject_users(user):
             is_account = identity.pk == user.pk
             state = context_row_state(identity)
+            residue = remembered_residue(identity)
             identities.append({
                 "kind": "account" if is_account else "linked_identity",
                 "context_row": state,
-                "erased": identity_is_erased(identity, is_account=is_account, state=state),
+                "remembered_rows": residue,
+                "erased": residue == 0
+                and identity_is_erased(identity, is_account=is_account, state=state),
             })
         erased = all(item["erased"] for item in identities)
         logger.info(
