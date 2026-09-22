@@ -200,6 +200,49 @@ def _settle_permanent_refusal(exc: AllProvidersFailedError, user) -> None:
         food_scan_budget.refund_total()
 
 
+def _settle_nutrition(scan, facts) -> None:
+    """DRF-2335: записать питание в строку и назвать в логе, если его нет.
+
+    До этого листа пустое питание было молчаливым: человек не получал калорий,
+    а узнать почему можно было только выборкой по ``raw_response``. Теперь
+    причина названа словом:
+
+    * ``dish_not_found`` — справочник промахнулся, чисел у нас нет;
+    * ``portion_unknown`` — блюдо нашли, но провайдер не назвал порцию, и
+      итоги не посчитаны (числа на 100 г при этом есть и уходят человеку).
+
+    Отказ распознавателя отдельной строкой здесь не пишется — до этого места
+    он не доходит: его называет ``all_providers_failed`` выше по ветке.
+
+    В строку лога не попадает ни название блюда, ни ингредиенты, ни человек:
+    журнал общий. Идёт ``scan`` (UUID строки) — по нему находят запись, не
+    называя того, кто прислал фото.
+    """
+    scan.nutrition = facts.to_dict() if facts is not None else None
+
+    reason = _nutrition_gap_reason(facts)
+    if reason is None:
+        return
+    logger.info(
+        "nutrition.scan.no_nutrition scan=%s reason=%s provider=%s",
+        scan.id, reason, scan.provider_used,
+    )
+
+
+def _nutrition_gap_reason(facts) -> str | None:
+    """Почему у скана нет итогов питания, или ``None``, если они есть.
+
+    Единственное место, где этот вопрос решается. П. 3 DRF-2335 (признак
+    наружу, в ответ) ждёт слова владельца — когда оно будет, брать причину
+    нужно отсюда, а не считать её заново у сериализатора.
+    """
+    if facts is None:
+        return "dish_not_found"
+    if facts.kcal is None:
+        return "portion_unknown"
+    return None
+
+
 class FoodScanView(APIView):
     """POST /api/v1/nutrition/scan/."""
 
@@ -315,7 +358,7 @@ class FoodScanView(APIView):
             ingredients=outcome.result.ingredients,
             portion_g=outcome.result.portion_g,
         )
-        scan.nutrition = facts.to_dict() if facts is not None else None
+        _settle_nutrition(scan, facts)
 
         scan.save()
 
@@ -447,7 +490,7 @@ class InternalFoodScanView(APIView):
             ingredients=outcome.result.ingredients,
             portion_g=outcome.result.portion_g,
         )
-        scan.nutrition = facts.to_dict() if facts is not None else None
+        _settle_nutrition(scan, facts)
 
         scan.save()
 
