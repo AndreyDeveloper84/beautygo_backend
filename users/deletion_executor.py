@@ -91,14 +91,9 @@ ERASED_NAME = "Удалён"
 #: ``external_user_id``), которые D3 НЕ стирает и не обезличивает, с причиной.
 #: Перепись ``users/tests/test_forget_all_vs_deletion_census_2226`` (s3) держит
 #: список точным: новая такая модель без записи здесь — красная.
-NOT_ERASED_ON_DELETION: dict[str, str] = {
-    "nutrition.NutritionOutboxEvent": (
-        "ОТКРЫТЫЙ ВОПРОС ВЛАДЕЛЬЦУ (DRF-2226): outbox вебхуков в бот — "
-        "external_user_id + payload с профилем питания и водой, без FK; не стирается "
-        "ни D3, ни «забудь всё», ретеншена нет. §66 про стирание outbox не говорит, "
-        "поэтому стирание не сделано этим листом — решение в теле PR"
-    ),
-}
+#: DRF-2277: единственная запись (``nutrition.NutritionOutboxEvent``) снята —
+#: решение владельца §72 п.3, outbox стирается и здесь, и в «забудь всё».
+NOT_ERASED_ON_DELETION: dict[str, str] = {}
 
 #: Поля ``SpecialistProfile``, которые стирает D3 (``_erase_catalog``, шаг 6):
 #: ровно этот список уходит в ``save(update_fields=...)``. Он же — вход сторожа
@@ -507,6 +502,7 @@ def _erase_catalog(user) -> dict:
         DeletedFoodLog,
         FoodLog,
         FoodScan,
+        NutritionOutboxEvent,
         NutritionProfile,
         ProfileIdempotencyKey,
         SavedMeal,
@@ -542,6 +538,8 @@ def _erase_catalog(user) -> dict:
     from recommendation.models import ContextSnapshot, RecommendationSet
 
     now = timezone.now()
+    #: Имя до переименования (шаг 7): по нему адресован outbox питания.
+    external_name = user.username
     deleted: dict[str, int] = {}
     anonymised: dict[str, int] = {}
     #: Что сознательно НЕ тронуто и почему — место или workspace, на котором
@@ -595,6 +593,12 @@ def _erase_catalog(user) -> dict:
     _delete("ai.Conversation", Conversation.all_objects.filter(user=user))
     _delete("notifications.Notification", Notification.objects.filter(user=user))
     _delete("appointments.IdempotencyKey", IdempotencyKey.objects.filter(user=user))
+    # DRF-2277 (§72 п.3) — outbox вебхуков питания: без FK, адресован именем
+    # личности (``bot:...``), поэтому ДО переименования в шаге 7.
+    _delete(
+        "nutrition.NutritionOutboxEvent",
+        NutritionOutboxEvent.objects.filter(external_user_id=external_name),
+    )
 
     # 5. Сделки и деньги — обезличиванием (D7/D8/D9).
     tomb = tombstone_user()
@@ -742,7 +746,7 @@ def _erase_catalog(user) -> dict:
     )
 
     # 8. Полнота — по перечитанным строкам, внутри транзакции.
-    residue = _residue(user)
+    residue = _residue(user, external_name=external_name)
     if residue:
         raise IncompleteErasure(json.dumps(residue, ensure_ascii=False))
 
@@ -823,8 +827,12 @@ def _erase_solo_tenant(sp, anonymised: dict, kept: dict) -> None:
     anonymised["tenants.Tenant.solo"] = anonymised.get("tenants.Tenant.solo", 0) + 1
 
 
-def _residue(user) -> dict[str, int]:
-    """Что осталось на человеке из того, что объявлено стёртым/обезличенным."""
+def _residue(user, *, external_name: str | None = None) -> dict[str, int]:
+    """Что осталось на человеке из того, что объявлено стёртым/обезличенным.
+
+    ``external_name`` — имя личности ДО переименования: по нему адресован
+    outbox питания (DRF-2277); без него outbox не проверяется.
+    """
     from appointments.models import (
         Appointment,
         AppointmentRevision,
@@ -935,6 +943,12 @@ def _residue(user) -> dict[str, int]:
         "users.User.user_permissions": user.user_permissions.all(),
     }
     residue = {k: n for k, qs in checks.items() if (n := qs.count())}
+    if external_name:
+        from nutrition.models import NutritionOutboxEvent
+
+        outbox = NutritionOutboxEvent.objects.filter(external_user_id=external_name).count()
+        if outbox:
+            residue["nutrition.NutritionOutboxEvent"] = outbox
     sp = SpecialistProfile.objects.filter(user=user).select_related("works_at__tenant").first()
     if sp is not None and (sp.location_lat is not None or sp.location_lng is not None):
         residue["users.SpecialistProfile.coordinates"] = 1

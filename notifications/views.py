@@ -50,7 +50,15 @@ def _user_notifications(user) -> QuerySet:
     # batch in one transaction and auto_now_add gives every row the same
     # created_at, leaving the paginator free to reshuffle them between
     # pages and silently drop entries from the feed — DRF-1128.
-    return Notification.objects.filter(user=user).order_by("-created_at", "-id")
+    # DRF-2277: обезличенный «забудь всё» маркер бита (пустой текст) — не
+    # уведомление, а ключ повтора; в ленте его нет.
+    from users.forget_all_catalog import _blank_marker_q
+
+    return (
+        Notification.objects.filter(user=user)
+        .exclude(_blank_marker_q())
+        .order_by("-created_at", "-id")
+    )
 
 
 class NotificationListView(APIView):
