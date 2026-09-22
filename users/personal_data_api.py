@@ -226,6 +226,35 @@ def _context_data(user: User) -> dict | None:
     return UserPersonalContextSerializer(ctx).data if ctx is not None else None
 
 
+#: DRF-2307 — ключи ответа C5.1, закрытым списком. Сторож —
+#: ``users/tests/test_personal_data_export_sections_pin_2307.py``: ответ обязан
+#: нести ровно их.
+#:
+#: **Добавил раздел — обнови бот.** ai-bot-platform держит зеркало этого списка,
+#: ``apps/identity/export_coverage.py::CATALOG_EXPORT_SECTIONS``, и по нему ведёт
+#: состав выгрузки человека и матрицу «забудь всё». Там же: раздел в
+#: ``NON_REGISTRY_SECTIONS`` (``catalog.<раздел> → ayla``), словами — в строке
+#: ``KNOWN_LIMITS`` про ``ayla``, строка исхода — в
+#: ``apps/identity/tests/test_forget_all_matrix.py``. Машиной два репозитория
+#: не сверяются — этот список и есть спусковой крючок.
+EXPORT_SECTIONS: tuple[str, ...] = (
+    "user_id",
+    "exported_at",
+    "profile",
+    "personal_context",
+    "specialist_profile",
+    "goals",
+    "wellness_plan",
+    "nutrition_profile",
+    "food_diary",
+    "shown_hints",
+    "notification_history",
+    "app_ai_chat",
+    "favorite_specialists",
+    "linked_identities",
+)
+
+
 def _not_found(request: Request, user_id: UUID) -> Response:
     logger.info(
         "internal.personal_data.user_not_found user_id=%s request_id=%s",
