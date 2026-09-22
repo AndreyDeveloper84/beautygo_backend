@@ -759,7 +759,7 @@ class TestSection4ScanAndSummary:
         with patch(
             "nutrition.views.FoodScannerRouter", return_value=router_mock,
         ), patch(
-            "nutrition.views.NutritionLookup",
+            "nutrition.views.build_nutrition_lookup",
             return_value=MagicMock(lookup=lambda *a, **kw: None),
         ):
             resp = client_api.post(

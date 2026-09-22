@@ -802,6 +802,19 @@ FOOD_SCAN_DAILY_TOTAL = int(os.environ.get("FOOD_SCAN_DAILY_TOTAL", "500"))
 FOOD_SCAN_PRICE_INPUT_USD_PER_1M = os.environ.get("FOOD_SCAN_PRICE_INPUT_USD_PER_1M") or None
 FOOD_SCAN_PRICE_OUTPUT_USD_PER_1M = os.environ.get("FOOD_SCAN_PRICE_OUTPUT_USD_PER_1M") or None
 
+# DRF-2334 — второй слой справочника питания (официальный источник, USDA
+# FoodData Central). Решение владельца §55 от 20.09 и вопрос 40: справочник
+# → официальный источник → расчёт по ингредиентам. Default CLOSED: включает
+# главное окно на стенде, когда владелец даст ключ и лимиты.
+#
+# Выключен или без ключа → слоя просто нет: справочник отвечает тем, что
+# знает сам (seed), скан остаётся 200 с пустым питанием. Это НЕ авария и НЕ
+# 5xx — общий breaker бота считает стойкий 5xx аварией, и кормить его
+# простоем чужого справочника нельзя. Сборка — только через
+# nutrition/services/nutrition_lookup_factory.py.
+USDA_LOOKUP_ENABLED = os.environ.get("USDA_LOOKUP_ENABLED", "false").lower() == "true"
+USDA_API_KEY = os.environ.get("USDA_API_KEY", "")
+
 # Service-to-service token for /api/v1/nutrition/internal/* endpoints (DRF-246).
 # Used by the MAX bot to call nutrition API on behalf of a BotUser. Empty
 # value disables internal endpoints (IsServiceAccount fails closed) — set

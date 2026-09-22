@@ -118,7 +118,7 @@ def _post_scan(router: MagicMock, external_id: str = "bot:42"):
     c = APIClient()
     with (
         patch("nutrition.views.FoodScannerRouter", return_value=router),
-        patch("nutrition.views.NutritionLookup", return_value=MagicMock(lookup=lambda *a, **kw: None)),
+        patch("nutrition.views.build_nutrition_lookup", return_value=MagicMock(lookup=lambda *a, **kw: None)),
     ):
         return c.post(
             INTERNAL_URL,
@@ -273,7 +273,7 @@ class TestB8PublicPathSharesTheCounter:
         c.force_authenticate(user=proxy)
         with (
             patch("nutrition.views.FoodScannerRouter", return_value=router),
-            patch("nutrition.views.NutritionLookup", return_value=MagicMock(lookup=lambda *a, **kw: None)),
+            patch("nutrition.views.build_nutrition_lookup", return_value=MagicMock(lookup=lambda *a, **kw: None)),
         ):
             second = c.post(PUBLIC_URL, {"image": _upload()}, format="multipart")
             third = c.post(PUBLIC_URL, {"image": _upload()}, format="multipart")
