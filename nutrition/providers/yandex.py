@@ -31,8 +31,8 @@ from django.conf import settings
 from nutrition.providers.base import (
     FoodScannerProvider,
     LowConfidenceError,
-    ProviderTimeout,
     ProviderPermanentlyUnavailable,
+    ProviderTimeout,
     ProviderUnavailable,
     ScanResult,
 )

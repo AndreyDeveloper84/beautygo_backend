@@ -244,6 +244,9 @@ def _permanent_reason(exc: Exception) -> str | None:
             code = body.get("code")
     if isinstance(code, str) and code in _PERMANENT_CODES:
         return _PERMANENT_CODES[code]
-    if getattr(exc, "status_code", None) in (401, 403):
+    # Только 401: 403 без известного кода — не «ключ отвергнут». Прод ходит в
+    # OpenAI через прокси (гео-блок РФ), и 403 гео-запрета или CDN при смене
+    # выхода прокси — временная поломка сети, а не ключа (ревью #549).
+    if getattr(exc, "status_code", None) == 401:
         return "auth_rejected"
     return None

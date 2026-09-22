@@ -181,7 +181,11 @@ class FoodScannerRouter:
                 primary_failed_with=type(primary_err).__name__,
             )
         except self.FALLBACKABLE as fallback_err:
-            _signal_if_permanent(self._fallback_name, fallback_err)
+            # Резерв сигналит только вместе со стойким основным: ненастроенный
+            # резерв при временном сбое основного — не страница каждый час
+            # (ревью #549); когда стойко отказали оба — звучат оба.
+            if isinstance(primary_err, ProviderPermanentlyUnavailable):
+                _signal_if_permanent(self._fallback_name, fallback_err)
             logger.warning(
                 "food_scanner.both_failed primary=%s fallback=%s",
                 type(primary_err).__name__, type(fallback_err).__name__,

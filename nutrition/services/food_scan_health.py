@@ -70,6 +70,11 @@ def signal_provider_down(*, provider: str, reason: str) -> bool:
             "nutrition.food_scan.provider_signal_failed provider=%s reason=%s err=%s",
             provider, reason, type(exc).__name__,
         )
+        # Час не занят молчанием: следующий стойкий отказ попробует снова (ревью #549).
+        try:
+            cache.delete(key)
+        except Exception:  # noqa: BLE001
+            pass
         return False
     logger.warning("nutrition.food_scan.provider_down provider=%s reason=%s", provider, reason)
     return True

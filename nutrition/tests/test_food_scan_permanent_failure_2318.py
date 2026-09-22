@@ -82,6 +82,21 @@ class TestP1OpenAI:
             OpenAIVisionProvider().scan(b"\xff\xd8\xff")
         assert exc.value.reason == reason
 
+    @pytest.mark.parametrize(
+        ("cls", "status", "code"),
+        [
+            (openai.RateLimitError, 429, None),
+            (openai.PermissionDeniedError, 403, "unsupported_country_region_territory"),
+            (openai.PermissionDeniedError, 403, None),
+        ],
+    )
+    def test_no_code_429_and_a_403_are_temporary(self, openai_client, cls, status, code) -> None:
+        """403 гео-запрета или CDN через прокси — не «ключ отвергнут» (ревью #549)."""
+        openai_client.chat.completions.create.side_effect = _openai_error(cls, status, code)
+        with pytest.raises(ProviderUnavailable) as exc:
+            OpenAIVisionProvider().scan(b"\xff\xd8\xff")
+        assert not isinstance(exc.value, ProviderPermanentlyUnavailable)
+
     def test_a_rate_limit_is_temporary(self, openai_client) -> None:
         openai_client.chat.completions.create.side_effect = _openai_error(
             openai.RateLimitError, 429, "rate_limit_exceeded"
@@ -192,7 +207,10 @@ class TestV1TheBotHearsPermanent:
 class TestS1OperatorsHearIt:
     def test_one_signal_per_provider_reason_hour(self) -> None:
         cache.clear()
-        permanent = ProviderPermanentlyUnavailable("billing", reason="billing_not_active")
+        permanent = ProviderPermanentlyUnavailable(
+            "Your account is not active, please check your billing details",
+            reason="billing_not_active",
+        )
         for _ in range(3):
             with pytest.raises(AllProvidersFailedError):
                 _router_with(_Fails(permanent), _Fails(ProviderUnavailable("5xx"))).scan(b"x")
@@ -210,6 +228,27 @@ class TestS1OperatorsHearIt:
         result = _router_with(_Fails(permanent), _Works()).scan(b"x")
         assert result.result.dish_name == "помидор"  # наличие: скан спасён резервом
         assert len(_signals()) == 1
+
+    def test_an_unconfigured_fallback_behind_a_temporary_primary_is_silent(self) -> None:
+        """Ненастроенный резерв при временном сбое основного — не страница (ревью #549)."""
+        cache.clear()
+        with pytest.raises(AllProvidersFailedError):
+            _router_with(
+                _Fails(ProviderUnavailable("5xx")),
+                _Fails(ProviderPermanentlyUnavailable("no key", reason="not_configured")),
+            ).scan(b"x")
+        assert _signals() == []
+
+    def test_a_failed_emit_releases_the_hour(self) -> None:
+        from nutrition.services import food_scan_health
+
+        cache.clear()
+        with patch(
+            "appointments.infrastructure.outbox.envelope.emit_outbox_event",
+            side_effect=RuntimeError("db"),
+        ):
+            assert food_scan_health.signal_provider_down(provider="openai", reason="billing_not_active") is False
+        assert food_scan_health.signal_provider_down(provider="openai", reason="billing_not_active") is True
 
     def test_a_temporary_failure_is_silent(self) -> None:
         cache.clear()
