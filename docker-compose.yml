@@ -1,5 +1,17 @@
+# DRF-2272 — логи прикладных сервисов. Драйвер по умолчанию (json-file) держит
+# лог в каталоге контейнера, и `up -d --force-recreate` выкладки удалял его
+# вместе с контейнером. На стенде выкладка ставит CATALOG_LOG_DRIVER=journald —
+# журнал хоста переживает пересоздание; локально (Docker Desktop, где journald
+# нет) остаётся json-file. Срок хранения — journald.conf хоста, не compose.
+# ПДн: в журнал идёт то, что прошло core.pii_log_filter (DRF-2272 C).
+x-app-logging: &app_logging
+  driver: ${CATALOG_LOG_DRIVER:-json-file}
+  options:
+    tag: "{{.Name}}"
+
 services:
   web:
+    logging: *app_logging
     build:
       context: .
       args:
@@ -69,6 +81,7 @@ services:
       retries: 5
 
   celery_worker:
+    logging: *app_logging
     build:
       context: .
       # DRF-1431: same base-image indirection as `web`. Without it two of
@@ -112,6 +125,7 @@ services:
         condition: service_healthy
 
   celery_beat:
+    logging: *app_logging
     build:
       context: .
       # DRF-1431 — see celery_worker above.

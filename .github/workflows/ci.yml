@@ -798,6 +798,12 @@ jobs:
             # (db, redis, minio) and pulls them into the recreate.
             # `--force-recreate` is kept so new .env values (SENTRY_*,
             # DJANGO_ENV) actually reach the processes.
+            # DRF-2272 — логи web/celery в journald хоста: переживают
+            # пересоздание контейнера этой строкой. Без постоянного журнала
+            # (/var/log/journal) они не переживут перезагрузку хоста —
+            # предупреждение, не отказ: выкладка важнее архива логов.
+            export CATALOG_LOG_DRIVER=journald
+            [ -d /var/log/journal ] || echo "::warning::DRF-2272: /var/log/journal нет — журнал не постоянный, логи контейнеров не переживут перезагрузку хоста"
             docker compose up -d --force-recreate --no-deps web celery_worker celery_beat
 
             docker compose ps
