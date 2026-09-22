@@ -71,6 +71,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -78,6 +79,7 @@ from typing import TYPE_CHECKING
 
 import requests
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -381,6 +383,121 @@ def _apply_outcome(event: "OutboxEvent", outcome: PublishOutcome) -> None:
     event.save(update_fields=fields)
 
 
+# ---------------------------------------------------------------------------
+# DRF-2306 — dead-letter → сигнал операторам через бот (контракт бота §6.4).
+# ---------------------------------------------------------------------------
+#
+# Контракт обещает оповещение о dead-letter; до этого листа был только
+# ``logger.warning``. Сигнал идёт тем же рельсом, что бюджет сканера
+# (DRF-2196): ``system.module.health.degraded`` с ``module_name =
+# "appointments.outbox"``, бот поднимает страницу в MAX.
+#
+# * Одно событие на (тема, класс) за батч, не чаще раза в UTC-час: тысяча
+#   мёртвых строк за час простоя — одна страница с числом.
+# * Классы: ``rejected`` — 4xx кроме 429 (постоянный отказ бота; ``reason`` —
+#   slug из его тела 422), ``retries_exhausted`` — 5xx / сеть после
+#   исчерпания попыток.
+# * О смерти самого системного события сигнал НЕ шлётся — иначе сигнал о
+#   мёртвом сигнале. Это обрыв круга.
+# * Известный предел: сигнал едет тем же outbox к тому же боту. Если строки
+#   умерли потому, что бот лежал, сигнал ждёт его подъёма и при простое
+#   больше ~4,5 ч сам уходит в dead — молча (см. пункт выше). Независимого
+#   канала у каталога нет (DRF-2145).
+# * В сигнале нет ни payload, ни текста ошибки, ни людей: тема, класс, код,
+#   число, час и slug причины.
+
+_SIGNAL_TOPIC = "system.module.health.degraded"
+_SIGNAL_MODULE = "appointments.outbox"
+_REASON_SLUG = re.compile(r"[a-z_]{1,64}")
+# Ключ часа живёт дольше часа: переживает сдвиг часов воркеров.
+_SIGNAL_DEDUP_TTL_SECONDS = 2 * 60 * 60
+
+
+def _failure_class(http_status: int | None) -> str:
+    if http_status is not None and 400 <= http_status < 500 and http_status != 429:
+        return "rejected"
+    return "retries_exhausted"
+
+
+def _reason_slug(http_status: int | None, error: str) -> str | None:
+    """Slug причины из тела 422 бота (``{"status": "rejected", "reason": ...}``).
+
+    Только slug — всё, что им не является, не несём: тело ответа чужое, и
+    текст из него в сигнал операторам не идёт.
+    """
+    prefix = f"HTTP {http_status}: "
+    if http_status is None or not error.startswith(prefix):
+        return None
+    try:
+        body = json.loads(error[len(prefix):])
+    except ValueError:
+        return None
+    reason = body.get("reason") if isinstance(body, dict) else None
+    return reason if isinstance(reason, str) and _REASON_SLUG.fullmatch(reason) else None
+
+
+def _emit_dead_signal(
+    *, topic: str, failure: str, http_status: int | None, count: int, reason: str | None
+) -> None:
+    """Одно сигнальное событие — если этот час по (тема, класс) ещё не звучал."""
+    hour = timezone.now().strftime("%Y-%m-%dT%H")
+    key = f"outbox:dead_signal:{topic}:{failure}:{hour}"
+    try:
+        if not cache.add(key, 1, timeout=_SIGNAL_DEDUP_TTL_SECONDS):
+            return
+    except Exception as exc:  # noqa: BLE001 — потеря кэша: молчание, а не шквал
+        logger.warning("outbox.publisher.dead_signal_dedup_unavailable err=%s", type(exc).__name__)
+        return
+
+    from appointments.infrastructure.outbox.envelope import emit_outbox_event
+
+    with transaction.atomic():
+        emit_outbox_event(
+            topic=_SIGNAL_TOPIC,
+            data={
+                "module_name": _SIGNAL_MODULE,
+                "severity": "error",
+                "metric": {
+                    "topic": topic,
+                    "failure": failure,
+                    "http_status": http_status,
+                    "count": count,
+                    "hour": hour,
+                    "reason": reason,
+                },
+            },
+            actor="system",
+            user_id=None,
+            tenant_id=None,
+        )
+
+
+def _signal_dead_rows(dead: list[tuple[str, int | None, str]]) -> None:
+    """Свести мёртвые строки батча в сигналы; сбой сигнала не ломает батч."""
+    groups: dict[tuple[str, str], dict] = {}
+    for topic, http_status, error in dead:
+        if topic == _SIGNAL_TOPIC:
+            continue  # обрыв круга
+        failure = _failure_class(http_status)
+        group = groups.setdefault(
+            (topic, failure), {"count": 0, "http_status": None, "reason": None}
+        )
+        group["count"] += 1
+        group["http_status"] = http_status
+        group["reason"] = _reason_slug(http_status, error) or group["reason"]
+
+    for (topic, failure), group in groups.items():
+        try:
+            _emit_dead_signal(topic=topic, failure=failure, **group)
+        except Exception as exc:  # noqa: BLE001 — сигнал никогда не важнее доставки
+            logger.warning(
+                "outbox.publisher.dead_signal_failed topic=%s failure=%s err=%s",
+                topic,
+                failure,
+                type(exc).__name__,
+            )
+
+
 def publish_outbox_events_to_bot() -> PublishBatchSummary:
     """Walk the publisher-eligible queue and deliver one batch.
 
@@ -394,6 +511,7 @@ def publish_outbox_events_to_bot() -> PublishBatchSummary:
 
     summary = PublishBatchSummary()
     now = timezone.now()
+    dead: list[tuple[str, int | None, str]] = []
 
     # Eligibility filter mirrors the composite index
     # ``outbox_publisher_scan_idx`` from migration 0010 so the planner
@@ -422,6 +540,7 @@ def publish_outbox_events_to_bot() -> PublishBatchSummary:
                 summary.sent += 1
             elif outcome.status == "dead":
                 summary.dead += 1
+                dead.append((str(event.topic), outcome.http_status, outcome.error or ""))
                 logger.warning(
                     "outbox.publisher.dead_lettered event_id=%s topic=%s "
                     "attempts=%d last_error=%s",
@@ -430,6 +549,11 @@ def publish_outbox_events_to_bot() -> PublishBatchSummary:
                 )
             else:
                 summary.failed += 1
+
+    # DRF-2306 — после коммита батча: сигнал только о смерти, которая
+    # действительно записана.
+    if dead:
+        _signal_dead_rows(dead)
 
     if summary.scanned:
         logger.info(
