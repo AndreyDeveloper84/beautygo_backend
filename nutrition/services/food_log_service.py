@@ -81,7 +81,12 @@ class FoodLogService:
     """Creates FoodLog rows with snapshotted macros."""
 
     def __init__(self, lookup: NutritionLookup | None = None) -> None:
-        self._lookup = lookup or NutritionLookup()
+        # DRF-2334: боевая сборка — только через фабрику, иначе слой
+        # официального источника снова потеряется молча. Явно переданный
+        # ``lookup`` остаётся точкой подмены для тестов.
+        from nutrition.services.nutrition_lookup_factory import build_nutrition_lookup
+
+        self._lookup = lookup or build_nutrition_lookup()
 
     # ------------------------------------------------------------------
     # Public API

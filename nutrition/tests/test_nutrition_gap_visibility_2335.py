@@ -89,7 +89,7 @@ def _scan(dish: str, portion_g: float | None, external_id: str = "bot:2335"):
     with (
         patch("nutrition.views.FoodScannerRouter", return_value=router),
         patch(
-            "nutrition.views.NutritionLookup",
+            "nutrition.views.build_nutrition_lookup",
             side_effect=lambda *a, **kw: _real_lookup(),
         ),
     ):

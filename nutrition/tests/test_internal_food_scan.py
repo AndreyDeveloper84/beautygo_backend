@@ -138,7 +138,7 @@ class TestExternalUserResolution:
             "nutrition.views.FoodScannerRouter",
             return_value=router_mock,
         ), patch(
-            "nutrition.views.NutritionLookup",
+            "nutrition.views.build_nutrition_lookup",
             return_value=MagicMock(lookup=lambda *a, **kw: None),
         ):
             resp = _post(c, token=SERVICE_TOKEN, external_id="bot:55555")
@@ -163,7 +163,7 @@ class TestExternalUserResolution:
             "nutrition.views.FoodScannerRouter",
             return_value=router_mock,
         ), patch(
-            "nutrition.views.NutritionLookup",
+            "nutrition.views.build_nutrition_lookup",
             return_value=MagicMock(lookup=lambda *a, **kw: None),
         ):
             resp = _post(c, token=SERVICE_TOKEN, external_id="bot:99999")
@@ -209,7 +209,7 @@ class TestScanFlow:
             "nutrition.views.FoodScannerRouter",
             return_value=router_mock,
         ), patch(
-            "nutrition.views.NutritionLookup",
+            "nutrition.views.build_nutrition_lookup",
             return_value=MagicMock(lookup=lambda *a, **kw: None),
         ):
             resp = _post(c, token=SERVICE_TOKEN, external_id="bot:42")
@@ -255,7 +255,7 @@ class TestScanFlow:
             "nutrition.views.FoodScannerRouter",
             return_value=router_mock,
         ), patch(
-            "nutrition.views.NutritionLookup",
+            "nutrition.views.build_nutrition_lookup",
             return_value=MagicMock(lookup=lambda *a, **kw: None),
         ):
             resp = _post(c, token=SERVICE_TOKEN, external_id="bot:loc")
