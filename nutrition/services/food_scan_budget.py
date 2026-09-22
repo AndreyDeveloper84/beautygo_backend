@@ -169,6 +169,28 @@ def refund_personal(user: Any) -> None:
         logger.warning("nutrition.food_scan.budget_unavailable op=refund err=%s", type(exc).__name__)
 
 
+def refund_total() -> None:
+    """DRF-2322: вернуть общий потолок — вызова провайдера не было.
+
+    Личную попытку возвращает :func:`refund_personal`; сюда приходят только
+    случаи, где ни один провайдер не выставил счёт (стойкий отказ: счёт не
+    активен, ключ отвергнут, квота исчерпана — ответ без результата). За
+    оплаченный вызов общий потолок остаётся потраченным (DRF-2218).
+
+    Ниже нуля не уходит, потеря кэша — строка в лог, не исключение.
+    """
+    key = _KEY_TOTAL.format(day=_day())
+    try:
+        current = cache.get(key)
+        if not isinstance(current, int) or current <= 0:
+            return
+        cache.decr(key)
+    except Exception as exc:  # noqa: BLE001 — возврат не важнее ответа человеку
+        logger.warning(
+            "nutrition.food_scan.budget_unavailable op=refund_total err=%s", type(exc).__name__
+        )
+
+
 def reserve(user: Any) -> None:
     """Занять одну попытку распознавания — ДО вызова провайдера.
 
@@ -406,6 +428,7 @@ __all__ = [
     "cost_usd",
     "record_cost",
     "refund_personal",
+    "refund_total",
     "reserve",
     "seconds_until_midnight",
 ]
