@@ -108,7 +108,7 @@ def _post(router: MagicMock, external_id: str = "bot:2218", upload=None):
     upload = upload or SimpleUploadedFile("meal.jpg", _jpeg(), content_type="image/jpeg")
     with (
         patch("nutrition.views.FoodScannerRouter", return_value=router),
-        patch("nutrition.views.NutritionLookup", return_value=MagicMock(lookup=lambda *a, **kw: None)),
+        patch("nutrition.views.build_nutrition_lookup", return_value=MagicMock(lookup=lambda *a, **kw: None)),
     ):
         return APIClient().post(
             INTERNAL_URL,

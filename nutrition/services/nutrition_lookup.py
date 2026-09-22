@@ -27,12 +27,15 @@ normalization) to avoid false positives like "сырник" matching "сыр".
 """
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import asdict, dataclass
 from typing import Iterable
 
 from nutrition.data.ru_dishes_seed import ALIASES, DISH_MACROS, DishMacros
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -176,10 +179,20 @@ class NutritionLookup:
                 facts = self._usda.lookup(dish_name, portion_g=portion_g)
                 if facts is not None:
                     return facts
+                # DRF-2334: «источник не знает такого блюда» — не поломка
+                # источника. Отдельная строка, INFO: по ней считают, чего
+                # не хватает справочнику, и она не будит тревогу.
+                logger.info("nutrition.usda.miss")
             except Exception as exc:  # noqa: BLE001 — duck-type on class name
                 if exc.__class__.__name__ != "USDAUnavailableError":
                     raise
-                # Outage → fall through to AI estimator.
+                # DRF-2334: простой внешнего справочника — его авария, не
+                # наша. Говорим вслух (её чинит человек), но наверх не
+                # пускаем: скан остаётся 200 с пустым питанием, иначе
+                # стойкий 5xx накормит общий предохранитель бота.
+                logger.warning(
+                    "nutrition.usda.unavailable kind=%s", type(exc).__name__,
+                )
 
         # Layer 3 — AI estimator.
         if self._ai is not None:
