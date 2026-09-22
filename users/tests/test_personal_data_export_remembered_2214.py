@@ -152,3 +152,63 @@ class TestAnExportCreatesNothing:
         assert data["shown_hints"] == []
         assert not NutritionProfile.objects.filter(user=user).exists()
         assert not FoodScan.objects.filter(user=user).exists()
+
+
+class TestEveryFieldIsDecided:
+    def test_every_field_of_every_exported_model_is_classified(self) -> None:
+        """Новое поле модели без решения — красное: ни молча мимо выгрузки, ни молча в неё."""
+        from django.apps import apps
+
+        from users.remembered_export import FIELDS
+
+        assert FIELDS  # наличие
+        for label, (exported, excluded) in FIELDS.items():
+            names = {f.name for f in apps.get_model(label)._meta.concrete_fields}
+            assert set(exported) | set(excluded) == names, (
+                label, sorted(names - set(exported) - set(excluded)),
+                sorted((set(exported) | set(excluded)) - names),
+            )
+            assert not set(exported) & set(excluded), label
+            assert all(reason.strip() for reason in excluded.values()), label
+
+    def test_every_erased_model_has_a_field_decision(self) -> None:
+        """Стык со стиранием: каждая модель словаря стирания выгружается или объявлена с причиной."""
+        from users.forget_all_catalog import REMEMBERED_SCOPE
+        from users.remembered_export import DECLARED_NOT_EXPORTED, FIELDS
+
+        erased = set(REMEMBERED_SCOPE) - {"files"}
+        assert erased  # наличие
+        decided = set(FIELDS) | set(DECLARED_NOT_EXPORTED)
+        assert erased <= decided, sorted(erased - decided)
+        assert not set(FIELDS) & set(DECLARED_NOT_EXPORTED)
+        assert all(reason.strip() for reason in DECLARED_NOT_EXPORTED.values())
+
+
+class TestTheScanRecognition:
+    def test_the_raw_model_response_is_exported_and_marked(self, user) -> None:  # noqa: F811
+        """Слово главного окна: сырой ответ модели о фото выгружается, с пометкой, что он сырой."""
+        scan = _seed_diary(user)
+        scan.raw_response = {"dish": "борщ со сметаной", "p": 0.91}
+        scan.provider_cost_usd = 0.0123
+        scan.save(update_fields=["raw_response", "provider_cost_usd"])
+
+        diary = _export(user)["food_diary"]
+
+        assert diary["food_scans"][0]["raw_model_response"] == {"dish": "борщ со сметаной", "p": 0.91}
+        assert "сырой ответ модели" in diary["notes"]["raw_model_response"]
+        # Телеметрия провайдера — не данные о человеке, не выгружается.
+        assert "provider_cost_usd" not in diary["food_scans"][0]
+        assert "0.0123" not in repr(diary)
+
+    def test_service_keys_do_not_leave(self, remembered) -> None:
+        """Ключ повтора — служебный: в выгрузке его нет, а сама запись есть."""
+        from nutrition.models import FoodLog
+
+        u, _ = remembered
+        key = FoodLog.objects.get(user=u).idempotency_key
+
+        diary = _export(u)["food_diary"]
+
+        assert [x["dish_name"] for x in diary["food_logs"]] == ["Борщ"]  # наличие
+        assert key not in repr(diary)
+        assert "idempotency_key" not in diary["food_logs"][0]
