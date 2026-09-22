@@ -173,6 +173,13 @@ FIELDS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
          "tokens_in": _MODEL_TELEMETRY, "tokens_out": _MODEL_TELEMETRY,
          "latency_ms": _MODEL_TELEMETRY},
     ),
+    # DRF-2214 PR-2b — избранные мастера: «забудь всё» их оставляет (CD §72 п.3,
+    # ``forget_all_catalog.KEPT_BY_FORGET_ALL``), но ст. 14 — о составе
+    # хранимого, а не о стираемом.
+    "users.FavoriteSpecialist": (
+        {"specialist": "specialist", "created_at": "created_at"},
+        {"id": _KEY, "user": _OWNER},
+    ),
 }
 
 
@@ -219,6 +226,11 @@ _CONVERT = {
     ("nutrition.WaterEntry", "food_log"): lambda o: o.food_log_id is not None,
     ("nutrition.SavedMeal", "source_food_log"): lambda o: o.source_food_log_id is not None,
     ("nutrition.CrossDomainShownRule", "rule"): lambda o: o.rule.rule_id,
+    # Мастер — его имя в каталоге и ключ профиля: по ним человек узнает, кого добавил.
+    ("users.FavoriteSpecialist", "specialist"): lambda o: {
+        "id": str(o.specialist_id),
+        "display_name": o.specialist.display_name,
+    },
     ("nutrition.CrossDomainShownRule", "appointment"): lambda o: (
         str(o.appointment_id) if o.appointment_id else None
     ),
@@ -328,8 +340,24 @@ def export_app_ai_chat(user) -> dict:
     return {"conversations": conversations, "notes": {"raw_tool_call": RAW_TOOL_CALL_NOTE}}
 
 
+def export_favorite_specialists(user) -> list[dict]:
+    """Избранные мастера (DRF-2214 PR-2b) — остаются после «забудь всё», выгружаются."""
+    from users.models import FavoriteSpecialist
+
+    return [
+        _row(x)
+        for x in FavoriteSpecialist.objects.filter(user=user)
+        .select_related("specialist")
+        .order_by("created_at", "id")
+    ]
+
+
 def export_remembered(user) -> dict:
-    """Все разделы запомненного — по слову словаря стирания на раздел."""
+    """Все разделы запомненного — по слову словаря стирания на раздел.
+
+    Плюс ``favorite_specialists`` (DRF-2214 PR-2b): «забудь всё» их не стирает,
+    но выгрузка называет всё, что хранится.
+    """
     return {
         "goals": export_goals(user),
         "wellness_plan": export_wellness_plan(user),
@@ -338,4 +366,5 @@ def export_remembered(user) -> dict:
         "shown_hints": export_shown_hints(user),
         "notification_history": export_notification_history(user),
         "app_ai_chat": export_app_ai_chat(user),
+        "favorite_specialists": export_favorite_specialists(user),
     }
