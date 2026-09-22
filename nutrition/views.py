@@ -94,7 +94,7 @@ from nutrition.services.food_scanner_router import (
     FoodScannerRouter,
 )
 from nutrition.services.deficit_hints import build_deficit_hint
-from nutrition.services.nutrition_lookup import NutritionLookup
+from nutrition.services.nutrition_lookup_factory import build_nutrition_lookup
 from nutrition.services.nutrition_summary_service import NutritionSummaryService
 from nutrition.services.water_entry_service import (
     CreateWaterInput,
@@ -353,7 +353,7 @@ class FoodScanView(APIView):
         # Slice 3a: seed-only lookup. Misses leave nutrition=null and the
         # mobile client shows "уточните порцию вручную". OFF/USDA HTTP
         # fallback ships in 3a'.
-        facts = NutritionLookup().lookup(
+        facts = build_nutrition_lookup().lookup(
             outcome.result.dish_name,
             ingredients=outcome.result.ingredients,
             portion_g=outcome.result.portion_g,
@@ -485,7 +485,7 @@ class InternalFoodScanView(APIView):
         _record_provider_cost(scan, outcome.result)
         scan.raw_response = outcome.result.raw_response
 
-        facts = NutritionLookup().lookup(
+        facts = build_nutrition_lookup().lookup(
             outcome.result.dish_name,
             ingredients=outcome.result.ingredients,
             portion_g=outcome.result.portion_g,
@@ -613,7 +613,7 @@ class InternalFoodEstimateView(APIView):
         dish_name = serializer.validated_data["dish_name"]
         named_portion = serializer.validated_data.get("portion_g")
         portion_g = named_portion if named_portion is not None else MANUAL_DISH_BASELINE_G
-        facts = NutritionLookup().lookup(dish_name, portion_g=portion_g)
+        facts = build_nutrition_lookup().lookup(dish_name, portion_g=portion_g)
         if facts is None or facts.kcal is None:
             return error_response(
                 "FOOD_NOT_RECOGNIZED",
