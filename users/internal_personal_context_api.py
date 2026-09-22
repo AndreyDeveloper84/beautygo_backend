@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import uuid as uuid_mod
 
-from django.db import transaction
 from rest_framework import serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -55,8 +54,7 @@ from users.deletion_requests import (
 from privacy_audit.mixins import AuditedPersonalDataAccess
 from privacy_audit.models import PersonalDataAccessLog
 from users.permissions import IsInternalBearerForSubject
-from users.forget_all_catalog import erase_remembered_catalog, remembered_scope
-from users.personal_context_erasure import erase_personal_context
+from users.forget_all_subject import erase_remembered_for_subject
 from users.personal_context_views import _GREEN_ZONE_FIELDS
 from users.response import error_response, success_response
 
@@ -216,11 +214,8 @@ class InternalPersonalContextView(AuditedPersonalDataAccess, APIView):
         # В одной транзакции с профилем — либо стёрто всё, либо ничего.
         # ``erased`` и журнал называют стёртое (``remembered_scope``).
         # Бот этот эндпоинт не зовёт — его путь C5.2 (``personal_data_api``).
-        with transaction.atomic():
-            counts = erase_remembered_catalog(user, initiator="bot_forget_all")
-            scope = erase_personal_context(
-                user, initiator="bot_forget_all", also_erased=remembered_scope(counts)
-            )
+        # DRF-2305 — по всем личностям субъекта, тем же глаголом, что C5.2.
+        scope = erase_remembered_for_subject(user, initiator="bot_forget_all")
         ctx, _ = UserPersonalContext.objects.get_or_create(user=user)
         return success_response({
             "ayla_user_id": str(user.id),

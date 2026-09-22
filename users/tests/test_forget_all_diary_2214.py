@@ -107,8 +107,9 @@ ALL_PATHS = pytest.mark.parametrize(
 REAL_PATHS_WITH_MODULE = pytest.mark.parametrize(
     "forget, view_module",
     [
-        (_forget_via_bot, "users.personal_data_api"),
-        (_forget_via_app, "users.personal_context_views"),
+        # DRF-2305 — оба пути зовут общий глагол ``users.forget_all_subject``.
+        (_forget_via_bot, "users.forget_all_subject"),
+        (_forget_via_app, "users.forget_all_subject"),
     ],
     ids=["бот-C5.2", "приложение"],
 )
