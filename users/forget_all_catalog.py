@@ -108,17 +108,9 @@ KEPT_BY_FORGET_ALL: dict[str, str] = {
     "users.SpecialistPortfolio": (
         "работы мастера — его профессиональный профиль в каталоге, а не запомненное о клиенте"
     ),
-    "notifications.Notification": (
-        "вопрос владельцу: договор оставляет «настройки уведомлений», про историю "
-        "отправленных молчит; до решения — остаётся"
-    ),
     "users.FavoriteSpecialist": (
-        "вопрос владельцу: избранные мастера — выбор человека в каталоге, в договор "
-        "«забудь всё» не названы; до решения — остаются"
-    ),
-    "ai.Conversation": (
-        "вопрос владельцу: договор бота «забуду … из наших разговоров» про память бота; "
-        "ИИ-чат приложения (каталог) им не назван; до решения — остаётся"
+        "решение владельца §72: избранные мастера остаются — выбор человека в каталоге, "
+        "а не запомненное о нём"
     ),
 }
 
@@ -144,11 +136,19 @@ REMEMBERED_SCOPE: dict[str, str] = {
     "nutrition.SavedMeal": "food_diary",
     "files": "food_diary",
     "nutrition.CrossDomainShownRule": "shown_hints",
+    # DRF-2277 — решение владельца §72 п.3.
+    "notifications.Notification": "notification_history",
+    "ai.Conversation": "app_ai_chat",
+    # Очередь вебхуков в бот — служебная копия профиля питания и дневника
+    # (темы: профиль, вода, рубеж, паттерн, распознавание); своего слова нет,
+    # темы дневника — большинство (решение главного окна, #545).
+    "nutrition.NutritionOutboxEvent": "food_diary",
 }
 
 #: Порядок слов в scope — стабильный, от целей к дневнику.
 SCOPE_ORDER: tuple[str, ...] = (
     "goals", "wellness_plan", "nutrition_profile", "food_diary", "shown_hints",
+    "notification_history", "app_ai_chat",
 )
 
 
@@ -162,14 +162,103 @@ def remembered_scope(counts: dict[str, int]) -> list[str]:
     return [word for word in SCOPE_ORDER if word in hit]
 
 
+#: DRF-2277 — поля строки уведомления, которые несут текст о человеке. У маркера
+#: открытого окна бита они пусты, а ``data`` сведено к ``{appointment_id}``.
+_NOTIFICATION_TEXT_FIELDS: tuple[str, ...] = ("title", "body", "deep_link", "error")
+
+
+def _beat_markers() -> tuple[str, str]:
+    """Шаблоны двух битов, чья идемпотентность держится строкой уведомления."""
+    from notifications import tasks as beats
+
+    return (beats.REMINDER_TEMPLATE_ID, beats.AFTERCARE_TEMPLATE_ID)
+
+
+def _blank_marker_q() -> Q:
+    """Обезличенный маркер бита — не остаток: текста о человеке в нём нет.
+
+    Тот же предикат прячет маркер из ленты уведомлений
+    (``notifications.views._user_notifications``): пустая карточка — не
+    уведомление.
+    """
+    return Q(template_id__in=_beat_markers(), **{f: "" for f in _NOTIFICATION_TEXT_FIELDS})
+
+
+def _beat_period(name: str):
+    """Период бита из ``CELERY_BEAT_SCHEDULE`` — запас окна на такт, который
+    стартовал раньше «забудь всё» (ревью #545). Нет записи — запаса нет."""
+    from datetime import timedelta
+
+    from django.conf import settings
+
+    entry = getattr(settings, "CELERY_BEAT_SCHEDULE", {}).get(name) or {}
+    seconds = entry.get("schedule")
+    return timedelta(seconds=seconds) if isinstance(seconds, (int, float)) else timedelta(0)
+
+
+def _open_window_markers(user) -> list:
+    """Строки уведомлений, на которых держится ещё не закрытое окно бита.
+
+    Напоминание за час (``dispatch_appointment_reminders``) шлётся, пока
+    начало записи не раньше ``now + LEAD - WINDOW/2``; уход после визита
+    (``dispatch_post_visit_aftercare``) — пока конец не раньше
+    ``now - LAG - WINDOW``. Оба бита шлют, только если строки
+    ``(user, template_id, data.appointment_id)`` нет, — стерев её в открытом
+    окне, «забудь всё» прислало бы то же напоминание второй раз. Окна — из
+    констант битов, с запасом в один такт бита (его период из
+    ``CELERY_BEAT_SCHEDULE``): такт, начатый чуть раньше, видит окно шире.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    from appointments.models import Appointment
+    from notifications import tasks as beats
+    from notifications.models import Notification
+
+    now = timezone.now()
+    reminder_open_from = (
+        now
+        + timedelta(minutes=beats.REMINDER_LEAD_MINUTES - beats.REMINDER_WINDOW_MINUTES // 2)
+        - _beat_period("dispatch-appointment-reminders")
+    )
+    aftercare_open_from = (
+        now
+        - timedelta(hours=beats.AFTERCARE_LAG_HOURS, minutes=beats.AFTERCARE_WINDOW_MINUTES)
+        - _beat_period("dispatch-post-visit-aftercare")
+    )
+    visits = Appointment.objects.filter(client=user)
+    open_ids = {
+        beats.REMINDER_TEMPLATE_ID: {
+            str(pk)
+            for pk in visits.filter(start_datetime__gte=reminder_open_from).values_list("pk", flat=True)
+        },
+        beats.AFTERCARE_TEMPLATE_ID: {
+            str(pk)
+            for pk in visits.filter(end_datetime__gte=aftercare_open_from).values_list("pk", flat=True)
+        },
+    }
+    # Отбор в базе: только строки с appointment_id из открытых окон.
+    rows = Notification.objects.filter(user=user).filter(
+        Q(template_id=beats.REMINDER_TEMPLATE_ID,
+          data__appointment_id__in=list(open_ids[beats.REMINDER_TEMPLATE_ID]))
+        | Q(template_id=beats.AFTERCARE_TEMPLATE_ID,
+            data__appointment_id__in=list(open_ids[beats.AFTERCARE_TEMPLATE_ID]))
+    )
+    return [row for row in rows if isinstance(row.data, dict)]
+
+
 def _remembered_querysets(user) -> dict:
     """Строки, которые стирает :func:`erase_remembered_catalog`, — для счёта остатка."""
+    from ai.models import Conversation
     from goals.models import ClientGoal, GoalAnketaRun
+    from notifications.models import Notification
     from nutrition.models import (
         CrossDomainShownRule,
         DeletedFoodLog,
         FoodLog,
         FoodScan,
+        NutritionOutboxEvent,
         NutritionProfile,
         ProfileIdempotencyKey,
         SavedMeal,
@@ -203,6 +292,11 @@ def _remembered_querysets(user) -> dict:
         "nutrition.WaterLog": WaterLog.objects.filter(user=user),
         "nutrition.SavedMeal": SavedMeal.objects.filter(user=user),
         "nutrition.CrossDomainShownRule": CrossDomainShownRule.objects.filter(user=user),
+        "notifications.Notification": Notification.objects.filter(user=user).exclude(
+            _blank_marker_q()
+        ),
+        "ai.Conversation": Conversation.all_objects.filter(user=user),
+        "nutrition.NutritionOutboxEvent": NutritionOutboxEvent.objects.filter(external_user_id=user.username),
     }
 
 
@@ -226,12 +320,15 @@ def erase_remembered_catalog(
     Возвращает счёт снятых строк по моделям — для журнала; значения не
     выводятся нигде (AMD-010: аудит без персональных данных).
     """
+    from ai.models import Conversation
     from goals.models import ClientGoal, GoalAnketaRun
+    from notifications.models import Notification
     from nutrition.models import (
         CrossDomainShownRule,
         DeletedFoodLog,
         FoodLog,
         FoodScan,
+        NutritionOutboxEvent,
         NutritionProfile,
         ProfileIdempotencyKey,
         SavedMeal,
@@ -298,6 +395,38 @@ def erase_remembered_catalog(
     _delete("nutrition.ProfileIdempotencyKey", ProfileIdempotencyKey.objects.filter(user=user))
     _delete("nutrition.SavedMeal", SavedMeal.objects.filter(user=user))
     deleted["files"] = files_deleted
+
+    # 4. DRF-2277 (решение владельца §72 п.3) — история уведомлений (настройки
+    #    остаются), ИИ-чат приложения, outbox вебхуков питания. Маркеры
+    #    ОТКРЫТЫХ окон двух битов не стираются, а обезличиваются (см.
+    #    :func:`_open_window_markers`); в счёт идут только те, где был текст, —
+    #    повтор даёт ноль (контракт идемпотентности C5.2).
+    #    Маркер ещё в очереди доставки (PENDING) уходит в терминальный SKIPPED:
+    #    ``deliver()`` шлёт только PENDING, иначе человек получил бы пустой пуш
+    #    (ревью #545). Прочитан — чтобы не висел непрочитанным.
+    markers = _open_window_markers(user)
+    blanked = 0
+    for row in markers:
+        data = {"appointment_id": str(row.data.get("appointment_id"))}
+        pending = row.status == Notification.Status.PENDING
+        had_text = row.data != data or any(getattr(row, f) for f in _NOTIFICATION_TEXT_FIELDS)
+        if not (had_text or pending or not row.is_read):
+            continue  # уже обезличен — повтор ничего не пишет
+        blanked += int(had_text)
+        fields = {f: "" for f in _NOTIFICATION_TEXT_FIELDS}
+        if pending:
+            fields["status"] = Notification.Status.SKIPPED
+        Notification.objects.filter(pk=row.pk).update(data=data, is_read=True, **fields)
+    _delete(
+        "notifications.Notification",
+        Notification.objects.filter(user=user).exclude(pk__in=[row.pk for row in markers]),
+    )
+    deleted["notifications.Notification"] += blanked
+    _delete("ai.Conversation", Conversation.all_objects.filter(user=user))
+    # Outbox адресован по внешнему имени личности (username прокси ``bot:...``),
+    # FK на человека у него нет.
+    outbox = NutritionOutboxEvent.objects.filter(external_user_id=user.username)
+    _delete("nutrition.NutritionOutboxEvent", outbox)
 
     logger.info(
         "forget_all.catalog.erased user=%s initiator=%s counts=%s",
