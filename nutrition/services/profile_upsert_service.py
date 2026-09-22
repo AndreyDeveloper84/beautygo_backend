@@ -175,6 +175,17 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
         # Названа — прежняя пометка пропуска больше не правда.
         flags.pop("activity_skipped", None)
 
+    # DRF-2279: названное значение — подтверждение: пометка прежнего
+    # умолчания снимается. Пропуск тоже снимает её — значения больше нет,
+    # «не названа» говорит NULL. Сама пометка через upsert не пишется: её
+    # нет ни в ``_DIRECT_FIELDS``, ни в сериализаторе.
+    marks = set(profile.legacy_default_inputs or [])
+    if "activity_coefficient" in payload or "activity" in skipped:
+        marks.discard("activity_coefficient")
+    if "pace" in payload or ("goal" in payload and "pace" not in payload):
+        marks.discard("pace")
+    profile.legacy_default_inputs = sorted(marks)
+
     # Тот же класс для темпа: пришла цель, которой темп не нужен, — прежний
     # темп (от другой цели, возможно давний) больше не вход. Пришла цель с
     # темпом без самого темпа — прежний не переносится молча: расчёт
@@ -212,6 +223,7 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
         goal=profile.goal or "",
         pace=profile.pace or "",
         health_flags=profile.health_flags or {},
+        legacy_default=frozenset(profile.legacy_default_inputs or []),
     ))
 
     # ── Действующее не заменяется (DRF-2192, DRF-2193; §63, 21.09.2026) ──
@@ -497,6 +509,8 @@ def _serialize(
         "activity_coefficient": profile.activity_coefficient,
         "goal": profile.goal or None,
         "pace": profile.pace or None,
+        # DRF-2279: какие из значений выше — прежние умолчания, а не ответы.
+        "legacy_default_inputs": list(profile.legacy_default_inputs or []),
         "diet_preference": profile.diet_preference or "none",
         "norms": _norms_block(profile),
         "health_flags": profile.health_flags or {},
