@@ -36,6 +36,7 @@ _TENANT = "ссылка на организацию, не данные о чел
 _REPEAT = "служебный ключ повтора запроса, не данные о человеке"
 _UPDATED = "служебная отметка изменения строки"
 _TELEMETRY = "техническая телеметрия распознавания (провайдер, время, стоимость, ошибка), не данные о человеке"
+_MODEL_TELEMETRY = "техническая телеметрия модели (токены, задержка), не данные о человеке"
 
 #: Пометка к сырому ответу модели — в самом ответе, рядом с разделом.
 RAW_MODEL_RESPONSE_NOTE = (
@@ -151,6 +152,27 @@ FIELDS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
          "rule": "rule_id", "appointment": "appointment_id"},
         {"id": _KEY, "user": _OWNER},
     ),
+    # DRF-2277 — история уведомлений и ИИ-чат приложения (решение владельца §72 п.3).
+    "notifications.Notification": (
+        _same("template_id", "channel", "title", "body", "data", "deep_link", "status",
+              "is_read", "created_at", "sent_at"),
+        {"id": _KEY, "user": _OWNER,
+         "error": "техническая ошибка доставки (транспорт пуша/SMS), не данные о человеке"},
+    ),
+    "ai.Conversation": (
+        _same("is_active", "deleted_at", "last_message_at", "created_at"),
+        {"id": _KEY, "user": _OWNER, "tenant": _TENANT},
+    ),
+    "ai.Message": (
+        # Сырой вызов инструмента модели — как сырой ответ распознавания (DRF-2214):
+        # спорное решено в пользу полноты, с пометкой.
+        {**_same("role", "content", "action_type", "action_data", "created_at"),
+         "tool_call": "raw_tool_call"},
+        {"id": _KEY, "conversation": _NEST,
+         "tool_call_id": "служебная связь вызова инструмента с его результатом",
+         "tokens_in": _MODEL_TELEMETRY, "tokens_out": _MODEL_TELEMETRY,
+         "latency_ms": _MODEL_TELEMETRY},
+    ),
 }
 
 
@@ -162,7 +184,18 @@ DECLARED_NOT_EXPORTED: dict[str, str] = {
         "суточный служебный кэш ответа на запись профиля питания — копия раздела "
         "nutrition_profile, выгруженного целиком"
     ),
+    # DRF-2277 — решение главного окна (#545).
+    "nutrition.NutritionOutboxEvent": (
+        "очередь вебхуков в бот — служебная копия профиля питания и дневника "
+        "(вода, рубежи, паттерны, распознавание), выгруженных своими разделами"
+    ),
 }
+
+#: Пометка к сырому вызову инструмента модели в ИИ-чате — рядом с разделом.
+RAW_TOOL_CALL_NOTE = (
+    "raw_tool_call — сырой вызов инструмента моделью ИИ-чата, как его вернул "
+    "провайдер; разобранное из него — в полях action_type и action_data"
+)
 
 
 def _plain(value):
@@ -275,6 +308,26 @@ def export_shown_hints(user) -> list[dict]:
     ]
 
 
+def export_notification_history(user) -> list[dict]:
+    """Все строки уведомлений человека — и обезличенные маркеры битов (DRF-2277):
+    выгрузка называет всё, что хранится."""
+    from notifications.models import Notification
+
+    return [_row(x) for x in Notification.objects.filter(user=user).order_by("created_at", "id")]
+
+
+def export_app_ai_chat(user) -> dict:
+    """ИИ-чат приложения — беседы с сообщениями, включая мягко удалённые (DRF-2277)."""
+    from ai.models import Conversation
+
+    conversations = []
+    for conv in Conversation.all_objects.filter(user=user).order_by("created_at", "id"):
+        item = _row(conv)
+        item["messages"] = [_row(m) for m in conv.messages.order_by("created_at", "id")]
+        conversations.append(item)
+    return {"conversations": conversations, "notes": {"raw_tool_call": RAW_TOOL_CALL_NOTE}}
+
+
 def export_remembered(user) -> dict:
     """Все разделы запомненного — по слову словаря стирания на раздел."""
     return {
@@ -283,4 +336,6 @@ def export_remembered(user) -> dict:
         "nutrition_profile": export_nutrition_profile(user),
         "food_diary": export_food_diary(user),
         "shown_hints": export_shown_hints(user),
+        "notification_history": export_notification_history(user),
+        "app_ai_chat": export_app_ai_chat(user),
     }

@@ -139,13 +139,16 @@ REMEMBERED_SCOPE: dict[str, str] = {
     # DRF-2277 — решение владельца §72 п.3.
     "notifications.Notification": "notification_history",
     "ai.Conversation": "app_ai_chat",
-    "nutrition.NutritionOutboxEvent": "nutrition_outbox",
+    # Очередь вебхуков в бот — служебная копия профиля питания и дневника
+    # (темы: профиль, вода, рубеж, паттерн, распознавание); своего слова нет,
+    # темы дневника — большинство (решение главного окна, #545).
+    "nutrition.NutritionOutboxEvent": "food_diary",
 }
 
 #: Порядок слов в scope — стабильный, от целей к дневнику.
 SCOPE_ORDER: tuple[str, ...] = (
     "goals", "wellness_plan", "nutrition_profile", "food_diary", "shown_hints",
-    "notification_history", "app_ai_chat", "nutrition_outbox",
+    "notification_history", "app_ai_chat",
 )
 
 
@@ -293,9 +296,7 @@ def _remembered_querysets(user) -> dict:
             _blank_marker_q()
         ),
         "ai.Conversation": Conversation.all_objects.filter(user=user),
-        "nutrition.NutritionOutboxEvent": NutritionOutboxEvent.objects.filter(
-            external_user_id=user.username
-        ),
+        "nutrition.NutritionOutboxEvent": NutritionOutboxEvent.objects.filter(external_user_id=user.username),
     }
 
 
@@ -424,10 +425,8 @@ def erase_remembered_catalog(
     _delete("ai.Conversation", Conversation.all_objects.filter(user=user))
     # Outbox адресован по внешнему имени личности (username прокси ``bot:...``),
     # FK на человека у него нет.
-    _delete(
-        "nutrition.NutritionOutboxEvent",
-        NutritionOutboxEvent.objects.filter(external_user_id=user.username),
-    )
+    outbox = NutritionOutboxEvent.objects.filter(external_user_id=user.username)
+    _delete("nutrition.NutritionOutboxEvent", outbox)
 
     logger.info(
         "forget_all.catalog.erased user=%s initiator=%s counts=%s",

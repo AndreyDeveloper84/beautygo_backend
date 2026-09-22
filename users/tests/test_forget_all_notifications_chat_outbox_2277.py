@@ -22,6 +22,8 @@
 * n6 — outbox питания связанного прокси стёрт путём бота C5.2;
 * n7 — журнал и ответ называют стёртое словами, C5.3 считает остаток;
 * d1 — D3 стирает outbox по имени прокси ДО переименования, остатка нет.
+* e1–e3 — «что стирается — то выгружается» (#544): история уведомлений и ИИ-чат
+  выгружаются своими разделами, outbox — объявлен невыгружаемым с причиной.
 * r1–r5 (ревью #545) — повтор ничего не пишет; маркер в очереди доставки —
   SKIPPED, пустого пуша нет; в ленте маркера нет, он прочитан; маркер чужой
   записи и маркер закрытого окна ухода — история.
@@ -199,7 +201,8 @@ class TestN7WordsAndResidue:
         words = remembered_scope(erase_remembered_catalog(user, initiator="test"))
         words += remembered_scope(erase_remembered_catalog(proxy, initiator="test"))
 
-        assert {"notification_history", "app_ai_chat", "nutrition_outbox"} <= set(words)
+        # Outbox — служебная копия дневника: его слово food_diary (решение главного окна).
+        assert {"notification_history", "app_ai_chat", "food_diary"} <= set(words)
         # Обезличенный маркер открытого окна — не остаток.
         assert Notification.objects.filter(user=user).count() == 1
         assert remembered_residue(user) == 0 and remembered_residue(proxy) == 0
@@ -299,3 +302,52 @@ class TestR5ClosedAftercareWindowIsHistory:
         erase_remembered_catalog(user, initiator="test")
 
         assert not Notification.objects.filter(user=user).exists()
+
+
+# ─── выгрузка (стык с #544) ──────────────────────────────────────────────────
+
+
+def _export(u) -> dict:
+    resp = _internal().get(f"/api/v1/internal/users/{u.pk}/personal-data/export/")
+    assert resp.status_code == 200, resp.content
+    return resp.json()["data"]
+
+
+class TestE1NotificationHistoryIsExported:
+    def test_the_rows_carry_their_text(self, user) -> None:  # noqa: F811
+        _notification(user, "promo_digest")
+
+        rows = _export(user)["notification_history"]
+
+        assert [r["title"] for r in rows] == [SECRET_TITLE]
+        assert "error" not in rows[0] and "user" not in rows[0]
+
+
+class TestE2AppAiChatIsExported:
+    def test_conversations_carry_their_messages(self, user) -> None:  # noqa: F811
+        conv = Conversation.objects.create(user=user)
+        Message.objects.create(conversation=conv, role="user", content="у меня секущиеся кончики",
+                               tokens_in=12)
+
+        chat = _export(user)["app_ai_chat"]
+
+        (item,) = chat["conversations"]
+        assert [m["content"] for m in item["messages"]] == ["у меня секущиеся кончики"]
+        assert "tokens_in" not in item["messages"][0]
+        assert "raw_tool_call" in chat["notes"]
+
+
+class TestE3OutboxIsDeclaredNotExported:
+    def test_it_is_declared_with_a_reason_and_absent(self, user) -> None:  # noqa: F811
+        from users.remembered_export import DECLARED_NOT_EXPORTED
+
+        User.objects.create(username=PROXY, role="client", is_proxy=True, linked_user=user)
+        NutritionOutboxEvent.objects.create(
+            topic=NutritionOutboxEvent.Topic.PROFILE_UPDATED, external_user_id=PROXY,
+            payload={"marker": "outbox-2277"},
+        )
+        data = _export(user)
+
+        assert "nutrition.NutritionOutboxEvent" in DECLARED_NOT_EXPORTED
+        assert "profile" in data  # наличие: выгрузка та самая
+        assert "outbox-2277" not in repr(data)
