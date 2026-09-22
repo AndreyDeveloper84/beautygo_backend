@@ -499,6 +499,14 @@ class NutritionProfile(models.Model):
     pace = models.CharField(
         max_length=12, choices=Pace.choices, blank=True, default="",
     )
+    # DRF-2279 (CD §76, №32): входы, значения которых подставил каталог до
+    # вопроса 59 (#543), — «legacy_default», не ответы человека. Список имён
+    # (``activity_coefficient``, ``pace``); для расчёта такой вход «не
+    # назван», названное значение (в том числе то же) снимает пометку. Ставит
+    # только команда ``mark_legacy_default_inputs``. НЕ в ``health_flags``:
+    # DT-1 (§67) выключает внешнюю модель при любом флаге здоровья (#534), а
+    # это и не данные о здоровье.
+    legacy_default_inputs = models.JSONField(default=list, blank=True)
     diet_preference = models.CharField(max_length=32, blank=True, default="none")
 
     # Health flags + skipped markers + allergies

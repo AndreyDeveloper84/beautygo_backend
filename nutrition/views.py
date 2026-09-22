@@ -74,6 +74,7 @@ from nutrition.services.manual_targets_service import (
     set_manual_targets,
 )
 from nutrition.services.profile_upsert_service import (
+    LegacyDefaultUnconfirmed,
     NothingToConfirm,
     confirm_targets,
     get_profile_response,
@@ -1352,6 +1353,18 @@ class InternalProfileTargetsConfirmView(APIView):
             )
         try:
             body, outcome = confirm_targets(user=user, external_user_id=external_user_id)
+        except LegacyDefaultUnconfirmed as exc:
+            logger.info(
+                "nutrition.targets.confirm_refused_legacy user=%s fields=%s",
+                user.pk,
+                ",".join(exc.fields),
+            )
+            return error_response(
+                exc.code,
+                str(exc),
+                details={"fields": exc.fields},
+                status_code=status.HTTP_409_CONFLICT,
+            )
         except NothingToConfirm as exc:
             logger.info(
                 "nutrition.targets.confirm_refused user=%s source=%s",

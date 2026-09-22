@@ -145,6 +145,9 @@ def maintenance_kcal(profile: NutritionProfile) -> int | None:
     snapshot = snapshot_as_named(profile)
     if not snapshot:
         return None
+    # DRF-2279: ``legacy_default`` сюда НЕ передаётся намеренно — считается
+    # отклонение от того, что человек ВИДЕЛ, а видел он число, посчитанное от
+    # входов снимка, какими они были.
     norms = compute_norms(ProfileInputs(
         gender=str(snapshot.get("gender") or ""),
         age=snapshot.get("age"),

@@ -623,6 +623,13 @@ class NutritionProfileUpsertSerializer(serializers.Serializer):
 
 
 class NutritionProfileResponseSerializer(serializers.Serializer):
+    # DRF-2279: имена входов, значения которых подставил каталог до вопроса
+    # 59, — для расчёта они «не названы», и спрашивающая сторона (бот) о них
+    # переспрашивает. Объявлено здесь, чтобы поле было и в схеме, не только
+    # в ответе.
+    legacy_default_inputs = serializers.ListField(
+        child=serializers.CharField(), required=False, read_only=True,
+    )
     """Wire shape of GET / POST /internal/profile/ (spec §1.1)."""
 
     external_user_id = serializers.CharField()
