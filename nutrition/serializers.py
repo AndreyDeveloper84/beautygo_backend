@@ -54,6 +54,16 @@ class OmitAbsentTargetsMixin:
 # FoodScan.nutrition JSON (DRF-260 added these). Exposed in the
 # response under ``nutrition.vitamins``. Sparse map: only non-null
 # keys land in the wire payload.
+# DRF-2335: числа на 100 г — проводное имя ← имя в строке. Отдаются
+# отдельной вложенностью, чтобы ни один потребитель не принял их за
+# итоги порции: клиент, читающий ``calories``, получит пусто, а не 49.
+_PER_100G_KEYS = (
+    ("calories", "kcal_per_100g"),
+    ("protein_g", "protein_g_per_100g"),
+    ("fat_g", "fat_g_per_100g"),
+    ("carbs_g", "carbs_g_per_100g"),
+)
+
 _VITAMIN_KEYS = (
     "vitamin_d_iu",
     "vitamin_b12_mcg",
@@ -219,6 +229,13 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
         keys in ``FoodScan.nutrition`` (DRF-260 added these). Sparse:
         null values are omitted to keep the wire payload small and
         avoid mobile-render artefacts ("0 mg" for unknown).
+
+        DRF-2335: пустые итоги больше не съедают числа на 100 г. Раньше
+        «нашли блюдо, но провайдер не назвал порцию» отдавало ``null``
+        целиком — вместе с посчитанными значениями на 100 г, которые
+        лежат в строке. Теперь они идут в ``per_100g``, а итоги остаются
+        пустыми: 49 ккал на 100 г и 49 ккал за тарелку — разные
+        утверждения, и подменять одно другим нельзя.
         """
         n = obj.nutrition
         if not n:
@@ -227,7 +244,12 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
         protein = n.get("protein_g")
         fat = n.get("fat_g")
         carbs = n.get("carbs_g")
-        if all(v is None for v in (kcal, protein, fat, carbs)):
+        per_100g = {
+            wire: n[stored]
+            for wire, stored in _PER_100G_KEYS
+            if n.get(stored) is not None
+        }
+        if all(v is None for v in (kcal, protein, fat, carbs)) and not per_100g:
             return None
 
         # DRF-264: build sparse vitamins map from per-portion micros.
@@ -241,6 +263,7 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
             "protein_g": protein,
             "fat_g": fat,
             "carbs_g": carbs,
+            "per_100g": per_100g,
             "vitamins": vitamins,
         }
 
