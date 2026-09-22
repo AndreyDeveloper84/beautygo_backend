@@ -4,7 +4,9 @@ PILOT_CONTRACTS_2026-08-15 v1.3.0:
 
 - **C5.1** ``GET /api/v1/internal/users/{ayla_user_id}/personal-data/export/``
   — synchronous JSON: profile subset + full personal-context catalogue
-  (declared prefs). The bot (W3) aggregates this with bot-side data into
+  (declared prefs) + (DRF-2214) everything «forget everything» erases —
+  goals, plan, nutrition profile, food diary, hint history
+  (``users.remembered_export``). The bot (W3) aggregates this with bot-side data into
   the customer-facing export.
 - **C5.2 / AMD-006** ``DELETE /api/v1/internal/users/{ayla_user_id}/personal-data/``
   — Ayla-side cascade of the customer delete: wipes UserPersonalContext and
@@ -63,6 +65,7 @@ from users.forget_all_catalog import (
 )
 from users.scan_file_erasure import remove_scan_files, scan_file_names
 from users.permissions import IsInternalBearerForSubject
+from users.remembered_export import export_remembered
 from users.personal_context_erasure import (
     context_row_state,
     erase_personal_context,
@@ -265,8 +268,11 @@ class InternalPersonalDataExportView(AuditedPersonalDataAccess, APIView):
             "152-ФЗ personal-data export (C5.1): profile subset "
             "(phone, email, full_name, bio, city) + the full "
             "personal-context catalogue + the specialist profile with "
-            "the whole portfolio (DRF-1918). Synchronous JSON; archives "
-            "are post-pilot."
+            "the whole portfolio (DRF-1918) + (DRF-2214) what the catalog "
+            "remembered and «forget everything» erases: goals, wellness_plan, "
+            "nutrition_profile, food_diary (scan photos by URL, the raw model "
+            "response marked as such), shown_hints — for every identity. "
+            "Synchronous JSON; archives are post-pilot."
         ),
     )
     def get(self, request: Request, user_id: UUID) -> Response:
@@ -284,6 +290,7 @@ class InternalPersonalDataExportView(AuditedPersonalDataAccess, APIView):
                 "profile": _profile_subset(identity),
                 "personal_context": _context_data(identity),
                 "specialist_profile": _specialist_profile(identity),
+                **export_remembered(identity),
             }
             for identity in subject_users(user)[1:]
         ]
@@ -298,6 +305,10 @@ class InternalPersonalDataExportView(AuditedPersonalDataAccess, APIView):
             "profile": profile_data,
             "personal_context": context_data,
             "specialist_profile": _specialist_profile(user),
+            # DRF-2214 — что стирается «забудь всё», то и выгружается: цели,
+            # план, профиль питания, дневник с фото, история подсказок
+            # (``users.remembered_export``), раздел на слово словаря стирания.
+            **export_remembered(user),
             "linked_identities": linked,
         })
 
