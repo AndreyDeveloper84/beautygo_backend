@@ -9,8 +9,8 @@ C5.2 (путь бота, ``InternalPersonalDataDeleteView``) с DRF-2214 обх�
 
 Узлы — по всем трём путям: дневник и запомненное прокси стёрты, надгробие
 прокси без строки профиля не создаётся, сосед и непривязанный прокси не
-тронуты; outbox прокси — под strict xfail до слияния #545 (стирание outbox
-вводит он).
+тронуты; outbox прокси, адресованный ``bot:…``, стёрт (стирание outbox ввёл
+#545; до его слияния узел стоял под strict xfail).
 """
 
 from __future__ import annotations
@@ -95,10 +95,6 @@ class TestEveryPathErasesTheWholeSubject:
 
 class TestTheProxyOutbox:
     @ALL_PATHS
-    @pytest.mark.xfail(
-        strict=True,
-        reason="стирание NutritionOutboxEvent вводит #545 (DRF-2277); после слияния — снять",
-    )
     def test_the_proxys_outbox_goes(self, user, forget) -> None:  # noqa: F811
         proxy = _proxy(user, "fa2305-outbox")
         NutritionOutboxEvent.objects.create(
