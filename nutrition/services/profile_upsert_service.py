@@ -175,6 +175,17 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
         # Названа — прежняя пометка пропуска больше не правда.
         flags.pop("activity_skipped", None)
 
+    # DRF-2279: названное значение — подтверждение: пометка прежнего
+    # умолчания снимается. Пропуск тоже снимает её — значения больше нет,
+    # «не названа» говорит NULL. Сама пометка через upsert не пишется: её
+    # нет ни в ``_DIRECT_FIELDS``, ни в сериализаторе.
+    marks = set(profile.legacy_default_inputs or [])
+    if "activity_coefficient" in payload or "activity" in skipped:
+        marks.discard("activity_coefficient")
+    if "pace" in payload or ("goal" in payload and "pace" not in payload):
+        marks.discard("pace")
+    profile.legacy_default_inputs = sorted(marks)
+
     # Тот же класс для темпа: пришла цель, которой темп не нужен, — прежний
     # темп (от другой цели, возможно давний) больше не вход. Пришла цель с
     # темпом без самого темпа — прежний не переносится молча: расчёт
@@ -212,6 +223,7 @@ def _recompute_and_persist(profile: NutritionProfile) -> None:
         goal=profile.goal or "",
         pace=profile.pace or "",
         health_flags=profile.health_flags or {},
+        legacy_default=frozenset(profile.legacy_default_inputs or []),
     ))
 
     # ── Действующее не заменяется (DRF-2192, DRF-2193; §63, 21.09.2026) ──
@@ -497,6 +509,8 @@ def _serialize(
         "activity_coefficient": profile.activity_coefficient,
         "goal": profile.goal or None,
         "pace": profile.pace or None,
+        # DRF-2279: какие из значений выше — прежние умолчания, а не ответы.
+        "legacy_default_inputs": list(profile.legacy_default_inputs or []),
         "diet_preference": profile.diet_preference or "none",
         "norms": _norms_block(profile),
         "health_flags": profile.health_flags or {},
@@ -638,6 +652,25 @@ def _strip_microseconds(value):
 # ---------------------------------------------------------------------------
 
 
+class LegacyDefaultUnconfirmed(Exception):
+    """Подтверждать нечем: в расчёте есть прежнее умолчание (DRF-2279).
+
+    Предложение, посчитанное до пометки, стоит на подставленных входах.
+    Подтвердить его значило бы записать подставленное как ответ человека —
+    ровно то, что решение владельца (CD §76, №32) запрещает. Отказ несёт
+    ИМЕНА входов: спрашивающая сторона (бот) знает, о чём спросить.
+    """
+
+    code = "LEGACY_DEFAULT_UNCONFIRMED"
+
+    def __init__(self, fields: list[str]) -> None:
+        self.fields = list(fields)
+        super().__init__(
+            "в расчёте есть прежние умолчания, не подтверждённые человеком: "
+            + ", ".join(self.fields)
+        )
+
+
 class NothingToConfirm(Exception):
     """Подтверждать нечего: нет предложения ни на месте, ни рядом.
 
@@ -654,6 +687,21 @@ class NothingToConfirm(Exception):
             f"Подтверждать нечего: ориентир в состоянии {source!r}, "
             "а не 'ayla_proposed'."
         )
+
+
+def _legacy_in_play(profile: NutritionProfile) -> list[str]:
+    """Помеченные входы, участвующие в расчёте этой строки (DRF-2279).
+
+    Темп — только при цели с темпом: у «поддерживать» он в число не входит,
+    и подтверждать по нему нечего.
+    """
+    from nutrition.services.nutrition_profile_service import PACE_GOALS
+
+    marks = set(profile.legacy_default_inputs or [])
+    in_play = {"activity_coefficient"}
+    if profile.goal in PACE_GOALS:
+        in_play.add("pace")
+    return sorted(marks & in_play)
 
 
 def confirm_targets(*, user, external_user_id: str) -> tuple[dict, str]:
@@ -684,6 +732,11 @@ def confirm_targets(*, user, external_user_id: str) -> tuple[dict, str]:
         )
         if profile is None:
             raise NothingToConfirm(Source.NONE)
+        # DRF-2279: раньше всего остального — подтверждать посчитанное на
+        # подставленном нельзя; сначала человек называет вход.
+        unconfirmed = _legacy_in_play(profile)
+        if unconfirmed:
+            raise LegacyDefaultUnconfirmed(unconfirmed)
         source = profile.targets_source
         pending = profile.pending_proposal or None
         # Виды, у которых предложение лежит НА МЕСТЕ (действующего не было).

@@ -246,6 +246,9 @@ class ProfileInputs:
     goal: str = ""
     pace: str = ""
     health_flags: dict = field(default_factory=dict)
+    # DRF-2279: входы с прежним умолчанием (``legacy_default_inputs``) —
+    # для расчёта «не названы», как пустые.
+    legacy_default: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -326,8 +329,12 @@ def _missing_inputs(inputs: ProfileInputs) -> list[str]:
         # и прежний ``_normalise_activity`` так его и читал.
         if value is None or value == "" or (name == "activity_coefficient" and not value):
             missing.append(name)
-    # Темп обязателен там, где он меняет число (вопрос 59).
-    if inputs.goal in PACE_GOALS and not inputs.pace:
+        elif name in inputs.legacy_default:
+            # DRF-2279: значение есть, но его подставил каталог — не ответ.
+            missing.append(name)
+    # Темп обязателен там, где он меняет число (вопрос 59); помеченный
+    # прежний темп — тоже «не назван» (DRF-2279), но только там же.
+    if inputs.goal in PACE_GOALS and (not inputs.pace or "pace" in inputs.legacy_default):
         missing.append("pace")
     return missing
 
