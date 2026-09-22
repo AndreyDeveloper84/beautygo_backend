@@ -181,6 +181,25 @@ def _settle_not_recognized(scan: FoodScan, exc: AllProvidersFailedError, user) -
     food_scan_budget.refund_personal(user)
 
 
+def _settle_permanent_refusal(exc: AllProvidersFailedError, user) -> None:
+    """DRF-2322: стойкий отказ распознавателя — вернуть попытку дня.
+
+    Поломка наша (счёт не активен, ключ отвергнут, квота исчерпана), и день
+    человека за неё не тратится. Личная попытка возвращается всегда; общий
+    потолок — по факту оплаченных вызовов: ``permanent_reason`` выставляется,
+    только когда ВСЕ опрошенные провайдеры отказали стойко, а такой отказ не
+    несёт ``partial``, то есть вызова, за который заплачено, не было. Если
+    частичный результат всё же пришёл, потолок остаётся потраченным (DRF-2218).
+    """
+    food_scan_budget.refund_personal(user)
+    paid = any(
+        getattr(getattr(err, "partial", None), "usage", None)
+        for err in (exc.primary_err, exc.fallback_err)
+    )
+    if not paid:
+        food_scan_budget.refund_total()
+
+
 class FoodScanView(APIView):
     """POST /api/v1/nutrition/scan/."""
 
@@ -259,6 +278,8 @@ class FoodScanView(APIView):
                 error_code = "FOOD_API_UNAVAILABLE"
                 http_status = status.HTTP_503_SERVICE_UNAVAILABLE
                 msg = "Сервис распознавания временно недоступен"
+                if exc.permanent_reason:
+                    _settle_permanent_refusal(exc, request.user)
 
             scan.error_code = error_code
             scan.error_message = str(exc)[:500]
@@ -392,6 +413,8 @@ class InternalFoodScanView(APIView):
                 error_code = "FOOD_API_UNAVAILABLE"
                 http_status = status.HTTP_503_SERVICE_UNAVAILABLE
                 msg = "Сервис распознавания временно недоступен"
+                if exc.permanent_reason:
+                    _settle_permanent_refusal(exc, user)
 
             scan.error_code = error_code
             scan.error_message = str(exc)[:500]
