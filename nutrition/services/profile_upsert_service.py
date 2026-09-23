@@ -23,7 +23,15 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 
 from nutrition.models import NutritionProfile, ProfileIdempotencyKey
-from nutrition.services.diet_type import DIET_FIELD, answer_diet, diet_answered, skip_diet
+from nutrition.services.diet_type import (  # noqa: F401
+    DietType,
+    DIET_FIELD,
+    DIET_SKIP_KEY,
+    DIET_SKIPPED_FLAG,
+    answer_diet,
+    diet_answered,
+    skip_diet,
+)
 from nutrition.services.nutrition_profile_service import (
     ProfileInputs,
     compute_norms,
@@ -168,7 +176,7 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
         # DRF-2310: тип питания разбирается ниже своим кодом. Общий цикл
         # поставил бы флаг и поверх настоящего ответа — то есть записал бы
         # рядом «назвал» и «не назвал» об одном вопросе.
-        if field == DIET_FIELD:
+        if field == DIET_SKIP_KEY:
             continue
         flags[f"{field}_skipped"] = True
 
@@ -204,6 +212,12 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
     if "goal" in payload and "pace" not in payload:
         profile.pace = ""
 
+    if diet_answered(profile):
+        # DRF-2310: «назвал» и «не назвал» об одном вопросе рядом не лежат.
+        # Правило живёт в ``skip_diet``, но флаг приходит и прямым телом
+        # (``health_flags``), мимо него — поэтому снимается здесь тоже.
+        flags.pop(DIET_SKIPPED_FLAG, None)
+
     profile.health_flags = flags
 
     # DRF-2310. Тип питания — после флагов: и ответ, и пропуск пишут в те же
@@ -212,9 +226,9 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
     # ответа не было.
     # Эхо прежнего значения (``none``) ответом не делает ничего: молчание,
     # вернувшееся обратно, остаётся молчанием.
-    if payload.get(DIET_FIELD) in NutritionProfile.DietType.values:
+    if payload.get(DIET_FIELD) in DietType.values:
         answer_diet(profile, payload[DIET_FIELD], note=payload.get("diet_note", ""))
-    elif DIET_FIELD in skipped:
+    elif DIET_SKIP_KEY in skipped:
         skip_diet(profile)
 
     if "disclaimer_acked" in payload:
@@ -235,7 +249,7 @@ _CALCULATION_INPUTS: frozenset[str] = frozenset({
 #: должно. Тот же довод, что в докстринге ``targets_recompute_gate``, где
 #: ``{"diet_preference": "vegetarian"}`` назван телом, которое ориентиров не
 #: трогает.
-_SKIPS_OUTSIDE_CALCULATION: frozenset[str] = frozenset({DIET_FIELD})
+_SKIPS_OUTSIDE_CALCULATION: frozenset[str] = frozenset({DIET_SKIP_KEY})
 
 
 def _touches_calculation(payload: dict) -> bool:

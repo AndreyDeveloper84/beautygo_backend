@@ -18,6 +18,7 @@ import pytest
 from rest_framework.test import APIClient
 
 from nutrition.models import NutritionProfile
+from nutrition.services.diet_type import DietType
 from nutrition.services.personal_calculation_consent import (
     PERSONAL_CALCULATION,
     PERSONAL_CALCULATION_FIELDS,
@@ -79,7 +80,7 @@ class TestTheBodyIsRefusedWithoutABasis:
         # незакрытое поле в список отказа не попадает.
         r = _post({
             "weight_kg": 70.0, "height_cm": 170,
-            "diet_preference": NutritionProfile.DietType.UNRESTRICTED,
+            "diet_preference": DietType.OMNIVORE,
         })
 
         fields = r.json()["error"]["details"]["fields"]

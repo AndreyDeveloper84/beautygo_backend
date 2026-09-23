@@ -7,8 +7,15 @@
 Состав совпал со словарём команд забывания бота
 (``apps/persona/memory_commands.py``), и это совпадение, а не основание:
 тот словарь — матчер фраз («забудь, что я веган»), он не решает, что
-человека спрашивают. Происхождение списка — слово владельца; если однажды
-списки разойдутся, разойтись им положено именно так.
+человека спрашивают. Происхождение списка — слово владельца.
+
+СЛОВАРЬ ОДИН НА КАТАЛОГ — ``users.UserPersonalContext.DietType``. Он старше
+этого листа и уже несёт тот самый состав; своего здесь нет намеренно (решение
+24.09.2026). Два словаря одного смысла разошлись бы молча — сегодня они уже
+расходились ровно в одном значении: «без ограничений» там зовётся
+``omnivore``, и код этого значения НЕ меняется, потому что в нём лежат данные
+живых людей. Заодно ``omnivore`` не равен умолчанию столбца ``none``, и
+прежние строки по-прежнему не сходят за ответ.
 
 # Почему «без ограничений» — не ``none``
 
@@ -51,6 +58,11 @@ from __future__ import annotations
 from django.utils import timezone
 
 from nutrition.models import NutritionProfile
+from users.models import UserPersonalContext
+from users.personal_context_direct_answer import record_direct_answer
+
+#: Словарь значений. Импортируется, а не объявляется здесь.
+DietType = UserPersonalContext.DietType
 
 #: Имя поля — одно на все три места: пометка легаси, флаг пропуска, ответ.
 DIET_FIELD = "diet_preference"
@@ -60,8 +72,17 @@ DIET_FIELD = "diet_preference"
 #: игнорируют, иначе обычный read-modify-write ломался бы отказом.
 LEGACY_DIET_ECHO = "none"
 
+#: Имя вопроса в ``_skipped_fields`` — КОРОТКОЕ, как у всех остальных
+#: пропусков (``weight`` при столбце ``weight_kg``, ``activity`` при
+#: ``activity_coefficient``). Возьми здесь имя столбца — и бот, написанный
+#: по общему образцу, прислал бы ``"diet"``: пропуск не записался бы, в
+#: словаре здоровья завёлся бы неизвестный ключ, следующий же
+#: read-modify-write получил бы отказ, а человек молча лишился бы живого
+#: комментария модели. Одна опечатка — три немых отказа.
+DIET_SKIP_KEY = "diet"
+
 #: Флаг пропуска — та же форма, что у остальных вопросов анкеты.
-DIET_SKIPPED_FLAG = f"{DIET_FIELD}_skipped"
+DIET_SKIPPED_FLAG = f"{DIET_SKIP_KEY}_skipped"
 
 
 def diet_answered(profile: NutritionProfile) -> bool:
@@ -74,9 +95,9 @@ def diet_answered(profile: NutritionProfile) -> bool:
     if profile.diet_answered_at is None:
         return False
     value = (profile.diet_preference or "").strip()
-    if value not in NutritionProfile.DietType.values:
+    if value not in DietType.values:
         return False
-    if value == NutritionProfile.DietType.OTHER:
+    if value == DietType.OTHER:
         return bool((profile.diet_note or "").strip())
     return True
 
@@ -84,15 +105,24 @@ def diet_answered(profile: NutritionProfile) -> bool:
 def answer_diet(profile: NutritionProfile, value: str, *, note: str = "") -> None:
     """Записать ответ: значение, слова для «другого», снятие прежних пометок.
 
-    Ничего не сохраняет в базу — вызывающий решает, когда писать (upsert
-    делает это своей транзакцией).
+    В базу пишет ровно одно — строку личного контекста (память ИИ): она
+    ЖИВЁТ отдельно от профиля, и оставить её вызывающему значило бы
+    разрешить расхождение, ради которого §77 п. 3 и написан. Сам профиль не
+    сохраняется: этим распоряжается upsert своей транзакцией.
     """
-    if value not in NutritionProfile.DietType.values:
+    if value not in DietType.values:
         raise ValueError(f"тип питания вне списка владельца: {value!r}")
 
     profile.diet_preference = value
-    profile.diet_note = note.strip() if value == NutritionProfile.DietType.OTHER else ""
+    profile.diet_note = note.strip() if value == DietType.OTHER else ""
     profile.diet_answered_at = timezone.now()
+
+    # §77 п. 3: прямой ответ доезжает до памяти ИИ, иначе подсказка модели
+    # продолжит называть прежнюю диету, выведенную из разговора, — и человек
+    # увидит в выгрузке два разных ответа на один вопрос. Источник
+    # ``explicit`` делает названное отличимым от выведенного; «прямой ответ
+    # главнее выведенного» без этой пометки нечем исполнить.
+    record_direct_answer(profile.user, "diet_type", value)
 
     flags = dict(profile.health_flags or {})
     # Ответ отменяет прежний пропуск: человек всё-таки назвал.
