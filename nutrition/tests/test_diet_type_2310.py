@@ -21,7 +21,11 @@
 * d3 — прежнее значение хранится, но ответом не считается;
 * d4 — названный ответ снимает пометку легаси (подтверждение);
 * d5 — пропуск — не «без ограничений» и ответом не считается;
-* d6 — умолчание колонки (`none`) ответом не считается никогда.
+* d6 — умолчание колонки (`none`) ответом не считается никогда;
+* d7 — команда пометки: прежнее значение, случайно совпавшее со словом из
+  списка, метится и ответом не становится; сухой прогон ничего не пишет;
+* d8 — эхо прежнего значения (`none`) принимается и ничего не меняет:
+  ручка его сама и отдаёт, и вызывающий возвращает тело целиком.
 """
 from __future__ import annotations
 
@@ -129,3 +133,73 @@ class TestD6TheColumnDefaultIsNotAnAnswer:
 
         assert p.diet_preference == "none"  # наличие: умолчание на месте
         assert diet_answered(p) is False
+
+
+class TestD7TheMarkingCommandCoversDiet:
+    def test_a_value_that_coincides_with_the_list_is_marked_not_counted(self) -> None:
+        """Прежнее «vegan» писали свободной строкой, и от ответа оно неотличимо.
+        Без пометки такая строка молча сошла бы за ответ, которого никто не
+        давал, — а решение владельца прямо говорит: шаг не пройден."""
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        p = _profile(n=9, p="0009", diet_preference=NutritionProfile.DietType.VEGAN)
+
+        out = StringIO()
+        call_command("mark_legacy_default_inputs", stdout=out)
+        p.refresh_from_db()
+        assert p.legacy_default_inputs == []  # сухой прогон ничего не пишет
+        assert diet_answered(p) is True  # до пометки строка неотличима от ответа
+
+        call_command("mark_legacy_default_inputs", "--apply", stdout=StringIO())
+        p.refresh_from_db()
+
+        assert p.diet_preference == NutritionProfile.DietType.VEGAN  # не стёрто
+        assert DIET_FIELD in p.legacy_default_inputs
+        assert diet_answered(p) is False
+
+    def test_the_column_default_is_not_marked(self) -> None:
+        """`none` метить нечем и незачем: он и так не ответ, а пометка на нём
+        означала бы, что когда-то был ответ."""
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        p = _profile(n=10, p="0010")
+
+        call_command("mark_legacy_default_inputs", "--apply", stdout=StringIO())
+        p.refresh_from_db()
+
+        assert diet_answered(p) is False  # наличие: шаг по-прежнему не пройден
+        assert DIET_FIELD not in p.legacy_default_inputs
+
+
+class TestD8TheEchoOfTheOldValueIsAccepted:
+    def test_posting_back_what_the_endpoint_returned_changes_nothing(self) -> None:
+        """Ручка отдаёт `"diet_preference": "none"`. Вызывающий, вернувший
+        тело обратно (обычный read-modify-write), не должен получать отказ на
+        поле, которого он не трогал, — и ответом это эхо тоже не становится."""
+        from nutrition.services.profile_upsert_service import upsert_profile
+
+        p = _profile(n=11, p="0011")
+
+        upsert_profile(
+            user=p.user,
+            external_user_id="bot:max:2310011",
+            idempotency_key=None,
+            payload={"diet_preference": "none"},
+        )
+        p.refresh_from_db()
+
+        assert p.diet_preference == "none"  # наличие: значение на месте
+        assert diet_answered(p) is False
+        assert DIET_FIELD not in (p.legacy_default_inputs or [])
+
+    def test_a_value_outside_the_list_is_refused_by_the_serializer(self) -> None:
+        from nutrition.serializers import NutritionProfileUpsertSerializer as S
+
+        ser = S(data={"diet_preference": "палео"})
+
+        assert ser.is_valid() is False
+        assert "diet_preference" in ser.errors

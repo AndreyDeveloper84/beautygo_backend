@@ -460,6 +460,23 @@ class NutritionProfile(models.Model):
         GENTLE = "gentle", "Мягкий"
         MODERATE = "moderate", "Средний"
 
+    class DietType(models.TextChoices):
+        """Тип питания — состав назвал владелец 23.09.2026 (§77 п. 5, DRF-2310).
+
+        ``unrestricted``, а не ``none``: ``none`` — умолчание колонки, оно
+        лежит в каждой строке, заведённой до вопроса. Возьми его под «без
+        ограничений» — и все эти люди молча оказались бы ответившими.
+        Что считается ответом, решает :mod:`nutrition.services.diet_type`.
+        """
+
+        UNRESTRICTED = "unrestricted", "Без ограничений"
+        VEGETARIAN = "vegetarian", "Вегетарианство"
+        VEGAN = "vegan", "Веганство"
+        KETO = "keto", "Кето"
+        HALAL = "halal", "Халяль"
+        KOSHER = "kosher", "Кошер"
+        OTHER = "other", "Другое словами"
+
     user = models.OneToOneField(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -507,7 +524,17 @@ class NutritionProfile(models.Model):
     # DT-1 (§67) выключает внешнюю модель при любом флаге здоровья (#534), а
     # это и не данные о здоровье.
     legacy_default_inputs = models.JSONField(default=list, blank=True)
+    # DRF-2310. Столбец НЕ переводится на ``choices``: в нём лежат прежние
+    # значения живых людей (``none`` умолчания, ``any``, свободные строки), и
+    # ``choices`` объявил бы их недопустимыми, не сделав ни одного из них
+    # ответом. Решение владельца (§77 п. 7) — хранить молча и не стирать;
+    # список держит проверка на входе и :func:`diet_type.diet_answered`.
     diet_preference = models.CharField(max_length=32, blank=True, default="none")
+
+    # Слова к ответу «другое» (§77 п. 5: «другое словами»). ``TextField``, а
+    # не ``CharField``: длину человеческого ответа здесь никто не называл, и
+    # выдуманный предел резал бы её молча.
+    diet_note = models.TextField(blank=True, default="")
 
     # Health flags + skipped markers + allergies
     health_flags = models.JSONField(default=dict, blank=True)

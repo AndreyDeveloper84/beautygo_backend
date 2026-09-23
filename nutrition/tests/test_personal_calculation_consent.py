@@ -73,7 +73,14 @@ class TestTheBodyIsRefusedWithoutABasis:
 
     def test_the_refusal_names_every_gated_field_it_saw(self, person):
         """Вызывающий чинит своё утверждение, а не угадывает поле."""
-        r = _post({"weight_kg": 70.0, "height_cm": 170, "diet_preference": "any"})
+        # DRF-2310: тип питания принимается списком владельца, и прежнее
+        # произвольное «any» теперь отсеялось бы проверкой ДО гейта согласия,
+        # подменив предмет узла. Утверждение узла от этого не меняется:
+        # незакрытое поле в список отказа не попадает.
+        r = _post({
+            "weight_kg": 70.0, "height_cm": 170,
+            "diet_preference": NutritionProfile.DietType.UNRESTRICTED,
+        })
 
         fields = r.json()["error"]["details"]["fields"]
         assert fields == ["height_cm", "weight_kg"]

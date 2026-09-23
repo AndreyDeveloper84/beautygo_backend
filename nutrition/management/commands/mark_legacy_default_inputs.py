@@ -53,6 +53,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from nutrition.models import NutritionProfile
+from nutrition.services.diet_type import DIET_FIELD
 from nutrition.services.nutrition_profile_service import PACE_GOALS
 
 #: Прежнее умолчание схемы активности (до #543).
@@ -64,6 +65,7 @@ GROUPS: tuple[str, ...] = (
     "activity_skipped",
     "pace_moderate_no_pace_goal",
     "pace_moderate_pace_goal",
+    "diet_before_the_question",
 )
 
 #: Коэффициент, который бот слал за «Не знаю» до вопроса 59.
@@ -74,7 +76,9 @@ SKIPPED_ACTIVITY = 1.375
 REPORT_ONLY = "activity_skipped_other_value"
 
 #: Поля, которые команда обязана оставить как были.
-UNTOUCHED: tuple[str, ...] = ("activity_coefficient", "pace", "goal", "health_flags")
+UNTOUCHED: tuple[str, ...] = (
+    "activity_coefficient", "pace", "goal", "health_flags", "diet_preference",
+)
 
 
 def _report_only(profile: NutritionProfile) -> bool:
@@ -102,12 +106,25 @@ def _groups_for(profile: NutritionProfile) -> dict[str, str]:
             else "pace_moderate_no_pace_goal"
         )
         out[key] = "pace"
+    # DRF-2310 (§77 п. 7). Тип питания до вопроса никто не спрашивал: в
+    # столбце лежит либо умолчание ``none``, либо прежняя свободная строка.
+    # Решение владельца — хранить молча и не стирать, но шаг считать
+    # НЕПРОЙДЕННЫМ. Значение вне списка `diet_answered` и так не признаёт
+    # ответом; пометка нужна тем строкам, где прежнее значение СЛУЧАЙНО
+    # совпало со словом из списка («vegan» писали свободной строкой), —
+    # иначе они молча сошли бы за ответ, которого никто не давал.
+    if (profile.diet_preference or "").strip() in NutritionProfile.DietType.values:
+        out["diet_before_the_question"] = DIET_FIELD
+
     already = set(profile.legacy_default_inputs or [])
     return {group: name for group, name in out.items() if name not in already}
 
 
 class Command(BaseCommand):
-    help = "Пометить прежние умолчания темпа и активности как legacy_default (DRF-2279)."
+    help = (
+        "Пометить прежние умолчания темпа, активности и типа питания как "
+        "legacy_default (DRF-2279, DRF-2310)."
+    )
 
     def add_arguments(self, parser):
         parser.add_argument(

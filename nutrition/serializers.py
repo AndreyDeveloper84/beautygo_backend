@@ -9,6 +9,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from nutrition.models import Beverage, FoodLog, FoodScan, NutritionProfile, SavedMeal, WaterLog
+from nutrition.services.diet_type import LEGACY_DIET_ECHO
 
 
 #: Поля-ОРИЕНТИРЫ. Их отсутствие обязано доезжать до потребителя
@@ -594,9 +595,32 @@ class NutritionProfileUpsertSerializer(serializers.Serializer):
     pace = serializers.ChoiceField(
         choices=NutritionProfile.Pace.choices, required=False, allow_blank=True,
     )
+    # DRF-2310 (§77 п. 5): на входе — закрытый список владельца. Прежние
+    # значения в столбце это не трогает (их хранят молча, §77 п. 7), но
+    # НОВАЯ свободная строка туда больше не попадёт: вопрос задан списком,
+    # и ответ вне списка — не ответ на него.
     diet_preference = serializers.CharField(
         required=False, allow_blank=True, max_length=32,
     )
+    #: Слова к ответу «другое»; при других значениях не хранятся.
+    diet_note = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_diet_preference(self, value: str) -> str:
+        """Список владельца — плюс эхо прежнего значения, которое не ответ.
+
+        ``ChoiceField`` здесь был бы ловушкой: ручка ОТДАЁТ
+        ``"diet_preference": "none"`` (умолчание столбца), и вызывающий,
+        вернувший тело обратно целиком — обычный read-modify-write, — получал
+        бы отказ на поле, которого он не трогал. Поэтому ``none`` и пустая
+        строка принимаются и ничего не записывают: они и значат «ничего не
+        сказано». Любая другая строка вне списка — отказ.
+        """
+        if value in ("", LEGACY_DIET_ECHO) or value in NutritionProfile.DietType.values:
+            return value
+        raise serializers.ValidationError(
+            "тип питания задаётся списком: "
+            + ", ".join(NutritionProfile.DietType.values)
+        )
     timezone = serializers.CharField(required=False, allow_blank=True, max_length=64)
     health_flags = serializers.DictField(required=False)
     _skipped_fields = serializers.ListField(
@@ -630,6 +654,10 @@ class NutritionProfileResponseSerializer(serializers.Serializer):
     legacy_default_inputs = serializers.ListField(
         child=serializers.CharField(), required=False, read_only=True,
     )
+    # DRF-2310: «шаг пройден?» — отдельный факт от значения столбца: прежнее
+    # значение там лежит, но ответом не считается (§77 п. 7).
+    diet_note = serializers.CharField(required=False, allow_blank=True, read_only=True)
+    diet_answered = serializers.BooleanField(required=False, read_only=True)
     """Wire shape of GET / POST /internal/profile/ (spec §1.1)."""
 
     external_user_id = serializers.CharField()

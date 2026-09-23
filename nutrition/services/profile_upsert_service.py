@@ -23,6 +23,7 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 
 from nutrition.models import NutritionProfile, ProfileIdempotencyKey
+from nutrition.services.diet_type import DIET_FIELD, answer_diet, diet_answered, skip_diet
 from nutrition.services.nutrition_profile_service import (
     ProfileInputs,
     compute_norms,
@@ -142,9 +143,13 @@ def upsert_profile(
 # ---------------------------------------------------------------------------
 
 
+#: ``diet_preference`` здесь НЕТ намеренно (DRF-2310): у него свой разбор —
+#: слова к «другому», снятие пометки прежнего значения и пропуск, который
+#: значения НЕ подставляет. Прямая запись мимо него сделала бы «пропустить»
+#: молчаливым «без ограничений», а это разные вещи (§77 п. 6).
 _DIRECT_FIELDS = (
     "gender", "age", "height_cm", "weight_kg", "weight_range",
-    "activity_coefficient", "goal", "pace", "diet_preference", "timezone",
+    "activity_coefficient", "goal", "pace", "timezone",
 )
 
 
@@ -195,6 +200,17 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
         profile.pace = ""
 
     profile.health_flags = flags
+
+    # DRF-2310. Тип питания — после флагов: и ответ, и пропуск пишут в те же
+    # ``health_flags``, и порядок решает, чьё слово последнее. Ответ отменяет
+    # прежний пропуск, пропуск не отменяет значения — он лишь говорит, что
+    # ответа не было.
+    # Эхо прежнего значения (``none``) ответом не делает ничего: молчание,
+    # вернувшееся обратно, остаётся молчанием.
+    if payload.get(DIET_FIELD) in NutritionProfile.DietType.values:
+        answer_diet(profile, payload[DIET_FIELD], note=payload.get("diet_note", ""))
+    elif DIET_FIELD in skipped:
+        skip_diet(profile)
 
     if "disclaimer_acked" in payload:
         profile.disclaimer_acked = payload["disclaimer_acked"]
@@ -512,6 +528,11 @@ def _serialize(
         # DRF-2279: какие из значений выше — прежние умолчания, а не ответы.
         "legacy_default_inputs": list(profile.legacy_default_inputs or []),
         "diet_preference": profile.diet_preference or "none",
+        # DRF-2310: слова к «другому» и ответ на сам вопрос — разные факты.
+        # ``diet_answered`` отвечает на «шаг пройден?», а не «столбец пуст?»:
+        # прежнее значение в столбце лежит, но ответом не считается.
+        "diet_note": profile.diet_note or "",
+        "diet_answered": diet_answered(profile),
         "norms": _norms_block(profile),
         "health_flags": profile.health_flags or {},
         "goal_overridden_by": profile.goal_overridden_by or None,
