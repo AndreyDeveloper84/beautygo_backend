@@ -165,6 +165,11 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
 
     skipped = payload.get("_skipped_fields") or []
     for field in skipped:
+        # DRF-2310: тип питания разбирается ниже своим кодом. Общий цикл
+        # поставил бы флаг и поверх настоящего ответа — то есть записал бы
+        # рядом «назвал» и «не назвал» об одном вопросе.
+        if field == DIET_FIELD:
+            continue
         flags[f"{field}_skipped"] = True
 
     # Вопрос 59 (CD §72): upsert частичный — поле, которого нет в теле,
@@ -222,6 +227,23 @@ _CALCULATION_INPUTS: frozenset[str] = frozenset({
     "gender", "age", "height_cm", "weight_kg", "weight_range",
     "activity_coefficient", "goal", "pace", "health_flags", "_skipped_fields",
 })
+
+#: Пропуски, которые расчёта не касаются (DRF-2310). ``_skipped_fields`` стоит
+#: в списке входов целиком, потому что пропуск активности или пола расчёт
+#: меняет. Пропуск вопроса о типе питания — нет: ни ``diet_preference``, ни
+#: ``diet_note`` во входах не числятся, и предложение из-за него падать не
+#: должно. Тот же довод, что в докстринге ``targets_recompute_gate``, где
+#: ``{"diet_preference": "vegetarian"}`` назван телом, которое ориентиров не
+#: трогает.
+_SKIPS_OUTSIDE_CALCULATION: frozenset[str] = frozenset({DIET_FIELD})
+
+
+def _touches_calculation(payload: dict) -> bool:
+    keys = _CALCULATION_INPUTS & set(payload)
+    if keys == {"_skipped_fields"}:
+        skipped = set(payload.get("_skipped_fields") or [])
+        return bool(skipped - _SKIPS_OUTSIDE_CALCULATION)
+    return bool(keys)
 
 
 def _recompute_and_persist(profile: NutritionProfile) -> None:
@@ -395,7 +417,7 @@ def _refuse_recompute(profile: NutritionProfile, payload: dict[str, Any]) -> Non
     # рядом предложение посчитано от прежних входов. Держать его значило
     # бы, что подтверждение применит расчёт от устаревших входов — например,
     # к человеку, только что назвавшему беременность.
-    if profile.pending_proposal and _CALCULATION_INPUTS & set(payload):
+    if profile.pending_proposal and _touches_calculation(payload):
         profile.pending_proposal = None
     logger.warning(
         "nutrition.targets.recompute_refused user=%s source=%s",

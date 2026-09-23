@@ -30,15 +30,25 @@
   владельца (§77 п. 7): хранить молча, не стирать, кампании переспроса не
   устраивать — но шаг считать НЕПРОЙДЕННЫМ, иначе человек со старым ``any``
   остался бы с неизвестным типом питания навсегда и не был бы спрошен ни
-  разу. Отмечается тем же механизмом, что темп и активность в DRF-2279:
-  имя поля в ``legacy_default_inputs``. Второй такой же механизм заводить
-  не стали — разошлись бы они молча.
+  разу.
 
-Названный ответ снимает пометку прежнего значения, в том числе когда
-значение то же самое: это подтверждение, и оно ровно то же, что у
-``pace``/``activity_coefficient`` (``profile_upsert_service``).
+# Почему не пометкой ``legacy_default_inputs`` (DRF-2279)
+
+Тот механизм узнаёт прежнее значение ПО САМОМУ ЗНАЧЕНИЮ: активность 1.4 и
+темп «moderate» — это и есть следы умолчаний схемы, человек их не называл.
+Здесь так не выходит: «vegan» одинаково может быть и прежней свободной
+строкой, и настоящим ответом, и различить их значением нельзя в принципе.
+Пометка по значению после выхода вопроса пометила бы КАЖДОГО ответившего и
+переспросила бы того, кто уже ответил, — ровно та кампания переспроса,
+которой владелец сказал не быть.
+
+Поэтому здесь отмечается не прежнее значение, а сам ФАКТ ответа
+(``diet_answered_at``). Он различает эти случаи сам и не требует ни
+команды, ни назначенного срока.
 """
 from __future__ import annotations
+
+from django.utils import timezone
 
 from nutrition.models import NutritionProfile
 
@@ -57,15 +67,14 @@ DIET_SKIPPED_FLAG = f"{DIET_FIELD}_skipped"
 def diet_answered(profile: NutritionProfile) -> bool:
     """Назвал ли человек свой тип питания.
 
-    Три причины ответить «нет» при непустой колонке: значение не из списка
-    (``none`` умолчания, старое ``any``, любая прежняя строка), значение
-    помечено как прежнее (``legacy_default_inputs``), либо это «другое» без
-    слов — сказано ничего.
+    Три причины ответить «нет» при непустой колонке: ответа не было вовсе
+    (``diet_answered_at`` пуст — в столбце прежнее значение), значение не из
+    списка, либо это «другое» без слов — сказано ничего.
     """
+    if profile.diet_answered_at is None:
+        return False
     value = (profile.diet_preference or "").strip()
     if value not in NutritionProfile.DietType.values:
-        return False
-    if DIET_FIELD in set(profile.legacy_default_inputs or []):
         return False
     if value == NutritionProfile.DietType.OTHER:
         return bool((profile.diet_note or "").strip())
@@ -76,18 +85,14 @@ def answer_diet(profile: NutritionProfile, value: str, *, note: str = "") -> Non
     """Записать ответ: значение, слова для «другого», снятие прежних пометок.
 
     Ничего не сохраняет в базу — вызывающий решает, когда писать (upsert
-    делает это своей транзакцией). Пометка прежнего значения снимается, а
-    чужие пометки не трогаются: список общий на несколько полей.
+    делает это своей транзакцией).
     """
     if value not in NutritionProfile.DietType.values:
         raise ValueError(f"тип питания вне списка владельца: {value!r}")
 
     profile.diet_preference = value
     profile.diet_note = note.strip() if value == NutritionProfile.DietType.OTHER else ""
-
-    marks = set(profile.legacy_default_inputs or [])
-    marks.discard(DIET_FIELD)
-    profile.legacy_default_inputs = sorted(marks)
+    profile.diet_answered_at = timezone.now()
 
     flags = dict(profile.health_flags or {})
     # Ответ отменяет прежний пропуск: человек всё-таки назвал.
@@ -100,8 +105,17 @@ def skip_diet(profile: NutritionProfile) -> None:
 
     Колонка не трогается намеренно: подставить сюда любое значение значило
     бы выдать молчание за ответ. Прежнее значение, если оно было, остаётся
-    лежать как лежало — со своей пометкой.
+    лежать как лежало.
+
+    **Пропуск поверх ответа ничего не пишет.** Человек, уже назвавший свой
+    тип, вопроса не видит — спрашивают только при ``diet_answered() is
+    False``. Приди пропуск всё равно (старый клиент, повтор тела), флаг
+    рядом с настоящим ответом означал бы два противоположных факта об одном
+    вопросе: «назвал» и «не назвал». Ответ старше и сильнее — он остаётся,
+    а пропуск не записывается.
     """
+    if diet_answered(profile):
+        return
     flags = dict(profile.health_flags or {})
     flags[DIET_SKIPPED_FLAG] = True
     profile.health_flags = flags

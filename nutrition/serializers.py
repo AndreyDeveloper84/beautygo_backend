@@ -531,6 +531,11 @@ _HEALTH_FLAG_KEYS = {
     "eating_disorder", "meds",
     "allergies", "allergies_vague",
     "gender_skipped", "age_skipped", "height_skipped", "weight_skipped",
+    # DRF-2310: ручка ОТДАЁТ этот ключ, когда человек пропустил вопрос о
+    # питании. Не приняв его обратно, мы ломали бы read-modify-write ровно
+    # так же, как ломал бы строгий список у самого `diet_preference`, —
+    # только на поле соседнем.
+    "diet_preference_skipped",
 }
 
 
@@ -605,6 +610,18 @@ class NutritionProfileUpsertSerializer(serializers.Serializer):
     #: Слова к ответу «другое»; при других значениях не хранятся.
     diet_note = serializers.CharField(required=False, allow_blank=True)
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        # DRF-2310: слова принадлежат ответу «другое». Пришли одни слова —
+        # неизвестно, к какому ответу их класть: молча проглотить присланное
+        # поле нельзя, а догадываться по тому, что лежит в строке, значит
+        # записать человеку ответ, которого он сейчас не давал.
+        if attrs.get("diet_note") and not attrs.get("diet_preference"):
+            raise serializers.ValidationError({
+                "diet_note": "слова принадлежат ответу: пришлите diet_preference вместе с ними",
+            })
+        return attrs
+
     def validate_diet_preference(self, value: str) -> str:
         """Список владельца — плюс эхо прежнего значения, которое не ответ.
 
@@ -647,6 +664,8 @@ class NutritionProfileUpsertSerializer(serializers.Serializer):
 
 
 class NutritionProfileResponseSerializer(serializers.Serializer):
+    """Wire shape of GET / POST /internal/profile/ (spec §1.1)."""
+
     # DRF-2279: имена входов, значения которых подставил каталог до вопроса
     # 59, — для расчёта они «не названы», и спрашивающая сторона (бот) о них
     # переспрашивает. Объявлено здесь, чтобы поле было и в схеме, не только
@@ -657,9 +676,10 @@ class NutritionProfileResponseSerializer(serializers.Serializer):
     # DRF-2310: «шаг пройден?» — отдельный факт от значения столбца: прежнее
     # значение там лежит, но ответом не считается (§77 п. 7).
     diet_note = serializers.CharField(required=False, allow_blank=True, read_only=True)
-    diet_answered = serializers.BooleanField(required=False, read_only=True)
-    """Wire shape of GET / POST /internal/profile/ (spec §1.1)."""
-
+    # Обязательное намеренно: по этому признаку спрашивающая сторона решает,
+    # задавать ли вопрос. Необязательный ключ означал бы, что её можно не
+    # получить и всё равно решать — тот же довод, что у `targets_provenance`.
+    diet_answered = serializers.BooleanField(read_only=True)
     external_user_id = serializers.CharField()
     exists = serializers.BooleanField()
 
