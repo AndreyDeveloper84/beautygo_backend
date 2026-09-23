@@ -58,8 +58,12 @@ _NUTRIENTS = (
 #: Модель → (выгружаемые поля: поле → ключ, исключённые: поле → причина).
 FIELDS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
     "goals.ClientGoal": (
-        _same("goal_key", "goal_text", "selected_at", "source_channel", "state",
-              "state_changed_at", "target_date", "created_at"),
+        # DRF-2283 — `text_origin` выгружается рядом с самими словами: это
+        # утверждение О ЧЕЛОВЕКЕ («эти слова сказал он сам»), а не служебная
+        # отметка строки. Пусто значит «происхождение не установлено» — и это
+        # тоже правда о строке, которую человек вправе увидеть.
+        _same("goal_key", "goal_text", "text_origin", "selected_at", "source_channel",
+              "state", "state_changed_at", "target_date", "created_at"),
         {"id": _KEY, "client": _OWNER, "updated_at": _UPDATED},
     ),
     "goals.GoalAnketaRun": (
