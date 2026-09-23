@@ -75,6 +75,23 @@ class ClientGoal(models.Model):
         BOT = "bot", "Бот (DM)"
         MINIAPP = "miniapp", "Mini App"
 
+    class TextOrigin(models.TextChoices):
+        """Откуда взялись СЛОВА цели — не путать с каналом.
+
+        ``source_channel`` отвечает «откуда пришло» (бот или приложение);
+        эта пометка — «кто это сказал». Значение одно, `user_stated`:
+        слова человека, записанные дословно (контракт Goal этапа C,
+        G-INV-15, решение владельца CD §73).
+
+        **Пусто — «происхождение не установлено», и это умолчание.**
+        Сделать умолчанием `user_stated` значило бы объявить словами
+        человека каждую прежнюю строку — пометка стала бы бесполезной
+        ровно в тот момент, когда родилась. Прежние строки метит
+        отдельная команда с сухим прогоном, по слову владельца.
+        """
+
+        USER_STATED = "user_stated", "Слова человека"
+
     class State(models.TextChoices):
         """Состояние цели — см. докстринг модуля; переходы в ``lifecycle.py``."""
 
@@ -109,6 +126,16 @@ class ClientGoal(models.Model):
         null=True,
         blank=True,
         help_text="Дословный свободный ввод пользователя; не нормализуется",
+    )
+    #: Происхождение СЛОВ (CD §73, G-INV-15). Пусто — не установлено; см.
+    #: докстринг :class:`TextOrigin`. Ставится только там, где текст пришёл
+    #: свободным вводом человека, и никогда — полем входящего сообщения.
+    text_origin = models.CharField(
+        max_length=16,
+        choices=TextOrigin.choices,
+        blank=True,
+        default="",
+        help_text="user_stated — слова человека; пусто — происхождение не установлено",
     )
     selected_at = models.DateTimeField(default=timezone.now)
     source_channel = models.CharField(
