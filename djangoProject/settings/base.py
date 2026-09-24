@@ -416,6 +416,25 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
+# Отчёт разбора услуг — DRF-2409.
+#
+# Куда `map_salon_services --store` кладёт исход резолвера. Это ЕДИНСТВЕННЫЙ
+# носитель исхода: база его не хранит («нет прогона» отличимо от «прогон был,
+# исхода нет»), поэтому каталог обязан быть доступен процессу на запись.
+#
+# Умолчание внутри образа: `/app/var/mapping_reports`, и он создаётся в
+# Dockerfile с владельцем APP_UID — потому что `/app` принадлежит root, а
+# контейнер идёт под uid 1000 (`user:` в docker-compose, DRF-1677). Машина с
+# другим uid задаёт путь этой настройкой, а не правит образ.
+#
+# Тома у каталога нет: отчёт живёт до пересоздания контейнера. Это названо
+# здесь и в докстроке команды, чтобы следующий не решил, что разбор где-то
+# хранится. Срок хранения — вопрос владельца (том переживал бы пересоздание,
+# а в отчёте лежат названия услуг салона).
+MAPPING_REPORT_DIR = os.environ.get(
+    'MAPPING_REPORT_DIR', str(BASE_DIR / 'var' / 'mapping_reports')
+)
+
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
