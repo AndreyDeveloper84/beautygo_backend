@@ -103,6 +103,31 @@ class TestTheOneOffRun:
         assert seed.mapping_status == SalonService.MappingStatus.REVIEW_REQUIRED
         assert seed.mapping_confirmed_rule == ""
 
+    def test_a_row_of_unknown_origin_is_not_touched(self, canon) -> None:
+        """Отбор положительный: «только свои», а не «все, кроме известных чужих».
+
+        На стенде 24.09 нашлась группа, которой никто не ждал: 206 строк сида —
+        это не 171 строка генератора демо, ещё 35 лежат в салонах `mkt-*`,
+        созданных 23.08, и чем они заведены — не измерено. Отрицательный отбор
+        («всё, кроме демо») такую группу пропустил бы и подтвердил бы её
+        правилом выбора мастера, то есть соврал бы о происхождении.
+
+        Узел держит именно это: строка с **чужим** основанием не трогается,
+        каким бы оно ни было — пустым, как у сида, или незнакомым.
+        """
+        tenant, category, template = canon
+        stranger = _row(tenant, category, template, mapping_source_ref="mkt-import:2026-08-23")
+        mine = _row(tenant, category, template)
+
+        MIGRATION.confirm_master_selections(live_apps, None)
+
+        stranger.refresh_from_db()
+        mine.refresh_from_db()
+        # Положительная пара в том же прогоне: своя строка подтверждена.
+        assert mine.mapping_status == SalonService.MappingStatus.VERIFIED
+        assert stranger.mapping_status == SalonService.MappingStatus.REVIEW_REQUIRED
+        assert stranger.mapping_confirmed_rule == ""
+
     def test_a_row_without_a_canon_link_is_skipped(self, canon) -> None:
         """Подтверждать нечего — и схема такую строку всё равно не примет."""
         tenant, category, template = canon
