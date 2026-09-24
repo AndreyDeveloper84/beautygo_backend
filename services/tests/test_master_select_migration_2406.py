@@ -196,3 +196,52 @@ class TestTheRuleLiteralsCannotDrift:
         assert MIGRATION.RULE == MASTER_SELECT_RULE
         assert MIGRATION.RULE_VERSION == MASTER_SELECT_RULE_VERSION
         assert MIGRATION.SOURCE_REF_PREFIX == SOURCE_REF_PREFIX
+
+
+class TestTheHalfFilledRowDoesNotAbortTheRun:
+    def test_a_human_in_provenance_on_a_queued_row_is_replaced_not_fatal(self, canon) -> None:
+        """Строка «в очереди» с заполненным «кто» роняла бы накатку целиком.
+
+        До неё доводит сама очередь: администратор вписал автора и не сменил
+        статус. Схема запрещает «и человек, и правило»
+        (`salonservice_provenance_is_who_xor_rule`), поэтому прогон падал бы на
+        середине — а падает он внутри миграции, то есть роняет и развёртывание.
+
+        По §77 п.30 автор теперь правило, значит половинчатый человек снимается,
+        и провенанс говорит правду о том, кто решил.
+        """
+        from django.contrib.auth import get_user_model
+
+        tenant, category, template = canon
+        moderator = get_user_model().objects.create(username=f"mod-{uuid.uuid4().hex[:8]}")
+        row = _row(tenant, category, template, mapping_confirmed_by=moderator)
+
+        MIGRATION.confirm_master_selections(live_apps, None)
+
+        row.refresh_from_db()
+        assert row.mapping_status == SalonService.MappingStatus.VERIFIED
+        assert row.mapping_confirmed_rule == MASTER_SELECT_RULE
+        assert row.mapping_confirmed_by_id is None
+
+
+class TestTheDriftGuardWatchesFieldsToo:
+    def test_the_run_writes_every_field_the_live_path_writes(self) -> None:
+        """Сторож на литералы пропустил бы новое поле провенанса.
+
+        Добавить пятое поле в `rule_confirmation` и забыть его в миграции —
+        значит подтвердить часть строк неполным провенансом, и ни один узел не
+        покраснеет, пока сверяются только имя и версия.
+        """
+        import inspect
+
+        from services.offer_selection import rule_confirmation
+
+        source = inspect.getsource(MIGRATION.confirm_master_selections)
+        # `mapping_source_ref` — исключение по существу: у живой строки основание
+        # своё (кто выбрал), а прогон закрывает уже существующие, где оно стоит.
+        live = set(rule_confirmation(source_ref="master_select:x")) - {"mapping_source_ref"}
+
+        missing = sorted(field for field in live if field not in source)
+
+        assert live, "положительная пара: помощник вообще возвращает поля"
+        assert missing == [], f"миграция не пишет {missing}, а живой путь пишет"
