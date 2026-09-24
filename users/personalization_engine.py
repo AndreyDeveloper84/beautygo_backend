@@ -14,12 +14,13 @@ Eight rules per CLAUDE.md / Notion 334b0dab295581d587cfeaf49efd2d5b:
 3. **24h cooldown** — last_asked_at[field] + 24h must be in the past.
 4. **Skip × 2 → 30-day pause** — skipped_questions[field].count >= 2
    AND last_at within 30 days.
-5. **Already have data → silent** — data_sources[field] in {explicit,
-   inferred} AND the field actually holds a value → skip. Пометка без
-   значения (DRF-2397) означает обратное: не знаем ничего, — и молчать
-   по ней нельзя. ``erased`` (DRF-1366) silences the question even on an
-   empty field: somebody who just said "забудь всё" must not be
-   interviewed about the same field on the next turn.
+5. **Already have data → silent** — ``explicit`` silences the question
+   (even on an empty value: пустой ответ — тоже ответ), ``inferred``
+   silences it only while the field holds a value (DRF-2397: вывод,
+   который ничего не нашёл, — не знание), ``erased`` silences it by the
+   DRF-1366 decision. Прочие пометки словаря (``behavioral``,
+   ``conversational``, ``transactional``) не молчат вовсе — их в контуре
+   никто не пишет, и заявлять по ним знание не на чем.
 6. **Organic or never** — wording responsibility on the caller; the
    engine just gates `should_ask`.
 7. **Explainability** — verdict tuple includes a ``reason`` string
@@ -109,13 +110,15 @@ def _field_holds_value(ctx, field: str) -> bool:
     """Несёт ли поле что-нибудь о человеке — тем же мерилом, что у стирания.
 
     Сравнение с умолчанием модели (``default_for``), а не «пусто ли»: у разных
-    полей пустота выглядит по-разному (строка, список, словарь, число), и своя
-    проверка разошлась бы с той, по которой стирание считает строку надгробием.
+    полей пустота выглядит по-разному (``""``, ``[]``, ``False``, ``None``), и
+    своя проверка разошлась бы с той, по которой стирание считает строку
+    надгробием.
     """
     if field not in declared_fields():
-        # Имя, которого нет среди полей о человеке, не может ничего о нём
-        # нести. Правило 5 тогда не заявляет знания, а пропускает ход
-        # дальше — остальные правила решают сами.
+        # Прежде всего это защита от падения: ``default_for`` на чужом имени
+        # поднимает ``FieldDoesNotExist``. И по смыслу так же — имя, которого
+        # нет среди полей о человеке, не может ничего о нём нести, так что
+        # правило 5 не заявляет знания, а пропускает ход дальше.
         return False
     return getattr(ctx, field) != default_for(field)
 
@@ -138,20 +141,26 @@ def should_ask_question(user, field: str) -> Verdict:
 
     # Rule 5 — already have data, or the subject erased it on purpose.
     #
-    # DRF-2397: «уже знаем» — про ЗНАЧЕНИЕ, а не про пометку. Пометка без
-    # значения означает ровно обратное: не знаем ничего. Так выглядит строка
-    # после «я теперь снова ем мясо» и после «забудь про мою диету» — бот
-    # пишет пустое значение с пометкой `explicit`, — и человек, попросивший
-    # забыть, оставался бы неспрошенным навсегда при пустой памяти о нём.
+    # DRF-2397: пометка `inferred` без значения — не знание, а ровно
+    # обратное. `_infer_favorite_masters` ставит её БЕЗУСЛОВНО, тем, что
+    # вернул запрос: у человека с короткой историей это пустой список. Первый
+    # же ночной проход закрывал «Есть любимый мастер, к кому вернуться?»
+    # навсегда — вывод не нашёл ничего, а человека не спросили ни разу.
     #
-    # ``erased`` проверяется ОТДЕЛЬНО и до значения: там пустота не незнание,
-    # а просьба человека, и молчание по ней — решение DRF-1366, а не
-    # побочный эффект.
+    # Для `explicit` пустота — ОТВЕТ, а не незнание, и молчать по ней верно:
+    # приложение ставит эту пометку всякому полю из тела PATCH, каким бы оно
+    # ни было (`personal_context_views`), так что снятая галочка «дни, которые
+    # лучше избегать» — это сказанное «нет таких». Бот пишет пустое значение
+    # так же, отменяя прежний ответ («снова ем мясо» — «диеты нет») и по
+    # просьбе забыть одно поле.
+    #
+    # ``erased`` — там пустота тоже не незнание, а просьба человека, и
+    # молчание по ней решено в DRF-1366.
     sources = ctx.data_sources or {}
     source = sources.get(field)
-    if source == ERASED:
+    if source in {ERASED, "explicit"}:
         return Verdict(False, "already_have_data", field)
-    if source in {"explicit", "inferred"} and _field_holds_value(ctx, field):
+    if source == "inferred" and _field_holds_value(ctx, field):
         return Verdict(False, "already_have_data", field)
 
     # Rule 3 — 24h cooldown.
