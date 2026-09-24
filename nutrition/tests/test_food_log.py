@@ -27,7 +27,6 @@ from rest_framework.test import APIClient
 from nutrition.models import FoodLog, FoodScan
 from nutrition.services.food_log_service import (
     CreateFoodLogInput,
-    DishNotRecognizedError,
     FoodLogService,
     InvalidInputError,
     ScanNotOwnedError,
