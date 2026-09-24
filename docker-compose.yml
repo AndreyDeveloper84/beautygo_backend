@@ -32,6 +32,11 @@ services:
         # authenticated path revives untouched if the visibility is closed
         # again (DRF-1466).
         GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
+        # DRF-2409 — владелец каталога отчётов внутри образа. Те же значения,
+        # что у `user:` ниже: каталог, созданный не тому uid, существует и
+        # не пишется — ровно состояние, сломавшее стенд.
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
     restart: unless-stopped
     # DRF-1677 (класс DRF-1646). Без `user:` контейнер идёт от root образа —
     # в Dockerfile нет USER, — и всё, что entrypoint пишет в смонтированные
@@ -97,6 +102,11 @@ services:
       # not needed at all: ayla-ai-core is public and clones anonymously.
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+        # DRF-2409 — владелец каталога отчётов внутри образа. Те же значения,
+        # что у `user:` ниже: каталог, созданный не тому uid, существует и
+        # не пишется — ровно состояние, сломавшее стенд.
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
     restart: unless-stopped
     # DRF-1677 (класс DRF-1646). Без `user:` контейнер идёт от root образа —
     # в Dockerfile нет USER, — и всё, что entrypoint пишет в смонтированные
@@ -131,6 +141,11 @@ services:
       # DRF-1431 — see celery_worker above.
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+        # DRF-2409 — владелец каталога отчётов внутри образа. Те же значения,
+        # что у `user:` ниже: каталог, созданный не тому uid, существует и
+        # не пишется — ровно состояние, сломавшее стенд.
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
     restart: unless-stopped
     # DRF-1677 (класс DRF-1646). Без `user:` контейнер идёт от root образа —
     # в Dockerfile нет USER, — и всё, что entrypoint пишет в смонтированные

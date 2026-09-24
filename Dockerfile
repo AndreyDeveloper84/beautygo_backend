@@ -71,6 +71,21 @@ COPY . .
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# DRF-2409 — каталог отчётов разбора услуг.
+#
+# `/app` принадлежит root, а контейнер идёт под `user:` (по умолчанию
+# 1000:1000, docker-compose, DRF-1677), поэтому создать `/app/var` на ходу
+# процесс НЕ может: на стенде `map_salon_services --store` падал
+# PermissionError, а ручное создание каталога не пережило пересоздание
+# контейнера. Каталог заводится в образе и отдаётся тому же uid.
+#
+# APP_UID/APP_GID — те же значения, что в compose; машина с другим
+# владельцем дерева задаёт их при сборке ИЛИ переносит отчёты настройкой
+# MAPPING_REPORT_DIR, не правя образ.
+ARG APP_UID=1000
+ARG APP_GID=1000
+RUN mkdir -p /app/var/mapping_reports && chown -R ${APP_UID}:${APP_GID} /app/var
+
 EXPOSE 8000
 
 ENTRYPOINT ["/entrypoint.sh"]

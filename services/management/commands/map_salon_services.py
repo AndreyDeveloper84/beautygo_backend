@@ -10,6 +10,14 @@
 в срезе, — потому что «44 не привязались» и «44 из 232 не привязались»
 читаются по-разному, а решают по ним одно и то же.
 
+**Где живёт отчёт (DRF-2409).** ``--store`` кладёт исход в
+``MAPPING_REPORT_DIR`` (умолчание внутри образа — ``/app/var/mapping_reports``).
+Это единственный носитель исхода: база его не хранит. **Тома у каталога нет,
+поэтому отчёт живёт до пересоздания контейнера** — после выкладки разбор
+нужно прогнать заново. Срок хранения (и нужен ли том) — вопрос владельца.
+Каталог недоступен на запись — команда отказывает названно, с путём и именем
+настройки, а не падает трассой.
+
 **Ничего не пишет.** ``--apply`` принимается только чтобы ответить отказом
 с названной причиной (``authorize_apply``): OD-NEW-7 не принят, запись —
 MAP-AUTO-06. Правила по умолчанию выключены — без ``--rules`` каждый
@@ -26,7 +34,7 @@ from services.canonical_code import SEED_PATH
 from services.mapping import ApplyNotAuthorized, RulesEnabled, resolve_tenant
 from services.mapping.report import row_lines, summary_lines, write_json
 from services.mapping.schema import SchemaNotReady, describe_subject
-from services.mapping.store import store_report
+from services.mapping.store import ReportDirUnavailable, store_report
 from services.mapping.types import RULE_VERSION
 from services.mapping_apply import ApplyStopped, apply_tenant, rollback_auto_rule
 from tenants.models import Tenant
@@ -241,7 +249,14 @@ class Command(BaseCommand):
                     "--store сохраняет отчёт на ВЕСЬ салон, а срез его сузил бы: "
                     "запустите --store без --status/--source"
                 )
-            path = store_report(rows, tenant.slug, rules=options["rules"] or "")
+            try:
+                path = store_report(rows, tenant.slug, rules=options["rules"] or "")
+            except ReportDirUnavailable as exc:
+                # DRF-2409 — отказ с путём и настройкой вместо голой трассы:
+                # на стенде `/app` пишется только root'ом, и человек по
+                # `PermissionError` не понимал ни где писать, ни чем это
+                # чинится.
+                raise CommandError(str(exc)) from exc
             w(f"отчёт последнего прогона (для админки): {path}")
 
     def _write(self, tenant, rules, options) -> None:
