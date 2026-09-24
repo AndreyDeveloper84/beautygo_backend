@@ -15,9 +15,11 @@ Eight rules per CLAUDE.md / Notion 334b0dab295581d587cfeaf49efd2d5b:
 4. **Skip × 2 → 30-day pause** — skipped_questions[field].count >= 2
    AND last_at within 30 days.
 5. **Already have data → silent** — data_sources[field] in {explicit,
-   inferred} → skip. ``erased`` (DRF-1366) silences the question too:
-   somebody who just said "забудь всё" must not be interviewed about
-   the same field on the next turn.
+   inferred} AND the field actually holds a value → skip. Пометка без
+   значения (DRF-2397) означает обратное: не знаем ничего, — и молчать
+   по ней нельзя. ``erased`` (DRF-1366) silences the question even on an
+   empty field: somebody who just said "забудь всё" must not be
+   interviewed about the same field on the next turn.
 6. **Organic or never** — wording responsibility on the caller; the
    engine just gates `should_ask`.
 7. **Explainability** — verdict tuple includes a ``reason`` string
@@ -36,7 +38,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from users.models import UserPersonalContext
-from users.personal_context_erasure import ERASED
+from users.personal_context_erasure import ERASED, declared_fields, default_for
 
 
 logger = logging.getLogger("users.personalization")
@@ -103,6 +105,21 @@ def _now() -> datetime:
 # ---------------------------------------------------------------------------
 
 
+def _field_holds_value(ctx, field: str) -> bool:
+    """Несёт ли поле что-нибудь о человеке — тем же мерилом, что у стирания.
+
+    Сравнение с умолчанием модели (``default_for``), а не «пусто ли»: у разных
+    полей пустота выглядит по-разному (строка, список, словарь, число), и своя
+    проверка разошлась бы с той, по которой стирание считает строку надгробием.
+    """
+    if field not in declared_fields():
+        # Имя, которого нет среди полей о человеке, не может ничего о нём
+        # нести. Правило 5 тогда не заявляет знания, а пропускает ход
+        # дальше — остальные правила решают сами.
+        return False
+    return getattr(ctx, field) != default_for(field)
+
+
 def should_ask_question(user, field: str) -> Verdict:
     """Return a verdict on whether to ask the user about ``field``.
 
@@ -120,8 +137,21 @@ def should_ask_question(user, field: str) -> Verdict:
         return Verdict(True, "ok", field)
 
     # Rule 5 — already have data, or the subject erased it on purpose.
+    #
+    # DRF-2397: «уже знаем» — про ЗНАЧЕНИЕ, а не про пометку. Пометка без
+    # значения означает ровно обратное: не знаем ничего. Так выглядит строка
+    # после «я теперь снова ем мясо» и после «забудь про мою диету» — бот
+    # пишет пустое значение с пометкой `explicit`, — и человек, попросивший
+    # забыть, оставался бы неспрошенным навсегда при пустой памяти о нём.
+    #
+    # ``erased`` проверяется ОТДЕЛЬНО и до значения: там пустота не незнание,
+    # а просьба человека, и молчание по ней — решение DRF-1366, а не
+    # побочный эффект.
     sources = ctx.data_sources or {}
-    if sources.get(field) in {"explicit", "inferred", ERASED}:
+    source = sources.get(field)
+    if source == ERASED:
+        return Verdict(False, "already_have_data", field)
+    if source in {"explicit", "inferred"} and _field_holds_value(ctx, field):
         return Verdict(False, "already_have_data", field)
 
     # Rule 3 — 24h cooldown.

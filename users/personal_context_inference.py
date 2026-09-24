@@ -16,8 +16,9 @@ maxbot side actually values:
    on the weekday in question.
 
 Both write under ``data_sources["<field>"] = "inferred"`` and refuse
-to overwrite a field whose value the subject decided themselves —
-either by typing it (``"explicit"``) or by erasing it (``"erased"``,
+to overwrite a field whose value the subject decided themselves — by
+typing it (``"explicit"``), by saying it in words to the bot
+(``"conversational"``, DRF-2397) or by erasing it (``"erased"``,
 DRF-1366). This keeps user intent sticky across nightly runs, and it
 is what makes erasure a terminal state rather than a moment in time.
 
@@ -73,10 +74,17 @@ class InferenceOutcome:
 
 
 #: Provenance values that mean "the subject decided this field, not us".
-#: ``explicit`` — they typed a value. ``erased`` — they told us to forget
-#: it (DRF-1366). Inference must not write either one; an erasure that a
-#: nightly job can undo is not an erasure.
-_SUBJECT_OWNED = frozenset({"explicit", ERASED})
+#: ``explicit`` — they typed a value. ``conversational`` — they said it in
+#: words to the bot, answering a direct question (DRF-2397); тот же субъект,
+#: другой канал. ``erased`` — they told us to forget it (DRF-1366).
+#: Inference must not write any of the three; an erasure that a nightly job
+#: can undo is not an erasure, и ответ человека, который к утру заменён
+#: догадкой из истории броней, — тоже не ответ.
+#:
+#: ``behavioral`` / ``transactional`` сюда НЕ входят: это наши же выводы, из
+#: поведения и из сделок. Свой вывод ночной проход вправе пересчитать —
+#: иначе первая догадка становится вечной.
+_SUBJECT_OWNED = frozenset({"explicit", "conversational", ERASED})
 
 
 def _is_tombstone(ctx: UserPersonalContext) -> bool:

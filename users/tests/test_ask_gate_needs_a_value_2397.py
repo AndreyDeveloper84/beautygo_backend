@@ -96,3 +96,17 @@ class TestH4NoStampIsUnchanged:
         verdict = should_ask_question(user, FIELD)
 
         assert verdict.allowed is True
+
+
+class TestH5AnUndeclaredNameCarriesNoKnowledge:
+    def test_a_stamp_on_a_name_that_is_not_a_field_claims_nothing(self) -> None:
+        """Мерило значения — умолчание модели, и у имени вне модели его нет.
+        Правило 5 тогда не заявляет «уже знаем», а пропускает ход дальше:
+        заявить знание о том, чего в строке нет вовсе, — та же ложь, что и
+        пометка без значения."""
+        user = _person(n=6, p="0006", data_sources={"not_a_field_at_all": "explicit"})
+
+        verdict = should_ask_question(user, "not_a_field_at_all")
+
+        assert verdict.allowed is True
+        assert verdict.reason == "ok"
