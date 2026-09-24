@@ -70,18 +70,22 @@ def _master(tenant: Tenant, *, suffix: str, display_name: str) -> SpecialistProf
         username=f"demo2420_{suffix}", password="x", role="specialist",
         phone=f"+7999242{suffix}",
     )
+    # Профиль может быть уже создан сигналом на создание пользователя-мастера,
+    # и тогда он DRAFT. Поля выставляются ПОСЛЕ get_or_create, иначе `defaults`
+    # молча не применятся к существующей строке — узел это и поймал.
     profile, _ = SpecialistProfile.objects.get_or_create(
-        user=user,
-        defaults={
-            "display_name": display_name,
-            "bio": "t",
-            "tenant": tenant,
-            "status": SpecialistProfile.ProfileStatus.ACTIVE,
-            "is_available": True,
-            "is_booking_enabled": True,
-            "rating": 5,
-        },
+        user=user, defaults={"display_name": display_name, "bio": "t"},
     )
+    profile.display_name = display_name
+    profile.tenant = tenant
+    profile.status = SpecialistProfile.ProfileStatus.ACTIVE
+    profile.is_available = True
+    profile.is_booking_enabled = True
+    profile.rating = 5
+    profile.save(update_fields=[
+        "display_name", "tenant", "status", "is_available",
+        "is_booking_enabled", "rating",
+    ])
     return profile
 
 
@@ -90,8 +94,7 @@ def _offer(profile: SpecialistProfile, *, name: str) -> SpecialistService:
         slug="demo2420-cat", defaults={"name": "Массаж"},
     )
     template, _ = ServiceTemplate.objects.get_or_create(
-        slug=f"demo2420-tpl-{profile.pk}",
-        defaults={"name": name, "category": category},
+        name=f"{name} — {profile.pk}", category=category,
     )
     salon_service = SalonService.objects.create(
         tenant=profile.tenant, template=template, name=name,
