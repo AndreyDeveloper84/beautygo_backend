@@ -70,7 +70,9 @@ class RecommendationResolveView(APIView):
         serializer.is_valid(raise_exception=True)
 
         try:
-            source = get_candidate_source()
+            # DRF-2420: границы показа демо — по личности, за которую
+            # спрашивает бот, а не по самому боту.
+            source = get_candidate_source(viewer=request.user)
         except CandidateSourceNotConfigured as exc:
             # Отдельная ветка и отдельный код: недоступность источника не
             # должна выглядеть как «посмотрели и не нашли». Именно слияние

@@ -197,6 +197,14 @@ class InternalSpecialistViewSet(SpecialistViewSet):
     # paused master must stay here with is_booking_enabled=false — dropping him
     # would leave his old active row selling in the bot.
     list_sells_only = False
+    # DRF-2420 — зеркало НЕ фильтрует демонстрационные салоны, и это решение,
+    # а не упущение. Синк бота upsert-only и сам никого не снимает, поэтому
+    # спрятать демо здесь значило бы: новые строки не приезжают, а уже
+    # уехавшие остаются активными в боте навсегда — то есть полумера, которую
+    # нельзя довести со стороны каталога. Вопрос у владельца: либо бот
+    # получает свой признак и фильтр, либо каталог получает способ сказать
+    # «снять строку». До ответа поведение фида прежнее.
+    hides_demo_from_client = False
     # DRF-1446. With `authentication_classes = []` every call here is
     # anonymous to DRF, so `slots` was spending the per-IP `anon` bucket
     # (30/min) — and every bot process reaches us from one source IP, so

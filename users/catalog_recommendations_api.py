@@ -225,6 +225,7 @@ def _resolve_layer(
     safety_state: SafetyState,
     seed: str | None,
     k: int,
+    viewer,
 ) -> RecommendationDecision:
     """Один вызов границы. Порядок — его, границы — наши."""
     return resolve(
@@ -238,7 +239,10 @@ def _resolve_layer(
             tie_break_seed=seed,
             k=k,
         ),
-        source=SpecialistCandidateSource(),
+        # DRF-2420 — источник знает СПРАШИВАЮЩЕГО: от него зависит, попадёт
+        # ли в пул демонстрационный салон. Полка этого не решает и порядка не
+        # касается: границы показа — доменная допустимость.
+        source=SpecialistCandidateSource(viewer=viewer),
         # Политику НЕ собираем: её читает резолвер сам
         # (`StagePolicy.from_settings`). Здесь стояла своя сборка из
         # настроек — и она давала одной политике два значения в одном
@@ -397,7 +401,7 @@ def _build_layer_3(specialist_ids: list) -> dict[str, Any]:
     return {"categories": rows[:LAYER_3_CATEGORY_LIMIT]}
 
 
-def _catalog_pool(*, goal: str, goal_category_ids) -> QuerySet:
+def _catalog_pool(*, goal: str, goal_category_ids, viewer) -> QuerySet:
     """Видимый каталог для полки 3, суженный тем, что человек ищет.
 
     Сужение целью здесь — **чтение каталога, а не политика рекомендации**:
@@ -411,7 +415,14 @@ def _catalog_pool(*, goal: str, goal_category_ids) -> QuerySet:
     from services.offer_sellable import sellable_offer_q
     from users.sellable import sellable_q
 
-    pool = SpecialistProfile.objects.filter(sellable_q(), tenant__is_active=True)
+    # DRF-2420 — счётчики полки 3 отвечают «что вообще есть», и для обычного
+    # клиента демонстрационных салонов в этом «есть» нет: иначе он увидит
+    # число, за которым для него ничего не стоит.
+    from users.sellable import demo_visibility_q
+
+    pool = SpecialistProfile.objects.filter(
+        sellable_q(), demo_visibility_q(viewer), tenant__is_active=True,
+    )
     if goal:
         pool = pool.filter(specialist_service_text_q(goal)).distinct()
     elif goal_category_ids:
@@ -516,6 +527,7 @@ class CatalogRecommendationsView(APIView):
             safety_state=safety_state,
             seed=seed,
             k=LAYER_1_LIMIT,
+            viewer=request.user,
         ) if history_tenant_ids else None
 
         layer_2_decision = _resolve_layer(
@@ -529,12 +541,16 @@ class CatalogRecommendationsView(APIView):
             safety_state=safety_state,
             seed=seed,
             k=LAYER_2_LIMIT,
+            viewer=request.user,
         )
 
         layer_1 = _shelf(layer_1_decision, limit=LAYER_1_LIMIT)
         layer_2 = _shelf(layer_2_decision, limit=LAYER_2_LIMIT)
         layer_3 = _build_layer_3(list(
-            _catalog_pool(goal=goal, goal_category_ids=goal_category_ids)
+            _catalog_pool(
+                goal=goal, goal_category_ids=goal_category_ids,
+                viewer=request.user,
+            )
             .values_list("id", flat=True)
         ))
 

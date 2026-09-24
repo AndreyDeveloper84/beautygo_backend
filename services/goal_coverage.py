@@ -64,6 +64,11 @@ def goal_master_coverage(*, limit: int = COVERAGE_LIMIT) -> dict[str, int]:
         result = engine.recommend(
             RecommendationQuery(
                 goal_category_ids=tuple(category_ids), limit=limit,
+                # DRF-2420: это операторский прогноз покрытия (им живёт сухой
+                # прогон `seed_demo_salons`), а не выдача клиенту. Спрятав
+                # демо-салоны, он перестал бы отвечать на свой вопрос —
+                # «что появится, если завести эти салоны».
+                viewer_sees_demo=True,
             ),
             use_cache=False,
         )

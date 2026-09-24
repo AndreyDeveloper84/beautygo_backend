@@ -232,3 +232,186 @@ class TestProxyIsNotTestness:
 
         assert REAL_NAME in names
         assert DEMO_NAME not in names
+
+
+# ---------------------------------------------------------------------------
+# Пять пулов, каждый в обе стороны (условие 1 тикета)
+# ---------------------------------------------------------------------------
+
+
+def _refs(facts) -> set[str]:
+    return {str(f.ref.id) for f in facts}
+
+
+class TestP1ThePickShelves:
+    """Полки 1–2 подбора: `users/recommendation_source.py`."""
+
+    def _facts(self, viewer):
+        from recommendation._types import NeedOrigin, NeedSpec, Scope, ScopeMode
+        from users.recommendation_source import SpecialistCandidateSource
+
+        return SpecialistCandidateSource(viewer=viewer).fetch(
+            scope=Scope(ScopeMode.MARKETPLACE),
+            need=NeedSpec(origin=NeedOrigin.USER_EXPLICIT, raw_text="массаж"),
+        )
+
+    def test_a_client_gets_the_real_salon_only(self, both_salons, client_person):
+        refs = _refs(self._facts(client_person))
+
+        assert str(both_salons["real"].user_id) in refs
+        assert str(both_salons["demo"].user_id) not in refs
+
+    def test_a_test_persona_gets_both(self, both_salons, test_person):
+        refs = _refs(self._facts(test_person))
+
+        assert {str(both_salons["real"].user_id), str(both_salons["demo"].user_id)} <= refs
+
+
+class TestP2TheCategoryCounters:
+    """Полка 3, счётчики: `users/catalog_recommendations_api._catalog_pool`."""
+
+    def _ids(self, viewer) -> set:
+        from users.catalog_recommendations_api import _catalog_pool
+
+        return set(
+            _catalog_pool(goal="", goal_category_ids=None, viewer=viewer)
+            .values_list("id", flat=True)
+        )
+
+    def test_a_client_counts_only_the_real_salon(self, both_salons, client_person):
+        ids = self._ids(client_person)
+
+        assert both_salons["real"].id in ids
+        assert both_salons["demo"].id not in ids
+
+    def test_a_test_persona_counts_both(self, both_salons, test_person):
+        ids = self._ids(test_person)
+
+        assert {both_salons["real"].id, both_salons["demo"].id} <= ids
+
+
+class TestP3TheHomeEngine:
+    """Движок главной Mini App: `ai/.../recommendation_engine.py`."""
+
+    def _names(self, *, sees_demo: bool) -> set[str]:
+        from ai.application.services.recommendation_engine import (
+            RecommendationEngine,
+            RecommendationQuery,
+        )
+
+        result = RecommendationEngine().recommend(
+            RecommendationQuery(limit=20, viewer_sees_demo=sees_demo),
+            use_cache=False,
+        )
+        return {c.display_name for c in result.candidates}
+
+    def test_a_client_sees_the_real_salon_only(self, both_salons):
+        names = self._names(sees_demo=False)
+
+        assert REAL_NAME in names
+        assert DEMO_NAME not in names
+
+    def test_a_test_persona_sees_both(self, both_salons):
+        names = self._names(sees_demo=True)
+
+        assert {REAL_NAME, DEMO_NAME} <= names
+
+    def test_the_two_audiences_do_not_share_a_cache_entry(self):
+        """Иначе выдача тестовой личности досталась бы клиенту на весь TTL —
+        особенно в анонимном пространстве ключей, где `client_id` пуст."""
+        from ai.application.services.recommendation_engine import RecommendationQuery
+
+        client_key = RecommendationQuery(limit=20).cache_key()
+        tester_key = RecommendationQuery(limit=20, viewer_sees_demo=True).cache_key()
+
+        assert client_key != tester_key
+
+
+class TestP4TheGlobalSearch:
+    """Глобальный поиск, все три выборки: `search/views.py`.
+
+    До этого тикета поиск к таблице салонов не присоединялся ВОВСЕ — демо
+    удерживал единственный замок сида (`status`), и он открыт.
+    """
+
+    def _found(self, viewer) -> tuple[set[str], set[str]]:
+        from rest_framework.test import APIClient
+
+        client = APIClient()
+        client.defaults["HTTP_X_APP_TYPE"] = "client"
+        client.force_authenticate(user=viewer)
+        response = client.get("/api/v1/search/", {"q": "Массаж", "limit": 50})
+        assert response.status_code == 200, response.content
+        body = response.json()
+        payload = body.get("data", body)
+        masters = {row["display_name"] for row in payload.get("specialists", [])}
+        services = {
+            row.get("specialist_name") or row.get("specialist", {}).get("display_name")
+            for row in payload.get("services", [])
+        }
+        return masters, services
+
+    def test_a_client_finds_the_real_salon_only(self, both_salons, client_person):
+        masters, services = self._found(client_person)
+
+        assert REAL_NAME in masters
+        assert DEMO_NAME not in masters
+        # Услуги — вторая и третья выборки той же ручки.
+        assert REAL_NAME in services
+        assert DEMO_NAME not in services
+
+    def test_a_test_persona_finds_both(self, both_salons, test_person):
+        masters, services = self._found(test_person)
+
+        assert {REAL_NAME, DEMO_NAME} <= masters
+        assert {REAL_NAME, DEMO_NAME} <= services
+
+
+class TestP5ThePublicCatalog:
+    """Публичный список и прямая карточка: `users/specialists_api.py`.
+
+    Карточка проверяется отдельно от списка: правило, снимаемое прямой
+    ссылкой, — не правило.
+    """
+
+    def _client(self, viewer):
+        from rest_framework.test import APIClient
+
+        client = APIClient()
+        client.defaults["HTTP_X_APP_TYPE"] = "client"
+        client.force_authenticate(user=viewer)
+        return client
+
+    def test_a_client_lists_the_real_salon_only(self, both_salons, client_person):
+        response = self._client(client_person).get("/api/v1/specialists/", {"limit": 50})
+
+        assert response.status_code == 200, response.content
+        body = response.content.decode("utf-8")
+        assert REAL_NAME in body
+        assert DEMO_NAME not in body
+
+    def test_a_test_persona_lists_both(self, both_salons, test_person):
+        response = self._client(test_person).get("/api/v1/specialists/", {"limit": 50})
+
+        assert response.status_code == 200, response.content
+        body = response.content.decode("utf-8")
+        assert REAL_NAME in body
+        assert DEMO_NAME in body
+
+    def test_a_direct_card_of_a_demo_master_is_closed_for_a_client(
+        self, both_salons, client_person
+    ):
+        client = self._client(client_person)
+        real = client.get(f"/api/v1/specialists/{both_salons['real'].id}/")
+        demo = client.get(f"/api/v1/specialists/{both_salons['demo'].id}/")
+
+        # Сначала о НАЛИЧИИ: боевая карточка открывается.
+        assert real.status_code == 200, real.content
+        assert demo.status_code == 404, demo.content
+
+    def test_a_direct_card_of_a_demo_master_opens_for_a_test_persona(
+        self, both_salons, test_person
+    ):
+        client = self._client(test_person)
+
+        assert client.get(f"/api/v1/specialists/{both_salons['demo'].id}/").status_code == 200

@@ -236,6 +236,7 @@ class HomeView(APIView):
             RecommendationQuery,
         )
         from goals.wiring import goal_category_ids_for
+        from users.sellable import is_test_persona
 
         # If client didn't share geo, fall back to top-rated (RecommendationEngine
         # treats None lat/lon as neutral 0.5 distance score, so rating dominates).
@@ -257,6 +258,10 @@ class HomeView(APIView):
                 city=city,
                 limit=LIMIT_NEARBY,
                 goal_category_ids=goal_category_ids_for(user),
+                # DRF-2420: демо-салон живой, но обычному клиенту его на
+                # главной не показываем. Признак идёт в запрос, а не в
+                # фильтр здесь, потому что он обязан войти в ключ кэша.
+                viewer_sees_demo=is_test_persona(user),
             ),
         )
         return [
