@@ -6,8 +6,9 @@
 * **При выборе создаётся только ``SalonService``** — строка «эта услуга есть
   в моём workspace»: ``template`` и ``category`` из канона, ``name`` =
   имя шаблона, ``base_price`` пуст (поле и так nullable), статус связи
-  ``REVIEW_REQUIRED`` (G5 → а: связь выбрана человеком, но не
-  подтверждена модератором; в подбор — только после ``VERIFIED``).
+  ``VERIFIED``, подтверждённый **правилом** (решение владельца §77 п.30 от
+  24.09, DRF-2406). Что правило подтверждает и чего НЕ подтверждает —
+  в ``MASTER_SELECT_RULE`` ниже; предел там записан намеренно.
 * **``SpecialistService`` при выборе НЕ создаётся.** Его ``price`` NOT
   NULL, и у поля 18 читателей в 11 файлах, включая запись (``Decimal(None)``
   в ``create_booking_service``) и зеркало бота
@@ -48,7 +49,59 @@ logger = logging.getLogger(__name__)
 #: Сколько шаблонов принимает один вызов. На экране — одно направление за раз.
 MAX_TEMPLATES_PER_CALL = 200
 #: ``SalonService.mapping_source_ref`` строки, заведённой выбором мастера.
+#: По этому префиксу правило ниже и узнаёт свои строки — и только свои.
 SOURCE_REF_PREFIX = "master_select:"
+
+#: Имя правила, подтверждающего связь при выборе мастера (§77 п.30, DRF-2406).
+#:
+#: **Что правило подтверждает:** мастер **выбрал** эту услугу из канона.
+#: Источник связи — его собственное действие на экране «Выберите услуги», и
+#: `mapping_source_ref` хранит, кто именно выбрал.
+#:
+#: **Чего правило НЕ подтверждает — и это предел, а не недоработка:** что
+#: мастер эту услугу **оказывает**. Прежняя схема ставила сюда человека, и
+#: ровно этот вопрос он должен был проверять. Владелец принял риск сознательно:
+#: подтверждать было некому — в группе прав ноль человек, и очередь на
+#: подтверждение росла вечно по построению, то есть «проверка» существовала
+#: только на бумаге.
+#:
+#: **Откат на `REVIEW_REQUIRED` запрещён** формулировкой владельца в докстринге
+#: `SalonService.MappingStatus`. Если выборочный контроль понадобится, он
+#: вводится **поверх** — отдельным признаком или отдельным разбором, — а не
+#: возвратом статуса: возврат снова сделал бы очередь вечной.
+#:
+#: Формулировка имени намеренно описывает ровно произошедшее и не присваивает
+#: себе проверку человеком; это сторожится узлом
+#: `test_rule_name_does_not_claim_the_master_performs_it` — усилить
+#: формулировку при следующей правке ничего не стоит, а проверить потом будет
+#: нечем. Тот же приём уже применён к `grandfathered_before_lifecycle`.
+MASTER_SELECT_RULE = "master_selected_from_canon"
+#: Версия правила. Меняется, когда меняется само основание подтверждения, а не
+#: когда правят код вокруг: «подтверждено правилом» без версии неотличимо от
+#: «подтверждено какой-то из его версий».
+MASTER_SELECT_RULE_VERSION = "1"
+
+
+def rule_confirmation(*, at=None) -> dict[str, object]:
+    """Провенанс подтверждения правилом: имя правила, версия, дата.
+
+    Одно место на живой выбор и на разовый прогон по уже существующим строкам:
+    иначе два вызова однажды разойдутся, и половина строк окажется подтверждена
+    «каким-то правилом без версии». `mapping_source_ref` сюда не входит
+    намеренно — основание у каждой строки своё, его подставляет вызывающий.
+
+    Поля не «на всякий случай»: без даты и автора `CheckConstraint`
+    `salonservice_verified_requires_provenance` не даст записать `VERIFIED`
+    вовсе, и это правильно — статус без происхождения через месяц читается как
+    умолчание.
+    """
+
+    return {
+        "mapping_status": SalonService.MappingStatus.VERIFIED,
+        "mapping_confirmed_rule": MASTER_SELECT_RULE,
+        "mapping_rule_version": MASTER_SELECT_RULE_VERSION,
+        "mapping_confirmed_at": at or timezone.now(),
+    }
 
 
 class SelectionRefused(Exception):
@@ -131,8 +184,8 @@ def select_templates(profile, template_ids: Iterable[UUID]) -> int:
                         category=template.category,
                         name=template.name,
                         source=SalonService.Source.MANUAL,
-                        mapping_status=SalonService.MappingStatus.REVIEW_REQUIRED,
                         mapping_source_ref=f"{SOURCE_REF_PREFIX}{profile.pk}",
+                        **rule_confirmation(),
                     )
             except IntegrityError:
                 # Гонка двух одинаковых вызовов: проигравший видит строку победителя.
@@ -187,6 +240,36 @@ DECIDED_MAPPING = frozenset({
     SalonService.MappingStatus.VERIFIED,
     SalonService.MappingStatus.NOT_RECOMMENDABLE,
 })
+
+
+def decided_by_someone_else(row: SalonService) -> bool:
+    """Держит ли строку **чужое** решение о связи — не собственный выбор мастера.
+
+    До DRF-2406 хватало одного статуса: строку с решённой связью удаление не
+    стирало. Теперь решённой становится **каждая** выбранная строка, и кнопка
+    «Убрать из моих услуг» перестала бы удалять что-либо вовсе: мастер, убравший
+    услугу сразу после выбора, оставлял бы выключенную строку навсегда. Это было
+    бы **молчаливым** изменением — лист §77 п.30 менял очередь на подтверждение,
+    а не смысл кнопки.
+
+    Граница проходит не между человеком и правилом: подтверждать связь правилом
+    умеет не только выбор мастера (есть, например, `owner_review`), и такие
+    решения удаление по-прежнему не стирает. Граница — **чьё это решение**:
+
+    * решение человека или другого правила — чужое, строку держим;
+    * подтверждение собственным выбором мастера — не чужое: убрать услугу
+      значит отозвать ровно то действие, которым строка и появилась.
+
+    Так поведение кнопки остаётся прежним для всех, кого она касалась раньше.
+    """
+
+    if row.mapping_status not in DECIDED_MAPPING:
+        return False
+    if row.mapping_status == SalonService.MappingStatus.NOT_RECOMMENDABLE:
+        # Отказ правило выбора не ставит никогда: такой статус — всегда чужое
+        # решение, кто бы ни значился в провенансе.
+        return True
+    return row.mapping_confirmed_rule != MASTER_SELECT_RULE
 
 
 class ServiceNotSelected(Exception):
@@ -285,7 +368,7 @@ def remove_service(profile, salon_service_id: UUID) -> str:
     if future:
         raise HasFutureAppointments(future)
 
-    keep = row.mapping_status in DECIDED_MAPPING or bookings.exists()
+    keep = decided_by_someone_else(row) or bookings.exists()
     outcome = "deactivated"
     with transaction.atomic():
         if not keep:
