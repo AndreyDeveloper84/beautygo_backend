@@ -65,10 +65,13 @@ SOURCE_REF_PREFIX = "master_select:"
 #: подтверждение росла вечно по построению, то есть «проверка» существовала
 #: только на бумаге.
 #:
-#: **Откат на `REVIEW_REQUIRED` запрещён** формулировкой владельца в докстринге
-#: `SalonService.MappingStatus`. Если выборочный контроль понадобится, он
-#: вводится **поверх** — отдельным признаком или отдельным разбором, — а не
-#: возвратом статуса: возврат снова сделал бы очередь вечной.
+#: **Откат статуса решением этого листа не вводится.** Формулировка владельца
+#: в докстринге `MappingStatus` говорит у́же, чем хочется процитировать: «ноль
+#: `VERIFIED` не разрешает откат на `REVIEW_REQUIRED`» — отвергнут конкретный
+#: довод, а не объявлен общий запрет. Здесь опора не на неё, а на §77 п.30: раз
+#: подтверждать некому, возврат в очередь вернул бы ровно то состояние, ради
+#: выхода из которого решение и принято. Если понадобится выборочный контроль,
+#: он вводится **поверх** — отдельным признаком или отдельным разбором.
 #:
 #: Формулировка имени намеренно описывает ровно произошедшее и не присваивает
 #: себе проверку человеком; это сторожится узлом
@@ -82,25 +85,32 @@ MASTER_SELECT_RULE = "master_selected_from_canon"
 MASTER_SELECT_RULE_VERSION = "1"
 
 
-def rule_confirmation(*, at=None) -> dict[str, object]:
-    """Провенанс подтверждения правилом: имя правила, версия, дата.
+def rule_confirmation(*, source_ref: str, at=None) -> dict[str, object]:
+    """Провенанс подтверждения правилом целиком: правило, версия, дата, основание.
 
     Одно место на живой выбор и на разовый прогон по уже существующим строкам:
     иначе два вызова однажды разойдутся, и половина строк окажется подтверждена
-    «каким-то правилом без версии». `mapping_source_ref` сюда не входит
-    намеренно — основание у каждой строки своё, его подставляет вызывающий.
+    «каким-то правилом без версии».
 
-    Поля не «на всякий случай»: без даты и автора `CheckConstraint`
-    `salonservice_verified_requires_provenance` не даст записать `VERIFIED`
-    вовсе, и это правильно — статус без происхождения через месяц читается как
-    умолчание.
+    `source_ref` **обязателен и возвращается отсюда же**, хотя значение у каждой
+    строки своё. Прежняя редакция оставляла его вызывающему — и тогда второй
+    вызывающий, забывший его подставить, упирался бы в
+    `salonservice_verified_requires_provenance` уже на записи. Ровно тот же
+    довод, по которому проверка стоит в схеме, а не в `clean()`: пусть
+    нарушение будет **невозможно построить**, а не «замечено на ревью».
+
+    Поля не «на всякий случай»: без даты, автора и основания схема `VERIFIED`
+    не примет — статус без происхождения через месяц читается как умолчание.
     """
 
+    if not source_ref:
+        raise ValueError("подтверждение правилом без основания: source_ref пуст")
     return {
         "mapping_status": SalonService.MappingStatus.VERIFIED,
         "mapping_confirmed_rule": MASTER_SELECT_RULE,
         "mapping_rule_version": MASTER_SELECT_RULE_VERSION,
         "mapping_confirmed_at": at or timezone.now(),
+        "mapping_source_ref": source_ref,
     }
 
 
@@ -184,8 +194,9 @@ def select_templates(profile, template_ids: Iterable[UUID]) -> int:
                         category=template.category,
                         name=template.name,
                         source=SalonService.Source.MANUAL,
-                        mapping_source_ref=f"{SOURCE_REF_PREFIX}{profile.pk}",
-                        **rule_confirmation(),
+                        **rule_confirmation(
+                            source_ref=f"{SOURCE_REF_PREFIX}{profile.pk}"
+                        ),
                     )
             except IntegrityError:
                 # Гонка двух одинаковых вызовов: проигравший видит строку победителя.
@@ -235,7 +246,11 @@ def _existing(tenant: Tenant, template: ServiceTemplate) -> SalonService | None:
 
 # --- M8b: цена и длительность, «Убрать из моих услуг» -----------------------
 
-#: Решённые модератором статусы связи: такую строку удаление не стирает.
+#: Статусы, при которых связь считается решённой. Одного статуса для удаления
+#: уже НЕ хватает: с DRF-2406 `VERIFIED` ставит и правило выбора мастера, то
+#: есть решённой стала бы каждая выбранная строка. Кто именно решил — разбирает
+#: `decided_by_someone_else` ниже; этот набор отвечает только на вопрос
+#: «решение вообще есть?».
 DECIDED_MAPPING = frozenset({
     SalonService.MappingStatus.VERIFIED,
     SalonService.MappingStatus.NOT_RECOMMENDABLE,
@@ -253,8 +268,9 @@ def decided_by_someone_else(row: SalonService) -> bool:
     а не смысл кнопки.
 
     Граница проходит не между человеком и правилом: подтверждать связь правилом
-    умеет не только выбор мастера (есть, например, `owner_review`), и такие
-    решения удаление по-прежнему не стирает. Граница — **чьё это решение**:
+    умеет не только выбор мастера — в коде это делают `map_salon_services:R*`
+    (`mapping_apply`), `tech_tenant_fixture`, `golden_stand`, — и такие решения
+    удаление по-прежнему не стирает. Граница — **чьё это решение**:
 
     * решение человека или другого правила — чужое, строку держим;
     * подтверждение собственным выбором мастера — не чужое: убрать услугу
@@ -352,8 +368,9 @@ def remove_service(profile, salon_service_id: UUID) -> str:
       конец в будущем) — ``HasFutureAppointments``, ничего не тронуто.
     * Строка удаляется целиком, только если её ничто не держит: нет ни
       одной записи (``Appointment.salon_service`` — PROTECT) и связь не решена
-      модератором. Иначе строка и предложения выключаются: история записей
-      и разметка модератора остаются.
+      **кем-то другим** (DRF-2406: собственное подтверждение выбора мастер
+      вправе отозвать, чужое решение удаление не стирает). Иначе строка и
+      предложения выключаются: история записей и чужая разметка остаются.
     """
 
     from appointments.domain.value_objects import ACTIVE_BOOKING_STATUSES
@@ -393,13 +410,18 @@ def remove_service(profile, salon_service_id: UUID) -> str:
 
 
 __all__ = [
+    "MASTER_SELECT_RULE",
+    "MASTER_SELECT_RULE_VERSION",
     "MAX_TEMPLATES_PER_CALL",
+    "SOURCE_REF_PREFIX",
     "HasFutureAppointments",
     "SelectedService",
     "SelectionRefused",
     "ServiceNotSelected",
     "TemplatesNotFound",
+    "decided_by_someone_else",
     "remove_service",
+    "rule_confirmation",
     "select_templates",
     "selected_services",
     "set_offer",

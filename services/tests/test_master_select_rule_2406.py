@@ -31,8 +31,8 @@ from django.db import IntegrityError, transaction
 from services.models import SalonService, ServiceCategory, ServiceTemplate
 from services.offer_selection import (
     MASTER_SELECT_RULE,
-    decided_by_someone_else,
     MASTER_SELECT_RULE_VERSION,
+    decided_by_someone_else,
     SOURCE_REF_PREFIX,
     rule_confirmation,
 )
@@ -78,8 +78,7 @@ class TestSelectionIsConfirmedByTheRule:
             category=template.category,
             name=template.name,
             source=SalonService.Source.MANUAL,
-            mapping_source_ref=f"{SOURCE_REF_PREFIX}{uuid.uuid4()}",
-            **rule_confirmation(),
+            **rule_confirmation(source_ref=f"{SOURCE_REF_PREFIX}{uuid.uuid4()}"),
         )
 
         assert row.mapping_status == SalonService.MappingStatus.VERIFIED
@@ -103,8 +102,7 @@ class TestSelectionIsConfirmedByTheRule:
             category=template.category,
             name=template.name,
             source=SalonService.Source.MANUAL,
-            mapping_source_ref=f"{SOURCE_REF_PREFIX}{uuid.uuid4()}",
-            **rule_confirmation(),
+            **rule_confirmation(source_ref=f"{SOURCE_REF_PREFIX}{uuid.uuid4()}"),
         )
 
         eligible = SalonService.objects.filter(
@@ -128,8 +126,7 @@ class TestWhatTheRuleRefusesToConfirm:
                     category=canon_category,
                     name="Своя услуга вне канона",
                     source=SalonService.Source.MANUAL,
-                    mapping_source_ref=f"{SOURCE_REF_PREFIX}{uuid.uuid4()}",
-                    **rule_confirmation(),
+                    **rule_confirmation(source_ref=f"{SOURCE_REF_PREFIX}{uuid.uuid4()}"),
                 )
 
     def test_provenance_cannot_be_dropped_while_keeping_the_status(self, template) -> None:
@@ -183,8 +180,7 @@ class TestTheRuleTouchesOnlyItsOwnRows:
             category=template.category,
             name=f"{template.name} (выбор мастера)",
             source=SalonService.Source.MANUAL,
-            mapping_source_ref=f"{SOURCE_REF_PREFIX}{uuid.uuid4()}",
-            **rule_confirmation(),
+            **rule_confirmation(source_ref=f"{SOURCE_REF_PREFIX}{uuid.uuid4()}"),
         )
         assert mine.pk in {row.pk for row in selected.all()}
 
@@ -241,8 +237,7 @@ class TestRemovalKeepsItsMeaning:
             "category": template.category,
             "name": template.name,
             "source": SalonService.Source.MANUAL,
-            "mapping_source_ref": f"{SOURCE_REF_PREFIX}{uuid.uuid4()}",
-            **rule_confirmation(),
+            **rule_confirmation(source_ref=f"{SOURCE_REF_PREFIX}{uuid.uuid4()}"),
         }
         fields.update(over)
         return SalonService.objects.create(**fields)
@@ -294,3 +289,25 @@ class TestRemovalKeepsItsMeaning:
         )
 
         assert decided_by_someone_else(row) is True
+
+
+class TestConfirmationCannotBeBuiltWithoutABasis:
+    def test_an_empty_source_ref_is_refused_before_the_database(self) -> None:
+        """Нарушение провенанса нельзя **построить**, а не «замечено на ревью».
+
+        Прежняя редакция возвращала четыре поля из пяти и полагалась на то, что
+        основание подставит вызывающий. Второй вызывающий, забывший его,
+        упирался бы в `salonservice_verified_requires_provenance` уже на записи
+        — то есть ошибка ловилась бы позже и дороже.
+        """
+        with pytest.raises(ValueError) as exc:
+            rule_confirmation(source_ref="")
+
+        assert "source_ref" in str(exc.value)
+
+    def test_a_basis_comes_back_from_the_helper(self) -> None:
+        """Положительная пара: основание — часть провенанса, а не забота вызывающего."""
+        fields = rule_confirmation(source_ref="master_select:x")
+
+        assert fields["mapping_source_ref"] == "master_select:x"
+        assert fields["mapping_status"] == SalonService.MappingStatus.VERIFIED
