@@ -1039,3 +1039,52 @@ class SalonAdminLinkRequest(models.Model):
 
     def __str__(self) -> str:
         return f"{self.tenant_id} {self.external_user_id} {self.result}"
+
+
+class SpecialistIdentityLinkRequest(models.Model):
+    """Одна принятая просьба «связать личность принявшего приглашение мастера» (DRF-2442).
+
+    Решение владельца §77 п.38 (24.09): человека в регистрации мастеров нет.
+    Строка — и ключ идемпотентности, и аудит: кто (``actor`` — служебная метка
+    вызывающего, не имя), какую личность, к какому профилю и когда. Пишется
+    ТОЛЬКО на успех и внутри той же транзакции, что и связь; отказ строки не
+    оставляет (причина уходит в лог с ``correlation_id``).
+
+    Отличие от :class:`SalonAdminLinkRequest`: там ручка СОЗДАЁТ учётку, здесь
+    только появляется ребро личности к уже существующему специалисту, поэтому
+    ``profile`` обязателен и ``PROTECT`` — по нему читается, что связь была.
+
+    Персональных данных нет: ``external_user_id`` — тот же ``bot:max:<id>``,
+    что уже лежит в ``User.username`` прокси-строки.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.CharField(max_length=64, unique=True)
+    profile = models.ForeignKey(
+        "users.SpecialistProfile", on_delete=models.PROTECT,
+        related_name="identity_link_requests",
+        help_text="The specialist profile whose identity edge this request created.",
+    )
+    external_user_id = models.CharField(max_length=200, db_index=True)
+    user = models.ForeignKey(
+        "users.User", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="specialist_identity_link_requests",
+        help_text="The specialist's working account the identity was bound to.",
+    )
+    actor = models.CharField(
+        max_length=200,
+        help_text="Caller label (e.g. `bot:onboarding_accept`) — no name, no phone.",
+    )
+    correlation_id = models.CharField(max_length=64, blank=True, default="")
+    result = models.CharField(max_length=32, default="created")
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = "Specialist identity link request"
+        verbose_name_plural = "Specialist identity link requests"
+        indexes = [
+            models.Index(fields=["profile", "created_at"], name="specidlink_profile_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.profile_id} {self.external_user_id} {self.result}"

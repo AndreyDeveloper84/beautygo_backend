@@ -557,6 +557,19 @@ GUARDED_OTHERWISE_SPECIALIST: dict[str, str] = {
     "internal-specialist-schedule": (
         "IsInternalBearer + tenant_id как заявка, 404 на чужой (DRF-1126)"
     ),
+    # DRF-2442: это дверь, КОТОРАЯ ДЕЛАЕТ субъекта. Сторож субъекта здесь
+    # невозможен по построению: пока связи нет, актор и есть та самая
+    # несвязанная личность, и IsInternalBearerForSpecialistSubject отказал бы
+    # всем — то есть ручка, чинящая 403, отвечала бы 403. Вместо него —
+    # собственный credential IsSpecialistIdentityLinkBearer (ни один соседний
+    # секрет не принимается) плюс проверки цели по имени
+    # (specialist_not_found / specialist_not_linkable / identity_already_bound)
+    # и authoritative readback боевым путём сторожа после записи. Отрицательные
+    # узлы — users/tests/test_specialist_identity_link_2442.py.
+    "internal-specialist-identity-link": (
+        "IsSpecialistIdentityLinkBearer + именованные отказы по цели + readback "
+        "боевым сторожем; сторож субъекта невозможен: дверь СОЗДАЁТ субъекта (DRF-2442)"
+    ),
 }
 
 #: Subject-маршруты мастера, чьи отрицательные тесты живут в своём наборе.
