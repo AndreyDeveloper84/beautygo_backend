@@ -85,13 +85,20 @@ class NutritionProfileAdmin(admin.ModelAdmin):
         "goal_overridden_by", "last_overrides_applied",
         "onboarded_at", "first_food_logged_at", "weekly_summary_unlocked_at",
         "created_at", "updated_at",
+        # DRF-2310: тип питания — ответ ЧЕЛОВЕКА, и поставленный рукой он
+        # стал бы ответом, которого никто не давал: `diet_answered` читает
+        # столбец вместе с отметкой времени, и правка мимо разбора её не
+        # ставит. Видеть — да (в том числе слова, чтобы поддержка могла их
+        # прочитать и вычистить по просьбе), править — через ручку.
+        "diet_preference", "diet_note", "diet_answered_at",
     )
     raw_id_fields = ("user", "tenant")
     fieldsets = (
         (None, {"fields": ("user", "tenant", "timezone")}),
         ("Анкета", {"fields": (
             "gender", "age", "height_cm", "weight_kg", "weight_range",
-            "activity_coefficient", "goal", "pace", "diet_preference",
+            "activity_coefficient", "goal", "pace",
+            "diet_preference", "diet_note", "diet_answered_at",
         )}),
         ("Health flags", {"fields": ("health_flags",)}),
         ("Computed нормы", {"fields": (
