@@ -194,3 +194,113 @@ class TestScopeFirstAndNothingWritten:
         ]
         assert queries.captured_queries, "положительная пара: прогон вообще ходил в базу"
         assert wrote == [], wrote
+
+
+class TestAnEmptySliceIsRefusedToo:
+    """Зеркальный случай опечатки, и он опаснее: отбор не применён, а заголовок
+    говорит «срез». Тогда 232 записывают в ответ на вопрос «сколько из 44».
+
+    Живой путь к нему — не выдумка: `--status "$ST"` с незаданной переменной
+    или запятая, оставшаяся от склейки списка в скрипте.
+    """
+
+    @pytest.mark.parametrize("spec", [",", " , ", ",,"])
+    def test_a_spec_naming_nothing_is_refused(self, tenant, canon, spec) -> None:
+        _svc(tenant, "Массаж спины", source=SalonService.Source.YCLIENTS)
+
+        with pytest.raises(CommandError) as exc:
+            _run(tenant, status=spec)
+
+        assert "пустой срез" in str(exc.value)
+
+    def test_an_absent_flag_still_means_the_whole_salon(self, tenant, canon) -> None:
+        """Положительная пара: пустая строка по умолчанию — не срез, и так и сказано."""
+        _svc(tenant, "Массаж спины", source=SalonService.Source.YCLIENTS)
+
+        report = _run(tenant, status="", source="")
+
+        assert "срез: весь салон" in report
+
+    def test_the_header_repeats_only_what_was_applied(self, tenant, canon) -> None:
+        """Заголовок собирается из разобранных значений, а не из сырой строки.
+
+        Иначе он повторял бы дубли и пробелы пользователя и мог бы описать
+        отбор, которого не было.
+        """
+        _svc(tenant, "Массаж спины", source=SalonService.Source.YCLIENTS)
+
+        report = _run(tenant, source=" yclients , yclients ")
+
+        assert "срез: источник yclients ·" in report
+
+
+class TestTheSliceDoesNotLeakIntoSinks:
+    def test_store_refuses_to_save_a_partial_report(self, tenant, canon) -> None:
+        """Отчёт админки — один файл на салон, и админка читает его как полный.
+
+        Строка, которой в нём нет, показывается как «нет в отчёте», действие
+        «подтвердить кандидата» на неё отказывает, а «отметить пробел канона»
+        пишет провенанс с пометкой «без отчёта». Срез, записанный сюда, увёл бы
+        туда весь салон молча.
+        """
+        _svc(tenant, "Массаж спины", source=SalonService.Source.YCLIENTS)
+
+        with pytest.raises(CommandError) as exc:
+            _run(tenant, source="yclients", store=True)
+
+        assert "--store" in str(exc.value)
+
+    def test_store_without_a_slice_still_works(self, tenant, canon, settings, tmp_path) -> None:
+        """Положительная пара: запрет узкий — он про срез, а не про --store."""
+        settings.MAPPING_REPORT_DIR = str(tmp_path)
+        _svc(tenant, "Массаж спины", source=SalonService.Source.YCLIENTS)
+
+        report = _run(tenant, store=True)
+
+        assert "отчёт последнего прогона" in report
+
+    def test_the_json_carries_its_own_scope(self, tenant, canon, tmp_path) -> None:
+        """Файл уходит дальше терминала, где два числа напечатаны рядом."""
+        import json
+
+        _svc(tenant, "Массаж спины", source=SalonService.Source.YCLIENTS)
+        _svc(tenant, "Массаж стоп", source=SalonService.Source.SEED)
+        out = tmp_path / "r.json"
+
+        _run(tenant, source="yclients", out=str(out))
+
+        payload = json.loads(out.read_text(encoding="utf-8"))
+        assert payload["scope"]["slice"] == "источник yclients"
+        assert payload["scope"]["rows_in_slice"] == 1
+        assert payload["scope"]["rows_in_tenant"] == 2
+        assert payload["scope"]["tenant"] == tenant.slug
+        # Положительная пара: сводка по-прежнему про срез, а не про салон.
+        assert payload["summary"]["total"] == 1
+
+
+class TestTheSliceIsRefusedOnTheWritePath:
+    def test_apply_with_a_slice_is_refused_before_the_gate(self, tenant, canon) -> None:
+        """Сегодня ворота закрыты, но в день, когда откроются, срез обманул бы.
+
+        `--apply --status unmapped` записал бы ВЕСЬ салон, пока оператор
+        считает, что сузил до 44 строк. Сужение для записи уже есть — `--only`.
+        """
+        _svc(tenant, "Массаж спины", source=SalonService.Source.YCLIENTS)
+
+        with pytest.raises(CommandError) as exc:
+            _run(tenant, source="yclients", apply=True)
+
+        assert "--only" in str(exc.value)
+
+    def test_a_typo_on_the_write_path_is_seen_at_all(self, tenant, canon) -> None:
+        """Прежде опечатка на этом пути не рассматривалась вовсе.
+
+        Разбор среза шёл после ветки записи, и `--apply --status unmaped`
+        уходил в отказ ворот, ни разу не взглянув на опечатку.
+        """
+        _svc(tenant, "Массаж спины", source=SalonService.Source.YCLIENTS)
+
+        with pytest.raises(CommandError) as exc:
+            _run(tenant, status="unmaped", apply=True)
+
+        assert "unmaped" in str(exc.value)
