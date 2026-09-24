@@ -223,6 +223,11 @@ class TestLinkedIsOneWriteOnTheProxyNotASecondProfile:
 class TestTheClaimIsNotASecondIdentityGraph:
     ALLOWED_READERS = {
         "tenants/solo_provisioning.py",
+        # DRF-2379: второй провижининг — специалист в УЖЕ существующем салоне.
+        # Читает claim по тому же праву, что и соседний соло: это ключ
+        # идемпотентности провижининга, а не ребро личности. Резолверы
+        # личности его по-прежнему не читают.
+        "tenants/salon_specialist_provisioning.py",
         "users/models.py",  # определение поля
         # DRF-1829 (M28): pre-LINKED принципал — единственный разрешённый
         # читатель claim вне provisioning; условие «прокси не связан» и DRAFT
