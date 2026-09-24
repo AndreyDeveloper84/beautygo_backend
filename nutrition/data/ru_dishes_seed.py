@@ -49,6 +49,34 @@ class DishMacros:
     fiber_g_per_100g: float | None = None
     micronutrients_source: str = "unknown"
 
+    # DRF-2402 — типовая порция блюда: СПРАВОЧНЫЕ данные, не догадка модели.
+    #
+    # Нужна там, где провайдер порцию не оценил: сегодня такой скан
+    # отклоняется целиком (DRF-2401), хотя калории на 100 г известны.
+    # Оценку провайдера она не перебивает никогда и **вопрос человеку не
+    # отменяет** — решение владельца остаётся спросить вес (DRF-2336),
+    # меняется только форма вопроса, и формулировку утверждает он.
+    #
+    # ``None`` — значит «общепринятой порции нет», и тогда спрашиваем, как
+    # сейчас. Пустое честнее выдуманного: половина блюд подаётся как угодно.
+    #
+    # ``typical_portion_source`` — происхождение числа, без него число равно
+    # выдуманному (урок DRF-2286). Значения:
+    #   ``ru_serving_practice`` — общепринятый выход блюда в русской подаче
+    #     (порция супа, гарнира, салата в сборниках рецептур и меню). Это
+    #     НЕ измерение и НЕ среднее по стране: это то, что человек увидит
+    #     в тарелке, и повод СПРОСИТЬ подтверждение, а не молча посчитать.
+    #
+    #     Откуда сами числа, без умолчаний: проставлены окном-исполнителем
+    #     по конвенции подачи — суповая тарелка 300, салат 150, горячее
+    #     250, гарнир 150, ломоть хлеба 30, стакан 200. **Построчной сверки
+    #     с ТТК или сборником рецептур не проводилось.** Названный предел —
+    #     долг, ненайденный — дыра; защищаемая цифра (например, в споре с
+    #     салоном) потребует отдельного замера и отдельного листа.
+    #   ``unknown`` — порции нет; стоит у каждой пустой строки.
+    typical_portion_g: float | None = None
+    typical_portion_source: str = "unknown"
+
 
 # ---------------------------------------------------------------------------
 # Canonical dish → macros per 100g
@@ -64,67 +92,203 @@ DISH_MACROS: dict[str, DishMacros] = {
         vitamin_c_mg_per_100g=5.0, calcium_mg_per_100g=29.0,
         magnesium_mg_per_100g=18.0,
         micronutrients_source="rospotrebnadzor",
+        typical_portion_g=300, typical_portion_source="ru_serving_practice",
     ),
-    "щи":             DishMacros(32,  1.4, 1.5, 4.1),
-    "солянка":        DishMacros(72,  4.7, 4.5, 3.4),
-    "окрошка":        DishMacros(53,  2.8, 2.4, 5.4),
-    "харчо":          DishMacros(67,  3.1, 3.5, 5.7),
-    "рассольник":     DishMacros(42,  1.4, 2.2, 4.4),
-    "уха":            DishMacros(46,  4.7, 1.5, 3.0),
-    "грибной суп":    DishMacros(26,  1.6, 1.0, 3.0),
-    "гороховый суп":  DishMacros(66,  4.0, 2.2, 7.6),
-    "куриный суп":    DishMacros(36,  2.5, 1.5, 3.4),
+    "щи": DishMacros(
+        32,  1.4, 1.5, 4.1,
+        typical_portion_g=300, typical_portion_source="ru_serving_practice",
+    ),
+    "солянка": DishMacros(
+        72,  4.7, 4.5, 3.4,
+        typical_portion_g=300, typical_portion_source="ru_serving_practice",
+    ),
+    "окрошка": DishMacros(
+        53,  2.8, 2.4, 5.4,
+        typical_portion_g=300, typical_portion_source="ru_serving_practice",
+    ),
+    "харчо": DishMacros(
+        67,  3.1, 3.5, 5.7,
+        typical_portion_g=300, typical_portion_source="ru_serving_practice",
+    ),
+    "рассольник": DishMacros(
+        42,  1.4, 2.2, 4.4,
+        typical_portion_g=300, typical_portion_source="ru_serving_practice",
+    ),
+    "уха": DishMacros(
+        46,  4.7, 1.5, 3.0,
+        typical_portion_g=300, typical_portion_source="ru_serving_practice",
+    ),
+    "грибной суп": DishMacros(
+        26,  1.6, 1.0, 3.0,
+        typical_portion_g=300, typical_portion_source="ru_serving_practice",
+    ),
+    "гороховый суп": DishMacros(
+        66,  4.0, 2.2, 7.6,
+        typical_portion_g=300, typical_portion_source="ru_serving_practice",
+    ),
+    "куриный суп": DishMacros(
+        36,  2.5, 1.5, 3.4,
+        typical_portion_g=300, typical_portion_source="ru_serving_practice",
+    ),
     # --- Salads ------------------------------------------------------------
-    "оливье":         DishMacros(198, 5.5, 16.5, 7.8),
-    "винегрет":       DishMacros(83,  1.6, 4.7, 8.2),
-    "сельдь под шубой": DishMacros(193, 6.6, 16.7, 4.4),
-    "мимоза":         DishMacros(290, 8.0, 26.0, 5.0),
-    "греческий салат": DishMacros(106, 3.1, 9.3, 3.0),
-    "цезарь":         DishMacros(190, 8.0, 14.0, 7.0),
-    "крабовый салат": DishMacros(128, 6.0, 9.0, 6.0),
+    "оливье": DishMacros(
+        198, 5.5, 16.5, 7.8,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "винегрет": DishMacros(
+        83,  1.6, 4.7, 8.2,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "сельдь под шубой": DishMacros(
+        193, 6.6, 16.7, 4.4,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "мимоза": DishMacros(
+        290, 8.0, 26.0, 5.0,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "греческий салат": DishMacros(
+        106, 3.1, 9.3, 3.0,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "цезарь": DishMacros(
+        190, 8.0, 14.0, 7.0,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "крабовый салат": DishMacros(
+        128, 6.0, 9.0, 6.0,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
     # --- Mains -------------------------------------------------------------
-    "плов":           DishMacros(150, 4.2, 6.0, 18.6),
-    "пельмени":       DishMacros(245, 11.5, 11.0, 25.0),
-    "вареники":       DishMacros(170, 6.6, 5.0, 25.0),
-    "голубцы":        DishMacros(124, 6.0, 6.0, 12.0),
-    "бефстроганов":   DishMacros(193, 17.0, 11.7, 5.8),
+    "плов": DishMacros(
+        150, 4.2, 6.0, 18.6,
+        typical_portion_g=250, typical_portion_source="ru_serving_practice",
+    ),
+    "пельмени": DishMacros(
+        245, 11.5, 11.0, 25.0,
+        typical_portion_g=250, typical_portion_source="ru_serving_practice",
+    ),
+    "вареники": DishMacros(
+        170, 6.6, 5.0, 25.0,
+        typical_portion_g=250, typical_portion_source="ru_serving_practice",
+    ),
+    "голубцы": DishMacros(
+        124, 6.0, 6.0, 12.0,
+        typical_portion_g=250, typical_portion_source="ru_serving_practice",
+    ),
+    "бефстроганов": DishMacros(
+        193, 17.0, 11.7, 5.8,
+        typical_portion_g=250, typical_portion_source="ru_serving_practice",
+    ),
     "котлеты":        DishMacros(220, 14.0, 14.0, 9.5),
     "тефтели":        DishMacros(163, 12.0, 10.0, 6.0),
     "котлета по-киевски": DishMacros(290, 17.0, 22.0, 7.0),
-    "шашлык":         DishMacros(225, 19.0, 17.0, 0.0),
-    "запеканка":      DishMacros(168, 17.6, 4.2, 14.2),
-    "омлет":          DishMacros(184, 9.6, 15.4, 1.9),
-    "яичница":        DishMacros(196, 13.6, 14.8, 0.6),
-    "блины":          DishMacros(186, 5.4, 3.1, 32.6),
-    "сырники":        DishMacros(220, 14.0, 9.0, 22.0),
+    "шашлык": DishMacros(
+        225, 19.0, 17.0, 0.0,
+        typical_portion_g=250, typical_portion_source="ru_serving_practice",
+    ),
+    "запеканка": DishMacros(
+        168, 17.6, 4.2, 14.2,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "омлет": DishMacros(
+        184, 9.6, 15.4, 1.9,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "яичница": DishMacros(
+        196, 13.6, 14.8, 0.6,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "блины": DishMacros(
+        186, 5.4, 3.1, 32.6,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "сырники": DishMacros(
+        220, 14.0, 9.0, 22.0,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
     # --- Sides -------------------------------------------------------------
-    "гречка":         DishMacros(101, 3.4, 0.6, 21.3),
-    "рис":            DishMacros(116, 2.2, 0.5, 24.9),
-    "макароны":       DishMacros(112, 3.5, 0.4, 23.2),
-    "картофельное пюре": DishMacros(106, 2.1, 4.2, 14.7),
-    "жареная картошка": DishMacros(192, 2.8, 9.4, 23.4),
-    "овсянка":        DishMacros(88,  3.0, 1.7, 15.0),
+    "гречка": DishMacros(
+        101, 3.4, 0.6, 21.3,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "рис": DishMacros(
+        116, 2.2, 0.5, 24.9,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "макароны": DishMacros(
+        112, 3.5, 0.4, 23.2,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "картофельное пюре": DishMacros(
+        106, 2.1, 4.2, 14.7,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "жареная картошка": DishMacros(
+        192, 2.8, 9.4, 23.4,
+        typical_portion_g=150, typical_portion_source="ru_serving_practice",
+    ),
+    "овсянка": DishMacros(
+        88,  3.0, 1.7, 15.0,
+        typical_portion_g=200, typical_portion_source="ru_serving_practice",
+    ),
     # --- Bread -------------------------------------------------------------
-    "хлеб белый":     DishMacros(242, 7.6, 0.8, 49.0),
-    "хлеб ржаной":    DishMacros(165, 6.6, 1.2, 33.4),
-    "батон":          DishMacros(264, 7.5, 2.9, 50.9),
+    "хлеб белый": DishMacros(
+        242, 7.6, 0.8, 49.0,
+        typical_portion_g=30, typical_portion_source="ru_serving_practice",
+    ),
+    "хлеб ржаной": DishMacros(
+        165, 6.6, 1.2, 33.4,
+        typical_portion_g=30, typical_portion_source="ru_serving_practice",
+    ),
+    "батон": DishMacros(
+        264, 7.5, 2.9, 50.9,
+        typical_portion_g=30, typical_portion_source="ru_serving_practice",
+    ),
     # --- Dairy -------------------------------------------------------------
     "творог":         DishMacros(155, 16.0, 9.0, 2.0),
-    "кефир":          DishMacros(53,  3.0, 2.5, 4.0),
-    "молоко":         DishMacros(60,  3.0, 3.2, 4.7),
-    "йогурт":         DishMacros(66,  3.2, 1.5, 9.6),
+    "кефир": DishMacros(
+        53,  3.0, 2.5, 4.0,
+        typical_portion_g=200, typical_portion_source="ru_serving_practice",
+    ),
+    "молоко": DishMacros(
+        60,  3.0, 3.2, 4.7,
+        typical_portion_g=200, typical_portion_source="ru_serving_practice",
+    ),
+    "йогурт": DishMacros(
+        66,  3.2, 1.5, 9.6,
+        typical_portion_g=125, typical_portion_source="ru_serving_practice",
+    ),
     "сметана":        DishMacros(206, 2.8, 20.0, 3.2),
     "сыр":            DishMacros(355, 24.0, 28.0, 0.0),
     # --- Drinks ------------------------------------------------------------
-    "чай":            DishMacros(0,   0.0, 0.0, 0.0),
-    "кофе":           DishMacros(2,   0.2, 0.0, 0.3),
-    "компот":         DishMacros(60,  0.2, 0.0, 14.6),
-    "кисель":         DishMacros(54,  0.1, 0.0, 13.0),
+    "чай": DishMacros(
+        0,   0.0, 0.0, 0.0,
+        typical_portion_g=200, typical_portion_source="ru_serving_practice",
+    ),
+    "кофе": DishMacros(
+        2,   0.2, 0.0, 0.3,
+        typical_portion_g=200, typical_portion_source="ru_serving_practice",
+    ),
+    "компот": DishMacros(
+        60,  0.2, 0.0, 14.6,
+        typical_portion_g=200, typical_portion_source="ru_serving_practice",
+    ),
+    "кисель": DishMacros(
+        54,  0.1, 0.0, 13.0,
+        typical_portion_g=200, typical_portion_source="ru_serving_practice",
+    ),
     # --- Desserts ----------------------------------------------------------
-    "пирог":          DishMacros(290, 5.5, 12.0, 41.0),
+    "пирог": DishMacros(
+        290, 5.5, 12.0, 41.0,
+        typical_portion_g=100, typical_portion_source="ru_serving_practice",
+    ),
     "печенье":        DishMacros(417, 7.5, 11.8, 74.4),
     "шоколад":        DishMacros(550, 5.4, 35.3, 52.4),
-    "медовик":        DishMacros(478, 4.5, 25.0, 56.0),
+    "медовик": DishMacros(
+        478, 4.5, 25.0, 56.0,
+        typical_portion_g=100, typical_portion_source="ru_serving_practice",
+    ),
 }
 
 
