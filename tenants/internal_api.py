@@ -44,6 +44,10 @@ from rest_framework.views import APIView
 from core.errors import ErrorCode
 from tenants.models import Tenant
 from tenants.provisioning import TenantNameMismatch, ensure_tenant
+from tenants.salon_specialist_provisioning import (
+    SalonSpecialistRefused,
+    provision_salon_specialist,
+)
 from tenants.solo_provisioning import SoloProvisioningRefused, provision_solo_workspace
 from users.permissions import IsInternalBearer, IsTenantProvisioningBearer
 from users.response import error_response, success_response
@@ -244,6 +248,118 @@ class InternalSoloWorkspaceView(APIView):
                 "status": workspace.profile.status,
             },
             status_code=status.HTTP_201_CREATED if workspace.created else status.HTTP_200_OK,
+        )
+
+
+# ─── DRF-2379: специалист в УЖЕ СУЩЕСТВУЮЩЕМ салоне ───
+
+
+class _SalonSpecialistRequestSerializer(serializers.Serializer):
+    tenant_id = serializers.UUIDField()
+    external_user_id = serializers.CharField(max_length=200)
+    display_name = serializers.CharField(max_length=255)
+
+
+class _SalonSpecialistResponseSerializer(serializers.Serializer):
+    specialist_id = serializers.UUIDField()
+    tenant_id = serializers.UUIDField()
+    user_id = serializers.UUIDField()
+    status = serializers.CharField()
+
+
+class InternalSalonSpecialistView(APIView):
+    """``POST /internal/tenants/salon-specialists/`` — завести специалиста в салоне.
+
+    Решение владельца §77 п.27 (24.09): привязка мастера к каталогу должна
+    происходить сама, когда салон заводит мастера. До этого листа она была
+    тремя шагами в двух системах с двумя правами: профиль заводился в админке
+    каталога, ключ приезжал синком, действие повторялось в админке бота.
+
+    **Почему не `solo-workspaces`.** Та ручка заводит тенант ЦЕЛИКОМ, а у
+    салона он уже есть: второй завёл бы параллельный кабинет с теми же людьми.
+    Здесь тенант ищется, и его отсутствие — отказ, а не повод создать.
+
+    **Что именно рождается.** В зеркале бота живут два разных понятия, и их
+    путали: ``linked_bot_user`` отвечает «кто этот человек» (роль мастера), а
+    ``catalog_specialist_id`` — «каким ключом эту строку знает каталог».
+    Привязка человека второго не создаёт, поэтому часы после неё отвечали 403.
+    Эта ручка возвращает именно второе — ``specialist_id``.
+
+    **Идемпотентность по ``external_user_id``**: повтор возвращает того же
+    специалиста, 200 вместо 201, и ничего не создаёт. Бот вправе повторить
+    вызов после обрыва, а второй специалист в салоне был бы не лишней строкой,
+    а вторым человеком в расписании.
+
+    Тот же сторож, что у соседей-provisioning: общий и identity-токены
+    отвергаются. На существующей строке здесь не обновляется ничего.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsTenantProvisioningBearer]
+    serializer_class = _SalonSpecialistRequestSerializer
+
+    @extend_schema(
+        operation_id="internal_salon_specialist_provision",
+        tags=["internal"],
+        request=_SalonSpecialistRequestSerializer,
+        responses={
+            200: _SalonSpecialistResponseSerializer,
+            201: _SalonSpecialistResponseSerializer,
+            400: OpenApiResponse(description="Malformed body"),
+            403: OpenApiResponse(
+                description="Missing / invalid provisioning bearer token",
+            ),
+            404: OpenApiResponse(description="tenant_not_found"),
+            409: OpenApiResponse(
+                description="tenant_is_solo / claim_bound_elsewhere "
+                            "/ invalid_external_user_id (details.reason)",
+            ),
+        },
+        description=(
+            "PROVISIONING-ONLY (DRF-2379, owner §77 п.27): create a specialist "
+            "inside an EXISTING salon tenant and return its catalog id. "
+            "Idempotent by external_user_id: a repeat returns the same "
+            "specialist with 200. Nothing on an existing row is updated."
+        ),
+    )
+    def post(self, request: Request) -> Response:
+        serializer = _SalonSpecialistRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        try:
+            specialist = provision_salon_specialist(
+                tenant_id=data["tenant_id"],
+                external_user_id=data["external_user_id"],
+                display_name=data["display_name"],
+            )
+        except SalonSpecialistRefused as exc:
+            # «Салона нет» — 404, остальное — 409: разные вопросы к
+            # вызывающему. Первое значит «адресат не тот», второе — «адресат
+            # тот, но состояние не позволяет».
+            code = (
+                status.HTTP_404_NOT_FOUND
+                if exc.reason == "tenant_not_found"
+                else status.HTTP_409_CONFLICT
+            )
+            return error_response(
+                exc.reason,
+                "Специалиста в этом салоне завести не удалось.",
+                details={"reason": exc.reason},
+                status_code=code,
+            )
+
+        profile = specialist.profile
+        return success_response(
+            {
+                "specialist_id": str(profile.id),
+                "tenant_id": str(profile.tenant_id),
+                "user_id": str(profile.user_id),
+                "status": profile.status,
+            },
+            status_code=(
+                status.HTTP_201_CREATED if specialist.created else status.HTTP_200_OK
+            ),
         )
 
 
