@@ -232,28 +232,37 @@ class TestScanPath:
         assert resp.status_code == status.HTTP_404_NOT_FOUND
         assert resp.json()["error"]["code"] == "SCAN_NOT_FOUND"
 
-    def test_scan_with_null_nutrition_returns_food_not_recognized(
+    def test_scan_with_null_nutrition_is_logged_without_numbers(
         self, auth_client, client_user,
     ):
+        """DRF-2371 — прежде здесь был отказ 400 ``FOOD_NOT_RECOGNIZED``.
+
+        Блюдо названо, а состав не выведен: запись всё равно ложится, числа
+        остаются отсутствующими. Решение владельца §77 п. 34 (вариант «а»):
+        человек, съевший суши, должен иметь возможность их записать, а ноль
+        в дневнике читался бы как «съел и не получил калорий».
+        """
         scan = FoodScan.objects.create(
             user=client_user, dish_name="суши",
             confidence=0.9, portion_g=200,
             provider_used=FoodScan.Provider.OPENAI,
-            nutrition=None,  # Slice 3a missed; mobile prompted manual entry
+            nutrition=None,
         )
         resp = auth_client.post(URL, {
             "scan_id": str(scan.id),
             "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json")
-        assert resp.status_code == status.HTTP_400_BAD_REQUEST
-        assert resp.json()["error"]["code"] == "FOOD_NOT_RECOGNIZED"
+        assert resp.status_code == status.HTTP_201_CREATED
+        data = resp.json()["data"]
+        assert data["dish_name"] == "суши"
+        assert data["calories"] is None
 
     def test_scan_with_partial_null_totals_returns_food_not_recognized(
         self, auth_client, client_user,
     ):
-        # Provider matched a dish but didn't estimate portion_g, so
-        # NutritionFacts left per-portion totals null. Snapshotting would
-        # silently produce a "0 kcal" diary entry; service rejects.
+        # Провайдер назвал блюдо, но веса не оценил: итогов на порцию нет.
+        # DRF-2371 — прежде это был отказ записи; теперь запись ложится без
+        # чисел, а ход «назови вес» предлагает поверхность.
         scan = FoodScan.objects.create(
             user=client_user, dish_name="борщ",
             confidence=0.9, portion_g=None,
@@ -276,8 +285,8 @@ class TestScanPath:
             "scan_id": str(scan.id),
             "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json")
-        assert resp.status_code == status.HTTP_400_BAD_REQUEST
-        assert resp.json()["error"]["code"] == "FOOD_NOT_RECOGNIZED"
+        assert resp.status_code == status.HTTP_201_CREATED
+        assert resp.json()["data"]["calories"] is None
 
     def test_logged_at_passed_through(
         self, auth_client, borscht_scan,
@@ -332,13 +341,20 @@ class TestManualPath:
         log = FoodLog.objects.get(id=resp.json()["data"]["id"])
         assert log.dish_name == "борщ"
 
-    def test_unknown_dish_returns_food_not_recognized(self, auth_client):
+    def test_unknown_dish_is_logged_under_the_typed_name(self, auth_client):
+        """DRF-2371 — блюда нет в справочнике: запись ложится без чисел.
+
+        Название берётся то, которое человек назвал сам: подставить чужое
+        название справочника значило бы записать другое блюдо.
+        """
         resp = auth_client.post(URL, {
             "dish_name": "ризотто с трюфелем",
             "portion_multiplier": 1.0, "meal_type": "dinner",
         }, format="json")
-        assert resp.status_code == status.HTTP_400_BAD_REQUEST
-        assert resp.json()["error"]["code"] == "FOOD_NOT_RECOGNIZED"
+        assert resp.status_code == status.HTTP_201_CREATED
+        data = resp.json()["data"]
+        assert data["dish_name"] == "ризотто с трюфелем"
+        assert data["calories"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -448,14 +464,22 @@ class TestServiceUnit:
                 meal_type="lunch",
             ))
 
-    def test_dish_not_recognized_when_lookup_fails(self, client_user):
-        with pytest.raises(DishNotRecognizedError):
-            FoodLogService().create(CreateFoodLogInput(
-                user_id=client_user.id,
-                dish_name="неизвестное_блюдо_xyz",
-                portion_multiplier=1.0,
-                meal_type="lunch",
-            ))
+    def test_lookup_miss_still_returns_an_entry_without_numbers(self, client_user):
+        """DRF-2371 — промах справочника больше не отказ.
+
+        ``DishNotRecognizedError`` остался ровно для «писать нечего»: скан,
+        не назвавший блюда ни сам, ни в снимке (см.
+        ``test_gap_not_zero_2371``).
+        """
+        log = FoodLogService().create(CreateFoodLogInput(
+            user_id=client_user.id,
+            dish_name="неизвестное_блюдо_xyz",
+            portion_multiplier=1.0,
+            meal_type="lunch",
+        ))
+
+        assert log.dish_name == "неизвестное_блюдо_xyz"
+        assert log.calories is None
 
     def test_scan_not_owned_raises(self, client_user, other_client_user):
         scan = FoodScan.objects.create(
