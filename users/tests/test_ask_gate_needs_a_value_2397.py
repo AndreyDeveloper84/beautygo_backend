@@ -11,10 +11,16 @@
 `explicit` — другой случай, и пустота там ОТВЕТ. Приложение ставит эту
 пометку всякому полю из тела PATCH, каким бы оно ни было
 (`personal_context_views`): снятая галочка «дни, которые лучше избегать» —
-это сказанное «нет таких», и переспрашивать его каждые сутки нельзя. Бот
-пишет пустое значение так же — отменяя прежний ответ («я теперь снова ем
-мясо» — «диеты нет») и по просьбе забыть одно поле. Все три — решения
-человека, молчание по ним верно.
+это сказанное «нет таких», и переспрашивать его каждые сутки нельзя. Так же
+выглядит отмена прежнего ответа в боте («я теперь снова ем мясо» — «диеты
+нет», `orchestrator/memory/ayla_bridge.py` в ai-bot-platform).
+
+Третий случай пустого `explicit` — просьба забыть одно поле
+(`clear_declared_fields` там же). Молчание верно и по ней, но по ДРУГОЙ
+причине: по решению DRF-1366, а не потому что пустой ответ — ответ. Честная
+пометка для просьбы — `erased`, и внутренний PATCH её не принимает; пока
+контракт не научится её выражать, различить «ответил пусто» и «просил
+забыть» в строке нечем. Это отложено, а не решено.
 
 * h1 — `explicit` со значением молчит (как было);
 * h2 — `explicit` без значения молчит: пустой ответ — ответ;
@@ -24,7 +30,10 @@
 * h6 — пометки нет вовсе → прежнее поведение;
 * h7 — имя вне модели знания не заявляет (и не роняет запрос);
 * h8 — живая форма дефекта целиком: ночной проход по короткой истории →
-  `favorite_masters=[]` с пометкой `inferred` → вопрос остаётся открытым.
+  `favorite_masters=[]` с пометкой `inferred` → вопрос остаётся открытым;
+* h9 — названная цена правки: у `_infer_busy_days` пустой список ПОСЛЕ
+  порога истории — это вывод «избегать нечего», и такому человеку вопрос
+  снова откроется. Читатель два этих случая не различает.
 """
 from __future__ import annotations
 
@@ -36,7 +45,11 @@ from appointments.models import Appointment
 from services.models import Service, ServiceCategory
 from users.models import SpecialistProfile, UserPersonalContext
 from users.personal_context_erasure import ERASED
-from users.personal_context_inference import FAVORITE_MIN_COMPLETED, infer_for_user
+from users.personal_context_inference import (
+    BUSY_DAYS_MIN_HISTORY,
+    FAVORITE_MIN_COMPLETED,
+    infer_for_user,
+)
 from users.personalization_engine import should_ask_question
 
 pytestmark = pytest.mark.django_db
@@ -58,6 +71,36 @@ def _person(n: int, **context_kwargs):
     return user
 
 
+def _book_days(user, *, suffix: str, days: int):
+    """``days`` завершённых записей подряд, начиная с понедельника.
+
+    Подряд — чтобы число дней прямо задавало, какие дни недели заняты: восемь
+    дней подряд покрывают все семь.
+    """
+    spec_user = type(user).objects.create_user(
+        username=f"ask2397_spec{suffix}", password="x", role="specialist",
+        phone=f"+7999222409{suffix}",
+    )
+    spec, _ = SpecialistProfile.objects.get_or_create(
+        user=spec_user, defaults={"display_name": "Master", "bio": "t"},
+    )
+    cat, _ = ServiceCategory.objects.get_or_create(
+        slug="ask2397-cat", defaults={"name": "Cat"},
+    )
+    service = Service.objects.create(
+        specialist=spec, category=cat, name="Svc", price=1000, duration_minutes=60,
+    )
+    monday = datetime(2026, 4, 6, 12, 0, tzinfo=timezone.utc)
+    for i in range(days):
+        ts = monday + timedelta(days=i)
+        Appointment.objects.create(
+            client=user, specialist=spec, service=service,
+            start_datetime=ts, end_datetime=ts + timedelta(hours=1),
+            price=1000, status=Appointment.Status.COMPLETED,
+        )
+    return spec
+
+
 class TestH1AStampedValueClosesTheQuestion:
     def test_a_named_value_is_not_asked_again(self) -> None:
         user = _person(1, diet_type="vegan", data_sources={FIELD: "explicit"})
@@ -70,8 +113,10 @@ class TestH1AStampedValueClosesTheQuestion:
 
 class TestH2AnEmptyAnswerIsStillAnAnswer:
     def test_an_empty_explicit_field_stays_silent(self) -> None:
-        """Так выглядит и снятая в приложении галочка, и «снова ем мясо», и
-        просьба забыть одно поле. Спрашивать снова — не слышать сказанного."""
+        """Так выглядит снятая в приложении галочка и отмена прежнего ответа
+        («снова ем мясо»). Спрашивать снова — не слышать сказанного. Тем же
+        видом приходит просьба забыть одно поле: по ней молчание тоже верно,
+        но по решению DRF-1366, и различить их в строке пока нечем."""
         user = _person(2, diet_type="", data_sources={FIELD: "explicit"})
 
         verdict = should_ask_question(user, FIELD)
@@ -123,9 +168,11 @@ class TestH6NoStampIsUnchanged:
 
 class TestH7AnUndeclaredNameCarriesNoKnowledge:
     def test_a_stamp_on_a_name_that_is_not_a_field_claims_nothing(self) -> None:
-        """Мерило значения — умолчание модели, и у имени вне модели его нет
-        (``default_for`` на таком имени поднимает ``FieldDoesNotExist``).
-        Правило 5 не заявляет знания и не роняет запрос."""
+        """Мерило значения — умолчание модели, и у имени вне модели его нет.
+        Без проверки членства это имя роняет запрос на ``getattr``
+        (``AttributeError``); имя, которое у строки есть, но полем о человеке
+        не является, не роняет ничего — и тем опаснее. Правило 5 в обоих
+        случаях знания не заявляет."""
         user = _person(7, data_sources={"not_a_field_at_all": "inferred"})
 
         verdict = should_ask_question(user, "not_a_field_at_all")
@@ -145,27 +192,7 @@ class TestH8TheLiveShapeOfTheDefect:
 
     def test_a_pass_that_found_nothing_leaves_the_question_open(self) -> None:
         user = _person(8)
-        spec_user = type(user).objects.create_user(
-            username="ask2397_spec", password="x", role="specialist",
-            phone="+79992224099",
-        )
-        spec, _ = SpecialistProfile.objects.get_or_create(
-            user=spec_user, defaults={"display_name": "Master", "bio": "t"},
-        )
-        cat, _ = ServiceCategory.objects.get_or_create(
-            slug="ask2397-cat", defaults={"name": "Cat"},
-        )
-        service = Service.objects.create(
-            specialist=spec, category=cat, name="Svc", price=1000, duration_minutes=60,
-        )
-        base = datetime(2026, 4, 6, 12, 0, tzinfo=timezone.utc)
-        for i in range(FAVORITE_MIN_COMPLETED - 1):  # на один меньше порога
-            ts = base + timedelta(days=i)
-            Appointment.objects.create(
-                client=user, specialist=spec, service=service,
-                start_datetime=ts, end_datetime=ts + timedelta(hours=1),
-                price=1000, status=Appointment.Status.COMPLETED,
-            )
+        _book_days(user, suffix="8", days=FAVORITE_MIN_COMPLETED - 1)  # на один меньше порога
 
         infer_for_user(user)
 
@@ -175,3 +202,26 @@ class TestH8TheLiveShapeOfTheDefect:
         assert ctx.favorite_masters == []
         verdict = should_ask_question(user, "favorite_masters")
         assert verdict.allowed is True
+
+
+class TestH9TheNamedPriceOfThisRule:
+    """Обратная сторона той же монеты, названная вслух.
+
+    У `_infer_busy_days` есть порог истории, и пустой список ПОСЛЕ порога —
+    содержательный вывод «избегать нечего» (человек записывался во все семь
+    дней недели). Для строки он выглядит так же, как вывод, не нашедший
+    ничего, — различает их только писатель. Значит такому человеку вопрос про
+    занятые дни снова откроется, пока он на него не ответит: это цена правки,
+    а не её цель, и узел стоит здесь, чтобы её не «исправили» молча.
+    """
+
+    def test_a_conclusive_empty_derivation_reopens_the_question(self) -> None:
+        user = _person(9)
+        _book_days(user, suffix="9", days=BUSY_DAYS_MIN_HISTORY)  # все семь дней недели
+
+        infer_for_user(user)
+
+        ctx = UserPersonalContext.objects.get(user=user)
+        assert ctx.data_sources["busy_days"] == "inferred"
+        assert ctx.busy_days == []
+        assert should_ask_question(user, "busy_days").allowed is True
