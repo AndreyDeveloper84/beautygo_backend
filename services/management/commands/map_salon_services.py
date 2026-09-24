@@ -1,9 +1,14 @@
 """``manage.py map_salon_services --tenant <slug> [--rules R1,R2] [--out <path>]`` — Level A, dry-run.
 
-Печатает предмет (база, host, старт постмастера, число канонов с кодом),
-потом по строке на каждую услугу салона: решение, причина, флаги,
-кандидаты с evidence, что стоит сейчас, план провенанса (для
-``AUTO_ELIGIBLE``), и сводку, посчитанную из тех же строк.
+Печатает предмет (база, host, старт постмастера, число канонов с кодом,
+**время снятия**), потом по строке на каждую услугу салона: решение,
+причина, флаги, кандидаты с evidence, что стоит сейчас, план провенанса
+(для ``AUTO_ELIGIBLE``), и сводку, посчитанную из тех же строк.
+
+Срез задаётся ``--status`` и ``--source`` (DRF-2407). Без них считается весь
+салон; со срезом печатаются **оба** числа — сколько строк у салона и сколько
+в срезе, — потому что «44 не привязались» и «44 из 232 не привязались»
+читаются по-разному, а решают по ним одно и то же.
 
 **Ничего не пишет.** ``--apply`` принимается только чтобы ответить отказом
 с названной причиной (``authorize_apply``): OD-NEW-7 не принят, запись —
@@ -15,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
+from django.utils import timezone
 
 from services.canonical_code import SEED_PATH
 from services.mapping import ApplyNotAuthorized, RulesEnabled, resolve_tenant
@@ -26,6 +32,56 @@ from services.mapping_apply import ApplyStopped, apply_tenant, rollback_auto_rul
 from tenants.models import Tenant
 
 
+def _parse_slice(spec: str, allowed: set[str], what: str) -> set[str]:
+    """Разобрать срез, отказав на незнакомом значении с перечислением известных.
+
+    Тихо пропустить опечатку нельзя: `--status unmaped` дал бы пустой срез, и
+    ноль прочитался бы как «нечего привязывать». Ноль от написания и ноль от
+    предмета — разные вещи, и отличить их постфактум по выводу невозможно.
+    """
+
+    values = {v.strip() for v in spec.split(",") if v.strip()}
+    unknown = sorted(values - allowed)
+    if unknown:
+        raise ValueError(
+            f"неизвестный {what}: {', '.join(unknown)}. Известные: {', '.join(sorted(allowed))}"
+        )
+    return values
+
+
+def _slice(rows, tenant, status_spec: str, source_spec: str):
+    """Сузить строки прогона до нужного среза.
+
+    Сужение идёт ПОСЛЕ прогона и по идентификаторам: резолвер видит салон
+    целиком и решает так же, как решал бы без среза. Иначе отчёт отвечал бы на
+    вопрос «что будет, если в салоне только эти строки», а спрашивают другое.
+    """
+
+    from services.models import SalonService
+
+    statuses = _parse_slice(status_spec, {c for c, _ in SalonService.MappingStatus.choices}, "статус")
+    sources = _parse_slice(source_spec, {c for c, _ in SalonService.Source.choices}, "источник")
+    if not statuses and not sources:
+        return rows
+
+    qs = SalonService.objects.filter(tenant=tenant)
+    if statuses:
+        qs = qs.filter(mapping_status__in=statuses)
+    if sources:
+        qs = qs.filter(source__in=sources)
+    keep = set(qs.values_list("pk", flat=True))
+    return [r for r in rows if r.salon_service_id in keep]
+
+
+def _slice_line(status_spec: str, source_spec: str) -> str:
+    parts = []
+    if status_spec.strip():
+        parts.append(f"статус {status_spec.strip()}")
+    if source_spec.strip():
+        parts.append(f"источник {source_spec.strip()}")
+    return " · ".join(parts) if parts else "весь салон"
+
+
 class Command(BaseCommand):
     help = "Level A резолвер услуг салона → канон. Только dry-run; --apply отказывает с причиной."
 
@@ -35,6 +91,15 @@ class Command(BaseCommand):
             "--rules", default="", help="включённые правила через запятую: R1,R2 (по умолчанию — ни одно)",
         )
         parser.add_argument("--out", default=None, help="куда записать JSON-отчёт (файл, не база)")
+        parser.add_argument(
+            "--status", default="",
+            help=("срез по статусу связи через запятую: unmapped,review_required,verified,"
+                  "not_recommendable (по умолчанию — весь салон)"),
+        )
+        parser.add_argument(
+            "--source", default="",
+            help="срез по источнику строки через запятую: yclients,seed,manual (по умолчанию — весь салон)",
+        )
         parser.add_argument(
             "--dry-run", action="store_true", default=True, help="единственный режим; принимается для явности",
         )
@@ -76,11 +141,26 @@ class Command(BaseCommand):
             self.stderr.write(self.style.ERROR(str(exc)))
             raise SystemExit(2)
 
+        total_rows = len(rows)
+        try:
+            rows = _slice(rows, tenant, options["status"], options["source"])
+        except ValueError as exc:
+            raise CommandError(str(exc))
+
         w = self.stdout.write
+        # Область и время — ДО чисел. Без них «0 привязалось» со стенда и с
+        # эталонной базы выглядят одинаково, а означают разное.
+        #
+        # Предмет остаётся ПЕРВОЙ строкой: на это есть узел
+        # (`test_command_prints_subject_first...`), и порядок двух строк шапки
+        # того не стоит.
         w(describe_subject().line())
+        w(f"снято: {timezone.now().isoformat(timespec='seconds')}")
         w(f"салон: {tenant.slug} ({tenant.pk}) · правила: "
           f"{', '.join(r for r in ('R0', 'R1', 'R2') if getattr(rules, r)) or 'ни одно (AUTO_NOT_ENABLED)'} "
           f"· версия правил: {RULE_VERSION} · режим: dry-run, записи нет")
+        w(f"срез: {_slice_line(options['status'], options['source'])} · "
+          f"строк в срезе: {len(rows)} из {total_rows} у салона")
         w("")
         for r in rows:
             for line in row_lines(r):
