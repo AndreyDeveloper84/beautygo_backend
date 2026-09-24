@@ -14,10 +14,15 @@ Eight rules per CLAUDE.md / Notion 334b0dab295581d587cfeaf49efd2d5b:
 3. **24h cooldown** — last_asked_at[field] + 24h must be in the past.
 4. **Skip × 2 → 30-day pause** — skipped_questions[field].count >= 2
    AND last_at within 30 days.
-5. **Already have data → silent** — data_sources[field] in {explicit,
-   inferred} → skip. ``erased`` (DRF-1366) silences the question too:
-   somebody who just said "забудь всё" must not be interviewed about
-   the same field on the next turn.
+5. **Already have data → silent** — ``explicit`` silences the question
+   (even on an empty value: пустой ответ — тоже ответ), ``inferred``
+   silences it only while the field holds a value (DRF-2397: вывод,
+   который ничего не нашёл, — не знание), ``erased`` silences it by the
+   DRF-1366 decision. Прочие пометки словаря (``behavioral``,
+   ``conversational``, ``transactional``) не молчат вовсе: контракт
+   внутреннего PATCH их принимает и пишет, но движок намеренно не считает
+   их знанием — чем они на самом деле являются, решается отдельно, и до
+   того решения вопрос по такому полю остаётся открытым.
 6. **Organic or never** — wording responsibility on the caller; the
    engine just gates `should_ask`.
 7. **Explainability** — verdict tuple includes a ``reason`` string
@@ -36,7 +41,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from users.models import UserPersonalContext
-from users.personal_context_erasure import ERASED
+from users.personal_context_erasure import ERASED, declared_fields, default_for
 
 
 logger = logging.getLogger("users.personalization")
@@ -103,6 +108,26 @@ def _now() -> datetime:
 # ---------------------------------------------------------------------------
 
 
+def _field_holds_value(ctx, field: str) -> bool:
+    """Несёт ли поле что-нибудь о человеке — тем же мерилом, что у стирания.
+
+    Сравнение с умолчанием модели (``default_for``), а не «пусто ли»: у разных
+    полей пустота выглядит по-разному (``""``, ``[]``, ``False``, ``None``), и
+    своя проверка разошлась бы с той, по которой стирание считает строку
+    надгробием.
+    """
+    if field not in declared_fields():
+        # Проверка закрывает два разных случая. Имя, которого у строки нет
+        # вовсе, без неё падает на ``getattr`` — ``AttributeError`` (не на
+        # ``default_for``: левый операнд считается первым). Имя, которое у
+        # строки есть, но не входит в поля о человеке (``created_at``,
+        # ``data_sources``), не падает нигде — и тем опаснее: знание по нему
+        # заявлять не на чем. В обоих случаях правило 5 молчит о знании и
+        # пропускает ход дальше.
+        return False
+    return getattr(ctx, field) != default_for(field)
+
+
 def should_ask_question(user, field: str) -> Verdict:
     """Return a verdict on whether to ask the user about ``field``.
 
@@ -120,8 +145,41 @@ def should_ask_question(user, field: str) -> Verdict:
         return Verdict(True, "ok", field)
 
     # Rule 5 — already have data, or the subject erased it on purpose.
+    #
+    # DRF-2397: пометка `inferred` без значения — не знание, а ровно
+    # обратное. `_infer_favorite_masters` ставит её БЕЗУСЛОВНО, тем, что
+    # вернул запрос, и порога при этом не проверяет: у человека, у которого ни
+    # с одним мастером нет трёх завершённых записей, это пустой список. Первый
+    # же ночной проход закрывал «Есть любимый мастер, к кому вернуться?»
+    # навсегда — вывод не нашёл ничего, а человека не спросили ни разу.
+    #
+    # Цена этой правки, названная честно: у `_infer_busy_days` пустой список
+    # ПОСЛЕ порога истории — это вывод «избегать нечего», а не «не нашли», и
+    # такому человеку вопрос про занятые дни снова откроется. Читатель этих
+    # двух случаев не различает: их различает только писатель, который пометку
+    # ставит. Сузить писателя (не штамповать вывод, ничего не нашедший) —
+    # отдельная правка; здесь выбран читатель, потому что модуль вывода обещает
+    # новые проходы, и каждый из них иначе пришлось бы проверять заново.
+    #
+    # Для `explicit` пустота — ОТВЕТ, а не незнание, и молчать по ней верно:
+    # приложение ставит эту пометку всякому полю из тела PATCH, каким бы оно
+    # ни было (`personal_context_views`), так что снятая галочка «дни, которые
+    # лучше избегать» — это сказанное «нет таких». Бот (ai-bot-platform,
+    # `orchestrator/memory/ayla_bridge.py`) пишет пустое значение так же,
+    # отменяя прежний ответ: «снова ем мясо» — «диеты нет».
+    #
+    # Третий случай пустого `explicit` — просьба забыть одно поле
+    # (`clear_declared_fields` там же): её честная пометка `erased`, но
+    # внутренний PATCH такого значения не принимает. Молчание верно и здесь,
+    # только по другой причине — по решению DRF-1366, а не потому что пустой
+    # ответ это ответ. Выразить просьбу на контракте — задача владельца.
+    #
+    # ``erased`` — пустота тоже не незнание, а просьба человека (DRF-1366).
     sources = ctx.data_sources or {}
-    if sources.get(field) in {"explicit", "inferred", ERASED}:
+    source = sources.get(field)
+    if source in {ERASED, "explicit"}:
+        return Verdict(False, "already_have_data", field)
+    if source == "inferred" and _field_holds_value(ctx, field):
         return Verdict(False, "already_have_data", field)
 
     # Rule 3 — 24h cooldown.
