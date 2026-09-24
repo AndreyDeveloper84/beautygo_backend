@@ -200,8 +200,13 @@ def build_specialist_context_for_actor(actor: "User") -> LocalSpecialistContext:
             else None
         )
     client_id = actor.id if not getattr(actor, "is_guest", False) else None
+    from users.sellable import is_test_persona
+
     return builder.build(
         client_id=client_id, client_lat=lat, client_lon=lon, city=city,
+        # DRF-2420 — личность здесь известна, значит и границы показа демо
+        # берутся у неё, а не угадываются ниже по стеку.
+        viewer_sees_demo=is_test_persona(actor),
     )
 
 

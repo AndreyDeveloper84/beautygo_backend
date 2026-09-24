@@ -141,7 +141,16 @@ class SpecialistContextBuilder:
         client_lat: float | None = None,
         client_lon: float | None = None,
         city: str | None = None,
+        viewer_sees_demo: bool = False,
     ) -> SpecialistContext:
+        # DRF-2420 — чат Ayla это шестая поверхность, где виден мастер, и она
+        # тоже подчиняется правилу «демо — только тестовой личности». Умолчание
+        # `False` — правило клиента; признак ставит вызывающий, который знает
+        # личность (`concierge_factory.build_specialist_context_for_actor`).
+        #
+        # Без этого аргумента правка отнимала бы у владельца возможность
+        # показать чат — то есть ровно ту пользу, ради которой демо-салоны и
+        # держат живыми (найдено ревью).
         query = RecommendationQuery(
             client_id=client_id,
             client_lat=client_lat,
@@ -149,6 +158,7 @@ class SpecialistContextBuilder:
             city=city,
             min_rating=self._min_rating,
             limit=self._limit,
+            viewer_sees_demo=viewer_sees_demo,
         )
         result = self._engine.recommend(query)
         return SpecialistContext(

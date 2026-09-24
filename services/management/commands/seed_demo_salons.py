@@ -343,9 +343,20 @@ class Command(BaseCommand):
         # выборе менеджера.
         # Адрес салона — у салона (§9, L8a): раньше сид клал его в профиль
         # каждого мастера, то есть делал адрес салона «адресом человека».
+        # DRF-2420 — `is_demo=True` ставит ТОТ, КТО САЛОН ЗАВОДИТ. Это
+        # единственное место в коде, которое знает, что салон
+        # демонстрационный: список слагов устаревает, а признак нет. Без этой
+        # строки следующий прогон сида заводил бы салон, видимый обычному
+        # клиенту, и дыра открывалась бы заново — тот же класс, что «новая
+        # строка сида приходит unmapped» (найдено ревью).
         tenant, created = Tenant.all_objects.get_or_create(
             slug=salon["slug"],
-            defaults={"name": salon["name"], "is_active": False, "address": salon.get("address", "")},
+            defaults={
+                "name": salon["name"],
+                "is_active": False,
+                "is_demo": True,
+                "address": salon.get("address", ""),
+            },
         )
         if created:
             counts.tenants += 1
@@ -355,6 +366,12 @@ class Command(BaseCommand):
             # салон осознанно, и повторный сид не вправе это отменить.
             # Адрес дописываем только в пустой: заданный оператором не трогаем.
             fields = []
+            # Признак демонстрационности ДОПИСЫВАЕТСЯ и существующему салону:
+            # салоны, заведённые до DRF-2420, иначе остались бы без него, а
+            # повторный прогон сида — ровно то место, где это видно.
+            if not tenant.is_demo:
+                tenant.is_demo = True
+                fields.append("is_demo")
             if tenant.name != salon["name"]:
                 tenant.name = salon["name"]
                 fields.append("name")
@@ -550,8 +567,11 @@ class Command(BaseCommand):
                 "id", flat=True
             )
         )
+        # Включение снимает замки, но НЕ снимает демонстрационность: «живой»
+        # и «для клиента» — разные утверждения, и `--activate` говорит только
+        # про первое (DRF-2420).
         n_tenants = Tenant.all_objects.filter(slug__in=slugs).update(
-            is_active=True
+            is_active=True, is_demo=True
         )
         n_specialists = SpecialistProfile.objects.filter(
             tenant_id__in=tenant_ids

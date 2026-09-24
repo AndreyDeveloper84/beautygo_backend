@@ -163,16 +163,31 @@ class TestThePredicateItself:
 
         assert {REAL_NAME, DEMO_NAME} <= names
 
+    @pytest.mark.no_auto_tenant
     def test_a_master_without_a_salon_is_not_demo(self, both_salons, client_person):
         """`SpecialistProfile.tenant` — `null=True`, и обычный
         `filter(tenant__is_demo=False)` дал бы INNER JOIN, молча выкосив
         каждого мастера без салона. Ровно этой ошибкой однажды уже сломали
-        выдачу (DRF-1430), поэтому предикат обязан держать LEFT JOIN."""
+        выдачу (DRF-1430), поэтому предикат обязан держать LEFT JOIN.
+
+        Маркер `no_auto_tenant` обязателен, и это не формальность: autouse
+        фикстура `_auto_default_tenant` (conftest.py) на `pre_save`
+        подставляет тенант любому профилю с `tenant_id=None`. Без маркера
+        NULL в строке не окажется НИКОГДА, и узел зеленеет при любом
+        предикате — в том числе при том самом голом
+        `filter(tenant__is_demo=False)`, от которого он якобы защищает.
+        Поэтому ниже сначала утверждается САМО УСЛОВИЕ опыта.
+        """
         from users.sellable import demo_visibility_q, sellable_q
 
         lonely = _master(None, suffix="0003", display_name="Мастер Одиночка")
         lonely.tenant = None
         lonely.save(update_fields=["tenant"])
+        lonely.refresh_from_db()
+        assert lonely.tenant_id is None, (
+            "условие опыта не выполнено: у мастера есть салон, значит про "
+            "LEFT JOIN этот узел ничего не проверяет"
+        )
 
         names = set(
             SpecialistProfile.objects
@@ -447,3 +462,95 @@ class TestP5ThePublicCatalog:
         client = self._client(test_person)
 
         assert client.get(f"/api/v1/specialists/{both_salons['demo'].id}/").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Утечки, которых не нашла моя перепись (найдены ревью)
+# ---------------------------------------------------------------------------
+
+
+class TestL1Favourites:
+    """Избранное — живой путь по ПРЯМОМУ идентификатору.
+
+    Идентификаторы демо-мастеров узнаваемы (салоны живые), а список избранного
+    рисует полную карточку: адрес салона, цены услуг. Мой же критерий из
+    докстринга P5 — «правило, снимаемое прямой ссылкой, — не правило» —
+    сработал против меня: перепись пяти пулов избранное не нашла.
+    """
+
+    def _client(self, viewer):
+        from rest_framework.test import APIClient
+
+        client = APIClient()
+        client.defaults["HTTP_X_APP_TYPE"] = "client"
+        client.force_authenticate(user=viewer)
+        return client
+
+    def test_a_client_cannot_favourite_a_demo_master(self, both_salons, client_person):
+        client = self._client(client_person)
+
+        real = client.post(f"/api/v1/favorites/specialists/{both_salons['real'].id}/")
+        demo = client.post(f"/api/v1/favorites/specialists/{both_salons['demo'].id}/")
+
+        # Сначала о НАЛИЧИИ: боевого мастера в избранное добавить можно.
+        assert real.status_code in (200, 201), real.content
+        assert demo.status_code == 404, demo.content
+
+    def test_a_demo_master_already_favourited_disappears_from_the_list(
+        self, both_salons, client_person
+    ):
+        """Строка могла быть создана ДО правки — тогда карточка не должна
+        рисоваться, хотя запись в избранном осталась."""
+        from users.models import FavoriteSpecialist
+
+        FavoriteSpecialist.objects.create(
+            user=client_person, specialist=both_salons["demo"]
+        )
+        FavoriteSpecialist.objects.create(
+            user=client_person, specialist=both_salons["real"]
+        )
+
+        response = self._client(client_person).get("/api/v1/favorites/specialists/")
+
+        assert response.status_code == 200, response.content
+        body = response.content.decode("utf-8")
+        assert REAL_NAME in body
+        assert DEMO_NAME not in body
+
+    def test_a_test_persona_keeps_seeing_both(self, both_salons, test_person):
+        from users.models import FavoriteSpecialist
+
+        for profile in (both_salons["real"], both_salons["demo"]):
+            FavoriteSpecialist.objects.create(user=test_person, specialist=profile)
+
+        response = self._client(test_person).get("/api/v1/favorites/specialists/")
+
+        body = response.content.decode("utf-8")
+        assert REAL_NAME in body
+        assert DEMO_NAME in body
+
+
+class TestL5TheConcierge:
+    """Чат Ayla: правка едва не отняла у владельца показ чата.
+
+    До ревью контекст консьержа строился без признака, то есть после правки
+    демо не видела и ТЕСТОВАЯ личность — а показ чата и есть причина, по
+    которой демо-салоны держат живыми.
+    """
+
+    def _names(self, actor) -> set[str]:
+        from ai.concierge_factory import build_specialist_context_for_actor
+
+        context = build_specialist_context_for_actor(actor)
+        return {c.display_name for c in context.candidates}
+
+    def test_a_client_gets_the_real_salon_only(self, both_salons, client_person):
+        names = self._names(client_person)
+
+        assert REAL_NAME in names
+        assert DEMO_NAME not in names
+
+    def test_a_test_persona_gets_both(self, both_salons, test_person):
+        names = self._names(test_person)
+
+        assert {REAL_NAME, DEMO_NAME} <= names

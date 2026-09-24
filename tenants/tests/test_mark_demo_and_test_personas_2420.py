@@ -120,3 +120,69 @@ class TestM6SilenceAboutPersonasIsSaidOutLoud:
         text = _run("--slug", SLUG)
 
         assert "демо не увидит НИКТО" in text
+
+
+class TestM7TheMarkIsReversible:
+    """Обратный ход: пометить не тот салон дешевле всего в тот день, когда
+    список правят руками. Без `--unmark` единственным способом исправить это
+    осталась бы оболочка на стенде — то есть ровно то, чего команда и
+    существует, чтобы не делать (найдено ревью)."""
+
+    def test_unmark_removes_the_flags(self, demo_salon, persona):
+        _run("--slug", SLUG, "--persona", persona.username, "--apply")
+        demo_salon.refresh_from_db()
+        persona.refresh_from_db()
+        # Сначала о НАЛИЧИИ: признаки действительно стоят.
+        assert demo_salon.is_demo is True
+        assert persona.is_test_persona is True
+
+        _run("--unmark", "--slug", SLUG, "--persona", persona.username, "--apply")
+
+        demo_salon.refresh_from_db()
+        persona.refresh_from_db()
+        assert demo_salon.is_demo is False
+        assert persona.is_test_persona is False
+
+    def test_unmark_dry_run_writes_nothing_and_says_which_way_it_goes(
+        self, demo_salon, persona
+    ):
+        _run("--slug", SLUG, "--persona", persona.username, "--apply")
+
+        text = _run("--unmark", "--slug", SLUG, "--persona", persona.username)
+
+        assert "СНЯТИЕ" in text
+        assert f"- демонстрационным: {SLUG}" in text
+        demo_salon.refresh_from_db()
+        assert demo_salon.is_demo is True, "сухой прогон снял признак"
+
+    def test_a_second_unmark_changes_nothing(self, demo_salon):
+        _run("--slug", SLUG, "--apply")
+        _run("--unmark", "--slug", SLUG, "--apply")
+
+        text = _run("--unmark", "--slug", SLUG, "--apply")
+
+        assert "пометить 0" in text
+        assert "уже помечены 1" in text
+
+
+class TestM8TheProtectedListIsOne:
+    """Список защищённых слагов берётся у сида, а не копируется.
+
+    Вторая копия разошлась бы в первый же день, когда появится второй живой
+    салон, и расхождение здесь стоит настоящих записей настоящих людей.
+    """
+
+    def test_the_command_reads_the_seed_list(self):
+        from services.management.commands.seed_demo_salons import PROTECTED_SLUGS
+        from tenants.management.commands import mark_demo_and_test_personas as cmd
+
+        assert cmd.SEED_PROTECTED_SLUGS is PROTECTED_SLUGS
+
+    def test_an_extra_protected_slug_is_refused(self, demo_salon):
+        """`--protect` перечень расширяет: защищённый слаг, который нельзя
+        назвать явно, защищён только до первой опечатки в списке."""
+        with pytest.raises(CommandError, match="боевой салон"):
+            _run("--slug", SLUG, "--protect", SLUG, "--apply")
+
+        demo_salon.refresh_from_db()
+        assert demo_salon.is_demo is False

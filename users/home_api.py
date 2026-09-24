@@ -171,11 +171,16 @@ class HomeView(APIView):
         """
         if not getattr(user, "is_authenticated", False):
             return []
+        from users.sellable import demo_visibility_q
+
         from .models import SpecialistProfile
 
+        # DRF-2420 — та же карточка, тот же предикат: демо-мастер не
+        # показывается обычному клиенту и на главной.
         specialists = (
             SpecialistProfile.objects
             .filter(favorited_by__user=user)
+            .filter(demo_visibility_q(user))
             .order_by("-favorited_by__created_at")[:LIMIT_FAVORITES]
         )
         return [
