@@ -317,14 +317,46 @@ class TestP3TheHomeEngine:
         assert {REAL_NAME, DEMO_NAME} <= names
 
     def test_the_two_audiences_do_not_share_a_cache_entry(self):
-        """Иначе выдача тестовой личности досталась бы клиенту на весь TTL —
-        особенно в анонимном пространстве ключей, где `client_id` пуст."""
+        """Ключ: иначе выдача тестовой личности досталась бы клиенту на весь
+        TTL — особенно в анонимном пространстве ключей, где `client_id` пуст.
+
+        Узел краснеет при выносе признака из digest — проверено подменой."""
         from ai.application.services.recommendation_engine import RecommendationQuery
 
         client_key = RecommendationQuery(limit=20).cache_key()
         tester_key = RecommendationQuery(limit=20, viewer_sees_demo=True).cache_key()
 
         assert client_key != tester_key
+
+    def test_a_cached_persona_answer_is_not_served_to_a_client(self, both_salons):
+        """И то же самое ЧЕРЕЗ КЭШ, а не только через ключ.
+
+        Правило «демо видит только тестовая личность» отменяется не подбором, а
+        кэшем: посчитанное для тестовой личности раздаётся настоящему клиенту
+        весь срок жизни записи, и снаружи это выглядит нормальной выдачей.
+        Поэтому узел ходит с включённым кэшем — тем самым путём, которым
+        отмена и происходила бы.
+        """
+        from django.core.cache import cache
+
+        from ai.application.services.recommendation_engine import (
+            RecommendationEngine,
+            RecommendationQuery,
+        )
+
+        cache.clear()
+        engine = RecommendationEngine()
+
+        persona = engine.recommend(RecommendationQuery(limit=20, viewer_sees_demo=True))
+        # Сначала о НАЛИЧИИ: в прогретой записи демо действительно было, иначе
+        # второе утверждение пройдёт на пустоте.
+        assert DEMO_NAME in {c.display_name for c in persona.candidates}
+
+        client = engine.recommend(RecommendationQuery(limit=20))
+
+        names = {c.display_name for c in client.candidates}
+        assert REAL_NAME in names
+        assert DEMO_NAME not in names
 
 
 class TestP4TheGlobalSearch:
