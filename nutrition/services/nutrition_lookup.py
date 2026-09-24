@@ -92,6 +92,18 @@ class NutritionFacts:
     # DRF-260: provenance tag — read by Track E pattern engine.
     micronutrients_source: str = "unknown"
 
+    # DRF-2402 — откуда взялась порция, по которой посчитаны итоги:
+    #   ``given``   — пришла с запросом (оценка провайдера на скане; на
+    #                 ручном вводе — названная человеком или базовая, и там
+    #                 есть свой признак ``portion_estimated``);
+    #   ``typical`` — провайдер молчал, взята типовая из справочника;
+    #   ``unknown`` — порции нет ни у кого, спрашиваем человека.
+    #
+    # Названо по тому, ЧТО это на границе вызова, а не по тому, кем оно
+    # обычно бывает: в ручном пути «provider» было бы неправдой.
+    # Нужно, чтобы «посчитано по типовой» не читалось как «измерено».
+    portion_source: str = "unknown"
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -261,6 +273,14 @@ class NutritionLookup:
     def _build_facts(
         self, canonical: str, macros: DishMacros, portion_g: float | None,
     ) -> NutritionFacts:
+        # DRF-2402 — типовая порция закрывает ТОЛЬКО пустую оценку.
+        # Провайдер назвал порцию — его число и остаётся, даже если оно
+        # отличается от типового: он видел тарелку, справочник — нет.
+        portion_source = "given" if (portion_g and portion_g > 0) else "unknown"
+        if (portion_g is None or portion_g <= 0) and macros.typical_portion_g:
+            portion_g = macros.typical_portion_g
+            portion_source = "typical"
+
         if portion_g is None or portion_g <= 0:
             kcal = protein = fat = carbs = None
             ratio = None
@@ -280,6 +300,7 @@ class NutritionLookup:
             return round(value * ratio, 2)
 
         return NutritionFacts(
+            portion_source=portion_source,
             matched_dish=canonical,
             source=self.SOURCE_SEED,
             portion_g=portion_g if (portion_g and portion_g > 0) else None,
