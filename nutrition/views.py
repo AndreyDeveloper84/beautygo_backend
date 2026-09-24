@@ -614,7 +614,11 @@ class InternalFoodEstimateView(APIView):
         dish_name = serializer.validated_data["dish_name"]
         named_portion = serializer.validated_data.get("portion_g")
         portion_g = named_portion if named_portion is not None else MANUAL_DISH_BASELINE_G
-        facts = build_nutrition_lookup().lookup(dish_name, portion_g=portion_g)
+        # DRF-2402: человек порцию не назвал — считаем по базовой константе,
+        # но происхождение честное (`unknown`): это число никто не наблюдал.
+        facts = build_nutrition_lookup().lookup(
+            dish_name, portion_g=portion_g, portion_named=named_portion is not None
+        )
         if facts is None or facts.kcal is None:
             return error_response(
                 "FOOD_NOT_RECOGNIZED",
