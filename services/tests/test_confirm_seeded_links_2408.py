@@ -208,7 +208,7 @@ class TestARowWithoutALinkIsCountedNotConfirmed:
         linked.refresh_from_db()
         assert linked.mapping_status == SalonService.MappingStatus.VERIFIED
         assert unlinked.mapping_status == SalonService.MappingStatus.REVIEW_REQUIRED
-        assert "без привязки (пропущено): 1" in report
+        assert "без привязки (пропущено):      1" in report
 
 
 class TestDryRunIsTheDefault:
@@ -221,7 +221,7 @@ class TestDryRunIsTheDefault:
         row.refresh_from_db()
         assert row.mapping_status == SalonService.MappingStatus.REVIEW_REQUIRED
         assert "сухой прогон" in report
-        assert "с привязкой (к записи):   1" in report
+        assert "с привязкой (к записи):        1" in report
 
 
 class TestTheRunIsIdempotent:
@@ -238,7 +238,7 @@ class TestTheRunIsIdempotent:
         row.refresh_from_db()
 
         assert row.mapping_confirmed_at == first
-        assert "с привязкой (к записи):   0" in report
+        assert "с привязкой (к записи):        0" in report
 
 
 class TestTheResolverGateIsNotInTheWay:
@@ -269,3 +269,119 @@ class TestTheResolverGateIsNotInTheWay:
 
         row.refresh_from_db()
         assert row.mapping_status == SalonService.MappingStatus.VERIFIED
+
+
+class TestEveryPremiseIsCountedNotAssumed:
+    """Своё правило «исключение должно быть названо числом» — ко всем трём
+    посылкам, а не к одной. Первая редакция считала только строки без привязки.
+    """
+
+    def test_a_row_outside_the_queue_is_counted(self) -> None:
+        """Новая строка сида заводится со статусом `unmapped` — команде невидима.
+
+        Нынешние `review_required` появились разовым прогоном 0017 08.09, а сид
+        статуса не ставит вовсе. Значит после нового запуска сида часть строк
+        этой командой не закроется — и это должно быть **видно числом**, а не
+        выясняться через месяц.
+        """
+        tenant = _tenant()
+        fresh = _row(tenant, mapping_status=SalonService.MappingStatus.UNMAPPED)
+        mine = _row(tenant)
+
+        report = _run(apply=True)
+
+        fresh.refresh_from_db()
+        mine.refresh_from_db()
+        assert mine.mapping_status == SalonService.MappingStatus.VERIFIED
+        # `unmapped` — «про строку ещё никто ничего не сказал»; перевод из него
+        # принадлежит 0017, не этой команде.
+        assert fresh.mapping_status == SalonService.MappingStatus.UNMAPPED
+        assert "не в очереди (пропущено):      1" in report
+
+    def test_a_row_losing_its_human_is_counted(self, django_user_model) -> None:
+        """Человек в провенансе снимается — значит теряется, значит назван числом.
+
+        До такой строки доводит сама очередь: администратор вписал автора и не
+        сменил статус. Схема запрещает «и человек, и правило», поэтому оставить
+        его нельзя, а промолчать о потере — нечестно.
+        """
+        tenant = _tenant()
+        moderator = django_user_model.objects.create(username=f"mod-{uuid.uuid4().hex[:8]}")
+        row = _row(tenant, mapping_confirmed_by=moderator)
+
+        report = _run(apply=True)
+
+        row.refresh_from_db()
+        assert row.mapping_status == SalonService.MappingStatus.VERIFIED
+        assert row.mapping_confirmed_by_id is None
+        assert "снимется «кто» с строк:        1" in report
+
+
+class TestTheSelectionChecksTheBasisItClaims:
+    def test_a_seed_row_with_its_own_basis_is_left_alone(self) -> None:
+        """`source=seed` пишет не только сид демонстрационных салонов.
+
+        Так же помечают строки `bootstrap_tech_tenant` и `bootstrap_e2e_wave1`.
+        Сегодня их строки под отбор не попадают, но это совпадение, а не
+        свойство. Пустое основание — часть отбора, а не предположение; заодно
+        чужое основание не затирается.
+        """
+        tenant = _tenant()
+        stranger = _row(tenant, mapping_source_ref="tech_probe:fixture")
+        mine = _row(tenant)
+
+        _run(apply=True)
+
+        stranger.refresh_from_db()
+        mine.refresh_from_db()
+        assert mine.mapping_status == SalonService.MappingStatus.VERIFIED
+        assert stranger.mapping_status == SalonService.MappingStatus.REVIEW_REQUIRED
+        assert stranger.mapping_source_ref == "tech_probe:fixture"
+
+
+class TestAnUnknownSlugIsRefused:
+    def test_a_typo_is_not_a_silent_zero(self) -> None:
+        """Молчаливый ноль неотличим от «нечего делать» — та же ошибка, что
+        опечатка в срезе сухого прогона резолвера (DRF-2407).
+        """
+        with pytest.raises(CommandError) as exc:
+            _run(tenant="demo-нет-такого", apply=True)
+
+        assert "нет" in str(exc.value)
+
+
+class TestTheProtectedListIsNotACopy:
+    def test_it_is_the_same_list_the_seed_defends(self) -> None:
+        """Две копии одного списка расходятся молча.
+
+        Добавивший слаг в сид не узнает, что эта команда продолжает писать.
+        """
+        from services.management.commands.seed_demo_salons import (
+            PROTECTED_SLUGS as SEED_PROTECTED,
+        )
+
+        assert PROTECTED_SLUGS is SEED_PROTECTED
+
+
+class TestTheSourceItselfIsPartOfTheSelection:
+    def test_a_manual_row_with_an_empty_basis_is_left_alone(self) -> None:
+        """Пустого основания мало: источник тоже проверяется.
+
+        Дыру нашли подмены: убрать из отбора `source=seed` — и все узлы
+        оставались зелёными, потому что чужие строки в них отличались
+        основанием. Но строка, заведённая вручную, основания тоже может не
+        иметь — и тогда провенанс сказал бы «из демонстрационного набора» о
+        строке, которую завёл человек.
+        """
+        tenant = _tenant()
+        manual = _row(tenant, source=SalonService.Source.MANUAL)
+        mine = _row(tenant)
+
+        _run(apply=True)
+
+        manual.refresh_from_db()
+        mine.refresh_from_db()
+        # Положительная пара в том же прогоне.
+        assert mine.mapping_status == SalonService.MappingStatus.VERIFIED
+        assert manual.mapping_status == SalonService.MappingStatus.REVIEW_REQUIRED
+        assert manual.mapping_confirmed_rule == ""
