@@ -3,8 +3,10 @@
 ``GET/POST /api/v1/internal/specialists/{id}/services/selection/`` под
 ``IsInternalBearerForSpecialistSubject``. Что стережётся:
 
-* выбор заводит только ``SalonService`` (``REVIEW_REQUIRED``, без цены,
+* выбор заводит только ``SalonService`` (``VERIFIED`` правилом, без цены,
   провенанс ``master_select:<profile>``) и ни одного ``SpecialistService``;
+  статус — решение владельца §77 п.30 от 24.09, DRF-2406: подтверждать было
+  некому, и очередь на подтверждение росла вечно;
 * повтор и пересечение идемпотентны по (tenant, template); дубли в одном
   вызове — одна строка;
 * уже существующая строка с шаблоном (в том числе решённая модератором) —
@@ -34,6 +36,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from services.models import SalonService, ServiceCategory, ServiceTemplate, SpecialistService
+from services.offer_selection import MASTER_SELECT_RULE, MASTER_SELECT_RULE_VERSION
 from tenants.models import Tenant
 from tenants.solo_provisioning import provision_solo_workspace
 from users.models import SpecialistProfile, User
@@ -113,7 +116,7 @@ def _rows(profile):
 
 
 class TestSelectionCreatesTheWorkspaceRowOnly:
-    def test_first_select_creates_review_required_rows_and_no_offers(self, olga, manicure, pedicure):
+    def test_first_select_creates_rule_verified_rows_and_no_offers(self, olga, manicure, pedicure):
         r = _select(olga, manicure, pedicure)
 
         assert r.status_code == 201, r.content
@@ -128,7 +131,13 @@ class TestSelectionCreatesTheWorkspaceRowOnly:
             row = rows[template.pk]
             assert row.name == template.name
             assert row.category_id == template.category_id
-            assert row.mapping_status == SalonService.MappingStatus.REVIEW_REQUIRED
+            # DRF-2406: подтверждено правилом, и у подтверждения есть автор,
+            # версия и дата — без них схема `VERIFIED` не примет.
+            assert row.mapping_status == SalonService.MappingStatus.VERIFIED
+            assert row.mapping_confirmed_rule == MASTER_SELECT_RULE
+            assert row.mapping_rule_version == MASTER_SELECT_RULE_VERSION
+            assert row.mapping_confirmed_at is not None
+            assert row.mapping_confirmed_by is None
             assert row.base_price is None
             assert row.source == SalonService.Source.MANUAL
             assert row.mapping_source_ref == f"master_select:{olga.pk}"
