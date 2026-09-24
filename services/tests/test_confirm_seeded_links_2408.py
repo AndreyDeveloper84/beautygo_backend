@@ -385,3 +385,31 @@ class TestTheSourceItselfIsPartOfTheSelection:
         assert mine.mapping_status == SalonService.MappingStatus.VERIFIED
         assert manual.mapping_status == SalonService.MappingStatus.REVIEW_REQUIRED
         assert manual.mapping_confirmed_rule == ""
+
+
+class TestAZeroIsOnlyHonestWithCoverage:
+    """Ноль исключений при пустой выборке читается как «исключений нет».
+
+    Пустая выборка бывает по бытовым причинам: не тот салон, не та база, сид не
+    накатан. Все три числа исключений тогда тоже нули, и отчёт выглядит
+    благополучным. Поэтому охват печатается первым, а нулевой охват назван
+    прямо.
+    """
+
+    def test_an_empty_coverage_says_so(self) -> None:
+        tenant = _tenant()  # салон есть, строк сида в нём нет
+
+        report = _run(tenant=tenant.slug)
+
+        assert "охват (строк сида просмотрено): 0" in report
+        assert "нули ниже ничего не доказывают" in report
+
+    def test_a_non_empty_coverage_does_not_shout(self) -> None:
+        """Положительная пара: предупреждение — про пустоту, а не про всё подряд."""
+        tenant = _tenant()
+        _row(tenant)
+
+        report = _run(tenant=tenant.slug)
+
+        assert "охват (строк сида просмотрено): 1" in report
+        assert "нули ниже ничего не доказывают" not in report
