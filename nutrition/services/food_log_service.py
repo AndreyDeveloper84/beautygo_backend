@@ -23,10 +23,11 @@ Errors:
   by the serializer; service is defensive).
 - ``scan_id`` references someone else's scan → ``ScanNotOwnedError`` →
   view returns 404 (not 403, to avoid existence leak).
-- Manual ``dish_name`` doesn't resolve in seed/lookup →
-  ``DishNotRecognizedError`` → view returns 400 ``FOOD_NOT_RECOGNIZED``.
-- Scan exists but its nutrition is null (Slice 3a miss) →
-  ``DishNotRecognizedError``.
+- DRF-2371: блюдо вне справочника и снимок без состава БОЛЬШЕ НЕ ОТКАЗ.
+  Запись ложится, а макросы остаются отсутствующими (NULL, не ноль) —
+  решение владельца §77 п. 34. ``DishNotRecognizedError`` остался ровно
+  для одного случая: скан не назвал блюда ни сам, ни в снимке, — писать
+  нечего.
 
 If both ``scan_id`` and ``dish_name`` are passed, scan_id wins (more
 authoritative — provider already saw the photo).
@@ -70,7 +71,11 @@ class ScanNotOwnedError(FoodLogServiceError):
 
 
 class DishNotRecognizedError(FoodLogServiceError):
-    """Manual dish_name didn't resolve OR scan has no nutrition snapshot."""
+    """Писать нечего: скан не назвал блюда ни сам, ни в снимке.
+
+    DRF-2371 — промах справочника и снимок без состава сюда больше не
+    приводят: такие записи ложатся без чисел.
+    """
 
 
 class InvalidInputError(FoodLogServiceError):

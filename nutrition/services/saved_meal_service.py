@@ -57,7 +57,9 @@ class SavedMealService:
         *,
         dish_name: str,
         portion_g: float,
-        calories: float = 0.0,
+        # DRF-2371 — ``None`` значит «не посчитано». Прежнее умолчание
+        # ``0.0`` писало в снимок ноль, которого никто не считал.
+        calories: float | None = None,
         protein_g: float | None = None,
         fat_g: float | None = None,
         carbs_g: float | None = None,
