@@ -37,15 +37,32 @@ def _lookup() -> NutritionLookup:
     return NutritionLookup(dish_macros=SEED, aliases={})
 
 
-class TestTheTypicalPortionFillsOnlyTheGap:
-    def test_an_unestimated_portion_falls_back_to_the_typical_one(self):
-        """Тот самый случай: блюдо есть, порции нет — и запись больше не пустая."""
+class TestTheTypicalPortionIsDataNotYetBehaviour:
+    """Типовая порция ПОКА не подменяет пустую оценку — и это решение.
+
+    Пустые итоги при известных числах на 100 г — действующий сигнал
+    «спроси вес» (DRF-2335, решение владельца §77 п.29). Заполни мы их
+    здесь — сигнал исчезнет, а человек увидит число, которого не
+    подтверждал, и выглядеть оно будет как измеренное.
+
+    Подмена включится отдельным листом, когда поверхности научатся читать
+    `portion_source` и показывать подтверждение рядом с числом.
+    """
+
+    def test_an_unestimated_portion_keeps_the_totals_empty(self):
         facts = _lookup().lookup("борщ", portion_g=None)
 
         assert facts is not None
-        assert facts.portion_g == 300
-        assert facts.kcal == pytest.approx(147.0)  # 49 × 3
-        assert facts.portion_source == "typical"
+        assert facts.portion_g is None
+        assert facts.kcal is None  # сигнал «спроси вес» остаётся
+        assert facts.portion_source == "unknown"
+
+    def test_the_typical_portion_is_available_to_whoever_asks(self):
+        """Знание уже есть — им просто ещё никто не подменяет ответ."""
+        from nutrition.data.ru_dishes_seed import DISH_MACROS
+
+        assert DISH_MACROS["борщ"].typical_portion_g == 300
+        assert DISH_MACROS["борщ"].typical_portion_source == "ru_serving_practice"
 
     def test_the_providers_estimate_is_never_overridden(self):
         """Порция названа провайдером — типовая молчит, даже если отличается."""
