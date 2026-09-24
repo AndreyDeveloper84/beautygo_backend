@@ -98,7 +98,9 @@ FIELDS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
         _same(
             "gender", "age", "height_cm", "weight_kg", "weight_range", "timezone",
             "activity_coefficient", "goal", "pace", "legacy_default_inputs",
-            "diet_preference", "health_flags",
+            # DRF-2310: слова человека о своём питании («без лактозы по
+            # назначению врача») — личные данные и едут вместе с самим типом.
+            "diet_preference", "diet_note", "diet_answered_at", "health_flags",
             "bmr", "daily_kcal", "daily_protein_g", "daily_fat_g", "daily_carbs_g",
             "daily_water_ml", "daily_vitamin_d_iu", "daily_vitamin_b12_mcg", "daily_vitamin_c_mg",
             "daily_iron_mg", "daily_calcium_mg", "daily_magnesium_mg", "daily_omega3_g",

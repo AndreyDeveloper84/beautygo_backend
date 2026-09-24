@@ -23,6 +23,15 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 
 from nutrition.models import NutritionProfile, ProfileIdempotencyKey
+from nutrition.services.diet_type import (  # noqa: F401
+    DietType,
+    DIET_FIELD,
+    DIET_SKIP_KEY,
+    DIET_SKIPPED_FLAG,
+    answer_diet,
+    diet_answered,
+    skip_diet,
+)
 from nutrition.services.nutrition_profile_service import (
     ProfileInputs,
     compute_norms,
@@ -142,9 +151,13 @@ def upsert_profile(
 # ---------------------------------------------------------------------------
 
 
+#: ``diet_preference`` здесь НЕТ намеренно (DRF-2310): у него свой разбор —
+#: слова к «другому», снятие пометки прежнего значения и пропуск, который
+#: значения НЕ подставляет. Прямая запись мимо него сделала бы «пропустить»
+#: молчаливым «без ограничений», а это разные вещи (§77 п. 6).
 _DIRECT_FIELDS = (
     "gender", "age", "height_cm", "weight_kg", "weight_range",
-    "activity_coefficient", "goal", "pace", "diet_preference", "timezone",
+    "activity_coefficient", "goal", "pace", "timezone",
 )
 
 
@@ -160,6 +173,11 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
 
     skipped = payload.get("_skipped_fields") or []
     for field in skipped:
+        # DRF-2310: тип питания разбирается ниже своим кодом. Общий цикл
+        # поставил бы флаг и поверх настоящего ответа — то есть записал бы
+        # рядом «назвал» и «не назвал» об одном вопросе.
+        if field == DIET_SKIP_KEY:
+            continue
         flags[f"{field}_skipped"] = True
 
     # Вопрос 59 (CD §72): upsert частичный — поле, которого нет в теле,
@@ -194,7 +212,24 @@ def _apply_patch(profile: NutritionProfile, payload: dict) -> None:
     if "goal" in payload and "pace" not in payload:
         profile.pace = ""
 
+    if diet_answered(profile):
+        # DRF-2310: «назвал» и «не назвал» об одном вопросе рядом не лежат.
+        # Правило живёт в ``skip_diet``, но флаг приходит и прямым телом
+        # (``health_flags``), мимо него — поэтому снимается здесь тоже.
+        flags.pop(DIET_SKIPPED_FLAG, None)
+
     profile.health_flags = flags
+
+    # DRF-2310. Тип питания — после флагов: и ответ, и пропуск пишут в те же
+    # ``health_flags``, и порядок решает, чьё слово последнее. Ответ отменяет
+    # прежний пропуск, пропуск не отменяет значения — он лишь говорит, что
+    # ответа не было.
+    # Эхо прежнего значения (``none``) ответом не делает ничего: молчание,
+    # вернувшееся обратно, остаётся молчанием.
+    if payload.get(DIET_FIELD) in DietType.values:
+        answer_diet(profile, payload[DIET_FIELD], note=payload.get("diet_note", ""))
+    elif DIET_SKIP_KEY in skipped:
+        skip_diet(profile)
 
     if "disclaimer_acked" in payload:
         profile.disclaimer_acked = payload["disclaimer_acked"]
@@ -206,6 +241,23 @@ _CALCULATION_INPUTS: frozenset[str] = frozenset({
     "gender", "age", "height_cm", "weight_kg", "weight_range",
     "activity_coefficient", "goal", "pace", "health_flags", "_skipped_fields",
 })
+
+#: Пропуски, которые расчёта не касаются (DRF-2310). ``_skipped_fields`` стоит
+#: в списке входов целиком, потому что пропуск активности или пола расчёт
+#: меняет. Пропуск вопроса о типе питания — нет: ни ``diet_preference``, ни
+#: ``diet_note`` во входах не числятся, и предложение из-за него падать не
+#: должно. Тот же довод, что в докстринге ``targets_recompute_gate``, где
+#: ``{"diet_preference": "vegetarian"}`` назван телом, которое ориентиров не
+#: трогает.
+_SKIPS_OUTSIDE_CALCULATION: frozenset[str] = frozenset({DIET_SKIP_KEY})
+
+
+def _touches_calculation(payload: dict) -> bool:
+    keys = _CALCULATION_INPUTS & set(payload)
+    if keys == {"_skipped_fields"}:
+        skipped = set(payload.get("_skipped_fields") or [])
+        return bool(skipped - _SKIPS_OUTSIDE_CALCULATION)
+    return bool(keys)
 
 
 def _recompute_and_persist(profile: NutritionProfile) -> None:
@@ -379,7 +431,7 @@ def _refuse_recompute(profile: NutritionProfile, payload: dict[str, Any]) -> Non
     # рядом предложение посчитано от прежних входов. Держать его значило
     # бы, что подтверждение применит расчёт от устаревших входов — например,
     # к человеку, только что назвавшему беременность.
-    if profile.pending_proposal and _CALCULATION_INPUTS & set(payload):
+    if profile.pending_proposal and _touches_calculation(payload):
         profile.pending_proposal = None
     logger.warning(
         "nutrition.targets.recompute_refused user=%s source=%s",
@@ -512,6 +564,11 @@ def _serialize(
         # DRF-2279: какие из значений выше — прежние умолчания, а не ответы.
         "legacy_default_inputs": list(profile.legacy_default_inputs or []),
         "diet_preference": profile.diet_preference or "none",
+        # DRF-2310: слова к «другому» и ответ на сам вопрос — разные факты.
+        # ``diet_answered`` отвечает на «шаг пройден?», а не «столбец пуст?»:
+        # прежнее значение в столбце лежит, но ответом не считается.
+        "diet_note": profile.diet_note or "",
+        "diet_answered": diet_answered(profile),
         "norms": _norms_block(profile),
         "health_flags": profile.health_flags or {},
         "goal_overridden_by": profile.goal_overridden_by or None,

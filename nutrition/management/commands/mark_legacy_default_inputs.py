@@ -74,7 +74,12 @@ SKIPPED_ACTIVITY = 1.375
 REPORT_ONLY = "activity_skipped_other_value"
 
 #: Поля, которые команда обязана оставить как были.
-UNTOUCHED: tuple[str, ...] = ("activity_coefficient", "pace", "goal", "health_flags")
+UNTOUCHED: tuple[str, ...] = (
+    "activity_coefficient", "pace", "goal", "health_flags",
+    # DRF-2310: тип питания эта команда не метит (по значению его от ответа
+    # не отличить) — и не трогает. Гарантия проверяется сравнением до/после.
+    "diet_preference", "diet_note", "diet_answered_at",
+)
 
 
 def _report_only(profile: NutritionProfile) -> bool:

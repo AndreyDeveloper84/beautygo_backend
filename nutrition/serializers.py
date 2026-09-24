@@ -9,6 +9,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from nutrition.models import Beverage, FoodLog, FoodScan, NutritionProfile, SavedMeal, WaterLog
+from nutrition.services.diet_type import DietType, LEGACY_DIET_ECHO
 
 
 #: Поля-ОРИЕНТИРЫ. Их отсутствие обязано доезжать до потребителя
@@ -530,7 +531,19 @@ _HEALTH_FLAG_KEYS = {
     "eating_disorder", "meds",
     "allergies", "allergies_vague",
     "gender_skipped", "age_skipped", "height_skipped", "weight_skipped",
+    # DRF-2310: ручка ОТДАЁТ этот ключ, когда человек пропустил вопрос о
+    # питании. Не приняв его обратно, мы ломали бы read-modify-write ровно
+    # так же, как ломал бы строгий список у самого `diet_preference`, —
+    # только на поле соседнем.
+    "diet_skipped",
 }
+
+#: Вопросы, которые можно пропустить. Закрытый список: без него ЛЮБАЯ строка
+#: в ``_skipped_fields`` заводила бы произвольный ключ в словаре здоровья —
+#: а там любой истинный ключ выключает внешнюю модель (DT-1 §67) и ломает
+#: обратную отправку тела. Имена короткие, как исторически сложилось у
+#: остальных (``weight`` при столбце ``weight_kg``).
+_SKIPPABLE_QUESTIONS = {"gender", "age", "height", "weight", "activity", "diet"}
 
 
 class DisclaimerAckSerializer(serializers.Serializer):
@@ -594,14 +607,59 @@ class NutritionProfileUpsertSerializer(serializers.Serializer):
     pace = serializers.ChoiceField(
         choices=NutritionProfile.Pace.choices, required=False, allow_blank=True,
     )
+    # DRF-2310 (§77 п. 5): на входе — закрытый список владельца. Прежние
+    # значения в столбце это не трогает (их хранят молча, §77 п. 7), но
+    # НОВАЯ свободная строка туда больше не попадёт: вопрос задан списком,
+    # и ответ вне списка — не ответ на него.
     diet_preference = serializers.CharField(
         required=False, allow_blank=True, max_length=32,
     )
+    #: Слова к ответу «другое»; при других значениях не хранятся.
+    diet_note = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        # DRF-2310: слова принадлежат ответу «другое». Пришли одни слова —
+        # неизвестно, к какому ответу их класть: молча проглотить присланное
+        # поле нельзя, а догадываться по тому, что лежит в строке, значит
+        # записать человеку ответ, которого он сейчас не давал.
+        named = attrs.get("diet_preference")
+        if attrs.get("diet_note") and named in (None, "", LEGACY_DIET_ECHO):
+            raise serializers.ValidationError({
+                "diet_note": "слова принадлежат ответу: пришлите diet_preference вместе с ними",
+            })
+        return attrs
+
+    def validate__skipped_fields(self, value: list[str]) -> list[str]:
+        unknown = [name for name in value if name not in _SKIPPABLE_QUESTIONS]
+        if unknown:
+            raise serializers.ValidationError(
+                "неизвестный вопрос в пропусках: " + ", ".join(unknown)
+            )
+        return value
+
+    def validate_diet_preference(self, value: str) -> str:
+        """Список владельца — плюс эхо прежнего значения, которое не ответ.
+
+        ``ChoiceField`` здесь был бы ловушкой: ручка ОТДАЁТ
+        ``"diet_preference": "none"`` (умолчание столбца), и вызывающий,
+        вернувший тело обратно целиком — обычный read-modify-write, — получал
+        бы отказ на поле, которого он не трогал. Поэтому ``none`` и пустая
+        строка принимаются и ничего не записывают: они и значат «ничего не
+        сказано». Любая другая строка вне списка — отказ.
+        """
+        if value in ("", LEGACY_DIET_ECHO) or value in DietType.values:
+            return value
+        raise serializers.ValidationError(
+            "тип питания задаётся списком: "
+            + ", ".join(DietType.values)
+        )
     timezone = serializers.CharField(required=False, allow_blank=True, max_length=64)
     health_flags = serializers.DictField(required=False)
     _skipped_fields = serializers.ListField(
         child=serializers.CharField(), required=False,
     )
+
     disclaimer_acked = DisclaimerAckSerializer(required=False)
     complete = serializers.BooleanField(required=False, default=False)
     #: Утверждение вызывающего о согласии (§92, срез N-a2). Здесь
@@ -623,6 +681,8 @@ class NutritionProfileUpsertSerializer(serializers.Serializer):
 
 
 class NutritionProfileResponseSerializer(serializers.Serializer):
+    """Wire shape of GET / POST /internal/profile/ (spec §1.1)."""
+
     # DRF-2279: имена входов, значения которых подставил каталог до вопроса
     # 59, — для расчёта они «не названы», и спрашивающая сторона (бот) о них
     # переспрашивает. Объявлено здесь, чтобы поле было и в схеме, не только
@@ -630,7 +690,13 @@ class NutritionProfileResponseSerializer(serializers.Serializer):
     legacy_default_inputs = serializers.ListField(
         child=serializers.CharField(), required=False, read_only=True,
     )
-    """Wire shape of GET / POST /internal/profile/ (spec §1.1)."""
+    # DRF-2310: «шаг пройден?» — отдельный факт от значения столбца: прежнее
+    # значение там лежит, но ответом не считается (§77 п. 7).
+    diet_note = serializers.CharField(required=False, allow_blank=True, read_only=True)
+    # Обязательное намеренно: по этому признаку спрашивающая сторона решает,
+    # задавать ли вопрос. Необязательный ключ означал бы, что её можно не
+    # получить и всё равно решать — тот же довод, что у `targets_provenance`.
+    diet_answered = serializers.BooleanField(read_only=True)
 
     external_user_id = serializers.CharField()
     exists = serializers.BooleanField()

@@ -133,7 +133,7 @@ UNTOUCHED_FIELDS: tuple[str, ...] = (
     "activity_coefficient",
     "goal",
     "pace",
-    "diet_preference",
+    "diet_preference", "diet_note", "diet_answered_at",
     "health_flags",
     "disclaimer_acked",
     "onboarded_at",
