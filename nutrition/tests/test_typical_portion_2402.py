@@ -71,7 +71,7 @@ class TestTheTypicalPortionIsDataNotYetBehaviour:
         assert facts is not None
         assert facts.portion_g == 420
         assert facts.kcal == pytest.approx(205.8)  # 49 × 4.2
-        assert facts.portion_source == "given"
+        assert facts.portion_source == "provider"
 
     def test_a_dish_without_a_typical_portion_still_asks(self):
         """Пусто — значит спрашиваем, как сейчас: выдумывать нечего."""
@@ -81,6 +81,39 @@ class TestTheTypicalPortionIsDataNotYetBehaviour:
         assert facts.portion_g is None
         assert facts.kcal is None
         assert facts.portion_source == "unknown"
+
+
+class TestTheWireVocabularyIsFinalAlready:
+    """Словарь значений окончателен в этом листе, хотя `typical` ещё не выдаётся.
+
+    Переименование значения на проводе — ломающее изменение: читателей
+    трое, и клиент уже пишется под три значения. Поэтому `typical`
+    объявлен и зарезервирован за DRF-2444, а не добавится потом вместо
+    `given`.
+    """
+
+    def test_a_substituted_baseline_is_not_passed_off_as_an_estimate(self):
+        """Ручной путь подставил константу — наблюдал это число никто."""
+        facts = _lookup().lookup("борщ", portion_g=250, portion_named=False)
+
+        assert facts is not None
+        assert facts.portion_g == 250  # считаем по ней
+        assert facts.portion_source == "unknown"  # но за оценку не выдаём
+
+    def test_typical_is_declared_but_never_emitted_yet(self):
+        """Зарезервировано — значит в словаре есть, на проводе пока нет."""
+        import inspect
+
+        from nutrition.services import nutrition_lookup as module
+
+        source = inspect.getsource(module.NutritionFacts)
+        assert "``typical``" in source  # объявлено читателям
+        assert "DRF-2444" in source  # и сказано, чем оно включится
+
+        for portion, named in ((None, True), (300, True), (300, False)):
+            facts = _lookup().lookup("борщ", portion_g=portion, portion_named=named)
+            assert facts is not None
+            assert facts.portion_source in {"provider", "unknown"}, facts.portion_source
 
 
 class TestEveryNumberHasAnOrigin:
