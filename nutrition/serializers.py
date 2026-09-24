@@ -260,6 +260,12 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
         }
 
         return {
+            # DRF-2402 — по какой порции посчитаны итоги: «given» (порция
+            # пришла с распознаванием), «typical» (провайдер молчал, взята
+            # типовая из справочника), «unknown» (порции нет — спросим).
+            # Без этого признака «посчитано по типовой» на экране читается
+            # как «измерено», а это разные утверждения.
+            "portion_source": n.get("portion_source", "unknown"),
             "calories": kcal,
             "protein_g": protein,
             "fat_g": fat,
