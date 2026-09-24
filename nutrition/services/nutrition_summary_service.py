@@ -44,6 +44,12 @@ class SummaryTotals:
     protein_g: float
     fat_g: float
     carbs_g: float
+    #: DRF-2371 — сколько записей суток осталось без расчёта (блюда нет в
+    #: справочнике, вес неизвестен). Суммы выше считают только посчитанное;
+    #: без этого числа частичная сумма выдавалась бы за полную — та же
+    #: ложь, что «0 ккал» у отдельной записи. Число, не текст: формулировка
+    #: для человека ждёт слова владельца (OWNER_QUESTIONS).
+    unscored_entries: int = 0
 
 
 @dataclass(frozen=True)
@@ -133,11 +139,16 @@ class NutritionSummaryService:
             fat_g=Sum("fat_g"),
             carbs_g=Sum("carbs_g"),
         )
+        # DRF-2371 — ``Sum`` пропускает NULL сам: сумма честно считает
+        # посчитанное. Но молчать о пропущенном нельзя, иначе итог врёт о
+        # полноте, а не о величине.
+        unscored = qs.filter(calories__isnull=True).count()
         totals = SummaryTotals(
             calories=_round1(agg["calories"]),
             protein_g=_round1(agg["protein_g"]),
             fat_g=_round1(agg["fat_g"]),
             carbs_g=_round1(agg["carbs_g"]),
+            unscored_entries=unscored,
         )
 
         # DRF-2217 — вода из ``WaterEntry`` за те же сутки, что еда выше.
@@ -185,7 +196,11 @@ class NutritionSummaryService:
             calories_goal = int(profile.daily_kcal)
 
         ai_comment: str | None = None
-        if with_comment:
+        # DRF-2371 — при незасчитанных записях комментарий не запрашиваем
+        # вовсе: модель получила бы неполное число как полное и уверенно
+        # рассудила бы о дне, которого не знает. Молчание честнее. Текст,
+        # который назовёт пробел словами, ждёт слова владельца.
+        if with_comment and totals.unscored_entries == 0:
             # Local import — keeps the LLM client out of every summary
             # request and avoids import cycles with the profile module.
             from nutrition.services.ai_comment_service import (

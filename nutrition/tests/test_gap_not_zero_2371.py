@@ -231,9 +231,18 @@ class TestK6GoalDaysDoNotCountAGuess:
         from nutrition.models import NutritionProfile
         from nutrition.services.plan_facts import count_days_within_calorie_target
 
+        from django.utils import timezone as dj_tz
+
         NutritionProfile.objects.update_or_create(
             user_id=client_user.id,
-            defaults={"daily_kcal": 2000, "calories_source": "manual"},
+            defaults={
+                "daily_kcal": 2000,
+                # Ориентир действует по происхождению, а не по числу
+                # (``calories_confirmed``): без подтверждения счёт дней —
+                # ``None``, и узел мерил бы не то.
+                "calories_source": NutritionProfile.TargetsSource.AYLA_CALCULATED,
+                "calories_confirmed_at": dj_tz.now(),
+            },
         )
         day = datetime.now(dt_tz.utc) - timedelta(days=1)
         FoodLog.objects.create(

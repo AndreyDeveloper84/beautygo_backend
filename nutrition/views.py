@@ -619,22 +619,25 @@ class InternalFoodEstimateView(APIView):
         facts = build_nutrition_lookup().lookup(
             dish_name, portion_g=portion_g, portion_named=named_portion is not None
         )
-        if facts is None or facts.kcal is None:
-            return error_response(
-                "FOOD_NOT_RECOGNIZED",
-                "Не удалось определить макросы блюда",
-            )
+        # DRF-2371 — отказа здесь больше нет. Раньше «блюда нет в
+        # справочнике» и «вес неизвестен» отвечали 400, и §109 шаг 6
+        # («запись только по подтверждению показанной оценки») делал запись
+        # такого блюда недостижимой: показать было нечего. Теперь оценка
+        # всегда есть, а числа в ней могут отсутствовать — NULL, не ноль.
+        #
+        # ``matched_dish`` без совпадения — то, что человек назвал сам:
+        # подставлять чужое название справочника было бы подменой блюда.
         return success_response(
             {
-                "matched_dish": facts.matched_dish,
-                "source": facts.source,
+                "matched_dish": facts.matched_dish if facts is not None else dish_name,
+                "source": facts.source if facts is not None else None,
                 "portion_g": portion_g,
                 "portion_estimated": named_portion is None,
-                "kcal": facts.kcal,
-                "protein_g": facts.protein_g,
-                "fat_g": facts.fat_g,
-                "carbs_g": facts.carbs_g,
-                "kcal_per_100g": facts.kcal_per_100g,
+                "kcal": facts.kcal if facts is not None else None,
+                "protein_g": facts.protein_g if facts is not None else None,
+                "fat_g": facts.fat_g if facts is not None else None,
+                "carbs_g": facts.carbs_g if facts is not None else None,
+                "kcal_per_100g": facts.kcal_per_100g if facts is not None else None,
             },
             status_code=status.HTTP_200_OK,
         )

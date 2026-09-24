@@ -179,10 +179,20 @@ class FoodLog(models.Model):
     portion_multiplier = models.FloatField(default=1.0)
 
     # Snapshotted macros — match the spec FoodLogEntry response shape.
-    calories = models.FloatField(default=0.0)
-    protein_g = models.FloatField(default=0.0)
-    fat_g = models.FloatField(default=0.0)
-    carbs_g = models.FloatField(default=0.0)
+    #
+    # DRF-2371 — NULL значит «не посчитано», и это не ноль. Человек ест
+    # блюда, которых нет в справочнике, и фотографирует порции, вес которых
+    # распознаватель не берётся назвать: запись о таком блюде всё равно
+    # должна лечь (решение владельца §77 п. 34, вариант «а»). Прежний
+    # ``default=0.0`` без NULL заставлял выбирать между отказом записи и
+    # нулём — а ноль читается как «съел и не получил калорий».
+    #
+    # ``default`` снят намеренно: значение по умолчанию вернуло бы ноль
+    # каждому, кто просто не передал поле.
+    calories = models.FloatField(null=True, blank=True)
+    protein_g = models.FloatField(null=True, blank=True)
+    fat_g = models.FloatField(null=True, blank=True)
+    carbs_g = models.FloatField(null=True, blank=True)
 
     # DRF-260: Track E micronutrient snapshot.
     # All nullable for backwards compatibility — existing logs stay valid
@@ -237,7 +247,10 @@ class FoodLog(models.Model):
         ]
 
     def __str__(self) -> str:
-        return f"{self.dish_name} ({self.meal_type}, {self.calories:.0f} kcal)"
+        # DRF-2371 — запись без чисел печатается словами: ``:.0f`` на None
+        # падал бы в админке и в журналах.
+        kcal = "не посчитано" if self.calories is None else f"{self.calories:.0f} kcal"
+        return f"{self.dish_name} ({self.meal_type}, {kcal})"
 
 
 class DeletedFoodLog(models.Model):
@@ -1250,7 +1263,8 @@ class SavedMeal(models.Model):
     dish_name = models.CharField(max_length=200)
     #: Порция в граммах — как её видит человек, не множитель базовых 100 г.
     portion_g = models.FloatField()
-    calories = models.FloatField(default=0.0)
+    # DRF-2371 — снимок мог быть сделан с записи без чисел: NULL, не ноль.
+    calories = models.FloatField(null=True, blank=True)
     protein_g = models.FloatField(null=True, blank=True)
     fat_g = models.FloatField(null=True, blank=True)
     carbs_g = models.FloatField(null=True, blank=True)
