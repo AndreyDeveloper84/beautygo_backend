@@ -12,15 +12,24 @@ def _json_default(o):
     return str(o)
 
 
-def rows_to_json(rows: list[ResolverRow]) -> str:
-    return json.dumps(
-        {"summary": asdict(Summary.of(rows)), "rows": [asdict(r) for r in rows]},
-        ensure_ascii=False, indent=2, default=_json_default,
-    )
+def rows_to_json(rows: list[ResolverRow], *, scope: dict | None = None) -> str:
+    """JSON прогона. ``scope`` — область, в которой он снят.
+
+    Без области файл читается как отчёт по всему салону: «total: 44» ничего не
+    говорит о том, из скольких. Файл уходит дальше терминала, где два числа
+    напечатаны рядом, поэтому область обязана ехать вместе с ним.
+    """
+
+    payload: dict = {}
+    if scope is not None:
+        payload["scope"] = scope
+    payload["summary"] = asdict(Summary.of(rows))
+    payload["rows"] = [asdict(r) for r in rows]
+    return json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default)
 
 
-def write_json(rows: list[ResolverRow], path: Path) -> None:
-    path.write_text(rows_to_json(rows), encoding="utf-8")
+def write_json(rows: list[ResolverRow], path: Path, *, scope: dict | None = None) -> None:
+    path.write_text(rows_to_json(rows, scope=scope), encoding="utf-8")
 
 
 def row_lines(r: ResolverRow) -> list[str]:
