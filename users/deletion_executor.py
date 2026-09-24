@@ -217,6 +217,11 @@ ANONYMISE: dict[str, str] = {
         "NULL; external_user_id → deleted:<pk прокси> — аудит операции (кто, когда, какой салон) "
         "остаётся, MAX-идентификатор не переживает удаление личности (DRF-2085)"
     ),
+    "users.SpecialistIdentityLinkRequest.user": (
+        "NULL; external_user_id → deleted:<pk прокси> — аудит связи личности мастера "
+        "(кто просил, когда, для какого профиля) остаётся, MAX-идентификатор не переживает "
+        "удаление личности (DRF-2442)"
+    ),
 }
 
 #: Хранить без изменений. Значение — основание и срок.
@@ -521,6 +526,7 @@ def _erase_catalog(user) -> dict:
         Profile,
         SalonAdminLinkRequest,
         SocialAccount,
+        SpecialistIdentityLinkRequest,
         SpecialistPortfolio,
         SpecialistProfile,
         TenantUserRelationship,
@@ -707,6 +713,21 @@ def _erase_catalog(user) -> dict:
     ).exists():
         raise IncompleteErasure("users.SalonAdminLinkRequest still names the person")
 
+    # 7-bis. Аудит связи личности мастера (DRF-2442) — то же правило, что у
+    # соседа выше: строка остаётся следом операции, человек из неё уходит.
+    anonymised["users.SpecialistIdentityLinkRequest.user"] = (
+        SpecialistIdentityLinkRequest.objects.filter(user=user).update(user=None)
+    )
+    anonymised["users.SpecialistIdentityLinkRequest.external_user_id"] = (
+        SpecialistIdentityLinkRequest.objects.filter(external_user_id=user.username).update(
+            external_user_id=f"deleted:{user.pk}"
+        )
+    )
+    if SpecialistIdentityLinkRequest.objects.filter(
+        Q(user=user) | Q(external_user_id=user.username)
+    ).exists():
+        raise IncompleteErasure("users.SpecialistIdentityLinkRequest still names the person")
+
     user.phone = None
     user.email = ""
     user.first_name = ERASED_NAME
@@ -862,6 +883,7 @@ def _residue(user, *, external_name: str | None = None) -> dict[str, int]:
         Profile,
         SalonAdminLinkRequest,
         SocialAccount,
+        SpecialistIdentityLinkRequest,
         SpecialistProfile,
         TenantUserRelationship,
         UserPersonalContext,
@@ -920,6 +942,9 @@ def _residue(user, *, external_name: str | None = None) -> dict[str, int]:
         ),
         "analytics.AnalyticsEvent.actor": AnalyticsEvent.objects.filter(actor=user),
         "users.SalonAdminLinkRequest.user": SalonAdminLinkRequest.objects.filter(user=user),
+        "users.SpecialistIdentityLinkRequest.user": (
+            SpecialistIdentityLinkRequest.objects.filter(user=user)
+        ),
         "users.Profile.pii": Profile.objects.filter(user=user).exclude(
             full_name=ERASED_NAME, bio="", city="",
             default_location_lat=None, default_location_lng=None,

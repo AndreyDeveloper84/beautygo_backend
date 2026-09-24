@@ -62,6 +62,39 @@ def salon_admin_link_token_check(app_configs, **kwargs):
 
 
 @register("security")
+def specialist_identity_link_token_check(app_configs, **kwargs):
+    """DRF-2442: секрет двери личности мастера отличается от ВСЕХ ЧЕТЫРЁХ прочих.
+
+    Решение владельца §77 п.38 даёт боту ровно одну новую силу — «связать
+    личность мастера, принявшего приглашение, с его учёткой». Равенство общему
+    Bearer сделало бы эту силу частью рантайма; равенство любому провижининг-
+    секрету или секрету ``salon-admins`` слило бы две силы в одно значение, и
+    разделение, ради которого их пять, исчезло бы молча. Отказ при старте, где
+    ошибку конфигурации видно; ``IsSpecialistIdentityLinkBearer`` отказывает и
+    на запросе.
+    """
+    link = getattr(settings, "AYLA_SPECIALIST_IDENTITY_LINK_TOKEN", "") or ""
+    if not link:
+        return []
+    siblings = (
+        ("AYLA_INTERNAL_API_TOKEN", "the general bot credential would bind master identities"),
+        ("AYLA_IDENTITY_PROVISIONING_TOKEN", "one value would carry bind-external AND the master door"),
+        ("AYLA_TENANT_PROVISIONING_TOKEN", "one value would carry salon creation AND the master door"),
+        ("AYLA_SALON_ADMIN_LINK_TOKEN", "one value would carry salon-admin linking AND the master door"),
+    )
+    errors = []
+    for name, consequence in siblings:
+        other = getattr(settings, name, "") or ""
+        if other and link == other:
+            errors.append(Error(
+                f"AYLA_SPECIALIST_IDENTITY_LINK_TOKEN equals {name} — {consequence}. "
+                "Provision a DISTINCT secret (owner ruling §77 п.38, DRF-2442).",
+                id="users.E005",
+            ))
+    return errors
+
+
+@register("security")
 def tenant_provisioning_token_check(app_configs, **kwargs):
     """DRF-1695 (C1): the tenant-provisioning secret must differ from BOTH
     the general bot Bearer and the identity-provisioning secret.

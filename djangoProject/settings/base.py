@@ -160,6 +160,10 @@ REST_FRAMEWORK = {
         # One operator click per salon administrator — a human pace, and the
         # ruling asks for a rate limit on the linking capability specifically.
         'salon_admin_link': '10/min',
+        # Scoped: POST /api/v1/internal/specialists/<uuid>/identity/ (DRF-2442).
+        # Один вызов на принятое приглашение — темп человека, регистрирующего
+        # мастера; лимит стоит на способности связывать, как у соседа выше.
+        'specialist_identity_link': '10/min',
         'water': '60/min',           # Scoped: water tracker tap-buttons; user can't tap faster than this
         # Scoped: POST /analytics/event/. Mobile may batch-emit on session
         # foreground/background; higher than `user` so analytics doesn't
@@ -902,6 +906,20 @@ AYLA_TENANT_PROVISIONING_TOKEN = os.environ.get(
 # Ротируется независимо; в логи и в клиентский код не попадает.
 AYLA_SALON_ADMIN_LINK_TOKEN = os.environ.get(
     "AYLA_SALON_ADMIN_LINK_TOKEN", "",
+)
+
+# DRF-2442 (решение владельца §77 п.38, 24.09.2026) — ПЯТЫЙ секрет, одна ручка.
+# ``POST /api/v1/internal/specialists/<uuid>/identity/`` связывает MAX-личность
+# мастера, ПРИНЯВШЕГО одноразовое приглашение, с его уже существующей учёткой
+# специалиста. Ничего не создаёт — только ребро личности, и только
+# ``role=specialist``. Свой credential по той же причине, что у
+# ``salon-admins``: это касание личности, а общий Bearer (§151),
+# identity-provisioning (bind-external к любым учёткам) и tenant-provisioning
+# — другие силы. Каталог требует, чтобы все пять значений различались
+# (users.E005 при старте; сторож отказывает и на запросе). Пусто — ручка
+# выключена, бот получает отказ по имени и мастер остаётся несвязанным.
+AYLA_SPECIALIST_IDENTITY_LINK_TOKEN = os.environ.get(
+    "AYLA_SPECIALIST_IDENTITY_LINK_TOKEN", "",
 )
 
 # S3C — YClients catalog intake (read-only pull of the pilot salon's
