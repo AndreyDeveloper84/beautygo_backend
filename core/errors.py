@@ -228,6 +228,8 @@ class ErrorCode(str, Enum):
     # authoritative readback не подтвердил результат. Причина — в
     # details.reason машинным именем; при отказе ничего не создано.
     SALON_ADMIN_LINK_REFUSED = "SALON_ADMIN_LINK_REFUSED"
+    # DRF-2442 — дверь личности мастера: причина в ``details.reason``.
+    SPECIALIST_IDENTITY_LINK_REFUSED = "SPECIALIST_IDENTITY_LINK_REFUSED"
     # DRF-1800 (M8a) — выбор канонических услуг недоступен этому workspace
     # (каталог салона ведёт владелец салона; у профиля нет тенанта).
     # Причина — в details.reason машинным именем; ничего не создано.

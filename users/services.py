@@ -286,6 +286,12 @@ INITIATOR_ADMIN_LINK_SALON_ADMIN = "admin_link_salon_admin"
 #: it from the catalog operator's «Связать с Ayla» (above) and from the
 #: provisioning bearer — three initiators, three different authorities.
 INITIATOR_BOT_SALON_ADMIN_LINK = "bot_salon_admin_link"
+#: DRF-2442 (решение владельца §77 п.38): бот связал личность мастера,
+#: ПРИНЯВШЕГО одноразовое приглашение, с его существующей учёткой через
+#: ``users.specialist_identity_linking``. Своё имя: в аудите видно, что
+#: доказательством владения было погашенное приглашение, а не клик оператора
+#: и не provisioning-bearer.
+INITIATOR_BOT_SPECIALIST_IDENTITY_LINK = "bot_specialist_identity_link"
 
 
 def bindable_target_q(target_roles: tuple[str, ...]) -> Q:

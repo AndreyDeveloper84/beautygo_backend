@@ -37,6 +37,7 @@ from users.internal_service_locations_api import (
     InternalSpecialistServiceLocationsView,
 )
 from users.internal_reviews_api import InternalSpecialistReviewsView
+from users.internal_specialist_identity_api import InternalSpecialistIdentityLinkView
 from users.internal_schedule_api import (
     InternalSpecialistAvailabilityView,
     InternalSpecialistScheduleView,
@@ -247,6 +248,14 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/availability/',
         InternalSpecialistAvailabilityView.as_view(),
         name='internal-specialist-availability',
+    ),
+    # DRF-2442 (решение владельца §77 п.38) — дверь личности мастера: бот
+    # связывает личность принявшего приглашение с его учёткой, без человека.
+    # Explicit route BEFORE the include, по той же причине, что у соседей.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/identity/',
+        InternalSpecialistIdentityLinkView.as_view(),
+        name='internal-specialist-identity-link',
     ),
     # DRF-1857 (K14) — «Мои отзывы» мастера под субъектом, без персданных
     # клиента; журнал §96. Explicit route BEFORE the include.

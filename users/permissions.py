@@ -364,6 +364,53 @@ class IsTenantProvisioningBearer(permissions.BasePermission):
         return True
 
 
+class IsSpecialistIdentityLinkBearer(permissions.BasePermission):
+    """The one-endpoint Bearer for ``POST /internal/specialists/<uuid>/identity/`` (DRF-2442).
+
+    Owner ruling §77 п.38 (24.09): no human takes part in registering masters,
+    so the catalog must accept «this MAX identity is that master» from the bot —
+    but only from the caller that can prove the master accepted a one-time
+    invitation, and only for that one capability. This class matches
+    ``settings.AYLA_SPECIALIST_IDENTITY_LINK_TOKEN`` and nothing else:
+
+    * empty setting — the route is closed (fails closed, no fallback to any
+      sibling secret);
+    * a value equal to the general Bearer, to either provisioning secret or to
+      the salon-admin-link secret is refused per request as well as at boot
+      (``users.E005``): equal secrets would be one power again.
+
+    A refusal here is «you were not let in» and is deliberately NOT the same
+    answer as «you asked about the wrong subject» (the service's
+    ``specialist_not_found`` / ``specialist_not_linkable``). Merging the two
+    would erase the distinction that costs masters their workspace today —
+    ``subject_unresolved`` (nothing resolves) versus a refusal by right.
+    """
+
+    message = "Specialist identity link auth required"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        expected = getattr(settings, "AYLA_SPECIALIST_IDENTITY_LINK_TOKEN", "") or ""
+        if not expected:
+            return False
+        for sibling in (
+            "AYLA_INTERNAL_API_TOKEN",
+            "AYLA_IDENTITY_PROVISIONING_TOKEN",
+            "AYLA_TENANT_PROVISIONING_TOKEN",
+            "AYLA_SALON_ADMIN_LINK_TOKEN",
+        ):
+            other = getattr(settings, sibling, "") or ""
+            if other and compare_digest(expected, other):
+                return False
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        prefix = "Bearer "
+        if not auth_header.startswith(prefix):
+            return False
+        provided = auth_header[len(prefix):].strip()
+        if not provided or not compare_digest(provided, expected):
+            return False
+        return True
+
+
 class IsSalonAdminLinkBearer(permissions.BasePermission):
     """The one-endpoint Bearer for ``POST /api/v1/internal/tenants/<slug>/salon-admins/`` (DRF-2085).
 
