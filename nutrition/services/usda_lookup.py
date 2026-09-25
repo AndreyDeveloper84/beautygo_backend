@@ -25,13 +25,17 @@ foundation/SR-legacy foods). Per-portion values are scaled when
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import httpx
 from django.conf import settings
 
+from nutrition.data.ru_to_usda import query_for
 from nutrition.models import USDAFoodCache
 from nutrition.services.nutrition_lookup import NutritionFacts
+
+logger = logging.getLogger(__name__)
 
 
 USDA_SEARCH_URL = "https://api.nal.usda.gov/fdc/v1/foods/search"
@@ -81,6 +85,11 @@ def _normalize(term: str) -> str:
     return term.strip().casefold()
 
 
+def _is_cyrillic(term: str) -> bool:
+    """Есть ли в названии кириллица — значит словарь обязателен (DRF-2381)."""
+    return any("Ѐ" <= ch <= "ӿ" for ch in term)
+
+
 class USDALookup:
     """USDA FoodData Central client with local cache."""
 
@@ -107,15 +116,43 @@ class USDALookup:
         if not key:
             return None
 
-        cached = self._read_cache(key)
+        # DRF-2381. Раньше сюда уходило русское название КАК ЕСТЬ, и у
+        # источника такой записи нет ни для одного блюда: слой работал и
+        # находил ноль. Теперь спрашиваем словарь.
+        mapped = query_for(key)
+        if mapped is not None:
+            query, source = mapped.query, "dict"
+        elif _is_cyrillic(key):
+            # Кириллицу без перевода не отправляем вовсе: промах известен
+            # заранее, а запрос стоит квоты владельца. И главное — исход
+            # называется своим именем: лечится он ЗАПИСЬЮ В СЛОВАРЬ, а не
+            # другим запросом, и путать его с «у источника такого нет»
+            # нельзя (DRF-2381).
+            logger.info("nutrition.usda.miss reason=unmapped dish=%s", key)
+            return None
+        else:
+            # Латиница — отправляем как есть: человек мог ввести название
+            # на языке источника, и словарь тут не нужен.
+            query, source = key, "as_is"
+
+        cached = self._read_cache(query)
         if cached is not None:
             return self._build_facts(cached, portion_g)
 
-        parsed = self._fetch(key)
+        parsed = self._fetch(query)
         if parsed is None:
+            # Отправили — и у источника этого нет. В строке И запрос, И
+            # откуда он взялся: иначе через месяц не отличить «плохой
+            # перевод в словаре» от «перевод не отправляли вовсе», а
+            # лечатся эти два по-разному.
+            logger.info(
+                "nutrition.usda.miss reason=not_in_source query=%s source=%s",
+                query,
+                source,
+            )
             return None
 
-        self._write_cache(key, parsed)
+        self._write_cache(query, parsed)
         return self._build_facts(parsed, portion_g)
 
     # ------------------------------------------------------------------

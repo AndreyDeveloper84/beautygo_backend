@@ -103,31 +103,19 @@ class TestEveryStateSaysItsName:
         assert off != unkeyed
 
 
-class TestTheLayerStillDoesNotSpeakRussian:
-    """Включение слоя не равно «начали находить» — и это записано узлом.
+class TestTheLayerNowSpeaksThroughTheDictionary:
+    """Словарь появился, и прежний узел этого класса стал неправдой.
 
-    Иначе следующий прочитает зелёный журнал «слой собран» как «USDA
-    работает», а русские блюда всё это время будут промахиваться.
+    Он утверждал, что запрос уходит кириллицей как есть, и подменял при
+    этом **весь метод слоя** — то есть проверял заглушку, а не код. Перевод
+    живёт внутри подменённого метода, поэтому узел остался бы зелёным при
+    любой правке словаря.
+
+    Теперь предмет другой и проверяется ниже по слою: непокрытая кириллица
+    наружу **не уходит вовсе** и называет свой исход (`reason=unmapped`),
+    а покрытая уходит английским термином. Подробные узлы про словарь —
+    в ``test_ru_to_usda_dictionary_2381.py``.
     """
-
-    def test_the_query_leaves_in_cyrillic_as_is(self, settings) -> None:
-        settings.USDA_LOOKUP_ENABLED = True
-        settings.USDA_API_KEY = "test-key"  # pragma: allowlist secret
-        sent: list[str] = []
-
-        lookup = build_nutrition_lookup()
-        assert lookup._usda is not None
-
-        def _capture(dish_name: str, **kwargs: object) -> None:
-            sent.append(dish_name)
-            return None
-
-        lookup._usda.lookup = _capture  # type: ignore[assignment]
-        lookup.lookup("лаваш с начинкой", portion_g=200)
-
-        # Наличие раньше отсутствия: запрос вообще ушёл — и ушёл кириллицей.
-        assert sent == ["лаваш с начинкой"]
-        assert any(ord(ch) > 127 for ch in sent[0])
 
     @pytest.mark.parametrize("dish", ["борщ", "оливье", "гречка"])
     def test_seed_dishes_never_reach_the_source(self, settings, dish: str) -> None:
