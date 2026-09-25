@@ -738,6 +738,13 @@ def _food_log_refusal(exc: Exception) -> Response:
     )
 
 
+#: Меньше этого объект не может быть фотографией еды: самый маленький
+#: настоящий снимок на стенде — 36 КБ, а пустышки замера 25.09 — сотни
+#: байт. Порог грубый намеренно: он отделяет «файл есть» от «файла нет по
+#: существу», а не сортирует снимки по качеству.
+MIN_PHOTO_BYTES = 1024
+
+
 class InternalFoodLogPhotoView(APIView):
     """GET /api/v1/nutrition/internal/food-log/{entry_id}/photo/ — DRF-2455.
 
@@ -833,6 +840,22 @@ class InternalFoodLogPhotoView(APIView):
                 "nutrition.food_photo.object_absent log=%s err=%s",
                 pk,
                 type(exc).__name__,
+            )
+            return self._absent()
+        # DRF-2455 — третье состояние, найденное замером 25.09: объект
+        # существует, но пуст. Три из пятнадцати живых строк на стенде
+        # ссылались на объект в несколько сотен байт — меньше, чем весят
+        # даже заглушки смоука. Отдать такие байты хуже, чем ответить
+        # «снимка нет»: человек увидит битую картинку вместо честного
+        # пустого места, а поверхность не отличит одно от другого.
+        try:
+            size = log.scan.image.size
+        except (FileNotFoundError, OSError):
+            size = 0
+        if size < MIN_PHOTO_BYTES:
+            handle.close()
+            logger.warning(
+                "nutrition.food_photo.object_empty log=%s size=%s", pk, size,
             )
             return self._absent()
         response = FileResponse(handle, content_type=content_type)

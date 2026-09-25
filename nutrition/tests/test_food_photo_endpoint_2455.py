@@ -29,6 +29,7 @@ from __future__ import annotations
 from datetime import datetime, timezone as dt_tz
 
 import pytest
+from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -90,6 +91,10 @@ PNG_BYTES = (
 )
 
 
+#: Снимок правдоподобного размера: PNG-заголовок плюс наполнитель.
+REAL_PHOTO_BYTES = PNG_BYTES + bytes(40_000)
+
+
 def _log_with_photo(user, *, dish="Овсяная каша"):
     scan = FoodScan.objects.create(
         user=user,
@@ -97,7 +102,10 @@ def _log_with_photo(user, *, dish="Овсяная каша"):
         confidence=0.9,
         portion_g=200,
         provider_used=FoodScan.Provider.OPENAI,
-        image=SimpleUploadedFile("meal.png", PNG_BYTES, content_type="image/png"),
+        # Настоящий снимок весит десятки килобайт; стенд это повторяет,
+        # иначе узел проверял бы файл, который сам код считает пустышкой
+        # (см. MIN_PHOTO_BYTES и замер 25.09).
+        image=SimpleUploadedFile("meal.png", REAL_PHOTO_BYTES, content_type="image/png"),
         nutrition={"matched_dish": dish, "kcal": 320.0, "protein_g": 9.0,
                    "fat_g": 7.0, "carbs_g": 52.0, "portion_g": 200},
     )
@@ -127,6 +135,7 @@ class TestK1OwnPhotoComesBackAsBytes:
         assert resp["Content-Type"].startswith("image/")
         body = b"".join(resp.streaming_content) if resp.streaming else resp.content
         assert body[:8] == PNG_BYTES[:8]
+        assert len(body) == len(REAL_PHOTO_BYTES)
 
 
 class TestK2SomeoneElsePhotoIsNotReachable:
@@ -270,3 +279,35 @@ class TestK8ThePhotoIsNotCachedForEveryone:
         assert resp.status_code == status.HTTP_200_OK
         # Докстрока обещает приватность — узел это и проверяет.
         assert "private" in resp["Cache-Control"]
+
+
+class TestK9AnEmptyObjectIsNotAPhoto:
+    """Объект есть, но пуст — третье состояние, найденное замером 25.09.
+
+    Три из пятнадцати живых строк на стенде ссылались на объект в
+    несколько сотен байт. Отдать их байтами хуже, чем ответить «снимка
+    нет»: человек увидел бы битую картинку, а поверхность не отличила бы
+    её от настоящего снимка.
+    """
+
+    def test_a_few_hundred_bytes_are_treated_as_absent(self, owner):
+        log = _log_with_photo(owner)
+        # Кладём на то же имя пустышку — ровно то, что нашлось на стенде.
+        log.scan.image.storage.delete(log.scan.image.name)
+        log.scan.image.storage.save(log.scan.image.name, ContentFile(b"x" * 379))
+
+        resp = _client_for(OWNER_EXT).get(PHOTO_URL.format(log_id=log.id))
+
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+    def test_a_real_photo_still_passes(self, owner):
+        """Положительная пара: порог не отсекает настоящий снимок."""
+        log = _log_with_photo(owner)
+        log.scan.image.storage.delete(log.scan.image.name)
+        log.scan.image.storage.save(
+            log.scan.image.name, ContentFile(REAL_PHOTO_BYTES),
+        )
+
+        resp = _client_for(OWNER_EXT).get(PHOTO_URL.format(log_id=log.id))
+
+        assert resp.status_code == status.HTTP_200_OK
