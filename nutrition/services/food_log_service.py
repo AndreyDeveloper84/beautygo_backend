@@ -23,10 +23,11 @@ Errors:
   by the serializer; service is defensive).
 - ``scan_id`` references someone else's scan → ``ScanNotOwnedError`` →
   view returns 404 (not 403, to avoid existence leak).
-- Manual ``dish_name`` doesn't resolve in seed/lookup →
-  ``DishNotRecognizedError`` → view returns 400 ``FOOD_NOT_RECOGNIZED``.
-- Scan exists but its nutrition is null (Slice 3a miss) →
-  ``DishNotRecognizedError``.
+- DRF-2371: блюдо вне справочника и снимок без состава БОЛЬШЕ НЕ ОТКАЗ.
+  Запись ложится, а макросы остаются отсутствующими (NULL, не ноль) —
+  решение владельца §77 п. 34. ``DishNotRecognizedError`` остался ровно
+  для одного случая: скан не назвал блюда ни сам, ни в снимке, — писать
+  нечего.
 
 If both ``scan_id`` and ``dish_name`` are passed, scan_id wins (more
 authoritative — provider already saw the photo).
@@ -70,7 +71,11 @@ class ScanNotOwnedError(FoodLogServiceError):
 
 
 class DishNotRecognizedError(FoodLogServiceError):
-    """Manual dish_name didn't resolve OR scan has no nutrition snapshot."""
+    """Писать нечего: скан не назвал блюда ни сам, ни в снимке.
+
+    DRF-2371 — промах справочника и снимок без состава сюда больше не
+    приводят: такие записи ложатся без чисел.
+    """
 
 
 class InvalidInputError(FoodLogServiceError):
@@ -126,22 +131,20 @@ class FoodLogService:
                 f"Scan {data.scan_id} not found for user {data.user_id}"
             ) from exc
 
-        if not scan.nutrition:
+        n = scan.nutrition or {}
+        # DRF-2371 — снимка может не быть вовсе, а в снимке могут
+        # отсутствовать итоги на порцию (провайдер не назвал вес). Прежде
+        # каждый такой случай был отказом записи: человек не мог записать
+        # съеденное совсем. Теперь запись ложится, а числа остаются
+        # отсутствующими — NULL, не ноль (решение владельца §77 п. 34).
+        #
+        # Отказ остаётся ровно для одного случая: писать нечего — блюдо не
+        # названо ни сканом, ни снимком. Строка без названия человеку
+        # бесполезна, а в дневнике неотличима от мусора.
+        dish_name = scan.dish_name or n.get("matched_dish") or ""
+        if not dish_name.strip():
             raise DishNotRecognizedError(
-                f"Scan {data.scan_id} has no nutrition snapshot — "
-                "the original recognition missed and macros aren't derivable"
-            )
-
-        n = scan.nutrition
-        # Scan dict may exist but per-portion totals can be null when the
-        # vision provider returned a dish without a portion_g estimate
-        # (NutritionFacts leaves totals=None in that branch). Snapshotting
-        # would silently produce a "0 kcal" diary entry — treat as
-        # not-recognized so the mobile UI prompts manual portion entry.
-        if any(n.get(field) is None for field in ("kcal", "protein_g", "fat_g", "carbs_g")):
-            raise DishNotRecognizedError(
-                f"Scan {data.scan_id} has nutrition snapshot with missing "
-                "per-portion totals — provider didn't estimate portion size"
+                f"Scan {data.scan_id} named no dish — there is nothing to log"
             )
 
         # Scan's nutrition snapshot already contains totals at the
@@ -150,12 +153,12 @@ class FoodLogService:
         return FoodLog.objects.create(
             user_id=data.user_id,
             scan=scan,
-            dish_name=scan.dish_name or n.get("matched_dish", ""),
+            dish_name=dish_name,
             portion_multiplier=m,
-            calories=_scale(n["kcal"], m),
-            protein_g=_scale(n["protein_g"], m),
-            fat_g=_scale(n["fat_g"], m),
-            carbs_g=_scale(n["carbs_g"], m),
+            calories=_scale(n.get("kcal"), m),
+            protein_g=_scale(n.get("protein_g"), m),
+            fat_g=_scale(n.get("fat_g"), m),
+            carbs_g=_scale(n.get("carbs_g"), m),
             # DRF-260: micronutrient snapshot — only when scan supplied
             # them. Older scans return None across the board, which is
             # fine: pattern engine treats unknowns as low-quality data.
@@ -172,22 +175,20 @@ class FoodLogService:
             data.dish_name,
             portion_g=MANUAL_DISH_BASELINE_G,
         )
-        if facts is None:
-            raise DishNotRecognizedError(
-                f"Dish '{data.dish_name}' not in seed and no fallback "
-                "is configured (Slice 3a' will add OFF/USDA)"
-            )
-
+        # DRF-2371 — блюда нет в справочнике: запись всё равно ложится, под
+        # тем названием, которое человек назвал сам. Числа отсутствуют, и
+        # это честнее и отказа, и нуля. Причина пробела наружу не
+        # выводится — п. 3 DRF-2335 ждёт слова владельца.
         m = data.portion_multiplier
         return FoodLog.objects.create(
             user_id=data.user_id,
             scan=None,
-            dish_name=facts.matched_dish,
+            dish_name=facts.matched_dish if facts is not None else data.dish_name.strip(),
             portion_multiplier=m,
-            calories=_scale(facts.kcal, m),
-            protein_g=_scale(facts.protein_g, m),
-            fat_g=_scale(facts.fat_g, m),
-            carbs_g=_scale(facts.carbs_g, m),
+            calories=_scale(facts.kcal if facts else None, m),
+            protein_g=_scale(facts.protein_g if facts else None, m),
+            fat_g=_scale(facts.fat_g if facts else None, m),
+            carbs_g=_scale(facts.carbs_g if facts else None, m),
             # DRF-260: snapshot micronutrients from NutritionFacts when
             # populated; defaults to None + source=unknown otherwise.
             **_micronutrient_snapshot_from_facts(facts, m),
@@ -198,12 +199,14 @@ class FoodLogService:
         )
 
 
-def _scale(value: float, multiplier: float) -> float:
+def _scale(value: float | None, multiplier: float) -> float | None:
     """Scale a macro value by a portion multiplier.
 
-    Caller guarantees value is non-None (partial-null snapshots are
-    rejected upstream as DishNotRecognizedError).
+    DRF-2371 — ``None`` на входе даёт ``None`` на выходе: умножать
+    отсутствие нельзя, а ``0.0`` было бы утверждением о расчёте.
     """
+    if value is None:
+        return None
     return round(value * multiplier, 1)
 
 
@@ -239,6 +242,15 @@ def _micronutrient_snapshot_from_facts(facts, multiplier: float) -> dict:
     user-supplied ``portion_multiplier`` scales those totals further —
     e.g. user logs 1.5× of a 100g baseline → multiplier=1.5.
     """
+    # DRF-2371 — ``facts`` может не быть вовсе: блюда нет в справочнике, а
+    # запись всё равно ложится. Тогда микронутриентов нет, и источник —
+    # «unknown», как у старых сканов: движок закономерностей исключает такие
+    # строки из расчёта качества окна, вместо того чтобы считать их нулями.
+    if facts is None:
+        return {
+            "micronutrients_source": "unknown",
+            **{field: None for field in _MICRONUTRIENT_FIELDS},
+        }
     out: dict = {"micronutrients_source": facts.micronutrients_source}
     for field in _MICRONUTRIENT_FIELDS:
         out[field] = _scale_micro(getattr(facts, field, None), multiplier)

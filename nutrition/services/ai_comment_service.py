@@ -57,11 +57,12 @@ class SummaryFacts:
     Only the fields the LLM needs — keeps prompt small and the contract
     boring. Not a Pydantic model on purpose; this is internal.
     """
-    calories_total: float
+    #: DRF-2371 — может отсутствовать: часть блюд дня не посчитана.
+    calories_total: float | None
     calories_goal: int | None
-    protein_g: float
-    fat_g: float
-    carbs_g: float
+    protein_g: float | None
+    fat_g: float | None
+    carbs_g: float | None
     water_ml: int
     water_goal_ml: int | None
     entries_count: int
@@ -206,6 +207,14 @@ _SYSTEM_PROMPT = """\
 """
 
 
+def _num(value: float | None) -> str:
+    # DRF-2371 — числа может не быть: часть блюд дня не посчитана. Вызывающий
+    # такой день сюда не пускает (комментарий не запрашивается вовсе), но
+    # охрана живёт в другом файле, а падение было бы здесь. Ноль модель
+    # прочитала бы как факт о человеке, поэтому пишем словом.
+    return "не посчитано" if value is None else str(int(value))
+
+
 def _build_prompt(profile: NutritionProfile | None, facts: SummaryFacts) -> str:
     # DRF-2269: цель — только НАЗВАННАЯ человеком. Здесь стояло
     # ``goal or "maintain"``: у того, кто цели не называл, модель получала
@@ -254,13 +263,13 @@ def _build_prompt(profile: NutritionProfile | None, facts: SummaryFacts) -> str:
         # цель на экране; адресат только не человек, а модель, которой
         # разрешено делать выводы.
         + (
-            f"- калории: {int(facts.calories_total)} из {facts.calories_goal} цели\n"
+            f"- калории: {_num(facts.calories_total)} из {facts.calories_goal} цели\n"
             if facts.calories_goal
-            else f"- калории: {int(facts.calories_total)} (дневной цели нет)\n"
+            else f"- калории: {_num(facts.calories_total)} (дневной цели нет)\n"
         )
-        + f"- белок: {int(facts.protein_g)} г\n"
-        f"- жиры: {int(facts.fat_g)} г\n"
-        f"- углеводы: {int(facts.carbs_g)} г\n"
+        + f"- белок: {_num(facts.protein_g)} г\n"
+        f"- жиры: {_num(facts.fat_g)} г\n"
+        f"- углеводы: {_num(facts.carbs_g)} г\n"
         + (
             f"- вода: {facts.water_ml} из {facts.water_goal_ml} мл\n"
             if facts.water_goal_ml

@@ -68,8 +68,13 @@ def day_window(day: date, tz: tzinfo) -> tuple[datetime, datetime]:
 class DiaryDay:
     date: date
     meals_count: int
+    #: DRF-2371 — сумма ПОСЧИТАННОГО; ``None``, когда посчитанного нет
+    #: вовсе, хотя записи есть. «0 ккал» о дне, в котором ели, — утверждение
+    #: о расчёте, которого не было.
     kcal: float | None
     has_entries: bool
+    #: Сколько записей дня остались без расчёта. Число, не текст.
+    uncounted_meals: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -77,6 +82,7 @@ class DiaryDay:
             "meals_count": self.meals_count,
             "kcal": self.kcal,
             "has_entries": self.has_entries,
+            "uncounted_meals": self.uncounted_meals,
         }
 
 
@@ -106,13 +112,20 @@ def diary_days(user, *, date_from: date, date_to: date, tz: tzinfo | None = None
 
     counts: dict[date, int] = defaultdict(int)
     kcal: dict[date, float] = defaultdict(float)
+    counted: dict[date, int] = defaultdict(int)
+    uncounted: dict[date, int] = defaultdict(int)
     for logged_at, calories in (
         FoodLog.objects.filter(user=user, logged_at__gte=start, logged_at__lt=end)
         .values_list("logged_at", "calories")
     ):
         local_day = logged_at.astimezone(tz).date()
         counts[local_day] += 1
-        kcal[local_day] += float(calories or 0.0)
+        # DRF-2371 — запись без расчёта считается пропуском, а не нулём.
+        if calories is None:
+            uncounted[local_day] += 1
+            continue
+        counted[local_day] += 1
+        kcal[local_day] += float(calories)
 
     rows: list[DiaryDay] = []
     for i in range(span):
@@ -122,8 +135,9 @@ def diary_days(user, *, date_from: date, date_to: date, tz: tzinfo | None = None
             DiaryDay(
                 date=day,
                 meals_count=n,
-                kcal=round(kcal[day], 1) if n else None,
+                kcal=round(kcal[day], 1) if counted.get(day) else None,
                 has_entries=n > 0,
+                uncounted_meals=uncounted.get(day, 0),
             )
         )
     return rows

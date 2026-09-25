@@ -21,7 +21,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from django.db.models import Sum
+from django.db.models import Count, Q, Sum
 from django.db.models.functions import TruncDate
 
 from nutrition.models import FoodLog, NutritionProfile
@@ -45,7 +45,18 @@ def count_days_within_calorie_target(user_id: UUID, start: datetime, end: dateti
         FoodLog.objects.filter(user_id=user_id, logged_at__gte=start, logged_at__lt=end)
         .annotate(day=TruncDate("logged_at"))
         .values("day")
-        .annotate(total=Sum("calories"))
+        .annotate(
+            total=Sum("calories"),
+            unscored=Count("pk", filter=Q(calories__isnull=True)),
+        )
     )
-    # В группе ≥ 1 строка с non-null calories — Sum не бывает None.
-    return sum(1 for row in per_day if row["total"] <= target)
+    # DRF-2371 — день, в котором часть съеденного не посчитана, не «уложился
+    # в ориентир»: он неизвестен. Прежний комментарий утверждал, что ``Sum``
+    # не бывает ``None``, — с тех пор как макросы стали nullable, это неверно
+    # дважды: сумма может быть ``None``, а частичная сумма «300 из 2000»
+    # зачла бы день молча.
+    return sum(
+        1
+        for row in per_day
+        if row["unscored"] == 0 and row["total"] is not None and row["total"] <= target
+    )

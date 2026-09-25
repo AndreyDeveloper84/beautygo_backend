@@ -260,9 +260,24 @@ class FoodScanResponseSerializer(serializers.ModelSerializer):
         }
 
         return {
-            # DRF-2402 — по какой порции посчитаны итоги: «given» (порция
-            # пришла с распознаванием), «typical» (провайдер молчал, взята
-            # типовая из справочника), «unknown» (порции нет — спросим).
+            # DRF-2402 — по какой порции посчитаны итоги. Словарь
+            # окончательный, три значения:
+            #
+            # * «provider» — порцию назвала наблюдавшая сторона: провайдер
+            #   скана ИЛИ сам человек в ручном вводе. Не «измерено
+            #   провайдером» — назвать вес мог и человек;
+            # * «typical» — зарезервировано за DRF-2444 и сейчас НЕ
+            #   ВЫДАЁТСЯ НИКОГДА. Объявлено заранее, чтобы поверхности
+            #   научились читать признак до того, как типовая порция начнёт
+            #   закрывать пустые итоги;
+            # * «unknown» — вес не назвал никто. Поля нет в старом снимке —
+            #   читать так же: отсутствие признака это «unknown», а не
+            #   отдельный случай и не «названо».
+            #
+            # Здесь стояло «given» — имя из первой версии провода, которое
+            # код уже не отдаёт (nutrition_lookup.py:309): читатель поверил
+            # бы комментарию, а не проводу.
+            #
             # Без этого признака «посчитано по типовой» на экране читается
             # как «измерено», а это разные утверждения.
             "portion_source": n.get("portion_source", "unknown"),
@@ -421,11 +436,17 @@ class NutritionSummaryResponseSerializer(OmitAbsentTargetsMixin, serializers.Ser
     """
 
     date = serializers.DateField(format="%Y-%m-%d")
-    calories_total = serializers.FloatField(source="totals.calories")
+    # DRF-2371 — итог может отсутствовать: записи есть, а посчитанных нет.
+    # ``unscored_entries`` называет, сколько блюд осталось без расчёта, —
+    # без него частичная сумма выдавалась бы за полную, и это та же ложь,
+    # что «0 ккал» у отдельной записи. Число, не текст: формулировка для
+    # человека ждёт слова владельца.
+    calories_total = serializers.FloatField(source="totals.calories", allow_null=True)
     calories_goal = serializers.IntegerField(allow_null=True, required=False)
-    protein_g = serializers.FloatField(source="totals.protein_g")
-    fat_g = serializers.FloatField(source="totals.fat_g")
-    carbs_g = serializers.FloatField(source="totals.carbs_g")
+    protein_g = serializers.FloatField(source="totals.protein_g", allow_null=True)
+    fat_g = serializers.FloatField(source="totals.fat_g", allow_null=True)
+    carbs_g = serializers.FloatField(source="totals.carbs_g", allow_null=True)
+    unscored_entries = serializers.IntegerField(source="totals.unscored_entries")
     water_ml = serializers.IntegerField()
     water_goal_ml = serializers.IntegerField(allow_null=True, required=False)
     entries = FoodLogEntrySerializer(many=True)
@@ -863,7 +884,12 @@ class SavedMealCreateSerializer(serializers.Serializer):
     food_log_id = serializers.UUIDField(required=False)
     dish_name = serializers.CharField(required=False, max_length=200, trim_whitespace=True)
     portion_g = serializers.FloatField(required=False, min_value=1.0, max_value=5000.0)
-    calories = serializers.FloatField(required=False, min_value=0.0, default=0.0)
+    # DRF-2371 — числа может не быть: блюда нет в справочнике. Прежний
+    # default=0.0 писал в снимок ноль, которого никто не считал, и
+    # null в этом поле — единственном из четырёх — давал 400.
+    calories = serializers.FloatField(
+        required=False, allow_null=True, min_value=0.0, default=None,
+    )
     protein_g = serializers.FloatField(required=False, allow_null=True, min_value=0.0)
     fat_g = serializers.FloatField(required=False, allow_null=True, min_value=0.0)
     carbs_g = serializers.FloatField(required=False, allow_null=True, min_value=0.0)

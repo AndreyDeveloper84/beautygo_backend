@@ -101,7 +101,12 @@ class TestTheWeekIsSevenRows:
 
         rows = {r["date"]: r for r in _week()}
 
-        assert rows["2026-09-16"] == {"date": "2026-09-16", "meals_count": 2, "kcal": 500.0, "has_entries": True}
+        # DRF-2371 — в строке дня появилось число записей без расчёта:
+        # «0 ккал» о дне, в котором ели, было бы утверждением о расчёте.
+        assert rows["2026-09-16"] == {
+            "date": "2026-09-16", "meals_count": 2, "kcal": 500.0,
+            "has_entries": True, "uncounted_meals": 0,
+        }
         assert sum(1 for r in rows.values() if r["has_entries"]) == 1
 
     def test_route_returns_seven_rows_for_the_default_window(self, owner) -> None:

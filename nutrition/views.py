@@ -529,12 +529,15 @@ def _create_food_log_for(user, serializer_data: dict, request: Request) -> Respo
             status_code=status.HTTP_404_NOT_FOUND,
         )
     except DishNotRecognizedError as exc:
+        # DRF-2371 — сюда приводит единственный случай: скан не назвал
+        # блюда ни сам, ни в снимке, и писать в дневник нечего. «Не удалось
+        # определить макросы» здесь было бы неправдой: дело не в макросах.
         logger.info(
-            "nutrition.food_log.not_recognized user=%s err=%s", user.id, exc,
+            "nutrition.food_log.dish_not_named user=%s err=%s", user.id, exc,
         )
         return error_response(
             "FOOD_NOT_RECOGNIZED",
-            "Не удалось определить макросы блюда",
+            "Не удалось разобрать, что за блюдо",
         )
     return success_response(
         FoodLogEntrySerializer(log).data,
@@ -558,7 +561,7 @@ class FoodLogCreateView(APIView):
         request=FoodLogCreateSerializer,
         responses={
             201: FoodLogEntrySerializer,
-            400: OpenApiResponse(description="Validation or dish-not-recognised"),
+            400: OpenApiResponse(description="Validation, or the scan named no dish at all"),
             404: OpenApiResponse(description="Scan not owned by caller"),
         },
     )
@@ -599,8 +602,13 @@ class InternalFoodEstimateView(APIView):
         tags=["internal"],
         request=FoodEstimateRequestSerializer,
         responses={
-            200: OpenApiResponse(description="Оценка блюда (без записи)"),
-            400: OpenApiResponse(description="Validation error or food not recognised"),
+            200: OpenApiResponse(
+                description=(
+                    "Оценка блюда (без записи). DRF-2371: числа могут быть "
+                    "null — блюда нет в справочнике или вес не назван."
+                ),
+            ),
+            400: OpenApiResponse(description="Validation error"),
         },
     )
     def post(self, request: Request) -> Response:
@@ -619,22 +627,30 @@ class InternalFoodEstimateView(APIView):
         facts = build_nutrition_lookup().lookup(
             dish_name, portion_g=portion_g, portion_named=named_portion is not None
         )
-        if facts is None or facts.kcal is None:
-            return error_response(
-                "FOOD_NOT_RECOGNIZED",
-                "Не удалось определить макросы блюда",
-            )
+        # DRF-2371 — отказа здесь больше нет. Раньше «блюда нет в
+        # справочнике» и «вес неизвестен» отвечали 400, и §109 шаг 6
+        # («запись только по подтверждению показанной оценки») делал запись
+        # такого блюда недостижимой: показать было нечего. Теперь оценка
+        # всегда есть, а числа в ней могут отсутствовать — NULL, не ноль.
+        #
+        # ``matched_dish`` без совпадения — то, что человек назвал сам:
+        # подставлять чужое название справочника было бы подменой блюда.
         return success_response(
             {
-                "matched_dish": facts.matched_dish,
-                "source": facts.source,
+                "matched_dish": facts.matched_dish if facts is not None else dish_name,
+                "source": facts.source if facts is not None else None,
                 "portion_g": portion_g,
                 "portion_estimated": named_portion is None,
-                "kcal": facts.kcal,
-                "protein_g": facts.protein_g,
-                "fat_g": facts.fat_g,
-                "carbs_g": facts.carbs_g,
-                "kcal_per_100g": facts.kcal_per_100g,
+                # DRF-2371 + DRF-2402 — признак происхождения порции обязан
+                # уехать и здесь: без него поверхность читает число оценки
+                # как названное человеком, хотя вес мог не называть никто.
+                # Совпадения нет — веса нет тем более: «unknown».
+                "portion_source": facts.portion_source if facts is not None else "unknown",
+                "kcal": facts.kcal if facts is not None else None,
+                "protein_g": facts.protein_g if facts is not None else None,
+                "fat_g": facts.fat_g if facts is not None else None,
+                "carbs_g": facts.carbs_g if facts is not None else None,
+                "kcal_per_100g": facts.kcal_per_100g if facts is not None else None,
             },
             status_code=status.HTTP_200_OK,
         )
@@ -658,7 +674,7 @@ class InternalFoodLogView(APIView):
         request=FoodLogCreateSerializer,
         responses={
             201: FoodLogEntrySerializer,
-            400: OpenApiResponse(description="Validation or dish-not-recognised"),
+            400: OpenApiResponse(description="Validation, or the scan named no dish at all"),
             404: OpenApiResponse(description="Scan not owned by caller"),
         },
     )
@@ -2204,7 +2220,7 @@ class InternalSavedMealsView(APIView):
                     user,
                     dish_name=data["dish_name"],
                     portion_g=data["portion_g"],
-                    calories=data.get("calories", 0.0),
+                    calories=data.get("calories"),
                     protein_g=data.get("protein_g"),
                     fat_g=data.get("fat_g"),
                     carbs_g=data.get("carbs_g"),

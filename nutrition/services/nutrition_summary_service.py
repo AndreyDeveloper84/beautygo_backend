@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 
 from django.conf import settings
-from django.db.models import Sum
+from django.db.models import Count, Q, Sum
 from django.db.models.functions import TruncDate
 
 from nutrition.models import FoodLog, NutritionProfile
@@ -40,10 +40,19 @@ from nutrition.services.targets_state import calories_confirmed
 
 @dataclass(frozen=True)
 class SummaryTotals:
-    calories: float
-    protein_g: float
-    fat_g: float
-    carbs_g: float
+    #: DRF-2371 — ``None``, когда записи за день есть, а посчитанных среди
+    #: них нет: ноль читался бы как «ел и не получил калорий». Пустой день
+    #: по-прежнему ноль.
+    calories: float | None
+    protein_g: float | None
+    fat_g: float | None
+    carbs_g: float | None
+    #: DRF-2371 — сколько записей суток осталось без расчёта (блюда нет в
+    #: справочнике, вес неизвестен). Суммы выше считают только посчитанное;
+    #: без этого числа частичная сумма выдавалась бы за полную — та же
+    #: ложь, что «0 ккал» у отдельной записи. Число, не текст: формулировка
+    #: для человека ждёт слова владельца (OWNER_QUESTIONS).
+    unscored_entries: int = 0
 
 
 @dataclass(frozen=True)
@@ -133,11 +142,28 @@ class NutritionSummaryService:
             fat_g=Sum("fat_g"),
             carbs_g=Sum("carbs_g"),
         )
+        # DRF-2371 — ``Sum`` пропускает NULL сам: сумма честно считает
+        # посчитанное. Но молчать о пропущенном нельзя, иначе итог врёт о
+        # полноте, а не о величине.
+        # DRF-2371 — пропуском считается запись, где нет ЛЮБОГО из четырёх
+        # макросов: они пишутся независимо, и «калории есть, белка нет»
+        # реально. Иначе охрана комментария пропустит день, и в промпт
+        # уедет «белок: 0 г».
+        unscored = qs.filter(
+            Q(calories__isnull=True)
+            | Q(protein_g__isnull=True)
+            | Q(fat_g__isnull=True)
+            | Q(carbs_g__isnull=True)
+        ).count()
+        # DRF-2371 — если записи есть, а посчитанных нет, сумма не ноль, а
+        # отсутствие: ноль читался бы как «ел и не получил калорий». Пустой
+        # день по-прежнему ноль — там и правда ничего не ели.
         totals = SummaryTotals(
-            calories=_round1(agg["calories"]),
-            protein_g=_round1(agg["protein_g"]),
-            fat_g=_round1(agg["fat_g"]),
-            carbs_g=_round1(agg["carbs_g"]),
+            calories=_round1(agg["calories"], empty_is_zero=not unscored),
+            protein_g=_round1(agg["protein_g"], empty_is_zero=not unscored),
+            fat_g=_round1(agg["fat_g"], empty_is_zero=not unscored),
+            carbs_g=_round1(agg["carbs_g"], empty_is_zero=not unscored),
+            unscored_entries=unscored,
         )
 
         # DRF-2217 — вода из ``WaterEntry`` за те же сутки, что еда выше.
@@ -185,7 +211,11 @@ class NutritionSummaryService:
             calories_goal = int(profile.daily_kcal)
 
         ai_comment: str | None = None
-        if with_comment:
+        # DRF-2371 — при незасчитанных записях комментарий не запрашиваем
+        # вовсе: модель получила бы неполное число как полное и уверенно
+        # рассудила бы о дне, которого не знает. Молчание честнее. Текст,
+        # который назовёт пробел словами, ждёт слова владельца.
+        if with_comment and totals.unscored_entries == 0:
             # Local import — keeps the LLM client out of every summary
             # request and avoids import cycles with the profile module.
             from nutrition.services.ai_comment_service import (
@@ -265,10 +295,16 @@ class NutritionSummaryService:
             .filter(user_id=user_id, logged_at__gte=start_dt, logged_at__lte=end_dt)
             .annotate(day=TruncDate("logged_at", tzinfo=timezone.utc))
             .values("day")
-            .annotate(protein_total=Sum("protein_g"))
+            .annotate(
+                protein_total=Sum("protein_g"),
+                # DRF-2371 — день, где хоть одна запись без расчёта, из
+                # сигнала выпадает: «мало белка» о таком дне — выдуманный
+                # факт, а он уезжает в промпт и звучит голосом Ayla.
+                uncounted=Count("pk", filter=Q(protein_g__isnull=True)),
+            )
             .order_by("day")
         )
-        per_day_list = list(per_day)
+        per_day_list = [row for row in per_day if row["uncounted"] == 0]
         days_observed = len(per_day_list)
         if days_observed == 0:
             return WeeklyDeficits(
@@ -330,9 +366,15 @@ class NutritionSummaryService:
         )
 
 
-def _round1(value: float | None) -> float:
+def _round1(value: float | None, *, empty_is_zero: bool = True) -> float | None:
+    """DRF-2371 — ``None`` на входе значит разное.
+
+    Пустой день («ничего не ели») — честный ноль. День, где записи есть, а
+    посчитанных среди них нет, — отсутствие: ноль там утверждал бы расчёт.
+    Вызывающий говорит, какой это случай.
+    """
     if value is None:
-        return 0.0
+        return 0.0 if empty_is_zero else None
     return round(float(value), 1)
 
 

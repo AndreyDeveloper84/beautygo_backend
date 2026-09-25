@@ -148,6 +148,9 @@ class TestEmptyDay:
             "water_ml",
             "entries", "vitamin_deficits",
             "ai_comment",
+            # DRF-2371 — сколько блюд дня осталось без расчёта. Для пустого
+            # дня это ноль, и ноль здесь честен: записей нет вовсе.
+            "unscored_entries",
         }
         # Backwards compat: ai_comment is null when caller didn't ask.
         assert body["ai_comment"] is None
@@ -157,6 +160,7 @@ class TestEmptyDay:
         assert body["fat_g"] == 0
         assert body["carbs_g"] == 0
         assert body["entries"] == []
+        assert body["unscored_entries"] == 0
         # Slice 3c stubs
         assert body["water_ml"] == 0
         assert body["vitamin_deficits"] == {}
