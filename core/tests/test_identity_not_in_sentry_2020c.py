@@ -229,3 +229,44 @@ class TestTheIdentityDoesNotLeaveInAnyCarrier:
         frames = (values[-1].get("stacktrace") or {}).get("frames") or []
         assert frames, "у исключения нет кадров стека — искать инцидент нечем"
         assert any("sentry_live_probe_urls" in str(f.get("filename") or "") for f in frames)
+
+
+class TestThePrefilterDoesNotSwallowTheIdentity:
+    """Дешёвый префильтр стоит ПЕРЕД редактурой и решает, звать ли её вообще.
+
+    Значит он — не оптимизация, а часть охраны: текст, который он отсёк,
+    редактуру не проходит, и личность уходит наружу молча. Отказ был бы
+    невидимым — ни исключения, ни записи в журнале, просто чистая строка,
+    которую никто не чистил.
+    """
+
+    def test_the_prefilter_lets_through_everything_the_patterns_catch(self):
+        from core.pii_log_filter import (
+            _HAS_PII_CANDIDATE,
+            _IDENTITY_RE,
+            _IDENTITY_SOURCES,
+            redact_pii,
+        )
+
+        sources = _IDENTITY_SOURCES.split("|")
+        assert sources, "список источников пуст — сторожить нечего"
+
+        missed = []
+        for source in sources:
+            # БЕЗ цифр и без «@» — намеренно. С `a1b2c3` узел был зелёным и на
+            # подмене: префильтр срабатывал на цифрах образца, а не на списке
+            # источников, то есть проверялось что угодно, кроме проверяемого
+            # утверждения (поймано подменой, а не чтением).
+            sample = f"upstream said {source}:abcdef is unknown"
+            # Премиссу утверждаем первой: если шаблон личности сам не видит
+            # образец, узел проверял бы префильтр на том, что чистить не надо.
+            assert _IDENTITY_RE.search(sample), source
+            if not _HAS_PII_CANDIDATE.search(sample):
+                missed.append(source)
+            elif "[IDENTITY]" not in redact_pii(sample):
+                missed.append(f"{source} (префильтр пустил, редактура не сработала)")
+
+        assert missed == [], (
+            "префильтр отсекает текст, который шаблон личности обязан почистить — "
+            f"наружу уйдёт молча: {missed}"
+        )

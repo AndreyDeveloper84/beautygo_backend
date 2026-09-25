@@ -177,11 +177,8 @@ _CREDIT_CARD_RE: Final[re.Pattern[str]] = re.compile(
     r"(?![\dA-Za-z])"
 )
 
-# Cheap short-circuit: if neither a digit nor an "@" appears in the text,
-# no phone / email / card can match. Saves three regex passes on the
-# common "all-words" log line.
 # Внешняя личность: `<source>:<segment>[:<segment>…]` — то, что ходит в
-# `X-External-User-ID` и лежит в `User.username` у прокси-строк
+# `X-External-User-ID` и лежит в имени прокси-строки пользователя
 # (`users.services._EXTERNAL_USER_ID_RE`). Это ИДЕНТИФИКАТОР ЧЕЛОВЕКА у
 # канала: по нему человек находится в чужой системе, поэтому наружу он не
 # уходит (DRF-2020 C — ушёл бы в Sentry текстом исключения).
@@ -201,7 +198,13 @@ _IDENTITY_RE: Final[re.Pattern[str]] = re.compile(
     r"(?![\w-])"
 )
 
-_HAS_PII_CANDIDATE: Final[re.Pattern[str]] = re.compile(r"[\d@]|(?i:bot|max|telegram|tg|vk|viber|whatsapp|wa):")
+# Cheap short-circuit: if neither a digit, an "@", nor a channel prefix appears
+# in the text, no phone / email / card / identity can match. Saves four regex
+# passes on the common "all-words" log line. Источники здесь ОБЯЗАНЫ совпадать
+# с `_IDENTITY_SOURCES`: разойдутся — префильтр отсечёт текст, который
+# `_IDENTITY_RE` обязан был почистить, и молча (узел
+# `test_the_prefilter_lets_through_everything_the_patterns_catch`).
+_HAS_PII_CANDIDATE: Final[re.Pattern[str]] = re.compile(rf"[\d@]|(?i:{_IDENTITY_SOURCES}):")
 
 
 # Placeholders. Literal tokens so operators can grep for "[PHONE]" etc.
