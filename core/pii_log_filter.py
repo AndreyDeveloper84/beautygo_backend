@@ -180,7 +180,28 @@ _CREDIT_CARD_RE: Final[re.Pattern[str]] = re.compile(
 # Cheap short-circuit: if neither a digit nor an "@" appears in the text,
 # no phone / email / card can match. Saves three regex passes on the
 # common "all-words" log line.
-_HAS_PII_CANDIDATE: Final[re.Pattern[str]] = re.compile(r"[\d@]")
+# Внешняя личность: `<source>:<segment>[:<segment>…]` — то, что ходит в
+# `X-External-User-ID` и лежит в `User.username` у прокси-строк
+# (`users.services._EXTERNAL_USER_ID_RE`). Это ИДЕНТИФИКАТОР ЧЕЛОВЕКА у
+# канала: по нему человек находится в чужой системе, поэтому наружу он не
+# уходит (DRF-2020 C — ушёл бы в Sentry текстом исключения).
+#
+# Источники перечислены ЗАКРЫТЫМ списком, и это осознанно. Общая форма
+# `слово:слово` в свободном тексте встречается постоянно («Internal Server
+# Error: /api/…», «reason: not_found», «ValueError: …»), и редактировать её
+# значило бы съесть диагностику — ту же цену мы уже платили за `<text>` в
+# золотых узлах. Список пополняется, когда появляется новый канал: замер по
+# дереву даёт `bot:` (655 упоминаний), `max:` (9), `telegram:` (2).
+_IDENTITY_SOURCES: Final[str] = "bot|max|telegram|tg|vk|viber|whatsapp|wa"
+
+_IDENTITY_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![\w.-])"
+    rf"(?:{_IDENTITY_SOURCES})"
+    r"(?::[A-Za-z0-9_-]{1,64}){1,3}"
+    r"(?![\w-])"
+)
+
+_HAS_PII_CANDIDATE: Final[re.Pattern[str]] = re.compile(r"[\d@]|(?i:bot|max|telegram|tg|vk|viber|whatsapp|wa):")
 
 
 # Placeholders. Literal tokens so operators can grep for "[PHONE]" etc.
@@ -188,6 +209,10 @@ _HAS_PII_CANDIDATE: Final[re.Pattern[str]] = re.compile(r"[\d@]")
 _PHONE_PLACEHOLDER: Final[str] = "[PHONE]"
 _EMAIL_PLACEHOLDER: Final[str] = "[EMAIL]"
 _CARD_PLACEHOLDER: Final[str] = "[CARD]"
+#: Остаётся ВИДНЫМ следом: оператор по нему понимает, что вырезано именно
+#: имя личности у канала, а не телефон и не почта. Пустота на этом месте
+#: читалась бы как «ничего не было» (DRF-2020 C).
+_IDENTITY_PLACEHOLDER: Final[str] = "[IDENTITY]"
 
 
 # Dict-style keyword logging: keys whose VALUES should NOT be redacted.
@@ -355,6 +380,9 @@ def redact_pii(text: str) -> str:
     text = _CREDIT_CARD_RE.sub(_sub_credit_card, text)
     text = _PHONE_RE.sub(_PHONE_PLACEHOLDER, text)
     text = _EMAIL_RE.sub(_EMAIL_PLACEHOLDER, text)
+    # Личность у канала — после почты: `max:729481` цифр не содержит обязательно,
+    # и предыдущие шаблоны её не видят (DRF-2020 C).
+    text = _IDENTITY_RE.sub(_IDENTITY_PLACEHOLDER, text)
     return text
 
 

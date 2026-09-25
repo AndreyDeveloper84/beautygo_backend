@@ -157,6 +157,7 @@ def _carriers_with(payload, needle: str, path: str = "") -> list[str]:
     return found
 
 
+@pytest.mark.django_db
 @pytest.mark.urls("core.tests.sentry_live_probe_urls")
 class TestTheIdentityDoesNotLeaveInAnyCarrier:
     def _run(self, live_sentry) -> dict:
