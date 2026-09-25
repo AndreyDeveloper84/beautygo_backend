@@ -63,6 +63,29 @@
   §77 п.54, отдельный путь через заявку и верификацию.
 * **Не пересопоставляет.** Список закрыт. Кода, который «улучшает» список,
   здесь нет и быть не должно.
+* **Не оставляет синонима.** Админка на переводе в ``VERIFIED`` записывает
+  салонную формулировку подтверждённым синонимом (§93, шаг 4,
+  ``services/admin.py`` → ``_record_salon_wording_as_synonym``); запись через
+  ``update()`` мимо админки этого не делает. Тот же размен назван у соседней
+  ``confirm_seeded_links``; здесь он повторяется на боевом салоне, и следующий
+  читатель должен знать: 36 салонных формулировок пилота подтверждёнными
+  синонимами не станут, и резолвер их потом не найдёт. Метод переиспользуем
+  вне админки (его зовёт ``mapping_review``), так что это ВЫБОР объёма листа,
+  а не неизбежность — добавлять его молча на боевых данных я не стал.
+* **Не переигрывает уже решённое.** Строка в терминальном статусе
+  (``VERIFIED`` или ``NOT_RECOMMENDABLE``) не трогается: про неё уже сказали
+  человек или другое правило. ``mapping_review`` держит это инвариантом, и
+  оператору через админку такое недоступно; обойти его командой на боевом
+  салоне значило бы стереть чужое решение вместе с его автором. Такие строки
+  печатаются поимённо с указанием, кто решил.
+* **Не выбирает между двойниками.** Если у названия из списка в салоне
+  больше одной строки, команда останавливается: какую из них подтверждал
+  владелец — ей неизвестно, а число кандидатов при этом сходится, и ворота
+  на числе такой промах не ловят.
+* **Не ставит ``VERIFIED`` на черновой канон.** Шаблон не в ``approved``
+  пропускается и называется: админский путь такое прямо отказывает
+  («сначала одобрить канон»), а ``check_canon_invariants`` считает
+  ``verified_on_provisional`` размером дыры — расширять её командой нельзя.
 
 Сухой прогон — умолчание
 ------------------------
@@ -84,13 +107,36 @@ from services.owner_confirmed_mapping import (
     OWNER_LIST_RULE,
     OWNER_LIST_RULE_VERSION,
     OWNER_LIST_SOURCE_REF,
-    OWNER_LIST_TENANT_SLUG,
+    EXPECTED_BY_SALON,
 )
 
 #: Сколько строк обязано найтись. Не `len(CONFIRMED)`: число названо владельцем
 #: и в документе, и сверять надо с НИМ, а не с длиной того же списка, который
 #: мы же и применяем. Иначе укоротившийся список сам себя и оправдает.
 EXPECTED = 36
+
+#: Состояния, про которые УЖЕ РЕШЕНО. Берутся у `mapping_review`, а не
+#: перечисляются здесь: две копии одного списка расходятся молча, и
+#: добавивший состояние в одном месте не узнает, что второе продолжает
+#: переигрывать чужие решения.
+try:  # pragma: no cover - подстраховка на случай переноса модуля
+    from services.mapping_review import TERMINAL as TERMINAL_STATUSES
+except ImportError:  # pragma: no cover
+    TERMINAL_STATUSES = frozenset({"verified", "not_recommendable"})
+
+
+def _code_of(row, templates) -> str:
+    """Код прежнего шаблона строки — для строки «было».
+
+    UUID в сухом прогоне нечитаем ровно там, где решение оператора и
+    требуется: при перенаправлении связи с чужого шаблона.
+    """
+    if row.template_id is None:
+        return ""
+    for code, tpl in templates.items():
+        if tpl.pk == row.template_id:
+            return code
+    return str(row.template_id)
 
 
 class Command(BaseCommand):
@@ -122,51 +168,111 @@ class Command(BaseCommand):
                 "повод применить сколько есть."
             )
 
-        tenant = Tenant.objects.filter(slug=OWNER_LIST_TENANT_SLUG).first()
-        if tenant is None:
-            # Молчаливый ноль неотличим от «нечего делать».
+        # Распределение по салонам сверяется с поправкой документа ДО базы:
+        # список, съехавший на один салон, иначе дошёл бы до ворот и получил
+        # бы ложный диагноз «данные уехали» вместо «посылка неверна».
+        from collections import Counter
+
+        actual = Counter(salon for salon, _, _ in CONFIRMED)
+        if dict(actual) != EXPECTED_BY_SALON:
             raise CommandError(
-                f"салона со слагом «{OWNER_LIST_TENANT_SLUG}» нет: "
-                "список подтверждён именно для него"
+                f"распределение по салонам {dict(actual)} не совпадает с "
+                f"поправкой документа {EXPECTED_BY_SALON}. Это расхождение с "
+                "основанием, а не повод применить как есть."
             )
+
+        needed = sorted(actual)
+        tenants: dict[str, object] = {}
+        for slug in needed:
+            tenant = Tenant.objects.filter(slug=slug).first()
+            if tenant is None:
+                # Молчаливый ноль неотличим от «нечего делать».
+                raise CommandError(
+                    f"салона со слагом «{slug}» нет: "
+                    "список подтверждён именно для него"
+                )
+            tenants[slug] = tenant
 
         templates = {
             t.canonical_code: t
             for t in ServiceTemplate.objects.filter(
-                canonical_code__in=[code for _, code in CONFIRMED]
+                canonical_code__in=[code for _, _, code in CONFIRMED]
             )
         }
-        rows = {
-            r.name: r
-            for r in SalonService.objects.filter(
-                tenant=tenant, name__in=[name for name, _ in CONFIRMED]
-            )
-        }
+
+        # Строки читаются по ПАРЕ (салон, имя): одно имя у двух салонов —
+        # разные строки, и смешать их значит записать чужому салону.
+        wanted_names = [name for _, name, _ in CONFIRMED]
+        fetched = list(
+            SalonService.objects.filter(
+                tenant__in=list(tenants.values()), name__in=wanted_names
+            ).order_by("pk")
+        )
+        rows: dict[tuple[object, str], SalonService] = {}
+        duplicates: list[str] = []
+        for r in fetched:
+            key = (r.tenant_id, r.name)
+            if key in rows:
+                # Дубль по имени в пределах салона схема РАЗРЕШАЕТ: уникальна
+                # только тройка (салон, шаблон, имя), а шаблон у целей пуст.
+                # Словарь оставил бы произвольного двойника, число всё равно
+                # сошлось бы, и второй остался бы непривязанным молча.
+                duplicates.append(f"{r.tenant.slug} · {r.name}")
+                continue
+            rows[key] = r
 
         plan: list[tuple[SalonService, object, str]] = []
         missing_rows: list[str] = []
         missing_templates: list[str] = []
+        not_approved: list[str] = []
         already: list[str] = []
+        decided_by_someone: list[str] = []
 
-        for name, code in CONFIRMED:
-            row = rows.get(name)
+        for salon, name, code in CONFIRMED:
+            tenant = tenants[salon]
+            row = rows.get((tenant.pk, name))
             template = templates.get(code)
             if row is None:
-                missing_rows.append(name)
+                missing_rows.append(f"{salon} · {name}")
                 continue
             if template is None:
-                missing_templates.append(f"{name} → {code}")
+                missing_templates.append(f"{salon} · {name} → {code}")
+                continue
+            if template.lifecycle != ServiceTemplate.Lifecycle.APPROVED:
+                # Админский путь такое прямо отказывает («сначала одобрить
+                # канон»), и командой обходить этот отказ нельзя.
+                not_approved.append(f"{salon} · {name} → {code} ({template.lifecycle})")
                 continue
             if (
                 row.template_id == template.pk
                 and row.mapping_status == SalonService.MappingStatus.VERIFIED
                 and row.mapping_confirmed_rule == OWNER_LIST_RULE
+                and row.mapping_rule_version == OWNER_LIST_RULE_VERSION
             ):
-                # Идемпотентность: строка уже доведена этим же правилом.
-                already.append(name)
+                # Идемпотентность: строка уже доведена этим же правилом ТОЙ ЖЕ
+                # версии. Иная версия — иное основание, и переписывать её
+                # молча нельзя.
+                already.append(f"{salon} · {name}")
+                continue
+            if row.mapping_status in TERMINAL_STATUSES:
+                # Про строку уже решено — человеком или другим правилом.
+                # `mapping_review` держит это как инвариант: «уже решено — не
+                # переигрывается», и оператору через админку такое недоступно.
+                # Командой обходить инвариант нельзя тем более: здесь боевой
+                # салон, и чужое решение стёрлось бы вместе с его автором.
+                who = (
+                    f"человек #{row.mapping_confirmed_by_id}"
+                    if row.mapping_confirmed_by_id
+                    else f"правило {row.mapping_confirmed_rule or '—'}"
+                    f" v{row.mapping_rule_version or '—'}"
+                )
+                decided_by_someone.append(
+                    f"{salon} · {name}: {row.mapping_status}, {who}"
+                )
                 continue
             was = (
-                f"template={row.template_id or '—'} status={row.mapping_status}"
+                f"template={_code_of(row, templates) or '—'} "
+                f"status={row.mapping_status}"
             )
             plan.append((row, template, was))
 
@@ -174,8 +280,9 @@ class Command(BaseCommand):
         w(f"предмет: база {db.get('NAME')}@{db.get('HOST') or 'local'} · "
           f"vendor {connection.vendor}")
         w(f"снято:   {stamped_at.isoformat(timespec='seconds')}")
-        w(f"область: салон {OWNER_LIST_TENANT_SLUG} · только строки из списка "
-          f"владельца ({EXPECTED} имён)")
+        area = ", ".join(f"{s}: {actual[s]}" for s in needed)
+        w(f"область: {area} · только строки из списка владельца "
+          f"({EXPECTED} имён)")
         w(f"режим:   {'ЗАПИСЬ (--apply)' if options['apply'] else 'сухой прогон, записи нет'}")
         w(f"правило: {OWNER_LIST_RULE} v{OWNER_LIST_RULE_VERSION}")
         w(f"основание: {OWNER_LIST_SOURCE_REF}")
@@ -187,13 +294,39 @@ class Command(BaseCommand):
         w(f"  уже поставлено:      {len(already)}")
         w(f"  строки салона нет:   {len(missing_rows)}")
         w(f"  шаблона канона нет:  {len(missing_templates)}")
+        w(f"  канон не approved:   {len(not_approved)}")
+        w(f"  уже решено другими:  {len(decided_by_someone)}")
+        w(f"  дублей имени:        {len(duplicates)}")
 
         # Исключения называются ПОИМЁННО: меньшее число молча неотличимо от
         # «столько и было», и именно так список однажды и разойдётся с базой.
+        # Для дублей и чужих решений число даже не меньше — оно ПРАВИЛЬНОЕ, а
+        # запись ушла бы не туда; молчание здесь опаснее всего.
         for name in missing_rows:
             w(f"    нет строки салона: {name}")
         for pair in missing_templates:
             w(f"    нет шаблона канона: {pair}")
+        for pair in not_approved:
+            w(f"    канон не approved: {pair}")
+        for item in decided_by_someone:
+            w(f"    УЖЕ РЕШЕНО, не трогаю: {item}")
+        for item in duplicates:
+            w(f"    ДУБЛЬ ИМЕНИ, пропущен: {item}")
+
+        # Дубль — НЕОДНОЗНАЧНОСТЬ, а не мелочь: владелец подтвердил «строку с
+        # таким названием», и если таких две, команда не знает, какую именно.
+        # Запись в первую попавшуюся была бы догадкой, а число при этом
+        # сошлось бы — то есть ворота на числе такой промах НЕ ловят. Отсюда
+        # отдельный останов: по тому же правилу, по которому девять
+        # неподтверждённых остаются пустыми, пустая связь честнее неверной.
+        if duplicates:
+            raise CommandError(
+                f"дублей имени: {len(duplicates)} — "
+                + "; ".join(duplicates)
+                + ". Останов: у названия из списка больше одной строки, и "
+                "какую из них подтверждал владелец — команде неизвестно. "
+                "Развести строки в салоне или уточнить список."
+            )
 
         if found != EXPECTED:
             raise CommandError(
@@ -204,10 +337,10 @@ class Command(BaseCommand):
 
         w("")
         for row, template, was in plan:
-            w(f"  {row.name}")
+            w(f"  {row.tenant.slug} · {row.name}")
             w(f"      было:  {was}")
-            w(f"      стало: template={template.pk} ({template.canonical_code}) "
-              f"status=verified")
+            w(f"      стало: template={template.canonical_code} status=verified "
+              f"rule={OWNER_LIST_RULE} v{OWNER_LIST_RULE_VERSION}")
 
         if not options["apply"]:
             w("")
