@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone as dt_tz
 
 from django.core.cache import cache
-from django.db.models import Sum
+from django.db.models import Count, Q, Sum
 from django.db.models.functions import TruncDate
 
 from nutrition.models import FoodLog, NutritionProfile
@@ -150,9 +150,22 @@ def _per_day_kcal(user_id: int, start: date, end: date) -> dict[date, float]:
         )
         .annotate(day=TruncDate("logged_at", tzinfo=dt_tz.utc))
         .values("day")
-        .annotate(total=Sum("calories"))
+        .annotate(
+            total=Sum("calories"),
+            unscored=Count("pk", filter=Q(calories__isnull=True)),
+        )
     )
-    return {row["day"]: float(row["total"] or 0.0) for row in rows}
+    # DRF-2371 — день с незасчитанной записью в словарь не попадает: полоса
+    # восстановления и полоса неудач обе читают его как «нет данных» и
+    # останавливаются. Следствие названо намеренно: одна незасчитанная
+    # запись гасит и сигнал «возвращайся», и сигнал «срывается» — про такой
+    # день мы не знаем ни того, ни другого. Прежний ``or 0.0`` превращал незнание в «съел ноль»,
+    # то есть утверждал провал там, где мы просто не считали.
+    return {
+        row["day"]: float(row["total"])
+        for row in rows
+        if row["unscored"] == 0 and row["total"] is not None
+    }
 
 
 def _trailing_recovery_streak(

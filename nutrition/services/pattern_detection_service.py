@@ -140,6 +140,11 @@ class DailyFoodStats:
     day: date
     total_kcal: float = 0.0
     total_protein_g: float = 0.0
+    #: DRF-2371 — сколько записей дня осталось без расчёта. Суммы выше
+    #: считают только посчитанное, поэтому день, где не посчитали ничего,
+    #: выглядит как «съел ноль». Детекторы обязаны различать «мало» и «не
+    #: знаю»: вывод о человеке уезжает в промпт и звучит его же словами.
+    uncounted_rows: int = 0
     last_meal_dt: datetime | None = None
     has_evening_sweets: bool = False
     weekday: int = 0  # 0..6
@@ -286,6 +291,14 @@ def _collect_food_stats(
             ts = ts.replace(tzinfo=dt_tz.utc)
         d = ts.astimezone(dt_tz.utc).date()
         s = stats.setdefault(d, DailyFoodStats(day=d, weekday=d.weekday()))
+        # DRF-2371 — строка «голосует» числом только если его несёт; иначе
+        # она считается пропуском, а не нулём. Приём тот же, что ниже у
+        # микронутриентов (DRF-262 LB-6).
+        # Запрос берёт из записи только калории и белок — по ним и судим:
+        # проверять поля, которых в строке нет, значило бы считать пропуском
+        # каждую запись.
+        if any(row.get(field) is None for field in ("calories", "protein_g")):
+            s.uncounted_rows += 1
         s.total_kcal += float(row["calories"] or 0.0)
         s.total_protein_g += float(row["protein_g"] or 0.0)
         if s.last_meal_dt is None or ts > s.last_meal_dt:
@@ -402,6 +415,9 @@ def _detect_low_protein(*, food_stats, water_stats, profile, today) -> DetectedP
     low_days = [
         d for d in window
         if (s := food_stats.get(d))
+        # DRF-2371 — день с незасчитанной записью не «низкий белок»: он
+        # неизвестен. Иначе Ayla утверждает о человеке то, чего не считала.
+        and s.uncounted_rows == 0
         and s.total_protein_g < goal * LOW_PROTEIN_PCT
     ]
     count = len(low_days)
@@ -486,7 +502,9 @@ def _detect_meal_skips(*, food_stats, water_stats, profile, today) -> DetectedPa
     for i in range(WINDOW_STREAK_DAYS):
         d = today - timedelta(days=i)
         s = food_stats.get(d)
-        if s is None or s.total_kcal >= goal * MEAL_SKIP_PCT:
+        # DRF-2371 — незасчитанная запись гасит вывод о пропуске еды:
+        # человек ел, просто числа мы не вывели.
+        if s is None or s.uncounted_rows > 0 or s.total_kcal >= goal * MEAL_SKIP_PCT:
             return None
         streak.append(d)
     return _build_pattern(

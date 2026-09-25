@@ -66,10 +66,18 @@ class TestFoodEstimate:
         assert data["portion_estimated"] is True
         assert data["kcal"] == pytest.approx(data["kcal_per_100g"], rel=0.01)
 
-    def test_unknown_dish_is_not_recognized(self, client):
+    def test_unknown_dish_gets_an_answer_without_numbers(self, client):
+        """DRF-2371 — отказа здесь больше нет.
+
+        §109 шаг 6 разрешает запись только по подтверждению показанной
+        оценки: пока оценка отвечала 400, блюдо вне справочника нельзя было
+        записать текстом вообще. Теперь оценка есть, а чисел в ней нет.
+        """
         resp = client.post(ESTIMATE_URL, {"dish_name": "зыбзик квантовый"}, format="json")
-        assert resp.status_code == status.HTTP_400_BAD_REQUEST
-        assert resp.json()["error"]["code"] == "FOOD_NOT_RECOGNIZED"
+        assert resp.status_code == status.HTTP_200_OK
+        data = resp.json()["data"]
+        assert data["matched_dish"] == "зыбзик квантовый"
+        assert data["kcal"] is None
 
     def test_estimate_writes_nothing(self, client):
         """§109 шаг 6: до подтверждения число не данные человека."""
