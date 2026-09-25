@@ -179,12 +179,25 @@ class TestTheIdentityDoesNotLeaveInAnyCarrier:
         return events[0]
 
     def test_the_identity_is_in_no_carrier_of_the_real_event(self, live_sentry):
+        """Отсутствие И место замены — в одном узле.
+
+        «Личности нет» выполнимо и пустым событием, и событием, где вырезано не
+        то. Поэтому рядом стоит утверждение, что след замены лежит ИМЕННО в том
+        носителе, из которого личность убрали — в тексте исключения. Критерий
+        успеха подмены не должен быть выполним ничем, кроме проверяемого
+        утверждения.
+        """
         event = self._run(live_sentry)
 
         carriers = _carriers_with(event, IDENTITY)
 
         assert carriers == [], (
             "внешняя личность уехала бы в Sentry; носители: " + ", ".join(carriers)
+        )
+        exception_text = (event["exception"]["values"][-1] or {}).get("value") or ""
+        assert "[IDENTITY]" in exception_text, (
+            "в тексте исключения нет следа замены — значит вырезали не там, "
+            f"а личности нет по другой причине: {exception_text[:80]!r}"
         )
 
     def test_a_phone_in_the_same_text_is_also_gone(self, live_sentry):
@@ -211,5 +224,8 @@ class TestTheIdentityDoesNotLeaveInAnyCarrier:
         assert values[-1]["type"] == "RuntimeError"
         assert "sentry-probe" in str(event.get("transaction") or ""), event.get("transaction")
         assert (event.get("tags") or {}).get("request_id") == REQUEST_ID
-        # И форма остатка от вырезанного: понятно, ЧТО вырезано, а не пустота.
-        assert "[IDENTITY]" in json.dumps(event, ensure_ascii=False)
+        # Диагностика самого падения: место в коде осталось на месте, то есть
+        # редактура не съела то, по чему инцидент ищут.
+        frames = (values[-1].get("stacktrace") or {}).get("frames") or []
+        assert frames, "у исключения нет кадров стека — искать инцидент нечем"
+        assert any("sentry_live_probe_urls" in str(f.get("filename") or "") for f in frames)
