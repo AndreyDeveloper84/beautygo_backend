@@ -36,6 +36,27 @@ pytestmark = pytest.mark.django_db
 EXPORT_URL = "/api/v1/internal/users/{user_id}/personal-data/export/"
 
 
+def _carriers(needle: str, value, path: str = "выгрузка") -> list[str]:
+    """Места, откуда подстрока попала в выгрузку.
+
+    Предикат тот же, что у ``needle not in repr(...)``, но падение называет
+    носителя: без имени поля красный сторож приватности требует перебора
+    файлов, а перебор стоит прогона (DRF-2428).
+    """
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if needle in repr(key):
+                found.append(f"{path}: ключ {key!r}")
+            found += _carriers(needle, item, f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            found += _carriers(needle, item, f"{path}[{index}]")
+    elif needle in repr(value):
+        found.append(f"{path} = {value!r}")
+    return found
+
+
 def _export(u) -> dict:
     resp = _internal().get(EXPORT_URL.format(user_id=u.pk))
     assert resp.status_code == 200, resp.content
@@ -198,6 +219,7 @@ class TestTheScanRecognition:
         assert "сырой ответ модели" in diary["notes"]["raw_model_response"]
         # Телеметрия провайдера — не данные о человеке, не выгружается.
         assert "provider_cost_usd" not in diary["food_scans"][0]
+        assert _carriers("0.0123", diary) == [], _carriers("0.0123", diary)
         assert "0.0123" not in repr(diary)
 
     def test_service_keys_do_not_leave(self, remembered) -> None:
