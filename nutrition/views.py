@@ -761,7 +761,11 @@ class InternalFoodLogPhotoView(APIView):
 
     permission_classes = [IsServiceAccount]
     throttle_classes = [ScopedRateThrottle]
-    throttle_scope = "food_scan_internal"
+    #: Свой бюджет, не общий со сканом: открытие дня с полутора десятками
+    #: снимков съедало бы ведро, которое делят распознавание, запись и
+    #: сводка. Ключ у ``IsServiceAccount`` — адрес бота, то есть ведро одно
+    #: на весь хост.
+    throttle_scope = "food_photo_internal"
 
     @extend_schema(
         tags=["internal"],
@@ -773,14 +777,34 @@ class InternalFoodLogPhotoView(APIView):
             ),
         },
     )
+    #: Один ответ на все три отказа — «чужая», «никогда не было»,
+    #: «снимка нет». Различать их кодом значило бы дать перебор чужих
+    #: записей по ответу.
+    def _absent(self) -> Response:
+        return error_response(
+            "NOT_FOUND", "Снимка нет", status_code=status.HTTP_404_NOT_FOUND,
+        )
+
     def get(self, request: Request, pk: UUID):
         import mimetypes
 
         from django.http import FileResponse
 
-        user, refusal = _food_log_actor(request)
-        if refusal is not None:
-            return refusal
+        from users.services import resolve_external_user_readonly
+
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            # Чтение, а не создание: ручка ПРОВЕРЯЕТ право на запись,
+            # названную UUID в адресе. Резолвер, заводящий строки, позволил
+            # бы держателю сервисного токена плодить учётные записи
+            # подбором заголовка — см. ``users/services.py``.
+            user = resolve_external_user_readonly(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR", f"X-External-User-ID невалиден: {exc}",
+            )
+        if user is None:
+            return self._absent()
         # Фильтр по владельцу — в самом запросе: проверка после выборки
         # переживает рефакторинг хуже, а цена ошибки здесь — чужое фото.
         log = (
@@ -790,14 +814,28 @@ class InternalFoodLogPhotoView(APIView):
             .first()
         )
         if log is None or log.scan is None or not log.scan.image:
-            return error_response(
-                "PHOTO_NOT_FOUND",
-                "Снимка нет",
-                status_code=status.HTTP_404_NOT_FOUND,
-            )
+            return self._absent()
         name = log.scan.image.name
+        # Тип берётся из имени, а имя всегда ``{scan_id}.jpg``
+        # (``_scan_image_path``): настоящий тип загруженного файла нигде не
+        # хранится, и PNG/WebP уезжают как jpeg. Назван как долг, а не
+        # починен здесь: хранение типа — правка модели и загрузки.
         content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
-        response = FileResponse(log.scan.image.open("rb"), content_type=content_type)
+        try:
+            handle = log.scan.image.open("rb")
+        except (FileNotFoundError, OSError) as exc:
+            # Строка ссылается на объект, которого в хранилище нет. Это не
+            # гипотеза: команда очистки (§134) знает такой исход под именем
+            # ``object_absent`` и насчитала его на пилоте. Человеку это то
+            # же «снимка нет»; нам — строка в журнале, иначе пропажа
+            # объектов невидима.
+            logger.warning(
+                "nutrition.food_photo.object_absent log=%s err=%s",
+                pk,
+                type(exc).__name__,
+            )
+            return self._absent()
+        response = FileResponse(handle, content_type=content_type)
         # Приватно и ненадолго: снимок принадлежит одному человеку, а через
         # 30 суток его не станет (§134) — общий кэш хранить его не должен.
         response["Cache-Control"] = "private, max-age=300"

@@ -187,7 +187,10 @@ class TestScanPath:
         body = resp.json()["data"]
         # Spec FoodLogEntry shape + DRF-1837 §136 ``entry_origin``
         # (NULL here: the client app does not pass an origin).
+        # DRF-2455 — у записи появился признак снимка: поверхность узнаёт
+        # о фото до того, как запросит файл.
         assert set(body.keys()) == {
+            "has_photo",
             "id", "dish_name", "calories", "protein_g",
             "fat_g", "carbs_g", "meal_type", "logged_at", "entry_origin",
         }

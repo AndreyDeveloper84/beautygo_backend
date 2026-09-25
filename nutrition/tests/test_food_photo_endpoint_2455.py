@@ -191,3 +191,82 @@ class TestK4TheEntryTellsWhetherAPhotoExists:
 
         entries = {e["id"]: e for e in resp.json()["data"]["entries"]}
         assert entries[str(log.id)]["has_photo"] is False
+
+
+class TestK5TheBorderOfAuthenticationIsReal:
+    """Без сервисного токена ручка не отвечает.
+
+    Без этого узла можно было снять ``permission_classes`` — и весь файл
+    остался бы зелёным, то есть граница входа не доказана ничем.
+    """
+
+    def test_no_service_token_means_no_file(self, owner):
+        log = _log_with_photo(owner)
+
+        resp = APIClient().get(PHOTO_URL.format(log_id=log.id))
+
+        assert resp.status_code in (401, 403)
+
+    def test_a_broken_external_id_is_refused(self, owner):
+        log = _log_with_photo(owner)
+        c = APIClient()
+        c.credentials(HTTP_X_SERVICE_TOKEN=SERVICE_TOKEN, HTTP_X_EXTERNAL_USER_ID="не-идентификатор")
+
+        resp = c.get(PHOTO_URL.format(log_id=log.id))
+
+        assert resp.status_code >= 400
+        assert resp.status_code != 200
+
+
+class TestK6ThreeRefusalsAreIndistinguishable:
+    """«Чужая», «никогда не было» и «своя без фото» отвечают одинаково.
+
+    Иначе по ответу можно перебирать чужие записи: разный код или разное
+    тело сказали бы, что запись существует.
+    """
+
+    def test_the_three_answers_match_each_other(self, owner, stranger):
+        someone_elses = _log_with_photo(owner)
+        mine_without = _log_without_photo(owner)
+        never_existed = "99999999-9999-4999-8999-999999999999"
+
+        answers = [
+            _client_for(STRANGER_EXT).get(PHOTO_URL.format(log_id=someone_elses.id)),
+            _client_for(OWNER_EXT).get(PHOTO_URL.format(log_id=mine_without.id)),
+            _client_for(OWNER_EXT).get(PHOTO_URL.format(log_id=never_existed)),
+        ]
+
+        # Сначала о наличии: все три ответа получены и это отказы.
+        assert [r.status_code for r in answers] == [404, 404, 404]
+        bodies = [r.json() for r in answers]
+        # И об отсутствии различий: ни код, ни текст не выдают существование.
+        assert bodies[0] == bodies[1] == bodies[2]
+
+
+class TestK7AnObjectMissingFromStorage:
+    """Строка ссылается на объект, которого в хранилище нет.
+
+    Не гипотеза: команда очистки (§134) знает этот исход под именем
+    ``object_absent`` и насчитала такие строки на пилоте. Человеку это то
+    же «снимка нет», а не 500.
+    """
+
+    def test_a_dangling_reference_is_not_a_crash(self, owner):
+        log = _log_with_photo(owner)
+        # Файл убираем, строку оставляем — ровно то состояние пилота.
+        log.scan.image.storage.delete(log.scan.image.name)
+
+        resp = _client_for(OWNER_EXT).get(PHOTO_URL.format(log_id=log.id))
+
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+
+class TestK8ThePhotoIsNotCachedForEveryone:
+    def test_the_answer_is_private(self, owner):
+        log = _log_with_photo(owner)
+
+        resp = _client_for(OWNER_EXT).get(PHOTO_URL.format(log_id=log.id))
+
+        assert resp.status_code == status.HTTP_200_OK
+        # Докстрока обещает приватность — узел это и проверяет.
+        assert "private" in resp["Cache-Control"]
