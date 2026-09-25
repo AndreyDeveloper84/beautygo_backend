@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("users", "0024_drf2085_salonadminlinkrequest"),
+        ("users", "0025_drf2442_specialistidentitylinkrequest"),
     ]
 
     operations = [
