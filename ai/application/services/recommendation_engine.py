@@ -140,6 +140,19 @@ class RecommendationQuery:
     # разрешить нельзя). Кортеж — dataclass frozen и должен остаться
     # хешируемым.
     goal_category_ids: tuple[UUID, ...] | None = None
+    # DRF-2420 — видит ли ЭТОТ спрашивающий демонстрационные салоны.
+    #
+    # Умолчание `False` — правило обычного клиента: не пометив запрос, демо не
+    # покажешь. Ставит его тот, кто знает личность (`home_api` — по
+    # `users.sellable.is_test_persona`), и операторские инструменты, которым
+    # демо обязано быть видно (`services.goal_coverage` — прогноз покрытия для
+    # сида: спрятав демо, он перестал бы отвечать на свой вопрос).
+    #
+    # Поле входит в ключ кэша, иначе выдача тестовой личности досталась бы
+    # клиенту на весь TTL. Добавляется в digest ТОЛЬКО когда True — той же
+    # дисциплиной, что `goal_category_ids`: появление поля не должно разом
+    # обнулить кэш всем прочим.
+    viewer_sees_demo: bool = False
 
     def cache_key(self) -> str:
         payload = {
@@ -165,6 +178,11 @@ class RecommendationQuery:
             payload["goal_category_ids"] = [
                 str(category_id) for category_id in self.goal_category_ids
             ]
+        if self.viewer_sees_demo:
+            # DRF-2420: иначе выдача с демо-салонами досталась бы обычному
+            # клиенту из кэша. Анонимный запрос делит одно пространство
+            # ключей («anon»), и там это единственная защита.
+            payload["viewer_sees_demo"] = True
         digest = hashlib.sha1(
             json.dumps(payload, sort_keys=True).encode("utf-8"),
         ).hexdigest()[:16]
@@ -405,6 +423,15 @@ class RecommendationEngine:
         # ``distinct()`` здесь не нужен (в отличие от фильтров по
         # услугам ниже).
         qs = qs.filter(Q(tenant__isnull=True) | Q(tenant__is_active=True))
+
+        # DRF-2420. Демонстрационный салон ЖИВОЙ — владелец держит его для
+        # показа интерфейса, — но обычному клиенту не показывается. Границы
+        # видимости выражает один предикат на весь каталог: своя копия здесь
+        # разошлась бы с остальными четырьмя пулами, как однажды разошлось
+        # условие «продаётся» (семь записей, четыре неполные).
+        from users.sellable import demo_scope_q
+
+        qs = qs.filter(demo_scope_q(query.viewer_sees_demo))
 
         if query.city:
             # L8a (§9): город — у места предложения или у салона, не в старом

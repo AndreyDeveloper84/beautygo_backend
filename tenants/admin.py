@@ -25,12 +25,26 @@ class TenantAdmin(admin.ModelAdmin):
     # были одни и те же, где бы его ни заводили.
     inlines = (TenantMastersInline,)
 
-    list_display = ("name", "slug", "city", "is_active", "created_at")
-    list_filter = ("is_active", "city")
+    list_display = ("name", "slug", "city", "is_active", "is_demo", "created_at")
+    list_filter = ("is_active", "is_demo", "city")
     search_fields = ("name", "slug", "city", "address")
     readonly_fields = ("id", "created_at", "updated_at")
     fieldsets = (
-        (None, {"fields": ("id", "slug", "name", "is_active")}),
+        (None, {
+            "fields": ("id", "slug", "name", "is_active", "is_demo"),
+            # DRF-2420 — признак ВИДЕН и правится отсюда: иначе владелец не
+            # может ни проверить результат команды пометки, ни исправить
+            # ошибку, и единственным способом остаётся оболочка на стенде.
+            # «Выключен» и «не для клиента» — разные поля, и стоят они рядом
+            # намеренно, чтобы их не путали.
+            "description": (
+                "is_active — живой ли салон. is_demo — демонстрационный: "
+                "остаётся живым и бронируемым, но обычному клиенту не "
+                "показывается; видит его только личность с «тестовой» "
+                "отметкой. Массовую пометку делает команда "
+                "mark_demo_and_test_personas (сухой прогон по умолчанию)."
+            ),
+        }),
         # DRF-1587 — единственное место, где адрес и город салона можно
         # завести в Ayla. До этого тикета их не было в источнике вовсе:
         # город существовал только в зеркале бота, куда его вписывал

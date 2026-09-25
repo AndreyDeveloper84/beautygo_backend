@@ -485,6 +485,13 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_class = SpecialistFilter
     #: DRF-1845 — the public list offers only masters that take bookings.
     list_sells_only = True
+    #: DRF-2420 — публичный каталог скрывает демонстрационные салоны от
+    #: обычного клиента. Атрибут, а не условие внутри `get_queryset`, по той же
+    #: причине, что `list_sells_only`: зеркало для бота наследует этот пул, а
+    #: решение про зеркало ждёт владельца (вопрос «либо бот получает свой
+    #: признак, либо каталог получает способ сказать «снять строку»»), и
+    #: менять его молча этим тикетом нельзя.
+    hides_demo_from_client = True
     ordering_fields = ['rating', 'reviews_count', 'experience_years']
     ordering = ['-rating']
 
@@ -532,7 +539,7 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
     # and the per-action permission_classes override that used to live here.
 
     def get_queryset(self) -> QuerySet:
-        from users.sellable import catalog_pool_q, sellable_q
+        from users.sellable import catalog_pool_q, demo_visibility_q, sellable_q
 
         qs = (
             SpecialistProfile.objects
@@ -548,6 +555,14 @@ class SpecialistViewSet(viewsets.ReadOnlyModelViewSet):
         # (``InternalSpecialistViewSet.list_sells_only``).
         if self.action == 'list' and self.list_sells_only:
             qs = qs.filter(sellable_q())
+        # DRF-2420 — и список, и прямая ссылка: карточка демо-мастера не должна
+        # открываться обычному клиенту, иначе правило снималось бы ссылкой.
+        #
+        # До этого тикета публичный каталог к таблице салонов не присоединялся
+        # вовсе — демо удерживал единственный замок сида (`status`), и он
+        # открыт. Правило здесь появляется впервые.
+        if self.hides_demo_from_client:
+            qs = qs.filter(demo_visibility_q(self.request.user))
         # Счётчик по обоим слоям каталога — раньше считались только
         # легаси-строки, то есть на пилоте ноль у каждого мастера.
         qs = annotate_catalog_services_count(qs)

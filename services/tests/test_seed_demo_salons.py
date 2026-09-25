@@ -470,3 +470,44 @@ def test_every_bookable_row_hangs_on_a_leaf_category(catalog):
     ]
     assert mismatched == []
     assert not rows.filter(category__isnull=True).exists()
+
+
+def test_seeded_salons_carry_the_demo_flag(catalog):
+    """Сид САМ ставит `is_demo` — иначе следующий прогон открывает дыру (DRF-2420).
+
+    Узел спрашивает не «у существующих демо признак есть», а «прогнать сид →
+    признак есть у ВСЕХ, кого он завёл». Разница принципиальная: первая форма
+    проверяет данные, которые кто-то однажды пометил руками, вторая —
+    писателя. Сид — писатель, которого раньше не охранял никто: он создавал
+    салон без признака, и правило видимости его не видело.
+    """
+    from tenants.models import Tenant
+
+    _run("--apply")
+
+    rows = list(Tenant.all_objects.filter(slug__in=DEMO_SLUGS).values_list("slug", "is_demo"))
+
+    # Сначала о НАЛИЧИИ: сид действительно завёл салоны.
+    assert len(rows) == len(DEMO_SLUGS), f"сид завёл не все салоны: {rows}"
+    unmarked = [slug for slug, is_demo in rows if not is_demo]
+    assert unmarked == [], f"салоны без признака демонстрационности: {unmarked}"
+
+
+def test_activation_keeps_the_demo_flag(catalog):
+    """`--activate` снимает замки, но не демонстрационность.
+
+    «Живой» и «для клиента» — разные утверждения; включение говорит только
+    про первое.
+    """
+    from tenants.models import Tenant
+
+    _run("--apply")
+    _run("--activate", "--apply")
+
+    rows = list(
+        Tenant.all_objects.filter(slug__in=DEMO_SLUGS).values_list("is_active", "is_demo")
+    )
+
+    assert rows, "салонов нет — проверять нечего"
+    assert all(is_active for is_active, _ in rows), "включение не сработало"
+    assert all(is_demo for _, is_demo in rows), "включение сняло признак демо"

@@ -30,6 +30,26 @@ class User(AbstractUser):
             "(e.g. 'bot:12345'). Phase C migration links proxy to a real account."
         ),
     )
+    # DRF-2420 — тестовость ЛИЧНОСТИ, отдельным свойством.
+    #
+    # Нужна затем, что демонстрационные салоны остаются живыми: показывать их
+    # кому-то надо, а обычному клиенту — нельзя. Личность владельца и личность
+    # для съёмки эталонов (DRF-2413) помечаются этим флагом, иначе они пойдут
+    # путём клиента и увидят пустой продукт: боевой салон пилота ведёт только
+    # тело и массаж.
+    #
+    # НЕ `is_proxy`: тот стоит у КАЖДОЙ внешней личности, включая живых
+    # клиентов бота, и взять его за тестовость значило бы показать демо ВСЕМ.
+    is_test_persona = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text=(
+            "Тестовая личность: видит демонстрационные салоны "
+            "(`Tenant.is_demo`). Ставится владельцем для показа и съёмки "
+            "эталонов. Не имеет отношения к `is_proxy` — тот стоит у всех "
+            "внешних личностей, включая живых клиентов бота."
+        ),
+    )
     # Phase C proxy→real binding (E2E-BOT-02B). Set ONLY on proxy rows
     # (is_proxy=True); points at the real account this external identity is
     # bound to. resolve_external_user() follows the pointer, so every

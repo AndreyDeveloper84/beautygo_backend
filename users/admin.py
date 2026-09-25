@@ -609,13 +609,24 @@ class UserAdmin(BaseUserAdmin):
         'phone', 'get_full_name_display', 'role',
         'is_active', 'is_verified', 'date_joined',
     )
-    list_filter = ('role', 'is_active', 'is_verified', 'is_staff')
+    list_filter = ('role', 'is_active', 'is_verified', 'is_staff', 'is_test_persona')
     search_fields = ('phone', 'email', 'first_name', 'last_name', 'username')
     ordering = ('-date_joined',)
     readonly_fields = ('date_joined', 'last_login', 'is_proxy', 'linked_user')
 
     fieldsets = BaseUserAdmin.fieldsets + (
-        ('BeautyGO', {'fields': ('role', 'phone', 'is_verified', 'deleted_at')}),
+        ('BeautyGO', {
+            'fields': ('role', 'phone', 'is_verified', 'deleted_at', 'is_test_persona'),
+            # DRF-2420 — тестовая личность видит демонстрационные салоны.
+            # Видна и правится здесь по той же причине, что и у салона:
+            # владельцу нужно проверить результат команды и уметь снять
+            # отметку. НЕ путать с is_proxy — тот стоит у всех внешних
+            # личностей, включая живых клиентов бота.
+            'description': (
+                'is_test_persona — личность для показа и съёмки эталонов: '
+                'видит демонстрационные салоны. Обычный клиент их не видит.'
+            ),
+        }),
         # Phase C binding (E2E-BOT-02B): visible for ops investigation,
         # read-only — bind_external_identity / unlink_external_identity
         # in users/services.py are the ONLY write paths (managed,

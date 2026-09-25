@@ -39,7 +39,14 @@ from users.models import SpecialistProfile, User
 
 REPO = Path(__file__).resolve().parents[2]
 RAW = re.compile(r"(?:\w+__)?is_available\s*=\s*True|ProfileStatus\.ACTIVE")
-SKIP_PARTS = {"tests", "migrations", "commands", "seeds", "venv", ".venv", "node_modules"}
+#: `.claude` — рабочие деревья. Без него сканер видит 28 вложенных копий
+#: репозитория (9011 файлов, ~54 с), и СВОИ ЖЕ законные файлы становятся
+#: «неожиданными» через префикс worktree: сторож красный на машине автора и
+#: зелёный в CI, где свежий клон вложенных деревьев не имеет.
+SKIP_PARTS = {
+    "tests", "migrations", "commands", "seeds", "venv", ".venv",
+    "node_modules", ".claude",
+}
 
 #: Where the raw form may stay, each with its reason.
 ALLOWED = {

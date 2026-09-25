@@ -96,18 +96,27 @@ from users.models import SpecialistProfile
 logger = logging.getLogger(__name__)
 
 
-def build_candidate_source() -> "SpecialistCandidateSource":
+def build_candidate_source(*, viewer=None) -> "SpecialistCandidateSource":
     """Фабрика для ``settings.RECOMMENDATION_CANDIDATE_SOURCE``.
 
     Новый экземпляр на каждый вызов: источник держит запросы и разрешение
     цели на время одного решения, и переиспользовать его между запросами
     значило бы кешировать доменную правду дольше, чем она верна.
+
+    ``viewer`` — тот, кто спрашивает (DRF-2420): от него зависит, попадут ли в
+    пул демонстрационные салоны. Ключевой аргумент необязателен, и отсутствие
+    его означает правило обычного клиента — демо скрыто.
     """
-    return SpecialistCandidateSource()
+    return SpecialistCandidateSource(viewer=viewer)
 
 
 class SpecialistCandidateSource:
     """`CandidateSource` над `SpecialistProfile`. Провайдеры, `kind=PROVIDER`."""
+
+    def __init__(self, *, viewer=None) -> None:
+        # Кто спрашивает. Нужен ровно для границ показа демо-салонов
+        # (DRF-2420) и больше ни для чего: баллы и порядок — не здесь.
+        self._viewer = viewer
 
     def fetch(self, *, scope: Scope, need: NeedSpec) -> Sequence[CandidateFacts]:
         pool = self._pool(scope)
@@ -143,11 +152,15 @@ class SpecialistCandidateSource:
         а не политика. Любое дополнительное условие здесь стало бы
         отбором, то есть политикой, то есть авторитетом.
         """
-        from users.sellable import sellable_q
+        from users.sellable import demo_visibility_q, sellable_q
 
+        # DRF-2420 — демо-салон живой, но не для обычного клиента. Это всё ещё
+        # доменная допустимость, а не политика отбора: вопрос «кому этот салон
+        # вообще показывают», а не «кто лучше». Условие не своё: один предикат
+        # на все пять пулов каталога, иначе разойдётся, как разошлось «продаётся».
         qs = (
             SpecialistProfile.objects
-            .filter(sellable_q(), tenant__is_active=True)
+            .filter(sellable_q(), demo_visibility_q(self._viewer), tenant__is_active=True)
             .select_related("tenant")
             .prefetch_related(*catalog_services_prefetch())
         )
