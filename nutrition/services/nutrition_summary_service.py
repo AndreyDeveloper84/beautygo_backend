@@ -131,6 +131,17 @@ class NutritionSummaryService:
         qs = (
             FoodLog.objects
             .filter(user_id=user_id, logged_at__gte=start, logged_at__lt=end)
+            # DRF-2455 — ``has_photo`` спрашивает скан у каждой записи.
+            # Без этого день с двумя десятками снимков давал столько же
+            # лишних запросов. ``only`` — намеренно: у скана есть тяжёлые
+            # поля (сырой ответ распознавателя, состав), и тащить их в
+            # список записей значило бы обменять запросы на трафик.
+            .select_related("scan")
+            .only(
+                "id", "dish_name", "calories", "protein_g", "fat_g", "carbs_g",
+                "meal_type", "logged_at", "entry_origin", "user_id", "scan_id",
+                "scan__id", "scan__image",
+            )
             .order_by("logged_at")
         )
 

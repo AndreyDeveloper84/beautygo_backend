@@ -138,6 +138,9 @@ REST_FRAMEWORK = {
         # Scoped: service-to-service /nutrition/internal/* — looser than
         # client-app rate; bot fans out across many BotUsers.
         'food_scan_internal': '60/min',
+        # DRF-2455 — снимки дневника: свой бюджет. Открытие дня с полутора
+        # десятками фото не должно съедать ведро распознавания и записи.
+        'food_photo_internal': '300/min',
         # Scoped: GET /api/v1/internal/specialists/{id}/slots/ (DRF-1446).
         # Derived, not rounded. The endpoint answers one date per call,
         # and the bot draws a schedule screen over a 14-day horizon
