@@ -69,6 +69,10 @@ def get_jwt_tenant_claim(user) -> str | None:
 # too instead of 403-ing every booking write.
 _EXTERNAL_USER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*(?::[A-Za-z0-9_-]{1,64})+$")
 
+#: Только источник — им проверяется, можно ли назвать его в сообщении
+#: об ошибке (DRF-2020 C: имя канала — не имя человека).
+_SOURCE_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
 
 #: DRF-1947 — источники, которые не бывают внешней личностью: их пишет сам
 #: каталог (``deleted:<pk>`` у стёртых строк, ``users.deletion_executor``).
@@ -78,6 +82,37 @@ RESERVED_EXTERNAL_SOURCES: frozenset[str] = frozenset({"deleted"})
 class InvalidExternalUserIDError(ValueError):
     """Raised when X-External-User-ID does not match the
     `<source>:<id>[:<id>...]` shape."""
+
+
+def external_id_shape(value: object) -> str:
+    """ФОРМА внешнего идентификатора для сообщений об ошибке (DRF-2020 C).
+
+    Идентификатор у канала — это имя человека в чужой системе, и в тексте
+    исключения ему не место: текст уезжает в Sentry, а чистка политики его не
+    трогала (носителей у события тринадцать, замер маркером). Но выкинуть
+    подробность целиком значило бы отнять диагностику — ту же цену мы уже
+    платили за `<text>` в золотых узлах.
+
+    Поэтому печатается форма: источник (имя канала, не человека) и ДЛИНА
+    каждого сегмента. «Пришло `max:` и шесть символов» отвечает на вопрос
+    «почему не совпало», не называя, кто это.
+
+    >>> external_id_shape("max:729481")
+    'max:<6 симв.>'
+    >>> external_id_shape("729481")
+    '<без источника, 6 симв.>'
+    """
+    text = "" if value is None else str(value)
+    if not text:
+        return "<пусто>"
+    if ":" not in text:
+        return f"<без источника, {len(text)} симв.>"
+    source, *segments = text.split(":")
+    if not _SOURCE_RE.match(source):
+        # Источник не похож на имя канала — значит и он может быть частью
+        # данных человека; тогда не печатается ничего, кроме длин.
+        return "<источник не распознан, " + ":".join(str(len(x)) for x in [source, *segments]) + " симв.>"
+    return source + "".join(f":<{len(segment)} симв.>" for segment in segments)
 
 
 def is_valid_external_user_id(value: str) -> bool:
@@ -131,7 +166,7 @@ def resolve_external_user(external_user_id: str) -> User:
     if not is_valid_external_user_id(external_user_id):
         raise InvalidExternalUserIDError(
             "external_user_id must match '<source>:<id>[:<id>...]', "
-            f"got {external_user_id!r}"
+            f"got {external_id_shape(external_user_id)}"
         )
     # select_related: bound identities follow the linked_user pointer on
     # EVERY s2s call (IsBotServiceWithVerifiedClient + nutrition views) —
@@ -466,7 +501,7 @@ def bind_external_identity(
         )
         raise InvalidExternalUserIDError(
             "external_user_id must match '<source>:<id>[:<id>...]', "
-            f"got {external_user_id!r}"
+            f"got {external_id_shape(external_user_id)}"
         )
     try:
         target = User.objects.get(
@@ -567,7 +602,7 @@ def bind_external_identity(
     )
     if outcome == "collision":
         raise IdentityBindingConflictError(
-            f"external identity {external_user_id!r} names an existing "
+            f"external identity {external_id_shape(external_user_id)} names an existing "
             "non-proxy account and cannot be bound"
         )
     if outcome == "target_void":
@@ -575,7 +610,7 @@ def bind_external_identity(
             f"ayla_user_id {ayla_user_id!r} does not name a bindable account"
         )
     raise IdentityBindingConflictError(
-        f"external identity {external_user_id!r} is already bound "
+        f"external identity {external_id_shape(external_user_id)} is already bound "
         "to a different account"
     )
 
@@ -685,17 +720,17 @@ def bind_external_identity_by_operator(
     if not is_valid_external_user_id(external_user_id):
         raise InvalidExternalUserIDError(
             "external_user_id must match '<source>:<id>[:<id>...]', "
-            f"got {external_user_id!r}"
+            f"got {external_id_shape(external_user_id)}"
         )
     proxy = User.objects.filter(username=external_user_id, is_proxy=True).first()
     if proxy is None:
         raise ExternalIdentityNotFoundError(
-            f"no proxy row for external identity {external_user_id!r}: "
+            f"no proxy row for external identity {external_id_shape(external_user_id)}: "
             "the bot has not presented this identity to Ayla yet"
         )
     if proxy.linked_user_id is not None:
         raise ExternalIdentityAlreadyBoundError(
-            f"external identity {external_user_id!r} is already bound "
+            f"external identity {external_id_shape(external_user_id)} is already bound "
             f"to account {proxy.linked_user_id}"
         )
     proxy, _created = bind_external_identity(
@@ -757,7 +792,7 @@ def unlink_external_identity(
         )
         raise InvalidExternalUserIDError(
             "external_user_id must match '<source>:<id>[:<id>...]', "
-            f"got {external_user_id!r}"
+            f"got {external_id_shape(external_user_id)}"
         )
 
     with transaction.atomic():
@@ -808,7 +843,7 @@ def unlink_external_identity(
             operation="unlink_external_identity",
         )
         raise ExternalIdentityNotFoundError(
-            f"external identity {external_user_id!r} has no proxy row"
+            f"external identity {external_id_shape(external_user_id)} has no proxy row"
         )
     return proxy, was_bound
 

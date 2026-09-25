@@ -32,6 +32,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
+from users.services import external_id_shape
 from django.db.models import Count
 
 from appointments.models import Appointment
@@ -70,7 +71,7 @@ def mask_phone(value: str | None) -> str:
 def parse_account(spec: str) -> tuple[str, str]:
     channel, sep, channel_user_id = spec.partition(":")
     if not sep or not channel or not channel_user_id:
-        raise ValueError(f"account must look like channel:channel_user_id, got {spec!r}")
+        raise ValueError(f"account must look like channel:channel_user_id, got {external_id_shape(spec)}")
     return channel, channel_user_id
 
 
