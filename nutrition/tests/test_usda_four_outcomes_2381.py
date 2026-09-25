@@ -112,7 +112,7 @@ class TestTheLayerStillDoesNotSpeakRussian:
 
     def test_the_query_leaves_in_cyrillic_as_is(self, settings) -> None:
         settings.USDA_LOOKUP_ENABLED = True
-        settings.USDA_API_KEY = "test-key"
+        settings.USDA_API_KEY = "test-key"  # pragma: allowlist secret
         sent: list[str] = []
 
         lookup = build_nutrition_lookup()
@@ -133,7 +133,7 @@ class TestTheLayerStillDoesNotSpeakRussian:
     def test_seed_dishes_never_reach_the_source(self, settings, dish: str) -> None:
         """Положительная половина: то, что знает seed, наружу не ходит."""
         settings.USDA_LOOKUP_ENABLED = True
-        settings.USDA_API_KEY = "test-key"
+        settings.USDA_API_KEY = "test-key"  # pragma: allowlist secret
         calls: list[str] = []
 
         lookup = build_nutrition_lookup()
