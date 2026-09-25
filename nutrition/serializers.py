@@ -348,10 +348,28 @@ class FoodLogCreateSerializer(serializers.Serializer):
 class FoodLogEntrySerializer(serializers.ModelSerializer):
     """Per Notion API Spec v2.0 §FOOD SCANNER+NUTRITION FoodLogEntry."""
 
+    has_photo = serializers.SerializerMethodField()
+
+    def get_has_photo(self, obj) -> bool:
+        """DRF-2455 — есть ли у записи снимок, который можно показать.
+
+        Поверхность обязана знать это ДО того, как запросит файл: иначе
+        она либо дёргает ручку у каждой записи, либо рисует пустую рамку
+        там, где снимка не было никогда.
+
+        ``False`` в двух разных случаях — записано текстом и снимок удалён
+        по сроку (§134, строка ``FoodScan`` уходит целиком, связь
+        обнуляется). Различать их здесь нечем и не нужно: вопрос «что
+        показать вместо фото» решается видом, а вид ждёт слова владельца.
+        """
+        scan = obj.scan
+        return bool(scan is not None and scan.image)
+
     class Meta:
         model = FoodLog
         fields = [
             "id",
+            "has_photo",
             "dish_name",
             "calories",
             "protein_g",
