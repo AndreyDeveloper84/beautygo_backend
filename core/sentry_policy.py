@@ -170,8 +170,16 @@ def _redact_text_leaves(value: Any, key: str | None = None) -> Any:
     if isinstance(value, dict):
         return {k: _redact_text_leaves(v, str(k)) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
-        redacted = [_redact_text_leaves(v, key) for v in value]
-        return type(value)(redacted) if isinstance(value, tuple) else redacted
+        # Всегда список, а не `type(value)(...)`. Тип восстанавливать не надо:
+        # SDK зовёт `serialize(event)` ПЕРЕД `before_send`, и до нас доходит
+        # только простое дерево JSON — ни кортежей, ни множеств, ни байтов
+        # (проверено прогоном через настоящий SDK). А вот вред от восстановления
+        # типа настоящий: именованный кортеж без значений по умолчанию упал бы
+        # на `type(value)(list)` с `TypeError`, SDK ловит исключения
+        # `before_send` внутрь себя — и событие исчезло бы ЦЕЛИКОМ, оставив одну
+        # строку INFO. То есть строка защищала от небывалого, принося ровно тот
+        # молчаливый отказ, против которого написан весь этот лист.
+        return [_redact_text_leaves(v, key) for v in value]
     return value
 
 
@@ -187,8 +195,16 @@ def scrub_event(event: Any, hint: Any = None) -> Any:
     _tag_request_id(event)
     _clean_breadcrumbs(event)
     # Редактура — ПОСЛЕДНЕЙ: она работает по тексту, а всё выше меняет
-    # структуру. Тег `request_id` уже проставлен и в исключениях списка
-    # неприкасаемых, поэтому редактура его не тронет.
+    # структуру. Тег `request_id` уже проставлен, и в словарной форме
+    # (`tags: {...}`, её и шлёт Python-SDK) редактура его не тронет — ключ в
+    # списке неприкасаемых. В списочной форме (`tags: [["request_id", …]]`,
+    # ветка `_tag_request_id` для чужого формата) ключом внутрь списка идёт
+    # `tags`, и значение через редактуру ПРОЙДЁТ. Недостижимо сегодня, но
+    # написать «не тронет» без этой оговорки значило бы соврать в комментарии.
+    #
+    # И про возврат: функция теперь наполовину правит на месте (структура,
+    # выше), наполовину возвращает копию (текст). Возвращаемое значение —
+    # единственное, на что можно смотреть; `scrub_event(ev) is ev` — ложь.
     return _redact_text_leaves(event)
 
 

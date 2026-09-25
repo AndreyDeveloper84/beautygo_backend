@@ -12,11 +12,22 @@
   `breadcrumbs[].data.*` (чистился ТОЛЬКО ключ `url`), `extra.*`,
   `contexts.*.data.*`, `tags.*`, `spans[].description` (события
   производительности идут через ту же чистку), `fingerprint[]`, `server_name`;
-* мест `raise` в каталоге — 644, подставляют значение — 304, названы как
-  личность — 37, из них несут ВНЕШНИЙ идентификатор — 13;
-* достижимость: `InvalidExternalUserIDError` перехвачен у четырёх
-  вызывающих файлов и НЕ перехвачен у четырёх, то есть путь до
-  необработанного 500 и до отправки существует.
+* мест, где форма печатается вместо значения, — **11**: девять в
+  `users/services.py`, по одному в `users/account_reset.py` и
+  `users/identity_card.py` (пересчитано после ревью: прежняя цифра 13 считала
+  ещё две строки доктеста, которые никто не исполняет);
+* достижимость: `InvalidExternalUserIDError` упомянут в восьми не-тестовых
+  файлах и перехвачен в **семи**; один не перехватывает
+  (`appointments/management/commands/bootstrap_e2e_wave1.py`), то есть путь до
+  необработанного 500 и до отправки существует. Прежняя формулировка
+  «четыре / четыре» не воспроизводится ни при одном определении области —
+  снята.
+
+Что НЕ покрыто первым слоем и держится только вторым (найдено ревью):
+`users/account_reset.py` `NotAllowed.__init__` собирает текст внутри САМОГО
+класса исключения, поэтому обход мест `raise` его не видит; а несёт он
+`listed_as` — операторскую форму `<канал>:<id>`. Это двенадцатый носитель, и он
+лучший аргумент за вторую линию, какой у нас есть.
 
 Отдельная находка того же замера: к событию Sentry в каталоге **вообще не
 применялась** редактура персональных данных. `core.pii_log_filter.redact_pii`
@@ -24,13 +35,16 @@
 на событии — значит телефон в тексте исключения уходил наружу так же, как
 идентификатор.
 
-Починка в два слоя, и здесь проверяются оба:
+Починка в два слоя:
 
-1. **не класть значение в текст** — в тех 13 местах, где идентификатор внешний,
-   печатается ФОРМА (источник и длина), а не значение;
+1. **не класть значение в текст** — в тех 11 местах печатается ФОРМА (источник и
+   длина), а не значение. Проверяется НЕ здесь, а в
+   `users/tests/test_external_id_shape_2020c.py`: ревью подменой показало, что
+   первый слой можно было удалить целиком, и все узлы этого файла оставались
+   зелёными;
 2. **чистить событие** — текстовые листья события проходят через `redact_pii`,
    одно определение на логи, алерты и Sentry. Вторая линия нужна потому, что
-   первую нарушит следующий разработчик, и молча.
+   первую нарушит следующий разработчик, и молча. Проверяется здесь.
 
 Узлы идут ЧЕРЕЗ НАСТОЯЩИЙ SDK и WSGI-вход каталога (как
 `test_sentry_policy_live_sdk`), а не зовут `scrub_event` напрямую: у нас уже
@@ -179,13 +193,23 @@ class TestTheIdentityDoesNotLeaveInAnyCarrier:
         return events[0]
 
     def test_the_identity_is_in_no_carrier_of_the_real_event(self, live_sentry):
-        """Отсутствие И место замены — в одном узле.
+        """Отсутствие И место замены — в ДВУХ носителях, а не в одном.
 
         «Личности нет» выполнимо и пустым событием, и событием, где вырезано не
-        то. Поэтому рядом стоит утверждение, что след замены лежит ИМЕННО в том
-        носителе, из которого личность убрали — в тексте исключения. Критерий
-        успеха подмены не должен быть выполним ничем, кроме проверяемого
-        утверждения.
+        то. Поэтому рядом стоит утверждение, что след замены лежит ИМЕННО там,
+        откуда личность убрали.
+
+        И носителей два, потому что с одним узел был слабее, чем выглядел
+        (найдено ревью): пробник кладёт личность только в текст исключения, и
+        подмена «чистить ТОЛЬКО `exception`» проходила зелёной — та самая узкая
+        починка, против которой написана рекурсия. Второй носитель
+        (`extra.probe_identity_note`) структурно другой, и теперь эта подмена
+        краснеет.
+
+        Замер, который стоит помнить: третье место — хлебная крошка из журнала —
+        приходит в событие УЖЕ чистой, её правит фильтр ПДн на самой записи.
+        Крошкой рекурсию доказать нельзя, поэтому она проверяется отдельно и как
+        утверждение о нижнем слое.
         """
         event = self._run(live_sentry)
 
@@ -199,6 +223,28 @@ class TestTheIdentityDoesNotLeaveInAnyCarrier:
             "в тексте исключения нет следа замены — значит вырезали не там, "
             f"а личности нет по другой причине: {exception_text[:80]!r}"
         )
+        note = (event.get("extra") or {}).get("probe_identity_note") or ""
+        assert "[IDENTITY]" in note, (
+            "в `extra` нет следа замены — значит чистится только текст "
+            f"исключения, а остальные двенадцать носителей нет: {note!r}"
+        )
+
+    def test_the_log_filter_covers_the_breadcrumb_before_the_event(self, live_sentry):
+        """Крошка приходит чистой — и это утверждение о НИЖНЕМ слое.
+
+        Я ожидал обратного: фильтр ПДн стоит на обработчике `console`, а крошки
+        Sentry собирает своим обработчиком. Замер показал, что фильтр правит
+        саму запись журнала, поэтому Sentry видит её уже чистой. Узел это
+        закрепляет: иначе следующая правка фильтра (например, возврат копии
+        вместо правки записи) тихо откроет журнальный путь в событие, и ни один
+        другой узел этого не увидит.
+        """
+        event = self._run(live_sentry)
+
+        crumbs = ((event.get("breadcrumbs") or {}).get("values")) or []
+        mine = [c for c in crumbs if "probe resolving" in str(c.get("message") or "")]
+        assert mine, f"крошки пробника нет — проверять нечего: {len(crumbs)} крошек"
+        assert "[IDENTITY]" in mine[0]["message"], mine[0]["message"]
 
     def test_a_phone_in_the_same_text_is_also_gone(self, live_sentry):
         """Тот же замер показал, что редактура ПДн к событию не применялась
@@ -231,6 +277,149 @@ class TestTheIdentityDoesNotLeaveInAnyCarrier:
         assert any("sentry_live_probe_urls" in str(f.get("filename") or "") for f in frames)
 
 
+class TestEveryIdentityTheCatalogCarries:
+    """Шаблон проверяется ВОКАБУЛЯРОМ ПРОДУКТА, а не соседним шаблоном.
+
+    Прежний узел сравнивал `_IDENTITY_RE` с `_HAS_PII_CANDIDATE` — то есть две
+    регулярки друг с другом. Оба построены из одного `_IDENTITY_SOURCES`,
+    поэтому названная им беда («списки разойдутся») стала невозможной по
+    построению, а настоящая беда — «из списка убрали источник, который каталог
+    носит» — его не роняла: `_IDENTITY_SOURCES = "bot"` проходило зелёным, пока
+    `max:729481` уезжал наружу (найдено ревью).
+
+    Опора здесь другая: значения, которые САМ каталог ставит на место внешнего
+    идентификатора — именованный аргумент/ключ `external_user_id`, заголовок
+    `X-External-User-ID`. Замер по дереву даёт 100 различных значений и ровно
+    два источника: `bot` и `max`. Уберут источник из списка — узел краснеет и
+    называет значение.
+
+    Предел: узел видит только литералы. Значение, собранное из переменных, ему
+    не видно — как и всякому сторожу написания.
+    """
+
+    #: Имена, за которыми в этом репозитории стоит внешний идентификатор.
+    IDENTITY_SLOTS = frozenset({
+        "external_user_id",
+        "HTTP_X_EXTERNAL_USER_ID",
+        "X-External-User-ID",
+        "external_id",
+    })
+
+    #: `.claude` — вложенные рабочие деревья: без этого сканер видит 28 копий
+    #: репозитория и краснеет на машине автора, оставаясь зелёным в CI.
+    SKIP_PARTS = frozenset({"venv", ".venv", "node_modules", "__pycache__", ".claude"})
+
+    def _fixtures(self) -> dict[str, str]:
+        """{значение: где впервые встретилось} — по разбору кода, не по грепу."""
+        import ast
+        import re as _re
+        from pathlib import Path
+
+        shape = _re.compile(r"^[a-z][a-z0-9_-]*(?::[A-Za-z0-9_-]{1,64})+$")
+        repo = Path(__file__).resolve().parents[2]
+        found: dict[str, str] = {}
+
+        def note(value: object, rel: str, lineno: int) -> None:
+            if isinstance(value, str) and shape.match(value):
+                found.setdefault(value, f"{rel}:{lineno}")
+
+        for path in repo.rglob("*.py"):
+            rel = path.relative_to(repo).as_posix()
+            if set(rel.split("/")) & self.SKIP_PARTS:
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+            except (SyntaxError, ValueError):
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    for kw in node.keywords:
+                        if kw.arg in self.IDENTITY_SLOTS and isinstance(kw.value, ast.Constant):
+                            note(kw.value.value, rel, kw.value.lineno)
+                elif isinstance(node, ast.Dict):
+                    for key, value in zip(node.keys, node.values):
+                        if (
+                            isinstance(key, ast.Constant)
+                            and key.value in self.IDENTITY_SLOTS
+                            and isinstance(value, ast.Constant)
+                        ):
+                            note(value.value, rel, value.lineno)
+        return found
+
+    @staticmethod
+    def _operator_spec(value: str) -> str | None:
+        """`bot:max:123` → `max:123` — форма, которую каталог показывает оператору.
+
+        Не выдумка узла: ровно это делает `users.account_reset._spec_of`
+        («bot:max:123 → max:123»), и именно она лежит в `NotAllowed.listed_as`,
+        то есть в тексте исключения. Поэтому список источников обязан покрывать
+        и её, а не только обёртку `bot:`.
+        """
+        parts = value.split(":")
+        return ":".join(parts[1:]) if len(parts) >= 3 else None
+
+    def test_the_census_is_not_vacuous(self):
+        """Нижняя граница: сканер, посмотревший не туда, не должен пройти на
+        пустом результате. И оба источника обязаны быть настоящими."""
+        fixtures = self._fixtures()
+        specs = {self._operator_spec(v) for v in fixtures} - {None}
+
+        assert len(fixtures) >= 50, f"перепись нашла только {len(fixtures)} — не тот корень?"
+        assert {v.split(":")[0] for v in fixtures} == {"bot"}, sorted(fixtures)[:5]
+        assert {s.split(":")[0] for s in specs} == {"max", "telegram"}, sorted(specs)[:5]
+
+    def test_a_long_identity_is_redacted_whole_not_by_its_head(self):
+        """Сегментов в контракте НЕ ТРИ, а сколько угодно.
+
+        `users.services._EXTERNAL_USER_ID_RE` — `(?::[A-Za-z0-9_-]{1,64})+`, без
+        верхней границы. Пока шаблон редактуры стоял на `{1,3}`,
+        `bot:max:a:b:c` превращался в `[IDENTITY]:c`: хвост личности оставался и
+        выглядел как чистый текст — хуже, чем нетронутая строка, потому что
+        читается как «здесь уже почистили».
+
+        Узел заведён отдельно, потому что подмена `+` → `{1,3}` не уронила
+        НИЧЕГО: все 100 значений переписи короче четырёх сегментов, и граница
+        была свободна.
+        """
+        import re as _re
+
+        from core.pii_log_filter import redact_pii
+        from users.services import _EXTERNAL_USER_ID_RE
+
+        long_identity = "bot:max:region-7:device-2:729481"
+        assert _EXTERNAL_USER_ID_RE.match(long_identity), "образец не по контракту"
+
+        cleaned = redact_pii(f"resolve failed for {long_identity} on this request")
+
+        assert "[IDENTITY]" in cleaned, cleaned
+        # Ни одного куска исходного значения: хвост — это тоже личность.
+        leftovers = [
+            part for part in long_identity.split(":") if _re.search(rf"\b{part}\b", cleaned)
+        ]
+        assert leftovers == [], f"от личности остался хвост {leftovers}: {cleaned!r}"
+
+    def test_redaction_removes_every_identity_the_catalog_uses(self):
+        from core.pii_log_filter import redact_pii
+
+        wanted: dict[str, str] = {}
+        for value, where in self._fixtures().items():
+            wanted[value] = where
+            spec = self._operator_spec(value)
+            if spec:
+                wanted[spec] = f"{where} (форма для оператора)"
+
+        survived = {
+            value: where
+            for value, where in wanted.items()
+            if value in redact_pii(f"resolve failed for {value} on this request")
+        }
+
+        assert survived == {}, (
+            "эти значения каталог считает внешней личностью, а редактура их не "
+            f"убирает — уйдут в Sentry и в журнал: {survived}"
+        )
+
+
 class TestThePrefilterDoesNotSwallowTheIdentity:
     """Дешёвый префильтр стоит ПЕРЕД редактурой и решает, звать ли её вообще.
 
@@ -238,6 +427,14 @@ class TestThePrefilterDoesNotSwallowTheIdentity:
     редактуру не проходит, и личность уходит наружу молча. Отказ был бы
     невидимым — ни исключения, ни записи в журнале, просто чистая строка,
     которую никто не чистил.
+
+    Регистр проверяется ОБОИМИ: префильтр был регистронезависимым, а шаблон
+    личности — нет, и `MAX:729481` проходил префильтр, но не редактуру. Это та
+    же форма отказа: пустил и не почистил.
+
+    Чего этот узел НЕ доказывает (и потому рядом стоит
+    `TestEveryIdentityTheCatalogCarries`): он сравнивает два шаблона друг с
+    другом, поэтому «из списка убрали настоящий источник» ему не видно.
     """
 
     def test_the_prefilter_lets_through_everything_the_patterns_catch(self):
@@ -249,10 +446,13 @@ class TestThePrefilterDoesNotSwallowTheIdentity:
         )
 
         sources = _IDENTITY_SOURCES.split("|")
-        assert sources, "список источников пуст — сторожить нечего"
+        # `assert sources` не годится: `"".split("|") == [""]`, а это истина.
+        # Пустой источник дал бы шаблон, который ловит любое `:слово` — и узел
+        # об этом молчал бы (найдено ревью).
+        assert all(sources), f"в списке источников есть пустой: {sources!r}"
 
         missed = []
-        for source in sources:
+        for source in sources + [s.upper() for s in sources]:
             # БЕЗ цифр и без «@» — намеренно. С `a1b2c3` узел был зелёным и на
             # подмене: префильтр срабатывал на цифрах образца, а не на списке
             # источников, то есть проверялось что угодно, кроме проверяемого

@@ -32,13 +32,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 
-from users.services import external_id_shape
 from django.db.models import Count
 
 from appointments.models import Appointment
 from goals.models import ClientGoal, GoalAnketaRun
 from nutrition.models import FoodLog
 from users.models import User, UserPersonalContext
+from users.services import external_id_shape
 
 BLOCKED_BY_IDENTITY = "BLOCKED_BY_IDENTITY"
 
