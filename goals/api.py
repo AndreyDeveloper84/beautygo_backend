@@ -246,6 +246,7 @@ def _create_goal(
     было бы хуже, чем не записывать: колонка, ни на что не влияющая,
     рано или поздно начинает влиять.
     """
+    words = (goal_text or "").strip() or None
     with transaction.atomic():
         # DRF-1660: прежняя ACTIVE цель закрывается как SUPERSEDED — это
         # факт «человек выбрал новую», а не догадка ARCHIVED. Цели на
@@ -254,8 +255,14 @@ def _create_goal(
         return ClientGoal.objects.create(
             client=client,
             goal_key=goal_key or None,
-            goal_text=(goal_text or "").strip() or None,
+            goal_text=words,
             source_channel=source_channel,
+            # CD §73 / G-INV-15 — пометка происхождения СЛОВ. Оба пути сюда
+            # ведут свободный ввод человека: прямой выбор с `goal_text` и
+            # шаг цели анкеты. Слов нет — нет и пометки: у чипа говорить
+            # нечему. Полем входящего сообщения она не ставится никогда
+            # (иначе завтра отправитель выдаст её себе сам).
+            text_origin=ClientGoal.TextOrigin.USER_STATED if words else "",
         )
 
 
