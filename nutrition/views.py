@@ -32,7 +32,7 @@ from users.permissions import IsClient, IsClientApp, IsServiceAccount
 from users.response import error_response, success_response
 from users.services import InvalidExternalUserIDError, resolve_external_user
 
-from nutrition.models import Beverage, FoodScan, WaterLog
+from nutrition.models import Beverage, FoodLog, FoodScan, WaterLog
 from nutrition.serializers import (
     ManualTargetsSerializer,
     BeverageCatalogItemSerializer,
@@ -736,6 +736,72 @@ def _food_log_refusal(exc: Exception) -> Response:
     return error_response(
         "CONFLICT", "Запись нельзя пересчитать", status_code=status.HTTP_409_CONFLICT,
     )
+
+
+class InternalFoodLogPhotoView(APIView):
+    """GET /api/v1/nutrition/internal/food-log/{entry_id}/photo/ — DRF-2455.
+
+    Отдаёт **сам файл**, а не ссылку на него, и по двум причинам сразу.
+
+    Первая: прямой адрес хранилища телефону бесполезен — MinIO живёт по
+    внутреннему адресу контейнера (``endpoint_url``, ``custom_domain`` не
+    задан), и браузер человека его не видит.
+
+    Вторая важнее: бакет создаётся с ``default_acl="public-read"``, то
+    есть объект доступен любому, кто знает адрес. Это фотографии еды,
+    снятые людьми дома; ссылка, однажды утёкшая, работала бы у кого
+    угодно. Поэтому файл проходит через ручку, которая спрашивает, чья
+    это запись, — и чужая запись отвечает **404**, а не 403: по коду
+    ответа нельзя перебирать чужие записи.
+
+    Снимка может не быть в двух случаях — запись сделана текстом и снимок
+    удалён по сроку (§134). Оба отвечают 404: пустое тело с кодом 200
+    поверхность прочитала бы как «фото есть, но сломано».
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "food_scan_internal"
+
+    @extend_schema(
+        tags=["internal"],
+        request=None,
+        responses={
+            200: OpenApiResponse(description="Файл снимка (image/*)"),
+            404: OpenApiResponse(
+                description="Записи нет у этого человека, либо снимка нет",
+            ),
+        },
+    )
+    def get(self, request: Request, pk: UUID):
+        import mimetypes
+
+        from django.http import FileResponse
+
+        user, refusal = _food_log_actor(request)
+        if refusal is not None:
+            return refusal
+        # Фильтр по владельцу — в самом запросе: проверка после выборки
+        # переживает рефакторинг хуже, а цена ошибки здесь — чужое фото.
+        log = (
+            FoodLog.objects
+            .filter(id=pk, user_id=user.id)
+            .select_related("scan")
+            .first()
+        )
+        if log is None or log.scan is None or not log.scan.image:
+            return error_response(
+                "PHOTO_NOT_FOUND",
+                "Снимка нет",
+                status_code=status.HTTP_404_NOT_FOUND,
+            )
+        name = log.scan.image.name
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        response = FileResponse(log.scan.image.open("rb"), content_type=content_type)
+        # Приватно и ненадолго: снимок принадлежит одному человеку, а через
+        # 30 суток его не станет (§134) — общий кэш хранить его не должен.
+        response["Cache-Control"] = "private, max-age=300"
+        return response
 
 
 class InternalFoodLogDetailView(APIView):

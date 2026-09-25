@@ -19,6 +19,7 @@ from nutrition.views import (
     InternalDiaryDaysView,
     InternalFoodEstimateView,
     InternalFoodLogDetailView,
+    InternalFoodLogPhotoView,
     InternalFoodLogRestoreView,
     InternalFoodLogView,
     InternalFoodScanView,
@@ -82,6 +83,12 @@ urlpatterns = [
         "internal/food-log/<uuid:pk>/",
         InternalFoodLogDetailView.as_view(),
         name="internal-food-log-detail",
+    ),
+    # DRF-2455 — снимок записи: сам файл, и только своему (§77 п.40).
+    path(
+        "internal/food-log/<uuid:pk>/photo/",
+        InternalFoodLogPhotoView.as_view(),
+        name="internal-food-log-photo",
     ),
     # DRF-2092 (F12) — избранные блюда под субъектом; серверный источник.
     path(
