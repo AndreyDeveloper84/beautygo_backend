@@ -32,7 +32,7 @@ from users.permissions import IsClient, IsClientApp, IsServiceAccount
 from users.response import error_response, success_response
 from users.services import InvalidExternalUserIDError, resolve_external_user
 
-from nutrition.models import Beverage, FoodScan, WaterLog
+from nutrition.models import Beverage, FoodLog, FoodScan, WaterLog
 from nutrition.serializers import (
     ManualTargetsSerializer,
     BeverageCatalogItemSerializer,
@@ -736,6 +736,133 @@ def _food_log_refusal(exc: Exception) -> Response:
     return error_response(
         "CONFLICT", "Запись нельзя пересчитать", status_code=status.HTTP_409_CONFLICT,
     )
+
+
+#: Меньше этого объект не может быть фотографией еды: самый маленький
+#: настоящий снимок на стенде — 36 КБ, а пустышки замера 25.09 — сотни
+#: байт. Порог грубый намеренно: он отделяет «файл есть» от «файла нет по
+#: существу», а не сортирует снимки по качеству.
+MIN_PHOTO_BYTES = 1024
+
+
+class InternalFoodLogPhotoView(APIView):
+    """GET /api/v1/nutrition/internal/food-log/{entry_id}/photo/ — DRF-2455.
+
+    Отдаёт **сам файл**, а не ссылку на него, и по двум причинам сразу.
+
+    Первая: прямой адрес хранилища телефону бесполезен — MinIO живёт по
+    внутреннему адресу контейнера (``endpoint_url``, ``custom_domain`` не
+    задан), и браузер человека его не видит.
+
+    Вторая важнее: бакет создаётся с ``default_acl="public-read"``, то
+    есть объект доступен любому, кто знает адрес. Это фотографии еды,
+    снятые людьми дома; ссылка, однажды утёкшая, работала бы у кого
+    угодно. Поэтому файл проходит через ручку, которая спрашивает, чья
+    это запись, — и чужая запись отвечает **404**, а не 403: по коду
+    ответа нельзя перебирать чужие записи.
+
+    Снимка может не быть в двух случаях — запись сделана текстом и снимок
+    удалён по сроку (§134). Оба отвечают 404: пустое тело с кодом 200
+    поверхность прочитала бы как «фото есть, но сломано».
+    """
+
+    permission_classes = [IsServiceAccount]
+    throttle_classes = [ScopedRateThrottle]
+    #: Свой бюджет, не общий со сканом: открытие дня с полутора десятками
+    #: снимков съедало бы ведро, которое делят распознавание, запись и
+    #: сводка. Ключ у ``IsServiceAccount`` — адрес бота, то есть ведро одно
+    #: на весь хост.
+    throttle_scope = "food_photo_internal"
+
+    @extend_schema(
+        tags=["internal"],
+        request=None,
+        responses={
+            200: OpenApiResponse(description="Файл снимка (image/*)"),
+            404: OpenApiResponse(
+                description="Записи нет у этого человека, либо снимка нет",
+            ),
+        },
+    )
+    #: Один ответ на все три отказа — «чужая», «никогда не было»,
+    #: «снимка нет». Различать их кодом значило бы дать перебор чужих
+    #: записей по ответу.
+    def _absent(self) -> Response:
+        return error_response(
+            "NOT_FOUND", "Снимка нет", status_code=status.HTTP_404_NOT_FOUND,
+        )
+
+    def get(self, request: Request, pk: UUID):
+        import mimetypes
+
+        from django.http import FileResponse
+
+        from users.services import resolve_external_user_readonly
+
+        external_user_id = request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+        try:
+            # Чтение, а не создание: ручка ПРОВЕРЯЕТ право на запись,
+            # названную UUID в адресе. Резолвер, заводящий строки, позволил
+            # бы держателю сервисного токена плодить учётные записи
+            # подбором заголовка — см. ``users/services.py``.
+            user = resolve_external_user_readonly(external_user_id)
+        except InvalidExternalUserIDError as exc:
+            return error_response(
+                "VALIDATION_ERROR", f"X-External-User-ID невалиден: {exc}",
+            )
+        if user is None:
+            return self._absent()
+        # Фильтр по владельцу — в самом запросе: проверка после выборки
+        # переживает рефакторинг хуже, а цена ошибки здесь — чужое фото.
+        log = (
+            FoodLog.objects
+            .filter(id=pk, user_id=user.id)
+            .select_related("scan")
+            .first()
+        )
+        if log is None or log.scan is None or not log.scan.image:
+            return self._absent()
+        name = log.scan.image.name
+        # Тип берётся из имени, а имя всегда ``{scan_id}.jpg``
+        # (``_scan_image_path``): настоящий тип загруженного файла нигде не
+        # хранится, и PNG/WebP уезжают как jpeg. Назван как долг, а не
+        # починен здесь: хранение типа — правка модели и загрузки.
+        content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        try:
+            handle = log.scan.image.open("rb")
+        except (FileNotFoundError, OSError) as exc:
+            # Строка ссылается на объект, которого в хранилище нет. Это не
+            # гипотеза: команда очистки (§134) знает такой исход под именем
+            # ``object_absent`` и насчитала его на пилоте. Человеку это то
+            # же «снимка нет»; нам — строка в журнале, иначе пропажа
+            # объектов невидима.
+            logger.warning(
+                "nutrition.food_photo.object_absent log=%s err=%s",
+                pk,
+                type(exc).__name__,
+            )
+            return self._absent()
+        # DRF-2455 — третье состояние, найденное замером 25.09: объект
+        # существует, но пуст. Три из пятнадцати живых строк на стенде
+        # ссылались на объект в несколько сотен байт — меньше, чем весят
+        # даже заглушки смоука. Отдать такие байты хуже, чем ответить
+        # «снимка нет»: человек увидит битую картинку вместо честного
+        # пустого места, а поверхность не отличит одно от другого.
+        try:
+            size = log.scan.image.size
+        except (FileNotFoundError, OSError):
+            size = 0
+        if size < MIN_PHOTO_BYTES:
+            handle.close()
+            logger.warning(
+                "nutrition.food_photo.object_empty log=%s size=%s", pk, size,
+            )
+            return self._absent()
+        response = FileResponse(handle, content_type=content_type)
+        # Приватно и ненадолго: снимок принадлежит одному человеку, а через
+        # 30 суток его не станет (§134) — общий кэш хранить его не должен.
+        response["Cache-Control"] = "private, max-age=300"
+        return response
 
 
 class InternalFoodLogDetailView(APIView):
