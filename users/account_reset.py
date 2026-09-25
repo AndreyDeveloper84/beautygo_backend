@@ -52,13 +52,13 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 
-from users.services import external_id_shape
 from django.apps import apps
 from django.conf import settings
 from django.db import models, transaction
 from django.db.models.deletion import Collector, ProtectedError, RestrictedError
 
 from users.models import User
+from users.services import external_id_shape
 
 # --- modes -------------------------------------------------------------------
 
