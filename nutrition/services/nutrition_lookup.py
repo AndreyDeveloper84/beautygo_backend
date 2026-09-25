@@ -92,6 +92,24 @@ class NutritionFacts:
     # DRF-260: provenance tag — read by Track E pattern engine.
     micronutrients_source: str = "unknown"
 
+    # DRF-2402 — откуда взялась порция, по которой посчитаны итоги.
+    #
+    # СЛОВАРЬ ЗНАЧЕНИЙ ОКОНЧАТЕЛЕН УЖЕ ЗДЕСЬ — переименование значения на
+    # проводе ломает читателей, а их трое. Добавлять значения без сговора
+    # с ними нельзя; неизвестное значение читатель обязан понимать как
+    # «происхождение неизвестно», а НЕ как «измерено».
+    #
+    #   ``provider`` — порцию назвала наблюдавшая сторона: оценка
+    #                  провайдера на скане или число, которое человек
+    #                  ввёл сам. Показывать можно как есть;
+    #   ``typical``  — ЗАРЕЗЕРВИРОВАНО ЗА DRF-2444, сейчас не выдаётся
+    #                  никогда: порция выведена из справочника, и рядом с
+    #                  числом обязан стоять ход подтверждения;
+    #   ``unknown``  — порцию не называл никто (в том числе когда ручной
+    #                  путь подставил ``MANUAL_DISH_BASELINE_G`` вместо
+    #                  человека). Поля нет в старом снимке — читать так же.
+    portion_source: str = "unknown"
+
     def to_dict(self) -> dict:
         return asdict(self)
 
@@ -165,13 +183,16 @@ class NutritionLookup:
         *,
         ingredients: Iterable[str] = (),
         portion_g: float | None = None,
+        portion_named: bool = True,
     ) -> NutritionFacts | None:
         """Return facts for ``dish_name``, or None if all layers miss."""
         # Layer 1 — seed.
         canonical = self._resolve_canonical(dish_name, ingredients)
         if canonical is not None:
             macros = self._dish_macros[canonical]
-            return self._build_facts(canonical, macros, portion_g)
+            return self._build_facts(
+                canonical, macros, portion_g, portion_named=portion_named
+            )
 
         # Layer 2 — USDA.
         if self._usda is not None:
@@ -259,8 +280,34 @@ class NutritionLookup:
         return None
 
     def _build_facts(
-        self, canonical: str, macros: DishMacros, portion_g: float | None,
+        self,
+        canonical: str,
+        macros: DishMacros,
+        portion_g: float | None,
+        *,
+        portion_named: bool = True,
     ) -> NutritionFacts:
+        # DRF-2402 — типовая порция ПОКА НЕ подменяет пустую оценку, и это
+        # решение, а не недоделка.
+        #
+        # Пустые итоги при известных числах на 100 г — действующий сигнал
+        # «спроси вес» (DRF-2335, решение владельца §77 п.29): по нему
+        # клиентская половина понимает, что порцию нужно подтвердить у
+        # человека. Заполни мы итоги здесь — сигнал исчезнет, а человек
+        # увидит число, которого не подтверждал, и выглядеть оно будет как
+        # измеренное. Это ровно тот дефект, который рядом сейчас убирают.
+        #
+        # Подмена включится отдельным листом — когда поверхности научатся
+        # читать `portion_source` и показывать «обычно 300 г — так?» рядом
+        # с числом. Тогда же переписываются узлы DRF-2335 под правило из
+        # трёх исходов, а не удаляются.
+        # Порция засчитывается за `provider`, только если её КТО-ТО назвал.
+        # Ручной путь при молчании человека подставляет базовую константу
+        # (`MANUAL_DISH_BASELINE_G`) — число есть, но не наблюдал его никто,
+        # и выдавать его за оценку наблюдавшей стороны нельзя.
+        named = bool(portion_g and portion_g > 0 and portion_named)
+        portion_source = "provider" if named else "unknown"
+
         if portion_g is None or portion_g <= 0:
             kcal = protein = fat = carbs = None
             ratio = None
@@ -280,6 +327,7 @@ class NutritionLookup:
             return round(value * ratio, 2)
 
         return NutritionFacts(
+            portion_source=portion_source,
             matched_dish=canonical,
             source=self.SOURCE_SEED,
             portion_g=portion_g if (portion_g and portion_g > 0) else None,

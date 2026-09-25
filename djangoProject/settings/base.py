@@ -160,6 +160,10 @@ REST_FRAMEWORK = {
         # One operator click per salon administrator — a human pace, and the
         # ruling asks for a rate limit on the linking capability specifically.
         'salon_admin_link': '10/min',
+        # Scoped: POST /api/v1/internal/specialists/<uuid>/identity/ (DRF-2442).
+        # Один вызов на принятое приглашение — темп человека, регистрирующего
+        # мастера; лимит стоит на способности связывать, как у соседа выше.
+        'specialist_identity_link': '10/min',
         'water': '60/min',           # Scoped: water tracker tap-buttons; user can't tap faster than this
         # Scoped: POST /analytics/event/. Mobile may batch-emit on session
         # foreground/background; higher than `user` so analytics doesn't
@@ -415,6 +419,25 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 # Media files (user uploads)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# Отчёт разбора услуг — DRF-2409.
+#
+# Куда `map_salon_services --store` кладёт исход резолвера. Это ЕДИНСТВЕННЫЙ
+# носитель исхода: база его не хранит («нет прогона» отличимо от «прогон был,
+# исхода нет»), поэтому каталог обязан быть доступен процессу на запись.
+#
+# Умолчание внутри образа: `/app/var/mapping_reports`, и он создаётся в
+# Dockerfile с владельцем APP_UID — потому что `/app` принадлежит root, а
+# контейнер идёт под uid 1000 (`user:` в docker-compose, DRF-1677). Машина с
+# другим uid задаёт путь этой настройкой, а не правит образ.
+#
+# Тома у каталога нет: отчёт живёт до пересоздания контейнера. Это названо
+# здесь и в докстроке команды, чтобы следующий не решил, что разбор где-то
+# хранится. Срок хранения — вопрос владельца (том переживал бы пересоздание,
+# а в отчёте лежат названия услуг салона).
+MAPPING_REPORT_DIR = os.environ.get(
+    'MAPPING_REPORT_DIR', str(BASE_DIR / 'var' / 'mapping_reports')
+)
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -883,6 +906,20 @@ AYLA_TENANT_PROVISIONING_TOKEN = os.environ.get(
 # Ротируется независимо; в логи и в клиентский код не попадает.
 AYLA_SALON_ADMIN_LINK_TOKEN = os.environ.get(
     "AYLA_SALON_ADMIN_LINK_TOKEN", "",
+)
+
+# DRF-2442 (решение владельца §77 п.38, 24.09.2026) — ПЯТЫЙ секрет, одна ручка.
+# ``POST /api/v1/internal/specialists/<uuid>/identity/`` связывает MAX-личность
+# мастера, ПРИНЯВШЕГО одноразовое приглашение, с его уже существующей учёткой
+# специалиста. Ничего не создаёт — только ребро личности, и только
+# ``role=specialist``. Свой credential по той же причине, что у
+# ``salon-admins``: это касание личности, а общий Bearer (§151),
+# identity-provisioning (bind-external к любым учёткам) и tenant-provisioning
+# — другие силы. Каталог требует, чтобы все пять значений различались
+# (users.E005 при старте; сторож отказывает и на запросе). Пусто — ручка
+# выключена, бот получает отказ по имени и мастер остаётся несвязанным.
+AYLA_SPECIALIST_IDENTITY_LINK_TOKEN = os.environ.get(
+    "AYLA_SPECIALIST_IDENTITY_LINK_TOKEN", "",
 )
 
 # S3C — YClients catalog intake (read-only pull of the pilot salon's
