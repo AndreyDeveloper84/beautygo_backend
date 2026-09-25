@@ -71,7 +71,16 @@ class TestTheDictionaryHoldsOnlyLiveEntries:
         ("name", "expected"),
         [("курица", "chicken"), ("яйцо", "egg"), ("яблоко", "apples")],
     )
-    def test_a_few_entries_say_what_they_should(self, name: str, expected: str) -> None:
+    def test_a_few_entries_are_pinned_on_purpose(self, name: str, expected: str) -> None:
+        """Закрепление трёх значений — и НЕ свидетельство работы словаря.
+
+        Признаком работы годится только то, что может напечатать сам
+        проверяемый код. Здесь и ожидание, и ответ приходят из одних и тех
+        же данных: узел заметит случайную правку этих трёх записей и не
+        заметит ничего больше. Про то, что словарь действительно
+        применяется, говорят узлы ниже — там наружу уходит латиница,
+        которой в русском названии взяться неоткуда.
+        """
         entry = query_for(name)
         assert entry is not None
         assert expected in entry.query
