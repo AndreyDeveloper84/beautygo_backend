@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from io import StringIO
 
@@ -35,14 +36,49 @@ from services.models import SalonService, ServiceCategory, ServiceTemplate
 from services.owner_confirmed_mapping import (
     CONFIRMED,
     DOCUMENT,
+    EXPECTED_BY_SALON,
     OWNER_LIST_RULE,
     OWNER_LIST_RULE_VERSION,
     OWNER_LIST_SOURCE_REF,
-    OWNER_LIST_TENANT_SLUG,
 )
 from tenants.models import Tenant
 
 pytestmark = pytest.mark.django_db
+
+
+DEFAULT_SLUG = "formula-tela"
+_SLUG_CELL = re.compile(r"^\*{0,2}`(?P<slug>[a-z0-9-]+)`\*{0,2}$")
+_CODE_CELL = re.compile(r"^`(?P<code>\d+(?:\.\d+)+)`$")
+
+
+def read_document() -> list[tuple[str, str, str]]:
+    """Тройки прямо из документа основания.
+
+    Фикстуры строятся ОТСЮДА, а не рядом. Первая редакция создавала все 36
+    строк у одного салона — то есть изготавливала реальность, которой нет, —
+    и узел «36 получают связь» был зелен потому, что ФИКСТУРА СОГЛАСНА С
+    КОДОМ, а не код с документом. Пока данные для проверки берутся из того же
+    источника, что и для работы, такой ответ невозможен.
+
+    Разбор терпим к двум формам таблицы: поправка 25.09 добавила столбец
+    «Салон» только в раздел массажей, и то не всем строкам. Где слага нет —
+    он `formula-tela`, как прямо говорит поправка.
+    """
+    text = DOCUMENT.read_text(encoding="utf-8")
+    section = text[text.index("## Подтверждено") : text.index("## НЕ подтверждено")]
+    out: list[tuple[str, str, str]] = []
+    for line in section.splitlines():
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if set("".join(cells)) <= set("- ") or cells[0] in ("Салон", "Услуга салона"):
+            continue
+        m = _SLUG_CELL.match(cells[0])
+        rest = cells[1:] if m else cells
+        code = _CODE_CELL.match(rest[1])
+        assert code, f"не код в строке документа: {line!r}"
+        out.append((m.group("slug") if m else DEFAULT_SLUG, rest[0].strip("* "), code.group("code")))
+    return out
 
 
 def _cat(name: str = "Лазерная эпиляция") -> ServiceCategory:
@@ -65,12 +101,19 @@ def _tpl(code: str) -> ServiceTemplate:
     )
 
 
-def _salon() -> Tenant:
-    tenant, _ = Tenant.objects.get_or_create(
-        slug=OWNER_LIST_TENANT_SLUG,
-        defaults={"name": "Формула тела", "kind": Tenant.Kind.SALON},
-    )
-    return tenant
+def _salons() -> dict[str, Tenant]:
+    """ОБА салона документа, а не один.
+
+    Защищённый слаг может быть уже заведён общей фикстурой репозитория —
+    берём существующего, иначе узел падал бы на уникальности, а не на предмете.
+    """
+    out: dict[str, Tenant] = {}
+    for slug in EXPECTED_BY_SALON:
+        tenant, _ = Tenant.objects.get_or_create(
+            slug=slug, defaults={"name": slug, "kind": Tenant.Kind.SALON}
+        )
+        out[slug] = tenant
+    return out
 
 
 def _row(tenant: Tenant, name: str, **over) -> SalonService:
@@ -88,18 +131,38 @@ def _row(tenant: Tenant, name: str, **over) -> SalonService:
     return SalonService.objects.create(**fields)
 
 
-def _whole_list(tenant: Tenant) -> dict[str, SalonService]:
-    """Весь подтверждённый список — и строки салона, и шаблоны канона."""
-    for _, code in {(n, c) for n, c in CONFIRMED}:
+def _whole_list() -> dict[tuple[str, str], SalonService]:
+    """Весь список — строки ОБОИХ салонов и шаблоны канона.
+
+    Строится из `read_document()`, а не из `CONFIRMED`: см. довод там.
+    """
+    salons = _salons()
+    for code in sorted({c for _, _, c in read_document()}):
         if not ServiceTemplate.objects.filter(canonical_code=code).exists():
             _tpl(code)
-    return {name: _row(tenant, name) for name, _ in CONFIRMED}
+    return {
+        (slug, name): _row(salons[slug], name)
+        for slug, name, _ in read_document()
+    }
 
 
 def _run(**options) -> str:
     out = StringIO()
     call_command("confirm_owner_mapping", stdout=out, stderr=StringIO(), **options)
     return out.getvalue()
+
+
+def _run_expecting_halt(**options) -> tuple[str, str]:
+    """Прогон, который обязан упереться в ворота, — с ЕГО ВЫВОДОМ.
+
+    Исключения печатаются до ворот, и без вывода узел проверил бы лишь факт
+    отказа, а не то, названа ли причина поимённо. «Останов произошёл» и
+    «оператор понял, почему» — разные утверждения.
+    """
+    out = StringIO()
+    with pytest.raises(CommandError) as err:
+        call_command("confirm_owner_mapping", stdout=out, stderr=StringIO(), **options)
+    return out.getvalue(), str(err.value)
 
 
 def _snapshot(rows) -> list[tuple]:
@@ -125,23 +188,35 @@ class TestTheListIsTheDocument:
 
         Разойдясь, они дали бы худший из возможных исходов: связь, у которой
         провенанс ссылается на документ, где написано ДРУГОЕ.
+
+        Сверяются ТРОЙКИ, включая салон. Прежняя редакция сверяла только пары
+        «услуга → код» — и пропустила то, что одна строка принадлежит другому
+        салону, хотя документ говорит это прямым текстом двумя строками выше
+        таблицы. Сверка, не покрывающая поле, по которому команда адресует,
+        не сверяет ничего важного.
         """
         assert DOCUMENT.exists(), f"документ основания не на месте: {DOCUMENT}"
-        text = DOCUMENT.read_text(encoding="utf-8")
-        section = text[text.index("## Подтверждено") : text.index("## НЕ подтверждено")]
-
-        import re
-
-        rows = re.findall(r"^\|\s*([^|]+?)\s*\|\s*`(\d+(?:\.\d+)+)`\s*\|", section, re.M)
-        assert list(rows) == [list(p) for p in map(list, CONFIRMED)] or rows == [
-            (n, c) for n, c in CONFIRMED
-        ], "список в коде разошёлся с документом основания"
+        assert read_document() == [tuple(x) for x in CONFIRMED], (
+            "список в коде разошёлся с документом основания"
+        )
 
     def test_the_list_holds_exactly_thirty_six(self) -> None:
         # Положительная пара к утверждениям об отсутствии ниже: если список
         # однажды опустеет, все проверки «не тронуто» станут вакуумными.
         assert len(CONFIRMED) == 36
-        assert len({n for n, _ in CONFIRMED}) == 36, "названия услуг обязаны быть различны"
+        assert len({(s, n) for s, n, _ in CONFIRMED}) == 36, (
+            "пары «салон + услуга» обязаны быть различны"
+        )
+
+    def test_the_distribution_by_salon_matches_the_correction(self) -> None:
+        """35 + 1, а не 36 у одного салона.
+
+        Ровно эта посылка и была неверна в первой редакции: `--apply` упал бы
+        на 35 из 36, а ворота напечатали бы ложную причину.
+        """
+        from collections import Counter
+
+        assert dict(Counter(s for s, _, _ in CONFIRMED)) == EXPECTED_BY_SALON
 
 
 class TestTheRuleNamesItsOrigin:
@@ -171,33 +246,33 @@ class TestTheRuleNamesItsOrigin:
 
 class TestBothSides:
     def test_the_listed_thirty_six_get_the_link(self) -> None:
-        salon = _salon()
-        rows = _whole_list(salon)
+        rows = _whole_list()
+        salons = _salons()
 
         _run(apply=True)
 
-        for name, code in CONFIRMED:
-            row = rows[name]
+        for slug, name, code in CONFIRMED:
+            row = rows[(slug, name)]
             row.refresh_from_db()
             assert row.mapping_status == SalonService.MappingStatus.VERIFIED, name
             assert row.template is not None, name
             assert row.template.canonical_code == code, name
 
     def test_provenance_is_read_from_the_field_on_every_row(self) -> None:
-        salon = _salon()
-        rows = _whole_list(salon)
+        rows = _whole_list()
+        salons = _salons()
 
         _run(apply=True)
 
-        for name in rows:
-            row = rows[name]
+        for key in rows:
+            row = rows[key]
             row.refresh_from_db()
-            assert row.mapping_confirmed_rule == OWNER_LIST_RULE, name
-            assert row.mapping_rule_version == OWNER_LIST_RULE_VERSION, name
-            assert row.mapping_source_ref == OWNER_LIST_SOURCE_REF, name
-            assert row.mapping_confirmed_at is not None, name
+            assert row.mapping_confirmed_rule == OWNER_LIST_RULE, key
+            assert row.mapping_rule_version == OWNER_LIST_RULE_VERSION, key
+            assert row.mapping_source_ref == OWNER_LIST_SOURCE_REF, key
+            assert row.mapping_confirmed_at is not None, key
             # Подтверждает правило — значит «кто» пуст: схема запрещает оба.
-            assert row.mapping_confirmed_by_id is None, name
+            assert row.mapping_confirmed_by_id is None, key
 
     def test_the_unconfirmed_stay_unmapped(self) -> None:
         """Вторая сторона, и она важнее первой.
@@ -205,10 +280,10 @@ class TestBothSides:
         Без неё мы измерили бы «что-то записалось», а не «записалось верное».
         Три из этих услуг в каноне отсутствуют вовсе — дыра канона, §77 п.54.
         """
-        salon = _salon()
-        _whole_list(salon)
+        _whole_list()
+        salons = _salons()
         untouched = [
-            _row(salon, name)
+            _row(salons[DEFAULT_SLUG], name)
             for name in (
                 "Биоэнергетический массаж",
                 "Биоэнергетический массаж детский",
@@ -237,9 +312,9 @@ class TestAddressingIsAProperty:
         подтверждённом списке. Отбор обязан отличать по списку, а не по
         «похоже на непривязанную услугу этого салона».
         """
-        salon = _salon()
-        _whole_list(salon)
-        stranger = _row(salon, "Услуга, которой нет в списке владельца")
+        _whole_list()
+        salons = _salons()
+        stranger = _row(salons[DEFAULT_SLUG], "Услуга, которой нет в списке владельца")
 
         _run(apply=True)
 
@@ -255,12 +330,12 @@ class TestAddressingIsAProperty:
         задел бы тёзку у соседа, и провенанс сказал бы, что владелец её
         подтверждал, — чего не было.
         """
-        salon = _salon()
-        _whole_list(salon)
+        _whole_list()
+        salons = _salons()
         other = Tenant.objects.create(
             slug=f"other-{uuid.uuid4().hex[:8]}", name="Соседний", kind=Tenant.Kind.SALON
         )
-        twin = _row(other, CONFIRMED[0][0])
+        twin = _row(other, CONFIRMED[0][1])
 
         _run(apply=True)
 
@@ -270,10 +345,10 @@ class TestAddressingIsAProperty:
 
     def test_only_the_two_allowed_fields_change(self) -> None:
         """Имя, цена, длительность и активность — салонные, их не трогают."""
-        salon = _salon()
-        rows = _whole_list(salon)
-        name = CONFIRMED[0][0]
-        row = rows[name]
+        rows = _whole_list()
+        salons = _salons()
+        slug, name = CONFIRMED[0][0], CONFIRMED[0][1]
+        row = rows[(slug, name)]
         SalonService.objects.filter(pk=row.pk).update(
             base_price="1234.00", duration_minutes=45, is_active=False
         )
@@ -289,8 +364,8 @@ class TestAddressingIsAProperty:
 
 class TestTheCountIsShownBeforeTheChange:
     def test_dry_run_prints_exactly_thirty_six(self) -> None:
-        salon = _salon()
-        _whole_list(salon)
+        _whole_list()
+        salons = _salons()
 
         out = _run()
 
@@ -303,9 +378,9 @@ class TestTheCountIsShownBeforeTheChange:
         Несовпадение значит, что данные на стенде уехали с 25.09 — и тогда
         пересматривать надо список, а не додавливать команду.
         """
-        salon = _salon()
-        rows = _whole_list(salon)
-        rows[CONFIRMED[0][0]].delete()
+        rows = _whole_list()
+        salons = _salons()
+        rows[(CONFIRMED[0][0], CONFIRMED[0][1])].delete()
 
         with pytest.raises(CommandError) as err:
             _run(apply=True)
@@ -320,10 +395,10 @@ class TestTheCountIsShownBeforeTheChange:
         отказ был ИМЕННО про число, — критерий не должен быть выполним ничем,
         кроме проверяемого предмета.
         """
-        salon = _salon()
-        rows = _whole_list(salon)
-        rows[CONFIRMED[0][0]].delete()
-        rest = [r for n, r in rows.items() if n != CONFIRMED[0][0]]
+        rows = _whole_list()
+        salons = _salons()
+        rows[(CONFIRMED[0][0], CONFIRMED[0][1])].delete()
+        rest = [r for k, r in rows.items() if k != (CONFIRMED[0][0], CONFIRMED[0][1])]
         before = _snapshot(rest)
 
         with pytest.raises(CommandError) as err:
@@ -336,8 +411,8 @@ class TestTheCountIsShownBeforeTheChange:
 class TestDryRunChangesNothing:
     def test_state_before_and_after_is_identical(self) -> None:
         """Сравнением состояния, а не доверием ключу."""
-        salon = _salon()
-        rows = _whole_list(salon)
+        rows = _whole_list()
+        salons = _salons()
         listed = list(rows.values())
         before = _snapshot(listed)
 
@@ -348,8 +423,8 @@ class TestDryRunChangesNothing:
 
 class TestIdempotence:
     def test_the_second_run_changes_nothing_including_the_date(self) -> None:
-        salon = _salon()
-        rows = _whole_list(salon)
+        rows = _whole_list()
+        salons = _salons()
 
         _run(apply=True)
         listed = list(rows.values())
@@ -358,3 +433,110 @@ class TestIdempotence:
         _run(apply=True)
 
         assert _snapshot(listed) == after_first
+
+
+class TestWhatMustNotBeOverwritten:
+    """Состояния, где кандидатов формально хватает, а запись была бы неверна.
+
+    Все четыре найдены ревью, и все четыре опаснее недобора: число сходится
+    или почти сходится, ворота довольны, а строка уходит не туда — или чужое
+    решение стирается вместе с его автором.
+    """
+
+    def test_a_duplicate_name_halts_and_is_named(self) -> None:
+        """Дубль имени останавливает прогон, а не схлопывается молча.
+
+        Схема его разрешает: уникальна только тройка (салон, шаблон, имя), а
+        у всех целей шаблон пуст. Словарь по имени оставил бы произвольного
+        двойника — и вот что важно: ЧИСЛО ПРИ ЭТОМ СОШЛОСЬ БЫ. Первая
+        редакция узла ждала останова, а команда доходила до конца: 36
+        перечисленных нашлись, дубль ушёл в пропуски, ворота на числе такой
+        промах не ловят по построению.
+
+        Чинилась команда, а не узел. Владелец подтвердил «строку с таким
+        названием»; если таких две, какую именно — неизвестно, и запись в
+        первую попавшуюся была бы догадкой. Правило то же, по которому девять
+        неподтверждённых остаются пустыми: пустая связь честнее неверной.
+        """
+        rows = _whole_list()
+        salons = _salons()
+        slug, name = CONFIRMED[0][0], CONFIRMED[0][1]
+        twin = _row(salons[slug], name)
+
+        out, _ = _run_expecting_halt(apply=True)
+
+        assert "ДУБЛЬ ИМЕНИ" in out, out
+        assert name in out
+        twin.refresh_from_db()
+        assert twin.mapping_status == SalonService.MappingStatus.UNMAPPED
+        assert twin.template_id is None
+
+    def test_a_row_decided_by_a_human_is_not_touched(self) -> None:
+        """Решение человека не переигрывается, и он не теряется.
+
+        `mapping_review` держит это инвариантом — «уже решено, не
+        переигрывается», — и оператору через админку такое недоступно.
+        Командой обходить инвариант нельзя тем более: тут боевой салон.
+        """
+        from django.contrib.auth import get_user_model
+
+        rows = _whole_list()
+        slug, name, code = CONFIRMED[0]
+        row = rows[(slug, name)]
+        человек = get_user_model().objects.create(username=f"u{uuid.uuid4().hex[:8]}")
+        SalonService.objects.filter(pk=row.pk).update(
+            template=ServiceTemplate.objects.get(canonical_code=code),
+            mapping_status=SalonService.MappingStatus.VERIFIED,
+            mapping_confirmed_by=человек,
+            mapping_confirmed_at=timezone.now(),
+            mapping_source_ref="решение человека",
+        )
+
+        out, _ = _run_expecting_halt(apply=True)
+
+        assert "УЖЕ РЕШЕНО" in out, out
+        row.refresh_from_db()
+        assert row.mapping_confirmed_by_id == человек.pk, "человек снят — этого нельзя"
+        assert row.mapping_source_ref == "решение человека", "основание затёрто"
+
+    def test_a_row_confirmed_by_another_rule_is_not_touched(self) -> None:
+        """Чужое правило — тоже «уже решено», и переписывать его нельзя."""
+        rows = _whole_list()
+        slug, name, code = CONFIRMED[0]
+        row = rows[(slug, name)]
+        SalonService.objects.filter(pk=row.pk).update(
+            template=ServiceTemplate.objects.get(canonical_code=code),
+            mapping_status=SalonService.MappingStatus.VERIFIED,
+            mapping_confirmed_rule="master_selected_from_canon",
+            mapping_rule_version="1",
+            mapping_confirmed_at=timezone.now(),
+            mapping_source_ref="master_select:42",
+        )
+
+        out, _ = _run_expecting_halt(apply=True)
+
+        assert "УЖЕ РЕШЕНО" in out, out
+        row.refresh_from_db()
+        assert row.mapping_confirmed_rule == "master_selected_from_canon"
+        assert row.mapping_source_ref == "master_select:42"
+
+    def test_a_provisional_canon_does_not_get_verified(self) -> None:
+        """Черновой канон не получает `verified`.
+
+        Админский путь такое прямо отказывает, а `check_canon_invariants`
+        считает `verified_on_provisional` размером дыры. Расширять дыру
+        командой нельзя.
+        """
+        rows = _whole_list()
+        slug, name, code = CONFIRMED[0]
+        ServiceTemplate.objects.filter(canonical_code=code).update(
+            lifecycle="provisional"
+        )
+
+        out, _ = _run_expecting_halt(apply=True)
+
+        assert "канон не approved" in out, out
+        row = rows[(slug, name)]
+        row.refresh_from_db()
+        assert row.mapping_status == SalonService.MappingStatus.UNMAPPED
+        assert row.template_id is None
