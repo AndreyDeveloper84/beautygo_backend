@@ -177,7 +177,7 @@ class GlobalSearchView(APIView):
             ).data
 
         if search_type in ('all', 'services'):
-            services = self._search_services(q, limit)
+            services = self._search_services(q, limit, viewer=request.user)
             result['services'] = SearchServiceSerializer(
                 services, many=True,
             ).data
@@ -188,11 +188,20 @@ class GlobalSearchView(APIView):
     def _search_specialists(
         self, q: str, request: Request, limit: int,
     ) -> QuerySet:
-        from users.sellable import sellable_q
+        from users.sellable import demo_visibility_q, sellable_q
 
+        # DRF-2420 — демонстрационный салон не показывается обычному клиенту.
+        #
+        # До этого тикета поиск к таблице салонов не присоединялся ВОВСЕ: демо
+        # удерживал единственный замок сида (`SpecialistProfile.status`), и
+        # владелец его открыл, чтобы показывать интерфейс. Так что правило
+        # здесь появляется впервые и ничего не дублирует.
         qs = (
             SpecialistProfile.objects
-            .filter(sellable_q(), user__is_active=True)
+            .filter(
+                sellable_q(), demo_visibility_q(request.user),
+                user__is_active=True,
+            )
             .select_related('user', 'works_at')
             # Превью услуг читает оба слоя каталога — без prefetch это
             # два запроса на каждую строку выдачи.
@@ -244,7 +253,7 @@ class GlobalSearchView(APIView):
 
         return qs.order_by('-rating')[:limit]
 
-    def _search_services(self, q: str, limit: int) -> list[dict]:
+    def _search_services(self, q: str, limit: int, viewer=None) -> list[dict]:
         """Услуги из ОБОИХ слоёв каталога, одной формой.
 
         Легаси-ветка сохраняет прежний путь целиком, включая PG-ранкинг
@@ -257,13 +266,15 @@ class GlobalSearchView(APIView):
         модели, общего queryset у них нет.
         """
         from services.offer_sellable import sellable_legacy_q
-        from users.sellable import sellable_q
+        from users.sellable import demo_visibility_q, sellable_q
 
         legacy_qs = (
             Service.objects
             .filter(sellable_legacy_q())
             .select_related('category', 'specialist', 'specialist__user')
             .filter(sellable_q("specialist"))
+            # DRF-2420 — тем же предикатом, через префикс мастера.
+            .filter(demo_visibility_q(viewer, "specialist"))
             .filter(
                 Q(name__icontains=q)
                 | Q(description__icontains=q)
@@ -298,7 +309,7 @@ class GlobalSearchView(APIView):
                 category=resolved_category(link.salon_service),
                 specialist=link.specialist,
             )
-            for link in self._salon_service_matches(q, limit)
+            for link in self._salon_service_matches(q, limit, viewer=viewer)
         ]
 
         rows = legacy_rows + salon_rows
@@ -310,7 +321,7 @@ class GlobalSearchView(APIView):
         return rows[:limit]
 
     @staticmethod
-    def _salon_service_matches(q: str, limit: int) -> list:
+    def _salon_service_matches(q: str, limit: int, viewer=None) -> list:
         """Активные бронируемые связки, совпавшие по названию/категории.
 
         Категория разрешается с запасным путём через шаблон: своя
@@ -318,7 +329,7 @@ class GlobalSearchView(APIView):
         """
         from services.models import SpecialistService
         from services.offer_sellable import sellable_offer_q
-        from users.sellable import sellable_q
+        from users.sellable import demo_visibility_q, sellable_q
 
         category_match = (
             Q(salon_service__category__name__icontains=q)
@@ -331,6 +342,8 @@ class GlobalSearchView(APIView):
             SpecialistService.objects
             .filter(sellable_offer_q())
             .filter(sellable_q("specialist"))
+            # DRF-2420 — третья выборка поиска, тот же предикат.
+            .filter(demo_visibility_q(viewer, "specialist"))
             .filter(Q(salon_service__name__icontains=q) | category_match)
             .select_related(
                 'salon_service', 'salon_service__category',

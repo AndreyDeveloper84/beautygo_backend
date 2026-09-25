@@ -64,6 +64,15 @@ def goal_master_coverage(*, limit: int = COVERAGE_LIMIT) -> dict[str, int]:
         result = engine.recommend(
             RecommendationQuery(
                 goal_category_ids=tuple(category_ids), limit=limit,
+                # DRF-2420: этот счёт кормит сухой прогон `seed_demo_salons`,
+                # который отвечает на вопрос «что появится, если завести эти
+                # салоны». Спрятав от него демо, мы получили бы «после» равное
+                # «до» — и прочиталось бы это не как «демо скрыто от клиента», а
+                # как «связи не работают, салоны ничего не добавляют». То есть
+                # признак стоит здесь не в виде исключения из правила, а потому
+                # что спрашивающий тут — оператор, и предмет вопроса — сами
+                # демо-салоны.
+                viewer_sees_demo=True,
             ),
             use_cache=False,
         )

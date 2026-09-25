@@ -30,8 +30,14 @@ EXTERNAL_USER_ID = "bot:resolver"
 _FIXTURE_CANDIDATES: list = []
 
 
-def fixture_source_factory():
-    """Фабрика источника для `RECOMMENDATION_CANDIDATE_SOURCE` в тестах."""
+def fixture_source_factory(*, viewer=None):
+    """Фабрика источника для `RECOMMENDATION_CANDIDATE_SOURCE` в тестах.
+
+    ``viewer`` принимается, потому что связка его передаёт (DRF-2420: границы
+    показа демо-салонов зависят от спрашивающего). Этому источнику он не нужен
+    — он отдаёт заранее собранные факты, — но подпись фабрики должна отвечать
+    контракту, иначе тест зелен на ложной форме вызова.
+    """
     return StaticSource(_FIXTURE_CANDIDATES)
 
 

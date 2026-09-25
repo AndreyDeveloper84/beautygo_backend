@@ -53,9 +53,16 @@ class FavoriteListView(GenericAPIView):
     serializer_class = SpecialistListSerializer
 
     def get(self, request: Request) -> Response:
+        from users.sellable import demo_visibility_q
+
+        # DRF-2420 — демонстрационный салон не показывается обычному клиенту и
+        # в избранном. Список избранного рисует ПОЛНУЮ карточку мастера
+        # (адрес салона, цены услуг), поэтому «правило, снимаемое прямой
+        # ссылкой, — не правило» относится к нему ровно так же, как к каталогу.
         specialists = (
             SpecialistProfile.objects
             .filter(favorited_by__user=request.user)
+            .filter(demo_visibility_q(request.user))
             .select_related("user")
             .prefetch_related("services")
             .order_by("-favorited_by__created_at")
@@ -91,8 +98,15 @@ class FavoriteAddRemoveView(GenericAPIView):
         # Existence check — POST against an unknown specialist still
         # surfaces 404 so the mobile UI can show "not found" instead of
         # silently swallowing.
+        from users.sellable import demo_visibility_q
+
         try:
-            specialist = SpecialistProfile.objects.get(pk=pk)
+            # DRF-2420 — идентификатор демо-мастера можно узнать (они живые на
+            # стенде), поэтому добавление в избранное закрывается тем же
+            # предикатом: иначе правило снималось бы одним POST'ом.
+            specialist = SpecialistProfile.objects.filter(
+                demo_visibility_q(request.user)
+            ).get(pk=pk)
         except SpecialistProfile.DoesNotExist:
             return error_response(
                 "SPECIALIST_NOT_FOUND",

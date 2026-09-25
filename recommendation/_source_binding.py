@@ -29,7 +29,7 @@ class CandidateSourceNotConfigured(RuntimeError):
     """``RECOMMENDATION_CANDIDATE_SOURCE`` не задан или не импортируется."""
 
 
-def get_candidate_source() -> CandidateSource:
+def get_candidate_source(*, viewer=None) -> CandidateSource:
     """Вернуть источник фактов или сказать, что его нет.
 
     Значение настройки — путь к **фабрике** (вызываемому объекту без
@@ -47,4 +47,8 @@ def get_candidate_source() -> CandidateSource:
         factory = import_string(path)
     except ImportError as exc:
         raise CandidateSourceNotConfigured(f"RECOMMENDATION_CANDIDATE_SOURCE={path!r} не импортируется: {exc}") from exc
-    return factory()
+    # DRF-2420: фабрика получает СПРАШИВАЮЩЕГО — от него зависят границы
+    # показа демонстрационных салонов. Аргумент ключевой и необязательный;
+    # вызов без него означает правило обычного клиента (демо скрыто), то есть
+    # ошибка на стороне вызывающего не может ПОКАЗАТЬ лишнего.
+    return factory(viewer=viewer)
