@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import pytest
 
+from users.account_reset import parse_account as account_reset_parse
+from users.identity_card import parse_account as identity_card_parse
 from users.services import (
     InvalidExternalUserIDError,
     external_id_shape,
@@ -69,9 +71,23 @@ class TestTheLivePathThroughTheResolver:
     """Не функция, а путь: текст, который РОЖДАЕТ продукт.
 
     Узел на `external_id_shape` сам по себе зелен и при нулевом числе вызовов —
-    ровно так слой и оказался непроверенным. Здесь падает настоящий резолвер, и
-    проверяется текст его исключения: то самое, что уезжает в Sentry и в тело
+    ровно так слой и оказался непроверенным. Здесь падают настоящие функции, и
+    проверяется текст их исключений: то самое, что уезжает в Sentry и в тело
     400.
+
+    **Сколько мест пришпилено — честно.** Ревью прошло все 11 вызовов по
+    одному (возвращая `external_id_shape(X)` → `X!r`) и намерило: узлы замечают
+    **один** из одиннадцати — проверку формы в `resolve_external_user`. Отсюда
+    добавлены ещё два пути, и оба операторские, то есть те, чей текст человек
+    читает глазами: разбор спецификации при сбросе учётки и в карточке
+    личности. Итого пришпилено три места из одиннадцати.
+
+    Остальные восемь держатся ВТОРЫМ слоем, и это сказано, а не подразумевается:
+    поштучный узел на каждое сообщение стоил бы дороже, чем стоит риск, а вторая
+    линия чистит их все — включая тот носитель, который первый слой не закрывает
+    вовсе (`NotAllowed.listed_as`, текст собирается внутри класса исключения).
+    Если второй слой когда-нибудь снимут, это красное придёт из
+    `core/tests/test_identity_not_in_sentry_2020c.py`, а не отсюда.
     """
 
     @pytest.mark.django_db
@@ -86,3 +102,24 @@ class TestTheLivePathThroughTheResolver:
         # Положительная сторона: отказ назвал СЕБЯ, иначе «личности нет» было бы
         # правдой и о пустом сообщении.
         assert "симв." in text, f"в тексте нет формы — диагностика потеряна: {text!r}"
+
+    @pytest.mark.parametrize(
+        "parse,where",
+        [
+            (account_reset_parse, "сброс учётки: спецификацию печатает оператор"),
+            (identity_card_parse, "карточка личности: тот же ввод, другой экран"),
+        ],
+    )
+    def test_the_operator_facing_parsers_refuse_without_naming_the_person(self, parse, where):
+        """Операторские разборы — те, чей текст человек читает глазами.
+
+        Обе функции падают на вводе без двоеточия, и обе печатали `{spec!r}`.
+        Проверяются живым вызовом, а не через форму: узел на форме зелен и при
+        нулевом числе вызовов.
+        """
+        with pytest.raises(ValueError) as caught:
+            parse("729481")
+
+        text = str(caught.value)
+        assert "729481" not in text, f"{where}: личность в тексте — {text!r}"
+        assert "симв." in text, f"{where}: формы в тексте нет — {text!r}"
