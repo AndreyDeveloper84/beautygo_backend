@@ -65,7 +65,9 @@ def read_document() -> list[tuple[str, str, str]]:
     он `formula-tela`, как прямо говорит поправка.
     """
     text = DOCUMENT.read_text(encoding="utf-8")
-    section = text[text.index("## Подтверждено") : text.index("## НЕ подтверждено")]
+    start = text.index("## Подтверждено")
+    end = text.index("## НЕ подтверждено")
+    section = text[start:end]
     out: list[tuple[str, str, str]] = []
     for line in section.splitlines():
         if not line.startswith("|"):
@@ -247,7 +249,6 @@ class TestTheRuleNamesItsOrigin:
 class TestBothSides:
     def test_the_listed_thirty_six_get_the_link(self) -> None:
         rows = _whole_list()
-        salons = _salons()
 
         _run(apply=True)
 
@@ -260,7 +261,6 @@ class TestBothSides:
 
     def test_provenance_is_read_from_the_field_on_every_row(self) -> None:
         rows = _whole_list()
-        salons = _salons()
 
         _run(apply=True)
 
@@ -331,7 +331,6 @@ class TestAddressingIsAProperty:
         подтверждал, — чего не было.
         """
         _whole_list()
-        salons = _salons()
         other = Tenant.objects.create(
             slug=f"other-{uuid.uuid4().hex[:8]}", name="Соседний", kind=Tenant.Kind.SALON
         )
@@ -346,7 +345,6 @@ class TestAddressingIsAProperty:
     def test_only_the_two_allowed_fields_change(self) -> None:
         """Имя, цена, длительность и активность — салонные, их не трогают."""
         rows = _whole_list()
-        salons = _salons()
         slug, name = CONFIRMED[0][0], CONFIRMED[0][1]
         row = rows[(slug, name)]
         SalonService.objects.filter(pk=row.pk).update(
@@ -365,7 +363,6 @@ class TestAddressingIsAProperty:
 class TestTheCountIsShownBeforeTheChange:
     def test_dry_run_prints_exactly_thirty_six(self) -> None:
         _whole_list()
-        salons = _salons()
 
         out = _run()
 
@@ -379,7 +376,6 @@ class TestTheCountIsShownBeforeTheChange:
         пересматривать надо список, а не додавливать команду.
         """
         rows = _whole_list()
-        salons = _salons()
         rows[(CONFIRMED[0][0], CONFIRMED[0][1])].delete()
 
         with pytest.raises(CommandError) as err:
@@ -396,7 +392,6 @@ class TestTheCountIsShownBeforeTheChange:
         кроме проверяемого предмета.
         """
         rows = _whole_list()
-        salons = _salons()
         rows[(CONFIRMED[0][0], CONFIRMED[0][1])].delete()
         rest = [r for k, r in rows.items() if k != (CONFIRMED[0][0], CONFIRMED[0][1])]
         before = _snapshot(rest)
@@ -412,7 +407,6 @@ class TestDryRunChangesNothing:
     def test_state_before_and_after_is_identical(self) -> None:
         """Сравнением состояния, а не доверием ключу."""
         rows = _whole_list()
-        salons = _salons()
         listed = list(rows.values())
         before = _snapshot(listed)
 
@@ -424,7 +418,6 @@ class TestDryRunChangesNothing:
 class TestIdempotence:
     def test_the_second_run_changes_nothing_including_the_date(self) -> None:
         rows = _whole_list()
-        salons = _salons()
 
         _run(apply=True)
         listed = list(rows.values())
@@ -463,13 +456,17 @@ class TestWhatMustNotBeOverwritten:
         slug, name = CONFIRMED[0][0], CONFIRMED[0][1]
         twin = _row(salons[slug], name)
 
+        original = rows[(slug, name)]
         out, _ = _run_expecting_halt(apply=True)
 
         assert "ДУБЛЬ ИМЕНИ" in out, out
         assert name in out
-        twin.refresh_from_db()
-        assert twin.mapping_status == SalonService.MappingStatus.UNMAPPED
-        assert twin.template_id is None
+        # Обе строки: и двойник, и ИСХОДНАЯ. Останов обязан удержать запись
+        # целиком — иначе «остановились» значило бы «успели половину».
+        for row in (twin, original):
+            row.refresh_from_db()
+            assert row.mapping_status == SalonService.MappingStatus.UNMAPPED
+            assert row.template_id is None
 
     def test_a_row_decided_by_a_human_is_not_touched(self) -> None:
         """Решение человека не переигрывается, и он не теряется.
