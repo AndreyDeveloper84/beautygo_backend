@@ -57,9 +57,14 @@
 """
 from __future__ import annotations
 
+import ast
 import io
 import json
+import os
+import re
 import sys
+from functools import lru_cache
+from pathlib import Path
 
 import pytest
 import sentry_sdk
@@ -277,6 +282,67 @@ class TestTheIdentityDoesNotLeaveInAnyCarrier:
         assert any("sentry_live_probe_urls" in str(f.get("filename") or "") for f in frames)
 
 
+#: Имена, за которыми в этом репозитории стоит внешний идентификатор.
+_IDENTITY_SLOTS = frozenset({
+    "external_user_id",
+    "HTTP_X_EXTERNAL_USER_ID",
+    "X-External-User-ID",
+    "external_id",
+})
+
+#: `.claude` — вложенные рабочие деревья: без этого сканер видит 28 копий
+#: репозитория и краснеет на машине автора, оставаясь зелёным в CI.
+_SKIP_DIRS = frozenset({"venv", ".venv", "node_modules", "__pycache__", ".claude", ".git"})
+
+#: Форма контракта (`users.services._EXTERNAL_USER_ID_RE`), но НЕ импорт его:
+#: узел должен краснеть и если контракт ослабят, а не подстраиваться под него.
+_CONTRACT_SHAPE = re.compile(r"^[a-z][a-z0-9_-]*(?::[A-Za-z0-9_-]{1,64})+$")
+
+
+@lru_cache(maxsize=1)
+def _identity_fixtures() -> tuple[tuple[str, str], ...]:
+    """{значение: где впервые встретилось} — по разбору кода, не по грепу.
+
+    Кэш и обход с ОТСЕЧЕНИЕМ каталогов, а не `rglob` с фильтром после: узлов,
+    зовущих перепись, два, и без кэша дерево разбиралось дважды — замер дал
+    8.9 с и 5.9 с. С одним разбором и отсечением — один раз и быстрее, потому
+    что `rglob` сначала перечисляет всё (включая вложенные рабочие деревья) и
+    только потом отбрасывает.
+    """
+    repo = Path(__file__).resolve().parents[2]
+    found: dict[str, str] = {}
+
+    def note(value: object, rel: str, lineno: int) -> None:
+        if isinstance(value, str) and _CONTRACT_SHAPE.match(value):
+            found.setdefault(value, f"{rel}:{lineno}")
+
+    for dirpath, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            path = Path(dirpath) / name
+            rel = path.relative_to(repo).as_posix()
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+            except (SyntaxError, ValueError, OSError):
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    for kw in node.keywords:
+                        if kw.arg in _IDENTITY_SLOTS and isinstance(kw.value, ast.Constant):
+                            note(kw.value.value, rel, kw.value.lineno)
+                elif isinstance(node, ast.Dict):
+                    for key, value in zip(node.keys, node.values):
+                        if (
+                            isinstance(key, ast.Constant)
+                            and key.value in _IDENTITY_SLOTS
+                            and isinstance(value, ast.Constant)
+                        ):
+                            note(value.value, rel, value.lineno)
+    return tuple(found.items())
+
+
 class TestEveryIdentityTheCatalogCarries:
     """Шаблон проверяется ВОКАБУЛЯРОМ ПРОДУКТА, а не соседним шаблоном.
 
@@ -297,54 +363,8 @@ class TestEveryIdentityTheCatalogCarries:
     не видно — как и всякому сторожу написания.
     """
 
-    #: Имена, за которыми в этом репозитории стоит внешний идентификатор.
-    IDENTITY_SLOTS = frozenset({
-        "external_user_id",
-        "HTTP_X_EXTERNAL_USER_ID",
-        "X-External-User-ID",
-        "external_id",
-    })
-
-    #: `.claude` — вложенные рабочие деревья: без этого сканер видит 28 копий
-    #: репозитория и краснеет на машине автора, оставаясь зелёным в CI.
-    SKIP_PARTS = frozenset({"venv", ".venv", "node_modules", "__pycache__", ".claude"})
-
     def _fixtures(self) -> dict[str, str]:
-        """{значение: где впервые встретилось} — по разбору кода, не по грепу."""
-        import ast
-        import re as _re
-        from pathlib import Path
-
-        shape = _re.compile(r"^[a-z][a-z0-9_-]*(?::[A-Za-z0-9_-]{1,64})+$")
-        repo = Path(__file__).resolve().parents[2]
-        found: dict[str, str] = {}
-
-        def note(value: object, rel: str, lineno: int) -> None:
-            if isinstance(value, str) and shape.match(value):
-                found.setdefault(value, f"{rel}:{lineno}")
-
-        for path in repo.rglob("*.py"):
-            rel = path.relative_to(repo).as_posix()
-            if set(rel.split("/")) & self.SKIP_PARTS:
-                continue
-            try:
-                tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
-            except (SyntaxError, ValueError):
-                continue
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Call):
-                    for kw in node.keywords:
-                        if kw.arg in self.IDENTITY_SLOTS and isinstance(kw.value, ast.Constant):
-                            note(kw.value.value, rel, kw.value.lineno)
-                elif isinstance(node, ast.Dict):
-                    for key, value in zip(node.keys, node.values):
-                        if (
-                            isinstance(key, ast.Constant)
-                            and key.value in self.IDENTITY_SLOTS
-                            and isinstance(value, ast.Constant)
-                        ):
-                            note(value.value, rel, value.lineno)
-        return found
+        return dict(_identity_fixtures())
 
     @staticmethod
     def _operator_spec(value: str) -> str | None:
