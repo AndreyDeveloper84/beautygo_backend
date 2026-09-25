@@ -169,10 +169,17 @@ class InternalMeIdentityView(APIView):
             "external_user_id=%s",
             user.id,
             user.is_proxy,
-            # Logged per the existing s2s policy (nutrition/views.py does
-            # the same): the external id is an opaque channel handle, not
-            # PII — no phone, email or name is emitted here or anywhere
-            # on this path.
+            # Прежнее обоснование гласило: «the external id is an opaque
+            # channel handle, not PII». После DRF-2020 C оно неверно дважды:
+            # идентификатор у канала НАЗЫВАЕТ человека в чужой системе, и
+            # значение здесь больше не доезжает до журнала — фильтр ПДн
+            # заменяет его на `[IDENTITY]`.
+            #
+            # Строка оставлена намеренно: оператору нужен ФАКТ «личность в
+            # запросе была» и была ли она прокси, а сопоставление делается по
+            # `user_id` рядом. То же решение и та же причина, что у создания
+            # прокси в `users/services.py`: при конфликте двух решений действует
+            # то, у кого есть сторож в CI, — у `scripts/pii_guard.py` он есть.
             request.META.get("HTTP_X_EXTERNAL_USER_ID", ""),
         )
 
