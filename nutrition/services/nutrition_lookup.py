@@ -200,10 +200,12 @@ class NutritionLookup:
                 facts = self._usda.lookup(dish_name, portion_g=portion_g)
                 if facts is not None:
                     return facts
-                # DRF-2334: «источник не знает такого блюда» — не поломка
-                # источника. Отдельная строка, INFO: по ней считают, чего
-                # не хватает справочнику, и она не будит тревогу.
-                logger.info("nutrition.usda.miss")
+                # DRF-2334 + DRF-2381. Промах называет ПРИЧИНУ, и говорит
+                # её сам слой — он один знает, отправляли мы запрос или нет:
+                #   miss reason=unmapped dish=…            нет в словаре
+                #   miss reason=not_in_source query=… source=dict|as_is
+                # Общая строка отсюда убрана, чтобы на один промах не
+                # приходилось две записи, а причина не тонула в дубле.
             except Exception as exc:  # noqa: BLE001 — duck-type on class name
                 if exc.__class__.__name__ != "USDAUnavailableError":
                     raise
