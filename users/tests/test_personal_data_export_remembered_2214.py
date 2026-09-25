@@ -161,6 +161,31 @@ class TestTheWholeSubjectAndNobodyElse:
         assert [g["goal_text"] for g in data["goals"]["goals"]] == [GOAL_TEXT]
         assert "соседская цель" not in repr(data)
 
+    def test_a_neighbours_scan_and_its_telemetry_are_not_exported(self, user) -> None:  # noqa: F811
+        """Сосед со сканом: в дневнике нет ни его блюда, ни его телеметрии.
+
+        Соседний узел выше держит эту границу на целях; дневник ею не закрыт,
+        а именно он — ось DRF-2428: подозревали, что в `food_scans[0]` попадает
+        чужой скан. Чтением это опровергнуто (выгрузка фильтрует по человеку),
+        узел делает то же утверждение проверяемым.
+        """
+        _seed_diary(user)
+        neighbour = User.objects.create_user(
+            username="exp2214_scan_neighbour", password="x", role="client", phone="+79995559005"
+        )
+        theirs = _seed_diary(neighbour, tag="-neighbour")
+        theirs.dish_name = "соседский борщ"
+        theirs.provider_cost_usd = 0.9876
+        theirs.raw_response = {"dish": "соседский борщ"}
+        theirs.save(update_fields=["dish_name", "provider_cost_usd", "raw_response"])
+
+        diary = _export(user)["food_diary"]
+
+        assert len(diary["food_scans"]) == 1
+        assert diary["food_scans"][0]["dish_name"] == "Борщ"
+        assert _carriers("0.9876", diary) == [], _carriers("0.9876", diary)
+        assert "соседский борщ" not in repr(diary)
+
 
 class TestAnExportCreatesNothing:
     def test_empty_sections_for_a_person_with_nothing(self, user) -> None:  # noqa: F811
