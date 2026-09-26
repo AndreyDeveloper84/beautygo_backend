@@ -9,6 +9,7 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils.text import slugify
 
+from core.image_privacy import MetadataFreeImageField
 from services.canonical_code import validate_canonical_code
 from services.normalization import normalize_service_name
 
@@ -556,7 +557,7 @@ class Service(models.Model):
     duration_minutes = models.PositiveIntegerField(
         validators=[MinValueValidator(15), MaxValueValidator(480)],
     )
-    image = models.ImageField(
+    image = MetadataFreeImageField(
         upload_to='services/', blank=True, null=True,
     )
     is_active = models.BooleanField(default=True)
