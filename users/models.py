@@ -3,6 +3,7 @@ import uuid
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
+from core.image_privacy import MetadataFreeImageField
 from users.timezones import validate_iana_timezone
 from django.conf import settings
 from django.utils import timezone
@@ -209,7 +210,7 @@ class Profile(models.Model):
     )
 
     full_name = models.CharField(max_length=255)
-    avatar = models.ImageField(upload_to='avatars/', blank=True, null=True)
+    avatar = MetadataFreeImageField(upload_to='avatars/', blank=True, null=True)
     bio = models.TextField(blank=True)
     city = models.CharField(max_length=100, blank=True)
     experience_years = models.PositiveIntegerField(default=0)
@@ -286,7 +287,7 @@ class SpecialistProfile(models.Model):
         ),
     )
     display_name = models.CharField(max_length=255)
-    avatar = models.ImageField(
+    avatar = MetadataFreeImageField(
         upload_to='specialists/avatars/', blank=True, null=True,
     )
     bio = models.TextField(blank=True)
@@ -447,7 +448,7 @@ class SpecialistPortfolio(models.Model):
         on_delete=models.CASCADE,
         related_name='portfolio',
     )
-    image = models.ImageField(upload_to='specialists/portfolio/')
+    image = MetadataFreeImageField(upload_to='specialists/portfolio/')
     sort_order = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
