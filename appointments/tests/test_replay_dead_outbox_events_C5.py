@@ -150,7 +150,9 @@ class TestTenantFilter:
         other = _dead_event(payload={"event_id": "b", "tenant_id": "t-2"})
 
         call_command(
+            # --topic обязателен при --tenant с DRF-2525.
             "replay_dead_outbox_events", "--tenant", "t-1",
+            "--topic", "booking.created",
             stdout=StringIO(),
         )
         target.refresh_from_db()
@@ -169,7 +171,9 @@ class TestSinceFilter:
 
         cutoff = (timezone.now() - timedelta(minutes=30)).isoformat()
         call_command(
+            # --topic обязателен при --since с DRF-2525.
             "replay_dead_outbox_events", "--since", cutoff,
+            "--topic", "booking.created",
             stdout=StringIO(),
         )
         old.refresh_from_db()
@@ -181,6 +185,7 @@ class TestSinceFilter:
         with pytest.raises(CommandError, match="ISO-8601"):
             call_command(
                 "replay_dead_outbox_events", "--since", "yesterday",
+                "--topic", "booking.created",
                 stdout=StringIO(),
             )
 
