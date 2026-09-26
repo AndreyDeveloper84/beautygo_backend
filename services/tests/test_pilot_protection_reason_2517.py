@@ -65,6 +65,10 @@ def _definitions() -> list[tuple[str, str]]:
 OLD_REASON = re.compile(
     r"(?<!«)настоящ\w+ запис\w+ настоящих людей|напоминания живым людям", re.IGNORECASE
 )
+#: Положительная пара к ``OLD_REASON``: та же фраза, но в «ёлочках». Единственный
+#: известный носитель — рассказ о старой причине у ``PROTECTED_SLUGS`` сида.
+QUOTED_OLD_REASON = re.compile(r"«настоящ\w+ запис\w+ настоящих людей»", re.IGNORECASE)
+QUOTED_CARRIER = "services/management/commands/seed_demo_salons.py"
 
 
 def test_the_refuted_reason_does_not_come_back() -> None:
@@ -74,7 +78,7 @@ def test_the_refuted_reason_does_not_come_back() -> None:
     защиту чужими руками. Миграции не читаются: исторический текст там про
     другой предмет (каскад ``PROTECT`` при откате).
     """
-    scanned, hits = 0, []
+    scanned, hits, quoted = 0, [], []
     for path in sorted(ROOT.rglob("*.py")):
         rel = path.relative_to(ROOT).as_posix()
         if rel.startswith((".venv/", "venv/", "node_modules/")) or "/migrations/" in rel:
@@ -85,8 +89,13 @@ def test_the_refuted_reason_does_not_come_back() -> None:
         text = path.read_text(encoding="utf-8", errors="replace")
         for match in OLD_REASON.finditer(text):
             hits.append(f"{rel}:{text.count(chr(10), 0, match.start()) + 1}")
-    # Охват: пустой обход дал бы «чисто» на любом дереве.
+        if QUOTED_OLD_REASON.search(text):
+            quoted.append(rel)
+    # Положительная пара — ПЕРЕД отрицательным утверждением и на тех же данных:
+    # обход обязан найти известную цитату. Иначе «не нашёл запрещённое» прошло
+    # бы и при ослепшем чтении (кодировка, не тот корень, сломанный шаблон).
     assert scanned > 500, scanned
+    assert quoted == [QUOTED_CARRIER], quoted
     assert hits == [], hits
 
 
