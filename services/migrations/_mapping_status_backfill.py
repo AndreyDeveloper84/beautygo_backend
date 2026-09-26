@@ -47,14 +47,14 @@ def classify(salon_service_model) -> dict[str, int]:
     есть уничтожил бы человеческую работу тем самым механизмом, который
     заведён её сохранять.
     """
-    undecided = salon_service_model.objects.filter(mapping_status="unmapped")
+    # DRF-2429: само правило переехало в ``services.mapping_status`` — у него
+    # появился второй вызывающий (шаг сида), и две копии одного перехода
+    # разошлись бы молча. Здесь остался исторический дом: миграция ссылается
+    # на этот модуль, поведение не изменилось, реализация одна.
+    from services.mapping_status import promote_linked_undecided
 
-    review_required = undecided.filter(template__isnull=False).update(
-        mapping_status="review_required",
-    )
-    # Второй ветки нет: «связи нет» — это и есть умолчание `unmapped`,
-    # и переписывать его в него же значило бы делать вид, что решение
-    # принято. Считаем для отчёта, не пишем.
-    unmapped = salon_service_model.objects.filter(mapping_status="unmapped").count()
-
-    return {"review_required": review_required, "unmapped": unmapped}
+    counts = promote_linked_undecided(salon_service_model)
+    return {
+        "review_required": counts["promoted"],
+        "unmapped": counts["still_unmapped"],
+    }

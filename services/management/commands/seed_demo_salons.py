@@ -96,6 +96,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from services.goal_coverage import goal_master_coverage
+from services.mapping_status import promote_linked_undecided
 from services.models import SalonService, ServiceTemplate, SpecialistService
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
@@ -127,6 +128,10 @@ class _Counts:
         "reused_users",
         "reused_salon_services",
         "reused_specialist_services",
+        # Переход ``unmapped → review_required`` по своим строкам (DRF-2429).
+        "mapping_promoted",
+        "mapping_still_unmapped",
+        "mapping_examined",
     )
 
     def __init__(self) -> None:
@@ -333,7 +338,28 @@ class Command(BaseCommand):
             tenant = self._upsert_tenant(salon, counts)
             specialists = self._upsert_specialists(salon, tenant, counts)
             self._upsert_services(salon, tenant, specialists, counts)
+        self._promote_own_rows(salons, counts)
         return counts
+
+    @staticmethod
+    def _promote_own_rows(salons: list[dict], counts: _Counts) -> None:
+        """Сделать со своими строками тот переход, который 08.09 сделала 0017.
+
+        Без этого шага строка нового запуска остаётся ``unmapped``, и правило
+        связи демо-услуг (``confirm_seeded_links``, DRF-2408) её не видит
+        (DRF-2429). Правило одно — ``services.mapping_status``; здесь только
+        область: строки сида в салонах этого прогона, чужих сид не решает.
+        Строки с принятым решением правило не трогает, поэтому повторный
+        прогон подтверждённую связь назад в очередь не сбросит.
+        """
+        own = SalonService.objects.filter(
+            tenant__slug__in=[salon["slug"] for salon in salons],
+            source=SalonService.Source.SEED,
+        )
+        result = promote_linked_undecided(own)
+        counts.mapping_promoted = result["promoted"]
+        counts.mapping_still_unmapped = result["still_unmapped"]
+        counts.mapping_examined = result["examined"]
 
     @staticmethod
     def _upsert_tenant(salon: dict, counts: _Counts) -> Tenant:
@@ -617,6 +643,12 @@ class Command(BaseCommand):
                 f"salon_services={counts.reused_salon_services} "
                 f"links={counts.reused_specialist_services}"
             )
+        # Охват — первым: ноль «без привязки» честен только при непустом.
+        self.stdout.write(
+            f"{prefix}mapping: examined={counts.mapping_examined} "
+            f"promoted_to_review_required={counts.mapping_promoted} "
+            f"still_unmapped={counts.mapping_still_unmapped}"
+        )
         self._print_coverage(before, after)
         if applied:
             self.stdout.write(
