@@ -30,7 +30,7 @@ from appointments.models import OutboxEvent
 from djangoProject.health import OUTBOX_CACHE_KEY, OUTBOX_CACHE_TTL_S
 
 READY_URL = "/api/v1/health/ready/"
-SECRET_MARKER = "payload-must-not-leak"
+PAYLOAD_MARKER = "payload-must-not-leak"
 
 
 @pytest.fixture
@@ -49,7 +49,7 @@ def _fresh_outbox_cache():
 def _row(topic: str, status: str, **kwargs) -> OutboxEvent:
     defaults = dict(
         topic=topic,
-        payload={"event_id": "x", "tenant_id": "t-1", "data": {"note": SECRET_MARKER}},
+        payload={"event_id": "x", "tenant_id": "t-1", "data": {"note": PAYLOAD_MARKER}},
         external_delivery_enabled=True,
         bot_delivery_status=status,
     )
@@ -179,6 +179,6 @@ class TestNoIdsNoPayload:
         row = _row(OutboxEvent.Topic.BOOKING_COMPLETED, OutboxEvent.BotDeliveryStatus.DEAD)
         raw = json.dumps(anon.get(READY_URL).json())
         assert str(row.id) not in raw
-        assert SECRET_MARKER not in raw
+        assert PAYLOAD_MARKER not in raw
         assert "t-1" not in raw
         assert "HTTP 500" not in raw
