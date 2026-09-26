@@ -91,8 +91,29 @@ PNG_BYTES = (
 )
 
 
-#: Снимок правдоподобного размера: PNG-заголовок плюс наполнитель.
-REAL_PHOTO_BYTES = PNG_BYTES + bytes(40_000)
+def _real_photo() -> bytes:
+    """Настоящий PNG правдоподобного размера: шум не сжимается.
+
+    DRF-2522: раньше здесь был PNG-заголовок плюс 40 000 нулей ПОСЛЕ
+    ``IEND``. Хранимые снимки теперь проходят срезание метаданных, а оно
+    отбрасывает всё после конца контейнера — стенд сжимался до 67 байт,
+    и ручка честно отвечала «снимка нет». Размер обязан быть в самом
+    изображении, а не в хвосте, который код вправе выбросить.
+    """
+    import io
+    import random
+
+    from PIL import Image
+
+    side = 120
+    noise = random.Random(2455).randbytes(side * side * 3)
+    buf = io.BytesIO()
+    Image.frombytes("RGB", (side, side), noise).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+#: Снимок правдоподобного размера — десятки килобайт самих пикселей.
+REAL_PHOTO_BYTES = _real_photo()
 
 
 def _log_with_photo(user, *, dish="Овсяная каша"):
