@@ -21,6 +21,7 @@ from django.utils import timezone
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 
 from core.deprecation import DeprecatedAliasMixin
+from core.image_privacy import strip_metadata
 from rest_framework import permissions, serializers as drf_serializers, status
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.request import Request
@@ -277,7 +278,14 @@ class FoodScanView(APIView):
         # Read once — providers and storage both want bytes; ImageField
         # streams from request body so we must materialise before two
         # reads. 10 MiB cap is enforced in the serializer.
-        image_bytes = image_file.read()
+        # DRF-2518: метаданные срезаются ЗДЕСЬ, а не при отдаче.
+        # Ниже ЭТИ ЖЕ байты уходят и в хранилище, и внешнему провайдеру
+        # распознавания, то есть за границу нашего контура. У телефонов
+        # геометка включена по умолчанию, а еду снимают дома — без
+        # срезания наружу уезжал бы домашний адрес человека. Очистка на
+        # входе закрывает оба пути одной строкой; на отдаче было бы
+        # поздно — байты уже у провайдера и уже в хранилище.
+        image_bytes = strip_metadata(image_file.read())
 
         # DRF-2145: бюджет — до строки и до провайдера; попытка считается.
         refusal = _budget_refusal(request.user)
@@ -418,7 +426,14 @@ class InternalFoodScanView(APIView):
         portion_multiplier = serializer.validated_data.get("portion_multiplier") or 1.0
         caption = serializer.validated_data.get("caption") or ""
 
-        image_bytes = image_file.read()
+        # DRF-2518: метаданные срезаются ЗДЕСЬ, а не при отдаче.
+        # Ниже ЭТИ ЖЕ байты уходят и в хранилище, и внешнему провайдеру
+        # распознавания, то есть за границу нашего контура. У телефонов
+        # геометка включена по умолчанию, а еду снимают дома — без
+        # срезания наружу уезжал бы домашний адрес человека. Очистка на
+        # входе закрывает оба пути одной строкой; на отдаче было бы
+        # поздно — байты уже у провайдера и уже в хранилище.
+        image_bytes = strip_metadata(image_file.read())
 
         # DRF-2145: бюджет — до строки и до провайдера; попытка считается.
         refusal = _budget_refusal(user)
