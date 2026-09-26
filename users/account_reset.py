@@ -58,6 +58,7 @@ from django.db import models, transaction
 from django.db.models.deletion import Collector, ProtectedError, RestrictedError
 
 from users.models import User
+from users.services import external_id_shape
 
 # --- modes -------------------------------------------------------------------
 
@@ -210,7 +211,7 @@ def parse_account(spec: str) -> tuple[str, str]:
     half takes, so one line in a runbook names the account on both sides."""
     channel, sep, channel_user_id = spec.partition(":")
     if not sep or not channel or not channel_user_id:
-        raise ValueError(f"account must look like channel:channel_user_id, got {spec!r}")
+        raise ValueError(f"account must look like channel:channel_user_id, got {external_id_shape(spec)}")
     return channel, channel_user_id
 
 

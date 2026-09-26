@@ -177,10 +177,89 @@ _CREDIT_CARD_RE: Final[re.Pattern[str]] = re.compile(
     r"(?![\dA-Za-z])"
 )
 
-# Cheap short-circuit: if neither a digit nor an "@" appears in the text,
-# no phone / email / card can match. Saves three regex passes on the
-# common "all-words" log line.
-_HAS_PII_CANDIDATE: Final[re.Pattern[str]] = re.compile(r"[\d@]")
+# Внешняя личность: `<source>:<segment>[:<segment>…]` — то, что ходит в
+# `X-External-User-ID` и лежит в имени прокси-строки пользователя
+# (`users.services._EXTERNAL_USER_ID_RE`). Это ИДЕНТИФИКАТОР ЧЕЛОВЕКА у
+# канала: по нему человек находится в чужой системе, поэтому наружу он не
+# уходит (DRF-2020 C — ушёл бы в Sentry текстом исключения).
+#
+# Источники перечислены ЗАКРЫТЫМ списком, и это осознанно. Общая форма
+# `слово:слово` в свободном тексте встречается постоянно («Internal Server
+# Error: /api/…», «reason: not_found», «ValueError: …»), и редактировать её
+# значило бы съесть диагностику — ту же цену мы уже платили за `<text>` в
+# золотых узлах.
+#
+# НО ЭТОТ СПИСОК НЕПОЛОН ПО ПОСТРОЕНИЮ, и это главное, что о нём надо знать.
+# Контракт заголовка (`users.services._EXTERNAL_USER_ID_RE`) принимает ЛЮБОЙ
+# источник в нижнем регистре, а запрещает ровно один (`deleted`). Замер:
+#
+#     vk:12345        принят=True  почищен=False
+#     signal:12345    принят=True  почищен=False
+#     instagram:99    принят=True  почищен=False
+#     max:729481      принят=True  почищен=True
+#
+# Бареформа не гипотетическая: `users.account_reset._spec_of` делает
+# `bot:vk:123 → vk:123`, и это попадает в `NotAllowed.listed_as`, то есть в
+# текст исключения. Значит новый канал уезжает наружу нечищеным БЕЗ единой
+# правки кода, и перепись по дереву его не увидит — в дереве его нет.
+#
+# Починка, которой здесь нет: один список каналов, общий для резолвера и для
+# редактуры, и узел «принят ⇒ почищен» по нему. Тогда разойтись они не смогут
+# по построению. Отдельным листом, потому что это меняет поведение резолвера
+# (он начнёт отказывать незнакомому каналу), а не только редактуру.
+#
+# Пока этого нет, список держится ШИРЕ дерева намеренно. Замер по дереву даёт
+# только `bot` (41 вне тестов), `max` (10) и `telegram` (0, но канал настоящий:
+# в дереве он внутри `bot:telegram:<id>`). Остальные пять — `tg`, `vk`, `viber`,
+# `whatsapp`, `wa` — в дереве не встречаются ни разу. Я их сократил и вернул:
+# сокращение отнимало охрану у пяти каналов ради тишины в диагностике, а это
+# ровно та сделка, которую этот лист отклонил для спанов. Дешевле держать
+# лишнее имя, чем узнать о канале из утечки.
+#
+# Цена, названная числом и замеренная на ЭТОЙ конфигурации (а не на той, что
+# была в середине листа): в самом дереве ложных срабатываний 0 на 108 188
+# проверенных строк; снаружи — 12 испорченных строк на 30 придуманных
+# диагностических. Четыре семейства:
+#
+#     pool stats min:2 max:10      -> min:2 [IDENTITY]        границы диапазонов
+#     upstream bot:8000            -> upstream [IDENTITY]     порты
+#     ayla/bot:v1.4.2              -> ayla/[IDENTITY].4.2     теги образов
+#     HGETALL wa:session:cache     -> HGETALL [IDENTITY]      ключи Redis
+#
+# Всё это порча ДИАГНОСТИКИ, а не потеря охраны, и ни одна нужная дежурному
+# форма не тронута: `ValueError: …`, `reason: not_found`, `users/services.py:373`,
+# `tenant:<uuid>`, `signal SIGTERM`, `postgres:16-alpine` проходят целыми.
+# Сужать по длине сегмента нельзя: есть живые идентификаторы в две буквы
+# (`bot:c1`).
+_IDENTITY_SOURCES: Final[str] = "bot|max|telegram|tg|vk|viber|whatsapp|wa"
+
+_IDENTITY_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![\w.-])"
+    rf"(?:{_IDENTITY_SOURCES})"
+    # `+`, а не `{1,3}`: контракт (`_EXTERNAL_USER_ID_RE`) не ограничивает
+    # число сегментов, а частичная редактура ХУЖЕ никакой — `bot:max:a:b:c`
+    # превращалось в `[IDENTITY]:c`, то есть хвост личности оставался и
+    # выглядел как чистый текст.
+    r"(?::[A-Za-z0-9_-]{1,64})+"
+    r"(?![\w-])",
+    # Регистр заголовка выбирает клиент: `MAX:729481` — тот же человек.
+    # Префильтр уже был регистронезависимым, а этот шаблон — нет, и
+    # расхождение значило «префильтр пустил, редактура не сработала».
+    #
+    # Ложных срабатываний это НЕ уменьшает, а добавляет: из 12 испорченных
+    # строк каталога две — `POOL STATS MIN:2 MAX:10` и `DRF-2020: Max:12` —
+    # портятся только из-за регистра. Сделка та же, что во всём листе: закрыть
+    # дыру в охране ценой шума в диагностике, а не наоборот.
+    re.IGNORECASE,
+)
+
+# Cheap short-circuit: if neither a digit, an "@", nor a channel prefix appears
+# in the text, no phone / email / card / identity can match. Saves four regex
+# passes on the common "all-words" log line. Источники здесь ОБЯЗАНЫ совпадать
+# с `_IDENTITY_SOURCES`: разойдутся — префильтр отсечёт текст, который
+# `_IDENTITY_RE` обязан был почистить, и молча (узел
+# `test_the_prefilter_lets_through_everything_the_patterns_catch`).
+_HAS_PII_CANDIDATE: Final[re.Pattern[str]] = re.compile(rf"[\d@]|(?i:{_IDENTITY_SOURCES}):")
 
 
 # Placeholders. Literal tokens so operators can grep for "[PHONE]" etc.
@@ -188,6 +267,10 @@ _HAS_PII_CANDIDATE: Final[re.Pattern[str]] = re.compile(r"[\d@]")
 _PHONE_PLACEHOLDER: Final[str] = "[PHONE]"
 _EMAIL_PLACEHOLDER: Final[str] = "[EMAIL]"
 _CARD_PLACEHOLDER: Final[str] = "[CARD]"
+#: Остаётся ВИДНЫМ следом: оператор по нему понимает, что вырезано именно
+#: имя личности у канала, а не телефон и не почта. Пустота на этом месте
+#: читалась бы как «ничего не было» (DRF-2020 C).
+_IDENTITY_PLACEHOLDER: Final[str] = "[IDENTITY]"
 
 
 # Dict-style keyword logging: keys whose VALUES should NOT be redacted.
@@ -355,6 +438,9 @@ def redact_pii(text: str) -> str:
     text = _CREDIT_CARD_RE.sub(_sub_credit_card, text)
     text = _PHONE_RE.sub(_PHONE_PLACEHOLDER, text)
     text = _EMAIL_RE.sub(_EMAIL_PLACEHOLDER, text)
+    # Личность у канала — после почты: `max:729481` цифр не содержит обязательно,
+    # и предыдущие шаблоны её не видят (DRF-2020 C).
+    text = _IDENTITY_RE.sub(_IDENTITY_PLACEHOLDER, text)
     return text
 
 

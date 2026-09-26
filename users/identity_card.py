@@ -38,6 +38,7 @@ from appointments.models import Appointment
 from goals.models import ClientGoal, GoalAnketaRun
 from nutrition.models import FoodLog
 from users.models import User, UserPersonalContext
+from users.services import external_id_shape
 
 BLOCKED_BY_IDENTITY = "BLOCKED_BY_IDENTITY"
 
@@ -70,7 +71,7 @@ def mask_phone(value: str | None) -> str:
 def parse_account(spec: str) -> tuple[str, str]:
     channel, sep, channel_user_id = spec.partition(":")
     if not sep or not channel or not channel_user_id:
-        raise ValueError(f"account must look like channel:channel_user_id, got {spec!r}")
+        raise ValueError(f"account must look like channel:channel_user_id, got {external_id_shape(spec)}")
     return channel, channel_user_id
 
 

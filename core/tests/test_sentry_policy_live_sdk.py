@@ -110,6 +110,14 @@ def _call_wsgi(app, *, method, path, query, body, headers):
     return status[0]
 
 
+# `django_db` — не потому, что узлу нужна база, а потому, что ручка идёт через
+# настоящий `WSGIHandler`, а тот на выходе шлёт `request_finished`, и обработчик
+# `close_old_connections` трогает соединение. Стоит в том же процессе пройти
+# тесту, оставившему соединение живым (`test_geocoding_contract`,
+# `test_surface_state` — замерено), и узел падает ДО проверок с
+# «Database access not allowed». Одиночным прогоном этого не видно: узел был
+# зелёным сам и красным в полном `core/`, то есть очередь решала, а не код.
+@pytest.mark.django_db
 @pytest.mark.urls("core.tests.sentry_live_probe_urls")
 def test_a_real_sdk_error_event_leaves_through_the_policy(live_sentry):
     from djangoProject.wsgi import application
