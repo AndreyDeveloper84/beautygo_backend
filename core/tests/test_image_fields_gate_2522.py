@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import io
 
-import pytest
 from django.apps import apps as project_apps
 from django.core.files.base import ContentFile
 from django.db import models
