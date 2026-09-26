@@ -84,7 +84,7 @@ class TestM3ASecondRunChangesNothing:
 class TestM4ThePilotIsProtected:
     """Запрет по ИМЕНИ, а не по строке: он срабатывает и до всякой записи, и
     вне зависимости от того, есть ли такой тенант в этой базе. Пилот
-    `formula-tela` — настоящие записи настоящих людей."""
+    `formula-tela` — боевой пилот с настоящим прайсом салона (DRF-2517)."""
 
     def test_the_live_salon_cannot_be_marked_demo(self):
         with pytest.raises(CommandError, match="боевой салон"):
@@ -169,7 +169,7 @@ class TestM8TheProtectedListIsOne:
     """Список защищённых слагов берётся у сида, а не копируется.
 
     Вторая копия разошлась бы в первый же день, когда появится второй живой
-    салон, и расхождение здесь стоит настоящих записей настоящих людей.
+    салон, и расхождение здесь стоит настоящего прайса боевого салона.
     """
 
     def test_the_command_reads_the_seed_list(self):
