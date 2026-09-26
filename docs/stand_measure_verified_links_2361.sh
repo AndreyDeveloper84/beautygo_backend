@@ -9,14 +9,16 @@
 # (CustomerCatalogScreen, RecommendationCardScreen — без флага; полка подборок —
 # под флагом VITE_RECOMMENDATION_SHELF и по OD-PILOT-9 на пилоте выключена).
 #
-# ДВА ПРИБОРА, ОДНА МЕРА. Числа снимаются дважды и печатаются рядом:
-#   шаг 1 — manage.py report_pilot_readiness (DRF-2361/#559): читает ORM, НИЧЕГО
-#           не пишет — у команды нет ни одного save/update/create, нет --apply;
-#           при запуске Django выполняет ready() приложений (регистрация
-#           сигналов и проверок) и системные проверки (читают настройки, в сеть
-#           не ходят). Пропустить шаг: SKIP_MANAGE=1.
-#   шаг 2 — SQL с ТЕМИ ЖЕ определениями, в транзакции READ ONLY с ROLLBACK.
-# Расхождение двух приборов на одной базе — находка само по себе.
+# ДВА ПРИБОРА, ОДНА МЕРА — второй по вашему выбору:
+#   шаг 1 — читающая команда каталога manage.py report_pilot_readiness (DRF-2361/#559).
+#           Она ORM, а вы просили ORM на стенде не использовать, поэтому ПО УМОЛЧАНИЮ
+#           ОНА ПРОПУСКАЕТСЯ. Если хотите второй прибор для сверки — запустите с
+#           RUN_MANAGE=1. Команда ничего не пишет (ни одного save/update/create, нет
+#           --apply); при старте Django выполняет ready() приложений (регистрация
+#           сигналов и проверок) и системные проверки (читают настройки, в сеть не ходят).
+#   шаг 2 — SQL в транзакции READ ONLY с ROLLBACK, с ТЕМИ ЖЕ определениями, что у команды.
+# С RUN_MANAGE=1 числа печатаются парами; расхождение двух приборов на одной базе —
+# находка само по себе.
 #
 # Определения (одинаковые у обоих шагов):
 #   услуг всего        — все строки services_salonservice (без фильтра активности тенанта:
@@ -35,9 +37,12 @@
 # Ни одного --apply, ни одного UPDATE/INSERT/DELETE.
 #
 # Запуск:  ! bash <путь>/docs/stand_measure_verified_links_2361.sh
+#          ! RUN_MANAGE=1 bash <путь>/docs/stand_measure_verified_links_2361.sh   (с командой)
+# Запускать из Git Bash: при core.autocrlf файл выписывается с CRLF, Git Bash это
+# переносит, а под WSL или Linux-шеллом такая копия сломается.
 set -euo pipefail
 
-ssh -i ~/.ssh/ayla_rsa -o IdentitiesOnly=yes -o ConnectTimeout=30 taximeter@176.119.159.141 "SKIP_MANAGE=${SKIP_MANAGE:-0} bash -s" <<'REMOTE'
+ssh -i ~/.ssh/ayla_rsa -o IdentitiesOnly=yes -o ConnectTimeout=30 taximeter@176.119.159.141 "RUN_MANAGE=${RUN_MANAGE:-0} bash -s" <<'REMOTE'
 set -uo pipefail
 
 PILOT_ID="b32a057a-56c7-4bf0-ae50-e11e76ab44be"
@@ -95,8 +100,8 @@ echo
 
 # ---------- ШАГ 1: команда каталога ----------
 MANAGE_ALL=""; MANAGE_PILOT=""
-if [ "${SKIP_MANAGE:-0}" = "1" ] || [ -z "${CAT_WEB:-}" ]; then
-  echo "=== 1. manage.py report_pilot_readiness — ПРОПУЩЕН (SKIP_MANAGE=1 или веб-контейнер не найден) ==="
+if [ "${RUN_MANAGE:-0}" != "1" ] || [ -z "${CAT_WEB:-}" ]; then
+  echo "=== 1. manage.py report_pilot_readiness — ПРОПУЩЕН (по умолчанию: команда — ORM; включить — RUN_MANAGE=1; или веб-контейнер не найден) ==="
 else
   echo "=== 1. manage.py report_pilot_readiness (читает, не пишет) — вся база ==="
   MANAGE_ALL=$(docker exec "$CAT_WEB" python manage.py report_pilot_readiness 2>&1 || true)
