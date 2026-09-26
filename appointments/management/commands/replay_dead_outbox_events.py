@@ -18,17 +18,30 @@ delivery state so the publisher picks the row up on its next tick:
   the reason the row hit DLQ originally.
 
 Selection is always opt-in: by default, no rows match, the operator
-must explicitly pass ``--tenant`` / ``--since`` (or ``--all``) to
-target a working set. ``--dry-run`` lists the matched rows without
-any mutation. Without ``--dry-run``, the reset runs inside a single
-transaction so a SIGINT mid-loop leaves the DB in the pre-command
-state.
+must explicitly pass ``--tenant`` / ``--since`` / ``--topic`` (or
+``--all``) to target a working set. ``--dry-run`` lists the matched
+rows without any mutation. Without ``--dry-run``, the reset runs inside
+a single transaction so a SIGINT mid-loop leaves the DB in the
+pre-command state.
+
+### ``--tenant`` / ``--since`` require ``--topic`` (DRF-2525)
+
+A salon's DLQ holds more than one topic, and topics are not equally
+safe to replay. 25.09 the six dead ``booking.completed`` of one salon
+sat next to three dead ``booking.created`` of the same salon; replaying
+the latter creates a bot proxy and tells the client «вы записаны» about
+a month-old booking — irreversible and visible to the client. Without a
+topic filter ``--tenant`` would have taken all nine. So a widening
+selector is refused unless the operator names the topic(s); the refusal
+fires before any read-out, dry-run included, so the previewed count is
+always the count that will run. ``--event-id`` is already surgical and
+needs no topic; ``--all`` stays the one explicit «everything» switch.
 
 Use case (from the pilot runbook): ops detects bot-platform ingest
 broken transiently — recovers it, then runs::
 
     python manage.py replay_dead_outbox_events \
-        --since "2026-06-01T08:00:00Z" --dry-run
+        --since "2026-06-01T08:00:00Z" --topic booking.completed --dry-run
 
 inspects the matched count, then re-runs without ``--dry-run`` to
 let the publisher pick the rows up.
@@ -80,6 +93,19 @@ class Command(BaseCommand):
             help=(
                 "Replay exactly one row by OutboxEvent.id. Bypasses the "
                 "--all gate so a single named row can be retried surgically."
+            ),
+        )
+        parser.add_argument(
+            "--topic",
+            dest="topics",
+            action="append",
+            choices=OutboxEvent.Topic.values,
+            default=None,
+            help=(
+                "Only replay rows of this topic (repeatable). REQUIRED with "
+                "--tenant / --since: a salon's DLQ mixes topics, and "
+                "replaying booking.created re-announces old bookings to "
+                "clients (DRF-2525)."
             ),
         )
         parser.add_argument(
@@ -162,25 +188,38 @@ class Command(BaseCommand):
         since_raw = options.get("since")
         event_id = options.get("event_id")
         all_dead = options.get("all_dead")
+        topics = options.get("topics") or []
 
         # Validate scope: at least one selector is required.
-        named_filters = [tenant, since_raw, event_id]
+        named_filters = [tenant, since_raw, event_id, topics]
         any_named = any(named_filters)
         if not any_named and not all_dead:
             raise CommandError(
                 "No selector given. Pass at least one of --tenant, --since, "
-                "--event-id, or --all to scope the replay set."
+                "--topic, --event-id, or --all to scope the replay set."
             )
         if all_dead and any_named:
             raise CommandError(
-                "--all cannot be combined with --tenant/--since/--event-id. "
+                "--all cannot be combined with --tenant/--since/--topic/--event-id. "
                 "Either replay everything or replay a narrowed set."
+            )
+        # DRF-2525: a widening selector without a topic takes every topic
+        # of the salon/window — booking.created included. Refuse before
+        # any read-out so the dry-run count is the count that will run.
+        if (tenant or since_raw) and not topics:
+            raise CommandError(
+                "--tenant/--since need --topic: a DLQ mixes topics, and "
+                "replaying booking.created re-announces old bookings to "
+                "clients. Name the topic(s), e.g. --topic booking.completed, "
+                "or replay rows one by one with --event-id."
             )
 
         qs = OutboxEvent.objects.filter(
             bot_delivery_status=OutboxEvent.BotDeliveryStatus.DEAD,
             bot_dead_lettered_at__isnull=False,
         )
+        if topics:
+            qs = qs.filter(topic__in=topics)
 
         if event_id:
             return qs.filter(id=event_id)
