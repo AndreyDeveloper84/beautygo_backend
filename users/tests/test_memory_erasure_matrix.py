@@ -49,9 +49,10 @@ VALID_TOKEN = "test-internal-token"  # noqa: S105 — test constant
 # районы / время» — ``clear_declared_fields``; sorted key order,
 # source=explicit). DRF-2534: it is NOT the «забудь всё» path any more —
 # whole-profile forget goes through ``DELETE /internal/users/{id}/
-# personal-data/`` (C5.2, ``erase_declared_prefs``). The name predates that
-# and is kept here on purpose; renaming it is separate debt.
-BOT_FORGET_ALL_UPDATES = [
+# personal-data/`` (C5.2, ``erase_declared_prefs``). DRF-2536: the name
+# says «domain clear», because the former name read as «what the bot sends
+# on „забудь всё“» and outlived the path it named.
+BOT_DOMAIN_CLEAR_UPDATES = [
     {"field": "diet_type", "value": "", "source": "explicit"},
     {"field": "preferred_districts", "value": [], "source": "explicit"},
     {"field": "preferred_time_slots", "value": [], "source": "explicit"},
@@ -502,7 +503,7 @@ class TestNightlyInferenceResurrection:
         DELETE and leaves a tombstone); expectations unchanged, only the
         frame was wrong.
         """
-        _internal().patch(_url(user.id), {"updates": BOT_FORGET_ALL_UPDATES}, format="json")
+        _internal().patch(_url(user.id), {"updates": BOT_DOMAIN_CLEAR_UPDATES}, format="json")
         ctx.refresh_from_db()
         assert ctx.data_sources["diet_type"] == "explicit"
 
@@ -582,7 +583,7 @@ class TestAccountDeletion:
         # DRF-1947 (а): refused by the subject guard (403) before the view.
         assert api.get(_url(user.id)).status_code == 403
         assert api.patch(
-            _url(user.id), {"updates": BOT_FORGET_ALL_UPDATES}, format="json",
+            _url(user.id), {"updates": BOT_DOMAIN_CLEAR_UPDATES}, format="json",
         ).status_code == 403
         assert api.delete(_url(user.id)).status_code == 403
         assert api.get(_url(user.id, "ask-eligibility/")).status_code == 403
