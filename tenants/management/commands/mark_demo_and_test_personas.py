@@ -62,9 +62,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.db.models import Q
 
-from services.management.commands.seed_demo_salons import (
-    PROTECTED_SLUGS as SEED_PROTECTED_SLUGS,
-)
+from tenants.protected_slugs import PROTECTED_SLUGS as SEED_PROTECTED_SLUGS
 from tenants.models import Tenant
 from users.models import User
 
@@ -75,7 +73,7 @@ DEFAULT_SEED = (
 #: Защищённые слаги берутся У СИДА (`SEED_PROTECTED_SLUGS`), а не копируются:
 #: вторая копия разошлась бы в первый же день, когда появится второй живой
 #: салон, а расхождение здесь стоит настоящего прайса боевого салона
-#: (основание — у ``seed_demo_salons.PROTECTED_SLUGS``, DRF-2517). Ключ
+#: (основание — у ``tenants/protected_slugs.py``, DRF-2517). Ключ
 #: `--protect` перечень расширяет; сузить его нельзя.
 
 
