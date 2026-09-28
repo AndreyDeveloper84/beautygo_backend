@@ -236,6 +236,11 @@ class TestTheClaimIsNotASecondIdentityGraph:
         # перечитанной строке проверяет, что его нет, — не резолвер личности
         # и не сторож доступа.
         "users/deletion_executor.py",
+        # DRF-2450 (А): дверь связи личности мастера сверяет у СОЛО-профиля
+        # предъявленный external_user_id с claim и при несовпадении отказывает
+        # ``claim_mismatch``. Проверка согласованности, не источник личности:
+        # claim может только отказать, личность резолвит тело запроса.
+        "users/specialist_identity_linking.py",
     }
 
     def test_only_the_provisioning_service_reads_the_claim(self):
