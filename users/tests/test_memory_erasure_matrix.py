@@ -45,7 +45,12 @@ User = get_user_model()
 VALID_TOKEN = "test-internal-token"  # noqa: S105 — test constant
 
 # The EXACT payload apps/orchestrator/memory/ayla_bridge.py:_CLEARABLE_FIELDS
-# produces for «забудь всё» (sorted key order, source=explicit).
+# produces for a DOMAIN forget of all three bridge keys («забудь про диету /
+# районы / время» — ``clear_declared_fields``; sorted key order,
+# source=explicit). DRF-2534: it is NOT the «забудь всё» path any more —
+# whole-profile forget goes through ``DELETE /internal/users/{id}/
+# personal-data/`` (C5.2, ``erase_declared_prefs``). The name predates that
+# and is kept here on purpose; renaming it is separate debt.
 BOT_FORGET_ALL_UPDATES = [
     {"field": "diet_type", "value": "", "source": "explicit"},
     {"field": "preferred_districts", "value": [], "source": "explicit"},
@@ -166,51 +171,45 @@ def _book(client_user, spec, *, day_offset: int, hour: int = 10,
 
 
 # ---------------------------------------------------------------------------
-# «забудь всё» — what the bot's payload actually does to the row
+# «забудь всё» — what the bot's live path does to the row
 # ---------------------------------------------------------------------------
 
 
 class TestForgetAllPayload:
-    def test_bot_forget_all_leaves_nine_of_twelve_fields_populated(self, user, ctx):
-        """STILL A GAP after DRF-1367 — and it is now the bot's half.
+    def test_bot_forget_all_leaves_no_declared_field_populated(self, user, ctx):
+        """INVERTED by DRF-2534 — the bot calls the verb now.
 
-        The backend has the verb (see ``TestForgetAllPayload`` below). This
-        cell pins what the CURRENT bridge payload does, and it still leaves
-        nine fields standing, because ``apps/orchestrator/memory/
-        ayla_bridge.py:_CLEARABLE_FIELDS`` still names three fields instead of
-        calling DELETE. Invert this cell in the bot repo's PR, not here.
+        This cell used to PATCH the three-field bridge payload and pin «nine
+        of twelve survive». The bot stopped sending that payload for «забудь
+        всё» (DRF-1367/1950): ``apps/persona/memory_commands.py`` →
+        ``ayla_bridge.erase_declared_profile_status`` →
+        ``apps/identity/services/personal_context.py:erase_declared_prefs`` →
+        ``DELETE /internal/users/{id}/personal-data/`` (C5.2). The old cell
+        kept describing a path that no longer exists, and on 2026-09-26 it
+        produced a false «forget-all leaves skin_sensitivities» in a
+        measurement (DRF-2532). The cell now exercises the live path.
         """
-        resp = _internal().patch(
-            _url(user.id), {"updates": BOT_FORGET_ALL_UPDATES}, format="json"
-        )
+        resp = _internal().delete(f"/api/v1/internal/users/{user.id}/personal-data/")
         assert resp.status_code == 200
 
         ctx.refresh_from_db()
-        assert ctx.diet_type == ""
-        assert ctx.preferred_districts == []
-        assert ctx.preferred_time_slots == []
-        # Nine survivors, on the source of truth.
-        assert str(ctx.price_range_min) == "1000.00"
-        assert str(ctx.price_range_max) == "3500.00"
-        assert ctx.favorite_masters == ["7f1d0f2e-0000-4000-8000-000000000001"]
-        assert ctx.skin_sensitivities == ["ретинол"]
-        assert ctx.prefers_flexible_cancellation is True
-        assert ctx.workplace_district == "Тверская"
-        assert ctx.home_district == "Сокол"
-        assert ctx.min_rating_preference == 4.5
-        assert ctx.busy_days == ["mon"]
+        _assert_all_twelve_at_default(ctx)
+        assert ctx.skin_sensitivities == []
 
-    def test_the_survivors_are_served_straight_back_to_the_prompt(self, user, ctx):
-        """The bot reads the prompt block off this exact GET."""
-        _internal().patch(_url(user.id), {"updates": BOT_FORGET_ALL_UPDATES}, format="json")
+    def test_nothing_is_served_back_to_the_prompt_after_bot_forget_all(self, user, ctx):
+        """INVERTED by DRF-2534. The bot reads the prompt block off this exact
+        GET; after its live «забудь всё» (C5.2 ``DELETE .../personal-data/``)
+        there is nothing left to serve. The old cell pinned nine survivors of
+        the three-field PATCH the bot no longer sends for «забудь всё».
+        """
+        _internal().delete(f"/api/v1/internal/users/{user.id}/personal-data/")
 
         resp = _internal().get(_url(user.id))
 
         assert resp.status_code == 200
+        assert resp.data["data"]["meta"]["filled_fields"] == 0
         context = resp.data["data"]["context"]
-        assert context["favorite_masters"] == ["7f1d0f2e-0000-4000-8000-000000000001"]
-        assert str(context["price_range_max"]) == "3500.00"
-        assert resp.data["data"]["meta"]["filled_fields"] == 9
+        assert not any(context.values()), f"still in the prompt source: {context}"
 
     def test_price_cannot_be_cleared_through_the_contract_at_all(self, user, ctx):
         """Still true after DRF-1367, and still the reason the verb exists.
@@ -494,9 +493,14 @@ class TestNightlyInferenceResurrection:
     def test_a_bot_cleared_field_is_marked_explicit_and_is_protected(self, user, ctx):
         """Refutation — the clear is not silently overwritten.
 
-        The bot's clear PATCH stamps ``data_sources[field]="explicit"``, and
-        inference refuses to touch an explicit field. So diet/districts/slots
-        stay cleared. The hole is only in the fields the bot never names.
+        The bot's DOMAIN clear PATCH («забудь про диету»,
+        ``clear_declared_fields``) stamps ``data_sources[field]="explicit"``,
+        and inference refuses to touch an explicit field. So
+        diet/districts/slots stay cleared. A field the domain clear never
+        names is not protected — ``favorite_masters`` comes back below.
+        DRF-2534: this is the domain path, not «забудь всё» (that one is C5.2
+        DELETE and leaves a tombstone); expectations unchanged, only the
+        frame was wrong.
         """
         _internal().patch(_url(user.id), {"updates": BOT_FORGET_ALL_UPDATES}, format="json")
         ctx.refresh_from_db()
@@ -664,24 +668,18 @@ class TestBackendPromptConsumer:
         assert "диета" in hint
         assert "бюджет" in hint
 
-    def test_the_hint_survives_the_bot_forget_all(self, user, ctx):
-        """STILL A GAP after DRF-1367 — the bot half again. The current
-        bridge payload leaves the backend chat's prompt block populated too,
-        through the same nine surviving fields. The verb empties it (see
-        ``test_the_erase_verb_empties_the_backend_chat_prompt_block``); the
-        bridge has to start calling the verb.
+    def test_the_hint_is_empty_after_the_bot_forget_all(self, user, ctx):
+        """INVERTED by DRF-2534 — the bridge calls the verb now (C5.2
+        ``DELETE .../personal-data/``), so the backend chat's prompt block is
+        empty after the bot's «забудь всё», sensitivities included. The old
+        cell pinned the three-field PATCH the bot no longer sends for it.
         """
         from ai.personal_context_hint import format_personal_context_hint
 
-        _internal().patch(_url(user.id), {"updates": BOT_FORGET_ALL_UPDATES}, format="json")
+        _internal().delete(f"/api/v1/internal/users/{user.id}/personal-data/")
         ctx.refresh_from_db()
 
-        hint = format_personal_context_hint(ctx)
-
-        assert hint != ""
-        assert "чувствительность / аллергии: ретинол" in hint
-        assert "бюджет" in hint
-        assert "диета" not in hint
+        assert format_personal_context_hint(ctx) == ""
 
 
 # ---------------------------------------------------------------------------
