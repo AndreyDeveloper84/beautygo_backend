@@ -84,6 +84,14 @@ Both return JSON with per-check status; 200 when all healthy, 503 when
 any check fails. Loadbalancer / k8s probe should hit `/health/`. Deploy
 scripts should poll `/health/ready/` until 200 before flipping traffic.
 
+`/health/ready/` also carries an informational `outbox` key (DRF-2525):
+outbox delivery counts by status, dead letters by topic, oldest dead-letter
+time, and the coverage next to them (`rows_seen`, `created_at` window). It
+never affects `status` or the HTTP code, carries no ids or payloads, and is
+cached for `cache_ttl_s` (60 s) so frequent polling costs at most one table
+scan per minute. `dead_total > 0` means events the bot never received —
+replay with `replay_dead_outbox_events --topic …` after the cause is fixed.
+
 ## 5. What this PR does NOT add (yet)
 
 - **Outbox lag check** in readiness — pending PR3 (Celery + Redis).

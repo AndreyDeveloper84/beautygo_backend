@@ -114,6 +114,53 @@ components:
     # ═══════════════════════════════════════
     # COMMON
     # ═══════════════════════════════════════
+    HealthCheck:
+      type: object
+      properties:
+        ok: {type: boolean}
+        detail: {type: string, example: ok}
+    HealthReady:
+      type: object
+      required: [status, version, timestamp, checks]
+      properties:
+        status: {type: string, enum: [ok, unhealthy]}
+        version: {type: string, example: "1.0.0"}
+        timestamp: {type: integer, description: Unix-секунды}
+        checks:
+          type: object
+          properties:
+            db: {$ref: '#/components/schemas/HealthCheck'}
+            cache: {$ref: '#/components/schemas/HealthCheck'}
+            migrations: {$ref: '#/components/schemas/HealthCheck'}
+        outbox:
+          description: |
+            Информационно, на status не влияет (DRF-2525). Либо подсчёт, либо
+            `{"error": "<класс>"}`. `rows_seen = 0` и `window` из null — пустой ящик:
+            ноль мёртвых тогда ничего не доказывает.
+          oneOf:
+            - type: object
+              properties:
+                rows_seen: {type: integer}
+                window:
+                  type: object
+                  properties:
+                    from: {type: string, format: date-time, nullable: true}
+                    to: {type: string, format: date-time, nullable: true}
+                by_delivery_status:
+                  type: object
+                  additionalProperties: {type: integer}
+                  example: {sent: 94, pending: 5, dead: 9}
+                dead_total: {type: integer}
+                dead_by_topic:
+                  type: object
+                  additionalProperties: {type: integer}
+                  example: {booking.completed: 6, booking.created: 3}
+                oldest_dead_at: {type: string, format: date-time, nullable: true}
+                computed_at: {type: integer, description: Unix-секунды подсчёта}
+                cache_ttl_s: {type: integer, example: 60}
+            - type: object
+              properties:
+                error: {type: string, example: OperationalError}
 
     ErrorResponse:
       type: object
@@ -3276,24 +3323,24 @@ paths:
     get:
       tags: [health]
       summary: Readiness check
+      description: |
+        Liveness + все миграции применены. 503, если любая из `checks` не `ok`.
+        Ключ `outbox` — информационный (DRF-2525): доставка писем каталога боту,
+        с охватом рядом с числом. На `status` и код ответа НЕ влияет. Подсчёт
+        кэшируется на `cache_ttl_s` секунд; ошибка подсчёта приходит как
+        `{"error": "<класс>"}` и не кэшируется. Идентификаторов и полезной
+        нагрузки писем нет.
       operationId: health_ready
       responses:
         '200':
-          description: Все сервисы доступны
+          description: Готов к трафику
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: ready
-                  database:
-                    type: string
-                    example: connected
-                  cache:
-                    type: string
-                    example: connected
-                  ai:
-                    type: string
-                    example: available
+                $ref: '#/components/schemas/HealthReady'
+        '503':
+          description: Хотя бы одна проверка из `checks` не прошла
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthReady'
