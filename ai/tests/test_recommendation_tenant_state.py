@@ -102,8 +102,8 @@ class TestSalonStateGatesMatching:
     def test_a_salon_in_the_pilot_state_stays_visible(self):
         """Салон в состоянии боевого пилота остаётся в выдаче.
 
-        ``formula-tela`` — живой салон пилота с реальными людьми и
-        записями; его заводит миграция
+        ``formula-tela`` — живой салон пилота с настоящим прайсом (клиенты
+        там тестовые, DRF-2517); его заводит миграция
         ``tenants.0003_seed_default_tenants`` со значением
         ``is_active=True``.
 
