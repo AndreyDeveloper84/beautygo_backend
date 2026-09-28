@@ -167,7 +167,7 @@ class TestNoRuleIsAppliedToSomeoneElsesRows:
 
 class TestTheProtectedSalonIsUntouched:
     def test_counts_before_and_after_are_equal(self) -> None:
-        """У боевого салона настоящие записи настоящих людей."""
+        """У боевого салона настоящий прайс настоящего салона (DRF-2517)."""
         live = _tenant(slug=next(iter(PROTECTED_SLUGS)))
         demo = _tenant()
         live_row = _row(live)
