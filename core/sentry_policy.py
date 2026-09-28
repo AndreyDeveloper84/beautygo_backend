@@ -34,6 +34,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from core.log_filters import get_request_id
+from core.pii_log_filter import redact_pii
 
 FILTERED = "[Filtered]"
 
@@ -137,6 +138,51 @@ def _drop_frame_vars(event: dict) -> None:
                 frame.pop("vars", None)
 
 
+#: Ключи, чьи значения редактура НЕ трогает: это опорные идентификаторы
+#: наблюдаемости, и вырезать их значило бы сломать поиск инцидента, ничего не
+#: защитив (они не указывают на человека). Тот же принцип, что у
+#: ``_OPAQUE_ID_KEYS`` в ``core.pii_log_filter``.
+_UNREDACTED_KEYS: frozenset[str] = frozenset({
+    "event_id", "trace_id", "span_id", "parent_span_id", "request_id",
+    "release", "environment", "platform", "logger", "level", "type",
+    "module", "abs_path", "filename", "function", "lineno", "url", "method",
+})
+
+
+def _redact_text_leaves(value: Any, key: str | None = None) -> Any:
+    """Каждый строковый лист события — через одно определение редактуры.
+
+    Вторая линия (DRF-2020 C). Первая — не класть значение в текст, и её
+    нарушит следующий разработчик, причём молча: носителей у события
+    тринадцать (замер маркером), и «починить `exception[].value`» оставило бы
+    двенадцать. Поэтому чистится не поле, а ВСЕ текстовые листья.
+
+    Не рекурсия ради рекурсии: ``message``, ``exception[].value``,
+    ``logentry.formatted``/``params``, ``breadcrumbs[].message`` и ``.data.*``,
+    ``extra.*``, ``contexts.*``, ``tags.*``, ``spans[].description``,
+    ``fingerprint[]`` — разные ветки одного дерева, и перечислять их по именам
+    значило бы завести четырнадцатую копию списка, который меняет SDK, а не мы.
+    """
+    if isinstance(value, str):
+        if key in _UNREDACTED_KEYS:
+            return value
+        return redact_pii(value)
+    if isinstance(value, dict):
+        return {k: _redact_text_leaves(v, str(k)) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        # Всегда список, а не `type(value)(...)`. Тип восстанавливать не надо:
+        # SDK зовёт `serialize(event)` ПЕРЕД `before_send`, и до нас доходит
+        # только простое дерево JSON — ни кортежей, ни множеств, ни байтов
+        # (проверено прогоном через настоящий SDK). А вот вред от восстановления
+        # типа настоящий: именованный кортеж без значений по умолчанию упал бы
+        # на `type(value)(list)` с `TypeError`, SDK ловит исключения
+        # `before_send` внутрь себя — и событие исчезло бы ЦЕЛИКОМ, оставив одну
+        # строку INFO. То есть строка защищала от небывалого, принося ровно тот
+        # молчаливый отказ, против которого написан весь этот лист.
+        return [_redact_text_leaves(v, key) for v in value]
+    return value
+
+
 def scrub_event(event: Any, hint: Any = None) -> Any:
     """Событие Sentry по политике R3; не словарь — как есть."""
     if not isinstance(event, dict):
@@ -148,7 +194,18 @@ def scrub_event(event: Any, hint: Any = None) -> Any:
     _drop_frame_vars(event)
     _tag_request_id(event)
     _clean_breadcrumbs(event)
-    return event
+    # Редактура — ПОСЛЕДНЕЙ: она работает по тексту, а всё выше меняет
+    # структуру. Тег `request_id` уже проставлен, и в словарной форме
+    # (`tags: {...}`, её и шлёт Python-SDK) редактура его не тронет — ключ в
+    # списке неприкасаемых. В списочной форме (`tags: [["request_id", …]]`,
+    # ветка `_tag_request_id` для чужого формата) ключом внутрь списка идёт
+    # `tags`, и значение через редактуру ПРОЙДЁТ. Недостижимо сегодня, но
+    # написать «не тронет» без этой оговорки значило бы соврать в комментарии.
+    #
+    # И про возврат: функция теперь наполовину правит на месте (структура,
+    # выше), наполовину возвращает копию (текст). Возвращаемое значение —
+    # единственное, на что можно смотреть; `scrub_event(ev) is ev` — ложь.
+    return _redact_text_leaves(event)
 
 
 def init_options(*, dsn: str, environment: str, release: str | None, traces_sampler) -> dict:
