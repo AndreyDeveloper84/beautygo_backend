@@ -26,11 +26,12 @@ to confirm.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from django.conf import settings
-from django.db import transaction
+from django.db import DatabaseError, transaction
 
 from nutrition.models import (
     CrossDomainRule,
@@ -45,6 +46,8 @@ from nutrition.services.pattern_detection_service import (
 
 # Tunables (cooldown defaults live on CrossDomainRule itself; these are
 # global to the engine).
+logger = logging.getLogger(__name__)
+
 GLOBAL_CAP_DAYS = 3
 AUTO_CONFIRM_MINUTES = 5
 
@@ -312,11 +315,20 @@ class CrossDomainEngine:
         # Favorite-specialist boost: if any Service in the rule's
         # category is owned by a specialist the user has favorited,
         # that's a strong relevance signal.
+        #
+        # DRF-2556: the filter used ``client=user`` — FavoriteSpecialist has
+        # no such field (``user``, ``specialist``), so every call raised
+        # FieldError, and a bare ``except Exception: pass`` swallowed it: the
+        # boost was never applied, score was always 1.0, and nobody could tell
+        # a typo from «no favourites». Only a database outage is tolerated
+        # here now (scoring degrades to the base score, loudly); a code error
+        # — FieldError, AttributeError — propagates and fails in tests.
+        from services.models import Service
+        from users.models import FavoriteSpecialist
+
         try:
-            from services.models import Service
-            from users.models import FavoriteSpecialist
             fav_ids = FavoriteSpecialist.objects.filter(
-                client=user,
+                user=user,
             ).values_list("specialist_id", flat=True)
             if fav_ids and Service.objects.filter(
                 category__slug=rule.service_category_slug,
@@ -324,9 +336,12 @@ class CrossDomainEngine:
                 is_active=True,
             ).exists():
                 score *= FAVORITE_SPECIALIST_BOOST
-        except Exception:
-            # Defensive — never let scoring crash the engine.
-            pass
+        except DatabaseError:
+            logger.warning(
+                "nutrition.cross_domain.favorite_boost_unavailable rule=%s",
+                rule.rule_id,
+                exc_info=True,
+            )
 
         return score
 
