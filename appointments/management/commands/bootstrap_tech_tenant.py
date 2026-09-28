@@ -8,7 +8,7 @@
 это боевой пилот с настоящим прайсом настоящего салона, и проверка смены
 цены и длительности его затёрла бы. Клиенты там тестовые (владелец 25.09:
 «в Формуле тела нет настоящих людей»), но защиту это не снимает — основание
-у ``seed_demo_salons.PROTECTED_SLUGS`` (DRF-2517).
+у ``tenants/protected_slugs.py`` (DRF-2517).
 §13 промпта требует отдельный тенант с собственной фикстурой.
 
 Состав по §13
@@ -108,11 +108,11 @@ from services.models import SalonService, ServiceCategory, ServiceTemplate, Spec
 from tenants.models import Tenant
 from users.models import SpecialistProfile, TenantUserRelationship, User
 
-# Боевой пилот. Захардкожен как ЗАПРЕТ: если кто-то перепишет
-# TENANT_SLUG на живой салон, команда откажется работать, а не заведёт
-# фикстуру поверх настоящего прайса. Своя копия, не импорт у сида: сведение
-# копий — отдельный лист (DRF-2530), здесь не делается.
-PROTECTED_SLUGS = frozenset({"formula-tela"})
+# Боевой пилот — из единственного определения (``tenants/protected_slugs.py``,
+# DRF-2530). Если кто-то перепишет TENANT_SLUG на живой салон, команда откажется
+# работать, а не заведёт фикстуру поверх настоящего прайса. До DRF-2530 здесь
+# стояла своя независимая копия списка, не связанная с источником ничем.
+from tenants.protected_slugs import PROTECTED_SLUGS  # noqa: E402
 
 TENANT_SLUG = "tech-probe"
 TENANT_NAME = "ТЕХСТЕНД — разрушающие проверки (НЕ БОЕВОЙ САЛОН)"
