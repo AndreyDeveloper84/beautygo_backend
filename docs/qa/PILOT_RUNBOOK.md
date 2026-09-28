@@ -156,7 +156,10 @@ FE-релизы miniapp (кроме fix); новые топики событий
 4. Зафиксировать причину в журнале (dunning T+1d/T+3d — не отключать глобально).
 
 ### 8.4. Outbox / ingest
-- Ayla dead-события: `python manage.py replay_dead_outbox_events`.
+- Ayla dead-события: `python manage.py replay_dead_outbox_events --event-id <id> --dry-run`
+  (по одному) либо `--tenant <uuid> --topic <тема> --dry-run`. Без `--topic` команда
+  `--tenant`/`--since` откажет: в ящике салона лежат разные темы, и переотправка
+  `booking.created` заново объявит клиенту старую бронь (DRF-2525).
 - Bot DLQ: `eventbus_ingestdlq` — после устранения причины пометить `replayed_at` (replay через
   повторный POST с тем же `event_id` → дедуп защитит).
 - Ingest 401 `no_secret` на всё → F0 (§3) не настроен.
