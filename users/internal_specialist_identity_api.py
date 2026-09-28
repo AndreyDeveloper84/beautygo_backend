@@ -99,7 +99,9 @@ class InternalSpecialistIdentityLinkView(APIView):
             ),
             409: OpenApiResponse(
                 description="FAIL_CLOSED: specialist_not_linkable, identity_not_proxy, "
-                            "identity_already_bound, idempotency_key_reused, bind_refused "
+                            "identity_already_bound, idempotency_key_reused, bind_refused, "
+                            "claim_mismatch (DRF-2450: solo profile, external_user_id "
+                            "!= provisioning claim) "
                             "(details.reason)",
             ),
             429: OpenApiResponse(description="specialist_identity_link rate limit"),

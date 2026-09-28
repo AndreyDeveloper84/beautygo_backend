@@ -49,6 +49,27 @@ authoritative readback, именованные отказы. Различие о
   прочитает потом). Нет строки — ``identity_unknown``;
 * не открывает выдачу. Связь открывает мастеру **кабинет**; попадание в подбор
   решают статус, расписание и услуги — другой предмет.
+
+# Соло-мастер: сверка с claim провижининга (DRF-2450, вариант А)
+
+У соло-мастера приглашения нет вовсе — связь ведёт бот сразу после
+провижининга, в том же ходе (§77 п.38: «участия человека в регистрации
+мастеров не надо»). Доказательство владения здесь — сам провижининг: профиль
+заведён для ``SpecialistProfile.provisioned_external_user_id``. Поэтому для
+соло-профиля дверь требует, чтобы предъявленный ``external_user_id`` РАВНЯЛСЯ
+claim; иначе — именованный отказ ``claim_mismatch``, ничего не записано.
+
+Claim здесь читается **как проверка согласованности, не как источник
+личности**: личность по-прежнему называет тело запроса и резолвит
+``resolve_external_user_readonly``; claim может только ОТКАЗАТЬ, открыть он не
+может ничего. Сторож «резолверы claim не читают»
+(``tenants/tests/test_solo_workspace_provisioning_1828.py``) остаётся в силе —
+этот модуль внесён в его закрытый список читателей с этой причиной.
+
+Соло-профиль без claim (claim стёрт или профиль заведён мимо провижининга)
+проходит ту же сверку и получает ``claim_mismatch``: владение не доказано —
+fail-closed. Мастер салона (не соло и без claim) сверку не проходит вовсе:
+его доказательство — приглашение.
 """
 
 from __future__ import annotations
@@ -85,6 +106,7 @@ REASON_IDENTITY_ALREADY_BOUND = "identity_already_bound"
 REASON_IDEMPOTENCY_KEY_REUSED = "idempotency_key_reused"
 REASON_BIND_REFUSED = "bind_refused"
 REASON_READBACK_FAILED = "readback_failed"
+REASON_CLAIM_MISMATCH = "claim_mismatch"
 
 #: HTTP-статус по причине. ``specialist_not_found`` — 404 вместе с «профиль
 #: есть, но связывать его нельзя»? Нет: это разные утверждения, и они
@@ -100,6 +122,7 @@ STATUS_BY_REASON: dict[str, int] = {
     REASON_IDEMPOTENCY_KEY_REUSED: 409,
     REASON_BIND_REFUSED: 409,
     REASON_READBACK_FAILED: 500,
+    REASON_CLAIM_MISMATCH: 409,
 }
 
 
@@ -193,6 +216,31 @@ def _linkable_profile(specialist_id, *, correlation_id: str) -> SpecialistProfil
     return profile
 
 
+def _refuse_unless_claim_matches(
+    profile: SpecialistProfile, external_user_id: str, *, correlation_id: str,
+) -> None:
+    """DRF-2450 (А): соло-профиль связывается только с личностью своего claim.
+
+    Соло — это тенант ``kind=solo`` ИЛИ непустой claim: любой из двух
+    признаков делает профиль провижиненным, и сверка не должна зависеть от
+    того, какой из них уцелел. Ни claim, ни внешний id в лог не пишутся
+    (``pii_guard``).
+    """
+
+    from tenants.models import Tenant
+
+    claim = profile.provisioned_external_user_id
+    tenant = profile.tenant
+    is_solo = claim is not None or (tenant is not None and tenant.kind == Tenant.Kind.SOLO)
+    if is_solo and claim != external_user_id:
+        raise _refuse(
+            REASON_CLAIM_MISMATCH,
+            correlation_id=correlation_id,
+            specialist_id=profile.pk,
+            claim_present=claim is not None,
+        )
+
+
 def link_specialist_identity(
     specialist_id,
     external_user_id: str,
@@ -236,6 +284,7 @@ def link_specialist_identity(
                 specialist_id=specialist_id,
             )
         profile = _linkable_profile(specialist_id, correlation_id=correlation_id)
+        _refuse_unless_claim_matches(profile, external_user_id, correlation_id=correlation_id)
         if not _readback(external_user_id, profile):
             # Строка есть, а доступа нет — повтор с тем же ключом повторит
             # именно readback, и это честнее, чем отдать 200 по наличию строки.
@@ -249,6 +298,7 @@ def link_specialist_identity(
         )
 
     profile = _linkable_profile(specialist_id, correlation_id=correlation_id)
+    _refuse_unless_claim_matches(profile, external_user_id, correlation_id=correlation_id)
 
     with transaction.atomic():
         # Под блокировкой, чтобы гонка двух вызовов на одну личность не
@@ -313,6 +363,7 @@ def link_specialist_identity(
 
 __all__ = [
     "LINK_TARGET_ROLES",
+    "REASON_CLAIM_MISMATCH",
     "SpecialistIdentityLink",
     "SpecialistIdentityLinkRefused",
     "link_specialist_identity",
