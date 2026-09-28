@@ -36,6 +36,27 @@ pytestmark = pytest.mark.django_db
 EXPORT_URL = "/api/v1/internal/users/{user_id}/personal-data/export/"
 
 
+def _carriers(needle: str, value, path: str = "выгрузка") -> list[str]:
+    """Места, откуда подстрока попала в выгрузку.
+
+    Предикат тот же, что у ``needle not in repr(...)``, но падение называет
+    носителя: без имени поля красный сторож приватности требует перебора
+    файлов, а перебор стоит прогона (DRF-2428).
+    """
+    found: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if needle in repr(key):
+                found.append(f"{path}: ключ {key!r}")
+            found += _carriers(needle, item, f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            found += _carriers(needle, item, f"{path}[{index}]")
+    elif needle in repr(value):
+        found.append(f"{path} = {value!r}")
+    return found
+
+
 def _export(u) -> dict:
     resp = _internal().get(EXPORT_URL.format(user_id=u.pk))
     assert resp.status_code == 200, resp.content
@@ -140,6 +161,31 @@ class TestTheWholeSubjectAndNobodyElse:
         assert [g["goal_text"] for g in data["goals"]["goals"]] == [GOAL_TEXT]
         assert "соседская цель" not in repr(data)
 
+    def test_a_neighbours_scan_and_its_telemetry_are_not_exported(self, user) -> None:  # noqa: F811
+        """Сосед со сканом: в дневнике нет ни его блюда, ни его телеметрии.
+
+        Соседний узел выше держит эту границу на целях; дневник ею не закрыт,
+        а именно он — ось DRF-2428: подозревали, что в `food_scans[0]` попадает
+        чужой скан. Чтением это опровергнуто (выгрузка фильтрует по человеку),
+        узел делает то же утверждение проверяемым.
+        """
+        _seed_diary(user)
+        neighbour = User.objects.create_user(
+            username="exp2214_scan_neighbour", password="x", role="client", phone="+79995559005"
+        )
+        theirs = _seed_diary(neighbour, tag="-neighbour")
+        theirs.dish_name = "соседский борщ"
+        theirs.provider_cost_usd = 0.9876
+        theirs.raw_response = {"dish": "соседский борщ"}
+        theirs.save(update_fields=["dish_name", "provider_cost_usd", "raw_response"])
+
+        diary = _export(user)["food_diary"]
+
+        assert len(diary["food_scans"]) == 1
+        assert diary["food_scans"][0]["dish_name"] == "Борщ"
+        assert _carriers("0.9876", diary) == [], _carriers("0.9876", diary)
+        assert "соседский борщ" not in repr(diary)
+
 
 class TestAnExportCreatesNothing:
     def test_empty_sections_for_a_person_with_nothing(self, user) -> None:  # noqa: F811
@@ -198,6 +244,7 @@ class TestTheScanRecognition:
         assert "сырой ответ модели" in diary["notes"]["raw_model_response"]
         # Телеметрия провайдера — не данные о человеке, не выгружается.
         assert "provider_cost_usd" not in diary["food_scans"][0]
+        assert _carriers("0.0123", diary) == [], _carriers("0.0123", diary)
         assert "0.0123" not in repr(diary)
 
     def test_service_keys_do_not_leave(self, remembered) -> None:
