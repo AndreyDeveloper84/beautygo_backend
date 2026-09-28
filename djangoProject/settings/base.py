@@ -434,12 +434,22 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # контейнер идёт под uid 1000 (`user:` в docker-compose, DRF-1677). Машина с
 # другим uid задаёт путь этой настройкой, а не правит образ.
 #
-# Тома у каталога нет: отчёт живёт до пересоздания контейнера. Это названо
-# здесь и в докстроке команды, чтобы следующий не решил, что разбор где-то
-# хранится. Срок хранения — вопрос владельца (том переживал бы пересоздание,
-# а в отчёте лежат названия услуг салона).
+# Том: `mapping_reports` в docker-compose (web и celery_worker) — отчёт
+# переживает пересоздание контейнера (DRF-2409, решение владельца 28.09, п.5).
+# До тома отчёт жил до следующей выкладки.
+#
+# Срок — «90 дней с последнего прогона по конкретному салону»: считается от
+# ``generated_at`` внутри файла салона, не от даты файла и не глобально
+# (services/mapping/store.py). Удаление истёкших идёт задачей по расписанию,
+# но только при MAPPING_REPORT_PURGE_ENABLED=true: необратимо, и включение
+# на стенде — слово владельца. Без флага задача считает и пишет событие
+# прогона. Истории прогонов нет: хранится только последний отчёт салона.
 MAPPING_REPORT_DIR = os.environ.get(
     'MAPPING_REPORT_DIR', str(BASE_DIR / 'var' / 'mapping_reports')
+)
+MAPPING_REPORT_RETENTION_DAYS = int(os.environ.get("MAPPING_REPORT_RETENTION_DAYS", "90"))
+MAPPING_REPORT_PURGE_ENABLED = (
+    os.environ.get("MAPPING_REPORT_PURGE_ENABLED", "false").lower() == "true"
 )
 
 # Default primary key field type
@@ -1293,6 +1303,12 @@ CELERY_BEAT_SCHEDULE = {
     "purge-expired-food-photos": {
         "task": "nutrition.purge_expired_food_photos",
         "schedule": crontab(hour=2, minute=45),
+    },
+    # DRF-2409 — отчёты разбора услуг старше 90 дней с последнего прогона
+    # салона. Без MAPPING_REPORT_PURGE_ENABLED только считает и пишет событие.
+    "purge-expired-mapping-reports": {
+        "task": "services.purge_expired_mapping_reports",
+        "schedule": crontab(hour=3, minute=15),
     },
     # DRF-306: webhook delivery for the nutrition outbox.
     # Same 10s cadence as the appointments outbox dispatcher — keeps

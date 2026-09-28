@@ -108,6 +108,12 @@ RECOMMENDATION_SHOWN = "recommendation_shown"
 # срок»), deleted, object_absent, no_image, refused. No ids, no names.
 FOOD_PHOTO_PURGE_RUN = "food_photo_purge_run"
 
+# mapping_report_purge_run: server-side, one per daily run of
+# services.purge_expired_mapping_reports (DRF-2409). Payload is counts only —
+# enabled, retention_days, dir_exists, examined, expired, deleted, refused,
+# unreadable. No slugs, no service names.
+MAPPING_REPORT_PURGE_RUN = "mapping_report_purge_run"
+
 
 EVENT_NAMES: frozenset[str] = frozenset({
     BOOKING_VIEWED, BOOKING_CREATED, BOOKING_CANCELLED,
@@ -130,4 +136,5 @@ EVENT_NAMES: frozenset[str] = frozenset({
     EXTERNAL_IDENTITY_BOUND,
     GOAL_SELECTED, RECOMMENDATION_SHOWN,
     FOOD_PHOTO_PURGE_RUN,
+    MAPPING_REPORT_PURGE_RUN,
 })

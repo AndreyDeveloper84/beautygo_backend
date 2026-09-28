@@ -21,8 +21,8 @@ root, существует и не пишется — ровно то состо
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
-from datetime import datetime
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from django.conf import settings
@@ -124,3 +124,102 @@ class StoredReport:
         for p in sorted(d.glob("*.json")):
             out[p.stem] = cls(json.loads(p.read_text(encoding="utf-8")), p)
         return out
+
+
+# ─── Срок хранения (DRF-2409, решение владельца 28.09, п.5) ──────────────────
+#
+# «Храним отчёты 90 дней с последнего прогона по конкретному салону.»
+#
+# Отчёт — один файл на салон, и каждый прогон его перезаписывает. Поэтому
+# «последний прогон салона» — это ``generated_at`` ВНУТРИ файла этого салона.
+# Не дата файла (``mtime``): копия и восстановление тома её меняют, а владелец
+# сказал прямо — «не от даты файла». И не глобально: срок у каждого салона свой.
+#
+# Истории прогонов здесь нет: сравнить «вчера и сегодня» по этому хранилищу
+# нельзя — сохраняется только последний прогон салона.
+
+#: Состояния файла отчёта для очистки по сроку.
+FRESH = "fresh"
+EXPIRED = "expired"
+#: Нечитаемый отчёт НЕ удаляется: «неизвестно, когда был прогон» — не «старый»,
+#: а удаление необратимо. Он называется, и решать о нём — человеку.
+UNREADABLE = "unreadable"
+
+
+@dataclass(frozen=True)
+class ReportAge:
+    slug: str
+    path: Path
+    state: str
+    generated_at: datetime | None = None
+    reason: str = ""
+
+
+def retention_days() -> int:
+    return int(getattr(settings, "MAPPING_REPORT_RETENTION_DAYS", 90))
+
+
+def review_reports(*, now: datetime | None = None) -> tuple[bool, list[ReportAge]]:
+    """Каждый отчёт салона — свежий, истёкший или нечитаемый.
+
+    Первое значение — есть ли каталог вообще: «каталога нет» и «отчётов нет»
+    — разные ответы, и пустой прогон не должен читаться как «удалять нечего».
+    Смотрятся только ``*.json``; чужие файлы в каталоге не трогаются.
+    """
+    d = report_dir()
+    if not d.is_dir():
+        return False, []
+    now = now or timezone.now()
+    cutoff = now - timedelta(days=retention_days())
+    out: list[ReportAge] = []
+    for path in sorted(d.glob("*.json")):
+        slug = path.stem
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            out.append(ReportAge(slug, path, UNREADABLE, reason=f"не читается: {exc}"))
+            continue
+        if not isinstance(payload, dict) or payload.get("tenant") != slug:
+            out.append(ReportAge(slug, path, UNREADABLE, reason="не отчёт этого салона"))
+            continue
+        raw = payload.get("generated_at")
+        try:
+            generated_at = datetime.fromisoformat(raw) if raw else None
+        except (TypeError, ValueError):
+            generated_at = None
+        if generated_at is None or generated_at.tzinfo is None:
+            out.append(ReportAge(slug, path, UNREADABLE, reason="нет generated_at с часовым поясом"))
+            continue
+        state = EXPIRED if generated_at < cutoff else FRESH
+        out.append(ReportAge(slug, path, state, generated_at))
+    return True, out
+
+
+def purge_expired_reports(*, apply: bool, now: datetime | None = None) -> dict:
+    """Удалить истёкшие отчёты — только при ``apply``; иначе только посчитать.
+
+    Возвращает числа без названий услуг: сколько просмотрено, сколько истекло,
+    сколько удалено, сколько нечитаемых и сколько удалений отказало.
+    """
+    dir_exists, ages = review_reports(now=now)
+    expired = [a for a in ages if a.state == EXPIRED]
+    deleted, refused = 0, 0
+    if apply:
+        for age in expired:
+            try:
+                age.path.unlink()
+                deleted += 1
+            except OSError:
+                refused += 1
+    return {
+        "dir_exists": dir_exists,
+        "retention_days": retention_days(),
+        "applied": apply,
+        "examined": len(ages),
+        "expired": len(expired),
+        "deleted": deleted,
+        "refused": refused,
+        "unreadable": sum(1 for a in ages if a.state == UNREADABLE),
+        "expired_slugs": [a.slug for a in expired],
+        "unreadable_slugs": [a.slug for a in ages if a.state == UNREADABLE],
+    }

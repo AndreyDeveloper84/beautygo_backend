@@ -65,6 +65,13 @@ services:
       # mount always resolves. Read-only inside the container — the
       # process never writes back.
       - ./firebase-admin.json:/app/firebase-admin.json:ro
+      # DRF-2409: отчёт разбора услуг переживает пересоздание контейнера —
+      # решение владельца 28.09, п.5 («храним 90 дней с последнего прогона
+      # по салону»). Пишет его админка (этот сервис), чистит по сроку задача
+      # в celery_worker — поэтому том смонтирован в оба. Пустой именованный
+      # том при первом монтировании наполняется из образа вместе с владельцем
+      # каталога (Dockerfile: chown ${APP_UID} на /app/var/mapping_reports).
+      - mapping_reports:/app/var/mapping_reports
     depends_on:
       db:
         condition: service_healthy
@@ -128,6 +135,9 @@ services:
     command: celery -A djangoProject worker --loglevel=info --concurrency=2
     volumes:
       - ./firebase-admin.json:/app/firebase-admin.json:ro
+      # DRF-2409: тот же том, что у web — задача очистки отчётов по сроку
+      # идёт здесь и обязана видеть те же файлы.
+      - mapping_reports:/app/var/mapping_reports
     depends_on:
       db:
         condition: service_healthy
@@ -249,3 +259,4 @@ volumes:
   postgres_data:
   minio_data:
   redis_data:
+  mapping_reports:
