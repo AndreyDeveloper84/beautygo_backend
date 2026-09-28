@@ -448,7 +448,11 @@ MAPPING_REPORT_DIR = os.environ.get(
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # OTP Configuration
-OTP_CODE_LENGTH = 6
+# Длина кода входа — 4 цифры: API Specification v2.0 (Notion), POST /auth/verify-otp,
+# «code: string // 4 цифры» — контракт двух мобильных приложений. Переход 6 → 4
+# сделан коммитом 15ca63b1 (08.04), но эта настройка тогда осталась шестёркой и не
+# читалась вовсе. Теперь её читает генератор (users/services.py), DRF-2559.
+OTP_CODE_LENGTH = 4
 OTP_EXPIRY_MINUTES = 5
 OTP_RATE_LIMIT_SECONDS = 60
 OTP_MAX_ATTEMPTS = 3

@@ -1,7 +1,7 @@
 """Authentication and OTP business logic."""
 
 import logging
-import random
+import secrets
 import re
 from datetime import timedelta
 
@@ -1338,6 +1338,23 @@ APP_TYPE_TO_ROLE = {
 }
 
 
+def _new_otp_code() -> str:
+    """Код входа длиной ``OTP_CODE_LENGTH`` из криптостойкого источника (DRF-2559).
+
+    Длина — из настройки, а не константой: до DRF-2559 настройка объявляла шесть,
+    а код был четырёхзначным, и смена настройки не меняла ничего.
+
+    Источник — ``secrets``, а не ``random``: предсказуемый генератор для кода
+    входа — самостоятельное ослабление, не зависящее от длины.
+
+    Диапазон прежний — без ведущего нуля (для 4 цифр ``1000``–``9999``, как у
+    ``randint(1000, 9999)`` до правки): приложения вне этого репозитория могли
+    держать код числом, и ведущий ноль у них пропал бы.
+    """
+    lowest = 10 ** (settings.OTP_CODE_LENGTH - 1)
+    return str(lowest + secrets.randbelow(9 * lowest))
+
+
 class OTPService:
     """Handles OTP generation, sending, and verification."""
 
@@ -1356,7 +1373,7 @@ class OTPService:
         if settings.DEBUG and not getattr(settings, 'SMS_ENABLED', False):
             code = settings.OTP_DEBUG_CODE
         else:
-            code = str(random.randint(1000, 9999))
+            code = _new_otp_code()
 
         expires_at = now + timedelta(minutes=settings.OTP_EXPIRY_MINUTES)
 
