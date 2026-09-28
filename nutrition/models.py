@@ -19,6 +19,8 @@ import uuid
 from django.conf import settings
 from django.db import models
 
+from core.image_privacy import MetadataFreeImageField
+
 
 def _scan_image_path(instance: "FoodScan", filename: str) -> str:
     return f"food-scans/{instance.user_id}/{instance.id}.jpg"
@@ -47,7 +49,7 @@ class FoodScan(models.Model):
         blank=True,
         related_name="food_scans",
     )
-    image = models.ImageField(upload_to=_scan_image_path)
+    image = MetadataFreeImageField(upload_to=_scan_image_path)
 
     # Recognition result (from provider).
     dish_name = models.CharField(max_length=200, blank=True, default="")

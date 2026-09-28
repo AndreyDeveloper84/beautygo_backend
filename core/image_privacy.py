@@ -174,3 +174,47 @@ def strip_metadata(data: bytes) -> bytes:
         # пропустил бы. Отдаём как есть: срезать здесь нечего, а ронять
         # загрузку на неизвестном входе — не предмет этого листа.
         return data
+
+
+# ---------------------------------------------------------------------------
+# DRF-2522: одно место, через которое проходят ВСЕ хранимые снимки.
+#
+# Перепись по конструктору (реестр моделей, ``isinstance(f, ImageField)``)
+# дала пять носителей хранимых байт; срезание стояло на одном — во вьюхе
+# снимка еды. Вьюха — неверное место: аватары, портфолио и услуги пишутся
+# через сериализаторы, админку и внутренние API, и каждый новый путь записи
+# пришлось бы помнить отдельно.
+#
+# Все эти пути сходятся в ``FieldFile.save``: и присваивание файла с
+# последующим ``model.save()`` (через ``FileField.pre_save``), и прямой
+# ``instance.image.save(name, content)``. Там и стоит очистка. Сторож
+# ``core/tests/test_image_fields_gate_2522.py`` краснеет, если в реестре
+# появится ``ImageField`` другого класса.
+# ---------------------------------------------------------------------------
+
+from django.core.files.base import ContentFile  # noqa: E402
+from django.db import models  # noqa: E402
+from django.db.models.fields.files import ImageFieldFile  # noqa: E402
+
+
+class MetadataFreeImageFieldFile(ImageFieldFile):
+    """Файл поля, который срезает метаданные ДО записи в хранилище."""
+
+    def save(self, name, content, save=True):
+        if hasattr(content, "seek"):
+            content.seek(0)
+        cleaned = strip_metadata(content.read())
+        super().save(name, ContentFile(cleaned, name=name), save=save)
+
+
+class MetadataFreeImageField(models.ImageField):
+    """``ImageField``, у которого метаданные не доезжают до хранилища."""
+
+    attr_class = MetadataFreeImageFieldFile
+
+    def deconstruct(self):
+        # Схема БД та же, что у ImageField: разница только в рантайме.
+        # Путь базового класса держит миграции пустыми — иначе на каждое
+        # поле ляжет AlterField без единой строки SQL.
+        name, _path, args, kwargs = super().deconstruct()
+        return name, "django.db.models.ImageField", args, kwargs
