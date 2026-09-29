@@ -32,6 +32,10 @@ from users.internal_specialist_profile_api import (
     InternalSpecialistPortfolioView,
     InternalSpecialistProfileView,
 )
+from users.internal_specialist_media_read_api import (
+    InternalSpecialistAvatarFileView,
+    InternalSpecialistPortfolioFileView,
+)
 from users.internal_service_locations_api import (
     InternalSpecialistServiceLocationView,
     InternalSpecialistServiceLocationsView,
@@ -186,6 +190,18 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/media/avatar/',
         InternalSpecialistAvatarView.as_view(),
         name='internal-specialist-avatar',
+    ),
+    # DRF-2539 — байты аватара и работ портфолио для бота (вариант 3 владельца:
+    # «отдача через наш бэкенд»); адрес хранилища наружу не уходит.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/media/avatar/file/',
+        InternalSpecialistAvatarFileView.as_view(),
+        name='internal-specialist-avatar-file',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/portfolio/<uuid:item_id>/file/',
+        InternalSpecialistPortfolioFileView.as_view(),
+        name='internal-specialist-portfolio-file',
     ),
     path(
         'api/v1/internal/specialists/<uuid:specialist_id>/portfolio/',
