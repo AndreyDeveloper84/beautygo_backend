@@ -176,6 +176,21 @@ class GoalSelectSerializer(serializers.Serializer):
         choices=ClientGoal.SourceChannel.choices, required=True,
     )
 
+    def validate_goal_key(self, value: str) -> str:
+        """DRF-2615 — канонический ключ, а не любой слаг.
+
+        Тот же приём, что у шага цели анкеты (``_answer_anketa``): там
+        прежний вид проверки «пропускал ЛЮБОЙ слаг прямо в
+        ``ClientGoal.goal_key``» и был починен; второй вход — этот —
+        остался открытым. Мусорный ключ неотличим от настоящей
+        незакурированной цели (``goal.unresolved``) и занимает единственное
+        активное место, вытесняя настоящую цель человека в ``superseded``.
+        Свободная формулировка (``goal_text``) не тронута — OD-1.
+        """
+        if value not in anketa.answerable_option_keys(anketa.goal_step()):
+            raise serializers.ValidationError("Unknown goal.")
+        return value
+
     def validate(self, attrs):
         provided = [
             bool(attrs.get("goal_key")),
