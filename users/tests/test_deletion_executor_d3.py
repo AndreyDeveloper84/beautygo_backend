@@ -396,6 +396,65 @@ class TestEveryPointerToUserIsDecided:
         assert person.phone == PHONE  # ничего не тронуто
 
 
+class TestAClaimOutlivesItsReviewersErasure:
+    """DRF-2606: проверяющий утверждения о процедуре (§6 reviewer) — в RETAIN,
+    как шесть соседних указателей провенанса каталога.
+
+    Пара, которая обязана различаться: подтверждённая строка после стирания
+    проверяющего — прежние статус, ``confirmed_at`` и указатель (на теперь
+    обезличенную учётку); никогда не подтверждённая — без ``confirmed_at`` и не
+    ``approved``. «``confirmed_by`` пуст» в одиночку прошло бы на второй строке
+    и не могло бы провалиться. Обнулить указатель при прежнем ``approved`` схема
+    не даёт (CHECK ``…_approved_requires_provenance``), а снятие статуса значило
+    бы, что стирание сотрудника меняет сказанное клиенту о процедуре.
+    """
+
+    def test_the_approved_claim_keeps_status_time_and_pointer(self, person):
+        from services.models import (
+            CapabilityGoalLink,
+            ClaimEvidence,
+            GoalOption,
+            ProcedureCapability,
+            ServiceCategory,
+            ServiceTemplate,
+        )
+
+        category = ServiceCategory.objects.create(name="Лицо D3-2606", slug="face-d3-2606")
+        template = ServiceTemplate.objects.create(
+            category=category, name="Пилинг D3", name_short="Пилинг", duration_default=45
+        )
+        goal = GoalOption.objects.create(key="skin-d3-2606", label="Уход за кожей")
+        when = timezone.now() - timedelta(days=3)
+        said = ProcedureCapability.objects.create(
+            template=template, key="even-tone", text_client="Выравнивает тон кожи",
+            status=ClaimEvidence.Status.APPROVED,
+            claim_scope=ClaimEvidence.ClaimScope.SUPPORTED,
+            confirmed_by=person, confirmed_at=when, source_ref="owner-review-2606",
+        )
+        link = CapabilityGoalLink.objects.create(
+            capability=said, goal=goal,
+            status=ClaimEvidence.Status.APPROVED,
+            claim_scope=ClaimEvidence.ClaimScope.SUPPORTED,
+            confirmed_by=person, confirmed_at=when, source_ref="owner-review-2606",
+        )
+        unsaid = ProcedureCapability.objects.create(
+            template=template, key="calm-skin", text_client="Успокаивает кожу",
+        )
+
+        req = ensure_deletion_request(person, initiator="bot").request
+        out = execute(req, bot_client=_BotOk())
+        assert out.completed, getattr(req, "failure_reason", "")
+
+        for row in (said, link):
+            row.refresh_from_db()
+            assert row.status == ClaimEvidence.Status.APPROVED
+            assert row.confirmed_at == when
+            assert row.confirmed_by_id == person.pk
+        unsaid.refresh_from_db()
+        assert unsaid.confirmed_at is None
+        assert unsaid.status != ClaimEvidence.Status.APPROVED
+
+
 class TestEverySubjectRefIsDecided:
     """DRF-1906 ч.2: строковый субъект не FK — своя таблица и своя перепись."""
 
