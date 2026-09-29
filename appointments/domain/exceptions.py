@@ -233,8 +233,12 @@ class HealthScreeningRequiredError(BookingDomainError):
         NOT_APPLICABLE: NOT_APPLICABLE_TEXT,
     }
 
-    def __init__(self, reason: str = REQUIRED):
+    def __init__(self, reason: str = REQUIRED, basis: str | None = None):
         self.reason = reason
+        #: DRF-2614 — чьим словом решён вердикт (``template_inferred`` —
+        #: черновой пол, ``template_confirmed`` — просмотренный …). Только
+        #: различение: отказ от основания не зависит.
+        self.basis = basis
         super().__init__(reason)
 
     @property

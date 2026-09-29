@@ -170,6 +170,38 @@ class ServiceTemplate(models.Model):
         default=False,
         help_text="Услуга требует проверки противопоказаний перед записью",
     )
+
+    class HealthCheckOrigin(models.TextChoices):
+        #: Выведено правилом (членство в подкатегории, слово в названии) —
+        #: черновик, человек флаг не смотрел. Так стоят все строки засева.
+        INFERRED = "inferred", "Inferred"
+        #: Флаг просмотрен и подтверждён человеком или названным правилом.
+        CONFIRMED = "confirmed", "Confirmed"
+
+    #: DRF-2614. Происхождение ФЛАГА `requires_health_check` — не строки
+    #: справочника (для неё — `lifecycle`/`approved_*` ниже). Решение
+    #: владельца §95: выведенный гейт — черновой, просмотренный — нет; до
+    #: этого поля их нечем было различить. Здесь только РАЗЛИЧЕНИЕ: гейт
+    #: записи по-прежнему отказывает по поднятому флагу любого
+    #: происхождения, пока владелец не скажет иначе.
+    health_check_origin = models.CharField(
+        max_length=16,
+        choices=HealthCheckOrigin.choices,
+        default=HealthCheckOrigin.INFERRED,
+    )
+    #: Кто подтвердил флаг. Взаимоисключающе с `health_check_confirmed_rule`
+    #: — «кто ИЛИ какое правило», та же форма, что у одобрения строки (§93).
+    health_check_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    health_check_confirmed_rule = models.CharField(max_length=100, blank=True, default="")
+    health_check_rule_version = models.CharField(max_length=32, blank=True, default="")
+    health_check_confirmed_at = models.DateTimeField(null=True, blank=True)
+    health_check_source_ref = models.CharField(max_length=200, blank=True, default="")
+
     contraindications = models.TextField(
         blank=True, default="",
         help_text="Противопоказания / оговорки (мед. профиль, разрешение врача и т.п.)",
@@ -250,6 +282,37 @@ class ServiceTemplate(models.Model):
                     | ~models.Q(approval_rule_version="")
                 ),
                 name="servicetemplate_approval_rule_carries_version",
+            ),
+            # DRF-2614: подтверждение ФЛАГА здоровья — то же устройство, что
+            # у одобрения строки выше: провенанс обязателен, «кто ИЛИ
+            # правило», правило несёт версию.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(health_check_origin="confirmed")
+                    | (
+                        models.Q(health_check_confirmed_at__isnull=False)
+                        & ~models.Q(health_check_source_ref="")
+                        & (
+                            models.Q(health_check_confirmed_by__isnull=False)
+                            | ~models.Q(health_check_confirmed_rule="")
+                        )
+                    )
+                ),
+                name="servicetemplate_health_check_confirmed_requires_provenance",
+            ),
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(health_check_confirmed_by__isnull=False)
+                    & ~models.Q(health_check_confirmed_rule="")
+                ),
+                name="servicetemplate_health_check_is_who_xor_rule",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(health_check_confirmed_rule="")
+                    | ~models.Q(health_check_rule_version="")
+                ),
+                name="servicetemplate_health_check_rule_carries_version",
             ),
         ]
 
@@ -1000,7 +1063,20 @@ class SpecialistService(models.Model):
         return None
 
     def resolved_requires_health_check(self) -> bool | None:
-        """Escalate-only OR across template floor, salon, specialist (D1).
+        """Вердикт гейта — см. :meth:`resolved_health_check` (DRF-2614)."""
+        return self.resolved_health_check()[0]
+
+    def resolved_health_check(self) -> tuple[bool | None, str]:
+        """Вердикт гейта и ЕГО ОСНОВАНИЕ — одним расчётом (DRF-2614).
+
+        Основание — одно из :data:`HEALTH_CHECK_BASES`: чьим словом решён
+        вердикт. Два вердикта ``True`` с разным основанием — разные
+        состояния: ``template_inferred`` — черновой пол, выведенный
+        правилом, ``template_confirmed`` — просмотренный. Решение владельца
+        §95 («черновой гейт не требует скрининга») различает именно их;
+        сам вердикт здесь не меняется, пока владелец не скажет.
+
+        Escalate-only OR across template floor, salon, specialist (D1).
 
         Tri-state. ``None`` means **unknown**, not ``False``.
 
@@ -1035,6 +1111,12 @@ class SpecialistService(models.Model):
         template_floor = (
             template.requires_health_check if template is not None else None
         )
+        template_basis = (
+            "template_confirmed"
+            if template is not None
+            and template.health_check_origin == ServiceTemplate.HealthCheckOrigin.CONFIRMED
+            else "template_inferred"
+        )
 
         # 1. Поднятый пол шаблона не снимает никто — это и есть D1
         #    «escalate-only»: салон не вправе ослабить канон.
@@ -1050,26 +1132,27 @@ class SpecialistService(models.Model):
         #    названии), и сид про себя говорит «draft flags for later
         #    owner review», а поля под этот review не существует.
         #
-        #    Как только провенанс шаблона появится, ЭТОТ ШАГ ОБЯЗАН
-        #    измениться: черновой пол перестаёт быть безусловным. Пока
-        #    поля нет, безусловность — граница знания, а не решение, и
-        #    принимать её за решение нельзя.
+        #    DRF-2614: провенанс флага появился (`health_check_origin`), и
+        #    черновой пол теперь ОТЛИЧИМ — основание `template_inferred`
+        #    против `template_confirmed`. Сам вердикт этот лист не меняет:
+        #    перестать требовать скрининг по черновому полу (§95) — слово
+        #    владельца, не побочный эффект разметки.
         if template_floor is True:
-            return True
+            return True, template_basis
         # 2. Эскалация мастера. Он вправе поднять и не вправе опустить,
         #    поэтому поле остаётся двузначным — см. его докстринг.
         if self.requires_health_check:
-            return True
+            return True, "specialist"
         # 3. Ответ салона, если салон отвечал. Трёхзначное поле: `False`
         #    здесь — это сказанное «нет», а не молчание.
         if salon.requires_health_check is not None:
-            return bool(salon.requires_health_check)
+            return bool(salon.requires_health_check), "salon"
         # 4. Шаблон есть и флага не несёт — ответил канон.
         if template_floor is False:
-            return False
+            return False, template_basis
         # 5. Опоры нет и никто не отвечал. Отсутствие свидетельства не
         #    является свидетельством безопасности.
-        return None
+        return None, "unknown"
 
     def clean(self) -> None:
         if self.is_active and self.resolved_duration() is None:
