@@ -177,7 +177,10 @@ class TestDeliverBothChannelFallback:
         assert n.status == Notification.Status.SENT
         mock_sms.assert_not_called()
 
-    def test_push_failure_falls_back_to_sms(self, client_user):
+    def test_push_failure_falls_back_to_sms(self, client_user, settings):
+        # DRF-2643: выключенная отправка — «не отправлено»; этот узел о
+        # настоящей отправке, поэтому она включена.
+        settings.SMS_ENABLED = True
         DeviceToken.objects.create(
             user=client_user, token="t", app_type="client",
             platform="ios", is_active=True,

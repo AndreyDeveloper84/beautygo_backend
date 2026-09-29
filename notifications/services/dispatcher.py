@@ -274,7 +274,13 @@ class NotificationService:
         if not text:
             notification.error = "template missing sms_text for SMS channel"
             return False
-        return SMSService().send(phone, text)
+        sms = SMSService()
+        if not sms.is_enabled():
+            # DRF-2643: выключенная отправка — не «отправлено». До листа
+            # SMSService.send возвращал здесь True, и строка становилась SENT.
+            notification.error = "sms sending disabled"
+            return False
+        return sms.send(phone, text)
 
     def _active_tokens_for(self, notification: Notification) -> list[str]:
         """Return the list of FCM tokens to push to — filtered by the
