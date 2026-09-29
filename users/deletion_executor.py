@@ -45,6 +45,12 @@
 ``PROCESSING`` с названной причиной, ``deletion_gate`` закрыт, следующий
 тик повторяет только бот-половину (все шаги каталога идемпотентны).
 
+Повтор не бесконечен (DRF-2644): проходы без подтверждения считаются в
+``bot_attempts``, и на :func:`bot_attempts_limit`-м заявка становится
+``STALLED`` с ERROR в журнале — открытой для D2 (данные в оборот не
+возвращаются), но бит её больше не берёт. Вернуть в работу — действие
+человека («Исполнить сейчас»), и счёт тогда начинается заново.
+
 Прокси-строки бота (``bot:max:<id>``, ``linked_user`` → человек)
 отвязываются **последними, вместе с COMPLETED**: шаг 1 каскада бота ходит
 в ``…/personal-data/`` каталога, а сторож ``IsInternalBearerForSubject``
@@ -447,6 +453,16 @@ def execute(request: DeletionRequest, *, bot_client=None) -> ExecutionOutcome:
         logger.error("deletion_executor.undecided request=%s %s", request.pk, reason)
         return ExecutionOutcome(str(request.pk), request.status, request.steps, reason)
 
+    if request.status == DeletionRequest.Status.STALLED:
+        # Бит STALLED не берёт никогда (EXECUTOR_DUE_STATUSES) — значит, сюда
+        # пришёл человек («Исполнить сейчас»). Новый круг — новый счёт.
+        logger.info(
+            "deletion_executor.stalled_restarted request=%s after_attempts=%s",
+            request.pk, request.bot_attempts,
+        )
+        request.bot_attempts = 0
+        request.save(update_fields=["bot_attempts"])
+
     _mark_processing(request)
     user = request.user
 
@@ -474,9 +490,22 @@ def execute(request: DeletionRequest, *, bot_client=None) -> ExecutionOutcome:
         # Бот не подтвердил: идентификаторы остаются на заявке для повтора.
         request.steps = {**steps, EXTERNAL_IDS_KEY: external_ids, "bot": bot.steps}
         request.failure_reason = bot.reason[:500]
-        request.save(update_fields=["steps", "failure_reason"])
+        request.bot_attempts += 1
+        limit = bot_attempts_limit()
+        if request.bot_attempts >= limit:
+            # DRF-2644: не «ждём» — остановлено. Бит больше не берёт, наружу —
+            # ERROR с причиной, а не очередной WARNING раз в 15 минут.
+            request.status = DeletionRequest.Status.STALLED
+            request.save(update_fields=["steps", "failure_reason", "bot_attempts", "status"])
+            logger.error(
+                "deletion_executor.stalled request=%s attempts=%s limit=%s reason=%s",
+                request.pk, request.bot_attempts, limit, bot.reason,
+            )
+            return ExecutionOutcome(str(request.pk), request.status, request.steps, bot.reason)
+        request.save(update_fields=["steps", "failure_reason", "bot_attempts"])
         logger.warning(
-            "deletion_executor.bot_unconfirmed request=%s reason=%s", request.pk, bot.reason
+            "deletion_executor.bot_unconfirmed request=%s attempt=%s/%s reason=%s",
+            request.pk, request.bot_attempts, limit, bot.reason,
         )
         return ExecutionOutcome(str(request.pk), request.status, request.steps, bot.reason)
 
@@ -1257,6 +1286,27 @@ def deletion_grace() -> timedelta:
     return timedelta(days=days)
 
 
+#: DRF-2644 — сколько проходов подряд бот может не подтвердить, прежде чем
+#: заявка станет STALLED. 96 = сутки при beat ``execute-deletion-requests``
+#: раз в 900 с: дольше это уже не ожидание, а остановленное обязательство.
+BOT_ATTEMPTS_SETTING = "DELETION_BOT_MAX_ATTEMPTS"
+DEFAULT_BOT_MAX_ATTEMPTS = 96
+
+
+def bot_attempts_limit() -> int:
+    """Предел проходов; кривое значение — не «без предела», а умолчание."""
+    raw = getattr(settings, BOT_ATTEMPTS_SETTING, DEFAULT_BOT_MAX_ATTEMPTS)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.error("deletion_executor.bot_attempts_misconfigured %s=%r", BOT_ATTEMPTS_SETTING, raw)
+        return DEFAULT_BOT_MAX_ATTEMPTS
+    if value < 1:
+        logger.error("deletion_executor.bot_attempts_misconfigured %s=%r", BOT_ATTEMPTS_SETTING, raw)
+        return DEFAULT_BOT_MAX_ATTEMPTS
+    return value
+
+
 def open_requests_due(now=None):
     """Заявки, которые исполнителю пора брать: открытые, у которых прошло
     окно :func:`deletion_grace` с момента приёма. Порядок — по сроку, чтобы
@@ -1268,7 +1318,7 @@ def open_requests_due(now=None):
     now = now or timezone.now()
     return (
         DeletionRequest.objects.filter(
-            status__in=DeletionRequest.OPEN_STATUSES,
+            status__in=DeletionRequest.EXECUTOR_DUE_STATUSES,
             requested_at__lte=now - deletion_grace(),
         )
         .order_by("deadline_at")
