@@ -3,7 +3,9 @@
 Путей стирания запомненного три:
 
 * C5.2 — ``users.personal_data_api.InternalPersonalDataDeleteView`` (бот,
-  повторы DRF-1950, отзыв согласия, бот-половина D3);
+  повторы DRF-1950, отзыв согласия). Бот-половина D3 его больше НЕ зовёт
+  (DRF-2639): каталог сам стёр свою половину до запроса к боту, и бот
+  закрывает шаг как ``erased_by_catalog`` без обращения сюда;
 * кнопка в приложении — ``DELETE /users/me/personal-context/``;
 * internal ``personal-context`` — ``DELETE /internal/users/{id}/personal-context/``.
 

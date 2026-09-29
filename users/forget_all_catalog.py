@@ -8,8 +8,10 @@
   (ai-bot-platform ``apps/identity/services/personal_context.py`` — «The ONE
   erase verb»); эту функцию он зовёт для каждой личности субъекта, а
   ``erase_personal_context`` — для аккаунта и прокси со строкой профиля. Его же
-  зовут задание повтора DRF-1950, отзыв согласия на хранение, удаление
-  аккаунта и мини-апп;
+  зовут задание повтора DRF-1950, отзыв согласия на хранение и мини-апп.
+  Удаление аккаунта (D3) — больше нет (DRF-2639): каталог стирает свою
+  половину сам (:func:`users.deletion_executor._erase_catalog`), и бот-половина
+  D3 закрывает этот шаг как ``erased_by_catalog`` без запроса сюда;
 - **приложение** — ``users.personal_context_views``;
 - ``users.internal_personal_context_api`` (``DELETE …/personal-context/``) —
   живой эндпоинт, но бот его НЕ зовёт. #526 ошибочно назвал его путём бота и
