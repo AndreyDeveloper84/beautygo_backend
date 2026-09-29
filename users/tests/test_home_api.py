@@ -342,6 +342,10 @@ class TestNearbyIsCatalogNotRecommendation:
     ALLOWED_KEYS = {
         "id", "display_name", "rating", "reviews_count",
         "address", "distance_km", "services_preview",
+        # Каноническое поле провода (#400, OD-PILOT-9: метры целым, км —
+        # дубль на релиз). Расстояние — смысл секции «рядом с тобой», а не
+        # объяснение пригодности: те имена — в RECOMMENDATION_ARTEFACTS.
+        "distance_meters",
     }
 
     #: Имена, под которыми объяснение персональной пригодности возвращалось
