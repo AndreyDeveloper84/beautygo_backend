@@ -327,7 +327,8 @@ class MaxSalonAdminTokenView(APIView):
     authentication_classes: list = []
     permission_classes = [permissions.AllowAny]
     throttle_classes = [ScopedRateThrottle]
-    throttle_scope = "auth"
+    # Its own bucket, not the client-login `auth` (see settings).
+    throttle_scope = "salon_admin_exchange"
 
     def post(self, request):
         tenant = getattr(request, "tenant", None)
