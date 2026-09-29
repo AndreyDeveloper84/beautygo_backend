@@ -1,6 +1,8 @@
 """Integration tests for GET /api/v1/home/ — DRF-110."""
 from __future__ import annotations
 
+import textwrap
+
 from datetime import datetime, timedelta, timezone as dt_tz
 from decimal import Decimal
 
@@ -308,3 +310,142 @@ class TestRecentActivity:
         resp = auth_client.get(HOME_URL)
         # Other user's completed appointment not in result
         assert resp.json()["data"]["recent_activity"] == []
+
+
+# ---------------------------------------------------------------------------
+# §125: «Рядом с тобой» — честный каталог, а не рекомендация
+# ---------------------------------------------------------------------------
+
+
+class TestNearbyIsCatalogNotRecommendation:
+    """Решение владельца §125 от 10.09.2026.
+
+    Секция использует каталог и географию и **не выдаёт себя за semantic
+    Recommendation**. Персональная рекомендация остаётся отдельной
+    поверхностью канонического резолвера.
+
+    Замер, из-за которого решение и принято: близость давала 25% порядка,
+    а `client history` — 10%, и наружу уезжали `match_reasons`, то есть
+    объяснения персональной пригодности. Секция с нейтральным именем
+    несла персональную семантику.
+
+    Исчезновение этого с экрана — **видимое изменение продукта,
+    санкционированное владельцем** (§125), а не побочный эффект правки.
+    Тесты ниже существуют, чтобы через месяц его не «вернули как было»
+    как случайную пропажу.
+    """
+
+    #: Ровно то, что секция вправе отдавать. Список закрытый: проверка
+    #: на «нет match_reasons» пропустила бы `score`, `top_reasons` и любое
+    #: следующее объяснение под новым именем. Закрытый набор ловит их все,
+    #: включая те, которых ещё не придумали.
+    ALLOWED_KEYS = {
+        "id", "display_name", "rating", "reviews_count",
+        "address", "distance_km", "services_preview",
+    }
+
+    #: Имена, под которыми объяснение персональной пригодности возвращалось
+    #: или могло бы вернуться. Проверяются отдельно от закрытого набора,
+    #: чтобы сообщение об ошибке называло предмет, а не «лишний ключ».
+    RECOMMENDATION_ARTEFACTS = {
+        "match_reasons", "score", "top_reasons", "why", "reasons",
+        "recommendation_reasons", "explanation",
+    }
+
+    def test_section_carries_no_personal_fit_explanation(self, auth_client):
+        """Объяснений «чем подходит именно тебе» в ответе нет."""
+        make_specialist(display_name="Anna", rating=4.9, reviews_count=80)
+        nearby = auth_client.get(HOME_URL).json()["data"]["nearby_specialists"]
+        assert nearby, "секция пуста — проверка ничего не проверяет"
+
+        for item in nearby:
+            leaked = set(item) & self.RECOMMENDATION_ARTEFACTS
+            assert not leaked, (
+                "в каталожную секцию вернулось объяснение пригодности: "
+                + ", ".join(sorted(leaked))
+                + ". §125: секция не выдаёт себя за Recommendation."
+            )
+
+    def test_section_returns_a_closed_set_of_fields(self, auth_client):
+        """Набор полей закрыт, а не «без match_reasons».
+
+        Запрет по списку запрещённого пропустил бы следующее объяснение
+        под новым именем. Здесь запрещено всё, что не разрешено.
+        """
+        make_specialist(display_name="Boris", rating=4.7, reviews_count=30)
+        nearby = auth_client.get(HOME_URL).json()["data"]["nearby_specialists"]
+        assert nearby, "секция пуста — проверка ничего не проверяет"
+
+        for item in nearby:
+            extra = set(item) - self.ALLOWED_KEYS
+            assert not extra, (
+                "в каталожной секции появились поля вне закрытого набора: "
+                + ", ".join(sorted(extra))
+            )
+
+    def test_the_section_still_consults_the_client_goal(self):
+        """Цель клиента секция спрашивает — и это НЕ откат к персонализации.
+
+        Сторож стоит наоборот тому, что было здесь раньше, и причина
+        названа, чтобы следующий не «починил» его обратно.
+
+        Я убирал цель отсюда вместе с историей и объяснениями, читая
+        §125 как «никакой персонализации вовсе». Это было моё чтение:
+        §125 говорит, что секция не выдаёт себя за semantic
+        Recommendation, и ни слова не говорит про цель. А OD-1 говорит
+        прямо противоположное — цель влияет на пассивную выдачу, — и в
+        отличие от моего чтения имеет сторожа:
+        `goals/tests/test_goal_wiring_od1.py`, пять проверок.
+
+        Пока владелец не рассудил §125 и OD-1, действует то решение, у
+        которого есть сторож. Снимать этот тест — только вместе с
+        ответом владельца, а не вместе с прочтением §125.
+        """
+        import inspect
+
+        from users import home_api
+
+        source = inspect.getsource(home_api)
+        assert "goal_category_ids=goal_category_ids_for(user)" in source, (
+            "секция перестала спрашивать цель клиента — это отмена OD-1, "
+            "и её нельзя вывести из §125: там про semantic Recommendation, "
+            "а не про цель. Нужно решение владельца."
+        )
+
+    def test_the_section_does_not_personalise_by_history(self):
+        """История визитов в секцию не передаётся.
+
+        `client_id` в запросе к движку включает `WEIGHT_HISTORY` —
+        подъём для вернувшегося клиента. §125 историю не называет; это
+        чтение «не выдаёт себя за Recommendation», и оно записано в
+        коде рядом с правкой, чтобы возражение было адресным.
+        """
+        import ast
+        import inspect
+
+        from users import home_api
+
+        # Разбор ДЕРЕВА, а не поиск подстроки. Первая версия этого теста
+        # искала `"client_id=None" in source` — и пропустила подмену,
+        # потому что та же строка стоит рядом в КОММЕНТАРИИ, объясняющем
+        # правку. Сторож зеленел на подменённом коде, читая рассказ о
+        # коде. Тот же урок, что записан у соседнего гарда в
+        # `recommendation/tests/test_boundary_guards.py`.
+        source = textwrap.dedent(
+            inspect.getsource(home_api.HomeView._nearby_specialists)
+        )
+        tree = ast.parse(source)
+        passed = [
+            kw
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            for kw in node.keywords
+            if kw.arg == "client_id"
+        ]
+        assert passed, "вызов движка не найден — тест смотрит не туда"
+        for kw in passed:
+            assert isinstance(kw.value, ast.Constant) and kw.value.value is None, (
+                "секция снова передаёт клиента движку — вернулась "
+                "персонализация прошлым опытом (§125, §72): "
+                f"client_id={ast.unparse(kw.value)}"
+            )
