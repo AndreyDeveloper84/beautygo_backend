@@ -10,6 +10,30 @@ on ``RegionalPricing`` / the per-specialist ``Service``, not here.
 ``requires_health_check`` + ``contraindications`` are seeded from the file's
 draft flags for later owner review.
 
+Существующие строки сид не трогает (DRF-2663)
+---------------------------------------------
+Всё, что сид кладёт в строку справочника, дальше живёт под рукой человека:
+длительности куратор заполняет, флаг гейта здоровья и противопоказания
+владелец просматривает и подтверждает (§95, ``health_check_origin``),
+``is_popular``/``sort_order`` правятся прямо в списке админки, одобрение
+ставит человек или правило. Поэтому шаблон заводится ``get_or_create`` —
+так же, как категории в этой же команде и как у ``seed_cross_domain_rules``.
+
+До DRF-2663 здесь стоял ``update_or_create``, и повторный прогон:
+возвращал флаг гейта к черновику файла, оставляя рядом «подтвердил
+человек»; обнулял длительности; переписывал одобрение человека на
+одобрение правилом; и ставил ``approved_at`` датой КАЖДОГО прогона — так
+что отметка «одобрено» никогда не выглядела старой, и расхождение нельзя
+было заметить по данным.
+
+Чего эта форма НЕ делает: новое издание файла (исправленная длительность,
+флаг, текст) на уже заведённые строки НЕ ложится — пути у него нет, и кто
+его применяет, не решено (вопрос владельцу). Отчёт печатает, сколько
+существующих строк оставлено как есть, чтобы пропуск был виден. Черновые
+(``PROVISIONAL``) строки сид тоже не одобряет: канон с тем же именем завёл
+оператор на ходу (§93) или человек вернул в черновик, и одобрять его —
+решение куратора. ``approved_at`` пишется один раз — в момент одобрения.
+
 See docs/CANONICAL_CATALOG_SEED_PLAN_2026-07.md (§4.1). Part of #200 / #1044.
 
 Usage::
@@ -67,11 +91,12 @@ class Command(BaseCommand):
             return
 
         with transaction.atomic():
-            n_cat, n_tpl, n_hc = self._seed(rows, source_name=path.name)
+            n_cat, n_tpl, n_hc, n_kept = self._seed(rows, source_name=path.name)
 
         self.stdout.write(self.style.SUCCESS(
             f"Canonical catalog seeded: +{n_cat} categories, +{n_tpl} templates "
-            f"(health_check={n_hc}). Totals: categories={ServiceCategory.objects.count()}, "
+            f"(health_check={n_hc}), existing templates left as is: {n_kept}. "
+            f"Totals: categories={ServiceCategory.objects.count()}, "
             f"templates={ServiceTemplate.objects.count()}."
         ))
 
@@ -82,7 +107,7 @@ class Command(BaseCommand):
         hc = sum(1 for r in rows if str(r.get("requires_health_check")).lower() == "true")
         return len(cats), len(subs), hc
 
-    def _seed(self, rows: list[dict], *, source_name: str) -> tuple[int, int, int]:
+    def _seed(self, rows: list[dict], *, source_name: str) -> tuple[int, int, int, int]:
         created_categories = 0
 
         # 1. Root categories (tenant-null / global taxonomy).
@@ -117,6 +142,7 @@ class Command(BaseCommand):
 
         # 3. Service templates. category = subcategory row if present, else root.
         created_templates = 0
+        kept_templates = 0
         health_check = 0
         for idx, r in enumerate(rows):
             sub_no = r.get("subcategory_no")
@@ -124,7 +150,9 @@ class Command(BaseCommand):
             hc = str(r.get("requires_health_check")).lower() == "true"
             health_check += int(hc)
             name = r["service"]
-            _, created = ServiceTemplate.objects.update_or_create(
+            # get_or_create: defaults — только для НОВОЙ строки. Существующую
+            # не трогаем (DRF-2663, шапка модуля): её поля под рукой человека.
+            _, created = ServiceTemplate.objects.get_or_create(
                 category=category,
                 name=name,
                 defaults={
@@ -132,8 +160,10 @@ class Command(BaseCommand):
                     # (§76 разрешает такую форму наравне с человеком,
                     # §93 требует её у канона). Правило проверяемое:
                     # строка пришла из эталонного списка владельца, имя
-                    # файла — в основании. Без этого повторный прогон
-                    # сида оставлял бы весь справочник черновым.
+                    # файла — в основании. Без этого вновь заведённый
+                    # справочник целиком лёг бы черновым. Ставится один
+                    # раз, при заведении: `approved_at` — дата акта
+                    # одобрения, а не прогона (DRF-2663).
                     #
                     # `seed_service_templates` (DRF-196) намеренно НЕ
                     # трогаем: его сорок строк — не эталонный список
@@ -155,5 +185,6 @@ class Command(BaseCommand):
                 },
             )
             created_templates += int(created)
+            kept_templates += int(not created)
 
-        return created_categories, created_templates, health_check
+        return created_categories, created_templates, health_check, kept_templates
