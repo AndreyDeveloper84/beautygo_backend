@@ -10,7 +10,22 @@ mapping is curated owner data; a silent skip would ship a chip that
 resolves to nothing. ``--dry-run`` previews without writing.
 
 Deactivated options/mappings are NOT removed by reseeding (owner may
-have hand-tuned rows via admin); the seed only creates/updates.
+have hand-tuned rows via admin); the seed only creates missing rows.
+
+Существующий вариант цели сид не трогает (DRF-2674)
+----------------------------------------------------
+До DRF-2674 вариант заводился ``update_or_create`` с ``is_active=True`` в
+``defaults``: повтор сида ВКЛЮЧАЛ обратно вариант, который владелец
+выключил в админке (``is_active`` — ``list_editable``), и переписывал его
+подпись и порядок. Обещание выше держалось только наполовину: «не удалён»
+выполнялось, «не включён обратно» — нет. Теперь ``get_or_create``, та же
+форма, что у ``seed_canonical_catalog`` (DRF-2663, #611) и у связей ниже.
+
+Чего эта форма НЕ делает: исправленные в файле подпись (``label``) или
+порядок (``sort_order``) на уже заведённый вариант НЕ ложатся — пути у них
+нет, и кто их применяет, не решено (вопрос владельцу, тот же род, что у
+канонического каталога). Отчёт печатает, сколько вариантов оставлено как
+есть.
 
 ``--prune`` (DRF-1317) — снять связь может ТОЛЬКО этот флаг
 --------------------------------------------------------
@@ -96,7 +111,7 @@ class Command(BaseCommand):
             return
 
         with transaction.atomic():
-            n_opt, n_link = self._seed(rows)
+            n_opt, n_link, n_kept = self._seed(rows)
             n_pruned = self._prune(rows) if options["prune"] else 0
 
         for line in stale:
@@ -104,6 +119,7 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(
             f"Goal options seeded: +{n_opt} options, +{n_link} category links, "
+            f"existing options left as is: {n_kept}, "
             f"-{n_pruned} stale links. "
             f"Totals: options={GoalOption.objects.count()}, "
             f"links={GoalOptionCategory.objects.count()}."
@@ -152,7 +168,7 @@ class Command(BaseCommand):
         return deleted
 
     @staticmethod
-    def _seed(rows: list[dict]) -> tuple[int, int]:
+    def _seed(rows: list[dict]) -> tuple[int, int, int]:
         categories_by_name = {
             c.name: c
             for c in ServiceCategory.objects.filter(
@@ -161,8 +177,11 @@ class Command(BaseCommand):
         }
         created_options = 0
         created_links = 0
+        kept_options = 0
         for r in rows:
-            option, created = GoalOption.objects.update_or_create(
+            # get_or_create: defaults — только для НОВОГО варианта. Выключенный
+            # владельцем остаётся выключенным (DRF-2674, шапка модуля).
+            option, created = GoalOption.objects.get_or_create(
                 key=r["key"],
                 defaults={
                     "label": r["label"],
@@ -171,6 +190,7 @@ class Command(BaseCommand):
                 },
             )
             created_options += int(created)
+            kept_options += int(not created)
             for idx, cat_name in enumerate(r["categories"]):
                 _, created = GoalOptionCategory.objects.get_or_create(
                     goal_option=option,
@@ -178,4 +198,4 @@ class Command(BaseCommand):
                     defaults={"sort_order": idx},
                 )
                 created_links += int(created)
-        return created_options, created_links
+        return created_options, created_links, kept_options
