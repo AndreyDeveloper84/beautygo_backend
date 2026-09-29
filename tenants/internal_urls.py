@@ -9,7 +9,12 @@ from django.urls import path
 
 from users.internal_salon_admin_api import InternalSalonAdminLinkView
 
-from .internal_api import InternalEnsureTenantView, InternalSoloWorkspaceView, InternalTenantKindView
+from .internal_api import (
+    InternalEnsureTenantView,
+    InternalSalonSpecialistView,
+    InternalSoloWorkspaceView,
+    InternalTenantKindView,
+)
 
 urlpatterns = [
     path("", InternalEnsureTenantView.as_view(), name="internal-tenants-ensure"),
@@ -18,6 +23,12 @@ urlpatterns = [
         "solo-workspaces/",
         InternalSoloWorkspaceView.as_view(),
         name="internal-solo-workspace-provision",
+    ),
+    # DRF-2379: специалист в уже существующем салоне — привязка без ручных шагов.
+    path(
+        "salon-specialists/",
+        InternalSalonSpecialistView.as_view(),
+        name="internal-salon-specialist-provision",
     ),
     # DRF-2254: вид тенанта — только чтение, под общим внутренним токеном бота.
     path(
