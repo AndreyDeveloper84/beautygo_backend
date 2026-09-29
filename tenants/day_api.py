@@ -75,6 +75,39 @@ class TenantDayView(APIView):
         ServiceCredentialIsReadOnly,
     ]
 
+    def check_permissions(self, request: Request) -> None:
+        """DRF's loop, plus a named refusal in the log (DRF-2640).
+
+        Until this, a 403 here left one line — ``django.request`` →
+        ``Forbidden`` with ``request_id "-"``: no tenant, no actor, no name of
+        the permission that said no. Whether a refusal depends on the date or
+        on the (actor, salon) pair could only be guessed. Same habit as
+        ``internal.subject_authz.unknown_actor`` in ``users/permissions.py``.
+
+        No personal data: the tenant slug, the actor's pk and the external id
+        the caller named — never a human name or phone.
+        """
+        for permission in self.get_permissions():
+            if not permission.has_permission(request, self):
+                tenant = getattr(request, "tenant", None)
+                user = getattr(request, "user", None)
+                authenticator = getattr(request, "successful_authenticator", None)
+                logger.warning(
+                    "tenants.day.forbidden permission=%s tenant=%s actor=%s "
+                    "external_user=%s credential=%s path=%s",
+                    type(permission).__name__,
+                    getattr(tenant, "slug", None) or request.META.get("HTTP_X_TENANT", "") or "-",
+                    getattr(user, "pk", None) or "-",
+                    request.META.get("HTTP_X_EXTERNAL_USER_ID", "") or "-",
+                    type(authenticator).__name__ if authenticator is not None else "-",
+                    request.path,
+                )
+                self.permission_denied(
+                    request,
+                    message=getattr(permission, "message", None),
+                    code=getattr(permission, "code", None),
+                )
+
     @extend_schema(
         tags=["tenants"],
         parameters=[
