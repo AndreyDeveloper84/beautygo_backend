@@ -99,11 +99,14 @@ class TestTheDevModeBranch:
 
         assert "sms.not_sent" in _text(caplog)
 
-    def test_it_still_returns_true(self, settings):
-        """Контракт вызывающих не трогаем в этой правке — он назван в теле PR."""
+    def test_it_says_not_sent(self, settings):
+        """DRF-2020 оставил контракт вызывающих как был и назвал это пределом
+        («не трогаем в этой правке»). DRF-2643 его меняет: выключено — «не
+        отправлено», а не «успех». Пара с «отправлено провайдером» —
+        ``users/tests/test_sms_disabled_is_not_sent_2643.py``."""
         settings.SMS_ENABLED = False
 
-        assert SMSService().send(PHONE, "любой текст") is True
+        assert SMSService().send(PHONE, "любой текст") is False
 
 
 @pytest.mark.django_db
