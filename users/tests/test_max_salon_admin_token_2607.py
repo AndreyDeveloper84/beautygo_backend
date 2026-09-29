@@ -462,3 +462,41 @@ class TestTheJournal:
         ordinary = str(RefreshToken.for_user(admin).access_token)
         line = self._write_and_read_journal(caplog, _client(tenant=salon, bearer=ordinary), master)
         assert f"actor={admin.pk} via=jwt tenant={salon.pk}" in line
+
+
+# --- 6. The exchange has its own rate, and login keeps its own --------------
+
+
+@pytest.mark.django_db
+class TestTheExchangeRateIsNotTheLoginRate:
+    """The bot spreads exchanges over many administrators from one address.
+    Pair that must differ: the exchange is NOT refused at the 11th call in a
+    minute, while client login still is. Both numbers are literals — a node
+    built from the setting would stay green if someone raised `auth` for all
+    (the #593 freshness lesson)."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh_buckets(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        yield
+        cache.clear()
+
+    def test_the_exchange_passes_the_11th_and_stops_at_the_61st(self, salon):
+        client = _client(tenant=salon)
+        statuses = [client.post(EXCHANGE, {}, format="json").status_code for _ in range(61)]
+        assert 429 not in statuses[:60], statuses.index(429)
+        assert statuses[60] == 429
+
+    def test_client_login_still_stops_at_the_11th(self, db):
+        from django.urls import reverse
+
+        client = APIClient()
+        client.defaults["HTTP_X_APP_TYPE"] = "client"
+        statuses = [
+            client.post(reverse("verify-otp"), {"phone": "+79001234567", "code": "0000"}).status_code
+            for _ in range(11)
+        ]
+        assert 429 not in statuses[:10]
+        assert statuses[10] == 429

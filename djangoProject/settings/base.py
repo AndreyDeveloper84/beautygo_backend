@@ -138,6 +138,17 @@ REST_FRAMEWORK = {
         # Scoped: service-to-service /nutrition/internal/* — looser than
         # client-app rate; bot fans out across many BotUsers.
         'food_scan_internal': '60/min',
+        # DRF-2607 — MAX signature → salon administrator's token. Not the
+        # client-login bucket `auth` (10/min guards ONE person's login against
+        # guessing): this exchange is service-to-service — the bot spreads it
+        # over many administrators from one address, the same kind as
+        # `payment_internal` / `food_scan_internal`. Nothing to guess here:
+        # the bot has verified the MAX signature before exchanging.
+        # The number, derived (pilot 29.09): 3 administrators who can exchange
+        # × 2 bot web workers (each keeps its own token cache) × 2 Mini App
+        # launches in one minute = 12/min peak — already over `auth`'s 10.
+        # 60 = ×5 headroom, the neighbours' rate.
+        'salon_admin_exchange': '60/min',
         # DRF-2455 — снимки дневника: свой бюджет. Открытие дня с полутора
         # десятками фото не должно съедать ведро распознавания и записи.
         'food_photo_internal': '300/min',
