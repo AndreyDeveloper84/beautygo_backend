@@ -74,6 +74,10 @@ class ResolvedService:
     #: одно значение, они дают очередь, в которую валится слой, который
     #: никто размечать не собирается (решение владельца §100).
     health_check_answerable: bool = True
+    #: DRF-2614 — чьим словом решён вердикт: ``template_confirmed`` /
+    #: ``template_inferred`` / ``specialist`` / ``salon`` / ``unknown``;
+    #: ``None`` — у слоя нет места под ответ (легаси-маркетплейс).
+    health_check_basis: str | None = None
 
 
 def resolve_bookable_service(
@@ -188,6 +192,7 @@ def resolve_bookable_service(
         if salon.duration_minutes is not None
         else link.resolved_duration()
     )
+    health_verdict, health_basis = link.resolved_health_check()
     return ResolvedService(
         kind="salon",
         service_id=salon.id,
@@ -198,5 +203,6 @@ def resolve_bookable_service(
         # Канонический слой отвечает трёхзначно: True / False / None.
         # `None` — «шаблона нет и никто флаг не поднимал», и сторож пути
         # записи закрывает такую бронь отдельным именем причины.
-        requires_health_check=link.resolved_requires_health_check(),
+        requires_health_check=health_verdict,
+        health_check_basis=health_basis,
     )
