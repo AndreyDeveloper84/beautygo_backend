@@ -1,4 +1,22 @@
-"""Create the deterministic backend half of the Wave 1 E2E fixture."""
+"""Create the deterministic backend half of the Wave 1 E2E fixture.
+
+Только база посева (DRF-2671)
+-----------------------------
+Команда заводит АКТИВНЫЙ салон, активных пользователей, мастера, услугу и
+четыре записи, а ключом ``--bind-external`` привязывает внешний id бота к
+выдуманному клиенту. На боевой базе ей делать нечего, поэтому она пишет только
+в базу, имя которой содержит ``e2e``, либо в тестовую базу pytest (``test_*``),
+либо с явным ``--allow-any-db``. Иначе — ``CommandError`` до первой записи.
+
+Форма взята у ``seed_golden`` (маркер ``golden``), третьей не заводится. Замки
+``bootstrap_tech_tenant`` (тенант выключен) сюда не подходят: харнес бронирует
+через REST, ему нужен активный салон, и замок не остановил бы запись
+пользователей, записей и привязки.
+
+Проверка идёт по ИМЕНИ базы, а не по модулю настроек: стенд e2e 04.08 работал
+на ``djangoProject.settings.prod`` с базой ``beautygo``, и по настройкам его
+от боевой базы не отличить.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +27,7 @@ from pathlib import Path
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
@@ -46,6 +65,16 @@ def _parse_anchor(value: str) -> datetime:
     return parsed.astimezone(MOSCOW).replace(second=0, microsecond=0)
 
 
+def _db_is_an_e2e_stand() -> bool:
+    """База посева — с «e2e» в имени либо тестовая база pytest (``test_*``).
+
+    Как у ``seed_golden._db_is_a_stand``: ``test_*`` создаёт и уничтожает
+    pytest-django, на пилоте такой базы не бывает.
+    """
+    name = str(settings.DATABASES["default"].get("NAME", "")).lower()
+    return "e2e" in name or name.startswith("test_")
+
+
 class Command(BaseCommand):
     help = "Create/reset the deterministic e2e-wave1 tenant fixture and emit a JSON manifest."
 
@@ -62,9 +91,28 @@ class Command(BaseCommand):
                 "the harness exercises until it performs the bind step."
             ),
         )
+        parser.add_argument(
+            "--allow-any-db",
+            action="store_true",
+            help="Разрешить запись в базу без «e2e» в имени. На пилоте — НЕТ.",
+        )
 
     @transaction.atomic
     def handle(self, *args, **options):
+        if not _db_is_an_e2e_stand() and not options["allow_any_db"]:
+            raise CommandError(
+                "bootstrap_e2e_wave1 заводит активный выдуманный салон и отказывается делать это "
+                f"в базе {settings.DATABASES['default'].get('NAME')!r}: в имени нет «e2e». "
+                "Это стенд e2e? Назовите базу так. Это не стенд? Тогда не сейте."
+            )
+        if options["allow_any_db"] and options.get("bind_external"):
+            # Два полномочия — два ключа. Люк базы существует для посева на
+            # нестандартно названной базе; привязку личности он не открывает:
+            # 05.08 ключ уже применяли к живому MAX-id как операцию поддержки.
+            raise CommandError(
+                "--bind-external вместе с --allow-any-db не исполняется: люк базы не открывает "
+                "привязку внешней личности. Привязка — только на базе посева («e2e» в имени)."
+            )
         anchor = _parse_anchor(options["anchor"])
         duration = timedelta(hours=1)
 
