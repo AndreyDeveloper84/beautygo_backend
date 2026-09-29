@@ -229,6 +229,14 @@ RETAIN: dict[str, str] = {
     "users.DeletionRequest.user": "юридический след заявки; строка User не удаляется физически",
     "admin.LogEntry.user": "журнал администрирования; у клиента пусто",
     "services.ServiceTemplate.approved_by": "провенанс решения по каталогу (§76), актор — сотрудник",
+    # DRF-2614. Кто подтвердил флаг гейта здоровья. НЕ обнуляется: CHECK
+    # ``servicetemplate_health_check_confirmed_requires_provenance`` требует у
+    # ``confirmed`` автора или правила — NULL нарушил бы схему, а снятие
+    # подтверждения переписало бы решение о медицинском гейте приватным
+    # действием сотрудника.
+    "services.ServiceTemplate.health_check_confirmed_by": (
+        "провенанс подтверждения флага гейта здоровья (§95), актор — сотрудник"
+    ),
     "services.ServiceTemplateSynonym.confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "services.SalonService.mapping_confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "services.DraftSalonService.confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
