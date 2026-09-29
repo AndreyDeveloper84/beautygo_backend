@@ -557,6 +557,15 @@ GUARDED_OTHERWISE_SPECIALIST: dict[str, str] = {
     "internal-specialist-schedule": (
         "IsInternalBearer + tenant_id как заявка, 404 на чужой (DRF-1126)"
     ),
+    # DRF-2539: публичное лицо мастера — байты аватара и работ портфолио для
+    # бота. Не субъект: читает любой клиент витрины. Только чтение, запись —
+    # за субъектной ручкой; 404 одинаковый на все отсутствия.
+    "internal-specialist-avatar-file": (
+        "IsInternalBearer, только чтение: публичное фото мастера для бота (DRF-2539)"
+    ),
+    "internal-specialist-portfolio-file": (
+        "IsInternalBearer, только чтение, работа фильтруется по мастеру в запросе (DRF-2539)"
+    ),
     # DRF-2442: это дверь, КОТОРАЯ ДЕЛАЕТ субъекта. Сторож субъекта здесь
     # невозможен по построению: пока связи нет, актор и есть та самая
     # несвязанная личность, и IsInternalBearerForSpecialistSubject отказал бы
