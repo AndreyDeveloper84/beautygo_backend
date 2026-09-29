@@ -106,9 +106,19 @@ class PushService:
 
         app = _ensure_app()
         if app is False:
+            # DRF-2623: which notification would have gone, and to which
+            # device — not what it said. Title and body carry the client's
+            # and the master's names (templates.py), which no pattern of
+            # `redact_pii` can recognise; at INFO they became Sentry
+            # breadcrumbs. The template and the notification row are enough
+            # to reconstruct the text from the database when debugging.
+            payload = data or {}
             logger.info(
-                "push.stub token=%s title=%r body=%r data=%s",
-                token[:12] + "…", title, body, data or {},
+                "push.stub token=%s template=%s notification=%s data_keys=%s",
+                token[:12] + "…",
+                payload.get("template_id", "-"),
+                payload.get("notification_id", "-"),
+                ",".join(sorted(payload)),
             )
             return True
 

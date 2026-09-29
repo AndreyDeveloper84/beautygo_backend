@@ -119,10 +119,11 @@ class InternalEnsureTenantView(APIView):
                 slug=data["slug"], name=data["name"], city=data["city"],
             )
         except TenantNameMismatch as exc:
-            logger.info(
-                "tenants.ensure.slug_taken slug=%s existing=%r requested=%r",
-                exc.slug, exc.existing_name, exc.requested_name,
-            )
+            # DRF-2623: the salon is named by its slug — unique, and enough to
+            # find the row. Its NAME is not logged: a salon is often called
+            # after its owner, and a name has no shape `redact_pii` could
+            # recognise, so at INFO it rode into Sentry as a breadcrumb.
+            logger.info("tenants.ensure.slug_taken slug=%s names_differ=yes", exc.slug)
             return error_response(
                 ErrorCode.TENANT_SLUG_TAKEN,
                 f"Slug {exc.slug!r} уже занят салоном {exc.existing_name!r}.",
