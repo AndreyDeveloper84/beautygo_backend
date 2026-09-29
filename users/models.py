@@ -923,10 +923,19 @@ class DeletionRequest(models.Model):
         PROCESSING = "DELETION_PROCESSING", "Выполняется"
         COMPLETED = "DELETION_COMPLETED", "Завершено"
         FAILED = "DELETION_FAILED", "Сбой исполнителя"
+        #: DRF-2644: бот не подтвердил свою половину столько проходов подряд,
+        #: что это уже не «ждём», а остановленное обязательство. Исполнитель
+        #: заявку больше не берёт; вернуть в работу — действие человека.
+        STALLED = "DELETION_STALLED", "Остановлено: бот не подтверждает"
 
     #: Открытые состояния — те, при которых новая заявка не заводится и
-    #: персонализация обязана быть остановлена (срез D2).
-    OPEN_STATUSES = (Status.REQUESTED, Status.PROCESSING, Status.FAILED)
+    #: персонализация обязана быть остановлена (срез D2). ``STALLED`` здесь:
+    #: остановился исполнитель, а не просьба человека — данные в оборот
+    #: не возвращаются.
+    OPEN_STATUSES = (Status.REQUESTED, Status.PROCESSING, Status.FAILED, Status.STALLED)
+    #: Те открытые, которые исполнитель берёт сам, по биту. ``STALLED`` —
+    #: нет: иначе остановка снова стала бы кольцом под другим именем.
+    EXECUTOR_DUE_STATUSES = (Status.REQUESTED, Status.PROCESSING, Status.FAILED)
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     # PROTECT: заявка — юридический след; строка пользователя мягко
@@ -951,6 +960,9 @@ class DeletionRequest(models.Model):
     #: [...], "retained": {"<модель>": "<основание>"}}. Пусто до исполнения.
     steps = models.JSONField(default=dict, blank=True)
     failure_reason = models.CharField(max_length=500, blank=True, default="")
+    #: DRF-2644: сколько проходов подряд бот не подтвердил свою половину.
+    #: Хранится, а не выводится из журнала: предел кольца считается по нему.
+    bot_attempts = models.PositiveIntegerField(default=0)
 
     class Meta:
         verbose_name = "Заявка на удаление"
@@ -964,6 +976,7 @@ class DeletionRequest(models.Model):
                         "DELETION_REQUESTED",
                         "DELETION_PROCESSING",
                         "DELETION_FAILED",
+                        "DELETION_STALLED",
                     )
                 ),
                 name="deletionrequest_one_open_per_user",

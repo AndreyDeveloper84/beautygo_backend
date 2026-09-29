@@ -785,6 +785,89 @@ class TestRecommendationRecordsAreAnonymised:
         assert resp.status_code == 403, resp.content[:200]
 
 
+class TestTheBotRetryIsBounded:
+    """DRF-2644: повтор бот-половины не бесконечен.
+
+    До листа ``bot_unconfirmed`` оставлял заявку в ``PROCESSING``, бит брал её
+    каждые 900 с, проходы не считались, наружу — только WARNING. Пара, которая
+    обязана различаться: один отказ — заявка в работе; N — остановлена с
+    причиной. «Тик обрабатывает заявку» прошло бы при самом дефекте.
+    """
+
+    def test_the_default_limit_is_a_day_of_ticks(self, settings):
+        from users.deletion_executor import DEFAULT_BOT_MAX_ATTEMPTS, bot_attempts_limit
+
+        if hasattr(settings, "DELETION_BOT_MAX_ATTEMPTS"):
+            delattr(settings, "DELETION_BOT_MAX_ATTEMPTS")
+        # Литерал, а не та же настройка: сутки при beat раз в 900 с.
+        assert DEFAULT_BOT_MAX_ATTEMPTS == 96
+        assert bot_attempts_limit() == 96
+
+    def test_one_unconfirmed_pass_keeps_the_request_in_work(self, person, settings):
+        from users.deletion_executor import open_requests_due
+
+        settings.DELETION_BOT_MAX_ATTEMPTS = 3
+        settings.DELETION_GRACE_DAYS = 0
+        req = ensure_deletion_request(person, initiator="bot").request
+
+        out = execute(req, bot_client=_BotDown("bot_not_ok: ['ayla_delete']"))
+
+        req.refresh_from_db()
+        assert out.status == req.status == DeletionRequest.Status.PROCESSING
+        assert req.bot_attempts == 1
+        assert req.pk in {r.pk for r in open_requests_due()}
+
+    def test_n_unconfirmed_passes_stop_the_request_by_name(self, person, settings):
+        from users.deletion_executor import open_requests_due
+
+        settings.DELETION_BOT_MAX_ATTEMPTS = 3
+        settings.DELETION_GRACE_DAYS = 0
+        req = ensure_deletion_request(person, initiator="bot").request
+        bot = _BotDown("bot_not_ok: ['ayla_delete']")
+
+        # Логгер ``users`` не передаёт записи корню (propagate=False), caplog
+        # их не видит — смотрим сам логгер исполнителя.
+        with patch("users.deletion_executor.logger") as log:
+            for _ in range(3):
+                req.refresh_from_db()
+                out = execute(req, bot_client=bot)
+
+        req.refresh_from_db()
+        assert bot.calls == 3
+        assert out.status == req.status == DeletionRequest.Status.STALLED
+        assert req.bot_attempts == 3
+        assert "ayla_delete" in req.failure_reason
+        stalled = [c for c in log.error.call_args_list if c.args[0].startswith("deletion_executor.stalled")]
+        assert len(stalled) == 1, log.error.call_args_list
+        assert stalled[0].args[1:3] == (req.pk, 3)
+        unconfirmed = [
+            c for c in log.warning.call_args_list
+            if c.args[0].startswith("deletion_executor.bot_unconfirmed")
+        ]
+        assert len(unconfirmed) == 2
+        # Бит её больше не берёт…
+        due = {r.pk for r in open_requests_due()}
+        assert req.pk not in due
+        # …но просьба человека жива: персонализация по-прежнему остановлена.
+        assert req.is_open
+        assert deletion_block_for(person) is not None
+
+    def test_a_human_restart_starts_the_count_anew(self, person, settings):
+        settings.DELETION_BOT_MAX_ATTEMPTS = 2
+        settings.DELETION_GRACE_DAYS = 0
+        req = ensure_deletion_request(person, initiator="bot").request
+        for _ in range(2):
+            req.refresh_from_db()
+            execute(req, bot_client=_BotDown())
+        req.refresh_from_db()
+        assert req.status == DeletionRequest.Status.STALLED
+
+        out = execute(req, bot_client=_BotOk())
+
+        req.refresh_from_db()
+        assert out.completed and req.status == DeletionRequest.Status.COMPLETED
+
+
 # ---------------------------------------------------------------------------
 # 4. Откат при неполноте
 # ---------------------------------------------------------------------------

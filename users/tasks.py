@@ -69,7 +69,7 @@ def infer_user_patterns_for_one(user_id: str) -> dict:
 @shared_task(name="users.execute_deletion_requests")
 def execute_deletion_requests(limit: int = 20) -> dict[str, int]:
     """Тик исполнителя: взять открытые заявки (REQUESTED / PROCESSING /
-    FAILED — повтор по той же записи), у которых прошло окно
+    FAILED — повтор по той же записи; STALLED — нет, DRF-2644), у которых прошло окно
     ``DELETION_GRACE_DAYS`` с приёма, и исполнить по одной.
 
     Идемпотентно: заявка, у которой каталог уже стёрт, а бот не подтвердил,
