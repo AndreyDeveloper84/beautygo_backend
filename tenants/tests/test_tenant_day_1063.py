@@ -591,3 +591,53 @@ class TestUsernameIsNeverAName:
         assert resp.status_code == 200, resp.data
         assert "bot:max:998877" not in str(resp.data)
         assert "998877" not in str(resp.data)
+
+
+@pytest.mark.django_db
+class TestARefusalHasAName:
+    """DRF-2640: отказ на дне салона оставляет запись, по которой его можно
+    разобрать — какое право сказало «нет», какой салон, какой актор.
+
+    До листа 403 оставлял одну строку ``django.request`` → ``Forbidden`` без
+    тенанта и актора; на пилоте будущие даты шли 200, «сегодня» — 403, и по
+    журналу нельзя было сказать, дата это или пара (актор, салон).
+    """
+
+    @staticmethod
+    def _forbidden(caplog) -> list[str]:
+        return [
+            r.getMessage() for r in caplog.records if r.getMessage().startswith("tenants.day.forbidden")
+        ]
+
+    def test_a_refusal_names_the_permission_the_salon_and_the_actor(
+        self, salon, other_salon, admin_user, caplog,
+    ):
+        with caplog.at_level("WARNING", logger="tenants.day_api"):
+            resp = _get(admin_user, other_salon.slug, date=DAY.isoformat())
+
+        assert resp.status_code == 403
+        lines = self._forbidden(caplog)
+        assert len(lines) == 1, lines
+        assert "permission=IsTenantAdmin" in lines[0]
+        assert f"tenant={other_salon.slug}" in lines[0]
+        assert f"actor={admin_user.pk}" in lines[0]
+
+    def test_an_admitted_read_leaves_no_refusal(self, salon, admin_user, caplog):
+        with caplog.at_level("WARNING", logger="tenants.day_api"):
+            resp = _get(admin_user, salon.slug, date=DAY.isoformat())
+
+        assert resp.status_code == 200, resp.data
+        assert self._forbidden(caplog) == []  # empty-assert-ok: 200 строкой выше — допуск доказан
+
+    def test_the_verdict_does_not_depend_on_the_date(self, salon, other_salon, admin_user):
+        """Права решают по паре (актор, салон) в ``initial()``, до того как
+        ``get()`` разбирает ``date``. Та же пара на «сегодня» и на будущую
+        дату — один и тот же ответ; разный ответ на пилоте значит разную пару."""
+        today = date.today().isoformat()
+        later = (date.today() + timedelta(days=30)).isoformat()
+
+        own = {_get(admin_user, salon.slug, date=d).status_code for d in (today, later)}
+        foreign = {_get(admin_user, other_salon.slug, date=d).status_code for d in (today, later)}
+
+        assert own == {200}
+        assert foreign == {403}
