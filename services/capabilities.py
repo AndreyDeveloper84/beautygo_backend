@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
+from django.db.models import Q
 from django.utils import timezone
 
 from services.models import CapabilityGoalLink, ClaimEvidence, ProcedureCapability, ServiceTemplate
@@ -46,11 +47,18 @@ class CapabilityReadout:
     capabilities: tuple[ProcedureCapability, ...] = field(default_factory=tuple)
 
 
-def _client_facing_filter(now: datetime) -> dict:
-    return {
-        "status": ClaimEvidence.Status.APPROVED,
-        "claim_scope": ClaimEvidence.ClaimScope.SUPPORTED,
-    }
+def _client_facing_q(now: datetime, prefix: str = "") -> Q:
+    """Подтверждено, поддержано, не истекло — в базе, а не только в памяти.
+
+    ``prefix`` — путь до строки с основанием (``"capability__"`` у связи):
+    связь проверяет возможность ПО БАЗЕ, а не по объекту в руках вызывающего,
+    который мог устареть.
+    """
+    return (
+        Q(**{f"{prefix}status": ClaimEvidence.Status.APPROVED})
+        & Q(**{f"{prefix}claim_scope": ClaimEvidence.ClaimScope.SUPPORTED})
+        & (Q(**{f"{prefix}valid_until__isnull": True}) | Q(**{f"{prefix}valid_until__gt": now}))
+    )
 
 
 def client_facing_capabilities(
@@ -58,13 +66,11 @@ def client_facing_capabilities(
 ) -> CapabilityReadout:
     """Возможности процедуры, которые можно сказать человеку, и явное состояние."""
     now = now or timezone.now()
-    rows = [
-        c
-        for c in ProcedureCapability.objects.filter(
-            template=template, **_client_facing_filter(now)
-        ).order_by("key")
-        if c.is_client_facing(now=now)
-    ]
+    rows = list(
+        ProcedureCapability.objects.filter(_client_facing_q(now), template=template).order_by(
+            "key"
+        )
+    )
     if not rows:
         return CapabilityReadout(state=KnowledgeState.UNKNOWN)
     return CapabilityReadout(state=KnowledgeState.KNOWN, capabilities=tuple(rows))
@@ -79,14 +85,15 @@ def client_facing_goal_links(
     говорится, пока не подтверждена сама возможность, и наоборот.
     """
     now = now or timezone.now()
-    if not capability.is_client_facing(now=now):
-        return ()
     return tuple(
-        link
-        for link in CapabilityGoalLink.objects.filter(
-            capability=capability, **_client_facing_filter(now)
-        ).select_related("goal")
-        if link.is_client_facing(now=now) and link.goal.is_active
+        CapabilityGoalLink.objects.filter(
+            _client_facing_q(now),
+            _client_facing_q(now, prefix="capability__"),
+            capability_id=capability.pk,
+            goal__is_active=True,
+        )
+        .select_related("goal")
+        .order_by("goal__sort_order", "goal__key")
     )
 
 

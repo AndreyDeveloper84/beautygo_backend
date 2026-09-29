@@ -117,6 +117,14 @@ class TestOnlySupportedClaimsAreSaid:
 
         assert keys == ["said"]
 
+    def test_validity_ends_exactly_at_valid_until(self, template, curator) -> None:
+        now = timezone.now()
+        _approve(_capability(template, key="edge"), curator, valid_until=now)
+        assert client_facing_capabilities(template, now=now - timedelta(seconds=1)).state is (
+            KnowledgeState.KNOWN
+        )
+        assert client_facing_capabilities(template, now=now).state is KnowledgeState.UNKNOWN
+
     def test_an_expired_confirmation_is_not_said(self, template, curator) -> None:
         _approve(_capability(template, key="fresh"), curator)
         _approve(
@@ -146,6 +154,34 @@ class TestProvenanceIsRequired:
             row.save()
 
 
+class TestProvenanceShapes:
+    """Ревью: провенанс — все четыре части, и «правило» так же законно, как «человек»."""
+
+    def test_a_named_rule_is_as_good_as_a_named_person(self, template) -> None:
+        row = _capability(template)
+        _approve(row, None, confirmed_rule="owner_confirmed_list", rule_version="1")
+        assert client_facing_capabilities(template).state is KnowledgeState.KNOWN
+
+    @pytest.mark.parametrize("missing", ["confirmed_at", "source_ref"])
+    def test_approved_without_date_or_basis_is_refused(self, template, curator, missing) -> None:
+        row = _capability(template)
+        row.status = S.APPROVED
+        row.claim_scope = C.SUPPORTED
+        row.confirmed_by = curator
+        row.confirmed_at = None if missing == "confirmed_at" else timezone.now()
+        row.source_ref = "" if missing == "source_ref" else "x"
+        with pytest.raises(IntegrityError), transaction.atomic():
+            row.save()
+
+    def test_the_goal_link_carries_the_same_constraint(self, template, goal) -> None:
+        link = CapabilityGoalLink(
+            capability=_capability(template), goal=goal, status=S.APPROVED,
+            claim_scope=C.SUPPORTED, confirmed_at=timezone.now(), source_ref="x",
+        )
+        with pytest.raises(IntegrityError), transaction.atomic():
+            link.save()
+
+
 class TestGoalLinkHasItsOwnEvidence:
     """Два утверждения — два подтверждения: «умеет X» и «X помогает цели Y»."""
 
@@ -168,8 +204,126 @@ class TestGoalLinkHasItsOwnEvidence:
     def test_a_confirmed_link_of_an_unconfirmed_capability_is_not_said(
         self, template, curator, goal
     ) -> None:
-        capability = _capability(template)  # inference
+        said = _capability(template, key="said")
+        _approve(said, curator)
+        _approve(CapabilityGoalLink.objects.create(capability=said, goal=goal), curator)
+        unsaid = _capability(template, key="unsaid")  # inference
+        _approve(CapabilityGoalLink.objects.create(capability=unsaid, goal=goal), curator)
+
+        assert len(client_facing_goal_links(said)) == 1
+        assert client_facing_goal_links(unsaid) == ()
+
+    def test_a_stale_in_memory_capability_does_not_open_its_links(
+        self, template, curator, goal
+    ) -> None:
+        """Ревью: связь проверяет возможность ПО БАЗЕ, а не по объекту в руках."""
+        capability = _capability(template)
+        _approve(capability, curator)
+        _approve(CapabilityGoalLink.objects.create(capability=capability, goal=goal), curator)
+        assert len(client_facing_goal_links(capability)) == 1
+
+        ProcedureCapability.objects.filter(pk=capability.pk).update(
+            claim_scope=C.PROHIBITED_CLAIM
+        )
+
+        assert client_facing_goal_links(capability) == ()  # capability in memory still says SUPPORTED
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"claim_scope": C.NOT_SUPPORTED},
+            {"claim_scope": C.PROHIBITED_CLAIM},
+            {"valid_until": "past"},
+            {"goal_inactive": True},
+        ],
+        ids=["not_supported", "prohibited", "expired", "goal_inactive"],
+    )
+    def test_a_link_is_dropped_by_its_own_evidence_or_an_inactive_goal(
+        self, template, curator, goal, change
+    ) -> None:
+        capability = _capability(template)
+        _approve(capability, curator)
         link = CapabilityGoalLink.objects.create(capability=capability, goal=goal)
         _approve(link, curator)
+        assert len(client_facing_goal_links(capability)) == 1  # positive side
+
+        if change.get("goal_inactive"):
+            GoalOption.objects.filter(pk=goal.pk).update(is_active=False)
+        elif change.get("valid_until") == "past":
+            CapabilityGoalLink.objects.filter(pk=link.pk).update(
+                valid_until=timezone.now() - timedelta(seconds=1)
+            )
+        else:
+            CapabilityGoalLink.objects.filter(pk=link.pk).update(**change)
 
         assert client_facing_goal_links(capability) == ()
+
+
+class TestStableIdentity:
+    """Приёмка владельца §9.1: ключ — идентичность смысла, не производная от текста."""
+
+    def test_editing_the_wording_does_not_change_the_key(self, template, curator) -> None:
+        row = _capability(template, key="temporary_relaxation")
+        _approve(row, curator)
+
+        row.text_client = "Помогает расслабиться — формулировка переписана редактором"
+        row.text_professional = "Снижение мышечного тонуса"
+        row.save()
+        row.refresh_from_db()
+
+        assert row.key == "temporary_relaxation"
+        assert [c.key for c in client_facing_capabilities(template).capabilities] == [
+            "temporary_relaxation"
+        ]
+
+
+class TestTrustBoundaryByName:
+    """Приёмка §9.2 тем же словом, что у владельца: system_inference."""
+
+    def test_new_knowledge_starts_as_system_inference_and_is_not_said(self, template) -> None:
+        row = _capability(template, claim_scope=C.SUPPORTED)
+        assert row.status == S.SYSTEM_INFERENCE == "system_inference"
+        assert client_facing_capabilities(template).state is KnowledgeState.UNKNOWN
+
+
+class TestSafeCourseStorage:
+    """Приёмка §9.4: курс не сохраняется голым; min/max не требуется."""
+
+    def _link(self, template, goal, **course) -> CapabilityGoalLink:
+        return CapabilityGoalLink(capability=_capability(template), goal=goal, **course)
+
+    def test_a_worded_course_with_a_note_and_evidence_is_stored_without_min_max(
+        self, template, goal
+    ) -> None:
+        link = self._link(
+            template,
+            goal,
+            course_pattern="Обычно рассматривается как курс сеансов",
+            variability_note="Длительность зависит от исходного состояния и выбранного результата",
+            evidence_source="Протокол салона",
+            source_ref="owner-2606",
+        )
+        link.save()
+        link.refresh_from_db()
+        assert link.course_pattern.startswith("Обычно")
+
+    @pytest.mark.parametrize(
+        "course",
+        [
+            {"course_pattern": "Курс сеансов", "evidence_source": "x", "source_ref": "x"},
+            {"course_pattern": "Курс сеансов", "variability_note": "зависит", "source_ref": "x"},
+            {"course_pattern": "Курс сеансов", "variability_note": "зависит", "evidence_source": "x"},
+            {
+                "course_pattern": " 10 ",
+                "variability_note": "зависит",
+                "evidence_source": "x",
+                "source_ref": "x",
+            },
+        ],
+        ids=["no_variability_note", "no_evidence_source", "no_source_ref", "bare_number"],
+    )
+    def test_a_course_without_note_or_evidence_or_as_a_bare_number_is_refused(
+        self, template, goal, course
+    ) -> None:
+        with pytest.raises(IntegrityError), transaction.atomic():
+            self._link(template, goal, **course).save()
