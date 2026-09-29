@@ -124,6 +124,9 @@ class PersonalDataAccessLog(models.Model):
         # (выгружается и стирается); чтение и запись полей, не разрушение.
         READ_SERVICE_LOCATION = "read_service_location", "Чтение места работы мастера"
         WRITE_SERVICE_LOCATION = "write_service_location", "Запись места работы мастера"
+        # DRF-2655 — оператор печатает карточку человека (``identity_card``):
+        # «просмотр сотрудником чувствительных профилей» §107, fail-closed.
+        OPERATOR_CARD_READ = "operator_card_read", "Просмотр карточки человека оператором"
 
     class ObjectCategory(models.TextChoices):
         PERSONAL_DATA = "personal_data", "Персональные данные"
@@ -144,6 +147,9 @@ class PersonalDataAccessLog(models.Model):
         # (DRF-2607). Человек, не сервис, и привязан к ОДНОМУ салону — у
         # таких строк ``tenant`` заполнен.
         SALON_ADMIN_TOKEN = "salon_admin_token", "Собственный токен администратора салона"
+        # DRF-2655: команда оператора на хосте. Аутентифицированного актора
+        # нет — ``actor`` пуст честно; кто назвался — в ``operator``.
+        OPERATOR_COMMAND = "operator_command", "Команда оператора на хосте"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -182,6 +188,12 @@ class PersonalDataAccessLog(models.Model):
         "tenants.Tenant", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="personal_data_accesses",
     )
+
+    #: DRF-2655 / DRF-2653 — у команды оператора: кто назвался при запуске
+    #: (``--operator``), роль или метка, НЕ имя и НЕ проверено. Отдельно от
+    #: ``actor``: тот — разрешённый субъект, этого у команды нет. Склейка
+    #: сказала бы «действовал такой-то», хотя он только так назвался.
+    operator = models.CharField(max_length=64, blank=True, default="")
 
     # --- что именно ---
     operation = models.CharField(max_length=32, choices=Operation.choices)
@@ -264,3 +276,67 @@ class PersonalDataAccessLog(models.Model):
             "PersonalDataAccessLog rows cannot be deleted through the "
             "application."
         )
+
+
+class PruneRunQuerySet(models.QuerySet):
+    def delete(self):  # noqa: D102 — see PruneRun
+        raise NotImplementedError(
+            "PruneRun is append-only: the record of a journal clean-up cannot be "
+            "deleted through the application, and no retention path touches it."
+        )
+
+    def update(self, **kwargs):  # noqa: D102 — see PruneRun
+        raise NotImplementedError("PruneRun rows are immutable.")
+
+
+class PruneRun(models.Model):
+    """Квитанция чистки журнала доступа (DRF-2655).
+
+    ``prune_privacy_audit --apply`` удалял строки журнала бесследно: «записи
+    никогда не было» и «запись удалили» были неразличимы. Теперь каждая
+    настоящая чистка оставляет строку ЗДЕСЬ — не в очищаемом журнале (иначе
+    следующая чистка сняла бы и её) и не в ``AnalyticsEvent``: §96 отвергает
+    аналитику для аудита («могут агрегироваться, очищаться»), а это аудит
+    самого аудита. Строка и удаление — одна транзакция: не записалась
+    квитанция — не удалено ничего.
+
+    Сухой прогон квитанции не пишет: он ничего не удаляет.
+
+    Законность самой чистки здесь не решается: основание — §96 («1 год —
+    временное продуктовое решение», окончательный срок — юридическое
+    решение). Квитанция делает чистку видимой, а не разрешённой.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    occurred_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    #: Кто назвался (``--operator``): роль или метка, не имя, не проверено.
+    operator = models.CharField(max_length=64)
+    retention_days = models.PositiveIntegerField()
+    cutoff = models.DateTimeField(help_text="Удалены строки с occurred_at строго раньше.")
+    matched = models.PositiveIntegerField()
+    deleted = models.PositiveIntegerField()
+    remaining = models.PositiveIntegerField()
+    oldest_remaining = models.DateTimeField(null=True, blank=True)
+    code_version = models.CharField(max_length=64, blank=True, default="")
+
+    objects = models.Manager.from_queryset(PruneRunQuerySet)()
+
+    class Meta:
+        verbose_name = "Чистка журнала доступа к персданным"
+        verbose_name_plural = "Чистки журнала доступа к персданным"
+        ordering = ("-occurred_at",)
+        default_permissions = ()
+        permissions = [
+            ("view_prune_run", "Может читать квитанции чистки журнала доступа"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.occurred_at:%Y-%m-%d %H:%M:%S} deleted={self.deleted} by={self.operator}"
+
+    def save(self, *args, **kwargs):
+        if self._state.adding is False:
+            raise NotImplementedError("PruneRun rows are immutable.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise NotImplementedError("PruneRun rows cannot be deleted through the application.")

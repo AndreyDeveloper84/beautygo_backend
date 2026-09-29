@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
@@ -62,23 +63,62 @@ class PruneOutcome:
     dry_run: bool
 
 
-def prune_expired(*, now: datetime | None = None, dry_run: bool = False) -> PruneOutcome:
-    """Удалить строки старше периода. ``dry_run`` — только посчитать."""
-    from privacy_audit.models import PersonalDataAccessLog
+#: Длина метки ``--operator`` — колонка ``PruneRun.operator`` /
+#: ``PersonalDataAccessLog.operator``. Сверх неё — отказ, не обрезка:
+#: обрезка молча меняла бы сказанное (DRF-2653, согласовано с ``cat``).
+OPERATOR_MAX_LENGTH = 64
+
+
+def prune_expired(
+    *,
+    now: datetime | None = None,
+    dry_run: bool = False,
+    operator: str = "",
+    code_version: str = "",
+) -> PruneOutcome:
+    """Удалить строки старше периода. ``dry_run`` — только посчитать.
+
+    DRF-2655: настоящая чистка оставляет квитанцию :class:`PruneRun` в ТОЙ ЖЕ
+    транзакции, что и удаление. Без ``operator`` (кто назвался) не удаляется
+    ничего; не записалась квитанция — удаление откатывается.
+    """
+    from privacy_audit.models import PersonalDataAccessLog, PruneRun
+
+    operator = (operator or "").strip()
+    if not dry_run:
+        if not operator:
+            raise ValueError("operator is required for a real prune: nothing deleted")
+        if len(operator) > OPERATOR_MAX_LENGTH:
+            raise ValueError(
+                f"operator longer than {OPERATOR_MAX_LENGTH} characters: nothing deleted"
+            )
 
     days = retention_days()
     now = now or timezone.now()
     cutoff = now - timedelta(days=days)
 
-    expired = PersonalDataAccessLog.objects.filter(occurred_at__lt=cutoff)
-    matched = expired.count()
-    deleted = 0
-    if not dry_run and matched:
-        deleted = expired.prune_before(cutoff)
+    with transaction.atomic():
+        expired = PersonalDataAccessLog.objects.filter(occurred_at__lt=cutoff)
+        matched = expired.count()
+        deleted = 0
+        if not dry_run and matched:
+            deleted = expired.prune_before(cutoff)
 
-    remaining_qs = PersonalDataAccessLog.objects.all()
-    remaining = remaining_qs.count()
-    oldest = remaining_qs.order_by("occurred_at").values_list("occurred_at", flat=True).first()
+        remaining_qs = PersonalDataAccessLog.objects.all()
+        remaining = remaining_qs.count()
+        oldest = remaining_qs.order_by("occurred_at").values_list("occurred_at", flat=True).first()
+
+        if not dry_run:
+            PruneRun.objects.create(
+                operator=operator,
+                retention_days=days,
+                cutoff=cutoff,
+                matched=matched,
+                deleted=deleted,
+                remaining=remaining,
+                oldest_remaining=oldest,
+                code_version=code_version[:64],
+            )
     outcome = PruneOutcome(
         retention_days=days,
         cutoff=cutoff,

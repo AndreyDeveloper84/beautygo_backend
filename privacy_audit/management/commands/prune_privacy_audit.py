@@ -7,6 +7,10 @@
 число без предмета не о том.
 
 Расписание (beat) ставится после первой ручной прогонки на пилоте — не здесь.
+
+DRF-2655: ``--operator`` обязателен (форма DRF-2653 — роль или метка, не
+имя, не проверено). ``--apply`` оставляет квитанцию :class:`PruneRun` в той
+же транзакции, что и удаление: не записалась — не удалено ничего.
 """
 
 from __future__ import annotations
@@ -44,6 +48,10 @@ class Command(BaseCommand):
             "--apply", action="store_true",
             help="Удалить. Без флага — сухой прогон: только посчитать.",
         )
+        parser.add_argument(
+            "--operator", required=True,
+            help="Кто запускает: роль или метка, НЕ имя; не проверяется (DRF-2653).",
+        )
 
     def handle(self, *args, **options):
         from core.measurement_subject import subject_lines
@@ -54,7 +62,13 @@ class Command(BaseCommand):
             raise CommandError(f"{exc}; ничего не удалено") from exc
 
         dry_run = not options["apply"]
-        outcome = prune_expired(dry_run=dry_run)
+        operator = options["operator"].strip()
+        if not operator:
+            raise CommandError("--operator пуст: квитанция чистки без него не пишется; ничего не удалено")
+        try:
+            outcome = prune_expired(dry_run=dry_run, operator=operator, code_version=_code_version())
+        except ValueError as exc:
+            raise CommandError(str(exc)) from exc
 
         for line in subject_lines():
             self.stdout.write(line)

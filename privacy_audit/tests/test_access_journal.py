@@ -331,12 +331,16 @@ class TestServedOperationsDoNotStopTheProduct:
         # decision of 15.09 — deleting a master's photo is deletion of personal
         # data literally, alongside DELETE, not by analogy. Uploading and
         # writing profile fields stay served, like WRITE_CONTEXT.
+        # DRF-2655: OPERATOR_CARD_READ — «просмотр сотрудником чувствительных
+        # профилей» стоит в списке §107 дословно, не по аналогии. Чтение
+        # карточки ботом (READ_PROFILE) остаётся обслуживаемым — ниже.
         assert policy.FAIL_CLOSED_OPERATIONS == {
             op.EXPORT, op.DELETE, op.ERASE_CONTEXT, op.DELETION_REQUEST_CREATE,
-            op.DELETE_MEDIA,
+            op.DELETE_MEDIA, op.OPERATOR_CARD_READ,
         }
         for stopped in (
             op.EXPORT, op.DELETE, op.ERASE_CONTEXT, op.DELETION_REQUEST_CREATE, op.DELETE_MEDIA,
+            op.OPERATOR_CARD_READ,
         ):
             assert policy.stops_when_unauditable(stopped)
         for served in (
@@ -664,7 +668,8 @@ class TestJournalIsItsOwnGrant:
             .filter(content_type__app_label="privacy_audit")
             .values_list("codename", flat=True)
         )
-        assert codenames == {"view_personal_data_access_log"}
+        # DRF-2655: квитанция чистки ``PruneRun`` — тоже только чтение.
+        assert codenames == {"view_personal_data_access_log", "view_prune_run"}
 
 
 class TestRetentionIsNamedAsProvisional:
