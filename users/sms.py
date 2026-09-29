@@ -34,7 +34,9 @@ class SMSService:
         sms = SMSService()
         sms.send("+79991234567", "Your code: 123456")
 
-    If SMS_ENABLED=false, records the event and does NOT send.
+    If SMS_ENABLED=false, records the event, does NOT send and returns
+    ``False`` — «не отправлено», а не «успех» (DRF-2643). Отличить «выключено»
+    от сбоя провайдера вызывающий может через :meth:`is_enabled`.
     If SMS.RU is unreachable, logs the failure class but does NOT raise
     (best-effort).
 
@@ -44,15 +46,23 @@ class SMSService:
     ``users/tests/test_sms_credentials_never_in_logs_2020.py``.
     """
 
+    @staticmethod
+    def is_enabled() -> bool:
+        """Включена ли отправка вообще (``SMS_ENABLED``)."""
+        return bool(getattr(settings, 'SMS_ENABLED', False))
+
     def send(self, phone: str, message: str) -> bool:
         """
         Send SMS to phone number.
 
-        Returns True if sent (or logged in dev mode), False on failure.
+        Returns True ONLY if the provider accepted the message. False
+        otherwise — including when sending is disabled: до DRF-2643 здесь
+        был ``True``, и вызывающий не мог отличить «отправлено» от «не
+        отправлено, потому что выключено».
         """
-        if not getattr(settings, 'SMS_ENABLED', False):
+        if not self.is_enabled():
             logger.info("sms.not_sent reason=sending_disabled")
-            return True
+            return False
 
         api_id = getattr(settings, 'SMS_RU_API_ID', '')
         if not api_id:
