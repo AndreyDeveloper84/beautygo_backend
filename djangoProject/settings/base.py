@@ -885,6 +885,13 @@ ACCOUNT_RESET_ALLOWLIST = [
 
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
 
+# DRF-2607 — the SALON-MASTER MAX bot's token, and only that bot's: the
+# catalog verifies a salon administrator's Mini App ``initData`` with it
+# (users/max_salon_admin_auth.py). Not ``MAX_BOT_WEB_APP``'s bot — that is
+# the CLIENT one. Empty → the exchange answers 503 NOT_CONFIGURED; there is
+# no fallback key.
+MAX_SALON_BOT_TOKEN = os.environ.get("MAX_SALON_BOT_TOKEN", "")
+
 # Provisioning-only Bearer for POST /api/v1/internal/users/bind-external/
 # (E2E-BOT-02B hardening). Identity binding accepts a caller-named
 # (external_user_id, ayla_user_id) pair with NO server-side proof of

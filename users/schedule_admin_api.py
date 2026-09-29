@@ -43,6 +43,7 @@ from appointments.application.services.schedule_impact_service import (
 from appointments.models import SpecialistScheduleException, TenantClosure
 
 from .authentication import AylaServiceBearerAuthentication
+from .max_salon_admin_auth import SalonAdminTokenAuthentication, auth_method
 from .permissions import (
     IsProApp,
     IsTenantAdminOrPlatformAdmin,
@@ -83,6 +84,33 @@ _ADMIN_AUTHENTICATION = [
     AylaServiceBearerAuthentication,
     *api_settings.DEFAULT_AUTHENTICATION_CLASSES,
 ]
+
+# DRF-2607 — the salon administrator's own token (MAX signature), accepted
+# ONLY where the owner opened it first: time off, per-date exceptions and the
+# read-only impact preview. The weekly template (``AdminScheduleView``) and
+# the closures stay on ``_ADMIN_AUTHENTICATION`` until the shrink guard.
+# Permissions are the same list: the token answers «who», ``IsTenantAdmin``
+# answers «may they», and ``ServiceCredentialIsReadOnly`` still holds the
+# service Bearer to reading whatever else the request carries.
+_HUMAN_TOKEN_AUTHENTICATION = [
+    AylaServiceBearerAuthentication,
+    SalonAdminTokenAuthentication,
+    *api_settings.DEFAULT_AUTHENTICATION_CLASSES,
+]
+
+
+def _journal(request: Request, event: str, **fields) -> None:
+    """One line per salon write: WHO (the person) and HOW they proved it.
+
+    ``actor`` alone would read the same for an ordinary JWT and for the MAX
+    token — ``via`` says which. (A service-Bearer write never gets here:
+    ``ServiceCredentialIsReadOnly`` refuses it first.)
+    """
+    extra = "".join(f" {k}={v}" for k, v in fields.items())
+    logger.info(
+        "%s actor=%s via=%s tenant=%s%s",
+        event, request.user.pk, auth_method(request), request.tenant.pk, extra,
+    )
 
 
 class _TenantScopedSpecialistMixin:
@@ -297,7 +325,7 @@ class AdminScheduleImpactView(_TenantScopedSpecialistMixin, APIView):
     administrator was deciding cannot be silently swept up or missed.
     """
 
-    authentication_classes = _ADMIN_AUTHENTICATION
+    authentication_classes = _HUMAN_TOKEN_AUTHENTICATION
     permission_classes = _ADMIN_PERMISSIONS
 
     @extend_schema(
@@ -339,12 +367,17 @@ class AdminTimeOffListView(_TenantScopedSpecialistMixin, TimeOffListView):
       into it, or nothing happens.
     """
 
+    authentication_classes = _HUMAN_TOKEN_AUTHENTICATION
+
     def get(self, request: Request, **kwargs) -> Response:
         return super().get(request)
 
     def post(self, request: Request, **kwargs) -> Response:
         if "resolutions" not in request.data:
-            return super().post(request)
+            response = super().post(request)
+            if response.status_code < 300:
+                _journal(request, "schedule.time_off_created", specialist=self.kwargs.get("specialist_id"))
+            return response
         return self._post_with_resolutions(request)
 
     def _post_with_resolutions(self, request: Request) -> Response:
@@ -395,18 +428,20 @@ class AdminTimeOffListView(_TenantScopedSpecialistMixin, TimeOffListView):
         except UnsupportedResolutionError as exc:
             return error_response("UNSUPPORTED_RESOLUTION", str(exc), status_code=400)
 
-        logger.info(
-            "schedule.absence_with_resolutions actor=%s tenant=%s specialist=%s",
-            request.user.pk, request.tenant.pk, specialist.pk,
-        )
+        _journal(request, "schedule.absence_with_resolutions", specialist=specialist.pk)
         return success_response(summary, status_code=201)
 
 
 class AdminTimeOffDetailView(_TenantScopedSpecialistMixin, TimeOffDetailView):
     """DELETE /api/v1/tenants/me/masters/{specialist_id}/time-off/{pk}/"""
 
+    authentication_classes = _HUMAN_TOKEN_AUTHENTICATION
+
     def delete(self, request: Request, **kwargs) -> Response:
-        return super().delete(request, pk=kwargs["pk"])
+        response = super().delete(request, pk=kwargs["pk"])
+        if response.status_code < 300:
+            _journal(request, "schedule.time_off_deleted", specialist=self.kwargs.get("specialist_id"))
+        return response
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +527,7 @@ class AdminScheduleExceptionListView(_TenantScopedSpecialistMixin, APIView):
     setting an override twice for the same date must replace it, not fail.
     """
 
-    authentication_classes = _ADMIN_AUTHENTICATION
+    authentication_classes = _HUMAN_TOKEN_AUTHENTICATION
     permission_classes = _ADMIN_PERMISSIONS
     serializer_class = ScheduleExceptionSerializer
 
@@ -579,10 +614,9 @@ class AdminScheduleExceptionListView(_TenantScopedSpecialistMixin, APIView):
                 "appointment(s) would be left outside working hours.",
                 status_code=409,
             )
-        logger.info(
-            "schedule.exception_set actor=%s tenant=%s specialist=%s date=%s working=%s",
-            request.user.pk, request.tenant.pk, specialist.pk,
-            data["date"], data["is_working_day"],
+        _journal(
+            request, "schedule.exception_set",
+            specialist=specialist.pk, date=data["date"], working=data["is_working_day"],
         )
         return success_response(_exception_to_dict(row))
 
@@ -591,7 +625,7 @@ class AdminScheduleExceptionDetailView(_TenantScopedSpecialistMixin, APIView):
     """DELETE .../masters/{specialist_id}/schedule-exceptions/{date}/ —
     drop the override and fall back to the weekly template."""
 
-    authentication_classes = _ADMIN_AUTHENTICATION
+    authentication_classes = _HUMAN_TOKEN_AUTHENTICATION
     permission_classes = _ADMIN_PERMISSIONS
     serializer_class = ScheduleExceptionSerializer
 
@@ -609,6 +643,7 @@ class AdminScheduleExceptionDetailView(_TenantScopedSpecialistMixin, APIView):
             return error_response("NOT_FOUND", "Exception not found.", status_code=404)
 
         row.delete()  # post_delete signal invalidates the slot cache
+        _journal(request, "schedule.exception_deleted", specialist=specialist.pk, date=kwargs["date"])
         return Response(status=204)
 
 
