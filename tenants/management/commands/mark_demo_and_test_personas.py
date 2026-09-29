@@ -53,9 +53,7 @@
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import NoReturn
 
 from django.core.management.base import BaseCommand, CommandError
@@ -66,9 +64,8 @@ from tenants.protected_slugs import PROTECTED_SLUGS as SEED_PROTECTED_SLUGS
 from tenants.models import Tenant
 from users.models import User
 
-DEFAULT_SEED = (
-    Path(__file__).resolve().parents[3] / "services" / "seeds" / "demo_salons_2026-08.json"
-)
+from tenants.demo_seed import DEMO_SEED_FILE as DEFAULT_SEED
+from tenants.demo_seed import DemoSeedUnreadable, demo_seed_slugs
 
 #: Защищённые слаги берутся У СИДА (`SEED_PROTECTED_SLUGS`), а не копируются:
 #: вторая копия разошлась бы в первый же день, когда появится второй живой
@@ -154,19 +151,11 @@ class Command(BaseCommand):
     # -- разбор -----------------------------------------------------------
 
     def _seed_slugs(self, path: str) -> list[str]:
+        # Один читатель файла с ``tenants.W001`` (DRF-2646).
         try:
-            payload = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-        except FileNotFoundError:
-            self._fail(f"файл сида не найден: {path}")
-        except json.JSONDecodeError as exc:
-            self._fail(f"файл сида не читается как JSON: {exc}")
-        slugs = [
-            salon.get("slug") for salon in payload.get("salons", [])
-            if salon.get("slug")
-        ]
-        if not slugs:
-            self._fail(f"в файле сида нет слагов салонов: {path}")
-        return list(dict.fromkeys(slugs))
+            return demo_seed_slugs(path)
+        except DemoSeedUnreadable as exc:
+            self._fail(str(exc))
 
     def _classify(
         self, slugs: list[str], personas: list[str], *, unmark: bool = False
