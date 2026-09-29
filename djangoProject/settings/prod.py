@@ -178,7 +178,10 @@ STORAGES = {
             "bucket_name": os.environ.get("S3_BUCKET_NAME", "beautygo-media"),
             "endpoint_url": os.environ.get("MINIO_ENDPOINT", "http://minio:9000"),
             "custom_domain": None,
-            "default_acl": "public-read",
+            # DRF-2457: объекты не публичные. Показ идёт по подписанному
+            # адресу (querystring_auth — умолчание django-storages) или через
+            # бэкенд (DRF-2455, DRF-2539); публичность бакета его не нужна.
+            "default_acl": "private",
             "file_overwrite": False,
         },
     },

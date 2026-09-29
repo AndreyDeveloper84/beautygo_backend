@@ -242,6 +242,10 @@ services:
       timeout: 5s
       retries: 5
 
+  # DRF-2457: бакет НЕ анонимный. Прежнее `mc anonymous set download` делало
+  # чтение открытым любому процессу, видящему MinIO, и возвращалось при каждом
+  # `compose up`, даже если бакет закрыли руками. Показ идёт по подписанному
+  # адресу или через бэкенд — анонимное чтение ему не нужно.
   minio-init:
     image: minio/mc:latest
     depends_on:
@@ -251,7 +255,7 @@ services:
       /bin/sh -c "
       mc alias set local http://minio:9000 $${MINIO_ROOT_USER:-minioadmin} $${MINIO_ROOT_PASSWORD:-minioadmin};
       mc mb --ignore-existing local/beautygo-media;
-      mc anonymous set download local/beautygo-media;
+      mc anonymous set none local/beautygo-media;
       exit 0;
       "
 
