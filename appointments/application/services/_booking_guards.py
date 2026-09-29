@@ -116,13 +116,15 @@ def check_health_screening(resolved_service) -> None:
     # отвечает ни на один полезный вопрос: сколько из N — запрет,
     # сколько наше незнание (работа для очереди разметки), а сколько
     # закрытый устаревший путь (работы нет вовсе).
+    basis = getattr(resolved_service, "health_check_basis", None)
     logger.info(
-        "booking.health_gate.refused reason=%s layer=%s service=%s",
+        "booking.health_gate.refused reason=%s basis=%s layer=%s service=%s",
         reason,
+        basis,
         resolved_service.kind,
         resolved_service.service_id,
     )
-    raise HealthScreeningRequiredError(reason)
+    raise HealthScreeningRequiredError(reason, basis=basis)
 
 
 def check_grid_alignment(start_at) -> None:
