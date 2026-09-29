@@ -32,7 +32,8 @@ SLUG = "mark2420-demo"
 
 def _run(*args) -> str:
     out = StringIO()
-    call_command("mark_demo_and_test_personas", *args, stdout=out)
+    # --operator обязателен с DRF-2653 (квитанция запуска).
+    call_command("mark_demo_and_test_personas", "--operator", "test", *args, stdout=out)
     return out.getvalue()
 
 

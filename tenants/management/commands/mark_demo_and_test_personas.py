@@ -35,13 +35,36 @@
 Повторный запуск ничего не меняет: пишутся только строки, у которых признак
 ещё не стоит, и в отчёте они видны отдельно от уже помеченных.
 
+Квитанция запуска (DRF-2653)
+----------------------------
+Каждый запуск — и сухой тоже — оставляет одну запись ``AnalyticsEvent``
+``mark_demo_and_test_personas_run``: кто назвался (``--operator``), сухой
+прогон или запись, в какую сторону, какие слаги и id личностей, и два числа —
+сколько строк подходило (``matched``) и сколько изменено фактически
+(``changed``). До неё причину «на пилоте is_demo у всех false» (DRF-2646)
+пришлось устанавливать исключением: «не запускали» и «запускали только
+сухим прогоном» следа не оставляли и были неотличимы.
+
+Форма — та же, что у квитанций ``FOOD_PHOTO_PURGE_RUN`` и
+``MAPPING_REPORT_PURGE_RUN``, с ОДНИМ осознанным расхождением: там сбой
+квитанции проглатывается (чистку и так видно по данным), а здесь запись
+``--apply`` и квитанция — в одной транзакции, и не записалась квитанция —
+не применилось ничего. Предмет команды — видимость салонов, она меняется
+молча; квитанция, которая умеет не записаться, вернула бы ровно тот дефект,
+ради которого заведена. На сухом прогоне менять нечего — там сбой квитанции
+пишется в журнал и прогон не роняет. Приводить эту форму «к общей» нельзя.
+
+``--operator`` — свободный текст, как у ``correct_completion_to_no_show``:
+роль или метка, не имя. Он не проверяется, поэтому запись отвечает на «кто
+сказал, что запустил», а не «кто запустил».
+
 Использование::
 
-    manage.py mark_demo_and_test_personas                       # сухой прогон
-    manage.py mark_demo_and_test_personas --apply               # записать
-    manage.py mark_demo_and_test_personas --persona owner --persona 41f0…
-    manage.py mark_demo_and_test_personas --slug olhovyy-dvor   # сузить салоны
-    manage.py mark_demo_and_test_personas --unmark --slug X --apply  # снять
+    manage.py mark_demo_and_test_personas --operator owner      # сухой прогон
+    manage.py mark_demo_and_test_personas --operator owner --apply
+    manage.py mark_demo_and_test_personas --operator owner --persona owner --persona 41f0…
+    manage.py mark_demo_and_test_personas --operator owner --slug olhovyy-dvor
+    manage.py mark_demo_and_test_personas --operator owner --unmark --slug X --apply
 
 Обратный ход
 ------------
@@ -53,6 +76,8 @@
 """
 from __future__ import annotations
 
+import logging
+import uuid
 from dataclasses import dataclass, field
 from typing import NoReturn
 
@@ -60,6 +85,9 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.db.models import Q
 
+from analytics import event_catalogue
+from analytics.models import AnalyticsEvent
+from privacy_audit.retention import OPERATOR_MAX_LENGTH
 from tenants.protected_slugs import PROTECTED_SLUGS as SEED_PROTECTED_SLUGS
 from tenants.models import Tenant
 from users.models import User
@@ -73,6 +101,12 @@ from tenants.demo_seed import DemoSeedUnreadable, demo_seed_slugs
 #: (основание — у ``tenants/protected_slugs.py``, DRF-2517). Ключ
 #: `--protect` перечень расширяет; сузить его нельзя.
 
+logger = logging.getLogger(__name__)
+
+
+class ReceiptUnwritten(CommandError):
+    """Квитанция ``--apply`` не записалась — запись откатана целиком."""
+
 
 @dataclass
 class Plan:
@@ -84,6 +118,10 @@ class Plan:
     personas_to_mark: list[str] = field(default_factory=list)
     personas_already: list[str] = field(default_factory=list)
     personas_absent: list[str] = field(default_factory=list)
+    # id найденных личностей — в квитанцию идут они, а не username
+    # (username может быть именем человека).
+    persona_ids_to_mark: list[str] = field(default_factory=list)
+    persona_ids_already: list[str] = field(default_factory=list)
 
 
 class Command(BaseCommand):
@@ -96,6 +134,13 @@ class Command(BaseCommand):
         parser.add_argument(
             "--apply", action="store_true",
             help="записать; без него команда ничего не меняет",
+        )
+        parser.add_argument(
+            "--operator", required=True,
+            help=(
+                "кто запускает — роль или метка, не имя; идёт в квитанцию "
+                "запуска. Обязателен (DRF-2653)"
+            ),
         )
         parser.add_argument(
             "--slug", action="append", default=[],
@@ -137,13 +182,27 @@ class Command(BaseCommand):
             )
         personas = list(dict.fromkeys(options["persona"]))
 
+        operator = options["operator"].strip()
+        if not operator:
+            self._fail("--operator пуст: квитанция запуска без него не пишется")
+        # Предел — общий с identity_card и prune_privacy_audit (DRF-2655):
+        # одно поле «кто назвался» в трёх квитанциях. Сверх — отказ, не обрезка.
+        if len(operator) > OPERATOR_MAX_LENGTH:
+            self._fail(f"--operator длиннее {OPERATOR_MAX_LENGTH} символов: не обрезаю")
+
         unmark = options["unmark"]
         plan = self._classify(slugs, personas, unmark=unmark)
         self._report(plan, apply=options["apply"], unmark=unmark)
         if not options["apply"]:
+            # Сухой прогон: менять нечего, терять нечего — квитанция best-effort.
+            try:
+                self._receipt(plan, operator=operator, apply=False, unmark=unmark, changed=None)
+            except Exception:  # noqa: BLE001 — сухой прогон не роняется своей квитанцией
+                logger.exception("tenants.mark_demo.receipt_write_failed")
+                self.stderr.write("квитанция сухого прогона не записана (см. журнал)")
             self.stdout.write("сухой прогон: ничего не записано (--apply запишет)")
             return
-        written = self._write(plan, unmark=unmark)
+        written = self._write(plan, operator=operator, unmark=unmark)
         self.stdout.write(
             f"записано: салонов {written['salons']}, личностей {written['personas']}"
         )
@@ -197,8 +256,10 @@ class Command(BaseCommand):
                 )
             if found[0].is_test_persona == wanted:
                 plan.personas_already.append(name)
+                plan.persona_ids_already.append(str(found[0].pk))
             else:
                 plan.personas_to_mark.append(name)
+                plan.persona_ids_to_mark.append(str(found[0].pk))
         return plan
 
     @staticmethod
@@ -244,7 +305,7 @@ class Command(BaseCommand):
                 "включая владельца и съёмку эталонов (--persona)"
             )
 
-    def _write(self, plan: Plan, *, unmark: bool = False) -> dict[str, int]:
+    def _write(self, plan: Plan, *, operator: str, unmark: bool = False) -> dict[str, int]:
         wanted = not unmark
         with transaction.atomic():
             salons = 0
@@ -261,7 +322,51 @@ class Command(BaseCommand):
                     .filter(self._persona_q(name), is_test_persona=not wanted)
                     .update(is_test_persona=wanted)
                 )
-        return {"salons": salons, "personas": personas}
+            changed = {"salons": salons, "personas": personas}
+            # Fail-closed: квитанция в той же транзакции. Не записалась —
+            # откатывается и пометка (см. «Квитанция запуска» в шапке модуля).
+            try:
+                self._receipt(
+                    plan, operator=operator, apply=True, unmark=unmark, changed=changed,
+                )
+            except Exception as exc:  # noqa: BLE001 — любой сбой квитанции = отказ
+                raise ReceiptUnwritten(
+                    "квитанция запуска не записана — пометка НЕ применена "
+                    f"({type(exc).__name__})"
+                ) from exc
+        return changed
+
+    def _receipt(
+        self, plan: Plan, *, operator: str, apply: bool, unmark: bool,
+        changed: dict[str, int] | None,
+    ) -> None:
+        """Одна запись на запуск. Слаги и id личностей — не имена: ненайденная
+        личность названа оператором (username может быть именем), поэтому в
+        квитанции от неё только счёт."""
+        AnalyticsEvent.objects.create(
+            event_name=event_catalogue.MARK_DEMO_AND_TEST_PERSONAS_RUN,
+            payload={
+                "operator": operator,
+                "mode": "apply" if apply else "dry_run",
+                "direction": "unmark" if unmark else "mark",
+                "salons": {
+                    "to_change": plan.salons_to_mark,
+                    "already": plan.salons_already,
+                    "absent": plan.salons_absent,
+                    "matched": len(plan.salons_to_mark),
+                    "changed": None if changed is None else changed["salons"],
+                },
+                "personas": {
+                    "to_change": plan.persona_ids_to_mark,
+                    "already": plan.persona_ids_already,
+                    "absent_count": len(plan.personas_absent),
+                    "matched": len(plan.persona_ids_to_mark),
+                    "changed": None if changed is None else changed["personas"],
+                },
+            },
+            app_type=AnalyticsEvent.AppType.CLIENT,
+            client_event_id=uuid.uuid4(),
+        )
 
     def _fail(self, message: str) -> NoReturn:
         raise CommandError(message)

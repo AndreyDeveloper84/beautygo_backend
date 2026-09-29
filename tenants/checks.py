@@ -52,7 +52,8 @@ def seeded_demo_salons_are_marked(app_configs, databases=None, **kwargs):
             f"{', '.join(unmarked)}. Клиенту их не прячет ни один пул выдачи (users.sellable).",
             hint=(
                 "Пометка видимая: демо видят только тестовые личности (DRF-2420). Сперва "
-                "`manage.py mark_demo_and_test_personas --persona <кто тестирует>`, затем "
+                "`manage.py mark_demo_and_test_personas --operator <роль> "
+                "--persona <кто тестирует>`, затем "
                 "тот же вызов с --apply (DRF-2646)."
             ),
             id="tenants.W001",

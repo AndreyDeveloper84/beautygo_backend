@@ -114,6 +114,18 @@ FOOD_PHOTO_PURGE_RUN = "food_photo_purge_run"
 # unreadable. No slugs, no service names.
 MAPPING_REPORT_PURGE_RUN = "mapping_report_purge_run"
 
+# mark_demo_and_test_personas_run: server-side, one per run of the manual
+# command tenants.mark_demo_and_test_personas — dry runs included (DRF-2653).
+# Payload: operator (free text, a role or label — not a name, not verified),
+# mode dry_run|apply, direction mark|unmark, and per salons/personas the
+# to_change / already lists (tenant slugs; persona ids, never usernames),
+# salons.absent, personas.absent_count, matched and changed (null on dry run).
+# Unlike the two purge receipts above this one is fail-closed on --apply: the
+# receipt shares the transaction with the change. A server receipt has actor
+# and anonymous_session_id both NULL; a client POST of the same name always
+# carries one of them — same limit as the purge receipts.
+MARK_DEMO_AND_TEST_PERSONAS_RUN = "mark_demo_and_test_personas_run"
+
 
 EVENT_NAMES: frozenset[str] = frozenset({
     BOOKING_VIEWED, BOOKING_CREATED, BOOKING_CANCELLED,
@@ -137,4 +149,5 @@ EVENT_NAMES: frozenset[str] = frozenset({
     GOAL_SELECTED, RECOMMENDATION_SHOWN,
     FOOD_PHOTO_PURGE_RUN,
     MAPPING_REPORT_PURGE_RUN,
+    MARK_DEMO_AND_TEST_PERSONAS_RUN,
 })
