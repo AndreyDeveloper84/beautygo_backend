@@ -1583,3 +1583,225 @@ class GoalDirection(models.Model):
     def __str__(self) -> str:
         scope = self.area_key or '*'
         return f"{self.goal_option.key} × {scope}: {self.what}"
+
+
+# --- DRF-2606: возможность процедуры и её связь с целью ---------------------
+#
+# Решение владельца 29.09: «Capability описывает возможность процедуры, связь
+# с целью — отдельной таблицей». Утверждение «процедура X помогает цели Y»
+# распадается на два (§10 владельца — «не хранить монолитные обещания»), и у
+# каждого своё основание, свой срок, свой статус claim.
+#
+# Здесь только НОСИТЕЛЬ и провенанс. Содержание собирает владелец; ни одной
+# строки кодом не заполняется. Читателя на пути ответа нет — есть одна
+# санкционированная функция чтения (:func:`client_facing_capabilities`),
+# которая держит правило «вывод системы ≠ подтверждённое человеком».
+
+
+class ClaimEvidence(models.Model):
+    """Основание утверждения — общее у возможности и у её связи с целью.
+
+    Та же форма провенанса, что у связи услуги с каноном (§76) и у одобрения
+    канона (§93): «кто ИЛИ какое правило», когда, по какому основанию. Поля
+    наследуются как СВОИ КОЛОНКИ каждой таблицы: у связи с целью —
+    собственные ``status``/``confirmed_by``/``source_ref``…, а не ссылка на
+    основание возможности. «Подтверждённая возможность ≠ подтверждённая
+    связь» (приёмка владельца 29.09, §6).
+
+    Контракт статуса (приёмка владельца 29.09, §7) — четыре пункта:
+
+    1. **Что измеряет.** Эпистемический статус ЗНАНИЯ — подтверждено ли
+       утверждение о процедуре (или о её связи с целью) человеком или
+       названным правилом, либо это вывод системы / черновик.
+    2. **Чем отличается от** ``SalonService.mapping_status``. Тот измеряет
+       СОПОСТАВЛЕНИЕ: «эта услуга салона — это вот этот канон»
+       (UNMAPPED / REVIEW_REQUIRED / VERIFIED / NOT_RECOMMENDABLE). Это
+       разные машины состояний: verified-сопоставление ничего не говорит о
+       том, что процедура делает, а подтверждённое знание — о том, какой
+       салон её продаёт. Слово «verified» здесь намеренно не используется.
+    3. **Кто переводит.** Из ``system_inference`` в ``approved`` — только
+       человек (``confirmed_by``) или названное правило владельца
+       (``confirmed_rule`` + ``rule_version``), с датой и основанием; без
+       них база откажет (``<класс>_approved_requires_provenance``).
+       Система сама в ``approved`` не переводит.
+    4. **Какое состояние пускает в клиентский путь знания.** Только
+       ``approved`` при ``claim_scope = supported`` и не истёкшем
+       ``valid_until`` — см. :func:`services.capabilities.client_facing_capabilities`.
+    """
+
+    class Status(models.TextChoices):
+        #: Вывод системы или черновик — человеку не говорится.
+        SYSTEM_INFERENCE = "system_inference", "System inference"
+        #: Подтверждено человеком или названным правилом владельца.
+        APPROVED = "approved", "Approved"
+
+    class ClaimScope(models.TextChoices):
+        SUPPORTED = "supported", "Supported"
+        NOT_SUPPORTED = "not_supported", "Not supported"
+        #: Обещание, которое произносить нельзя (§12 владельца).
+        PROHIBITED_CLAIM = "prohibited_claim", "Prohibited claim"
+
+    status = models.CharField(
+        max_length=24, choices=Status.choices, default=Status.SYSTEM_INFERENCE,
+    )
+    claim_scope = models.CharField(
+        max_length=24, choices=ClaimScope.choices, default=ClaimScope.NOT_SUPPORTED,
+    )
+    #: Что ограничивает утверждение (показания, условия, кому не подходит).
+    limitations = models.TextField(blank=True, default="")
+    #: Откуда знание — публикация, протокол, практика салона.
+    evidence_source = models.CharField(max_length=300, blank=True, default="")
+    #: Вид доказательства — исследование, консенсус, опыт практика.
+    evidence_kind = models.CharField(max_length=64, blank=True, default="")
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    confirmed_rule = models.CharField(max_length=100, blank=True, default="")
+    rule_version = models.CharField(max_length=32, blank=True, default="")
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    source_ref = models.CharField(max_length=200, blank=True, default="")
+    #: Срок годности подтверждения; NULL — бессрочно. Истёкшее не говорится.
+    valid_until = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+        constraints = [
+            # Подтверждение — решение, и без автора оно через месяц
+            # неотличимо от умолчания. Форма та же, что у
+            # `salonservice_verified_requires_provenance`.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="approved")
+                    | (
+                        models.Q(confirmed_at__isnull=False)
+                        & ~models.Q(source_ref="")
+                        & (
+                            models.Q(confirmed_by__isnull=False)
+                            | ~models.Q(confirmed_rule="")
+                        )
+                    )
+                ),
+                name="%(class)s_approved_requires_provenance",
+            ),
+        ]
+
+    def is_client_facing(self, *, now) -> bool:
+        """Можно ли сказать это человеку: подтверждено, поддержано, не истекло."""
+        return (
+            self.status == self.Status.APPROVED
+            and self.claim_scope == self.ClaimScope.SUPPORTED
+            and (self.valid_until is None or self.valid_until > now)
+        )
+
+
+class ProcedureCapability(ClaimEvidence):
+    """Что процедура канона умеет — одна возможность одной процедуры.
+
+    ``key`` — **стабильный машинный идентификатор смысла, а не производная от
+    текста** (приёмка владельца 29.09, §4): ``key ≠ slugify(text_client)``.
+    Правка ``text_client`` / ``text_professional`` не меняет ``key``, и никакой
+    код не выводит его из формулировки — ключ задаёт тот, кто заводит
+    возможность (пример владельца: ``temporary_relaxation``). Одна возможность
+    встречается у многих процедур; устойчивый ключ позволит потом свести их в
+    общий словарь, не перечитывая текст. Уникален в паре (шаблон, ключ).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    #: PROTECT: знание о процедуре не должно исчезать вместе с правкой канона.
+    template = models.ForeignKey(
+        ServiceTemplate, on_delete=models.PROTECT, related_name="capabilities",
+    )
+    key = models.SlugField(max_length=64)
+    #: Формулировка для человека — то, что может прозвучать клиенту.
+    text_client = models.TextField(blank=True, default="")
+    #: Профессиональная формулировка — для мастера и разбора.
+    text_professional = models.TextField(blank=True, default="")
+    expected_effect = models.TextField(blank=True, default="")
+    #: Когда ждать результат — словами («после 3–5 сеансов», «сразу»).
+    result_timeframe = models.CharField(max_length=200, blank=True, default="")
+
+    class Meta(ClaimEvidence.Meta):
+        constraints = [
+            *ClaimEvidence.Meta.constraints,
+            models.UniqueConstraint(
+                fields=["template", "key"], name="procedurecapability_template_key_uniq",
+            ),
+        ]
+        ordering = ["template", "key"]
+
+    def __str__(self) -> str:
+        return f"{self.template_id}:{self.key}"
+
+
+class CapabilityGoalLink(ClaimEvidence):
+    """Возможность процедуры → цель человека (``GoalOption``).
+
+    Своя строка со своим основанием: «процедура умеет X» и «X помогает цели
+    Y» — два утверждения, и подтверждаются они порознь.
+
+    **Курс — здесь, на связи** (решение владельца 29.09): «обычно курс N» без
+    названной цели — маркетинговое утверждение; осмысленно только «чтобы
+    приблизиться к ЭТОЙ цели этой возможностью, обычно нужно…». Поэтому курс
+    — часть claim и живёт под его основанием.
+
+    **Голого числа хранить негде.** ``course_pattern`` не сохраняется без
+    ``variability_note`` и основания (источник + ссылка) и не может быть
+    одним числом — ограничения базы ниже. ``variability_note`` — ТЕКСТ с
+    оговоркой, а не пара min/max: владелец запретил заставлять выдумывать
+    точный диапазон там, где источник его не даёт.
+
+    Предел, названный честно: это закрывает «в базе нет голого числа, которое
+    можно процитировать», но НЕ закрывает персональное «тебе нужно 10».
+    Обязательный будущий контракт читателя: **population-level knowledge ≠
+    personal prescription** — подтверждённое общее утверждение само по себе
+    не разрешает превращать его в предписание конкретному человеку.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    capability = models.ForeignKey(
+        ProcedureCapability, on_delete=models.CASCADE, related_name="goal_links",
+    )
+    #: PROTECT: закрытый список целей решает владелец, связь его не правит.
+    goal = models.ForeignKey(
+        GoalOption, on_delete=models.PROTECT, related_name="capability_links",
+    )
+    #: Характер курса словами («обычно рассматривается как курс сеансов»).
+    course_pattern = models.TextField(blank=True, default="")
+    #: Когда ждать результат относительно этой цели — словами.
+    result_horizon = models.CharField(max_length=200, blank=True, default="")
+    #: Оговорка о разбросе — текст, не числа («зависит от исходного состояния»).
+    variability_note = models.TextField(blank=True, default="")
+
+    class Meta(ClaimEvidence.Meta):
+        constraints = [
+            *ClaimEvidence.Meta.constraints,
+            models.UniqueConstraint(
+                fields=["capability", "goal"], name="capabilitygoallink_capability_goal_uniq",
+            ),
+            # Курс — только вместе с оговоркой о разбросе и основанием.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(course_pattern="")
+                    | (
+                        ~models.Q(variability_note="")
+                        & ~models.Q(evidence_source="")
+                        & ~models.Q(source_ref="")
+                    )
+                ),
+                name="capabilitygoallink_course_requires_variability_and_evidence",
+            ),
+            # И не одним числом: «10» в чистом виде хранить негде.
+            models.CheckConstraint(
+                condition=~models.Q(course_pattern__regex=r"^\s*[0-9]+([.,][0-9]+)?\s*$"),
+                name="capabilitygoallink_course_not_a_bare_number",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.capability_id}->{self.goal_id}"
