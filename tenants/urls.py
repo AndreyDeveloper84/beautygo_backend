@@ -9,6 +9,7 @@ masters other than themselves.
 """
 from django.urls import path
 
+from users.salon_admin_media_api import AdminSpecialistAvatarView
 from users.schedule_admin_api import (
     AdminScheduleExceptionDetailView,
     AdminScheduleExceptionListView,
@@ -108,6 +109,11 @@ urlpatterns = [
         "me/masters/<uuid:specialist_id>/time-off/<uuid:pk>/",
         AdminTimeOffDetailView.as_view(),
         name="tenants-master-time-off-detail",
+    ),
+    path(
+        "me/masters/<uuid:specialist_id>/media/avatar/",
+        AdminSpecialistAvatarView.as_view(),
+        name="tenants-master-avatar",
     ),
     path(
         "me/masters/<uuid:specialist_id>/schedule-exceptions/",
