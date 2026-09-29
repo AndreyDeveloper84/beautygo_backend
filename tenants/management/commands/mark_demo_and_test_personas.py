@@ -87,6 +87,7 @@ from django.db.models import Q
 
 from analytics import event_catalogue
 from analytics.models import AnalyticsEvent
+from privacy_audit.retention import OPERATOR_MAX_LENGTH
 from tenants.protected_slugs import PROTECTED_SLUGS as SEED_PROTECTED_SLUGS
 from tenants.models import Tenant
 from users.models import User
@@ -184,6 +185,10 @@ class Command(BaseCommand):
         operator = options["operator"].strip()
         if not operator:
             self._fail("--operator пуст: квитанция запуска без него не пишется")
+        # Предел — общий с identity_card и prune_privacy_audit (DRF-2655):
+        # одно поле «кто назвался» в трёх квитанциях. Сверх — отказ, не обрезка.
+        if len(operator) > OPERATOR_MAX_LENGTH:
+            self._fail(f"--operator длиннее {OPERATOR_MAX_LENGTH} символов: не обрезаю")
 
         unmark = options["unmark"]
         plan = self._classify(slugs, personas, unmark=unmark)

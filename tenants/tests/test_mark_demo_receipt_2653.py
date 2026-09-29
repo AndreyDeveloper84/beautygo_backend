@@ -148,6 +148,15 @@ class TestR4OperatorIsRequired:
             call_command("mark_demo_and_test_personas", "--slug", SLUG, stdout=StringIO())
         assert _receipts() == []  # empty-assert-ok: пара — r1, где квитанция есть
 
+    def test_an_operator_over_the_shared_limit_is_refused_not_cut(self, demo_salon):
+        # Литералом, а не из константы: узел из константы не поймал бы её смену.
+        with pytest.raises(CommandError, match="длиннее 64"):
+            _run("--slug", SLUG, "--apply", operator="x" * 65)
+        demo_salon.refresh_from_db()
+        assert demo_salon.is_demo is False
+        _run("--slug", SLUG, operator="x" * 64)  # пара: ровно 64 — принято
+        assert len(_receipts()) == 1
+
     def test_blank_operator_is_refused(self, demo_salon):
         with pytest.raises(CommandError, match="--operator пуст"):
             _run("--slug", SLUG, "--apply", operator="   ")
