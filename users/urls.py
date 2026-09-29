@@ -6,6 +6,7 @@ from core.deprecation import DeprecatedAliasMixin
 
 from .auth_serializers import TenantAwareTokenRefreshSerializer
 
+from .max_salon_admin_auth import MaxSalonAdminTokenView
 from .personal_context_views import (
     UserPersonalContextFieldDeleteView,
     UserPersonalContextSkipView,
@@ -82,6 +83,13 @@ urlpatterns = [
     # Social auth
     path('social/<str:provider>/', SocialAuthView.as_view(), name='social-auth'),
     path('bind-phone/', BindPhoneView.as_view(), name='bind-phone'),
+
+    # DRF-2607 — salon administrator's own token from a MAX Mini App signature.
+    path(
+        'max/salon-admin/token/',
+        MaxSalonAdminTokenView.as_view(),
+        name='max-salon-admin-token',
+    ),
 
     # Specialist profile (GET/POST/PATCH).
     # Canonical path is /api/v1/specialists/me/ (DRF-209); this entry is the
