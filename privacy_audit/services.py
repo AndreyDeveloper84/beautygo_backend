@@ -75,6 +75,7 @@ def build_payload(
     basis: str = "",
     request_id: str = "",
     tenant=None,
+    operator: str = "",
 ) -> dict:
     """The record, as plain data — one shape for the table and for the queue.
 
@@ -96,8 +97,13 @@ def build_payload(
         "caller_purpose": caller_purpose,
         "actor_id": getattr(actor, "pk", None),
         "actor_role": (
-            (getattr(actor, "role", "") or "") if actor is not None else "service"
+            (getattr(actor, "role", "") or "")
+            if actor is not None
+            # DRF-2655: команда оператора — не сервис; человек есть, но не
+            # разрешён (``actor`` пуст), кто он — в ``operator``.
+            else ("operator" if caller_purpose == "operator_command" else "service")
         ),
+        "operator": operator,
         # Global client subject — see the model's tenant field comment. A
         # tenant route (DRF-2619, the salon administrator's token) names it.
         "tenant_id": getattr(tenant, "pk", None),
@@ -125,6 +131,7 @@ def record_access(
     basis: str = "",
     request_id: str = "",
     tenant=None,
+    operator: str = "",
 ) -> PersonalDataAccessLog:
     """Append one row, or raise :class:`AuditUnavailable`.
 
@@ -143,7 +150,7 @@ def record_access(
         caller_purpose=caller_purpose, actor=actor, object_id=object_id,
         operation=operation, object_category=object_category, result=result,
         actor_named=actor_named, denial_reason=denial_reason, basis=basis,
-        request_id=request_id, tenant=tenant,
+        request_id=request_id, tenant=tenant, operator=operator,
     )
     actor_id = payload.pop("actor_id")
     try:
