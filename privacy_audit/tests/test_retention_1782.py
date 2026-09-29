@@ -76,13 +76,13 @@ class TestPeriodIsAParameter:
         with pytest.raises(RetentionMisconfigured):
             retention_days()
         with pytest.raises(RetentionMisconfigured):
-            prune_expired()
+            prune_expired(operator="test")
         assert PersonalDataAccessLog.objects.count() == 4
 
 
 class TestPruneExpired:
     def test_deletes_only_rows_older_than_the_period(self, journal):
-        out = prune_expired()
+        out = prune_expired(operator="test")
         assert (out.matched, out.deleted, out.remaining) == (2, 2, 2)
         assert not out.dry_run
         left = set(PersonalDataAccessLog.objects.values_list("pk", flat=True))
@@ -91,7 +91,7 @@ class TestPruneExpired:
             pk=journal["inside"].pk
         ).occurred_at
         # Повтор — нечего удалять, и это не ошибка.
-        again = prune_expired()
+        again = prune_expired(operator="test")
         assert (again.matched, again.deleted, again.remaining) == (0, 0, 2)
 
     def test_dry_run_counts_and_deletes_nothing(self, journal):
@@ -101,7 +101,7 @@ class TestPruneExpired:
 
     def test_a_shorter_period_reaches_more_rows(self, settings, journal):
         settings.PRIVACY_AUDIT_RETENTION_DAYS = 2
-        out = prune_expired()
+        out = prune_expired(operator="test")
         assert out.deleted == 3
         assert list(PersonalDataAccessLog.objects.values_list("pk", flat=True)) == [journal["fresh"].pk]
 
@@ -132,7 +132,7 @@ class TestAppendOnlyStillHolds:
 class TestCommand:
     def test_default_is_dry_run_with_the_subject_printed(self, journal):
         out = StringIO()
-        call_command("prune_privacy_audit", stdout=out)
+        call_command("prune_privacy_audit", "--operator", "test", stdout=out)
         text = out.getvalue()
         assert "хост (hostname процесса)" in text
         assert "период (PRIVACY_AUDIT_RETENTION_DAYS) : 365 дн" in text
@@ -143,7 +143,7 @@ class TestCommand:
 
     def test_apply_deletes_and_prints_the_oldest_remaining(self, journal):
         out = StringIO()
-        call_command("prune_privacy_audit", "--apply", stdout=out)
+        call_command("prune_privacy_audit", "--apply", "--operator", "test", stdout=out)
         text = out.getvalue()
         assert "удалено                    : 2" in text
         assert "осталось строк             : 2" in text
@@ -154,5 +154,5 @@ class TestCommand:
     def test_misconfigured_period_is_a_command_error_and_nothing_is_deleted(self, settings, journal):
         settings.PRIVACY_AUDIT_RETENTION_DAYS = "0"
         with pytest.raises(CommandError, match="ничего не удалено"):
-            call_command("prune_privacy_audit", "--apply", stdout=StringIO())
+            call_command("prune_privacy_audit", "--apply", "--operator", "test", stdout=StringIO())
         assert PersonalDataAccessLog.objects.count() == 4

@@ -170,7 +170,7 @@ class TestTheOperatorSeesMasks:
         proxy = _proxy_with_history()
         _bound_to_real(proxy)
         out = io.StringIO()
-        call_command("identity_card", "--account", f"max:{CID}", stdout=out)
+        call_command("identity_card", "--account", f"max:{CID}", "--operator", "test", stdout=out)
         text = out.getvalue()
         assert PROXY in text
         assert NAME not in text
@@ -178,4 +178,4 @@ class TestTheOperatorSeesMasks:
 
     def test_the_command_refuses_a_bare_id(self):
         with pytest.raises(CommandError):
-            call_command("identity_card", "--account", CID, stdout=io.StringIO())
+            call_command("identity_card", "--account", CID, "--operator", "test", stdout=io.StringIO())
