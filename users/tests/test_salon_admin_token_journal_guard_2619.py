@@ -30,7 +30,8 @@ _RECORDERS = frozenset({"record_or_lose", "record_access"})
 JOURNALLED_OTHERWISE: dict[str, str] = {
     name: (
         "расписание мастера (DRF-2607) — не категория §96; каждая запись — строка "
-        "лога ``_journal`` (actor, via, tenant) в ``users/schedule_admin_api``"
+        "лога ``_journal`` (actor, via, tenant) в ``users/schedule_admin_api``; "
+        "писать ли §96 — вопрос владельцу DRF-2625"
     )
     for name in (
         "AdminScheduleImpactView",
