@@ -141,6 +141,9 @@ REST_FRAMEWORK = {
         # DRF-2455 — снимки дневника: свой бюджет. Открытие дня с полутора
         # десятками фото не должно съедать ведро распознавания и записи.
         'food_photo_internal': '300/min',
+        # DRF-2539 — фото мастеров и работ портфолио для бота: витрина
+        # открывает десятки мастеров сразу, бот кэширует по версии адреса.
+        'specialist_media_internal': '600/min',
         # Scoped: GET /api/v1/internal/specialists/{id}/slots/ (DRF-1446).
         # Derived, not rounded. The endpoint answers one date per call,
         # and the bot draws a schedule screen over a 14-day horizon
