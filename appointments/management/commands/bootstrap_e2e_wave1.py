@@ -105,6 +105,14 @@ class Command(BaseCommand):
                 f"в базе {settings.DATABASES['default'].get('NAME')!r}: в имени нет «e2e». "
                 "Это стенд e2e? Назовите базу так. Это не стенд? Тогда не сейте."
             )
+        if options["allow_any_db"] and options.get("bind_external"):
+            # Два полномочия — два ключа. Люк базы существует для посева на
+            # нестандартно названной базе; привязку личности он не открывает:
+            # 05.08 ключ уже применяли к живому MAX-id как операцию поддержки.
+            raise CommandError(
+                "--bind-external вместе с --allow-any-db не исполняется: люк базы не открывает "
+                "привязку внешней личности. Привязка — только на базе посева («e2e» в имени)."
+            )
         anchor = _parse_anchor(options["anchor"])
         duration = timedelta(hours=1)
 

@@ -14,7 +14,9 @@
   причиной ДО первой записи;
 * g2 — база с «e2e» в имени принимается сама, не только через ``test_*``;
 * g3 — ``--allow-any-db`` снимает страж явно;
-* g4 — ``--bind-external`` на чужой базе не исполняется: страж стоит раньше.
+* g4 — ``--bind-external`` на чужой базе не исполняется: страж стоит раньше;
+* g5 — ``--allow-any-db`` вместе с ``--bind-external`` — отказ до первой
+  записи (пара — g3: тот же люк без привязки работает).
 """
 from __future__ import annotations
 
@@ -101,3 +103,21 @@ class TestG4BindExternalIsBehindTheSameGuard:
 
         assert User.objects.count() == users_before
         assert not User.objects.filter(username="bot:max:2671").exists()
+
+
+class TestG5TheDatabaseHatchDoesNotOpenBinding:
+    """Люк ``--allow-any-db`` — для посева; привязку личности он не открывает.
+    Пара с g3: тот же люк без ``--bind-external`` работает."""
+
+    def test_allow_any_db_with_bind_external_is_refused_before_the_first_write(
+        self, settings
+    ) -> None:
+        assert _fixture_absent()
+        users_before = User.objects.count()
+        _name_the_db(settings, "beautygo")
+
+        with pytest.raises(CommandError, match="люк базы не открывает"):
+            _bootstrap("--allow-any-db", "--bind-external", "bot:max:2671")
+
+        assert _fixture_absent()
+        assert User.objects.count() == users_before
