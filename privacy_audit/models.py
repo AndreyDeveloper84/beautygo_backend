@@ -140,6 +140,10 @@ class PersonalDataAccessLog(models.Model):
     class CallerPurpose(models.TextChoices):
         INTERNAL = "internal", "Рабочий служебный токен"
         PROVISIONING = "provisioning", "Токен провизионирования"
+        # DRF-2619: собственный токен администратора салона по подписи MAX
+        # (DRF-2607). Человек, не сервис, и привязан к ОДНОМУ салону — у
+        # таких строк ``tenant`` заполнен.
+        SALON_ADMIN_TOKEN = "salon_admin_token", "Собственный токен администратора салона"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
@@ -172,6 +176,8 @@ class PersonalDataAccessLog(models.Model):
     # уникальной колонке. Поле есть, потому что состав записи назван
     # владельцем, и потому что срез B-2.2 придёт на тенантные маршруты,
     # где оно заполнится. Здесь оно NULL — по устройству, а не по забывчивости.
+    # DRF-2619: первый такой маршрут — администратор салона грузит фото
+    # мастера своего салона; там тенант — салон, к которому привязан токен.
     tenant = models.ForeignKey(
         "tenants.Tenant", on_delete=models.SET_NULL, null=True, blank=True,
         related_name="personal_data_accesses",

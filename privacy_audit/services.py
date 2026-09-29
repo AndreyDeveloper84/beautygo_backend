@@ -74,6 +74,7 @@ def build_payload(
     denial_reason: str = "",
     basis: str = "",
     request_id: str = "",
+    tenant=None,
 ) -> dict:
     """The record, as plain data — one shape for the table and for the queue.
 
@@ -97,8 +98,9 @@ def build_payload(
         "actor_role": (
             (getattr(actor, "role", "") or "") if actor is not None else "service"
         ),
-        # Global client subject — see the model's tenant field comment.
-        "tenant_id": None,
+        # Global client subject — see the model's tenant field comment. A
+        # tenant route (DRF-2619, the salon administrator's token) names it.
+        "tenant_id": getattr(tenant, "pk", None),
         "operation": operation,
         "object_category": object_category,
         "object_id": object_id,
@@ -122,6 +124,7 @@ def record_access(
     denial_reason: str = "",
     basis: str = "",
     request_id: str = "",
+    tenant=None,
 ) -> PersonalDataAccessLog:
     """Append one row, or raise :class:`AuditUnavailable`.
 
@@ -140,7 +143,7 @@ def record_access(
         caller_purpose=caller_purpose, actor=actor, object_id=object_id,
         operation=operation, object_category=object_category, result=result,
         actor_named=actor_named, denial_reason=denial_reason, basis=basis,
-        request_id=request_id,
+        request_id=request_id, tenant=tenant,
     )
     actor_id = payload.pop("actor_id")
     try:
