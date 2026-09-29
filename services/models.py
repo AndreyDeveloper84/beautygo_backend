@@ -1602,13 +1602,37 @@ class ClaimEvidence(models.Model):
     """Основание утверждения — общее у возможности и у её связи с целью.
 
     Та же форма провенанса, что у связи услуги с каноном (§76) и у одобрения
-    канона (§93): «кто ИЛИ какое правило», когда, по какому основанию.
+    канона (§93): «кто ИЛИ какое правило», когда, по какому основанию. Поля
+    наследуются как СВОИ КОЛОНКИ каждой таблицы: у связи с целью —
+    собственные ``status``/``confirmed_by``/``source_ref``…, а не ссылка на
+    основание возможности. «Подтверждённая возможность ≠ подтверждённая
+    связь» (приёмка владельца 29.09, §6).
+
+    Контракт статуса (приёмка владельца 29.09, §7) — четыре пункта:
+
+    1. **Что измеряет.** Эпистемический статус ЗНАНИЯ — подтверждено ли
+       утверждение о процедуре (или о её связи с целью) человеком или
+       названным правилом, либо это вывод системы / черновик.
+    2. **Чем отличается от** ``SalonService.mapping_status``. Тот измеряет
+       СОПОСТАВЛЕНИЕ: «эта услуга салона — это вот этот канон»
+       (UNMAPPED / REVIEW_REQUIRED / VERIFIED / NOT_RECOMMENDABLE). Это
+       разные машины состояний: verified-сопоставление ничего не говорит о
+       том, что процедура делает, а подтверждённое знание — о том, какой
+       салон её продаёт. Слово «verified» здесь намеренно не используется.
+    3. **Кто переводит.** Из ``system_inference`` в ``approved`` — только
+       человек (``confirmed_by``) или названное правило владельца
+       (``confirmed_rule`` + ``rule_version``), с датой и основанием; без
+       них база откажет (``<класс>_approved_requires_provenance``).
+       Система сама в ``approved`` не переводит.
+    4. **Какое состояние пускает в клиентский путь знания.** Только
+       ``approved`` при ``claim_scope = supported`` и не истёкшем
+       ``valid_until`` — см. :func:`services.capabilities.client_facing_capabilities`.
     """
 
     class Status(models.TextChoices):
         #: Вывод системы или черновик — человеку не говорится.
-        INFERENCE = "inference", "Inference"
-        #: Подтверждено человеком или названным правилом.
+        SYSTEM_INFERENCE = "system_inference", "System inference"
+        #: Подтверждено человеком или названным правилом владельца.
         APPROVED = "approved", "Approved"
 
     class ClaimScope(models.TextChoices):
@@ -1617,7 +1641,9 @@ class ClaimEvidence(models.Model):
         #: Обещание, которое произносить нельзя (§12 владельца).
         PROHIBITED_CLAIM = "prohibited_claim", "Prohibited claim"
 
-    status = models.CharField(max_length=16, choices=Status.choices, default=Status.INFERENCE)
+    status = models.CharField(
+        max_length=24, choices=Status.choices, default=Status.SYSTEM_INFERENCE,
+    )
     claim_scope = models.CharField(
         max_length=24, choices=ClaimScope.choices, default=ClaimScope.NOT_SUPPORTED,
     )
@@ -1677,9 +1703,13 @@ class ClaimEvidence(models.Model):
 class ProcedureCapability(ClaimEvidence):
     """Что процедура канона умеет — одна возможность одной процедуры.
 
-    ``key`` — хедж, названный хеджем: одна возможность встречается у десятков
-    процедур, и ключ рядом с текстом позволит потом свести их в общий
-    словарь, не перечитывая формулировки. Уникален в паре (шаблон, ключ).
+    ``key`` — **стабильный машинный идентификатор смысла, а не производная от
+    текста** (приёмка владельца 29.09, §4): ``key ≠ slugify(text_client)``.
+    Правка ``text_client`` / ``text_professional`` не меняет ``key``, и никакой
+    код не выводит его из формулировки — ключ задаёт тот, кто заводит
+    возможность (пример владельца: ``temporary_relaxation``). Одна возможность
+    встречается у многих процедур; устойчивый ключ позволит потом свести их в
+    общий словарь, не перечитывая текст. Уникален в паре (шаблон, ключ).
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1714,6 +1744,23 @@ class CapabilityGoalLink(ClaimEvidence):
 
     Своя строка со своим основанием: «процедура умеет X» и «X помогает цели
     Y» — два утверждения, и подтверждаются они порознь.
+
+    **Курс — здесь, на связи** (решение владельца 29.09): «обычно курс N» без
+    названной цели — маркетинговое утверждение; осмысленно только «чтобы
+    приблизиться к ЭТОЙ цели этой возможностью, обычно нужно…». Поэтому курс
+    — часть claim и живёт под его основанием.
+
+    **Голого числа хранить негде.** ``course_pattern`` не сохраняется без
+    ``variability_note`` и основания (источник + ссылка) и не может быть
+    одним числом — ограничения базы ниже. ``variability_note`` — ТЕКСТ с
+    оговоркой, а не пара min/max: владелец запретил заставлять выдумывать
+    точный диапазон там, где источник его не даёт.
+
+    Предел, названный честно: это закрывает «в базе нет голого числа, которое
+    можно процитировать», но НЕ закрывает персональное «тебе нужно 10».
+    Обязательный будущий контракт читателя: **population-level knowledge ≠
+    personal prescription** — подтверждённое общее утверждение само по себе
+    не разрешает превращать его в предписание конкретному человеку.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1724,12 +1771,35 @@ class CapabilityGoalLink(ClaimEvidence):
     goal = models.ForeignKey(
         GoalOption, on_delete=models.PROTECT, related_name="capability_links",
     )
+    #: Характер курса словами («обычно рассматривается как курс сеансов»).
+    course_pattern = models.TextField(blank=True, default="")
+    #: Когда ждать результат относительно этой цели — словами.
+    result_horizon = models.CharField(max_length=200, blank=True, default="")
+    #: Оговорка о разбросе — текст, не числа («зависит от исходного состояния»).
+    variability_note = models.TextField(blank=True, default="")
 
     class Meta(ClaimEvidence.Meta):
         constraints = [
             *ClaimEvidence.Meta.constraints,
             models.UniqueConstraint(
                 fields=["capability", "goal"], name="capabilitygoallink_capability_goal_uniq",
+            ),
+            # Курс — только вместе с оговоркой о разбросе и основанием.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(course_pattern="")
+                    | (
+                        ~models.Q(variability_note="")
+                        & ~models.Q(evidence_source="")
+                        & ~models.Q(source_ref="")
+                    )
+                ),
+                name="capabilitygoallink_course_requires_variability_and_evidence",
+            ),
+            # И не одним числом: «10» в чистом виде хранить негде.
+            models.CheckConstraint(
+                condition=~models.Q(course_pattern__regex=r"^\s*[0-9]+([.,][0-9]+)?\s*$"),
+                name="capabilitygoallink_course_not_a_bare_number",
             ),
         ]
 
