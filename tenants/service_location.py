@@ -213,8 +213,10 @@ class ServiceLocation(models.Model):
             "review_required — происхождение неизвестно; inactive — тестовый, личный, недействительный."
         ),
     )
+    # DRF-2612: PROTECT, не SET_NULL — CHECK модели требует это поле непустым
+    # у подтверждённой строки; обнуление при удалении User нарушило бы его.
     confirmed_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
         related_name="+", help_text="Кто подтвердил место. Обязателен при confirmed.",
     )
     confirmed_at = models.DateTimeField(null=True, blank=True)

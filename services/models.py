@@ -191,9 +191,11 @@ class ServiceTemplate(models.Model):
     )
     #: Кто подтвердил флаг. Взаимоисключающе с `health_check_confirmed_rule`
     #: — «кто ИЛИ какое правило», та же форма, что у одобрения строки (§93).
+    # DRF-2612: PROTECT, не SET_NULL — CHECK модели требует это поле непустым
+    # у подтверждённой строки; обнуление при удалении User нарушило бы его.
     health_check_confirmed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True, blank=True,
         related_name="+",
     )
@@ -220,9 +222,11 @@ class ServiceTemplate(models.Model):
     )
     #: Кто одобрил. Взаимоисключающе с `approved_rule` — «кто ИЛИ какое
     #: правило», та же форма, что у связи (§76).
+    # DRF-2612: PROTECT, не SET_NULL — CHECK модели требует это поле непустым
+    # у подтверждённой строки; обнуление при удалении User нарушило бы его.
     approved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True, blank=True,
         related_name="+",
     )
@@ -518,9 +522,11 @@ class ServiceTemplateSynonym(models.Model):
         related_name="+",
     )
     #: Провенанс. Та же форма, что у `SalonService`: кто ИЛИ правило.
+    # DRF-2612: PROTECT, не SET_NULL — CHECK модели требует это поле непустым
+    # у подтверждённой строки; обнуление при удалении User нарушило бы его.
     confirmed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True, blank=True,
         related_name="+",
     )
@@ -821,9 +827,11 @@ class SalonService(models.Model):
     #: Кто подтвердил. Взаимоисключающе с `mapping_confirmed_rule`:
     #: владелец назвал «кто ИЛИ какое правило», и оба сразу означали бы,
     #: что происхождение неизвестно точно.
+    # DRF-2612: PROTECT, не SET_NULL — CHECK модели требует это поле непустым
+    # у подтверждённой строки; обнуление при удалении User нарушило бы его.
     mapping_confirmed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True, blank=True,
         related_name="+",
     )
@@ -1259,8 +1267,10 @@ class CanonGapRequest(models.Model):
     )
     clarification_question = models.TextField(blank=True, default="")
     rejection_reason = models.TextField(blank=True, default="")
+    # DRF-2612: PROTECT, не SET_NULL — CHECK модели требует это поле непустым
+    # у подтверждённой строки; обнуление при удалении User нарушило бы его.
     decided_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
         related_name="+",
     )
     decided_at = models.DateTimeField(null=True, blank=True)
@@ -1736,9 +1746,11 @@ class ClaimEvidence(models.Model):
     evidence_source = models.CharField(max_length=300, blank=True, default="")
     #: Вид доказательства — исследование, консенсус, опыт практика.
     evidence_kind = models.CharField(max_length=64, blank=True, default="")
+    # DRF-2612: PROTECT, не SET_NULL — CHECK модели требует это поле непустым
+    # у подтверждённой строки; обнуление при удалении User нарушило бы его.
     confirmed_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        on_delete=models.SET_NULL,
+        on_delete=models.PROTECT,
         null=True, blank=True,
         related_name="+",
     )

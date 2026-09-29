@@ -286,6 +286,50 @@ def pointers_to_user() -> set[str]:
     return found
 
 
+def _required_by_check(condition) -> set[str]:
+    """Поля, которые условие CHECK где-то требует непустыми (``поле__isnull=False``)."""
+    from django.db.models import Q
+
+    required: set[str] = set()
+    for child in condition.children:
+        if isinstance(child, Q):
+            required |= _required_by_check(child)
+        else:
+            lookup, value = child
+            if lookup.endswith("__isnull") and value is False:
+                required.add(lookup.removesuffix("__isnull"))
+    return required
+
+
+def set_null_pointers_required_by_check() -> set[str]:
+    """DRF-2612 — указатели на ``User``, которые удаление обнулило бы
+    (``on_delete=SET_NULL``), а CHECK той же модели требует непустыми.
+
+    Такая пара — заряженная ловушка: сегодня ``User`` физически не удаляется
+    (стирание — tombstone), но первое настоящее удаление дало бы
+    ``IntegrityError`` посреди исполнителя, обязанного довести стирание до
+    конца. Правило одно, на объективном признаке: ``SET_NULL`` — где NULL
+    допустим (акторы истории, ``DraftSalonService.confirmed_by``), ``PROTECT`` —
+    где CHECK его запрещает. Пусто по построению; новое такое поле краснеет
+    при рождении (``users/tests/test_provenance_on_delete_2612.py``).
+    """
+    from django.db import models
+
+    found: set[str] = set()
+    for model in apps.get_models():
+        if model._meta.proxy:
+            continue
+        checks = [c for c in model._meta.constraints if isinstance(c, models.CheckConstraint)]
+        for f in model._meta.get_fields(include_hidden=True):
+            if not (f.concrete and f.is_relation) or f.many_to_many or f.related_model is not User:
+                continue
+            if f.remote_field.on_delete is not models.SET_NULL:
+                continue
+            if any(f.name in _required_by_check(c.condition) for c in checks):
+                found.add(f"{model._meta.label}.{f.name}")
+    return found
+
+
 def undecided_pointers() -> dict[str, list[str]]:
     """Расхождения таблиц с переписью: ``{"missing": [...], "duplicate": [...],
     "stale": [...]}``. Пусто — можно исполнять."""
