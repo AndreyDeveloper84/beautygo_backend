@@ -82,9 +82,21 @@ class TestPaymentCreateHoldsTheUrl:
         assert svc.create_payment.call_args.kwargs["return_url"] == GOOD_URL
 
 
+def _mock_binding_result():
+    return {
+        "provider_payment_id": "yk_bind_2681",
+        "confirmation_url": "https://yookassa.ru/bind/2681",
+        "status": "pending",
+    }
+
+
 class TestCardSetupHoldsTheUrl:
     def test_a_non_url_is_refused_and_the_provider_is_not_called(self, customer):  # noqa: F811
         svc = MagicMock()
+        # Настоящий ответ и в отказной ветке: если ``URLField`` ослабят, дверь
+        # дойдёт до провайдера, и голый ``MagicMock`` в теле ответа подвесит
+        # JSON-кодировщик — шард умрёт по таймауту вместо ``200 != 400``.
+        svc.create_card_binding.return_value = _mock_binding_result()
 
         r = _card_setup(customer, NOT_A_URL, svc)
 
@@ -94,11 +106,7 @@ class TestCardSetupHoldsTheUrl:
 
     def test_a_url_reaches_the_provider_verbatim(self, customer):  # noqa: F811
         svc = MagicMock()
-        svc.create_card_binding.return_value = {
-            "provider_payment_id": "yk_bind_2681",
-            "confirmation_url": "https://yookassa.ru/bind/2681",
-            "status": "pending",
-        }
+        svc.create_card_binding.return_value = _mock_binding_result()
 
         r = _card_setup(customer, GOOD_URL, svc)
 
