@@ -186,17 +186,29 @@ class SalonServiceInternalSerializer(serializers.ModelSerializer):
 
     Список может быть пустым — это честное «цель не заявлена», а не сбой.
     Ложную цель ради покрытия не подставляем (решение владельца, п. 4).
+
+    ``resolved_duration`` (DRF-2705) — длительность, уже разрешённая по
+    каскаду салон → шаблон. Контракт обещал «null ⇒ resolves from
+    template», но отдавал только сырое ``duration_minutes`` и UUID шаблона:
+    потребитель получал null и разрешить его не мог. Причина та же, что у
+    ``goals``, — у зеркала нет таблицы шаблонов. ``duration_minutes``
+    остаётся сырым: это собственное слово салона, а не итог.
     """
 
     goals = serializers.SerializerMethodField()
+    resolved_duration = serializers.SerializerMethodField()
 
     class Meta:
         model = SalonService
         fields = [
             'id', 'tenant', 'template', 'category', 'name',
-            'duration_minutes', 'base_price', 'requires_health_check',
+            'duration_minutes', 'resolved_duration',
+            'base_price', 'requires_health_check',
             'is_active', 'source', 'goals', 'created_at', 'updated_at',
         ]
+
+    def get_resolved_duration(self, obj: SalonService) -> int | None:
+        return obj.resolved_duration()
 
     def get_goals(self, obj: SalonService) -> list[dict[str, str]]:
         """`[{"key": ..., "label": ...}, …]`, порядок — sort_order цели.

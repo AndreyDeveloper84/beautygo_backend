@@ -34,7 +34,12 @@ SPEC_URL = f"{CATALOG_BASE}specialist-services/"
 # --- FROZEN field sets (mirror of CATALOG_INTERNAL_API_CONTRACT.md) ---------- #
 SALON_SERVICE_FIELDS = {
     "id", "tenant", "template", "category", "name",
-    "duration_minutes", "base_price", "requires_health_check",
+    "duration_minutes",
+    # DRF-2705 (additive, 2026-10-01): длительность, разрешённая по каскаду
+    # салон → шаблон. Контракт обещал «null ⇒ resolves from template», а
+    # отдавал только сырое значение; у бота нет таблицы шаблонов.
+    "resolved_duration",
+    "base_price", "requires_health_check",
     "is_active", "source",
     # DRF-1308 (additive, 2026-08-23): цели, разрешённые по дереву
     # категорий на стороне Ayla. Расширение контракта осознанное —

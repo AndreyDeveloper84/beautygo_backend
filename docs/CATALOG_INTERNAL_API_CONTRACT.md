@@ -54,7 +54,8 @@ Authorization: Bearer <AYLA_INTERNAL_API_TOKEN>
 | `template` | uuid str \| null | ServiceTemplate (taxonomy); null = off-taxonomy custom |
 | `category` | uuid str \| null | ServiceCategory |
 | `name` | str | |
-| `duration_minutes` | int \| null | salon-level default (null ⇒ resolves from template) |
+| `duration_minutes` | int \| null | **raw** salon-level default. `null` = the salon set nothing of its own; the value then comes from the template — read `resolved_duration`, this field stays `null` |
+| `resolved_duration` | int \| null | **DRF-2705, additive 2026-10-01.** **Effective** salon-level duration: salon → template (`duration_default`). `null` only when nothing resolves — no salon value and no template, or a template whose timing is not curated. **Use this.** A specialist's own override is not in it — that is `resolved_duration` of the bookable (§2) |
 | `base_price` | str \| null | indicative salon price; per-specialist price on the bookable |
 | `requires_health_check` | bool | salon-level flag (escalate-only vs template floor) |
 | `is_active` | bool | |
@@ -98,6 +99,7 @@ Example detail:
   "category": "1122....",
   "name": "Классический маникюр",
   "duration_minutes": null,
+  "resolved_duration": 60,
   "base_price": null,
   "requires_health_check": false,
   "is_active": true,
@@ -330,6 +332,12 @@ Additive-only within S3A. New fields may be appended; existing field names /
 types will not change without bumping this contract and notifying S3B.
 
 **Changelog**
+- 2026-10-01 — added `resolved_duration` to the salon-services payload (additive,
+  DRF-2705, §1). The table promised «null ⇒ resolves from template» for
+  `duration_minutes` but the door served only the raw value and the template's
+  UUID, so a consumer without a templates table got `null` and could resolve
+  nothing: the bot mirrored it as "no duration" and refused slots for a service
+  the catalog sells. `duration_minutes` is unchanged and stays raw.
 - 2026-09-20 — `GET /api/v1/internal/salons/<slug>/readiness/` (DRF-2117, §2b): салонная
   готовность поимённо под субъектным сторожем салона; чужой салон → 404.
 - 2026-08-23 — `/api/v1/internal/specialists/` accepts `?tenant=<uuid>` and every
