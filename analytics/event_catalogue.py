@@ -126,6 +126,25 @@ MAPPING_REPORT_PURGE_RUN = "mapping_report_purge_run"
 # carries one of them — same limit as the purge receipts.
 MARK_DEMO_AND_TEST_PERSONAS_RUN = "mark_demo_and_test_personas_run"
 
+# retry_capture_run: server-side, one per run of the manual command
+# payments.retry_capture — dry runs included (DRF-2689). Payload: operator
+# (free text, a role or label — not verified), mode dry_run|apply, database
+# (the name the process is connected to), provider_mode test|live|unset|unknown
+# (YooKassa key prefix — never the key), dispatch sync|async, scope
+# single|all, matched, amount_total (string), payment_ids. Fail-closed on
+# --apply, and written BEFORE the first capture: the charge is external, so
+# the receipt records intent — the outcome is in Payment.capture_state.
+RETRY_CAPTURE_RUN = "retry_capture_run"
+
+# complete_elapsed_backlog_run: server-side, one per run of the manual command
+# appointments.complete_elapsed_backlog — dry runs included (DRF-2689).
+# Payload: operator (null on a dry run without one), mode, database,
+# provider_mode, since, cutoff, hours, limit, matched, planned, and result
+# {completed, skipped, failed} — null on a dry run, filled best-effort after
+# a real one. Counts and a window only — no appointment ids, no names.
+# Fail-closed on a real run and written BEFORE the first closure.
+COMPLETE_ELAPSED_BACKLOG_RUN = "complete_elapsed_backlog_run"
+
 
 EVENT_NAMES: frozenset[str] = frozenset({
     BOOKING_VIEWED, BOOKING_CREATED, BOOKING_CANCELLED,
@@ -150,4 +169,6 @@ EVENT_NAMES: frozenset[str] = frozenset({
     FOOD_PHOTO_PURGE_RUN,
     MAPPING_REPORT_PURGE_RUN,
     MARK_DEMO_AND_TEST_PERSONAS_RUN,
+    RETRY_CAPTURE_RUN,
+    COMPLETE_ELAPSED_BACKLOG_RUN,
 })
