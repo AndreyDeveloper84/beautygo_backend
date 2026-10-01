@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import URLValidator
 from drf_spectacular.utils import OpenApiResponse, extend_schema, inline_serializer
 from rest_framework import serializers
 from rest_framework.request import Request
@@ -31,6 +33,20 @@ from users.permissions import IsInternalBearer
 from users.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
+
+_validate_https_url = URLValidator(schemes=["https"])
+
+
+def _is_https_url(value: object) -> bool:
+    """DRF-2681: ``return_url`` is held at the door — an https URL or a
+    400, never a raw body value handed to the payment provider."""
+    if not isinstance(value, str):
+        return False
+    try:
+        _validate_https_url(value)
+    except DjangoValidationError:
+        return False
+    return True
 
 
 class BillingSpecialistStatusView(APIView):
@@ -128,6 +144,10 @@ class BillingCardSetupView(APIView):
                 "VALIDATION_ERROR",
                 "Body must include tariff (solo|salon) and return_url.",
             )
+        if not _is_https_url(return_url):
+            return error_response(
+                "VALIDATION_ERROR", "return_url must be an https URL.",
+            )
 
         tenant = None
         if tariff_code == "salon":
@@ -224,6 +244,10 @@ class BillingPayDebtView(APIView):
             return error_response(
                 "VALIDATION_ERROR",
                 "return_url is required when no payment method is saved.",
+            )
+        if return_url and not _is_https_url(return_url):
+            return error_response(
+                "VALIDATION_ERROR", "return_url must be an https URL.",
             )
 
         try:
