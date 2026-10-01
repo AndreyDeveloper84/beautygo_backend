@@ -11,12 +11,23 @@ run means a burst of both — to people whose visit was in the spring.
 Hence: ``--dry-run`` first, an explicit window, and a batch cap.
 
     manage.py complete_elapsed_backlog --since 2026-08-01 --dry-run
-    manage.py complete_elapsed_backlog --since 2026-08-01 --limit 50
+    manage.py complete_elapsed_backlog --since 2026-08-01 --limit 50 \\
+        --operator ops --database <name>
 
 ``--since`` is required. There is no "everything" mode on purpose.
+
+The write names its database and leaves a receipt (DRF-2689). A closure
+charges the platform fee, so a run that writes requires ``--database`` and
+refuses, before the first closure, unless it names the database this
+process is connected to; ``--operator`` says who ran it. Every run, dry or
+real, leaves one ``complete_elapsed_backlog_run`` receipt — on a real run
+written BEFORE the first closure (no receipt, nothing closed), then
+completed with the counters. ``--dry-run`` stays what it was: opt-in, and
+needs neither key. See ``payments/money_commands.py`` for the shape.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, time, timedelta
 
 from django.conf import settings
@@ -24,8 +35,21 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 
+from analytics import event_catalogue
+from analytics.models import AnalyticsEvent
 from appointments.models import Appointment
 from appointments.tasks import complete_elapsed_bookings
+from payments.money_commands import (
+    ReceiptUnwritten,
+    clean_operator,
+    provider_mode,
+    require_named_database,
+    write_receipt,
+)
+
+logger = logging.getLogger(__name__)
+
+COMMAND = "complete_elapsed_backlog"
 
 
 class Command(BaseCommand):
@@ -57,8 +81,30 @@ class Command(BaseCommand):
             "--dry-run", action="store_true",
             help="List what would be closed and exit without writing.",
         )
+        parser.add_argument(
+            "--database", type=str, default=None,
+            help=(
+                "Name of the database you mean to close visits in. Required "
+                "to write; must be the one this process is connected to."
+            ),
+        )
+        parser.add_argument(
+            "--operator", type=str, default=None,
+            help=(
+                "Who runs it — a role or a tag, not a name; goes into the "
+                "run receipt. Required to write."
+            ),
+        )
 
     def handle(self, *args, **options) -> None:
+        writing = not options["dry_run"]
+        operator = clean_operator(
+            options["operator"], command=COMMAND, required=writing,
+        )
+        database = require_named_database(
+            options["database"], command=COMMAND, required=writing,
+        )
+
         raw = options["since"].strip()
         not_before = parse_datetime(raw)
         if not_before is None:
@@ -107,7 +153,29 @@ class Command(BaseCommand):
                 f"Capped at --limit {limit}; re-run to continue."
             ))
 
+        receipt = {
+            "operator": operator or None,
+            "mode": "apply" if writing else "dry_run",
+            "database": database,
+            "provider_mode": provider_mode(),
+            "since": not_before.isoformat(),
+            "cutoff": cutoff.isoformat(),
+            "hours": hours,
+            "limit": limit,
+            "matched": total,
+            "planned": min(total, limit),
+            # Filled in after a real run; null on a dry run and on a run
+            # that did not get as far as closing anything.
+            "result": None,
+        }
+
         if options["dry_run"]:
+            # Nothing to lose on a dry run — its receipt is best-effort.
+            try:
+                write_receipt(event_catalogue.COMPLETE_ELAPSED_BACKLOG_RUN, receipt)
+            except Exception:  # noqa: BLE001 — a dry run is not failed by its receipt
+                logger.exception("appointments.backlog.receipt_write_failed")
+                self.stderr.write("dry-run receipt not written (see the log)")
             for appt in candidates[:limit]:
                 self.stdout.write(
                     f"  would close {appt.id} — ended "
@@ -117,9 +185,32 @@ class Command(BaseCommand):
             self.stdout.write(self.style.WARNING("dry-run: nothing written"))
             return
 
+        # Fail-closed, and BEFORE the first closure: a closure charges the
+        # fee through its own transactions, which a receipt that failed
+        # afterwards could not take back.
+        try:
+            row = write_receipt(event_catalogue.COMPLETE_ELAPSED_BACKLOG_RUN, receipt)
+        except Exception as exc:  # noqa: BLE001 — any receipt failure is a refusal
+            raise ReceiptUnwritten(
+                "run receipt not written — NOTHING was closed "
+                f"({type(exc).__name__})"
+            ) from exc
+
         result = complete_elapsed_bookings(
             not_before=not_before, cutoff=cutoff, batch_size=limit,
         )
+        # The counters complete the receipt. Best-effort: the closures are
+        # done and visible in their rows; the intent is already recorded.
+        try:
+            AnalyticsEvent.objects.filter(pk=row.pk).update(payload={
+                **receipt,
+                "result": {
+                    key: result[key] for key in ("completed", "skipped", "failed")
+                },
+            })
+        except Exception:  # noqa: BLE001
+            logger.exception("appointments.backlog.receipt_result_write_failed")
+            self.stderr.write("receipt counters not written (see the log)")
         self.stdout.write(self.style.SUCCESS(
             f"completed={result['completed']} skipped={result['skipped']} "
             f"failed={result['failed']}"

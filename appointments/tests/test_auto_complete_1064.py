@@ -28,6 +28,7 @@ from uuid import uuid4
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import connection
 from django.utils import timezone
 
 from appointments.application.dto import CreateBookingDTO
@@ -313,6 +314,7 @@ class TestBacklogCommand:
         call_command(
             "complete_elapsed_backlog",
             "--since", (timezone.now() - timedelta(days=30)).date().isoformat(),
+            "--operator", "test", "--database", connection.settings_dict["NAME"],
             stdout=out,
         )
 
@@ -340,7 +342,9 @@ class TestBacklogCommand:
         call_command(
             "complete_elapsed_backlog",
             "--since", (timezone.now() - timedelta(days=30)).date().isoformat(),
-            "--limit", "1", stdout=out,
+            "--limit", "1",
+            "--operator", "test", "--database", connection.settings_dict["NAME"],
+            stdout=out,
         )
 
         assert Appointment.objects.filter(

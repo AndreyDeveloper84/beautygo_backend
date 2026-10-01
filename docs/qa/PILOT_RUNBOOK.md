@@ -137,8 +137,13 @@ FE-релизы miniapp (кроме fix); новые топики событий
 ### 8.1. Холд сгорел / capture застрял
 - Автоматика: `reconcile-captures` (каждые 5 мин) лечит `completed_stuck`, алертит
   `expiry_approaching` (2×buffer до `yookassa_expires_at`) и `capture_failed`.
-- Ручное: `docker compose exec web python manage.py retry_capture [--payment-id <uuid>] [--sync]`
-  (идемпотентно, ключ `capture-{payment.id}`).
+- Ручное (DRF-2689 — без `--apply` команда ничего не списывает):
+  1. сухой прогон: `docker compose exec web python manage.py retry_capture --operator <роль> [--payment-id <uuid>]`
+     — печатает платежи, их число и сумму, имя базы и режим провайдера (`test`/`live`);
+  2. списание: `… retry_capture --operator <роль> --database <имя базы из шага 1> --apply [--payment-id <uuid>] [--sync]`
+     — имя базы обязательно и сверяется с подключённой; не совпало — отказ до первого списания.
+  Идемпотентно (ключ `capture-{payment.id}`). Каждый запуск, и сухой тоже, оставляет квитанцию
+  `retry_capture_run` в `AnalyticsEvent` (кто назвался, база, платежи, сумма).
 - Холд сгорел (`expires_at` прошёл): деньги разблокированы у клиента, платёж → `canceled`;
   клиенту — «резерв отменён»; запись идёт как офлайн → fee 90₽ через billing (инвариант AMD-011).
   Повторную оплату — новой записью/платежом, НЕ «оживлением» старого холда.

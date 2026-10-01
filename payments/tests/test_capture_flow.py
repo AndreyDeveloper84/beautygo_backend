@@ -22,6 +22,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from django.core.management import call_command
+from django.db import connection
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -545,7 +546,11 @@ class TestRetryCaptureCommand:
         payment.save()
         svc, sdk_payment = _svc_with_mocked_sdk()
         with patch('payments.services.YooKassaService', return_value=svc):
-            call_command('retry_capture', '--sync')
+            call_command(
+                'retry_capture', '--operator', 'test',
+                '--database', connection.settings_dict['NAME'],
+                '--apply', '--sync',
+            )
         payment.refresh_from_db()
         assert payment.status == Payment.Status.PAID
         assert payment.capture_state == (
@@ -564,7 +569,11 @@ class TestRetryCaptureCommand:
         payment.save()
         svc, sdk_payment = _svc_with_mocked_sdk()
         with patch('payments.services.YooKassaService', return_value=svc):
-            call_command('retry_capture', '--sync')
+            call_command(
+                'retry_capture', '--operator', 'test',
+                '--database', connection.settings_dict['NAME'],
+                '--apply', '--sync',
+            )
         sdk_payment.capture.assert_not_called()
 
 
