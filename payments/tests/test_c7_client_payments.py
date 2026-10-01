@@ -291,7 +291,8 @@ class TestCardSetup:
         )
         call = svc.create_card_binding.call_args
         assert call.kwargs["user_id"] == customer.id
-        assert call.kwargs["consent_version"] == "card-consent-v1"
+        # DRF-2681: the stored version is the server's, not the sent one.
+        assert call.kwargs["consent_version"] == "offer-client-cards-0.0-todo-legal"
 
     def test_consent_version_required(self, customer):
         """Consent boundary: binding without an explicit consent version

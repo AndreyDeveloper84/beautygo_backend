@@ -44,6 +44,7 @@ from .services import (
     PaymentRetryStatusError,
     YooKassaService,
     build_appointment_receipt,
+    client_card_consent_version,
 )
 
 logger = logging.getLogger(__name__)
@@ -1571,7 +1572,9 @@ class InternalPaymentStatusView(APIView):
 class _InternalCardSetupSerializer(drf_serializers.Serializer):
     """C7.2 card-binding body. ``consent_version`` is REQUIRED — the
     consent boundary: binding is a separate voluntary action with an
-    explicit, versioned consent text."""
+    explicit, versioned consent text. Its presence is the act of consent;
+    its VALUE is not trusted (DRF-2681) — the stored version is
+    ``client_card_consent_version()``."""
     consent_version = drf_serializers.CharField(max_length=64, allow_blank=False)
     return_url = drf_serializers.URLField()
 
@@ -1617,11 +1620,19 @@ class InternalCardSetupView(APIView):
         serializer = _InternalCardSetupSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        consent_version = client_card_consent_version()
+        if serializer.validated_data['consent_version'] != consent_version:
+            # The sent value is client input — never logged, never stored.
+            logger.warning(
+                'card_binding.consent_version_mismatch user_id=%s stamped=%s',
+                request.user.id, consent_version,
+            )
+
         try:
             svc = _get_yookassa()
             result = svc.create_card_binding(
                 user_id=request.user.id,
-                consent_version=serializer.validated_data['consent_version'],
+                consent_version=consent_version,
                 return_url=serializer.validated_data['return_url'],
                 idempotency_key=_idempotency_key_from(request),
             )

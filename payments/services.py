@@ -32,6 +32,19 @@ def get_platform_fee(amount: Decimal) -> Decimal:
     return min(flat, amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
 
 
+def client_card_consent_version() -> str:
+    """Version of the card-binding consent text a client accepts (C7.2).
+
+    Server-authoritative (owner decision 2026-10-01, DRF-2681): the
+    catalog stamps it and does not trust the value a client sends — the
+    same rule as ``billing.charges._offer_version``. The default is a
+    placeholder until the legal text and its version exist.
+    """
+    return getattr(
+        settings, 'CLIENT_CARD_CONSENT_VERSION', 'offer-client-cards-0.0-todo-legal',
+    )
+
+
 class YooKassaService:
     """
     Thin wrapper around the yookassa SDK.
