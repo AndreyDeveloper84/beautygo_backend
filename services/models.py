@@ -774,7 +774,8 @@ class SalonService(models.Model):
     )
     name = models.CharField(max_length=200)
     # Salon-level default; null resolves from template (see
-    # SpecialistService.resolved_duration).
+    # resolved_duration below, and SpecialistService.resolved_duration,
+    # which puts the specialist's own override in front of it).
     duration_minutes = models.PositiveIntegerField(
         null=True, blank=True,
         validators=[MinValueValidator(5), MaxValueValidator(480)],
@@ -975,6 +976,20 @@ class SalonService(models.Model):
         self.clean()
         super().save(*args, **kwargs)
 
+    def resolved_duration(self) -> int | None:
+        """First non-null of salon -> template duration (DRF-2705).
+
+        The salon-level half of :meth:`SpecialistService.resolved_duration`,
+        which delegates here. ``None`` means nothing resolves: no salon value
+        and either no template or a template whose timing is not curated yet.
+        """
+        if self.duration_minutes is not None:
+            return self.duration_minutes
+        template = self.template
+        if template is not None:
+            return template.duration_default
+        return None
+
     def __str__(self) -> str:
         return f"{self.name} @ {self.tenant.slug}"
 
@@ -1062,13 +1077,7 @@ class SpecialistService(models.Model):
         """First non-null of specialist -> salon -> template duration."""
         if self.duration_minutes is not None:
             return self.duration_minutes
-        salon = self.salon_service
-        if salon.duration_minutes is not None:
-            return salon.duration_minutes
-        template = salon.template
-        if template is not None:
-            return template.duration_default
-        return None
+        return self.salon_service.resolved_duration()
 
     def resolved_requires_health_check(self) -> bool | None:
         """Вердикт гейта — см. :meth:`resolved_health_check` (DRF-2614)."""
