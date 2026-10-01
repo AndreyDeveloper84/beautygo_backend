@@ -307,7 +307,7 @@ jobs:
 
       - name: Upload pytest junit
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: junit-catalog-${{ matrix.shard.id }}-${{ github.sha }}
           path: junit-catalog-${{ matrix.shard.id }}.xml
@@ -341,7 +341,7 @@ jobs:
 
       - name: Upload collection census
         if: always() && matrix.shard.id == 4
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: catalog-census-${{ github.sha }}
           path: catalog-census.txt
@@ -430,7 +430,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Download shard junits and the census
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: '*-${{ github.sha }}'
           path: artifacts
