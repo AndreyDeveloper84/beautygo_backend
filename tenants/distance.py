@@ -21,7 +21,7 @@ location_lat/lng`` (адрес человека): движок подбора, �
 """
 from __future__ import annotations
 
-from math import asin, cos, radians, sin, sqrt
+from math import asin, cos, isfinite, radians, sin, sqrt
 from typing import TYPE_CHECKING
 
 from django.db.models import Q
@@ -59,14 +59,34 @@ def offer_point(specialist: "SpecialistProfile") -> tuple[float, float] | None:
     return float(place.latitude), float(place.longitude)
 
 
+def is_client_point(lat: float, lon: float) -> bool:
+    """Координата клиента — точка на глобусе: конечные числа в пределах широт и долгот.
+
+    DRF-2762. ``float("nan")`` разбирается без ошибки, проходил сюда числом и
+    ронял ответ на ``int(round(nan))`` — 500 на карточке, списке и поиске у
+    каждого мастера с местом. Широта 999 давала расстояние в 16 805 км, то
+    есть число там, где ответ — «неизвестно». Обе беды — одна: точки клиента
+    нет, и §8 уже сказал, что тогда отдаём ``None``, а не угадываем.
+
+    Сравнение ловит и NaN (любое сравнение с ним ложно), ``isfinite`` стоит
+    рядом, чтобы это не было случайностью записи условия.
+    """
+    try:
+        lat_f, lon_f = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return False
+    return isfinite(lat_f) and isfinite(lon_f) and -90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0
+
+
 def distance_km_to(specialist: "SpecialistProfile", lat: float | None, lon: float | None) -> float | None:
     """Расстояние от точки клиента до места предложения, либо ``None``.
 
     ``None`` при любой неизвестной стороне: нет координаты клиента (§8 — не
-    угадываем, откуда человек поедет) или нет подтверждённого геокодированного
-    места. Нулей и середин шкалы здесь нет.
+    угадываем, откуда человек поедет), она не точка на глобусе
+    (``is_client_point``) или нет подтверждённого геокодированного места.
+    Нулей и середин шкалы здесь нет.
     """
-    if lat is None or lon is None:
+    if lat is None or lon is None or not is_client_point(lat, lon):
         return None
     point = offer_point(specialist)
     if point is None:
@@ -100,7 +120,14 @@ def bbox_q(lat: float, lon: float, radius_km: float, prefix: str = "works_at") -
 
     Только по участвующим местам: мастер без подтверждённого места не
     «далеко», он «неизвестно где», и в радиус не попадает по построению.
+
+    ``ValueError`` на не-числе (NaN, бесконечность) в любой из трёх величин:
+    вызывающий уже ловит его для нечитаемого ввода и фильтр не ставит. Без
+    этого NaN доезжал до сравнения с ``DecimalField`` и ронял список
+    ``ValidationError`` — 500 (DRF-2762).
     """
+    if not (isfinite(lat) and isfinite(lon) and isfinite(radius_km)):
+        raise ValueError("bbox needs finite lat, lon and radius")
     lat_delta = radius_km / 111.0
     lon_delta = radius_km / (111.0 * max(cos(radians(lat)), 1e-6))
     p = f"{prefix}__" if prefix else ""
