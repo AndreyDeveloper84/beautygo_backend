@@ -28,6 +28,7 @@ class TestDeprecationHeaders:
         # Sunset is an HTTP-date — sanity-check it parses as one
         assert "GMT" in resp["Sunset"]
 
+    @pytest.mark.usefixtures("sms_delivered")
     def test_register_success_path_carries_headers(self):
         resp = self.client.post(
             reverse("register"),
