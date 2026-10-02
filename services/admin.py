@@ -91,7 +91,7 @@ class ServiceCategoryAdmin(admin.ModelAdmin):
         if capabilities or goal_links or contraindications:
             self.message_user(
                 request,
-                "У процедур изменились значимые данные: подтверждённое знание о них "
+                "У процедур изменились значимые данные или состав: подтверждённое знание о них "
                 f"возвращено в черновик и требует повторной проверки — возможностей: "
                 f"{capabilities}, связей с целями: {goal_links}, противопоказаний: "
                 f"{contraindications}. Что именно изменилось — в журнале снятых подтверждений.",

@@ -265,8 +265,7 @@ class TestTheSharedRule:
             review_date=review_date, has_scope=True, today=dt.date(2026, 10, 2),
         )
 
-        assert errors == ({"review_date": errors.get("review_date")} if refused else {})
-        assert ("review_date" in errors) is refused
+        assert set(errors) == ({"review_date"} if refused else set())
 
     def test_a_kind_outside_the_list_is_refused_on_a_draft_too(self) -> None:
         errors = approval_errors(
@@ -823,6 +822,29 @@ class TestTheScopeChangesWithoutAnEditOfTheRow:
 
         assert _statuses(by_root, by_face) == ["system_inference", "system_inference"]
 
+    def test_an_empty_subcategory_moved_to_another_root_resets_the_rules_of_both_roots(
+        self, body, face, by_root, by_face, reviewer, approver
+    ) -> None:
+        """Процедур в подкатегории нет — сброс идёт не через них, а от самой категории."""
+        empty = ServiceCategory.objects.create(name="Пустая 2741", parent=body)
+        named = _row(key="named", **COMPLETE, **_both_signed(reviewer, approver))
+        named.categories.set([empty])
+
+        empty.parent = face
+        empty.save()
+
+        assert _statuses(named, by_root, by_face) == ["system_inference"] * 3
+        assert set(ClaimApprovalReset.objects.values_list("reason", flat=True)) == {"category_moved"}
+
+    def test_a_category_deleted_with_its_procedures_is_journalled_once_per_rule(
+        self, template, by_category, by_root
+    ) -> None:
+        template.category.delete()
+
+        assert _statuses(by_category, by_root) == ["system_inference", "system_inference"]
+        assert ClaimApprovalReset.objects.filter(contraindication=by_category).count() == 1
+        assert ClaimApprovalReset.objects.filter(contraindication=by_root).count() == 1
+
     def test_a_rule_under_two_matching_names_is_journalled_once(
         self, template, body, reviewer, approver
     ) -> None:
@@ -963,10 +985,13 @@ class TestTheCarrierIsNotARoute:
         любого модуля. Список тех, кто таблицу упоминает, — литералом; новый
         читатель обязан появиться здесь вместе с решением о нём."""
         root = Path(services_models.__file__).resolve().parents[1]
+        # Каталоги с точкой (``.venv``, ``.git``) не обходятся вовсе — а не
+        # отсеиваются после обхода.
+        tops = [p for p in root.iterdir() if not p.name.startswith(".") and (p.is_dir() or p.suffix == ".py")]
         mentions = set()
-        for path in root.rglob("*.py"):
+        for path in (found for top in tops for found in ([top] if top.is_file() else top.rglob("*.py"))):
             parts = path.relative_to(root).parts
-            if parts[0].startswith(".") or {"migrations", "tests", "node_modules", "site-packages"} & set(parts):
+            if {"migrations", "tests", "node_modules", "site-packages"} & set(parts):
                 continue
             source = path.read_text(encoding="utf-8", errors="ignore")
             if "ProcedureContraindication" in source or "contraindication_rules" in source:
