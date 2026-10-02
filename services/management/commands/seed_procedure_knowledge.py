@@ -30,6 +30,8 @@
 Чего команда не делает
 ----------------------
 * Знание не выдумывает и из названий услуг не выводит.
+* **Отметку рецензента не несёт.** Тип утверждения (``claim_type``) в файле
+  указать можно; проверка рецензентом делается только в админке.
 * Новое издание файла на уже заведённые строки не ложится (см. выше) — правка
   существующего делается в админке.
 * **Удалённое в админке возвращает.** Строка, которая есть в файле, при
@@ -62,6 +64,8 @@
         "result_timeframe": "...",         # словами, не числом; только вместе с
         "variability_note": "...",         # оговоркой, источником и ссылкой
         "claim_scope": "supported",        # | not_supported | prohibited_claim
+        "claim_type": "physiological",     # | product | professional | medical;
+                                           # не указан — unclassified (подтвердить нельзя)
         "prohibited_statement": "",        # только у prohibited_claim и там обязателен:
                                            # что именно нельзя утверждать
         "limitations": "...", "evidence_source": "...", "evidence_kind": "...",
@@ -110,6 +114,7 @@ DEFAULT_FILE = Path(__file__).resolve().parents[2] / "seeds" / "procedure_knowle
 
 _STATUSES = {choice.value for choice in ClaimEvidence.Status}
 _SCOPES = {choice.value for choice in ClaimEvidence.ClaimScope}
+_CLAIM_TYPES = {choice.value for choice in ClaimEvidence.ClaimType}
 
 _CAPABILITY_TEXT = (
     "text_client", "text_professional", "expected_effect", "result_timeframe", "variability_note",
@@ -119,7 +124,9 @@ _CLAIM_TEXT = (
     "limitations", "prohibited_statement", "evidence_source", "evidence_kind", "source_ref",
     "confirmed_rule", "rule_version",
 )
-_CLAIM_KEYS = frozenset({"status", "claim_scope", "confirmed_at", "valid_until", *_CLAIM_TEXT})
+_CLAIM_KEYS = frozenset(
+    {"status", "claim_scope", "claim_type", "confirmed_at", "valid_until", *_CLAIM_TEXT}
+)
 _CAPABILITY_KEYS = _CLAIM_KEYS | {"template_code", "key", "goal_links", *_CAPABILITY_TEXT}
 _LINK_KEYS = _CLAIM_KEYS | {"goal", *_LINK_TEXT}
 
@@ -186,9 +193,16 @@ def _claim_fields(
     if scope not in _SCOPES:
         problems.add(where, f"неизвестный claim_scope «{scope}» (допустимо: {sorted(_SCOPES)})")
 
+    claim_type = (
+        _text(row, "claim_type", where, problems) or ClaimEvidence.ClaimType.UNCLASSIFIED.value
+    )
+    if claim_type not in _CLAIM_TYPES:
+        problems.add(where, f"неизвестный claim_type «{claim_type}» (допустимо: {sorted(_CLAIM_TYPES)})")
+
     fields: dict[str, Any] = {name: _text(row, name, where, problems) for name in _CLAIM_TEXT}
     fields["status"] = status
     fields["claim_scope"] = scope
+    fields["claim_type"] = claim_type
     fields["confirmed_at"] = _moment(row, "confirmed_at", where, problems)
     fields["valid_until"] = _moment(row, "valid_until", where, problems)
 
@@ -203,6 +217,17 @@ def _claim_fields(
             problems.add(where, f"{field} — {message}")
         if fields["confirmed_at"] is None:
             problems.add(where, "confirmed_at — у подтверждённой строки должна быть дата подтверждения.")
+        # DRF-2726: импорт — не проверка. Отметка рецензента из файла не
+        # приезжает, поэтому подтвердить из файла можно только тип, которому
+        # рецензент не нужен.
+        if claim_type == ClaimEvidence.ClaimType.UNCLASSIFIED.value:
+            problems.add(where, "claim_type — подтвердить можно только утверждение с указанным типом.")
+        elif claim_type in ClaimEvidence.REVIEW_REQUIRED_CLAIM_TYPES:
+            problems.add(
+                where,
+                f"claim_type «{claim_type}» подтверждается только после проверки рецензентом, "
+                "а отметка проверки из файла не приезжает. Заведите строку черновиком.",
+            )
     else:
         # Отметки подтверждения у черновика были бы утверждением, которого
         # никто не делал; из файла они в базу не едут.

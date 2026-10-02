@@ -104,6 +104,7 @@ def _capability(template, *, key="even-tone", **kw) -> ProcedureCapability:
 def _approve(row, curator, **extra) -> None:
     for name, value in {
         "status": S.APPROVED,
+        "claim_type": "product",  # DRF-2726: тип без рецензента
         "claim_scope": C.SUPPORTED,
         "confirmed_by": curator,
         "confirmed_at": timezone.now(),

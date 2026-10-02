@@ -1762,6 +1762,25 @@ class ClaimEvidence(models.Model):
         #: Обещание, которое произносить нельзя (§12 владельца).
         PROHIBITED_CLAIM = "prohibited_claim", "Prohibited claim"
 
+    class ClaimType(models.TextChoices):
+        """Тип утверждения — по нему решается, нужен ли рецензент (DRF-2726).
+
+        Список — УМОЛЧАНИЕ из слов владельца 02.10 (блок A: «проф./физиол./
+        мед. утверждения»), а не его решение; меняется миграцией.
+        """
+
+        #: Тип не указан. С ним строку подтвердить нельзя.
+        UNCLASSIFIED = "unclassified", "Не указан"
+        #: Продуктовое / организационное — рецензент не нужен.
+        PRODUCT = "product", "Продуктовое"
+        PROFESSIONAL = "professional", "Профессиональное"
+        PHYSIOLOGICAL = "physiological", "Физиологическое"
+        MEDICAL = "medical", "Медицинское"
+
+    #: Типы, которые подтверждаются только после проверки назначенным
+    #: рецензентом. УМОЛЧАНИЕ: все, кроме ``product`` (главный выбор владельца).
+    REVIEW_REQUIRED_CLAIM_TYPES = ("professional", "physiological", "medical")
+
     status = models.CharField(
         max_length=24, choices=Status.choices, default=Status.SYSTEM_INFERENCE,
     )
@@ -1791,6 +1810,21 @@ class ClaimEvidence(models.Model):
     source_ref = models.CharField(max_length=200, blank=True, default="")
     #: Срок годности подтверждения; NULL — бессрочно. Истёкшее не говорится.
     valid_until = models.DateTimeField(null=True, blank=True)
+
+    # DRF-2726 (блок A): «рецензент проверил факт» — отдельное решение от
+    # «куратор утвердил использование» (``confirmed_by``), со своим автором.
+    claim_type = models.CharField(
+        max_length=16, choices=ClaimType.choices, default=ClaimType.UNCLASSIFIED,
+    )
+    # PROTECT по той же причине, что у ``confirmed_by`` (DRF-2612): CHECK ниже
+    # требует это поле непустым у подтверждённой строки проверяемого типа.
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True, blank=True,
+        related_name="+",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1833,6 +1867,29 @@ class ClaimEvidence(models.Model):
                     | ~models.Q(prohibited_statement="")
                 ),
                 name="%(class)s_approved_prohibition_has_statement",
+            ),
+            # Подтверждённое утверждение имеет тип: без типа неизвестно, нужен
+            # ли ему рецензент.
+            models.CheckConstraint(
+                condition=~models.Q(status="approved") | ~models.Q(claim_type="unclassified"),
+                name="%(class)s_approved_has_claim_type",
+            ),
+            # Тип, требующий рецензента, подтверждается только с отметкой проверки.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="approved")
+                    | ~models.Q(claim_type__in=["professional", "physiological", "medical"])
+                    | (models.Q(reviewed_by__isnull=False) & models.Q(reviewed_at__isnull=False))
+                ),
+                name="%(class)s_approved_review_when_required",
+            ),
+            # Отметка проверки цельная: человек и время — вместе или никак.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(reviewed_by__isnull=True) & models.Q(reviewed_at__isnull=True))
+                    | (models.Q(reviewed_by__isnull=False) & models.Q(reviewed_at__isnull=False))
+                ),
+                name="%(class)s_review_is_whole",
             ),
         ]
 
@@ -2028,3 +2085,68 @@ class CapabilityGoalLink(ClaimEvidence):
 
     def __str__(self) -> str:
         return f"{self.capability} → {self.goal.label}"
+
+
+class ClaimReviewer(models.Model):
+    """Назначение рецензента: кто вправе проверять утверждения какого типа (DRF-2726).
+
+    Решение владельца 02.10 (блок A): медицинские и физиологические
+    утверждения проверяет «только назначенный рецензент подходящей
+    квалификации»; «тело/массаж и кожа лица — возможно, разные люди». Строка
+    этой таблицы и есть назначение. Имён в коде нет — строки заводит владелец
+    в админке.
+
+    ``category`` — область компетенции: корневая категория каталога, покрывает
+    её и её подкатегории. Пусто — любая область.
+
+    Право администратора компетенцией не является: суперпользователь без
+    строки здесь проверить не может (:func:`services.knowledge_review.may_review`).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # PROTECT: учётка сотрудника физически не удаляется (стирание — tombstone),
+    # а назначение — след того, кто был вправе проверять.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="claim_reviewer_appointments",
+    )
+    claim_type = models.CharField(max_length=16, choices=ClaimEvidence.ClaimType.choices)
+    category = models.ForeignKey(
+        ServiceCategory, on_delete=models.PROTECT, null=True, blank=True, related_name="+",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            # Назначать можно только на тип, который рецензент проверяет.
+            models.CheckConstraint(
+                condition=models.Q(claim_type__in=["professional", "physiological", "medical"]),
+                name="claimreviewer_type_is_reviewable",
+            ),
+            models.UniqueConstraint(
+                fields=["user", "claim_type", "category"],
+                condition=models.Q(category__isnull=False),
+                name="claimreviewer_user_type_category_uniq",
+            ),
+            models.UniqueConstraint(
+                fields=["user", "claim_type"],
+                condition=models.Q(category__isnull=True),
+                name="claimreviewer_user_type_any_category_uniq",
+            ),
+        ]
+        ordering = ["user", "claim_type"]
+
+    def clean(self) -> None:
+        if self.category_id is not None and self.category.parent_id is not None:
+            raise ValidationError(
+                {"category": "Область компетенции — корневая категория; она покрывает свои подкатегории."}
+            )
+        if self.claim_type and self.claim_type not in ClaimEvidence.REVIEW_REQUIRED_CLAIM_TYPES:
+            raise ValidationError(
+                {"claim_type": "Рецензент назначается только на тип утверждения, требующий проверки."}
+            )
+
+    def __str__(self) -> str:
+        area = self.category.name if self.category_id else "любая область"
+        return f"{self.user} · {self.get_claim_type_display()} · {area}"

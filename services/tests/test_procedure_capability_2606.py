@@ -61,6 +61,7 @@ def _capability(template, *, key="even-tone", **kw) -> ProcedureCapability:
 def _approve(row, curator, **extra) -> None:
     for name, value in {
         "status": S.APPROVED,
+        "claim_type": "product",  # DRF-2726: тип без рецензента
         "claim_scope": C.SUPPORTED,
         "confirmed_by": curator,
         "confirmed_at": timezone.now(),
@@ -177,7 +178,7 @@ class TestProvenanceShapes:
 
     def test_the_goal_link_carries_the_same_constraint(self, template, goal) -> None:
         link = CapabilityGoalLink(
-            capability=_capability(template), goal=goal, status=S.APPROVED,
+            capability=_capability(template), goal=goal, status=S.APPROVED, claim_type="product",
             claim_scope=C.SUPPORTED, confirmed_at=timezone.now(), source_ref="x",
         )
         with pytest.raises(IntegrityError), transaction.atomic():

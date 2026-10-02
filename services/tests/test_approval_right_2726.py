@@ -111,6 +111,7 @@ def _form(template: ServiceTemplate, **overrides) -> dict:
         "expected_effect": "",
         "result_timeframe": "",
         "variability_note": "",
+        "claim_type": "product",
         "status": "system_inference",
         "claim_scope": "supported",
         "prohibited_statement": "",
@@ -127,7 +128,7 @@ def _form(template: ServiceTemplate, **overrides) -> dict:
 def approved_row(template, approver) -> ProcedureCapability:
     return ProcedureCapability.objects.create(
         template=template, key="example_effect", text_client="Синтетическая формулировка",
-        status="approved", claim_scope="supported", source_ref="DOC-2726",
+        status="approved", claim_type="product", claim_scope="supported", source_ref="DOC-2726",
         confirmed_by=approver, confirmed_at=timezone.now(),
     )
 
@@ -144,6 +145,7 @@ def _link_form(capability: ProcedureCapability, goal: GoalOption, **overrides) -
     data = {
         "capability": str(capability.pk), "goal": str(goal.pk),
         "course_pattern": "", "result_horizon": "", "variability_note": "",
+        "claim_type": "product",
         "status": "system_inference", "claim_scope": "supported", "prohibited_statement": "",
         "limitations": "", "evidence_source": "", "evidence_kind": "", "source_ref": "DOC-2726",
     }
@@ -255,7 +257,7 @@ class TestAnEditorKeepsDraftsOnly:
         нельзя снести, удалив её черновую возможность."""
         draft = ProcedureCapability.objects.create(template=template, key="draft-with-link")
         link = CapabilityGoalLink.objects.create(
-            capability=draft, goal=goal, status="approved", claim_scope="supported",
+            capability=draft, goal=goal, status="approved", claim_type="product", claim_scope="supported",
             source_ref="DOC-2726", confirmed_by=approver, confirmed_at=timezone.now(),
         )
 
@@ -286,7 +288,7 @@ class TestAnEditorKeepsDraftsOnly:
     ) -> None:
         capability = ProcedureCapability.objects.create(template=template, key="for-link")
         link = CapabilityGoalLink.objects.create(
-            capability=capability, goal=goal, status="approved", claim_scope="supported",
+            capability=capability, goal=goal, status="approved", claim_type="product", claim_scope="supported",
             source_ref="DOC-2726", confirmed_by=approver, confirmed_at=timezone.now(),
         )
         client = _client(editor)

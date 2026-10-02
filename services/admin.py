@@ -13,6 +13,7 @@ from services.knowledge_intake import (
     provenance_errors,
     timeframe_errors,
 )
+from services.knowledge_review import UNCLASSIFIED, may_review, requires_review
 from services.mapping.store import StoredReport
 from services.mapping.types import Decision
 from services.mapping_review import confirm_single_candidate, evidence_text, mark_canon_gap
@@ -21,6 +22,8 @@ from services.normalization import normalize_service_name
 from .models import (
     CanonGapRequest,
     CapabilityGoalLink,
+    ClaimEvidence,
+    ClaimReviewer,
     DraftSalonService,
     ExternalBusyInterval,
     ExternalSourceMapping,
@@ -733,14 +736,21 @@ class CanonGapRequestAdmin(admin.ModelAdmin):
 # словами: база тоже откажет, но именем ограничения и уже после нажатия.
 
 _CLAIM_READONLY = (
+    "reviewed_by", "reviewed_at",
     "confirmed_by", "confirmed_at", "confirmed_rule", "rule_version",
     "created_at", "updated_at",
 )
+
+#: Поля формы, правка которых НЕ меняет содержания утверждения: статус и срок
+#: годности — решения куратора, отметка проверки — действие рецензента. Правка
+#: любого другого поля снимает прежнюю отметку проверки (DRF-2726).
+_NOT_CLAIM_CONTENT = frozenset({"status", "valid_until", "mark_reviewed"})
 
 _CLAIM_FIELDSET = (
     "Утверждение и основание",
     {
         "fields": (
+            "claim_type", "mark_reviewed",
             "status", "claim_scope", "prohibited_statement", "limitations",
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         ),
@@ -749,13 +759,16 @@ _CLAIM_FIELDSET = (
             "Автором подтверждения станет тот, кто сохраняет. "
             "Предмет запрета (prohibited statement) заполняется только у запрещённого "
             "утверждения: что именно нельзя утверждать. Он нужен внутреннему "
-            "проверяющему; клиенту не говорится."
+            "проверяющему; клиенту не говорится. "
+            "Тип утверждения решает, нужен ли рецензент: профессиональное, "
+            "физиологическое и медицинское подтверждаются только после отметки "
+            "проверки, которую ставит назначенный рецензент."
         ),
     },
 )
 
 _CONFIRMATION_FIELDSET = (
-    "Подтверждение (ставится при сохранении)",
+    "Проверка и подтверждение (ставятся при сохранении)",
     {"fields": _CLAIM_READONLY},
 )
 
@@ -777,9 +790,82 @@ class _ClaimAdminForm(forms.ModelForm):
     #: Кто сохраняет. Ставит ``_ClaimAdmin.get_form`` на классе формы,
     #: собранном под один запрос.
     acting_user = None
+    #: Остаётся ли в силе прежняя отметка проверки (считает ``clean``,
+    #: читает ``_ClaimAdmin.save_model``).
+    review_kept = False
+
+    mark_reviewed = forms.BooleanField(
+        required=False,
+        label="Проверено мной как рецензентом",
+        help_text=(
+            "Отметку ставит назначенный рецензент — за себя. Она значит: утверждение "
+            "в нынешней формулировке проверено. Любая правка содержания её снимает."
+        ),
+    )
+
+    def _claim_template(self, cleaned):
+        """Процедура, о которой утверждение, — для области компетенции рецензента."""
+        return cleaned.get("template")
+
+    def _clean_review(self, cleaned) -> None:
+        """Проверка рецензентом: кто вправе отметить и хватает ли отметки (DRF-2726)."""
+        claim_type = cleaned.get("claim_type") or UNCLASSIFIED
+        marks = bool(cleaned.get("mark_reviewed"))
+        if marks:
+            if not requires_review(claim_type):
+                self.add_error(
+                    "mark_reviewed",
+                    forms.ValidationError(
+                        "Утверждение этого типа рецензент не проверяет. Укажите тип: "
+                        "профессиональное, физиологическое или медицинское.",
+                        code="review_not_applicable",
+                    ),
+                )
+                marks = False
+            elif not may_review(
+                self.acting_user, claim_type=claim_type, template=self._claim_template(cleaned),
+            ):
+                self.add_error(
+                    "mark_reviewed",
+                    forms.ValidationError(
+                        "У вас нет назначения рецензентом для утверждений этого типа "
+                        "в этой области. Рецензентов назначает владелец.",
+                        code="reviewer_competence_required",
+                    ),
+                )
+                marks = False
+
+        had_review = not self.instance._state.adding and self.instance.reviewed_by_id is not None
+        content_changed = bool(set(self.changed_data) - _NOT_CLAIM_CONTENT)
+        self.review_kept = had_review and not content_changed
+
+        if cleaned.get("status") != APPROVED:
+            return
+        if claim_type == UNCLASSIFIED:
+            if not self.has_error("claim_type"):
+                self.add_error(
+                    "claim_type",
+                    forms.ValidationError(
+                        "Подтвердить можно только утверждение с указанным типом.",
+                        code="claim_type_required",
+                    ),
+                )
+        elif requires_review(claim_type) and not (marks or self.review_kept):
+            if had_review and content_changed:
+                message = (
+                    "Содержание изменилось после проверки рецензентом — прежняя отметка "
+                    "к новой формулировке не относится. Подтвердить можно после новой проверки."
+                )
+            else:
+                message = (
+                    "Утверждение этого типа подтверждается только после проверки "
+                    "назначенным рецензентом. Отметки проверки нет."
+                )
+            self.add_error("status", forms.ValidationError(message, code="review_required"))
 
     def clean(self):
         cleaned = super().clean()
+        self._clean_review(cleaned)
         # Право подтверждения. ``self.instance`` здесь ещё несёт значения из
         # базы: форма переносит свои поля в экземпляр позже, в ``_post_clean``.
         # ``_state.adding``, а не ``pk``: первичный ключ — UUID по умолчанию и
@@ -828,6 +914,7 @@ class ProcedureCapabilityAdminForm(_ClaimAdminForm):
         fields = (
             "template", "key", "text_client", "text_professional",
             "expected_effect", "result_timeframe", "variability_note",
+            "claim_type",
             "status", "claim_scope", "prohibited_statement", "limitations",
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         )
@@ -847,10 +934,15 @@ class ProcedureCapabilityAdminForm(_ClaimAdminForm):
 
 
 class CapabilityGoalLinkAdminForm(_ClaimAdminForm):
+    def _claim_template(self, cleaned):
+        capability = cleaned.get("capability")
+        return capability.template if capability is not None else None
+
     class Meta:
         model = CapabilityGoalLink
         fields = (
             "capability", "goal", "course_pattern", "result_horizon", "variability_note",
+            "claim_type",
             "status", "claim_scope", "prohibited_statement", "limitations",
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         )
@@ -881,7 +973,7 @@ class _ClaimAdmin(admin.ModelAdmin):
     """Общее у двух таблиц знания: кто сохранил «подтверждено», тот и подтвердил."""
 
     readonly_fields = _CLAIM_READONLY
-    list_filter = ("status", "claim_scope")
+    list_filter = ("status", "claim_scope", "claim_type")
 
     def get_form(self, request, obj=None, **kwargs):
         # ``super().get_form`` собирает новый класс формы на каждый запрос —
@@ -903,6 +995,20 @@ class _ClaimAdmin(admin.ModelAdmin):
             # подтверждения, ни время изменения. Иначе открыть строку и нажать
             # кнопку значило бы оставить в ней след.
             return
+        # Отметка проверки (DRF-2726): ставит рецензент — за себя; правка
+        # содержания снимает прежнюю, и об этом говорится вслух.
+        if form.cleaned_data.get("mark_reviewed"):
+            obj.reviewed_by = request.user
+            obj.reviewed_at = timezone.now()
+        elif not form.review_kept:
+            if obj.reviewed_by_id is not None:
+                self.message_user(
+                    request,
+                    "Отметка проверки рецензентом снята: содержание утверждения изменилось.",
+                    level=messages.WARNING,
+                )
+            obj.reviewed_by = None
+            obj.reviewed_at = None
         if obj.status == obj.Status.APPROVED:
             # Сохранить подтверждённую строку с правкой — значит подтвердить
             # то, что в ней теперь написано: иначе новая формулировка осталась
@@ -937,10 +1043,13 @@ class ProcedureCapabilityAdmin(_ClaimAdmin):
     """
 
     form = ProcedureCapabilityAdminForm
-    list_display = ("template", "key", "status", "claim_scope", "valid_until", "confirmed_by")
+    list_display = (
+        "template", "key", "claim_type", "status", "claim_scope", "valid_until",
+        "reviewed_by", "confirmed_by",
+    )
     search_fields = ("key", "text_client", "template__name", "template__canonical_code")
     autocomplete_fields = ("template",)
-    list_select_related = ("template", "confirmed_by")
+    list_select_related = ("template", "confirmed_by", "reviewed_by")
     ordering = ("template", "key")
     fieldsets = (
         (
@@ -966,10 +1075,13 @@ class CapabilityGoalLinkAdmin(_ClaimAdmin):
     """Какой цели помогает возможность — отдельное утверждение со своим основанием."""
 
     form = CapabilityGoalLinkAdminForm
-    list_display = ("capability", "goal", "status", "claim_scope", "valid_until", "confirmed_by")
+    list_display = (
+        "capability", "goal", "claim_type", "status", "claim_scope", "valid_until",
+        "reviewed_by", "confirmed_by",
+    )
     search_fields = ("capability__key", "capability__template__name", "goal__key", "goal__label")
     autocomplete_fields = ("capability", "goal")
-    list_select_related = ("capability__template", "goal", "confirmed_by")
+    list_select_related = ("capability__template", "goal", "confirmed_by", "reviewed_by")
     ordering = ("capability", "goal")
     fieldsets = (
         (
@@ -987,3 +1099,31 @@ class CapabilityGoalLinkAdmin(_ClaimAdmin):
         _CLAIM_FIELDSET,
         _CONFIRMATION_FIELDSET,
     )
+
+
+@admin.register(ClaimReviewer)
+class ClaimReviewerAdmin(admin.ModelAdmin):
+    """Назначения рецензентов (DRF-2726): кто вправе проверять утверждения какого типа.
+
+    Заводит владелец. Имён в коде нет; право управлять этой таблицей — обычные
+    права модели.
+    """
+
+    list_display = ("user", "claim_type", "category", "is_active", "updated_at")
+    list_filter = ("claim_type", "is_active")
+    raw_id_fields = ("user",)
+    fields = ("user", "claim_type", "category", "is_active")
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "category":
+            # Область — корневая категория; подкатегории она покрывает сама.
+            kwargs["queryset"] = ServiceCategory.objects.filter(parent__isnull=True)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def formfield_for_choice_field(self, db_field, request, **kwargs):
+        if db_field.name == "claim_type":
+            kwargs["choices"] = [
+                choice for choice in ClaimEvidence.ClaimType.choices
+                if choice[0] in ClaimEvidence.REVIEW_REQUIRED_CLAIM_TYPES
+            ]
+        return super().formfield_for_choice_field(db_field, request, **kwargs)
