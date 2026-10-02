@@ -926,7 +926,8 @@ class TestAChangeOfTheProcedureDropsTheApproval:
         monkeypatch.setattr(services_models, "reset_claims_of_procedure", boom)
         template.name = "Процедура 2726-р, новая редакция"
 
-        with pytest.raises(RuntimeError), transaction.atomic():
+        # Без своей транзакции вокруг: откатить запись должен сам ``save()``.
+        with pytest.raises(RuntimeError):
             template.save()
 
         assert ServiceTemplate.objects.get(pk=template.pk).name == "Процедура 2726-р"
