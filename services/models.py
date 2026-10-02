@@ -1762,6 +1762,23 @@ class ClaimEvidence(models.Model):
         #: Обещание, которое произносить нельзя (§12 владельца).
         PROHIBITED_CLAIM = "prohibited_claim", "Prohibited claim"
 
+    class EvidenceKind(models.TextChoices):
+        """Вид доказательства — закрытый список (решение владельца №4 от 02.10).
+
+        Восемь видов названы владельцем; порядок — его. «Маркетинг салона» сюда
+        не входит: это не вид доказательства, а то, чем доказательство не
+        является.
+        """
+
+        CLINICAL_GUIDELINE = "clinical_guideline", "Клиническая рекомендация"
+        SYSTEMATIC_REVIEW = "systematic_review", "Систематический обзор / мета-анализ"
+        RCT = "rct", "Рандомизированное контролируемое исследование"
+        MANUFACTURER_IFU = "manufacturer_ifu", "Официальная инструкция производителя"
+        REGULATORY_DOCUMENT = "regulatory_document", "Регуляторный документ"
+        PROFESSIONAL_CONSENSUS = "professional_consensus", "Профессиональный консенсус"
+        LEGAL_RULE = "legal_rule", "Правовая норма"
+        PRODUCT_POLICY = "product_policy", "Продуктовая политика"
+
     status = models.CharField(
         max_length=24, choices=Status.choices, default=Status.SYSTEM_INFERENCE,
     )
@@ -1775,8 +1792,13 @@ class ClaimEvidence(models.Model):
     prohibited_statement = models.TextField(blank=True, default="")
     #: Откуда знание — публикация, протокол, практика салона.
     evidence_source = models.CharField(max_length=300, blank=True, default="")
-    #: Вид доказательства — исследование, консенсус, опыт практика.
-    evidence_kind = models.CharField(max_length=64, blank=True, default="")
+    #: Вид доказательства — из закрытого списка (решение владельца №4 от 02.10,
+    #: DRF-2742). У черновика может быть пуст; у подтверждённой строки —
+    #: обязателен (ограничение базы ниже). Маркетинг салона в списке нет
+    #: намеренно: доказательством он не является.
+    evidence_kind = models.CharField(
+        max_length=64, blank=True, default="", choices=EvidenceKind.choices,
+    )
     # DRF-2612: PROTECT, не SET_NULL — CHECK модели требует это поле непустым
     # у подтверждённой строки; обнуление при удалении User нарушило бы его.
     confirmed_by = models.ForeignKey(
@@ -1833,6 +1855,21 @@ class ClaimEvidence(models.Model):
                     | ~models.Q(prohibited_statement="")
                 ),
                 name="%(class)s_approved_prohibition_has_statement",
+            ),
+            # Подтверждённое опирается на доказательство названного вида —
+            # одного из закрытого списка; пустой вид в список не входит.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="approved")
+                    | models.Q(
+                        evidence_kind__in=[
+                            "clinical_guideline", "systematic_review", "rct", "manufacturer_ifu",
+                            "regulatory_document", "professional_consensus", "legal_rule",
+                            "product_policy",
+                        ]
+                    )
+                ),
+                name="%(class)s_approved_evidence_kind_known",
             ),
         ]
 

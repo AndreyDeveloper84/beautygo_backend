@@ -9,6 +9,7 @@ from django.utils import timezone
 from services.knowledge_intake import (
     APPROVED,
     course_errors,
+    evidence_kind_errors,
     prohibition_errors,
     provenance_errors,
     timeframe_errors,
@@ -745,7 +746,8 @@ _CLAIM_FIELDSET = (
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         ),
         "description": (
-            "«Подтверждено» можно сохранить только со ссылкой на источник. "
+            "«Подтверждено» можно сохранить только со ссылкой на источник и с видом "
+            "доказательства из списка. "
             "Автором подтверждения станет тот, кто сохраняет. "
             "Предмет запрета (prohibited statement) заполняется только у запрещённого "
             "утверждения: что именно нельзя утверждать. Он нужен внутреннему "
@@ -811,6 +813,14 @@ class _ClaimAdminForm(forms.ModelForm):
             has_confirmer=True,
         ).items():
             self.add_error(field, forms.ValidationError(message, code="provenance_required"))
+        # Список видов держит само поле (выбор из списка); здесь — только
+        # обязательность вида у подтверждённой строки.
+        for field, message in evidence_kind_errors(
+            status=cleaned.get("status") or "",
+            evidence_kind=cleaned.get("evidence_kind") or "",
+        ).items():
+            if not self.has_error(field):
+                self.add_error(field, forms.ValidationError(message, code="evidence_kind_required"))
         # ``text_client`` есть только у возможности; у связи с целью его нет.
         for field, message in prohibition_errors(
             claim_scope=cleaned.get("claim_scope") or "",
