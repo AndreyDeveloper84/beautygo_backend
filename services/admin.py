@@ -75,6 +75,24 @@ class ServiceCategoryAdmin(admin.ModelAdmin):
     ordering = ('sort_order', 'name')
     inlines = [ServiceTemplateInline]
 
+    def save_formset(self, request, form, formset, change):
+        super().save_formset(request, form, formset, change)
+        # DRF-2726: правка процедуры во вложенной таблице тоже возвращает
+        # знание о ней в черновик — куратор должен узнать об этом здесь же.
+        saved = list(formset.new_objects) + [obj for obj, _ in formset.changed_objects]
+        resets = [obj.knowledge_reset for obj in saved if getattr(obj, "knowledge_reset", None)]
+        capabilities = sum(reset["capabilities"] for reset in resets)
+        goal_links = sum(reset["goal_links"] for reset in resets)
+        if capabilities or goal_links:
+            self.message_user(
+                request,
+                "У процедур изменились значимые данные: подтверждённое знание о них "
+                f"возвращено в черновик и требует повторной проверки — возможностей: "
+                f"{capabilities}, связей с целями: {goal_links}. Что именно изменилось — "
+                "в журнале снятых подтверждений.",
+                level=messages.WARNING,
+            )
+
 
 class RegionalPricingInline(admin.TabularInline):
     model = RegionalPricing
@@ -1070,7 +1088,11 @@ class _NeedsReconfirmationFilter(admin.SimpleListFilter):
 
     def queryset(self, request, queryset):
         if self.value() == "yes":
-            return queryset.exclude(status=APPROVED).filter(approval_resets__isnull=False).distinct()
+            return (
+                queryset.exclude(status=APPROVED)
+                .filter(approval_resets__isnull=False, approval_resets__resolved_at__isnull=True)
+                .distinct()
+            )
         return queryset
 
 
@@ -1085,7 +1107,7 @@ class _ClaimAdmin(admin.ModelAdmin):
         """Что и почему сняло подтверждение — пока строка не подтверждена заново."""
         if obj is None or obj._state.adding or obj.status == obj.Status.APPROVED:
             return "—"
-        last = obj.approval_resets.first()
+        last = obj.approval_resets.filter(resolved_at__isnull=True).first()
         if last is None:
             return "—"
         return f"{last.created_at:%d.%m.%Y %H:%M} — подтверждение снято. {last.describe()}"
@@ -1167,8 +1189,12 @@ class _ClaimAdmin(admin.ModelAdmin):
             kind = "capability" if isinstance(obj, ProcedureCapability) else "goal_link"
             ClaimApprovalReset.objects.create(
                 reason=ClaimApprovalReset.Reason.CLAIM_EDITED, changes=form.content_changes,
+                claim_kind=kind, claim_label=str(obj)[:300],
                 was_approved=lost_approval, had_review=lost_review, **{kind: obj},
             )
+        elif obj.status == obj.Status.APPROVED:
+            # Подтверждено заново — повторная проверка больше не нужна.
+            ClaimApprovalReset.resolve_for(obj)
 
 
 @admin.register(ProcedureCapability)
@@ -1295,12 +1321,16 @@ class ClaimApprovalResetAdmin(admin.ModelAdmin):
     Строки пишет система; править и удалять их в админке нельзя.
     """
 
-    list_display = ("created_at", "reason", "capability", "goal_link", "was_approved", "had_review", "what_changed")
-    list_filter = ("reason", "was_approved", "had_review")
+    list_display = (
+        "created_at", "reason", "claim_kind", "claim_label", "was_approved", "had_review",
+        "resolved_at", "what_changed",
+    )
+    list_filter = ("reason", "claim_kind", "was_approved", "had_review")
     search_fields = ("capability__key", "goal_link__capability__key", "capability__template__name")
     list_select_related = ("capability__template", "goal_link__capability__template", "goal_link__goal")
     readonly_fields = (
-        "created_at", "reason", "capability", "goal_link", "was_approved", "had_review", "what_changed",
+        "created_at", "reason", "claim_kind", "claim_label", "capability", "goal_link",
+        "was_approved", "had_review", "resolved_at", "what_changed",
     )
     fields = readonly_fields
 

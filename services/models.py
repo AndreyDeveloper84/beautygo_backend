@@ -7,7 +7,8 @@ from typing import Any
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import models
+from django.db import models, transaction
+from django.utils import timezone
 from django.utils.text import slugify
 
 from core.image_privacy import MetadataFreeImageField
@@ -77,20 +78,24 @@ class ServiceCategory(models.Model):
         # DRF-2726: перенос подкатегории под другой корень меняет область
         # компетенции рецензента у всех её процедур.
         was_parent = self._stored_parent_if_moved()
-        super().save(*args, **kwargs)
-        if was_parent is not None:
-            names = dict(
-                type(self).objects.filter(pk__in=[was_parent[0], self.parent_id]).values_list("pk", "name")
-            )
-            change = {
-                "field": "category.parent",
-                "old": names.get(was_parent[0], "—"),
-                "new": names.get(self.parent_id, "—"),
-            }
-            for template in ServiceTemplate.objects.filter(category=self):
-                reset_claims_of_procedure(
-                    template, reason=ClaimApprovalReset.Reason.CATEGORY_MOVED, changes=[change],
+        # Запись и сброс — одной транзакцией: иначе при сбое сброса перенос
+        # уже лежит в базе, повторное сохранение разницы не увидит, и
+        # подтверждения переживут перенос.
+        with transaction.atomic():
+            super().save(*args, **kwargs)
+            if was_parent is not None:
+                names = dict(
+                    type(self).objects.filter(pk__in=[was_parent[0], self.parent_id]).values_list("pk", "name")
                 )
+                change = {
+                    "field": "category.parent",
+                    "old": names.get(was_parent[0], "—"),
+                    "new": names.get(self.parent_id, "—"),
+                }
+                for template in ServiceTemplate.objects.filter(category=self):
+                    reset_claims_of_procedure(
+                        template, reason=ClaimApprovalReset.Reason.CATEGORY_MOVED, changes=[change],
+                    )
 
     def _stored_parent_if_moved(self) -> tuple[Any] | None:
         """``(прежний parent_id,)``, если это сохранение переносит категорию; иначе ``None``."""
@@ -399,15 +404,19 @@ class ServiceTemplate(models.Model):
         if self.canonical_code == "":
             self.canonical_code = None
         changes = self._significant_changes()
-        super().save(*args, **kwargs)
-        #: Что это сохранение сделало со знанием о процедуре — читает админка,
-        #: чтобы сказать куратору (``ServiceTemplateAdmin.save_model``).
-        self.knowledge_reset = (
-            reset_claims_of_procedure(
-                self, reason=ClaimApprovalReset.Reason.PROCEDURE_CHANGED, changes=changes,
+        # Запись и сброс — одной транзакцией: иначе при сбое сброса правка
+        # уже лежит в базе, повторное сохранение разницы не увидит, и
+        # подтверждения переживут правку.
+        with transaction.atomic():
+            super().save(*args, **kwargs)
+            #: Что это сохранение сделало со знанием о процедуре — читает
+            #: админка, чтобы сказать куратору.
+            self.knowledge_reset = (
+                reset_claims_of_procedure(
+                    self, reason=ClaimApprovalReset.Reason.PROCEDURE_CHANGED, changes=changes,
+                )
+                if changes else None
             )
-            if changes else None
-        )
 
     #: Поля процедуры, правка которых заведомо НЕ меняет того, о чём утверждает
     #: знание о ней (DRF-2726, требование владельца): штамп версии каталога
@@ -415,7 +424,10 @@ class ServiceTemplate(models.Model):
     #: признаки. Смена номера версии каталога сама по себе подтверждения не
     #: снимает. Список разрешительный: любое другое поле — в том числе
     #: добавленное позже — считается значимым, потому что неизменность смысла
-    #: по нему доказать нечем.
+    #: по нему доказать нечем. В списке НЕТ ``lifecycle`` и отметок о
+    #: происхождении флага гейта здоровья (``health_check_*``): одобрение
+    #: чернового канона и подтверждение флага здоровья меняют то, что известно
+    #: о процедуре, — и знание о ней подтверждается заново.
     KNOWLEDGE_NEUTRAL_FIELDS = frozenset({
         "approval_rule_version", "approval_source_ref", "approved_at", "approved_by", "approved_rule",
         "is_popular", "sort_order", "created_at", "updated_at",
@@ -436,6 +448,10 @@ class ServiceTemplate(models.Model):
         for f in fields:
             before, after = stored[f.attname], getattr(self, f.attname)
             if before == after:
+                continue
+            if _same_text(before, after):
+                # Перевод строки из браузера (CRLF) против засеянного (LF) —
+                # не правка: иначе первое же сохранение формы сбрасывало бы знание.
                 continue
             if f.name == "category":
                 names = dict(ServiceCategory.objects.filter(pk__in=[before, after]).values_list("pk", "name"))
@@ -1656,6 +1672,28 @@ class GoalOption(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        # DRF-2726: связь возможности с целью утверждает «помогает ЭТОЙ цели».
+        # Смена ключа или названия цели меняет предмет утверждения — её
+        # подтверждённые связи возвращаются в черновик (адресно: только связи
+        # этой цели).
+        changes = []
+        if not self._state.adding:
+            stored = type(self).objects.filter(pk=self.pk).values("key", "label").first() or {}
+            changes = [
+                {"field": f"goal.{name}", "old": _journal_text(stored[name]), "new": _journal_text(getattr(self, name))}
+                for name in ("key", "label")
+                if name in stored and stored[name] != getattr(self, name)
+            ]
+        with transaction.atomic():
+            super().save(*args, **kwargs)
+            if changes:
+                reset_claims(
+                    capabilities=ProcedureCapability.objects.none(),
+                    goal_links=CapabilityGoalLink.objects.filter(goal=self),
+                    reason=ClaimApprovalReset.Reason.GOAL_CHANGED, changes=changes,
+                )
+
     class Meta:
         ordering = ['sort_order', 'key']
         indexes = [
@@ -1776,6 +1814,14 @@ def _journal_text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+def _same_text(before: Any, after: Any) -> bool:
+    """Два текста, различающиеся только видом перевода строки."""
+    return (
+        isinstance(before, str) and isinstance(after, str)
+        and before.replace("\r\n", "\n") == after.replace("\r\n", "\n")
+    )
+
+
 def reset_claims(*, capabilities, goal_links, reason: str, changes: list[dict[str, str]]) -> dict[str, int]:
     """Снять подтверждение и проверку с ЭТИХ утверждений и записать, почему (DRF-2726).
 
@@ -1794,23 +1840,28 @@ def reset_claims(*, capabilities, goal_links, reason: str, changes: list[dict[st
     """
     counts: dict[str, int] = {}
     journal: list[ClaimApprovalReset] = []
-    for name, rows, kind in (("capabilities", capabilities, "capability"), ("goal_links", goal_links, "goal_link")):
-        affected = list(
-            rows.filter(models.Q(status="approved") | models.Q(reviewed_by__isnull=False))
-        )
-        journal += [
-            ClaimApprovalReset(
-                reason=reason, changes=changes,
-                was_approved=row.status == "approved", had_review=row.reviewed_by_id is not None,
-                **{kind: row},
+    # Журнал и сброс — вместе или никак: строка в черновике без записи в
+    # журнале не попала бы в очередь куратора.
+    with transaction.atomic():
+        for name, rows, kind in (
+            ("capabilities", capabilities, "capability"), ("goal_links", goal_links, "goal_link"),
+        ):
+            affected = list(
+                rows.filter(models.Q(status="approved") | models.Q(reviewed_by__isnull=False))
             )
-            for row in affected
-        ]
-        rows.model.objects.filter(pk__in=[row.pk for row in affected]).update(
-            status="system_inference", reviewed_by=None, reviewed_at=None,
-        )
-        counts[name] = len(affected)
-    ClaimApprovalReset.objects.bulk_create(journal)
+            journal += [
+                ClaimApprovalReset(
+                    reason=reason, changes=changes, claim_kind=kind, claim_label=str(row)[:300],
+                    was_approved=row.status == "approved", had_review=row.reviewed_by_id is not None,
+                    **{kind: row},
+                )
+                for row in affected
+            ]
+            rows.model.objects.filter(pk__in=[row.pk for row in affected]).update(
+                status="system_inference", reviewed_by=None, reviewed_at=None,
+            )
+            counts[name] = len(affected)
+        ClaimApprovalReset.objects.bulk_create(journal)
     if journal:
         logger.warning("knowledge.approvals_reset reason=%s counts=%s", reason, counts)
     return counts
@@ -2256,16 +2307,28 @@ class ClaimApprovalReset(models.Model):
         PROCEDURE_CHANGED = "procedure_changed", "Изменены значимые данные процедуры"
         #: Категория процедуры перенесена под другой корень (другая область).
         CATEGORY_MOVED = "category_moved", "Категория процедуры перенесена"
+        #: Изменена цель, о которой говорит связь.
+        GOAL_CHANGED = "goal_changed", "Изменена цель, о которой связь"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     reason = models.CharField(max_length=24, choices=Reason.choices)
+    # SET_NULL, не CASCADE: журнал переживает удаление утверждения (иначе
+    # удаление стирало бы след), а само удаление не упирается в журнал,
+    # который в админке только читается. Что это было за утверждение, после
+    # удаления говорят ``claim_kind`` и ``claim_label``.
     capability = models.ForeignKey(
-        ProcedureCapability, on_delete=models.CASCADE, null=True, blank=True, related_name="approval_resets",
+        ProcedureCapability, on_delete=models.SET_NULL, null=True, blank=True, related_name="approval_resets",
     )
     goal_link = models.ForeignKey(
-        CapabilityGoalLink, on_delete=models.CASCADE, null=True, blank=True, related_name="approval_resets",
+        CapabilityGoalLink, on_delete=models.SET_NULL, null=True, blank=True, related_name="approval_resets",
     )
+    claim_kind = models.CharField(
+        max_length=16, choices=[("capability", "Возможность"), ("goal_link", "Связь с целью")],
+    )
+    claim_label = models.CharField(max_length=300, blank=True, default="")
+    #: Когда утверждение подтвердили заново. Пусто — повторная проверка ещё нужна.
+    resolved_at = models.DateTimeField(null=True, blank=True)
     #: Что изменилось: ``[{"field": …, "old": …, "new": …}]``.
     changes = models.JSONField(default=list)
     was_approved = models.BooleanField(default=False)
@@ -2274,19 +2337,22 @@ class ClaimApprovalReset(models.Model):
     class Meta:
         ordering = ["-created_at"]
         constraints = [
-            # Строка — ровно об одном утверждении.
+            # Строка — не более чем об одном утверждении (после его удаления — ни об одном).
             models.CheckConstraint(
-                condition=(
-                    (models.Q(capability__isnull=False) & models.Q(goal_link__isnull=True))
-                    | (models.Q(capability__isnull=True) & models.Q(goal_link__isnull=False))
-                ),
-                name="claimapprovalreset_exactly_one_claim",
+                condition=models.Q(capability__isnull=True) | models.Q(goal_link__isnull=True),
+                name="claimapprovalreset_at_most_one_claim",
             ),
         ]
 
     @property
     def claim(self):
-        return self.capability or self.goal_link
+        return self.capability or self.goal_link or self.claim_label
+
+    @classmethod
+    def resolve_for(cls, claim) -> int:
+        """Утверждение подтверждено заново — его открытые записи закрываются."""
+        kind = "capability" if isinstance(claim, ProcedureCapability) else "goal_link"
+        return cls.objects.filter(resolved_at__isnull=True, **{kind: claim}).update(resolved_at=timezone.now())
 
     def describe(self) -> str:
         """Одна строка для куратора: причина и что изменилось."""

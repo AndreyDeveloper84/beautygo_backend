@@ -29,7 +29,9 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import uuid
 from io import StringIO
 from pathlib import Path
 
@@ -46,6 +48,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from services import knowledge_intake
+from services import models as services_models
 from services.knowledge_review import may_review, requires_review
 from services.models import (
     CapabilityGoalLink,
@@ -849,18 +852,81 @@ class TestAChangeOfTheProcedureDropsTheApproval:
 
         assert self._states(claims) == [self.RETURNED, self.RETURNED]
 
-    def test_5_any_field_not_proven_neutral_counts_as_a_change__literally(self) -> None:
-        """Разрешительный список литералом. Поле, которого в нём нет, — в том
-        числе добавленное в модель позже — считается значимым: доказать по нему
-        неизменность нечем, и подтверждение автоматически не переносится."""
-        assert ServiceTemplate.KNOWLEDGE_NEUTRAL_FIELDS == {
-            "approval_rule_version", "approval_source_ref", "approved_at", "approved_by", "approved_rule",
-            "is_popular", "sort_order", "created_at", "updated_at",
-        }
+    NEUTRAL = {
+        "approval_rule_version", "approval_source_ref", "approved_at", "approved_by", "approved_rule",
+        "is_popular", "sort_order", "created_at", "updated_at",
+    }
+
+    @staticmethod
+    def _another_value(field, current):
+        """Значение того же типа, отличное от нынешнего, — для любого поля модели."""
+        kind = field.get_internal_type()
+        if kind in ("ForeignKey", "UUIDField"):
+            return uuid.uuid4()
+        if kind == "BooleanField":
+            return not current
+        if kind in ("PositiveIntegerField", "IntegerField"):
+            return (current or 0) + 1
+        if kind == "DateTimeField":
+            return timezone.now() + dt.timedelta(days=1)
+        return f"{current or ''}-другое"
+
+    def test_5_the_neutral_list_is_these_nine_fields__literally(self) -> None:
+        """Разрешительный список литералом: штамп версии каталога и витринные
+        признаки. Расширить его — решение владельца."""
+        assert ServiceTemplate.KNOWLEDGE_NEUTRAL_FIELDS == self.NEUTRAL
         every_field = {f.name for f in ServiceTemplate._meta.concrete_fields}
-        assert ServiceTemplate.KNOWLEDGE_NEUTRAL_FIELDS <= every_field  # в списке нет несуществующих имён
-        significant = every_field - ServiceTemplate.KNOWLEDGE_NEUTRAL_FIELDS - {"id"}
-        assert {"category", "name", "canonical_code", "requires_health_check", "contraindications"} <= significant
+        assert self.NEUTRAL <= every_field  # в списке нет несуществующих имён
+
+    def test_5_every_other_field_of_the_procedure_counts_as_a_change(self, template) -> None:
+        """Исполнением, по каждому полю модели: поле, которого нет в списке
+        нейтральных, — в том числе добавленное в модель позже — считается
+        значимым. Доказать неизменность по нему нечем."""
+        checked = []
+        for field in ServiceTemplate._meta.concrete_fields:
+            if field.primary_key:
+                continue
+            row = ServiceTemplate.objects.get(pk=template.pk)
+            setattr(row, field.attname, self._another_value(field, getattr(row, field.attname)))
+            reported = [change["field"] for change in row._significant_changes()]
+            assert reported == ([] if field.name in self.NEUTRAL else [field.name]), field.name
+            checked.append(field.name)
+
+        # Контроль: перебор дошёл до полей, о которых владелец сказал отдельно,
+        # и до тех, что стали значимыми по умолчанию.
+        assert {
+            "name", "contraindications", "requires_health_check", "category",
+            "lifecycle", "health_check_origin", "canonical_code", "approved_by",
+        } <= set(checked)
+
+    def test_a_different_line_ending_is_not_a_change(self, template, claims) -> None:
+        """Браузер присылает CRLF там, где засев положил LF: первое сохранение
+        формы не должно возвращать знание в черновик."""
+        ServiceTemplate.objects.filter(pk=template.pk).update(contraindications="строка один\nстрока два")
+        row = ServiceTemplate.objects.get(pk=template.pk)
+
+        row.contraindications = "строка один\r\nстрока два"
+        row.save()
+
+        assert self._states(claims) == [self.APPROVED_AND_REVIEWED, self.APPROVED_AND_REVIEWED]
+
+    def test_if_the_reset_fails_the_change_of_the_procedure_is_not_stored(
+        self, template, claims, monkeypatch
+    ) -> None:
+        """Запись и сброс — одной транзакцией. Иначе правка осталась бы в базе,
+        повторное сохранение разницы не увидело бы — и подтверждение пережило
+        бы правку навсегда."""
+        def boom(*args, **kwargs):
+            raise RuntimeError("reset failed")
+
+        monkeypatch.setattr(services_models, "reset_claims_of_procedure", boom)
+        template.name = "Процедура 2726-р, новая редакция"
+
+        with pytest.raises(RuntimeError), transaction.atomic():
+            template.save()
+
+        assert ServiceTemplate.objects.get(pk=template.pk).name == "Процедура 2726-р"
+        assert self._states(claims) == [self.APPROVED_AND_REVIEWED, self.APPROVED_AND_REVIEWED]
 
     def test_when_dependencies_cannot_be_told_every_claim_of_this_procedure_is_reset(
         self, template, claims, boundary_holder, goal
@@ -941,7 +1007,9 @@ class TestTheCuratorSeesWhatWasReset:
         template.save()
 
         rows = list(ClaimApprovalReset.objects.order_by("created_at"))
-        assert {(r.capability_id, r.goal_link_id) for r in rows} == {(capability.pk, None), (None, link.pk)}
+        assert {(r.claim_kind, r.capability_id, r.goal_link_id) for r in rows} == {
+            ("capability", capability.pk, None), ("goal_link", None, link.pk),
+        }
         for row in rows:
             assert row.reason == "procedure_changed"
             assert row.changes == [
@@ -963,21 +1031,65 @@ class TestTheCuratorSeesWhatWasReset:
 
         assert ClaimApprovalReset.objects.count() == 0
 
+    @staticmethod
+    def _posted(form) -> dict:
+        """То, что прислал бы браузер, открыв форму и ничего не тронув."""
+        data = {}
+        for name in form.fields:
+            value = form.initial.get(name)
+            if value is None or value is False:
+                continue
+            data[form.add_prefix(name)] = "on" if value is True else value
+        return data
+
     def test_the_procedure_admin_tells_the_curator_at_once(self, owner, template, claims) -> None:
         url = reverse("admin:services_servicetemplate_change", args=[template.pk])
         client = _client(owner)
-        form = client.get(url).context["adminform"].form
-        data = {name: ("" if value is None else value) for name, value in form.initial.items()}
-        data.update({k: v for k, v in client.get(url).context["adminform"].form.initial.items() if v is not None})
-        data["category"] = str(template.category_id)
-        data["contraindications"] = "новая оговорка"
-        for prefix in ("regional_prices", "synonyms"):
+        page = client.get(url)
+        data = self._posted(page.context["adminform"].form)
+        for inline in page.context["inline_admin_formsets"]:
+            prefix = inline.formset.prefix
             data.update({f"{prefix}-TOTAL_FORMS": "0", f"{prefix}-INITIAL_FORMS": "0"})
-        data = {k: v for k, v in data.items() if not isinstance(v, bool) or v}
+
+        untouched = client.post(url, data)
+        nothing_yet = ClaimApprovalReset.objects.count()
+        edited = client.post(url, {**data, "contraindications": "новая оговорка"})
+
+        # Контроль: сохранение процедуры без правок знание не трогает и ничего не говорит.
+        assert untouched.status_code == 302, untouched.context["adminform"].form.errors
+        assert nothing_yet == 0
+        assert not any("повторной проверки" in str(m) for m in get_messages(untouched.wsgi_request))
+        assert edited.status_code == 302, edited.context["adminform"].form.errors
+        told = " ".join(str(m) for m in get_messages(edited.wsgi_request))
+        assert "требует повторной проверки — возможностей: 1, связей с целями: 1" in told
+        assert ClaimApprovalReset.objects.count() == 2
+
+    def test_an_edit_in_the_table_under_the_category_tells_the_curator_too(
+        self, owner, template, claims
+    ) -> None:
+        """Процедуру можно править и из карточки категории — правило то же, и
+        куратор должен узнать о сбросе там же."""
+        url = reverse("admin:services_servicecategory_change", args=[template.category_id])
+        client = _client(owner)
+        page = client.get(url)
+        data = self._posted(page.context["adminform"].form)
+        data["slug"] = "peels-2726-r"  # слаг из кириллицы форма категории не принимает
+        formset = page.context["inline_admin_formsets"][0].formset
+        data.update({
+            f"{formset.prefix}-TOTAL_FORMS": str(len(formset.forms)),
+            f"{formset.prefix}-INITIAL_FORMS": str(len(formset.forms)),
+        })
+        for form in formset.forms:
+            data.update(self._posted(form))
+            data[form.add_prefix("id")] = str(form.instance.pk)
+            data[form.add_prefix("category")] = str(template.category_id)
+            data[form.add_prefix("name")] = "Процедура 2726-р, новая редакция"
 
         response = client.post(url, data)
 
-        assert response.status_code == 302, response.context["adminform"].form.errors
+        assert response.status_code == 302, (
+            response.context["adminform"].form.errors, formset.errors,
+        )
         told = " ".join(str(m) for m in get_messages(response.wsgi_request))
         assert "требует повторной проверки — возможностей: 1, связей с целями: 1" in told
 
@@ -1023,6 +1135,102 @@ class TestTheCuratorSeesWhatWasReset:
             {"field": "text_client", "old": "Синтетическая формулировка", "new": "Новая формулировка"},
         ]
         assert (own.was_approved, own.had_review) == (True, True)
+
+    def test_a_new_approval_closes_the_reset_and_a_later_return_to_draft_does_not_reopen_it(
+        self, owner, template, claims
+    ) -> None:
+        capability, _ = claims
+        template.contraindications = "новая оговорка"
+        template.save()
+        ClaimReviewer.objects.create(user=owner, claim_type="medical")
+        client = _client(owner)
+        queue_url = reverse("admin:services_procedurecapability_changelist")
+        change_url = reverse(CHANGE, args=[capability.pk])
+
+        def in_queue() -> list:
+            page = client.get(queue_url, {"needs_reconfirmation": "yes"})
+            return [row.pk for row in page.context["cl"].result_list]
+
+        waiting = in_queue()
+        approved = client.post(change_url, _form(template, status="approved", mark_reviewed="on"))
+        after_approval = in_queue()
+        client.post(change_url, _form(template, status="system_inference"))
+        after_return = in_queue()
+
+        assert waiting == [capability.pk]
+        assert approved.status_code == 302, approved.context["adminform"].form.errors
+        assert after_approval == []
+        # Куратор сам вернул строку в черновик — это не сброс, и прежняя причина не всплывает.
+        assert after_return == []
+        assert "подтверждение снято" not in client.get(change_url).content.decode()
+        assert ClaimApprovalReset.objects.get(capability=capability).resolved_at is not None
+
+    def test_two_resets_of_one_claim_put_it_in_the_queue_once(self, owner, template, claims) -> None:
+        capability, _ = claims
+        reviewer_id = capability.reviewed_by_id
+        for text in ("первая оговорка", "вторая оговорка"):
+            ProcedureCapability.objects.filter(pk=capability.pk).update(
+                status="approved", reviewed_by_id=reviewer_id, reviewed_at=timezone.now(),
+            )
+            template.contraindications = text
+            template.save()
+
+        queue = _client(owner).get(
+            reverse("admin:services_procedurecapability_changelist"), {"needs_reconfirmation": "yes"},
+        )
+
+        assert ClaimApprovalReset.objects.filter(capability=capability).count() == 2
+        assert [row.pk for row in queue.context["cl"].result_list] == [capability.pk]
+
+    def test_a_claim_that_was_reset_can_still_be_deleted_and_the_journal_survives(
+        self, owner, template, claims
+    ) -> None:
+        """Журнал в админке только читается — и не должен из-за этого запирать
+        удаление утверждения; а удаление не должно стирать след."""
+        capability, link = claims
+        template.name = "Процедура 2726-р, новая редакция"
+        template.save()
+
+        response = _client(owner).post(
+            reverse("admin:services_procedurecapability_delete", args=[capability.pk]), {"post": "yes"},
+        )
+
+        assert response.status_code == 302
+        assert not ProcedureCapability.objects.filter(pk=capability.pk).exists()
+        rows = list(ClaimApprovalReset.objects.order_by("claim_kind"))
+        assert [(r.claim_kind, r.capability_id, r.goal_link_id) for r in rows] == [
+            ("capability", None, None), ("goal_link", None, None),
+        ]
+        # Подпись снята в момент сброса — уже с новым названием процедуры.
+        assert rows[0].claim_label == "Процедура 2726-р, новая редакция · example_effect"
+
+    def test_a_renamed_goal_returns_its_links_to_draft__and_only_them(
+        self, template, claims, goal, reviewer, approver
+    ) -> None:
+        """Связь утверждает «помогает ЭТОЙ цели»: смена названия цели меняет
+        предмет утверждения. Адресно — связи этой цели; возможность и связи
+        с другими целями не тронуты."""
+        capability, link = claims
+        other_goal = GoalOption.objects.create(key="other-goal-2726-j", label="Другая цель")
+        other_link = CapabilityGoalLink.objects.create(
+            capability=capability, goal=other_goal, claim_type="medical", claim_scope="supported",
+            reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
+        )
+
+        goal.label = "Цель 2726-р, новая редакция"
+        goal.save()
+        goal.sort_order = 7  # не содержание цели
+        goal.save()
+
+        for row in (capability, link, other_link):
+            row.refresh_from_db()
+        assert (link.status, link.reviewed_by_id) == ("system_inference", None)
+        assert (capability.status, other_link.status) == ("approved", "approved")
+        journalled = ClaimApprovalReset.objects.get()
+        assert (journalled.reason, journalled.goal_link_id) == ("goal_changed", link.pk)
+        assert journalled.changes == [
+            {"field": "goal.label", "old": "Цель 2726-р", "new": "Цель 2726-р, новая редакция"},
+        ]
 
     def test_the_journal_is_read_only(self, owner, template, claims) -> None:
         template.name = "Процедура 2726-р, новая редакция"

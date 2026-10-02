@@ -315,10 +315,26 @@ class Migration(migrations.Migration):
                             ),
                             ("procedure_changed", "Изменены значимые данные процедуры"),
                             ("category_moved", "Категория процедуры перенесена"),
+                            ("goal_changed", "Изменена цель, о которой связь"),
                         ],
                         max_length=24,
                     ),
                 ),
+                (
+                    "claim_kind",
+                    models.CharField(
+                        choices=[
+                            ("capability", "Возможность"),
+                            ("goal_link", "Связь с целью"),
+                        ],
+                        max_length=16,
+                    ),
+                ),
+                (
+                    "claim_label",
+                    models.CharField(blank=True, default="", max_length=300),
+                ),
+                ("resolved_at", models.DateTimeField(blank=True, null=True)),
                 ("changes", models.JSONField(default=list)),
                 ("was_approved", models.BooleanField(default=False)),
                 ("had_review", models.BooleanField(default=False)),
@@ -327,7 +343,7 @@ class Migration(migrations.Migration):
                     models.ForeignKey(
                         blank=True,
                         null=True,
-                        on_delete=django.db.models.deletion.CASCADE,
+                        on_delete=django.db.models.deletion.SET_NULL,
                         related_name="approval_resets",
                         to="services.procedurecapability",
                     ),
@@ -337,7 +353,7 @@ class Migration(migrations.Migration):
                     models.ForeignKey(
                         blank=True,
                         null=True,
-                        on_delete=django.db.models.deletion.CASCADE,
+                        on_delete=django.db.models.deletion.SET_NULL,
                         related_name="approval_resets",
                         to="services.capabilitygoallink",
                     ),
@@ -348,17 +364,11 @@ class Migration(migrations.Migration):
                 "constraints": [
                     models.CheckConstraint(
                         condition=models.Q(
-                            models.Q(
-                                ("capability__isnull", False),
-                                ("goal_link__isnull", True),
-                            ),
-                            models.Q(
-                                ("capability__isnull", True),
-                                ("goal_link__isnull", False),
-                            ),
+                            ("capability__isnull", True),
+                            ("goal_link__isnull", True),
                             _connector="OR",
                         ),
-                        name="claimapprovalreset_exactly_one_claim",
+                        name="claimapprovalreset_at_most_one_claim",
                     )
                 ],
             },
