@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("sms_delivered")
 class TestRegisterView:
     def test_register_client_success(self, api_client):
         url = reverse('register')
@@ -57,6 +58,7 @@ class TestRegisterView:
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("sms_delivered")
 class TestLoginView:
     def test_login_success(self, api_client, client_user):
         url = reverse('login')
@@ -148,6 +150,7 @@ class TestLogoutView:
 
 
 @pytest.mark.django_db
+@pytest.mark.usefixtures("sms_delivered")
 class TestSendCodeView:
     def test_send_code_existing_user(self, api_client, client_user):
         url = reverse('send-code')
@@ -601,6 +604,7 @@ class TestMasterProfile:
 class TestSendOTPView:
     URL = reverse('send-otp')
 
+    @pytest.mark.usefixtures("sms_delivered")
     def test_new_user_creates_and_sends_otp(self, api_client):
         phone = '+79005550001'
         response = api_client.post(
@@ -610,6 +614,7 @@ class TestSendOTPView:
         assert response.data['data']['retry_after'] == 60
         assert User.objects.filter(phone=phone).exists()
 
+    @pytest.mark.usefixtures("sms_delivered")
     def test_existing_user_sends_otp(self, api_client, client_user):
         response = api_client.post(
             self.URL, {'phone': client_user.phone}, HTTP_X_APP_TYPE='client',
@@ -623,6 +628,7 @@ class TestSendOTPView:
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
 
+    @pytest.mark.usefixtures("sms_delivered")
     def test_rate_limit(self, api_client):
         phone = '+79005550002'
         api_client.post(
