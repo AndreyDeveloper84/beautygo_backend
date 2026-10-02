@@ -154,7 +154,7 @@ def _form(template: ServiceTemplate, **overrides) -> dict:
         "prohibited_statement": "",
         "limitations": "",
         "evidence_source": "",
-        "evidence_kind": "",
+        "evidence_kind": "professional_consensus",
         "source_ref": "DOC-2726",
     }
     data.update(overrides)
@@ -169,7 +169,10 @@ def _errors(response) -> dict[str, list[str]]:
 
 
 def _signed(owner: User) -> dict:
-    return {"status": "approved", "confirmed_by": owner, "confirmed_at": timezone.now(), "source_ref": "DOC-2726"}
+    return {
+        "status": "approved", "evidence_kind": "professional_consensus",
+        "confirmed_by": owner, "confirmed_at": timezone.now(), "source_ref": "DOC-2726",
+    }
 
 
 def _refused_by(constraint: str, create) -> None:
@@ -450,7 +453,8 @@ class TestTheAdminKeepsTheTwoSignaturesApart:
             "course_pattern": "", "result_horizon": "", "variability_note": "",
             "claim_type": "medical", "mark_reviewed": "on",
             "status": "system_inference", "claim_scope": "supported", "prohibited_statement": "",
-            "limitations": "", "evidence_source": "", "evidence_kind": "", "source_ref": "DOC-2726",
+            "limitations": "", "evidence_source": "", "evidence_kind": "professional_consensus",
+            "source_ref": "DOC-2726",
         }
 
         refused = _client(body_reviewer).post(reverse(ADD_LINK), data)
@@ -702,7 +706,7 @@ class TestTheOwnersTwoRequirements:
                 "course_pattern": "", "result_horizon": "", "variability_note": "",
                 "claim_type": "product", "status": "approved", "claim_scope": "supported",
                 "prohibited_statement": "", "limitations": "", "evidence_source": "",
-                "evidence_kind": "", "source_ref": "DOC-2726-B",
+                "evidence_kind": "professional_consensus", "source_ref": "DOC-2726-B",
             },
         )
 
@@ -1257,6 +1261,7 @@ class TestAnEditOfTheCapabilityUnderAReviewedLink:
         return ProcedureCapability.objects.create(
             template=template, key="example_effect", text_client="Синтетическая формулировка",
             claim_type="product", claim_scope="supported", source_ref="DOC-2726",
+            evidence_kind="professional_consensus",
         )
 
     @pytest.fixture
@@ -1447,6 +1452,7 @@ def _refusal(tmp_path: Path, capabilities: list) -> str:
 APPROVED_BY_RULE = {
     "template_code": "1.1.3", "key": "signed", "status": "approved", "claim_scope": "supported",
     "source_ref": "DOC-2726", "confirmed_rule": "owner_rule_2726", "rule_version": "1",
+    "evidence_kind": "professional_consensus",
     "confirmed_at": "2026-10-02T09:00:00+03:00",
 }
 
@@ -1496,8 +1502,8 @@ class TestAFileCarriesTheTypeButNotTheReview:
 
 # ── Миграция поверх строк, лежавших до неё ─────────────────────────────────
 
-BEFORE = "0034_drf2726_approval_right"
-THE_MIGRATION = "0035_drf2726_reviewer_role"
+BEFORE = "0037_drf2726_approval_right"
+THE_MIGRATION = "0038_drf2726_reviewer_role"
 
 postgres_only = pytest.mark.skipif(
     connection.vendor != "postgresql",
@@ -1537,6 +1543,7 @@ class TestTheMigrationOnRowsThatWereThereBefore:
         stamp = timezone.now()
         signed = {
             "status": "approved", "confirmed_by_id": user.id, "confirmed_at": stamp, "source_ref": "DOC-2726",
+            "evidence_kind": "professional_consensus",
         }
         approved = Capability.objects.create(
             template=template, key="approved", text_client="Синтетика", claim_scope="supported", **signed,

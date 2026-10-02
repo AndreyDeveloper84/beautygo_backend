@@ -35,7 +35,7 @@ def _demote(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("services", "0034_drf2726_approval_right"),
+        ("services", "0037_drf2726_approval_right"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 

@@ -95,7 +95,7 @@ def _capability(template, *, key="even-tone", **kw) -> ProcedureCapability:
         "variability_note": "Зависит от исходного состояния кожи",
         "limitations": "Не проводят при активных высыпаниях",
         "evidence_source": "Протокол салона",
-        "evidence_kind": "practice",
+        "evidence_kind": "professional_consensus",
         **kw,
     }
     return ProcedureCapability.objects.create(template=template, key=key, **fields)
@@ -104,6 +104,7 @@ def _capability(template, *, key="even-tone", **kw) -> ProcedureCapability:
 def _approve(row, curator, **extra) -> None:
     for name, value in {
         "status": S.APPROVED,
+        "evidence_kind": "professional_consensus",  # DRF-2742: вид из закрытого списка
         "claim_type": "product",  # DRF-2726: тип без рецензента
         "claim_scope": C.SUPPORTED,
         "confirmed_by": curator,

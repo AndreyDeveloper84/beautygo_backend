@@ -107,7 +107,7 @@ def _capability_form(template: ServiceTemplate, **overrides) -> dict:
         "claim_scope": "supported",
         "limitations": "",
         "evidence_source": "",
-        "evidence_kind": "",
+        "evidence_kind": "professional_consensus",
         "source_ref": "",
     }
     data.update(overrides)
@@ -139,6 +139,7 @@ def _refusal(path: Path) -> str:
 
 APPROVED_BY_RULE = {
     "template_code": "1.1.3", "key": "signed", "status": "approved", "claim_type": "product",
+    "evidence_kind": "professional_consensus",
     "claim_scope": "supported", "source_ref": "DOC-2717",
     "confirmed_rule": "owner_rule_2717", "rule_version": "1",
     "confirmed_at": "2026-10-02T09:00:00+03:00",
@@ -262,7 +263,7 @@ class TestApprovingNeedsASource:
             "course_pattern": "", "result_horizon": "", "variability_note": "",
             "claim_type": "product",
             "status": "approved", "claim_scope": "supported", "limitations": "",
-            "evidence_source": "", "evidence_kind": "", "source_ref": "DOC-2717",
+            "evidence_source": "", "evidence_kind": "professional_consensus", "source_ref": "DOC-2717",
         })
 
         assert response.status_code == 302, response.context["adminform"].form.errors
@@ -280,7 +281,8 @@ class TestSavingWithoutAnEditKeepsTheSignature:
         return ProcedureCapability.objects.create(
             template=world["relaxing"], key="example_effect",
             text_client="Синтетическая формулировка",
-            status="approved", claim_type="product", claim_scope="supported", source_ref="DOC-2717",
+            status="approved", claim_type="product", evidence_kind="professional_consensus",
+            claim_scope="supported", source_ref="DOC-2717",
             confirmed_rule="owner_rule_2717", rule_version="1", confirmed_at=timezone.now(),
         )
 
@@ -334,7 +336,7 @@ class TestTheCourseIsWordsWithAGround:
             "claim_scope": "supported",
             "limitations": "",
             "evidence_source": "",
-            "evidence_kind": "",
+            "evidence_kind": "professional_consensus",
             "source_ref": "",
         }
         data.update(overrides)
@@ -384,7 +386,8 @@ class TestSeedingFromTheCuratorsFile:
     def test_a_second_run_adds_nothing_and_keeps_the_curators_hand(self, world, owner) -> None:
         _seed(EXAMPLE_FILE)
         ProcedureCapability.objects.filter(key="example_supported_effect").update(
-            status="approved", claim_type="product", confirmed_by=owner, confirmed_at=timezone.now(),
+            status="approved", claim_type="product", evidence_kind="professional_consensus",
+            confirmed_by=owner, confirmed_at=timezone.now(),
             source_ref="DOC-2717", text_client="Правка куратора",
         )
 

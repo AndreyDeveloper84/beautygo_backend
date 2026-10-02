@@ -121,7 +121,7 @@ def _form(template: ServiceTemplate, **overrides) -> dict:
         "prohibited_statement": "",
         "limitations": "",
         "evidence_source": "",
-        "evidence_kind": "",
+        "evidence_kind": "professional_consensus",
         "source_ref": "DOC-2726",
     }
     data.update(overrides)
@@ -132,7 +132,8 @@ def _form(template: ServiceTemplate, **overrides) -> dict:
 def approved_row(template, approver) -> ProcedureCapability:
     return ProcedureCapability.objects.create(
         template=template, key="example_effect", text_client="Синтетическая формулировка",
-        status="approved", claim_type="product", claim_scope="supported", source_ref="DOC-2726",
+        status="approved", claim_type="product", claim_scope="supported",
+        evidence_kind="professional_consensus", source_ref="DOC-2726",
         confirmed_by=approver, confirmed_at=timezone.now(),
     )
 
@@ -151,7 +152,7 @@ def _link_form(capability: ProcedureCapability, goal: GoalOption, **overrides) -
         "course_pattern": "", "result_horizon": "", "variability_note": "",
         "claim_type": "product",
         "status": "system_inference", "claim_scope": "supported", "prohibited_statement": "",
-        "limitations": "", "evidence_source": "", "evidence_kind": "", "source_ref": "DOC-2726",
+        "limitations": "", "evidence_source": "", "evidence_kind": "professional_consensus", "source_ref": "DOC-2726",
     }
     data.update(overrides)
     return data
@@ -262,6 +263,7 @@ class TestAnEditorKeepsDraftsOnly:
         draft = ProcedureCapability.objects.create(template=template, key="draft-with-link")
         link = CapabilityGoalLink.objects.create(
             capability=draft, goal=goal, status="approved", claim_type="product", claim_scope="supported",
+            evidence_kind="professional_consensus",
             source_ref="DOC-2726", confirmed_by=approver, confirmed_at=timezone.now(),
         )
 
@@ -293,6 +295,7 @@ class TestAnEditorKeepsDraftsOnly:
         capability = ProcedureCapability.objects.create(template=template, key="for-link")
         link = CapabilityGoalLink.objects.create(
             capability=capability, goal=goal, status="approved", claim_type="product", claim_scope="supported",
+            evidence_kind="professional_consensus",
             source_ref="DOC-2726", confirmed_by=approver, confirmed_at=timezone.now(),
         )
         client = _client(editor)
