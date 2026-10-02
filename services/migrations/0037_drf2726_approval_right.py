@@ -6,7 +6,7 @@ from django.db import migrations
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("services", "0033_drf2726_prohibited_statement"),
+        ("services", "0036_drf2742_evidence_kind_closed_list"),
     ]
 
     operations = [
