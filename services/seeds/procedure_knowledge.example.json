@@ -31,7 +31,8 @@
       "key": "example_prohibited_promise",
       "text_client": "",
       "claim_scope": "prohibited_claim",
-      "limitations": "[пример формата] обещание, которое произносить нельзя, и почему",
+      "prohibited_statement": "[пример формата] что именно нельзя утверждать — для внутреннего проверяющего, клиенту не говорится",
+      "limitations": "[пример формата] почему это обещание произносить нельзя",
       "source_ref": "EXAMPLE-SOURCE-3"
     },
     {

@@ -1735,6 +1735,19 @@ class ClaimEvidence(models.Model):
     4. **Какое состояние пускает в клиентский путь знания.** Только
        ``approved`` при ``claim_scope = supported`` и не истёкшем
        ``valid_until`` — см. :func:`services.capabilities.client_facing_capabilities`.
+
+    **У запрещённого есть предмет** (решение владельца 02.10, блок C;
+    DRF-2726). Что именно нельзя утверждать, хранится у самого утверждения —
+    в ``prohibited_statement``, а не прозой в ``limitations`` и не отдельным
+    списком фраз. Поле существует для ВНУТРЕННЕГО проверяющего: чтобы он мог
+    опознать нарушение и честно ответить на прямой вопрос. Клиенту оно не
+    говорится и в контекст генерации клиентской рекомендации не входит —
+    модель, получившая текст запрещённого обещания, способна его повторить.
+
+    Заполняется только у ``claim_scope = prohibited_claim`` (ограничение базы,
+    у любой строки), а у подтверждённого запрета обязательно (ограничение базы,
+    у подтверждённой строки). Читателя этого поля здесь нет: кто и как отдаёт
+    запрещённое проверяющему, решает мост чтения, не носитель.
     """
 
     class Status(models.TextChoices):
@@ -1757,6 +1770,9 @@ class ClaimEvidence(models.Model):
     )
     #: Что ограничивает утверждение (показания, условия, кому не подходит).
     limitations = models.TextField(blank=True, default="")
+    #: Предмет запрета: что именно нельзя утверждать. Только у
+    #: ``prohibited_claim``; для внутреннего проверяющего, не для клиента.
+    prohibited_statement = models.TextField(blank=True, default="")
     #: Откуда знание — публикация, протокол, практика салона.
     evidence_source = models.CharField(max_length=300, blank=True, default="")
     #: Вид доказательства — исследование, консенсус, опыт практика.
@@ -1798,6 +1814,25 @@ class ClaimEvidence(models.Model):
                     )
                 ),
                 name="%(class)s_approved_requires_provenance",
+            ),
+            # Предмет запрета — только у запрещённого утверждения: текст
+            # запрещённого обещания не должен лежать у строки, которая может
+            # стать клиентской.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(prohibited_statement="")
+                    | models.Q(claim_scope="prohibited_claim")
+                ),
+                name="%(class)s_prohibition_only_on_prohibited_claim",
+            ),
+            # Подтверждённый запрет без предмета исполнить нечем.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="approved")
+                    | ~models.Q(claim_scope="prohibited_claim")
+                    | ~models.Q(prohibited_statement="")
+                ),
+                name="%(class)s_approved_prohibition_has_statement",
             ),
         ]
 

@@ -24,8 +24,8 @@
 * Сначала проверяет файл целиком, потом пишет. Любая ошибка — неизвестный код
   шаблона, неизвестная цель, неизвестное поле, значение не того типа, слишком
   длинный текст, подтверждение без основания, курс или срок результата голым
-  числом либо без оговорки и источника — печатается списком, и не пишется
-  ничего.
+  числом либо без оговорки и источника, запрет без предмета — печатается
+  списком, и не пишется ничего.
 
 Чего команда не делает
 ----------------------
@@ -62,6 +62,8 @@
         "result_timeframe": "...",         # словами, не числом; только вместе с
         "variability_note": "...",         # оговоркой, источником и ссылкой
         "claim_scope": "supported",        # | not_supported | prohibited_claim
+        "prohibited_statement": "",        # только у prohibited_claim и там обязателен:
+                                           # что именно нельзя утверждать
         "limitations": "...", "evidence_source": "...", "evidence_kind": "...",
         "source_ref": "...",
         "goal_links": [{"goal": "relax",   # GoalOption.key
@@ -91,6 +93,7 @@ from django.utils.dateparse import parse_datetime
 from services.knowledge_intake import (
     APPROVED,
     course_errors,
+    prohibition_errors,
     provenance_errors,
     rule_problem,
     timeframe_errors,
@@ -113,7 +116,7 @@ _CAPABILITY_TEXT = (
 )
 _LINK_TEXT = ("course_pattern", "result_horizon", "variability_note")
 _CLAIM_TEXT = (
-    "limitations", "evidence_source", "evidence_kind", "source_ref",
+    "limitations", "prohibited_statement", "evidence_source", "evidence_kind", "source_ref",
     "confirmed_rule", "rule_version",
 )
 _CLAIM_KEYS = frozenset({"status", "claim_scope", "confirmed_at", "valid_until", *_CLAIM_TEXT})
@@ -168,8 +171,14 @@ def _moment(row: dict[str, Any], name: str, where: str, problems: _Problems) -> 
     return parsed
 
 
-def _claim_fields(row: dict[str, Any], where: str, problems: _Problems) -> dict[str, Any]:
-    """Общие поля основания одной строки файла — проверенные, готовые к записи."""
+def _claim_fields(
+    row: dict[str, Any], where: str, problems: _Problems, *, has_client_text: bool,
+) -> dict[str, Any]:
+    """Общие поля основания одной строки файла — проверенные, готовые к записи.
+
+    ``has_client_text`` — есть ли у строки формулировка для клиента: у
+    возможности есть, у связи с целью такого поля нет.
+    """
     status = _text(row, "status", where, problems) or ClaimEvidence.Status.SYSTEM_INFERENCE.value
     scope = _text(row, "claim_scope", where, problems) or ClaimEvidence.ClaimScope.NOT_SUPPORTED.value
     if status not in _STATUSES:
@@ -200,6 +209,15 @@ def _claim_fields(row: dict[str, Any], where: str, problems: _Problems) -> dict[
         fields["confirmed_rule"] = ""
         fields["rule_version"] = ""
         fields["confirmed_at"] = None
+
+    # Тип ``text_client`` здесь не судится (это делает разбор возможности) —
+    # отсюда одноразовый приёмник ошибок.
+    for field, message in prohibition_errors(
+        claim_scope=scope,
+        prohibited_statement=fields["prohibited_statement"],
+        text_client=_text(row, "text_client", where, _Problems()) if has_client_text else None,
+    ).items():
+        problems.add(where, f"{field} — {message}")
     return fields
 
 
@@ -318,7 +336,7 @@ class Command(BaseCommand):
                 problems.add(where, "такая пара (template_code, key) в файле уже есть")
             seen.add((code, key))
 
-            fields = _claim_fields(row, where, problems)
+            fields = _claim_fields(row, where, problems, has_client_text=True)
             fields.update({name: _text(row, name, where, problems) for name in _CAPABILITY_TEXT})
             for field, message in timeframe_errors(
                 field="result_timeframe",
@@ -354,7 +372,7 @@ class Command(BaseCommand):
                 if goal_key in seen_goals:
                     problems.add(link_where, "связь с этой целью у возможности в файле уже есть")
                 seen_goals.add(goal_key)
-                link_fields = _claim_fields(raw, link_where, problems)
+                link_fields = _claim_fields(raw, link_where, problems, has_client_text=False)
                 link_fields.update(
                     {name: _text(raw, name, link_where, problems) for name in _LINK_TEXT}
                 )

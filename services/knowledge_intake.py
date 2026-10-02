@@ -212,10 +212,63 @@ def timeframe_errors(
     return errors
 
 
+PROHIBITED_CLAIM = "prohibited_claim"
+
+
+def prohibition_errors(
+    *,
+    claim_scope: str,
+    prohibited_statement: str,
+    text_client: str | None = None,
+) -> dict[str, str]:
+    """Что не так с запретом — у возможности или у связи с целью.
+
+    Решение владельца 02.10 (блок C): машиночитаемое правило запрета хранится
+    у самого утверждения, а не прозой в ограничениях и не отдельным списком
+    фраз; запрещённое служит внутреннему проверяющему и клиенту как
+    рекомендация не передаётся.
+
+    Три условия, у ЛЮБОЙ строки (база судит первое всегда, второе — у
+    подтверждённой, третье не судит):
+
+    * предмет запрета заполняется только у ``prohibited_claim``;
+    * у ``prohibited_claim`` предмет запрета обязателен;
+    * у ``prohibited_claim`` нет формулировки для клиента (``text_client``):
+      поле с названием «то, что может прозвучать клиенту» — не место для
+      текста, который звучать не должен. ``text_client=None`` — у строки
+      такого поля нет (связь с целью).
+
+    Чего проверка НЕ может: отличить предмет запрета от любого другого
+    непустого текста. Что написано в поле — решает куратор и рецензент.
+    """
+    statement = (prohibited_statement or "").strip()
+    errors: dict[str, str] = {}
+    if claim_scope != PROHIBITED_CLAIM:
+        if statement:
+            errors["prohibited_statement"] = (
+                "Предмет запрета заполняется только у запрещённого утверждения "
+                "(claim_scope = prohibited_claim)."
+            )
+        return errors
+    if not statement:
+        errors["prohibited_statement"] = (
+            "У запрещённого утверждения должен быть предмет: что именно нельзя утверждать. "
+            "Без него запрет нечем проверить."
+        )
+    if (text_client or "").strip():
+        errors["text_client"] = (
+            "У запрещённого утверждения нет формулировки для клиента — клиенту оно не "
+            "говорится. Что нельзя утверждать, пишется в предмете запрета."
+        )
+    return errors
+
+
 __all__ = [
     "APPROVED",
     "KNOWN_CONFIRMATION_RULES",
+    "PROHIBITED_CLAIM",
     "course_errors",
+    "prohibition_errors",
     "provenance_errors",
     "rule_problem",
     "source_ref_problem",
