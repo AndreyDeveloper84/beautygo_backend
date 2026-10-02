@@ -1331,6 +1331,22 @@ class RateLimitError(AuthError):
         super().__init__("Please wait before requesting a new code")
 
 
+class OTPNotSentError(AuthError):
+    """Код выдан и не ушёл (DRF-2652).
+
+    Решение владельца 02.10.2026: успешную отправку показывать только при
+    подтверждённом результате провайдера; при установленном отказе —
+    понятная ошибка. Текст — его слова, дословно. 503, а не 4xx: запрос
+    человека верен, не справились мы или провайдер, и повтор имеет смысл.
+    """
+
+    code = "OTP_NOT_SENT"
+    status_code = 503
+
+    def __init__(self):
+        super().__init__("Не удалось отправить код, попробуйте ещё раз")
+
+
 # --- Services ---
 
 APP_TYPE_TO_ROLE = {
@@ -1386,11 +1402,11 @@ class OTPService:
     def send_otp(self, phone: str) -> OtpSendOutcome:
         """Generate OTP, send via SMS, and say how the sending ended.
 
-        DRF-2652: исход возвращается, но ответы ручек от него ПОКА не зависят —
-        что отвечать человеку, когда код не ушёл, решает владелец. Здесь —
-        различение и след: несостоявшаяся отправка пишет ``otp.not_delivered``
-        (без номера и без кода), чтобы «сколько раз сказали „код отправлен“
-        зря» можно было посчитать.
+        DRF-2652: здесь — различение и след. Несостоявшаяся отправка пишет
+        ``otp.not_delivered`` (без номера и без кода) и не оставляет кода в
+        базе. Сам метод ошибок не бросает: что делать с исходом, решает
+        вызывающий. Поверхности, которые говорят человеку «код отправлен»,
+        зовут :meth:`send_otp_or_fail`.
         """
         now = timezone.now()
 
@@ -1410,7 +1426,7 @@ class OTPService:
 
         expires_at = now + timedelta(minutes=settings.OTP_EXPIRY_MINUTES)
 
-        OTPCode.objects.create(
+        otp = OTPCode.objects.create(
             phone=phone,
             code=code,
             expires_at=expires_at,
@@ -1431,7 +1447,25 @@ class OTPService:
             "otp.not_delivered reason=%s",
             "send_failed" if sender.is_enabled() else "sending_disabled",
         )
+        # Код, которого никто не получил, не оставляем: войти по нему нельзя,
+        # а его строка держала бы лимит повторной отправки — человеку сказали
+        # бы «попробуйте ещё раз» и минуту отвечали «слишком часто». Лимит
+        # охраняет от потока SMS; здесь SMS не было.
+        otp.delete()
         return OtpSendOutcome.NOT_SENT
+
+    def send_otp_or_fail(self, phone: str) -> OtpSendOutcome:
+        """То же, что :meth:`send_otp`, но несостоявшаяся отправка — ошибка.
+
+        Этим входом пользуются все четыре поверхности, которые говорят
+        человеку «код отправлен»: регистрация, вход, единая авторизация по
+        телефону и повторная отправка. ``DEV_CODE`` отказом НЕ является: в
+        разработке код известен заранее, и вход обязан работать.
+        """
+        outcome = self.send_otp(phone)
+        if outcome is OtpSendOutcome.NOT_SENT:
+            raise OTPNotSentError()
+        return outcome
 
     def consume_otp(self, phone: str, code: str) -> bool:
         """Consume an OTP code (single-use).
@@ -1488,14 +1522,19 @@ class AuthService:
         if User.objects.filter(phone=phone).exists():
             raise PhoneAlreadyRegisteredError()
 
-        user = User.objects.create_user(
-            username=f"user_{phone.replace('+', '')}",
-            phone=phone,
-            role=role,
-            password=None,
-        )
-
-        self.otp_service.send_otp(phone)
+        # DRF-2652: если код не ушёл, учётной записи не остаётся. Иначе
+        # повторная регистрация ответила бы «номер уже зарегистрирован»
+        # человеку, который кода так и не получил. Откат — транзакцией, а
+        # не удалением: вместе с пользователем уходит всё, что завели его
+        # сигналы, и отложенные на commit действия не срабатывают.
+        with transaction.atomic():
+            user = User.objects.create_user(
+                username=f"user_{phone.replace('+', '')}",
+                phone=phone,
+                role=role,
+                password=None,
+            )
+            self.otp_service.send_otp_or_fail(phone)
         return user
 
     def login(self, phone: str) -> None:
@@ -1503,7 +1542,7 @@ class AuthService:
         if not User.objects.filter(phone=phone).exists():
             raise UserNotFoundError()
 
-        self.otp_service.send_otp(phone)
+        self.otp_service.send_otp_or_fail(phone)
 
     def complete_otp_flow(self, phone: str, code: str) -> tuple[User, bool]:
         """Consume the OTP code and activate the user.

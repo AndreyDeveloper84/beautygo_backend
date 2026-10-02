@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
 from rest_framework.test import APIClient
 
@@ -8,6 +10,26 @@ from users.models import User
 def _disable_sms(settings):
     """Disable real SMS sending in all user tests."""
     settings.SMS_ENABLED = False
+
+
+@pytest.fixture
+def sms_delivered(settings, _disable_sms):
+    """Отправка включена, провайдер принимает сообщение — без сети (DRF-2652).
+
+    С DRF-2652 «код отправлен» отвечается только при подтверждённой
+    отправке. Умолчание этих тестов — отправка выключена и режим не
+    разработка: код в таком контуре никто не получает, и ручка честно
+    отвечает отказом. Узел, которому нужен УСПЕШНЫЙ путь, просит эту
+    фикстуру явно — молчаливого «успеха» у выключенной отправки больше нет.
+
+    Зависит от ``_disable_sms``, чтобы включить отправку ПОСЛЕ него.
+    """
+    settings.SMS_ENABLED = True
+    settings.SMS_RU_API_ID = "test-api-id"  # pragma: allowlist secret
+    response = MagicMock()
+    response.json.return_value = {"status_code": 100}
+    with patch("users.sms.requests.get", return_value=response) as get:
+        yield get
 
 
 @pytest.fixture

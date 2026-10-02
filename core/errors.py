@@ -74,6 +74,8 @@ class ErrorCode(str, Enum):
     MAX_ATTEMPTS_EXCEEDED = "MAX_ATTEMPTS_EXCEEDED"
     TOO_MANY_ATTEMPTS = "TOO_MANY_ATTEMPTS"
     SMS_RATE_LIMITED = "SMS_RATE_LIMITED"
+    # DRF-2652: код выдан и не ушёл — человеку нельзя отвечать «код отправлен».
+    OTP_NOT_SENT = "OTP_NOT_SENT"
 
     # --- Social auth ---
     SOCIAL_AUTH_ERROR = "SOCIAL_AUTH_ERROR"
