@@ -1814,6 +1814,15 @@ class ProcedureCapability(ClaimEvidence):
     возможность (пример владельца: ``temporary_relaxation``). Одна возможность
     встречается у многих процедур; устойчивый ключ позволит потом свести их в
     общий словарь, не перечитывая текст. Уникален в паре (шаблон, ключ).
+
+    **Срок результата — не самостоятельное число** (решение владельца 02.10,
+    блок B; DRF-2726). ``result_timeframe`` у ПОДТВЕРЖДЁННОЙ строки не может
+    быть одним числом и не хранится без оговорки о разбросе
+    (``variability_note``) и основания (источник + ссылка) — ограничения базы
+    ниже. Черновик база не судит: черновик человеку не говорится, а строки,
+    заведённые до этого правила, не должны ронять миграцию. Входы — форма и
+    засев — строже базы и спрашивают то же у любой строки
+    (:func:`services.knowledge_intake.timeframe_errors`).
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1827,14 +1836,38 @@ class ProcedureCapability(ClaimEvidence):
     #: Профессиональная формулировка — для мастера и разбора.
     text_professional = models.TextField(blank=True, default="")
     expected_effect = models.TextField(blank=True, default="")
-    #: Когда ждать результат — словами («после 3–5 сеансов», «сразу»).
+    #: Когда ждать результат — словами, не числом, и вместе с оговоркой ниже.
     result_timeframe = models.CharField(max_length=200, blank=True, default="")
+    #: Оговорка о разбросе срока — текст, не числа («зависит от исходного
+    #: состояния»). То же поле и тот же смысл, что у связи с целью.
+    variability_note = models.TextField(blank=True, default="")
 
     class Meta(ClaimEvidence.Meta):
         constraints = [
             *ClaimEvidence.Meta.constraints,
             models.UniqueConstraint(
                 fields=["template", "key"], name="procedurecapability_template_key_uniq",
+            ),
+            # Подтверждённый срок — только с оговоркой о разбросе и основанием.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="approved")
+                    | models.Q(result_timeframe="")
+                    | (
+                        ~models.Q(variability_note="")
+                        & ~models.Q(evidence_source="")
+                        & ~models.Q(source_ref="")
+                    )
+                ),
+                name="procedurecapability_approved_timeframe_grounded",
+            ),
+            # И не одним числом.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="approved")
+                    | ~models.Q(result_timeframe__regex=r"^\s*[0-9]+([.,][0-9]+)?\s*$")
+                ),
+                name="procedurecapability_approved_timeframe_not_bare_number",
             ),
         ]
         ordering = ["template", "key"]
@@ -1867,6 +1900,13 @@ class CapabilityGoalLink(ClaimEvidence):
     Обязательный будущий контракт читателя: **population-level knowledge ≠
     personal prescription** — подтверждённое общее утверждение само по себе
     не разрешает превращать его в предписание конкретному человеку.
+
+    **Горизонт результата — под той же защитой** (решение владельца 02.10,
+    блок B; DRF-2726): ``result_horizon`` у подтверждённой связи не может
+    быть одним числом и не хранится без ``variability_note`` и основания.
+    Оговорка у связи одна — на курс и на горизонт. Черновик база не судит
+    (причина — в докстринге :class:`ProcedureCapability`); входы спрашивают
+    то же у любой строки.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -1906,6 +1946,26 @@ class CapabilityGoalLink(ClaimEvidence):
             models.CheckConstraint(
                 condition=~models.Q(course_pattern__regex=r"^\s*[0-9]+([.,][0-9]+)?\s*$"),
                 name="capabilitygoallink_course_not_a_bare_number",
+            ),
+            # Подтверждённый горизонт результата — как срок у возможности.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="approved")
+                    | models.Q(result_horizon="")
+                    | (
+                        ~models.Q(variability_note="")
+                        & ~models.Q(evidence_source="")
+                        & ~models.Q(source_ref="")
+                    )
+                ),
+                name="capabilitygoallink_approved_horizon_grounded",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="approved")
+                    | ~models.Q(result_horizon__regex=r"^\s*[0-9]+([.,][0-9]+)?\s*$")
+                ),
+                name="capabilitygoallink_approved_horizon_not_bare_number",
             ),
         ]
 

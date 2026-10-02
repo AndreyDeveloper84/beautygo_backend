@@ -159,6 +159,52 @@ def course_errors(
     return errors
 
 
+def timeframe_errors(
+    *,
+    field: str,
+    value: str,
+    variability_note: str,
+    evidence_source: str,
+    source_ref: str,
+) -> dict[str, str]:
+    """Что не так со сроком результата — у возможности или у связи с целью.
+
+    Решение владельца 02.10 (блок B): срок результата — «не самостоятельное
+    число без контекста, источника и оговорки о вариативности»; защита та же,
+    что у курса. ``field`` — имя поля со сроком: ``result_timeframe`` у
+    возможности, ``result_horizon`` у связи.
+
+    Входы спрашивают это у ЛЮБОЙ строки, в том числе у черновика, — как курс.
+    База судит только подтверждённую строку
+    (``<класс>_approved_*_grounded`` / ``*_not_bare_number``): она последний
+    рубеж и не должна ронять миграцию на черновике, заведённом раньше правила.
+
+    Чего проверка НЕ ловит: срок числом со словом («3 недели», «через 5
+    сеансов») при заполненных оговорке и источнике проходит. Голое число —
+    форма, а не смысл; годится ли срок по смыслу, решает рецензент.
+    """
+    text = (value or "").strip()
+    if not text:
+        return {}
+    errors: dict[str, str] = {}
+    if _BARE_NUMBER.match(text):
+        errors[field] = (
+            "Срок результата описывается словами, а не одним числом: «3» нельзя, "
+            "«обычно заметно в течение первых недель» — можно."
+        )
+    if not (variability_note or "").strip():
+        errors["variability_note"] = (
+            "У срока результата должна быть оговорка о разбросе: от чего зависит, "
+            "у кого бывает иначе."
+        )
+    if not (evidence_source or "").strip():
+        errors["evidence_source"] = "У срока результата должен быть источник: откуда это известно."
+    problem = source_ref_problem(source_ref)
+    if problem:
+        errors["source_ref"] = "У срока результата должна быть ссылка на источник. " + problem
+    return errors
+
+
 __all__ = [
     "APPROVED",
     "KNOWN_CONFIRMATION_RULES",
@@ -166,4 +212,5 @@ __all__ = [
     "provenance_errors",
     "rule_problem",
     "source_ref_problem",
+    "timeframe_errors",
 ]
