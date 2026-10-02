@@ -273,4 +273,21 @@ class Migration(migrations.Migration):
                 name="claimreviewer_user_type_any_category_uniq",
             ),
         ),
+        # Право подтверждать утверждение без рецензента (продуктовые границы).
+        migrations.AlterModelOptions(
+            name="procedurecapability",
+            options={
+                "ordering": ["template", "key"],
+                "permissions": [
+                    (
+                        "approve_procedurecapability",
+                        "Может подтверждать возможности процедур",
+                    ),
+                    (
+                        "approve_claim_without_reviewer",
+                        "Может подтверждать утверждения без рецензента (продуктовые границы)",
+                    ),
+                ],
+            },
+        ),
     ]

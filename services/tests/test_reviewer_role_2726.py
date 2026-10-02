@@ -14,6 +14,10 @@
 * проверка и подтверждение — две подписи, и они могут быть разных людей;
 * правка содержания снимает отметку проверки, и подтверждённой строка после
   этого остаться не может;
+* подтвердить утверждение БЕЗ рецензента (тип ``product``) может только
+  держатель права продуктовых границ: тип объявляет тот, кого он ограничивает,
+  и обычный куратор не может переименовать медицинское в продуктовое;
+* правка содержания возможности снимает проверку у её связей с целями;
 * из файла отметка проверки не приезжает;
 * строки, подтверждённые ДО правила, миграция возвращает в черновик — на
   настоящей миграции.
@@ -67,6 +71,7 @@ EVERYDAY = [
     for action in ("add", "change", "delete", "view")
 ]
 APPROVE = ["approve_procedurecapability", "approve_capabilitygoallink"]
+BOUNDARY = ["approve_claim_without_reviewer"]
 
 
 def _staff(username: str, codenames: list[str]) -> User:
@@ -111,8 +116,15 @@ def goal() -> GoalOption:
 
 @pytest.fixture
 def approver() -> User:
-    """Куратор: право подтверждения есть, назначения рецензентом нет."""
+    """Куратор: право подтверждения есть; назначения рецензентом и права
+    продуктовых границ нет."""
     return _staff("approver-2726-r", EVERYDAY + APPROVE)
+
+
+@pytest.fixture
+def boundary_holder() -> User:
+    """Держатель продуктовых границ: вправе подтвердить без рецензента."""
+    return _staff("boundary-2726-r", EVERYDAY + APPROVE + BOUNDARY)
 
 
 @pytest.fixture
@@ -318,13 +330,26 @@ class TestWhoMayReview:
 
 
 class TestTheAdminKeepsTheTwoSignaturesApart:
-    def test_a_product_claim_is_approved_by_the_curator_alone(self, approver, template) -> None:
-        """Контроль: подтверждение у куратора работает — отказы ниже вызваны типом."""
-        response = _client(approver).post(reverse(ADD), _form(template, claim_type="product", status="approved"))
+    def test_a_product_claim_is_approved_only_by_the_holder_of_the_product_boundary(
+        self, approver, boundary_holder, template
+    ) -> None:
+        """Тип объявляет тот, кого он ограничивает: «рецензент не нужен» — решение
+        держателя продуктовых границ, а не любого с правом подтверждения."""
+        data = _form(template, claim_type="product", status="approved")
+
+        refused = _client(approver).post(reverse(ADD), data)
+        accepted = _client(boundary_holder).post(reverse(ADD), data)
+
+        assert _errors(refused) == {"claim_type": ["product_boundary_right_required"]}
+        assert accepted.status_code == 302, accepted.context["adminform"].form.errors
+        row = ProcedureCapability.objects.get()
+        assert (row.status, row.confirmed_by_id, row.reviewed_by_id) == ("approved", boundary_holder.pk, None)
+
+    def test_a_product_draft_needs_no_right_at_all(self, approver, template) -> None:
+        """Контроль: отказ выше вызван подтверждением, а не типом."""
+        response = _client(approver).post(reverse(ADD), _form(template, claim_type="product"))
 
         assert response.status_code == 302, response.context["adminform"].form.errors
-        row = ProcedureCapability.objects.get()
-        assert (row.status, row.confirmed_by_id, row.reviewed_by_id) == ("approved", approver.pk, None)
 
     def test_a_medical_claim_is_not_approved_without_a_review(self, approver, template) -> None:
         response = _client(approver).post(reverse(ADD), _form(template, status="approved"))
@@ -408,19 +433,28 @@ class TestTheAdminKeepsTheTwoSignaturesApart:
         assert accepted.status_code == 302, accepted.context["adminform"].form.errors
         assert ProcedureCapability.objects.get().reviewed_by_id == face_reviewer.pk
 
-    def test_a_goal_link_is_reviewed_within_the_area_of_its_procedure(self, reviewer, template, goal) -> None:
+    def test_a_goal_link_is_reviewed_within_the_area_of_its_procedure(self, template, goal, face, body) -> None:
+        """Область связи — область процедуры её возможности. Оба рецензента
+        ограничены областью: без процедуры форма не пустила бы ни одного."""
+        face_reviewer = _staff("face-2726-r", EVERYDAY)
+        body_reviewer = _staff("body-2726-r", EVERYDAY)
+        ClaimReviewer.objects.create(user=face_reviewer, claim_type="medical", category=face)
+        ClaimReviewer.objects.create(user=body_reviewer, claim_type="medical", category=body)
         capability = ProcedureCapability.objects.create(template=template, key="for-link")
-
-        response = _client(reviewer).post(reverse(ADD_LINK), {
+        data = {
             "capability": str(capability.pk), "goal": str(goal.pk),
             "course_pattern": "", "result_horizon": "", "variability_note": "",
             "claim_type": "medical", "mark_reviewed": "on",
             "status": "system_inference", "claim_scope": "supported", "prohibited_statement": "",
             "limitations": "", "evidence_source": "", "evidence_kind": "", "source_ref": "DOC-2726",
-        })
+        }
 
-        assert response.status_code == 302, response.context["adminform"].form.errors
-        assert CapabilityGoalLink.objects.get().reviewed_by_id == reviewer.pk
+        refused = _client(body_reviewer).post(reverse(ADD_LINK), data)
+        accepted = _client(face_reviewer).post(reverse(ADD_LINK), data)
+
+        assert _errors(refused) == {"mark_reviewed": ["reviewer_competence_required"]}
+        assert accepted.status_code == 302, accepted.context["adminform"].form.errors
+        assert CapabilityGoalLink.objects.get().reviewed_by_id == face_reviewer.pk
 
 
 class TestAnEditAfterTheReview:
@@ -472,17 +506,124 @@ class TestAnEditAfterTheReview:
         assert (reviewed_and_approved.status, reviewed_and_approved.reviewed_by_id) == ("approved", reviewer.pk)
         assert reviewed_and_approved.valid_until is not None
 
-    def test_changing_the_type_drops_the_review(self, approver, template, reviewed_and_approved) -> None:
-        """Проверено было медицинское утверждение; переименовать его в продуктовое
-        и оставить подтверждённым под той же отметкой — нельзя: отметка снимается."""
+    def test_the_curator_cannot_relabel_a_medical_claim_as_product_and_keep_it_approved(
+        self, approver, template, reviewed_and_approved, reviewer
+    ) -> None:
+        """Обход, найденный ревью: сменить тип на тот, которому рецензент не
+        нужен, и оставить «подтверждено»."""
         response = _client(approver).post(
             reverse(CHANGE, args=[reviewed_and_approved.pk]),
             _form(template, status="approved", claim_type="product"),
         )
 
+        assert _errors(response) == {"claim_type": ["product_boundary_right_required"]}
+        row = reviewed_and_approved
+        row.refresh_from_db()
+        assert (row.claim_type, row.status, row.reviewed_by_id) == ("medical", "approved", reviewer.pk)
+
+    def test_the_holder_of_the_product_boundary_may_relabel__and_signs_it(
+        self, boundary_holder, template, reviewed_and_approved
+    ) -> None:
+        """Предел, литералом: держатель продуктовых границ может объявить
+        продуктовым и проверенное медицинское. Отметка рецензента при этом
+        снимается, а решение подписано его именем."""
+        response = _client(boundary_holder).post(
+            reverse(CHANGE, args=[reviewed_and_approved.pk]),
+            _form(template, status="approved", claim_type="product"),
+        )
+
         assert response.status_code == 302, response.context["adminform"].form.errors
-        reviewed_and_approved.refresh_from_db()
-        assert (reviewed_and_approved.claim_type, reviewed_and_approved.reviewed_by_id) == ("product", None)
+        row = reviewed_and_approved
+        row.refresh_from_db()
+        assert (row.claim_type, row.status, row.reviewed_by_id, row.confirmed_by_id) == (
+            "product", "approved", None, boundary_holder.pk,
+        )
+
+    def test_saving_untouched_keeps_both_signatures(
+        self, approver, template, reviewed_and_approved, reviewer
+    ) -> None:
+        row = reviewed_and_approved
+        before = (row.reviewed_at, row.confirmed_at, row.updated_at)
+
+        response = _client(approver).post(reverse(CHANGE, args=[row.pk]), _form(template, status="approved"))
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        row.refresh_from_db()
+        assert (row.reviewed_at, row.confirmed_at, row.updated_at) == before
+        assert (row.reviewed_by_id, row.confirmed_by_id) == (reviewer.pk, approver.pk)
+
+
+class TestAnEditOfTheCapabilityUnderAReviewedLink:
+    """Связь с целью проверена как утверждение об ЭТОЙ возможности."""
+
+    @pytest.fixture
+    def capability(self, template) -> ProcedureCapability:
+        return ProcedureCapability.objects.create(
+            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            claim_type="product", claim_scope="supported", source_ref="DOC-2726",
+        )
+
+    @pytest.fixture
+    def approved_link(self, capability, goal, reviewer, approver) -> CapabilityGoalLink:
+        return CapabilityGoalLink.objects.create(
+            capability=capability, goal=goal, claim_type="medical", claim_scope="supported",
+            reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
+        )
+
+    def test_a_new_wording_of_the_capability_returns_its_reviewed_link_to_draft(
+        self, approver, template, capability, approved_link, goal, reviewer
+    ) -> None:
+        other = GoalOption.objects.create(key="other-2726-r", label="Другая цель")
+        reviewed_draft = CapabilityGoalLink.objects.create(
+            capability=capability, goal=other, claim_type="medical",
+            reviewed_by=reviewer, reviewed_at=timezone.now(),
+        )
+
+        response = _client(approver).post(
+            reverse(CHANGE, args=[capability.pk]),
+            _form(template, claim_type="product", text_client="Новая формулировка"),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        approved_link.refresh_from_db()
+        reviewed_draft.refresh_from_db()
+        assert (approved_link.status, approved_link.reviewed_by_id, approved_link.reviewed_at) == (
+            "system_inference", None, None,
+        )
+        assert approved_link.confirmed_by_id == approver.pk  # след подтверждения остаётся
+        assert (reviewed_draft.status, reviewed_draft.reviewed_by_id) == ("system_inference", None)
+        told = [str(m) for m in get_messages(response.wsgi_request)]
+        assert any("снята проверка рецензентом — 2; из них возвращено в черновик — 1" in m for m in told)
+
+    def test_without_the_right_to_change_approved_links_the_edit_is_refused(
+        self, template, capability, approved_link, reviewer
+    ) -> None:
+        """Иначе правка возможности была бы обходом права подтверждения связей."""
+        editor = _staff("editor-2726-r", EVERYDAY)
+
+        response = _client(editor).post(
+            reverse(CHANGE, args=[capability.pk]),
+            _form(template, claim_type="product", text_client="Новая формулировка"),
+        )
+
+        assert _errors(response) == {"__all__": ["linked_review_would_be_dropped"]}
+        approved_link.refresh_from_db()
+        capability.refresh_from_db()
+        assert (approved_link.status, approved_link.reviewed_by_id) == ("approved", reviewer.pk)
+        assert capability.text_client == "Синтетическая формулировка"
+
+    def test_a_change_that_is_not_content_leaves_the_link_alone(
+        self, boundary_holder, template, capability, approved_link, reviewer
+    ) -> None:
+        """Контроль: связь трогает только правка содержания — подтверждение
+        самой возможности её не касается."""
+        response = _client(boundary_holder).post(
+            reverse(CHANGE, args=[capability.pk]), _form(template, claim_type="product", status="approved"),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        approved_link.refresh_from_db()
+        assert (approved_link.status, approved_link.reviewed_by_id) == ("approved", reviewer.pk)
 
 
 class TestAppointingAReviewerInTheAdmin:
@@ -504,6 +645,20 @@ class TestAppointingAReviewerInTheAdmin:
         assert (appointment.user_id, appointment.claim_type, appointment.category_id) == (
             approver.pk, "medical", face.pk,
         )
+
+    def test_the_one_who_appoints_may_appoint_themselves__a_named_limit(self, owner_client, template) -> None:
+        """Предел, литералом: самоназначение не запрещено — владелец может быть
+        единственным рецензентом в своей области. «Суперпользователь не
+        рецензент» верно, только пока он не назначил себя; след — в журнале."""
+        owner = User.objects.get(username="owner-2726-r")
+        before = may_review(owner, claim_type="medical", template=template)
+
+        response = owner_client.post(reverse(ADD_REVIEWER), {
+            "user": str(owner.pk), "claim_type": "medical", "is_active": "on",
+        })
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        assert (before, may_review(owner, claim_type="medical", template=template)) == (False, True)
 
     def test_a_type_that_needs_no_reviewer_is_not_offered(self, owner_client, approver) -> None:
         response = owner_client.post(reverse(ADD_REVIEWER), {

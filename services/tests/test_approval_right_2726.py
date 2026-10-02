@@ -60,6 +60,10 @@ EVERYDAY = [
     for action in ("add", "change", "delete", "view")
 ]
 APPROVE = ["approve_procedurecapability", "approve_capabilitygoallink"]
+#: Право продуктовых границ (DRF-2726 п.1): без него не подтвердить утверждение
+#: типа ``product``, которым пользуются эти узлы. Оно есть у всех участников —
+#: здесь проверяется право ПОДТВЕРЖДЕНИЯ, и отличаться должно только оно.
+BOUNDARY = ["approve_claim_without_reviewer"]
 
 
 def _staff(username: str, codenames: list[str]) -> User:
@@ -94,12 +98,12 @@ def goal() -> GoalOption:
 @pytest.fixture
 def editor() -> User:
     """Сотрудник с обычными правами на обе таблицы — без права подтверждения."""
-    return _staff("editor-2726", EVERYDAY)
+    return _staff("editor-2726", EVERYDAY + BOUNDARY)
 
 
 @pytest.fixture
 def approver() -> User:
-    return _staff("approver-2726", EVERYDAY + APPROVE)
+    return _staff("approver-2726", EVERYDAY + APPROVE + BOUNDARY)
 
 
 def _form(template: ServiceTemplate, **overrides) -> dict:
@@ -312,7 +316,7 @@ class TestAnEditorKeepsDraftsOnly:
         ],
     )
     def test_the_right_for_one_table_does_not_open_the_other(self, template, goal, held, url, kind) -> None:
-        half = _staff(f"half-{kind}-2726", EVERYDAY + [held])
+        half = _staff(f"half-{kind}-2726", EVERYDAY + BOUNDARY + [held])
         capability = ProcedureCapability.objects.create(template=template, key="for-link")
         data = (
             _link_form(capability, goal, status="approved")
@@ -376,7 +380,13 @@ class TestAFormWithoutAPersonCannotApprove:
 
         assert draft.is_valid(), draft.errors  # контроль: сама форма проходит
         assert not approved.is_valid()
-        assert set(approved.errors) == {"status"}
+        # Без пользователя нет ни права подтверждения (``status``), ни права
+        # продуктовых границ (``claim_type``, DRF-2726 п.1): оба отказа — по правам.
+        codes = {field: [e.code for e in errs] for field, errs in approved.errors.as_data().items()}
+        assert codes == {
+            "status": ["approval_right_required"],
+            "claim_type": ["product_boundary_right_required"],
+        }
 
 
 # ── Первое право — без оболочки ────────────────────────────────────────────

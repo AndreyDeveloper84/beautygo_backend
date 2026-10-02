@@ -13,7 +13,12 @@ from services.knowledge_intake import (
     provenance_errors,
     timeframe_errors,
 )
-from services.knowledge_review import UNCLASSIFIED, may_review, requires_review
+from services.knowledge_review import (
+    UNCLASSIFIED,
+    may_approve_without_reviewer,
+    may_review,
+    requires_review,
+)
 from services.mapping.store import StoredReport
 from services.mapping.types import Decision
 from services.mapping_review import confirm_single_candidate, evidence_text, mark_canon_gap
@@ -793,6 +798,8 @@ class _ClaimAdminForm(forms.ModelForm):
     #: Остаётся ли в силе прежняя отметка проверки (считает ``clean``,
     #: читает ``_ClaimAdmin.save_model``).
     review_kept = False
+    #: Изменилось ли содержание утверждения (считает ``clean``).
+    content_changed = False
 
     mark_reviewed = forms.BooleanField(
         required=False,
@@ -837,6 +844,7 @@ class _ClaimAdminForm(forms.ModelForm):
 
         had_review = not self.instance._state.adding and self.instance.reviewed_by_id is not None
         content_changed = bool(set(self.changed_data) - _NOT_CLAIM_CONTENT)
+        self.content_changed = content_changed
         self.review_kept = had_review and not content_changed
 
         if cleaned.get("status") != APPROVED:
@@ -862,6 +870,22 @@ class _ClaimAdminForm(forms.ModelForm):
                     "назначенным рецензентом. Отметки проверки нет."
                 )
             self.add_error("status", forms.ValidationError(message, code="review_required"))
+        elif not requires_review(claim_type) and (self.instance._state.adding or self.changed_data):
+            # Тип объявляет тот, кого он ограничивает. Подтвердить утверждение
+            # без рецензента — решение держателя продуктовых границ, а не
+            # любого, у кого есть право подтверждения. Сохранение без правок
+            # права не требует — оно ничего не пишет.
+            if not may_approve_without_reviewer(self.acting_user) and not self.has_error("claim_type"):
+                self.add_error(
+                    "claim_type",
+                    forms.ValidationError(
+                        "Подтвердить утверждение без проверки рецензентом может только тот, "
+                        "кому владелец дал право продуктовых границ. Если утверждение "
+                        "профессиональное, физиологическое или медицинское — укажите этот "
+                        "тип и передайте рецензенту.",
+                        code="product_boundary_right_required",
+                    ),
+                )
 
     def clean(self):
         cleaned = super().clean()
@@ -919,8 +943,30 @@ class ProcedureCapabilityAdminForm(_ClaimAdminForm):
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         )
 
+    def reviewed_links(self):
+        """Связи этой возможности с целями, несущие отметку проверки."""
+        if self.instance._state.adding:
+            return CapabilityGoalLink.objects.none()
+        return CapabilityGoalLink.objects.filter(capability=self.instance, reviewed_by__isnull=False)
+
     def clean(self):
         cleaned = super().clean()
+        # Связь с целью проверена как утверждение об ЭТОЙ возможности. Правка
+        # содержания возможности снимет проверку у её связей и вернёт
+        # подтверждённые в черновик (делает ``save_model``) — а менять
+        # подтверждённое вправе не каждый (DRF-2726 п.2).
+        if self.content_changed and self.reviewed_links().filter(status=APPROVED).exists():
+            if not _may_approve(self.acting_user, CapabilityGoalLink):
+                self.add_error(
+                    None,
+                    forms.ValidationError(
+                        "У этой возможности есть подтверждённые связи с целями, проверенные "
+                        "рецензентом. Правка содержания снимет их проверку и вернёт их в "
+                        "черновик — это может сделать только тот, у кого есть право "
+                        "подтверждения связей.",
+                        code="linked_review_would_be_dropped",
+                    ),
+                )
         for field, message in timeframe_errors(
             field="result_timeframe",
             value=cleaned.get("result_timeframe") or "",
@@ -1043,6 +1089,27 @@ class ProcedureCapabilityAdmin(_ClaimAdmin):
     """
 
     form = ProcedureCapabilityAdminForm
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        if not (change and form.content_changed):
+            return
+        # Проверка связи относилась к прежнему содержанию возможности.
+        # Подтверждённые сначала уходят в черновик: подтверждённой без
+        # проверки связь проверяемого типа база не хранит.
+        reviewed = form.reviewed_links()
+        returned = reviewed.filter(status=APPROVED).update(
+            status=ClaimEvidence.Status.SYSTEM_INFERENCE, reviewed_by=None, reviewed_at=None,
+        )
+        dropped = returned + reviewed.update(reviewed_by=None, reviewed_at=None)
+        if dropped:
+            self.message_user(
+                request,
+                f"Содержание возможности изменилось: у её связей с целями снята проверка "
+                f"рецензентом — {dropped}; из них возвращено в черновик — {returned}.",
+                level=messages.WARNING,
+            )
+
     list_display = (
         "template", "key", "claim_type", "status", "claim_scope", "valid_until",
         "reviewed_by", "confirmed_by",
