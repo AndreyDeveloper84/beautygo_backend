@@ -87,13 +87,14 @@ class ServiceCategoryAdmin(admin.ModelAdmin):
         resets = [obj.knowledge_reset for obj in saved if getattr(obj, "knowledge_reset", None)]
         capabilities = sum(reset["capabilities"] for reset in resets)
         goal_links = sum(reset["goal_links"] for reset in resets)
-        if capabilities or goal_links:
+        contraindications = sum(reset.get("contraindications", 0) for reset in resets)
+        if capabilities or goal_links or contraindications:
             self.message_user(
                 request,
                 "У процедур изменились значимые данные: подтверждённое знание о них "
                 f"возвращено в черновик и требует повторной проверки — возможностей: "
-                f"{capabilities}, связей с целями: {goal_links}. Что именно изменилось — "
-                "в журнале снятых подтверждений.",
+                f"{capabilities}, связей с целями: {goal_links}, противопоказаний: "
+                f"{contraindications}. Что именно изменилось — в журнале снятых подтверждений.",
                 level=messages.WARNING,
             )
 
@@ -145,7 +146,18 @@ class ServiceTemplateAdmin(admin.ModelAdmin):
         # черновик (правило — в ``ServiceTemplate.save``); куратор должен это
         # увидеть сразу, а не обнаружить потом.
         reset = getattr(obj, "knowledge_reset", None)
-        if reset and any(reset.values()):
+        if reset and any(reset.values()) and not change:
+            # DRF-2741: новая процедура попала в область противопоказаний,
+            # названную её категорией.
+            self.message_user(
+                request,
+                "Новая процедура попала в область применения противопоказаний, названную её "
+                "категорией: они возвращены в черновик и требуют повторной проверки — "
+                f"противопоказаний: {reset['contraindications']}. Подробности — в журнале "
+                "снятых подтверждений.",
+                level=messages.WARNING,
+            )
+        elif reset and any(reset.values()):
             self.message_user(
                 request,
                 "У процедуры изменились значимые данные: подтверждённое знание о ней "
@@ -847,6 +859,8 @@ class _ClaimAdminForm(forms.ModelForm):
     content_changes: list = []
     #: Снято ли этим сохранением прежнее подтверждение (считает ``clean``).
     approval_dropped = False
+    #: Была ли строка подтверждена до этого сохранения (считает ``clean``).
+    was_approved = False
 
     mark_reviewed = forms.BooleanField(
         required=False,
@@ -950,6 +964,7 @@ class _ClaimAdminForm(forms.ModelForm):
         # не ``pk``: первичный ключ — UUID по умолчанию и есть у ещё не
         # сохранённой строки.
         was_approved = not self.instance._state.adding and self.instance.status == APPROVED
+        self.was_approved = was_approved
         # Требование владельца (DRF-2726): смена ТИПА, СОДЕРЖАНИЯ или ИСТОЧНИКА
         # снимает подтверждение — подтверждённой строка остаться не может.
         # Правка сохраняется, а строка тем же сохранением уходит в черновик:
@@ -1147,7 +1162,11 @@ class _ClaimAdmin(admin.ModelAdmin):
             # кнопку значило бы оставить в ней след.
             return
         # Что это сохранение отнимает у строки — для журнала снятых подтверждений.
-        lost_approval = form.approval_dropped
+        # Подтверждение потеряно правкой и тогда, когда сохранявший сам выбрал
+        # «черновик» тем же сохранением: в журнале строка была подтверждённой.
+        # Возврат в черновик без правок — решение человека, а не сброс, и в
+        # журнал не идёт.
+        lost_approval = form.was_approved and form.content_changed and obj.status != obj.Status.APPROVED
         lost_review = (
             obj.reviewed_by_id is not None
             and not form.cleaned_data.get("mark_reviewed")
@@ -1341,7 +1360,10 @@ class ClaimApprovalResetAdmin(admin.ModelAdmin):
     )
     # ``contraindication`` — DRF-2741: журнал один на всё знание о процедуре.
     list_filter = ("reason", "claim_kind", "was_approved", "had_review")
-    search_fields = ("capability__key", "goal_link__capability__key", "capability__template__name")
+    search_fields = (
+        "capability__key", "goal_link__capability__key", "capability__template__name",
+        "contraindication__key", "claim_label",
+    )
     list_select_related = ("capability__template", "goal_link__capability__template", "goal_link__goal")
     readonly_fields = (
         "created_at", "reason", "claim_kind", "claim_label", "capability", "goal_link", "contraindication",
@@ -1386,6 +1408,8 @@ class ProcedureContraindicationAdminForm(forms.ModelForm):
     review_kept = False
     #: Снято ли этим сохранением прежнее подтверждение (считает ``clean``).
     approval_dropped = False
+    #: Была ли строка подтверждена до этого сохранения (считает ``clean``).
+    was_approved = False
     #: Что изменилось в содержании: ``[{field, old, new}]`` — для журнала.
     content_changes: list = []
 
@@ -1421,6 +1445,7 @@ class ProcedureContraindicationAdminForm(forms.ModelForm):
         cleaned = super().clean()
         adding = self.instance._state.adding
         was_approved = not adding and self.instance.status == APPROVED
+        self.was_approved = was_approved
         changed_content = [name for name in self.changed_data if name not in _NOT_CONTRAINDICATION_CONTENT]
         self.content_changes = [] if adding else [
             {"field": name, "old": self._old_value(name), "new": self._new_value(cleaned.get(name))}
@@ -1474,13 +1499,18 @@ class ProcedureContraindicationAdminForm(forms.ModelForm):
                     code="review_required",
                 ),
             )
-        for field, message in approval_errors(
+        # Сохранение без единой правки ничего не пишет и ни о чём не судит:
+        # иначе строку, у которой дата пересмотра наступила, нельзя было бы
+        # даже открыть и закрыть.
+        demands = {} if untouched else approval_errors(
             status=status,
             source_ref=cleaned.get("source_ref") or "",
             evidence_kind=cleaned.get("evidence_kind") or "",
             review_date=cleaned.get("review_date"),
             has_scope=bool(templates or categories),
-        ).items():
+            today=timezone.localdate(),
+        )
+        for field, message in demands.items():
             if not self.has_error(field):
                 self.add_error(field, forms.ValidationError(message, code="approval_incomplete"))
         return cleaned
@@ -1517,7 +1547,8 @@ class ProcedureContraindicationAdmin(admin.ModelAdmin):
                 ),
                 "description": (
                     "«Подтверждено» сохраняется только с источником, видом доказательства, "
-                    "датой пересмотра, областью применения и отметкой рецензента."
+                    "датой пересмотра (она должна быть впереди), областью применения и "
+                    "отметкой рецензента."
                 ),
             },
         ),
@@ -1555,13 +1586,16 @@ class ProcedureContraindicationAdmin(admin.ModelAdmin):
     def save_model(self, request, obj, form, change):
         if change and not form.changed_data:
             return  # «Сохранить» без единой правки не пишет ничего.
-        lost_approval = form.approval_dropped
+        # Как у остального знания: подтверждение потеряно правкой и тогда,
+        # когда сохранявший сам выбрал «черновик»; возврат в черновик без
+        # правок — решение человека и в журнал не идёт.
+        lost_approval = form.was_approved and bool(form.content_changes) and obj.status != APPROVED
         lost_review = (
             obj.reviewed_by_id is not None
             and not form.cleaned_data.get("mark_reviewed")
             and not form.review_kept
         )
-        if lost_approval:
+        if form.approval_dropped:
             self.message_user(
                 request,
                 "Подтверждение снято: изменилось содержание или область противопоказания. "

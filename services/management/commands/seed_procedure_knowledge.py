@@ -421,7 +421,9 @@ class Command(BaseCommand):
             if date_problem:
                 problems.add(where, date_problem)
 
-            raw_codes = row.get("template_codes") or []
+            # ``get(..., [])``, а не ``or []``: ``0``, ``""`` и ``{}`` — не
+            # «области нет», а испорченное поле, и о нём говорится.
+            raw_codes = row.get("template_codes", [])
             if not isinstance(raw_codes, list) or not all(isinstance(code, str) for code in raw_codes):
                 problems.add(where, "template_codes — ожидался список кодов процедур")
                 raw_codes = []

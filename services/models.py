@@ -8,6 +8,8 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models, transaction
+from django.db.models.signals import pre_delete
+from django.dispatch import receiver
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -96,11 +98,11 @@ class ServiceCategory(models.Model):
                     reset_claims_of_procedure(
                         template, reason=ClaimApprovalReset.Reason.CATEGORY_MOVED, changes=[change],
                     )
-                # DRF-2741: противопоказание, чья область названа этой категорией.
-                reset_claims(
-                    capabilities=ProcedureCapability.objects.none(),
-                    goal_links=CapabilityGoalLink.objects.none(),
-                    contraindications=ProcedureContraindication.objects.filter(categories=self),
+                # DRF-2741: противопоказание, чья область названа этой
+                # категорией либо корнем, который она покинула или под который
+                # пришла, — состав процедур в его области изменился.
+                reset_contraindications(
+                    contraindications_in_scope(category_ids=[self.pk, was_parent[0], self.parent_id]),
                     reason=ClaimApprovalReset.Reason.CATEGORY_MOVED, changes=[change],
                 )
 
@@ -411,6 +413,14 @@ class ServiceTemplate(models.Model):
         if self.canonical_code == "":
             self.canonical_code = None
         changes = self._significant_changes()
+        adding = self._state.adding
+        # DRF-2741: откуда процедура уходит. Противопоказание, названное
+        # прежней категорией, теряет её из области — читать прежнюю категорию
+        # нужно до записи.
+        left_category_id = (
+            type(self).objects.filter(pk=self.pk).values_list("category_id", flat=True).first()
+            if any(change["field"] == "category" for change in changes) else None
+        )
         # Запись и сброс — одной транзакцией: иначе при сбое сброса правка
         # уже лежит в базе, повторное сохранение разницы не увидит, и
         # подтверждения переживут правку.
@@ -424,6 +434,23 @@ class ServiceTemplate(models.Model):
                 )
                 if changes else None
             )
+            if left_category_id is not None:
+                self.knowledge_reset["contraindications"] += reset_contraindications(
+                    contraindications_in_scope(category_ids=[left_category_id]),
+                    reason=ClaimApprovalReset.Reason.PROCEDURE_CHANGED, changes=changes,
+                )
+            if adding:
+                # DRF-2741: новая процедура молча попала бы под противопоказание,
+                # область которого названа её категорией, — а рецензент проверял
+                # правило для прежнего состава.
+                self.knowledge_reset = {
+                    "capabilities": 0, "goal_links": 0,
+                    "contraindications": reset_contraindications(
+                        contraindications_in_scope(category_ids=[self.category_id]),
+                        reason=ClaimApprovalReset.Reason.SCOPE_CHANGED,
+                        changes=[{"field": "templates", "old": "", "new": self.name}],
+                    ),
+                }
 
     #: Поля процедуры, правка которых заведомо НЕ меняет того, о чём утверждает
     #: знание о ней (DRF-2726, требование владельца): штамп версии каталога
@@ -1896,9 +1923,44 @@ def reset_claims_of_procedure(template: Any, *, reason: str, changes: list[dict[
     return reset_claims(
         capabilities=ProcedureCapability.objects.filter(template=template),
         goal_links=CapabilityGoalLink.objects.filter(capability__template=template),
-        contraindications=ProcedureContraindication.objects.filter(templates=template),
+        contraindications=contraindications_in_scope(template=template, category_ids=[template.category_id]),
         reason=reason, changes=changes,
     )
+
+
+def contraindications_in_scope(*, template: Any = None, category_ids: Any = ()) -> Any:
+    """Противопоказания, чья область применения задевает эту процедуру или эти категории (DRF-2741).
+
+    Область строки названа процедурами и/или категориями. Категория покрывает
+    свои процедуры, корневая — и процедуры своих подкатегорий (так же её
+    читает :func:`services.knowledge_review.may_review_scope`), поэтому вместе
+    с категорией берётся её корень.
+
+    Правило, названное категорией, — знание о КАЖДОЙ её процедуре. Отсюда
+    следствие, которое стоит знать куратору: значимая правка, появление,
+    перенос или удаление любой процедуры категории возвращает такое правило в
+    черновик. Правило, названное процедурами поимённо, соседние процедуры не
+    задевают.
+    """
+    ids = [pk for pk in category_ids if pk is not None]
+    scope = models.Q(categories__in=ids) | models.Q(
+        categories__in=ServiceCategory.objects.filter(pk__in=ids).values("parent_id")
+    )
+    if template is not None:
+        scope |= models.Q(templates=template)
+    # Через ``pk__in``: строка с двумя совпавшими связями пришла бы дважды и
+    # дважды попала бы в журнал.
+    return ProcedureContraindication.objects.filter(
+        pk__in=ProcedureContraindication.objects.filter(scope).values("pk")
+    )
+
+
+def reset_contraindications(rows: Any, *, reason: str, changes: list[dict[str, str]]) -> int:
+    """Вернуть в черновик ЭТИ противопоказания; сколько строк затронуто."""
+    return reset_claims(
+        capabilities=ProcedureCapability.objects.none(), goal_links=CapabilityGoalLink.objects.none(),
+        contraindications=rows, reason=reason, changes=changes,
+    )["contraindications"]
 
 
 #: Срок результата «без слов» — ни одной буквы, только цифры и знаки (DRF-2726).
@@ -2359,6 +2421,9 @@ class ClaimApprovalReset(models.Model):
         CATEGORY_MOVED = "category_moved", "Категория процедуры перенесена"
         #: Изменена цель, о которой говорит связь.
         GOAL_CHANGED = "goal_changed", "Изменена цель, о которой связь"
+        #: В области применения противопоказания появилась или исчезла процедура
+        #: либо категория (DRF-2741).
+        SCOPE_CHANGED = "scope_changed", "Изменился состав области применения"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -2530,7 +2595,13 @@ class ProcedureContraindication(models.Model):
     Правило сброса то же, что у остального знания: правка содержания или
     области снимает подтверждение; значимая правка процедуры из области
     применения возвращает строку в черновик
-    (:func:`reset_claims_of_procedure`).
+    (:func:`reset_claims_of_procedure`). Область меняется и без правки самой
+    строки — когда процедура или категория из неё удалена, а в категорию
+    пришла новая процедура; это тоже сброс (:func:`contraindications_in_scope`).
+
+    Предел: прямые ``rule.templates.add()`` / ``.remove()`` из кода правило
+    сброса не видят — как ``QuerySet.update()`` у остального знания. В дереве
+    таких писателей нет: область пишут форма админки и засев новой строки.
 
     ``key`` — стабильный машинный идентификатор, как у возможности: по нему
     засев из файла узнаёт уже заведённую строку.
@@ -2633,3 +2704,29 @@ class ProcedureContraindication(models.Model):
 
     def __str__(self) -> str:
         return f"{self.key} → {self.get_action_display()}"
+
+
+# Удаление процедуры или категории убирает её из области применения молча:
+# строки связи «многие ко многим» уходят каскадом, а правка строки при этом не
+# происходит. Подтверждённое противопоказание осталось бы подтверждённым с
+# другой — возможно, пустой — областью (DRF-2741). ``pre_delete``, а не
+# ``delete()`` модели: при каскаде от категории ``delete()`` процедуры не
+# вызывается. Сигнал идёт внутри транзакции удаления.
+
+
+@receiver(pre_delete, sender=ServiceTemplate)
+def _a_deleted_procedure_leaves_the_scope(sender: Any, instance: Any, **kwargs: Any) -> None:
+    reset_contraindications(
+        contraindications_in_scope(template=instance, category_ids=[instance.category_id]),
+        reason=ClaimApprovalReset.Reason.SCOPE_CHANGED,
+        changes=[{"field": "templates", "old": instance.name, "new": ""}],
+    )
+
+
+@receiver(pre_delete, sender=ServiceCategory)
+def _a_deleted_category_leaves_the_scope(sender: Any, instance: Any, **kwargs: Any) -> None:
+    reset_contraindications(
+        contraindications_in_scope(category_ids=[instance.pk]),
+        reason=ClaimApprovalReset.Reason.SCOPE_CHANGED,
+        changes=[{"field": "categories", "old": instance.name, "new": ""}],
+    )
