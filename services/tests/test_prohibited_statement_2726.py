@@ -53,6 +53,7 @@ from users.models import User
 pytestmark = pytest.mark.django_db
 
 ADD_CAPABILITY = "admin:services_procedurecapability_add"
+CHANGE_CAPABILITY = "admin:services_procedurecapability_change"
 STATEMENT = "синтетическое обещание, которое нельзя произносить"
 
 
@@ -191,7 +192,6 @@ class TestTheProhibitionNeverReachesTheClientReader:
         readout = client_facing_capabilities(template)
 
         assert [c.key for c in readout.capabilities] == ["effect"]
-        assert [c.prohibited_statement for c in readout.capabilities] == [""]
 
     def test_a_prohibited_goal_link_is_not_returned(self, template, goal, owner) -> None:
         capability = ProcedureCapability.objects.create(
@@ -300,6 +300,26 @@ class TestTheAdminFormAsksForTheStatement:
         assert set(response.context["adminform"].form.errors) == {"prohibited_statement"}
         assert ProcedureCapability.objects.count() == 0
 
+    def test_a_prohibition_cannot_be_turned_into_a_supported_claim_with_its_statement_left_in(
+        self, admin_client, template
+    ) -> None:
+        """Запрет → «поддержано» с оставленным предметом запрета: текст
+        запрещённого обещания оказался бы у строки, которая может стать
+        клиентской. Отказ — по полю, а не ошибкой базы."""
+        ban = ProcedureCapability.objects.create(
+            template=template, key="example_ban", claim_scope="prohibited_claim",
+            prohibited_statement=STATEMENT,
+        )
+
+        response = admin_client.post(
+            reverse(CHANGE_CAPABILITY, args=[ban.pk]), _capability_form(template, claim_scope="supported"),
+        )
+
+        assert response.status_code == 200
+        assert set(response.context["adminform"].form.errors) == {"prohibited_statement"}
+        ban.refresh_from_db()
+        assert ban.claim_scope == "prohibited_claim"
+
     def test_the_link_form_asks_the_same(self, template, goal) -> None:
         capability = ProcedureCapability.objects.create(template=template, key="for-link")
         data = {
@@ -368,6 +388,22 @@ class TestTheSeedAsksForTheStatement:
         }])
 
         assert "prohibited_statement — Предмет запрета заполняется только" in message
+
+    def test_a_client_wording_on_a_goal_link_is_an_unknown_field_and_nothing_more(
+        self, template, goal, tmp_path
+    ) -> None:
+        """У связи с целью формулировки для клиента нет: лишний ключ — опечатка,
+        а не «у запрета не может быть формулировки»."""
+        message = _refusal(tmp_path, [{
+            "template_code": "1.1.3", "key": "effect",
+            "goal_links": [{
+                "goal": "relax", "claim_scope": "prohibited_claim",
+                "prohibited_statement": STATEMENT, "text_client": "лишнее",
+            }],
+        }])
+
+        assert "неизвестное поле «text_client»" in message
+        assert "1 problem(s)" in message
 
     def test_a_prohibited_goal_link_needs_its_statement_too(self, template, goal, tmp_path) -> None:
         message = _refusal(tmp_path, [{
