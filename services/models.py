@@ -1840,7 +1840,9 @@ class ProcedureCapability(ClaimEvidence):
         ordering = ["template", "key"]
 
     def __str__(self) -> str:
-        return f"{self.template_id}:{self.key}"
+        # Имя процедуры, а не её UUID: эту строку читает куратор — в списке,
+        # в выборе возможности у связи с целью, в журнале админки.
+        return f"{self.template.name} · {self.key}"
 
 
 class CapabilityGoalLink(ClaimEvidence):
@@ -1908,4 +1910,4 @@ class CapabilityGoalLink(ClaimEvidence):
         ]
 
     def __str__(self) -> str:
-        return f"{self.capability_id}->{self.goal_id}"
+        return f"{self.capability} → {self.goal.label}"

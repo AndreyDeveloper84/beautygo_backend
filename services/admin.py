@@ -4,7 +4,9 @@ from __future__ import annotations
 from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 
+from services.knowledge_intake import course_errors, provenance_errors
 from services.mapping.store import StoredReport
 from services.mapping.types import Decision
 from services.mapping_review import confirm_single_candidate, evidence_text, mark_canon_gap
@@ -12,12 +14,14 @@ from services.normalization import normalize_service_name
 
 from .models import (
     CanonGapRequest,
+    CapabilityGoalLink,
     DraftSalonService,
     ExternalBusyInterval,
     ExternalSourceMapping,
     GoalDirection,
     GoalOption,
     GoalOptionCategory,
+    ProcedureCapability,
     RegionalPricing,
     SalonService,
     Service,
@@ -700,3 +704,179 @@ class CanonGapRequestAdmin(admin.ModelAdmin):
             from django.contrib import messages
 
             messages.error(request, str(exc))
+
+
+# ── Знание о процедурах: возможность и её связь с целью (DRF-2606, DRF-2717) ──
+#
+# Путь ввода для куратора (владельца). Модели существовали с DRF-2606, но
+# вписать в них строку было нечем: ни формы, ни команды. Здесь — форма.
+#
+# Одно правило держит обе формы: **подтверждает тот, кто сохранил.** Полей
+# «кто подтвердил» и «когда» в форме нет — их ставит ``save_model`` из
+# ``request.user`` и текущего времени, как у заявок о разрыве канона выше.
+# Подтверждение, вписанное рукой в поле, было бы утверждением о человеке, а не
+# его действием. Источник (``source_ref``) форма требует сама, по полю и
+# словами: база тоже откажет, но именем ограничения и уже после нажатия.
+
+_CLAIM_READONLY = (
+    "confirmed_by", "confirmed_at", "confirmed_rule", "rule_version",
+    "created_at", "updated_at",
+)
+
+_CLAIM_FIELDSET = (
+    "Утверждение и основание",
+    {
+        "fields": (
+            "status", "claim_scope", "limitations",
+            "evidence_source", "evidence_kind", "source_ref", "valid_until",
+        ),
+        "description": (
+            "«Подтверждено» можно сохранить только со ссылкой на источник. "
+            "Автором подтверждения станет тот, кто сохраняет."
+        ),
+    },
+)
+
+_CONFIRMATION_FIELDSET = (
+    "Подтверждение (ставится при сохранении)",
+    {"fields": _CLAIM_READONLY},
+)
+
+
+class _ClaimAdminForm(forms.ModelForm):
+    """Общая проверка основания — ошибки по полям, а не имена ограничений базы."""
+
+    def clean(self):
+        cleaned = super().clean()
+        # В форме подтверждающий есть всегда — это тот, кто сохраняет; его
+        # впишет ``save_model``. Поэтому из двух условий базы форма спрашивает
+        # одно: источник.
+        for field, message in provenance_errors(
+            status=cleaned.get("status") or "",
+            source_ref=cleaned.get("source_ref") or "",
+            has_confirmer=True,
+        ).items():
+            self.add_error(field, forms.ValidationError(message, code="provenance_required"))
+        return cleaned
+
+
+class ProcedureCapabilityAdminForm(_ClaimAdminForm):
+    class Meta:
+        model = ProcedureCapability
+        fields = (
+            "template", "key", "text_client", "text_professional",
+            "expected_effect", "result_timeframe",
+            "status", "claim_scope", "limitations",
+            "evidence_source", "evidence_kind", "source_ref", "valid_until",
+        )
+
+
+class CapabilityGoalLinkAdminForm(_ClaimAdminForm):
+    class Meta:
+        model = CapabilityGoalLink
+        fields = (
+            "capability", "goal", "course_pattern", "result_horizon", "variability_note",
+            "status", "claim_scope", "limitations",
+            "evidence_source", "evidence_kind", "source_ref", "valid_until",
+        )
+
+    def clean(self):
+        cleaned = super().clean()
+        for field, message in course_errors(
+            course_pattern=cleaned.get("course_pattern") or "",
+            variability_note=cleaned.get("variability_note") or "",
+            evidence_source=cleaned.get("evidence_source") or "",
+            source_ref=cleaned.get("source_ref") or "",
+        ).items():
+            if not self.has_error(field):
+                self.add_error(field, forms.ValidationError(message, code="course_incomplete"))
+        return cleaned
+
+
+class _ClaimAdmin(admin.ModelAdmin):
+    """Общее у двух таблиц знания: кто сохранил «подтверждено», тот и подтвердил."""
+
+    readonly_fields = _CLAIM_READONLY
+    list_filter = ("status", "claim_scope")
+
+    def save_model(self, request, obj, form, change):
+        if obj.status == obj.Status.APPROVED:
+            # Сохранить подтверждённую строку с правкой — значит подтвердить
+            # то, что в ней теперь написано: иначе новая формулировка осталась
+            # бы под подтверждением прежней. Подтверждение правилом человек
+            # при этом заменяет своим.
+            #
+            # Сохранение БЕЗ правок отметку не трогает: «Сохранить» на
+            # открытой для чтения строке не должно переписывать, кто и когда
+            # её подтвердил, — прежнего автора потом нигде не найти.
+            already_confirmed = bool(obj.confirmed_by_id or obj.confirmed_rule)
+            if not (change and already_confirmed and not form.changed_data):
+                obj.confirmed_by = request.user
+                obj.confirmed_at = timezone.now()
+                obj.confirmed_rule = ""
+                obj.rule_version = ""
+        else:
+            # Возврат в черновик снимает отметку: иначе у неподтверждённой
+            # строки оставался бы автор подтверждения.
+            obj.confirmed_by = None
+            obj.confirmed_at = None
+            obj.confirmed_rule = ""
+            obj.rule_version = ""
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(ProcedureCapability)
+class ProcedureCapabilityAdmin(_ClaimAdmin):
+    """Что процедура умеет — одна возможность одной процедуры (DRF-2606).
+
+    ``key`` вводится руками и из формулировки не выводится (решение владельца
+    29.09): автозаполнения из ``text_client`` здесь нет намеренно.
+    """
+
+    form = ProcedureCapabilityAdminForm
+    list_display = ("template", "key", "status", "claim_scope", "valid_until", "confirmed_by")
+    search_fields = ("key", "text_client", "template__name", "template__canonical_code")
+    autocomplete_fields = ("template",)
+    list_select_related = ("template", "confirmed_by")
+    ordering = ("template", "key")
+    fieldsets = (
+        (
+            "Возможность",
+            {
+                "fields": (
+                    "template", "key", "text_client", "text_professional",
+                    "expected_effect", "result_timeframe",
+                ),
+            },
+        ),
+        _CLAIM_FIELDSET,
+        _CONFIRMATION_FIELDSET,
+    )
+
+
+@admin.register(CapabilityGoalLink)
+class CapabilityGoalLinkAdmin(_ClaimAdmin):
+    """Какой цели помогает возможность — отдельное утверждение со своим основанием."""
+
+    form = CapabilityGoalLinkAdminForm
+    list_display = ("capability", "goal", "status", "claim_scope", "valid_until", "confirmed_by")
+    search_fields = ("capability__key", "capability__template__name", "goal__key", "goal__label")
+    autocomplete_fields = ("capability", "goal")
+    list_select_related = ("capability__template", "goal", "confirmed_by")
+    ordering = ("capability", "goal")
+    fieldsets = (
+        (
+            "Связь с целью",
+            {
+                "fields": (
+                    "capability", "goal", "course_pattern", "result_horizon", "variability_note",
+                ),
+                "description": (
+                    "Курс — словами, не числом, и только вместе с оговоркой о разбросе, "
+                    "источником и ссылкой."
+                ),
+            },
+        ),
+        _CLAIM_FIELDSET,
+        _CONFIRMATION_FIELDSET,
+    )
