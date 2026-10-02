@@ -23,8 +23,9 @@
   бы от куратора, что его «подтверждено» не принято.
 * Сначала проверяет файл целиком, потом пишет. Любая ошибка — неизвестный код
   шаблона, неизвестная цель, неизвестное поле, значение не того типа, слишком
-  длинный текст, подтверждение без основания, курс голым числом — печатается
-  списком, и не пишется ничего.
+  длинный текст, подтверждение без основания, курс или срок результата голым
+  числом либо без оговорки и источника — печатается списком, и не пишется
+  ничего.
 
 Чего команда не делает
 ----------------------
@@ -57,7 +58,9 @@
         "template_code": "1.1.3",          # ServiceTemplate.canonical_code
         "key": "temporary_relaxation",     # машинный ключ смысла, не из текста
         "text_client": "...", "text_professional": "...",
-        "expected_effect": "...", "result_timeframe": "...",
+        "expected_effect": "...",
+        "result_timeframe": "...",         # словами, не числом; только вместе с
+        "variability_note": "...",         # оговоркой, источником и ссылкой
         "claim_scope": "supported",        # | not_supported | prohibited_claim
         "limitations": "...", "evidence_source": "...", "evidence_kind": "...",
         "source_ref": "...",
@@ -85,7 +88,13 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils.dateparse import parse_datetime
 
-from services.knowledge_intake import APPROVED, course_errors, provenance_errors, rule_problem
+from services.knowledge_intake import (
+    APPROVED,
+    course_errors,
+    provenance_errors,
+    rule_problem,
+    timeframe_errors,
+)
 from services.models import (
     CapabilityGoalLink,
     ClaimEvidence,
@@ -99,7 +108,9 @@ DEFAULT_FILE = Path(__file__).resolve().parents[2] / "seeds" / "procedure_knowle
 _STATUSES = {choice.value for choice in ClaimEvidence.Status}
 _SCOPES = {choice.value for choice in ClaimEvidence.ClaimScope}
 
-_CAPABILITY_TEXT = ("text_client", "text_professional", "expected_effect", "result_timeframe")
+_CAPABILITY_TEXT = (
+    "text_client", "text_professional", "expected_effect", "result_timeframe", "variability_note",
+)
 _LINK_TEXT = ("course_pattern", "result_horizon", "variability_note")
 _CLAIM_TEXT = (
     "limitations", "evidence_source", "evidence_kind", "source_ref",
@@ -309,6 +320,14 @@ class Command(BaseCommand):
 
             fields = _claim_fields(row, where, problems)
             fields.update({name: _text(row, name, where, problems) for name in _CAPABILITY_TEXT})
+            for field, message in timeframe_errors(
+                field="result_timeframe",
+                value=fields["result_timeframe"],
+                variability_note=fields["variability_note"],
+                evidence_source=fields["evidence_source"],
+                source_ref=fields["source_ref"],
+            ).items():
+                problems.add(where, f"{field} — {message}")
             if key:
                 _model_problems(ProcedureCapability(key=key, **fields), {"template"}, where, problems)
 
@@ -341,6 +360,14 @@ class Command(BaseCommand):
                 )
                 for field, message in course_errors(
                     course_pattern=link_fields["course_pattern"],
+                    variability_note=link_fields["variability_note"],
+                    evidence_source=link_fields["evidence_source"],
+                    source_ref=link_fields["source_ref"],
+                ).items():
+                    problems.add(link_where, f"{field} — {message}")
+                for field, message in timeframe_errors(
+                    field="result_horizon",
+                    value=link_fields["result_horizon"],
                     variability_note=link_fields["variability_note"],
                     evidence_source=link_fields["evidence_source"],
                     source_ref=link_fields["source_ref"],
