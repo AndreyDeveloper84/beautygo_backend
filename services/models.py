@@ -1916,6 +1916,12 @@ class ProcedureCapability(ClaimEvidence):
             ),
         ]
         ordering = ["template", "key"]
+        # Право подтверждать — отдельное от права изменять (DRF-2726, решение
+        # владельца 02.10, блок A). Кому его дать, решает владелец; здесь —
+        # только носитель. Исполняет его форма админки (services/admin.py).
+        permissions = [
+            ("approve_procedurecapability", "Может подтверждать возможности процедур"),
+        ]
 
     def __str__(self) -> str:
         # Имя процедуры, а не её UUID: эту строку читает куратор — в списке,
@@ -1971,6 +1977,10 @@ class CapabilityGoalLink(ClaimEvidence):
     variability_note = models.TextField(blank=True, default="")
 
     class Meta(ClaimEvidence.Meta):
+        # Право подтверждать — отдельное от права изменять; см. ProcedureCapability.
+        permissions = [
+            ("approve_capabilitygoallink", "Может подтверждать связи возможностей с целями"),
+        ]
         constraints = [
             *ClaimEvidence.Meta.constraints,
             models.UniqueConstraint(
