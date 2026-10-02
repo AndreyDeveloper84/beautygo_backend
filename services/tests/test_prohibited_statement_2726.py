@@ -87,7 +87,8 @@ def admin_client(owner) -> Client:
 
 def _approved(owner: User) -> dict:
     return {
-        "status": "approved", "confirmed_by": owner, "confirmed_at": timezone.now(),
+        "status": "approved", "evidence_kind": "professional_consensus",
+        "confirmed_by": owner, "confirmed_at": timezone.now(),
         "source_ref": "DOC-2726",
     }
 
@@ -252,7 +253,7 @@ def _capability_form(template: ServiceTemplate, **overrides) -> dict:
         "prohibited_statement": STATEMENT,
         "limitations": "",
         "evidence_source": "",
-        "evidence_kind": "",
+        "evidence_kind": "professional_consensus",
         "source_ref": "",
     }
     data.update(overrides)
