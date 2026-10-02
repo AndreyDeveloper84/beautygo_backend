@@ -428,12 +428,17 @@ class TestTheMigrationOnRowsThatWereThereBefore:
 
     @pytest.fixture(autouse=True)
     def _restore_services_schema(self):
-        """Вернуть ``services`` на лист графа: DDL здесь коммитится в тестовую базу."""
+        """Вернуть ``services`` на лист графа: DDL здесь коммитится в тестовую базу.
+
+        Сначала схема, потом строки: живые модели знают колонки листа графа,
+        а база после теста стоит на проверяемой миграции — следующая миграция,
+        добавившая колонку, иначе сломала бы уборку.
+        """
         yield
-        CapabilityGoalLink.objects.all().delete()
-        ProcedureCapability.objects.all().delete()
         executor = MigrationExecutor(connection)
         executor.migrate(executor.loader.graph.leaf_nodes("services"))
+        CapabilityGoalLink.objects.all().delete()
+        ProcedureCapability.objects.all().delete()
 
     @staticmethod
     def _migrate(target: str):
@@ -482,7 +487,11 @@ class TestTheMigrationOnRowsThatWereThereBefore:
         no_note_link = link("l-no-note", result_horizon="обычно в первые недели", **signed)
         draft_link = link("l-draft", result_horizon="3")
 
-        self._migrate(THE_MIGRATION)  # не падает — это и есть свойство выкладки
+        new = self._migrate(THE_MIGRATION)  # не падает — это и есть свойство выкладки
+        # Читать историческими моделями ЭТОЙ миграции, а не живыми: живые
+        # знают колонки более поздних миграций, которых в базе сейчас нет.
+        ProcedureCapability = new.get_model("services", "ProcedureCapability")  # noqa: N806
+        CapabilityGoalLink = new.get_model("services", "CapabilityGoalLink")  # noqa: N806
 
         def state(model, pk):
             row = model.objects.get(pk=pk)

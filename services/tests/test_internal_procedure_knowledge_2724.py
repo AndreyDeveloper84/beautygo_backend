@@ -21,6 +21,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from services import knowledge_api
 from services.models import (
     CapabilityGoalLink,
     ClaimEvidence,
@@ -90,6 +91,8 @@ def _capability(template, *, key="even-tone", **kw) -> ProcedureCapability:
         "text_professional": PRO_TEXT,
         "expected_effect": "Кожа выглядит ровнее",
         "result_timeframe": "после 3–5 сеансов",
+        # DRF-2726: подтверждённый срок база хранит только с оговоркой о разбросе.
+        "variability_note": "Зависит от исходного состояния кожи",
         "limitations": "Не проводят при активных высыпаниях",
         "evidence_source": "Протокол салона",
         "evidence_kind": "practice",
@@ -429,20 +432,27 @@ class TestGoalLinks:
     def test_a_horizon_without_a_variability_note_is_withheld(
         self, api, template, curator, goal
     ) -> None:
-        """Блок B: срок — не самостоятельное число без оговорки о разбросе."""
+        """Блок B: срок — не самостоятельное число без оговорки о разбросе.
+
+        С DRF-2726 подтверждённую связь со сроком без оговорки база не хранит
+        (``capabilitygoallink_approved_horizon_grounded``), поэтому «голую»
+        сторону через базу не построить: проверка ручки остаётся вторым
+        рубежом и держится на строке в памяти.
+        """
         capability = _capability(template)
         _approve(capability, curator)
+        unsaved = CapabilityGoalLink(capability=capability, goal=goal, result_horizon="через месяц")
+        bare_link = knowledge_api._goal_link(unsaved)
+
         link = CapabilityGoalLink.objects.create(
-            capability=capability, goal=goal, result_horizon="через месяц"
+            capability=capability, goal=goal, result_horizon="через месяц",
+            variability_note="У всех по-разному", evidence_source="Протокол салона",
         )
         _approve(link, curator)
-        bare = _read(api, template_id=str(template.id))
-
-        CapabilityGoalLink.objects.filter(pk=link.pk).update(variability_note="У всех по-разному")
         qualified = _read(api, template_id=str(template.id))
 
-        assert bare["claims"][0]["goal_links"][0]["result_horizon"] == ""
-        assert "через месяц" not in [str(a) for a in _atoms(bare)]
+        assert bare_link["result_horizon"] == ""
+        assert "через месяц" not in [str(a) for a in _atoms(bare_link)]
         assert qualified["claims"][0]["goal_links"][0]["result_horizon"] == "через месяц"
         assert qualified["claims"][0]["goal_links"][0]["variability_note"] == "У всех по-разному"
 
@@ -486,7 +496,8 @@ class TestWhatNeverLeavesTheCatalog:
         assert PRO_TEXT not in atoms
         assert "curator-2724" not in atoms
         assert str(curator.pk) not in atoms
-        # Срок возможности: поля для оговорки о разбросе у неё нет (блок B).
+        # Срок возможности ручка не отдаёт (блок B). Оговорка у возможности с
+        # DRF-2726 есть, но отдавать ли срок парой с ней — решение моста чтения.
         assert "после 3–5 сеансов" not in atoms
 
     def test_n13_an_unknown_subject_is_not_found_rather_than_unknown(self, api) -> None:
