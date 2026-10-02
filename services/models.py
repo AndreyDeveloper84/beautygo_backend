@@ -2055,3 +2055,125 @@ class CapabilityGoalLink(ClaimEvidence):
 
     def __str__(self) -> str:
         return f"{self.capability} → {self.goal.label}"
+
+
+class ProcedureContraindication(models.Model):
+    """Противопоказание: условие → что делать (DRF-2741, слот C8).
+
+    Решение владельца №2 от 02.10: C8 хранится структурированным набором —
+    условие, действие из закрытого списка, источник, область применения, дата
+    пересмотра, рецензент; «один непроверяемый текстовый блок недостаточен».
+    Строка — одно условие и одно действие; общий набор для нескольких процедур
+    — одна строка с несколькими процедурами в области применения, а не копии.
+
+    Это НОСИТЕЛЬ. Читателя на пути ответа нет, клиенту отсюда ничего не
+    говорится; текстовое поле ``ServiceTemplate.contraindications`` и гейт
+    здоровья живут как жили. Набор — маршрутизация, а не диагностика:
+    отсутствие условия в таблице не доказывает безопасность человеку.
+
+    Две подписи, как у остального знания: ``reviewed_by`` — рецензент проверил
+    условие и действие, ``confirmed_by`` — куратор утвердил использование.
+    Подтверждённая строка без источника, вида доказательства, даты пересмотра,
+    отметки рецензента и подписи не хранится (ограничение базы). Область
+    применения — связи «многие ко многим», базой не проверяются: её у
+    подтверждённой строки спрашивают входы.
+
+    ``key`` — стабильный машинный идентификатор, как у возможности: по нему
+    засев из файла узнаёт уже заведённую строку.
+    """
+
+    class Action(models.TextChoices):
+        """Что делать при условии — закрытый список (решение владельца №2)."""
+
+        EXCLUDE = "exclude", "Исключить (не проводить / исключить зону)"
+        POSTPONE = "postpone", "Отложить"
+        REFER_TO_DOCTOR = "refer_to_doctor", "Направить к врачу"
+        EMERGENCY = "emergency", "Экстренная помощь"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    key = models.SlugField(max_length=64, unique=True)
+    #: Условие — словами: при чём правило срабатывает.
+    condition = models.TextField()
+    action = models.CharField(max_length=16, choices=Action.choices)
+    #: Уточнение действия («исключить зону», «только после разрешения врача»).
+    action_note = models.TextField(blank=True, default="")
+    #: Область применения: процедуры канона и/или категории (класс процедур).
+    templates = models.ManyToManyField(ServiceTemplate, blank=True, related_name="contraindication_rules")
+    categories = models.ManyToManyField(ServiceCategory, blank=True, related_name="+")
+    #: Уточнение области словами («особенно при интенсивной технике»).
+    scope_note = models.TextField(blank=True, default="")
+
+    source_ref = models.CharField(max_length=200, blank=True, default="")
+    evidence_source = models.CharField(max_length=300, blank=True, default="")
+    evidence_kind = models.CharField(
+        max_length=64, blank=True, default="", choices=ClaimEvidence.EvidenceKind.choices,
+    )
+    #: Когда строку нужно проверить заново.
+    review_date = models.DateField(null=True, blank=True)
+
+    # PROTECT у обеих подписей — по той же причине, что у ``confirmed_by``
+    # знания (DRF-2612): CHECK ниже требует их у подтверждённой строки.
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(
+        max_length=24, choices=ClaimEvidence.Status.choices, default=ClaimEvidence.Status.SYSTEM_INFERENCE,
+    )
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+",
+    )
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["key"]
+        permissions = [
+            ("review_procedurecontraindication", "Может отмечать противопоказание проверенным (рецензент)"),
+            ("approve_procedurecontraindication", "Может подтверждать противопоказания"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(condition=""), name="procedurecontraindication_condition_not_blank",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(action__in=["exclude", "postpone", "refer_to_doctor", "emergency"]),
+                name="procedurecontraindication_action_known",
+            ),
+            # Отметка проверки цельная: человек и время — вместе или никак.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(reviewed_by__isnull=True) & models.Q(reviewed_at__isnull=True))
+                    | (models.Q(reviewed_by__isnull=False) & models.Q(reviewed_at__isnull=False))
+                ),
+                name="procedurecontraindication_review_is_whole",
+            ),
+            # Подтверждённое противопоказание — с источником, видом
+            # доказательства, датой пересмотра и обеими подписями.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="approved")
+                    | (
+                        ~models.Q(source_ref="")
+                        & models.Q(
+                            evidence_kind__in=[
+                                "clinical_guideline", "systematic_review", "rct", "manufacturer_ifu",
+                                "regulatory_document", "professional_consensus", "legal_rule",
+                                "product_policy",
+                            ]
+                        )
+                        & models.Q(review_date__isnull=False)
+                        & models.Q(reviewed_by__isnull=False)
+                        & models.Q(reviewed_at__isnull=False)
+                        & models.Q(confirmed_by__isnull=False)
+                        & models.Q(confirmed_at__isnull=False)
+                    )
+                ),
+                name="procedurecontraindication_approved_complete",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.key} → {self.get_action_display()}"

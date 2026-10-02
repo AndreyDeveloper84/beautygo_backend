@@ -6,7 +6,9 @@ from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
+from services.contraindication_intake import approval_errors
 from services.knowledge_intake import (
+    APPROVED,
     course_errors,
     evidence_kind_errors,
     prohibition_errors,
@@ -28,6 +30,7 @@ from .models import (
     GoalOption,
     GoalOptionCategory,
     ProcedureCapability,
+    ProcedureContraindication,
     RegionalPricing,
     SalonService,
     Service,
@@ -932,3 +935,171 @@ class CapabilityGoalLinkAdmin(_ClaimAdmin):
         _CLAIM_FIELDSET,
         _CONFIRMATION_FIELDSET,
     )
+
+
+# ── Структурированные противопоказания, слот C8 (DRF-2741) ──────────────────
+#
+# Две подписи — два действия: рецензент отмечает «проверено», куратор ставит
+# «подтверждено». Оба — за себя и только при своём праве
+# (``services.review_procedurecontraindication`` /
+# ``services.approve_procedurecontraindication``); имён в коде нет, права
+# раздаёт владелец. Правка содержания снимает отметку проверки, и
+# подтверждённой строка после этого остаться не может.
+
+#: Правка этих полей формы содержания не меняет.
+_NOT_CONTRAINDICATION_CONTENT = frozenset({"status", "mark_reviewed"})
+
+
+class ProcedureContraindicationAdminForm(forms.ModelForm):
+    #: Кто сохраняет — ставит ``ProcedureContraindicationAdmin.get_form``.
+    acting_user = None
+    #: Остаётся ли в силе прежняя отметка проверки (считает ``clean``).
+    review_kept = False
+
+    mark_reviewed = forms.BooleanField(
+        required=False,
+        label="Проверено мной как рецензентом",
+        help_text=(
+            "Отметку ставит рецензент — за себя: условие и действие в нынешней "
+            "формулировке проверены. Любая правка содержания её снимает."
+        ),
+    )
+
+    class Meta:
+        model = ProcedureContraindication
+        fields = (
+            "key", "condition", "action", "action_note", "templates", "categories", "scope_note",
+            "source_ref", "evidence_source", "evidence_kind", "review_date", "status",
+        )
+
+    def _has(self, codename: str) -> bool:
+        user = self.acting_user
+        return user is not None and user.has_perm(f"services.{codename}")
+
+    def clean(self):
+        cleaned = super().clean()
+        adding = self.instance._state.adding
+        status = cleaned.get("status") or ""
+        was_approved = not adding and self.instance.status == APPROVED
+        wants_approved = status == APPROVED
+        untouched = was_approved and wants_approved and not self.changed_data
+
+        marks = bool(cleaned.get("mark_reviewed"))
+        if marks and not self._has("review_procedurecontraindication"):
+            self.add_error(
+                "mark_reviewed",
+                forms.ValidationError(
+                    "Отметить противопоказание проверенным может только рецензент — тот, "
+                    "кому владелец дал это право.",
+                    code="reviewer_right_required",
+                ),
+            )
+            marks = False
+        had_review = not adding and self.instance.reviewed_by_id is not None
+        content_changed = bool(set(self.changed_data) - _NOT_CONTRAINDICATION_CONTENT)
+        self.review_kept = had_review and not content_changed
+
+        if (was_approved or wants_approved) and not untouched:
+            if not self._has("approve_procedurecontraindication"):
+                self.add_error(
+                    "status",
+                    forms.ValidationError(
+                        "Подтверждать противопоказание и менять подтверждённое может только "
+                        "тот, кому владелец дал право подтверждения.",
+                        code="approval_right_required",
+                    ),
+                )
+        if wants_approved and not (marks or self.review_kept) and not self.has_error("status"):
+            self.add_error(
+                "status",
+                forms.ValidationError(
+                    "Противопоказание подтверждается только после проверки рецензентом. "
+                    "Отметки проверки нет либо содержание изменилось после неё.",
+                    code="review_required",
+                ),
+            )
+        has_scope = bool(cleaned.get("templates")) or bool(cleaned.get("categories"))
+        for field, message in approval_errors(
+            status=status,
+            source_ref=cleaned.get("source_ref") or "",
+            evidence_kind=cleaned.get("evidence_kind") or "",
+            review_date=cleaned.get("review_date"),
+            has_scope=has_scope,
+        ).items():
+            if not self.has_error(field):
+                self.add_error(field, forms.ValidationError(message, code="approval_incomplete"))
+        return cleaned
+
+
+@admin.register(ProcedureContraindication)
+class ProcedureContraindicationAdmin(admin.ModelAdmin):
+    """Противопоказания: условие → действие, с источником и двумя подписями (DRF-2741)."""
+
+    form = ProcedureContraindicationAdminForm
+    list_display = ("key", "action", "status", "review_date", "reviewed_by", "confirmed_by")
+    list_filter = ("status", "action", "evidence_kind")
+    search_fields = ("key", "condition")
+    autocomplete_fields = ("templates", "categories")
+    list_select_related = ("reviewed_by", "confirmed_by")
+    readonly_fields = ("reviewed_by", "reviewed_at", "confirmed_by", "confirmed_at", "created_at", "updated_at")
+    fieldsets = (
+        ("Условие и действие", {"fields": ("key", "condition", "action", "action_note")}),
+        (
+            "Область применения",
+            {
+                "fields": ("templates", "categories", "scope_note"),
+                "description": "К каким процедурам или классам процедур правило применяется.",
+            },
+        ),
+        (
+            "Основание",
+            {
+                "fields": (
+                    "source_ref", "evidence_source", "evidence_kind", "review_date",
+                    "mark_reviewed", "status",
+                ),
+                "description": (
+                    "«Подтверждено» сохраняется только с источником, видом доказательства, "
+                    "датой пересмотра, областью применения и отметкой рецензента."
+                ),
+            },
+        ),
+        (
+            "Проверка и подтверждение (ставятся при сохранении)",
+            {"fields": ("reviewed_by", "reviewed_at", "confirmed_by", "confirmed_at", "created_at", "updated_at")},
+        ),
+    )
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        form.acting_user = request.user
+        return form
+
+    def has_delete_permission(self, request, obj=None):
+        allowed = super().has_delete_permission(request, obj)
+        if allowed and obj is not None and obj.status == APPROVED:
+            return request.user.has_perm("services.approve_procedurecontraindication")
+        return allowed
+
+    def save_model(self, request, obj, form, change):
+        if change and not form.changed_data:
+            return  # «Сохранить» без единой правки не пишет ничего.
+        if form.cleaned_data.get("mark_reviewed"):
+            obj.reviewed_by = request.user
+            obj.reviewed_at = timezone.now()
+        elif not form.review_kept:
+            if obj.reviewed_by_id is not None:
+                self.message_user(
+                    request,
+                    "Отметка проверки рецензентом снята: содержание противопоказания изменилось.",
+                    level=messages.WARNING,
+                )
+            obj.reviewed_by = None
+            obj.reviewed_at = None
+        if obj.status == APPROVED:
+            obj.confirmed_by = request.user
+            obj.confirmed_at = timezone.now()
+        else:
+            obj.confirmed_by = None
+            obj.confirmed_at = None
+        super().save_model(request, obj, form, change)

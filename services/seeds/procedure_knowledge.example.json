@@ -1,5 +1,19 @@
 {
   "_about": "ПРИМЕР ФОРМАТА, не знание. Тексты синтетические и в базу стенда не попадают: файл по умолчанию — procedure_knowledge.json, его кладёт куратор. Поля и их смысл — в докстринге команды seed_procedure_knowledge. Все строки здесь — черновики: подтверждает знание человек в админке.",
+  "contraindications": [
+    {
+      "key": "example_condition",
+      "condition": "[пример формата] условие, при котором правило срабатывает",
+      "action": "postpone",
+      "action_note": "[пример формата] уточнение действия",
+      "template_codes": ["1.1.3", "1.1.2"],
+      "scope_note": "[пример формата] уточнение области применения",
+      "source_ref": "EXAMPLE-SOURCE-4",
+      "evidence_source": "[пример формата] название источника",
+      "evidence_kind": "clinical_guideline",
+      "review_date": "2027-10-01"
+    }
+  ],
   "capabilities": [
     {
       "template_code": "1.1.3",

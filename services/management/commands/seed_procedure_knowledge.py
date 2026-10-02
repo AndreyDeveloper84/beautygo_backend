@@ -36,6 +36,9 @@
   следующем запуске заводится заново: команда не знает, что её удалили
   намеренно. Чтобы убрать строку, пришедшую из файла, её убирают из файла —
   или оставляют в базе не подтверждённой.
+* Противопоказания (раздел ``contraindications``, DRF-2741) заводит только
+  черновиками: статуса, отметки рецензента и подписи в файле нет — проверка
+  и подтверждение делаются в админке.
 * Шаблоны и цели не заводит: им нужны ``seed_canonical_catalog`` и
   ``seed_goal_options``, и порядок именно такой.
 * Шаблон адресуется кодом эталонного справочника (``canonical_code``), и
@@ -75,6 +78,20 @@
                         "source_ref": "..."}]
     }]}
 
+Раздел противопоказаний — рядом с ``capabilities``, любой из двух может
+отсутствовать::
+
+    {"contraindications": [{
+        "key": "fever_or_acute_infection",   # машинный ключ, по нему строка узнаётся
+        "condition": "...",                  # условие — словами
+        "action": "postpone",                # exclude | postpone | refer_to_doctor | emergency
+        "action_note": "...", "scope_note": "...",
+        "template_codes": ["1.1.1", "1.1.4"],  # к каким процедурам применяется
+        "source_ref": "...", "evidence_source": "...",
+        "evidence_kind": "clinical_guideline",
+        "review_date": "2027-10-01"          # когда пересмотреть
+    }]}
+
 Usage::
 
     python manage.py seed_procedure_knowledge
@@ -93,6 +110,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils.dateparse import parse_datetime
 
+from services.contraindication_intake import ACTIONS, FILE_KEYS, parse_review_date
 from services.knowledge_intake import (
     APPROVED,
     course_errors,
@@ -107,6 +125,7 @@ from services.models import (
     ClaimEvidence,
     GoalOption,
     ProcedureCapability,
+    ProcedureContraindication,
     ServiceTemplate,
 )
 
@@ -266,11 +285,20 @@ class Command(BaseCommand):
             raise CommandError(f"{path} is not UTF-8: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise CommandError(f"Invalid JSON in {path}: {exc}") from exc
-        rows = payload.get("capabilities") if isinstance(payload, dict) else None
-        if not isinstance(rows, list):
-            raise CommandError(f'{path}: expected an object with a "capabilities" list.')
+        sections = payload if isinstance(payload, dict) else {}
+        rows = sections.get("capabilities", [])
+        safety_rows = sections.get("contraindications", [])
+        if (
+            not {"capabilities", "contraindications"} & set(sections)
+            or not isinstance(rows, list)
+            or not isinstance(safety_rows, list)
+        ):
+            raise CommandError(
+                f'{path}: expected an object with a "capabilities" list and/or a "contraindications" list.'
+            )
 
         plan, problems = self._plan(rows)
+        safety_plan = self._plan_contraindications(safety_rows, problems)
         if problems.lines:
             listing = "\n".join(f"  - {line}" for line in problems.lines)
             raise CommandError(
@@ -280,7 +308,8 @@ class Command(BaseCommand):
         if options["dry_run"]:
             links = sum(len(item["links"]) for item in plan)
             self.stdout.write(
-                f"[dry-run] {len(plan)} capabilities · {links} goal links — file is valid, nothing written."
+                f"[dry-run] {len(plan)} capabilities · {links} goal links · "
+                f"{len(safety_plan)} contraindications — file is valid, nothing written."
             )
             return
 
@@ -298,14 +327,93 @@ class Command(BaseCommand):
                     )
                     created_links += link_created
                     kept_links += not link_created
+            created_rules = kept_rules = 0
+            for item in safety_plan:
+                rule, rule_created = ProcedureContraindication.objects.get_or_create(
+                    key=item["key"], defaults=item["fields"],
+                )
+                if rule_created:
+                    rule.templates.set(item["templates"])
+                created_rules += rule_created
+                kept_rules += not rule_created
         self.stdout.write(
             self.style.SUCCESS(
                 f"Procedure knowledge seeded: +{created_caps} capabilities, +{created_links} goal links; "
                 f"existing left as is: {kept_caps} capabilities, {kept_links} goal links. "
                 f"Totals: capabilities={ProcedureCapability.objects.count()}, "
-                f"goal links={CapabilityGoalLink.objects.count()}."
+                f"goal links={CapabilityGoalLink.objects.count()}. "
+                f"Contraindications: +{created_rules}, existing left as is: {kept_rules}, "
+                f"total={ProcedureContraindication.objects.count()}."
             )
         )
+
+    def _plan_contraindications(self, rows: list[Any], problems: _Problems) -> list[dict[str, Any]]:
+        """Противопоказания из файла (DRF-2741) — всегда черновиками.
+
+        Статуса, отметки рецензента и подписи в файле нет: такие ключи
+        неизвестны. Существующая строка (по ``key``) не трогается.
+        """
+        codes = {
+            code.strip()
+            for row in rows if isinstance(row, dict) and isinstance(row.get("template_codes"), list)
+            for code in row["template_codes"] if isinstance(code, str)
+        }
+        templates = {
+            t.canonical_code: t for t in ServiceTemplate.objects.filter(canonical_code__in=codes)
+        }
+        plan: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for index, row in enumerate(rows, start=1):
+            where = f"contraindications[{index}]"
+            if not isinstance(row, dict):
+                problems.add(where, "ожидался объект")
+                continue
+            key = _text(row, "key", where, problems)
+            where = f"contraindications[{index}] {key or '?'}"
+            _unknown_keys(row, FILE_KEYS, where, problems)
+            if not key:
+                problems.add(where, "key — не указан ключ противопоказания")
+            elif key in seen:
+                problems.add(where, "такой key в файле уже есть")
+            seen.add(key)
+
+            fields: dict[str, Any] = {
+                name: _text(row, name, where, problems)
+                for name in (
+                    "condition", "action", "action_note", "scope_note",
+                    "source_ref", "evidence_source", "evidence_kind",
+                )
+            }
+            if not fields["condition"]:
+                problems.add(where, "condition — не указано условие")
+            if fields["action"] not in ACTIONS:
+                problems.add(where, f"action «{fields['action']}» — допустимо: {list(ACTIONS)}")
+            for field, message in evidence_kind_errors(
+                status=ClaimEvidence.Status.SYSTEM_INFERENCE.value, evidence_kind=fields["evidence_kind"],
+            ).items():
+                problems.add(where, f"{field} — {message}")
+            fields["review_date"], date_problem = parse_review_date(row.get("review_date"))
+            if date_problem:
+                problems.add(where, date_problem)
+
+            raw_codes = row.get("template_codes") or []
+            if not isinstance(raw_codes, list) or not all(isinstance(code, str) for code in raw_codes):
+                problems.add(where, "template_codes — ожидался список кодов процедур")
+                raw_codes = []
+            scope = []
+            for code in (code.strip() for code in raw_codes):
+                if code in templates:
+                    scope.append(templates[code])
+                else:
+                    problems.add(where, f"template_codes — код «{code}» не найден среди шаблонов")
+
+            if key and fields["condition"] and fields["action"] in ACTIONS:
+                _model_problems(
+                    ProcedureContraindication(key=key, **fields),
+                    {"status", "reviewed_by", "confirmed_by"}, where, problems,
+                )
+            plan.append({"key": key, "fields": fields, "templates": scope})
+        return plan
 
     def _plan(self, rows: list[Any]) -> tuple[list[dict[str, Any]], _Problems]:
         problems = _Problems()
