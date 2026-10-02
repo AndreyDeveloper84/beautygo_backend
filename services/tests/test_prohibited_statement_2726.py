@@ -87,7 +87,7 @@ def admin_client(owner) -> Client:
 
 def _approved(owner: User) -> dict:
     return {
-        "status": "approved", "evidence_kind": "professional_consensus",
+        "status": "approved", "claim_type": "product", "evidence_kind": "professional_consensus",
         "confirmed_by": owner, "confirmed_at": timezone.now(),
         "source_ref": "DOC-2726",
     }
@@ -248,6 +248,7 @@ def _capability_form(template: ServiceTemplate, **overrides) -> dict:
         "expected_effect": "",
         "result_timeframe": "",
         "variability_note": "",
+        "claim_type": "product",
         "status": "system_inference",
         "claim_scope": "prohibited_claim",
         "prohibited_statement": STATEMENT,
@@ -326,6 +327,7 @@ class TestTheAdminFormAsksForTheStatement:
         data = {
             "capability": str(capability.pk), "goal": str(goal.pk),
             "course_pattern": "", "result_horizon": "", "variability_note": "",
+            "claim_type": "product",
             "status": "system_inference", "claim_scope": "prohibited_claim",
             "prohibited_statement": "", "limitations": "",
             "evidence_source": "", "evidence_kind": "", "source_ref": "",

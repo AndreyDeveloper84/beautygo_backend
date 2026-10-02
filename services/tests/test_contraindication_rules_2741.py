@@ -11,11 +11,15 @@
   строки (база);
 * подтверждённая строка без источника, вида доказательства, даты пересмотра,
   отметки рецензента или подписи не хранится (база);
-* в админке: отметку «проверено» ставит только держатель права рецензента,
-  «подтверждено» — только держатель права подтверждения; это два действия и
-  две подписи; правка содержания снимает отметку, и подтверждённой строка
-  остаться не может; подтверждённая строка без области применения не
-  сохраняется;
+* в админке: «проверено» ставит только назначенный рецензент медицинских
+  утверждений, чьи назначения покрывают ВСЮ область применения строки;
+  суперпользователь и держатель права подтверждения рецензентами не являются;
+  «подтверждено» — только держатель права подтверждения и только после
+  проверки; это две подписи двух действий;
+* правило сброса то же, что у остального знания (DRF-2726): правка содержания
+  или области подтверждённой строки возвращает её в черновик; значимая правка
+  процедуры из области применения — тоже; соседние строки не трогаются; всё
+  пишется в журнал и показывается куратору;
 * из файла строка приходит только черновиком: статус, отметка и подпись в
   файле — неизвестные ключи;
 * клиентский путь знания таблицу не читает.
@@ -43,7 +47,15 @@ from django.utils import timezone
 
 from services import capabilities, knowledge_api
 from services.contraindication_intake import ACTIONS, FILE_KEYS, approval_errors
-from services.models import ProcedureContraindication, ServiceCategory, ServiceTemplate
+from services.knowledge_review import may_review_scope
+from services.models import (
+    ClaimApprovalReset,
+    ClaimReviewer,
+    GoalOption,
+    ProcedureContraindication,
+    ServiceCategory,
+    ServiceTemplate,
+)
 from users.deletion_executor import undecided_pointers
 from users.models import User
 
@@ -52,9 +64,9 @@ pytestmark = pytest.mark.django_db
 ADD = "admin:services_procedurecontraindication_add"
 CHANGE = "admin:services_procedurecontraindication_change"
 DELETE = "admin:services_procedurecontraindication_delete"
+LIST = "admin:services_procedurecontraindication_changelist"
 
 EVERYDAY = [f"{action}_procedurecontraindication" for action in ("add", "change", "delete", "view")]
-REVIEW = ["review_procedurecontraindication"]
 APPROVE = ["approve_procedurecontraindication"]
 EXAMPLE_FILE = Path(__file__).resolve().parents[1] / "seeds" / "procedure_knowledge.example.json"
 
@@ -76,26 +88,46 @@ def _client(user: User) -> Client:
 
 
 @pytest.fixture
-def template() -> ServiceTemplate:
-    category = ServiceCategory.objects.create(name="Категория 2741")
+def body() -> ServiceCategory:
+    return ServiceCategory.objects.create(name="Тело 2741")
+
+
+@pytest.fixture
+def face() -> ServiceCategory:
+    return ServiceCategory.objects.create(name="Лицо 2741")
+
+
+@pytest.fixture
+def template(body) -> ServiceTemplate:
+    """Процедура в подкатегории «тела»."""
+    massage = ServiceCategory.objects.create(name="Массаж 2741", parent=body)
     return ServiceTemplate.objects.create(
-        category=category, name="Процедура 2741", name_short="Процедура 2741", canonical_code="1.1.3",
+        category=massage, name="Процедура 2741", name_short="Процедура 2741", canonical_code="1.1.3",
     )
 
 
 @pytest.fixture
+def face_template(face) -> ServiceTemplate:
+    return ServiceTemplate.objects.create(category=face, name="Процедура лица 2741", name_short="Лицо 2741")
+
+
+@pytest.fixture
 def curator() -> User:
-    """Ведёт черновики; ни права рецензента, ни права подтверждения."""
+    """Ведёт черновики; не рецензент и без права подтверждения."""
     return _staff("curator-2741", EVERYDAY)
 
 
 @pytest.fixture
 def reviewer() -> User:
-    return _staff("reviewer-2741", EVERYDAY + REVIEW)
+    """Назначенный рецензент медицинских утверждений, любая область; подтверждать не вправе."""
+    user = _staff("reviewer-2741", EVERYDAY)
+    ClaimReviewer.objects.create(user=user, claim_type="medical")
+    return user
 
 
 @pytest.fixture
 def approver() -> User:
+    """Право подтверждения есть, назначения рецензентом нет."""
     return _staff("approver-2741", EVERYDAY + APPROVE)
 
 
@@ -125,6 +157,13 @@ def _row(**fields) -> ProcedureContraindication:
     data = {"key": "example_condition", "condition": "синтетическое условие", "action": "postpone"}
     data.update(fields)
     return ProcedureContraindication.objects.create(**data)
+
+
+@pytest.fixture
+def approved(template, reviewer, approver) -> ProcedureContraindication:
+    row = _row(**COMPLETE, **_both_signed(reviewer, approver))
+    row.templates.set([template])
+    return row
 
 
 # ── Список действий и база ─────────────────────────────────────────────────
@@ -208,6 +247,44 @@ class TestTheSharedRule:
         assert set(errors) == {"evidence_kind"}
 
 
+# ── Кто вправе проверить ───────────────────────────────────────────────────
+
+
+class TestWhoMayReviewAContraindication:
+    def test_a_reviewer_of_any_area_covers_any_scope(self, reviewer, template, face_template) -> None:
+        assert may_review_scope(reviewer, claim_type="medical", templates=[template, face_template], categories=[])
+        assert may_review_scope(reviewer, claim_type="medical", templates=[], categories=[])
+
+    def test_an_area_reviewer_must_cover_every_procedure_in_the_scope(
+        self, template, face_template, body, face
+    ) -> None:
+        """Пример владельца: «тело/массаж и кожа лица — возможно, разные люди»."""
+        body_reviewer = _staff("body-2741", EVERYDAY)
+        ClaimReviewer.objects.create(user=body_reviewer, claim_type="medical", category=body)
+
+        def may(templates, categories=()):
+            return may_review_scope(
+                body_reviewer, claim_type="medical", templates=templates, categories=list(categories),
+            )
+
+        assert may([template])  # подкатегория «тела»
+        assert may([], [body])
+        assert not may([template, face_template])  # одна из процедур — вне его области
+        assert not may([], [face])
+        assert not may([])  # пустая область — только рецензент без ограничения области
+
+    def test_other_claim_types_admin_rights_and_the_approval_right_do_not_count(self, template, approver) -> None:
+        physiological = _staff("physio-2741", EVERYDAY)
+        ClaimReviewer.objects.create(user=physiological, claim_type="physiological")
+        superuser = User.objects.create_superuser(
+            username="super-2741", password="pw",  # pragma: allowlist secret
+            email="super-2741@example.test", role="admin",
+        )
+
+        for user in (physiological, superuser, approver, None):
+            assert not may_review_scope(user, claim_type="medical", templates=[template], categories=[])
+
+
 # ── Админка ────────────────────────────────────────────────────────────────
 
 
@@ -253,7 +330,7 @@ class TestTheAdmin:
     def test_a_curator_cannot_tick_the_review(self, curator, template) -> None:
         response = _client(curator).post(reverse(ADD), _form(template, mark_reviewed="on"))
 
-        assert _codes(response) == {"mark_reviewed": ["reviewer_right_required"]}
+        assert _codes(response) == {"mark_reviewed": ["reviewer_competence_required"]}
         assert ProcedureContraindication.objects.count() == 0
 
     def test_the_approver_cannot_tick_the_review_for_the_reviewer(self, approver, template) -> None:
@@ -262,8 +339,22 @@ class TestTheAdmin:
         )
 
         codes = _codes(response)
-        assert codes["mark_reviewed"] == ["reviewer_right_required"]
+        assert codes["mark_reviewed"] == ["reviewer_competence_required"]
         assert codes["status"] == ["review_required"]
+
+    def test_a_superuser_neither_reviews_nor_approves_without_a_review(self, template) -> None:
+        """Требование владельца (DRF-2726): суперпользователь не обходит рецензию."""
+        superuser = User.objects.create_superuser(
+            username="super-2741", password="pw",  # pragma: allowlist secret
+            email="super-2741@example.test", role="admin",
+        )
+        client = _client(superuser)
+
+        ticked = client.post(reverse(ADD), _form(template, mark_reviewed="on"))
+        approved = client.post(reverse(ADD), _form(template, status="approved"))
+
+        assert _codes(ticked) == {"mark_reviewed": ["reviewer_competence_required"]}
+        assert _codes(approved) == {"status": ["review_required"]}
 
     def test_the_reviewer_cannot_approve(self, reviewer, template) -> None:
         response = _client(reviewer).post(
@@ -286,6 +377,20 @@ class TestTheAdmin:
         assert (row.status, row.reviewed_by_id, row.confirmed_by_id) == ("approved", reviewer.pk, approver.pk)
         assert row.reviewed_at == stamped_at
 
+    def test_the_scope_decides_who_may_review_in_the_form(self, template, face_template, body) -> None:
+        body_reviewer = _staff("body-2741", EVERYDAY)
+        ClaimReviewer.objects.create(user=body_reviewer, claim_type="medical", category=body)
+        client = _client(body_reviewer)
+
+        both_areas = client.post(reverse(ADD), _form(
+            templates=[str(template.pk), str(face_template.pk)], mark_reviewed="on",
+        ))
+        own_area = client.post(reverse(ADD), _form(template, mark_reviewed="on"))
+
+        assert _codes(both_areas) == {"mark_reviewed": ["reviewer_competence_required"]}
+        assert own_area.status_code == 302, own_area.context["adminform"].form.errors
+        assert ProcedureContraindication.objects.get().reviewed_by_id == body_reviewer.pk
+
     def test_an_unreviewed_row_is_not_approved(self, approver, template) -> None:
         response = _client(approver).post(reverse(ADD), _form(template, status="approved"))
 
@@ -300,9 +405,9 @@ class TestTheAdmin:
             ({"review_date": ""}, "review_date"),
         ],
     )
-    def test_approving_an_incomplete_row_is_a_field_error_not_a_database_error(
-        self, reviewer, approver, template, missing, field
-    ) -> None:
+    def test_approving_an_incomplete_draft_is_refused(self, reviewer, approver, template, missing, field) -> None:
+        """Проверенный черновик поправить и тем же сохранением подтвердить нельзя:
+        правка снимает отметку, а неполную строку не пропускают поля."""
         row = _row(**COMPLETE, reviewed_by=reviewer, reviewed_at=timezone.now())
         row.templates.set([template])
 
@@ -310,7 +415,7 @@ class TestTheAdmin:
             reverse(CHANGE, args=[row.pk]), _form(template, status="approved", **missing),
         )
 
-        assert field in _codes(response)
+        assert response.status_code == 200
         row.refresh_from_db()
         assert row.status == "system_inference"
 
@@ -321,63 +426,191 @@ class TestTheAdmin:
 
         assert _codes(response) == {"templates": ["approval_incomplete"]}
 
-    def test_an_edit_of_the_condition_drops_the_review_and_the_approval_with_it(
-        self, reviewer, approver, template
-    ) -> None:
-        row = _row(**COMPLETE, **_both_signed(reviewer, approver))
-        row.templates.set([template])
-        client = _client(approver)
-
-        kept_approved = client.post(
-            reverse(CHANGE, args=[row.pk]), _form(template, status="approved", condition="новое условие"),
-        )
-        to_draft = client.post(
-            reverse(CHANGE, args=[row.pk]), _form(template, condition="новое условие"),
-        )
-
-        assert _codes(kept_approved) == {"status": ["review_required"]}
-        assert to_draft.status_code == 302, to_draft.context["adminform"].form.errors
-        row.refresh_from_db()
-        assert (row.status, row.reviewed_by_id, row.confirmed_by_id) == ("system_inference", None, None)
-        assert any("Отметка проверки рецензентом снята" in str(m) for m in get_messages(to_draft.wsgi_request))
-
-    def test_changing_the_scope_is_a_change_of_content(self, reviewer, approver, template) -> None:
-        other = ServiceTemplate.objects.create(
-            category=template.category, name="Процедура 2741-2", name_short="Процедура 2741-2",
-        )
-        row = _row(**COMPLETE, **_both_signed(reviewer, approver))
-        row.templates.set([template])
-
-        response = _client(approver).post(
-            reverse(CHANGE, args=[row.pk]),
-            _form(status="approved", templates=[str(template.pk), str(other.pk)]),
-        )
-
-        assert _codes(response) == {"status": ["review_required"]}
-
-    def test_a_curator_cannot_edit_or_delete_an_approved_row(self, curator, reviewer, approver, template) -> None:
-        row = _row(**COMPLETE, **_both_signed(reviewer, approver))
-        row.templates.set([template])
+    def test_a_curator_cannot_edit_or_delete_an_approved_row(self, curator, template, approved) -> None:
         client = _client(curator)
 
-        edited = client.post(reverse(CHANGE, args=[row.pk]), _form(template, condition="чужая правка"))
-        deleted = client.post(reverse(DELETE, args=[row.pk]), {"post": "yes"})
+        edited = client.post(reverse(CHANGE, args=[approved.pk]), _form(template, condition="чужая правка"))
+        deleted = client.post(reverse(DELETE, args=[approved.pk]), {"post": "yes"})
 
         assert _codes(edited) == {"status": ["approval_right_required"]}
         assert deleted.status_code == 403
-        row.refresh_from_db()
-        assert (row.status, row.condition) == ("approved", "синтетическое условие")
+        approved.refresh_from_db()
+        assert (approved.status, approved.condition) == ("approved", "синтетическое условие")
 
-    def test_saving_untouched_writes_nothing(self, curator, reviewer, approver, template) -> None:
-        row = _row(**COMPLETE, **_both_signed(reviewer, approver))
-        row.templates.set([template])
-        before = (row.reviewed_at, row.confirmed_at, row.updated_at)
+    def test_saving_untouched_writes_nothing(self, curator, template, approved) -> None:
+        before = (approved.reviewed_at, approved.confirmed_at, approved.updated_at)
 
-        response = _client(curator).post(reverse(CHANGE, args=[row.pk]), _form(template, status="approved"))
+        response = _client(curator).post(reverse(CHANGE, args=[approved.pk]), _form(template, status="approved"))
 
         assert response.status_code == 302, response.context["adminform"].form.errors
-        row.refresh_from_db()
-        assert (row.reviewed_at, row.confirmed_at, row.updated_at) == before
+        approved.refresh_from_db()
+        assert (approved.reviewed_at, approved.confirmed_at, approved.updated_at) == before
+
+
+# ── Правило сброса (то же, что у остального знания) ────────────────────────
+
+
+class TestAnEditDropsTheApproval:
+    @pytest.mark.parametrize(
+        "change",
+        [
+            pytest.param({"condition": "новое условие"}, id="condition"),
+            pytest.param({"action": "exclude"}, id="action"),
+            pytest.param({"source_ref": "DOC-2741-B"}, id="source_ref"),
+            pytest.param({"evidence_source": "другой источник"}, id="evidence_source"),
+            pytest.param({"review_date": "2028-01-01"}, id="review_date"),
+        ],
+    )
+    def test_an_edit_of_an_approved_row_returns_it_to_draft_and_is_journalled(
+        self, approver, template, approved, change
+    ) -> None:
+        """Сохраняющий оставил «подтверждено» — строка всё равно уходит в
+        черновик: правка сохранена, обе подписи сняты, куратору сказано."""
+        response = _client(approver).post(
+            reverse(CHANGE, args=[approved.pk]), _form(template, **{"status": "approved", **change}),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        approved.refresh_from_db()
+        assert (approved.status, approved.reviewed_by_id, approved.confirmed_by_id) == (
+            "system_inference", None, None,
+        )
+        assert "Подтверждение снято" in " ".join(str(m) for m in get_messages(response.wsgi_request))
+        journalled = ClaimApprovalReset.objects.get()
+        assert (journalled.reason, journalled.claim_kind, journalled.contraindication_id) == (
+            "claim_edited", "contraindication", approved.pk,
+        )
+        assert [c["field"] for c in journalled.changes] == list(change)
+        assert (journalled.was_approved, journalled.had_review) == (True, True)
+
+    def test_a_change_of_the_scope_is_a_change_of_content(
+        self, approver, template, face_template, approved
+    ) -> None:
+        response = _client(approver).post(
+            reverse(CHANGE, args=[approved.pk]),
+            _form(status="approved", templates=[str(template.pk), str(face_template.pk)]),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        approved.refresh_from_db()
+        assert approved.status == "system_inference"
+        assert ClaimApprovalReset.objects.get().changes[0]["field"] == "templates"
+
+    def test_a_new_approval_closes_the_reset_and_empties_the_queue(
+        self, approver, reviewer, template, approved
+    ) -> None:
+        owner_of_both = _staff("both-2741", EVERYDAY + APPROVE)
+        ClaimReviewer.objects.create(user=owner_of_both, claim_type="medical")
+        client = _client(owner_of_both)
+        url = reverse(CHANGE, args=[approved.pk])
+        edited = _form(template, condition="новое условие")
+
+        def queue() -> list:
+            page = client.get(reverse(LIST), {"needs_reconfirmation": "yes"})
+            return [row.pk for row in page.context["cl"].result_list]
+
+        client.post(url, {**edited, "status": "approved"})
+        waiting, notice = queue(), client.get(url).content.decode()
+        again = client.post(url, {**edited, "status": "approved", "mark_reviewed": "on"})
+        after = queue()
+
+        assert waiting == [approved.pk]
+        assert "подтверждение снято" in notice
+        assert again.status_code == 302, again.context["adminform"].form.errors
+        assert after == []
+        approved.refresh_from_db()
+        assert (approved.status, approved.reviewed_by_id, approved.confirmed_by_id) == (
+            "approved", owner_of_both.pk, owner_of_both.pk,
+        )
+
+
+class TestAChangeOfTheProcedureReachesItsContraindications:
+    def test_a_significant_change_returns_the_rules_of_this_procedure_to_draft(
+        self, template, approved
+    ) -> None:
+        template.name = "Процедура 2741, новая редакция"
+        template.save()
+
+        approved.refresh_from_db()
+        assert (approved.status, approved.reviewed_by_id) == ("system_inference", None)
+        assert approved.confirmed_by_id is not None  # след подтверждения остаётся
+        journalled = ClaimApprovalReset.objects.get()
+        assert (journalled.reason, journalled.claim_kind) == ("procedure_changed", "contraindication")
+        assert journalled.changes == [
+            {"field": "name", "old": "Процедура 2741", "new": "Процедура 2741, новая редакция"},
+        ]
+
+    def test_the_rules_of_neighbouring_procedures_are_untouched(
+        self, template, face_template, approved, reviewer, approver
+    ) -> None:
+        neighbour = _row(key="neighbour", **COMPLETE, **_both_signed(reviewer, approver))
+        neighbour.templates.set([face_template])
+
+        template.contraindications = "новая оговорка"
+        template.save()
+
+        neighbour.refresh_from_db()
+        approved.refresh_from_db()
+        assert (approved.status, neighbour.status) == ("system_inference", "approved")
+
+    def test_a_new_catalogue_version_alone_keeps_the_approval(self, template, approved) -> None:
+        template.approval_rule_version = "canonical_catalog_2027-01.json"
+        template.is_popular = not template.is_popular
+        template.save()
+
+        approved.refresh_from_db()
+        assert approved.status == "approved"
+        assert ClaimApprovalReset.objects.count() == 0
+
+    def test_a_rule_scoped_by_a_category_is_reset_when_the_category_moves(
+        self, template, face, reviewer, approver
+    ) -> None:
+        by_category = _row(key="by-category", **COMPLETE, **_both_signed(reviewer, approver))
+        by_category.categories.set([template.category])
+
+        subcategory = template.category
+        subcategory.parent = face
+        subcategory.save()
+
+        by_category.refresh_from_db()
+        assert by_category.status == "system_inference"
+
+    def test_the_procedure_admin_names_the_contraindications_it_reset(self, template, approved) -> None:
+        owner = User.objects.create_superuser(
+            username="owner-2741", password="pw",  # pragma: allowlist secret
+            email="owner-2741@example.test", role="admin",
+        )
+        url = reverse("admin:services_servicetemplate_change", args=[template.pk])
+        client = _client(owner)
+        page = client.get(url)
+        form = page.context["adminform"].form
+        data = {}
+        for name in form.fields:
+            value = form.initial.get(name)
+            if value is None or value is False:  # ``0 in (None, False)`` истинно — сравнивать тождеством
+                continue
+            data[form.add_prefix(name)] = "on" if value is True else value
+        for inline in page.context["inline_admin_formsets"]:
+            prefix = inline.formset.prefix
+            data.update({f"{prefix}-TOTAL_FORMS": "0", f"{prefix}-INITIAL_FORMS": "0"})
+
+        response = client.post(url, {**data, "contraindications": "новая оговорка"})
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        told = " ".join(str(m) for m in get_messages(response.wsgi_request))
+        assert "противопоказаний: 1" in told
+
+    def test_a_deleted_rule_leaves_its_journal_behind(self, approver, template, approved) -> None:
+        template.name = "Процедура 2741, новая редакция"
+        template.save()
+
+        response = _client(approver).post(reverse(DELETE, args=[approved.pk]), {"post": "yes"})
+
+        assert response.status_code == 302
+        assert not ProcedureContraindication.objects.filter(pk=approved.pk).exists()
+        journalled = ClaimApprovalReset.objects.get()
+        assert (journalled.claim_kind, journalled.contraindication_id) == ("contraindication", None)
+        assert journalled.claim_label.startswith("example_condition")
 
 
 # ── Засев из файла ─────────────────────────────────────────────────────────
@@ -455,8 +688,6 @@ class TestAFileBringsDraftsOnly:
             ServiceTemplate.objects.create(
                 category=category, name=f"Процедура {code}", name_short=f"Процедура {code}", canonical_code=code,
             )
-        from services.models import GoalOption
-
         GoalOption.objects.create(key="relax", label="Цель 2741")
         out = StringIO()
 

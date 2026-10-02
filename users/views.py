@@ -430,7 +430,7 @@ class SendCodeView(APIView):
 
         from .services import OTPService
         otp_service = OTPService()
-        otp_service.send_otp(phone)
+        otp_service.send_otp_or_fail(phone)
         return success_response({"message": "OTP sent"})
 
 

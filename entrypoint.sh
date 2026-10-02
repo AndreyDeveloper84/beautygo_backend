@@ -41,6 +41,13 @@ python manage.py migrate --noinput
 echo "Seeding procedure knowledge..."
 python manage.py seed_procedure_knowledge || echo "WARNING: seed_procedure_knowledge failed - the site starts without the new knowledge rows" >&2
 
+# DRF-2726: право подтверждать знание о процедурах — учёткам из переменной
+# KNOWLEDGE_APPROVER_USERNAMES (через запятую). Раздать право в админке может
+# только тот, кто вправе управлять правами; оболочки на стенде нет — это способ
+# выдать ПЕРВОЕ право. Переменная пуста — команда печатает это и завершается
+# успехом. Сбой сайт не останавливает.
+python manage.py grant_knowledge_approval || echo "WARNING: grant_knowledge_approval failed - nobody was granted the right to approve knowledge" >&2
+
 echo "Collecting static files..."
 python manage.py collectstatic --noinput
 

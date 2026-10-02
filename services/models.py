@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
-from django.db import models
+from django.db import models, transaction
+from django.utils import timezone
 from django.utils.text import slugify
 
 from core.image_privacy import MetadataFreeImageField
 from services.canonical_code import validate_canonical_code
 from services.normalization import normalize_service_name
+
+logger = logging.getLogger(__name__)
 
 
 class ServiceCategory(models.Model):
@@ -71,7 +75,43 @@ class ServiceCategory(models.Model):
         if not self.slug:
             self.slug = slugify(self.name, allow_unicode=True)
         self.clean()
-        super().save(*args, **kwargs)
+        # DRF-2726: перенос подкатегории под другой корень меняет область
+        # компетенции рецензента у всех её процедур.
+        was_parent = self._stored_parent_if_moved()
+        # Запись и сброс — одной транзакцией: иначе при сбое сброса перенос
+        # уже лежит в базе, повторное сохранение разницы не увидит, и
+        # подтверждения переживут перенос.
+        with transaction.atomic():
+            super().save(*args, **kwargs)
+            if was_parent is not None:
+                names = dict(
+                    type(self).objects.filter(pk__in=[was_parent[0], self.parent_id]).values_list("pk", "name")
+                )
+                change = {
+                    "field": "category.parent",
+                    "old": names.get(was_parent[0], "—"),
+                    "new": names.get(self.parent_id, "—"),
+                }
+                for template in ServiceTemplate.objects.filter(category=self):
+                    reset_claims_of_procedure(
+                        template, reason=ClaimApprovalReset.Reason.CATEGORY_MOVED, changes=[change],
+                    )
+                # DRF-2741: противопоказание, чья область названа этой категорией.
+                reset_claims(
+                    capabilities=ProcedureCapability.objects.none(),
+                    goal_links=CapabilityGoalLink.objects.none(),
+                    contraindications=ProcedureContraindication.objects.filter(categories=self),
+                    reason=ClaimApprovalReset.Reason.CATEGORY_MOVED, changes=[change],
+                )
+
+    def _stored_parent_if_moved(self) -> tuple[Any] | None:
+        """``(прежний parent_id,)``, если это сохранение переносит категорию; иначе ``None``."""
+        if self._state.adding:
+            return None
+        stored = type(self).objects.filter(pk=self.pk).values_list("parent_id", flat=True)[:1]
+        if not stored or stored[0] == self.parent_id:
+            return None
+        return (stored[0],)
 
     def __str__(self):
         if self.parent:
@@ -370,7 +410,61 @@ class ServiceTemplate(models.Model):
         self._assert_canonical_code_immutable()
         if self.canonical_code == "":
             self.canonical_code = None
-        super().save(*args, **kwargs)
+        changes = self._significant_changes()
+        # Запись и сброс — одной транзакцией: иначе при сбое сброса правка
+        # уже лежит в базе, повторное сохранение разницы не увидит, и
+        # подтверждения переживут правку.
+        with transaction.atomic():
+            super().save(*args, **kwargs)
+            #: Что это сохранение сделало со знанием о процедуре — читает
+            #: админка, чтобы сказать куратору.
+            self.knowledge_reset = (
+                reset_claims_of_procedure(
+                    self, reason=ClaimApprovalReset.Reason.PROCEDURE_CHANGED, changes=changes,
+                )
+                if changes else None
+            )
+
+    #: Поля процедуры, правка которых заведомо НЕ меняет того, о чём утверждает
+    #: знание о ней (DRF-2726, требование владельца): штамп версии каталога
+    #: (каким изданием справочника и когда строка одобрена) и витринные
+    #: признаки. Смена номера версии каталога сама по себе подтверждения не
+    #: снимает. Список разрешительный: любое другое поле — в том числе
+    #: добавленное позже — считается значимым, потому что неизменность смысла
+    #: по нему доказать нечем. В списке НЕТ ``lifecycle`` и отметок о
+    #: происхождении флага гейта здоровья (``health_check_*``): одобрение
+    #: чернового канона и подтверждение флага здоровья меняют то, что известно
+    #: о процедуре, — и знание о ней подтверждается заново.
+    KNOWLEDGE_NEUTRAL_FIELDS = frozenset({
+        "approval_rule_version", "approval_source_ref", "approved_at", "approved_by", "approved_rule",
+        "is_popular", "sort_order", "created_at", "updated_at",
+    })
+
+    def _significant_changes(self) -> list[dict[str, str]]:
+        """Какие значимые для знания поля меняет это сохранение: ``[{field, old, new}]``."""
+        if self._state.adding:
+            return []
+        fields = [
+            f for f in self._meta.concrete_fields
+            if f.name not in self.KNOWLEDGE_NEUTRAL_FIELDS and not f.primary_key
+        ]
+        stored = type(self).objects.filter(pk=self.pk).values(*(f.attname for f in fields)).first()
+        if stored is None:
+            return []
+        changes = []
+        for f in fields:
+            before, after = stored[f.attname], getattr(self, f.attname)
+            if before == after:
+                continue
+            if _same_text(before, after):
+                # Перевод строки из браузера (CRLF) против засеянного (LF) —
+                # не правка: иначе первое же сохранение формы сбрасывало бы знание.
+                continue
+            if f.name == "category":
+                names = dict(ServiceCategory.objects.filter(pk__in=[before, after]).values_list("pk", "name"))
+                before, after = names.get(before, before), names.get(after, after)
+            changes.append({"field": f.name, "old": _journal_text(before), "new": _journal_text(after)})
+        return changes
 
     def __str__(self) -> str:
         return f"{self.name} ({self.category.name})"
@@ -1585,6 +1679,28 @@ class GoalOption(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        # DRF-2726: связь возможности с целью утверждает «помогает ЭТОЙ цели».
+        # Смена ключа или названия цели меняет предмет утверждения — её
+        # подтверждённые связи возвращаются в черновик (адресно: только связи
+        # этой цели).
+        changes = []
+        if not self._state.adding:
+            stored = type(self).objects.filter(pk=self.pk).values("key", "label").first() or {}
+            changes = [
+                {"field": f"goal.{name}", "old": _journal_text(stored[name]), "new": _journal_text(getattr(self, name))}
+                for name in ("key", "label")
+                if name in stored and stored[name] != getattr(self, name)
+            ]
+        with transaction.atomic():
+            super().save(*args, **kwargs)
+            if changes:
+                reset_claims(
+                    capabilities=ProcedureCapability.objects.none(),
+                    goal_links=CapabilityGoalLink.objects.filter(goal=self),
+                    reason=ClaimApprovalReset.Reason.GOAL_CHANGED, changes=changes,
+                )
+
     class Meta:
         ordering = ['sort_order', 'key']
         indexes = [
@@ -1700,6 +1816,91 @@ class GoalDirection(models.Model):
 # которая держит правило «вывод системы ≠ подтверждённое человеком».
 
 
+def _journal_text(value: Any) -> str:
+    """Значение поля — строкой для журнала снятых подтверждений."""
+    return "" if value is None else str(value)
+
+
+def _same_text(before: Any, after: Any) -> bool:
+    """Два текста, различающиеся только видом перевода строки."""
+    return (
+        isinstance(before, str) and isinstance(after, str)
+        and before.replace("\r\n", "\n") == after.replace("\r\n", "\n")
+    )
+
+
+def reset_claims(
+    *, capabilities, goal_links, reason: str, changes: list[dict[str, str]], contraindications=None,
+) -> dict[str, int]:
+    """Снять подтверждение и проверку с ЭТИХ утверждений и записать, почему (DRF-2726).
+
+    Требование владельца: подтверждение не переносится на изменившийся
+    предмет, а куратор должен видеть, что и почему требует повторной
+    проверки. По каждому затронутому утверждению пишется строка
+    :class:`ClaimApprovalReset` — причина, что изменилось (было → стало),
+    время; сам список затронутых и есть эти строки.
+
+    Затронутое утверждение — то, которому есть что терять: подтверждённое
+    или несущее отметку рецензента. Меняются только статус и отметка;
+    содержание и след подтверждения (``confirmed_by``, ``confirmed_at``)
+    остаются, как после миграций ``0032``–``0038``.
+
+    В журнал приложения уходят числа и причина — без содержания.
+    """
+    counts: dict[str, int] = {}
+    journal: list[ClaimApprovalReset] = []
+    # Журнал и сброс — вместе или никак: строка в черновике без записи в
+    # журнале не попала бы в очередь куратора.
+    with transaction.atomic():
+        groups = [("capabilities", capabilities, "capability"), ("goal_links", goal_links, "goal_link")]
+        if contraindications is not None:
+            # DRF-2741: правило безопасности, область которого изменилась, —
+            # такое же знание о процедуре, и подтверждается заново.
+            groups.append(("contraindications", contraindications, "contraindication"))
+        for name, rows, kind in groups:
+            affected = list(
+                rows.filter(models.Q(status="approved") | models.Q(reviewed_by__isnull=False))
+            )
+            journal += [
+                ClaimApprovalReset(
+                    reason=reason, changes=changes, claim_kind=kind, claim_label=str(row)[:300],
+                    was_approved=row.status == "approved", had_review=row.reviewed_by_id is not None,
+                    **{kind: row},
+                )
+                for row in affected
+            ]
+            rows.model.objects.filter(pk__in=[row.pk for row in affected]).update(
+                status="system_inference", reviewed_by=None, reviewed_at=None,
+            )
+            counts[name] = len(affected)
+        ClaimApprovalReset.objects.bulk_create(journal)
+    if journal:
+        logger.warning("knowledge.approvals_reset reason=%s counts=%s", reason, counts)
+    return counts
+
+
+def reset_claims_of_procedure(template: Any, *, reason: str, changes: list[dict[str, str]]) -> dict[str, int]:
+    """Снять подтверждение со знания об ЭТОЙ процедуре — и только о ней.
+
+    Требование владельца: сброс адресный. Где система может определить,
+    какие утверждения зависят от изменившегося, — сбрасываются только они
+    (так устроены правка самого утверждения и правка возможности, от которой
+    зависят её связи с целями). **От какого поля процедуры зависит конкретное
+    утверждение, нигде не записано** — определить нечем, поэтому значимая
+    правка процедуры возвращает в черновик ВСЕ утверждения этой процедуры.
+    Знание о соседних процедурах не трогается никогда.
+
+    Предел: срабатывает на ``save()`` процедуры и категории. Массовое
+    ``QuerySet.update()`` его обходит — как любое правило уровня модели.
+    """
+    return reset_claims(
+        capabilities=ProcedureCapability.objects.filter(template=template),
+        goal_links=CapabilityGoalLink.objects.filter(capability__template=template),
+        contraindications=ProcedureContraindication.objects.filter(templates=template),
+        reason=reason, changes=changes,
+    )
+
+
 #: Срок результата «без слов» — ни одной буквы, только цифры и знаки (DRF-2726).
 #: Одно выражение на базу (ограничения ниже), на входы
 #: (:func:`services.knowledge_intake.timeframe_errors`) и на шаг миграции.
@@ -1779,6 +1980,25 @@ class ClaimEvidence(models.Model):
         LEGAL_RULE = "legal_rule", "Правовая норма"
         PRODUCT_POLICY = "product_policy", "Продуктовая политика"
 
+    class ClaimType(models.TextChoices):
+        """Тип утверждения — по нему решается, нужен ли рецензент (DRF-2726).
+
+        Список — УМОЛЧАНИЕ из слов владельца 02.10 (блок A: «проф./физиол./
+        мед. утверждения»), а не его решение; меняется миграцией.
+        """
+
+        #: Тип не указан. С ним строку подтвердить нельзя.
+        UNCLASSIFIED = "unclassified", "Не указан"
+        #: Продуктовое / организационное — рецензент не нужен.
+        PRODUCT = "product", "Продуктовое"
+        PROFESSIONAL = "professional", "Профессиональное"
+        PHYSIOLOGICAL = "physiological", "Физиологическое"
+        MEDICAL = "medical", "Медицинское"
+
+    #: Типы, которые подтверждаются только после проверки назначенным
+    #: рецензентом. УМОЛЧАНИЕ: все, кроме ``product`` (главный выбор владельца).
+    REVIEW_REQUIRED_CLAIM_TYPES = ("professional", "physiological", "medical")
+
     status = models.CharField(
         max_length=24, choices=Status.choices, default=Status.SYSTEM_INFERENCE,
     )
@@ -1813,6 +2033,21 @@ class ClaimEvidence(models.Model):
     source_ref = models.CharField(max_length=200, blank=True, default="")
     #: Срок годности подтверждения; NULL — бессрочно. Истёкшее не говорится.
     valid_until = models.DateTimeField(null=True, blank=True)
+
+    # DRF-2726 (блок A): «рецензент проверил факт» — отдельное решение от
+    # «куратор утвердил использование» (``confirmed_by``), со своим автором.
+    claim_type = models.CharField(
+        max_length=16, choices=ClaimType.choices, default=ClaimType.UNCLASSIFIED,
+    )
+    # PROTECT по той же причине, что у ``confirmed_by`` (DRF-2612): CHECK ниже
+    # требует это поле непустым у подтверждённой строки проверяемого типа.
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True, blank=True,
+        related_name="+",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1870,6 +2105,29 @@ class ClaimEvidence(models.Model):
                     )
                 ),
                 name="%(class)s_approved_evidence_kind_known",
+            ),
+            # Подтверждённое утверждение имеет тип: без типа неизвестно, нужен
+            # ли ему рецензент.
+            models.CheckConstraint(
+                condition=~models.Q(status="approved") | ~models.Q(claim_type="unclassified"),
+                name="%(class)s_approved_has_claim_type",
+            ),
+            # Тип, требующий рецензента, подтверждается только с отметкой проверки.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="approved")
+                    | ~models.Q(claim_type__in=["professional", "physiological", "medical"])
+                    | (models.Q(reviewed_by__isnull=False) & models.Q(reviewed_at__isnull=False))
+                ),
+                name="%(class)s_approved_review_when_required",
+            ),
+            # Отметка проверки цельная: человек и время — вместе или никак.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(reviewed_by__isnull=True) & models.Q(reviewed_at__isnull=True))
+                    | (models.Q(reviewed_by__isnull=False) & models.Q(reviewed_at__isnull=False))
+                ),
+                name="%(class)s_review_is_whole",
             ),
         ]
 
@@ -1953,6 +2211,21 @@ class ProcedureCapability(ClaimEvidence):
             ),
         ]
         ordering = ["template", "key"]
+        # Право подтверждать — отдельное от права изменять (DRF-2726, решение
+        # владельца 02.10, блок A). Кому его дать, решает владелец; здесь —
+        # только носитель. Исполняет его форма админки (services/admin.py).
+        permissions = [
+            ("approve_procedurecapability", "Может подтверждать возможности процедур"),
+            # DRF-2726: тип утверждения решает, нужен ли рецензент, — значит,
+            # объявить утверждение «продуктовым» и подтвердить его без
+            # рецензента не может тот же, кого тип ограничивает. Это право
+            # держателя продуктовых границ (третья роль блока A); одно на обе
+            # таблицы знания.
+            (
+                "approve_claim_without_reviewer",
+                "Может подтверждать утверждения без рецензента (продуктовые границы)",
+            ),
+        ]
 
     def __str__(self) -> str:
         # Имя процедуры, а не её UUID: эту строку читает куратор — в списке,
@@ -2008,6 +2281,10 @@ class CapabilityGoalLink(ClaimEvidence):
     variability_note = models.TextField(blank=True, default="")
 
     class Meta(ClaimEvidence.Meta):
+        # Право подтверждать — отдельное от права изменять; см. ProcedureCapability.
+        permissions = [
+            ("approve_capabilitygoallink", "Может подтверждать связи возможностей с целями"),
+        ]
         constraints = [
             *ClaimEvidence.Meta.constraints,
             models.UniqueConstraint(
@@ -2057,6 +2334,173 @@ class CapabilityGoalLink(ClaimEvidence):
         return f"{self.capability} → {self.goal.label}"
 
 
+class ClaimApprovalReset(models.Model):
+    """Журнал снятых подтверждений: что, когда и почему вернулось в черновик (DRF-2726).
+
+    Требование владельца: снятие подтверждения фиксируется — причина, старое и
+    новое значение, время, затронутые утверждения — и показывается куратору
+    как необходимость повторной проверки. Строка — одно затронутое
+    утверждение одного события; старое и новое значение лежат в ``changes``
+    (внутренний аудит куратора: содержание здесь допустимо, наружу и в журнал
+    приложения оно не уходит).
+
+    Кто сделал правку, строка не хранит: это уже записано в журнале админки
+    (``LogEntry``) у процедуры или утверждения.
+    """
+
+    class Reason(models.TextChoices):
+        #: Правка типа, содержания или источника самого утверждения.
+        CLAIM_EDITED = "claim_edited", "Изменено само утверждение"
+        #: Правка возможности, о которой говорит связь с целью.
+        CAPABILITY_EDITED = "capability_edited", "Изменена возможность, о которой связь"
+        #: Правка значимого поля процедуры.
+        PROCEDURE_CHANGED = "procedure_changed", "Изменены значимые данные процедуры"
+        #: Категория процедуры перенесена под другой корень (другая область).
+        CATEGORY_MOVED = "category_moved", "Категория процедуры перенесена"
+        #: Изменена цель, о которой говорит связь.
+        GOAL_CHANGED = "goal_changed", "Изменена цель, о которой связь"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    reason = models.CharField(max_length=24, choices=Reason.choices)
+    # SET_NULL, не CASCADE: журнал переживает удаление утверждения (иначе
+    # удаление стирало бы след), а само удаление не упирается в журнал,
+    # который в админке только читается. Что это было за утверждение, после
+    # удаления говорят ``claim_kind`` и ``claim_label``.
+    capability = models.ForeignKey(
+        ProcedureCapability, on_delete=models.SET_NULL, null=True, blank=True, related_name="approval_resets",
+    )
+    goal_link = models.ForeignKey(
+        CapabilityGoalLink, on_delete=models.SET_NULL, null=True, blank=True, related_name="approval_resets",
+    )
+    contraindication = models.ForeignKey(
+        "services.ProcedureContraindication", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="approval_resets",
+    )
+    claim_kind = models.CharField(
+        max_length=16,
+        choices=[
+            ("capability", "Возможность"), ("goal_link", "Связь с целью"),
+            ("contraindication", "Противопоказание"),
+        ],
+    )
+    claim_label = models.CharField(max_length=300, blank=True, default="")
+    #: Когда утверждение подтвердили заново. Пусто — повторная проверка ещё нужна.
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    #: Что изменилось: ``[{"field": …, "old": …, "new": …}]``.
+    changes = models.JSONField(default=list)
+    was_approved = models.BooleanField(default=False)
+    had_review = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            # Строка — не более чем об одном утверждении (после его удаления — ни об одном).
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(capability__isnull=True) & models.Q(goal_link__isnull=True))
+                    | (models.Q(capability__isnull=True) & models.Q(contraindication__isnull=True))
+                    | (models.Q(goal_link__isnull=True) & models.Q(contraindication__isnull=True))
+                ),
+                name="claimapprovalreset_at_most_one_claim",
+            ),
+        ]
+
+    @property
+    def claim(self):
+        return self.capability or self.goal_link or self.contraindication or self.claim_label
+
+    @staticmethod
+    def kind_of(claim) -> str:
+        if isinstance(claim, ProcedureCapability):
+            return "capability"
+        if isinstance(claim, CapabilityGoalLink):
+            return "goal_link"
+        return "contraindication"
+
+    @classmethod
+    def resolve_for(cls, claim) -> int:
+        """Утверждение подтверждено заново — его открытые записи закрываются."""
+        return cls.objects.filter(
+            resolved_at__isnull=True, **{cls.kind_of(claim): claim},
+        ).update(resolved_at=timezone.now())
+
+    def describe(self) -> str:
+        """Одна строка для куратора: причина и что изменилось."""
+        what = "; ".join(
+            f"{c.get('field')}: «{c.get('old')}» → «{c.get('new')}»" for c in self.changes
+        ) or "—"
+        return f"{self.get_reason_display()}. {what}"
+
+    def __str__(self) -> str:
+        return f"{self.created_at:%Y-%m-%d %H:%M} · {self.claim} · {self.get_reason_display()}"
+
+
+class ClaimReviewer(models.Model):
+    """Назначение рецензента: кто вправе проверять утверждения какого типа (DRF-2726).
+
+    Решение владельца 02.10 (блок A): медицинские и физиологические
+    утверждения проверяет «только назначенный рецензент подходящей
+    квалификации»; «тело/массаж и кожа лица — возможно, разные люди». Строка
+    этой таблицы и есть назначение. Имён в коде нет — строки заводит владелец
+    в админке.
+
+    ``category`` — область компетенции: корневая категория каталога, покрывает
+    её и её подкатегории. Пусто — любая область.
+
+    Право администратора компетенцией не является: суперпользователь без
+    строки здесь проверить не может (:func:`services.knowledge_review.may_review`).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # PROTECT: учётка сотрудника физически не удаляется (стирание — tombstone),
+    # а назначение — след того, кто был вправе проверять.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="claim_reviewer_appointments",
+    )
+    claim_type = models.CharField(max_length=16, choices=ClaimEvidence.ClaimType.choices)
+    category = models.ForeignKey(
+        ServiceCategory, on_delete=models.PROTECT, null=True, blank=True, related_name="+",
+    )
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            # Назначать можно только на тип, который рецензент проверяет.
+            models.CheckConstraint(
+                condition=models.Q(claim_type__in=["professional", "physiological", "medical"]),
+                name="claimreviewer_type_is_reviewable",
+            ),
+            models.UniqueConstraint(
+                fields=["user", "claim_type", "category"],
+                condition=models.Q(category__isnull=False),
+                name="claimreviewer_user_type_category_uniq",
+            ),
+            models.UniqueConstraint(
+                fields=["user", "claim_type"],
+                condition=models.Q(category__isnull=True),
+                name="claimreviewer_user_type_any_category_uniq",
+            ),
+        ]
+        ordering = ["user", "claim_type"]
+
+    def clean(self) -> None:
+        if self.category_id is not None and self.category.parent_id is not None:
+            raise ValidationError(
+                {"category": "Область компетенции — корневая категория; она покрывает свои подкатегории."}
+            )
+        if self.claim_type and self.claim_type not in ClaimEvidence.REVIEW_REQUIRED_CLAIM_TYPES:
+            raise ValidationError(
+                {"claim_type": "Рецензент назначается только на тип утверждения, требующий проверки."}
+            )
+
+    def __str__(self) -> str:
+        area = self.category.name if self.category_id else "любая область"
+        return f"{self.user} · {self.get_claim_type_display()} · {area}"
+
+
 class ProcedureContraindication(models.Model):
     """Противопоказание: условие → что делать (DRF-2741, слот C8).
 
@@ -2071,16 +2515,29 @@ class ProcedureContraindication(models.Model):
     здоровья живут как жили. Набор — маршрутизация, а не диагностика:
     отсутствие условия в таблице не доказывает безопасность человеку.
 
-    Две подписи, как у остального знания: ``reviewed_by`` — рецензент проверил
-    условие и действие, ``confirmed_by`` — куратор утвердил использование.
+    Две подписи, как у остального знания (DRF-2726): ``reviewed_by`` —
+    рецензент проверил условие и действие, ``confirmed_by`` — куратор утвердил
+    использование. C8 владелец назвал требующим профильной проверки ВСЕГДА,
+    поэтому типа утверждения у строки нет: проверяет её назначенный рецензент
+    медицинских утверждений (:data:`REVIEW_CLAIM_TYPE`), чьи назначения
+    покрывают всю область применения строки.
+
     Подтверждённая строка без источника, вида доказательства, даты пересмотра,
     отметки рецензента и подписи не хранится (ограничение базы). Область
     применения — связи «многие ко многим», базой не проверяются: её у
     подтверждённой строки спрашивают входы.
 
+    Правило сброса то же, что у остального знания: правка содержания или
+    области снимает подтверждение; значимая правка процедуры из области
+    применения возвращает строку в черновик
+    (:func:`reset_claims_of_procedure`).
+
     ``key`` — стабильный машинный идентификатор, как у возможности: по нему
     засев из файла узнаёт уже заведённую строку.
     """
+
+    #: Тип утверждения, рецензент которого проверяет противопоказания.
+    REVIEW_CLAIM_TYPE = "medical"
 
     class Action(models.TextChoices):
         """Что делать при условии — закрытый список (решение владельца №2)."""
@@ -2131,7 +2588,6 @@ class ProcedureContraindication(models.Model):
     class Meta:
         ordering = ["key"]
         permissions = [
-            ("review_procedurecontraindication", "Может отмечать противопоказание проверенным (рецензент)"),
             ("approve_procedurecontraindication", "Может подтверждать противопоказания"),
         ]
         constraints = [

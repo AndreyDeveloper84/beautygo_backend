@@ -15,6 +15,13 @@ from services.knowledge_intake import (
     provenance_errors,
     timeframe_errors,
 )
+from services.knowledge_review import (
+    UNCLASSIFIED,
+    may_approve_without_reviewer,
+    may_review,
+    may_review_scope,
+    requires_review,
+)
 from services.mapping.store import StoredReport
 from services.mapping.types import Decision
 from services.mapping_review import confirm_single_candidate, evidence_text, mark_canon_gap
@@ -23,6 +30,10 @@ from services.normalization import normalize_service_name
 from .models import (
     CanonGapRequest,
     CapabilityGoalLink,
+    ClaimApprovalReset,
+    ClaimEvidence,
+    ClaimReviewer,
+    reset_claims,
     DraftSalonService,
     ExternalBusyInterval,
     ExternalSourceMapping,
@@ -68,6 +79,24 @@ class ServiceCategoryAdmin(admin.ModelAdmin):
     ordering = ('sort_order', 'name')
     inlines = [ServiceTemplateInline]
 
+    def save_formset(self, request, form, formset, change):
+        super().save_formset(request, form, formset, change)
+        # DRF-2726: правка процедуры во вложенной таблице тоже возвращает
+        # знание о ней в черновик — куратор должен узнать об этом здесь же.
+        saved = list(formset.new_objects) + [obj for obj, _ in formset.changed_objects]
+        resets = [obj.knowledge_reset for obj in saved if getattr(obj, "knowledge_reset", None)]
+        capabilities = sum(reset["capabilities"] for reset in resets)
+        goal_links = sum(reset["goal_links"] for reset in resets)
+        if capabilities or goal_links:
+            self.message_user(
+                request,
+                "У процедур изменились значимые данные: подтверждённое знание о них "
+                f"возвращено в черновик и требует повторной проверки — возможностей: "
+                f"{capabilities}, связей с целями: {goal_links}. Что именно изменилось — "
+                "в журнале снятых подтверждений.",
+                level=messages.WARNING,
+            )
+
 
 class RegionalPricingInline(admin.TabularInline):
     model = RegionalPricing
@@ -109,6 +138,23 @@ class ServiceTemplateAdmin(admin.ModelAdmin):
     list_editable = ('is_popular', 'sort_order')
     ordering = ('category', '-is_popular', 'sort_order', 'name')
     inlines = [RegionalPricingInline, ServiceTemplateSynonymInline]
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        # DRF-2726: значимая правка процедуры возвращает знание о ней в
+        # черновик (правило — в ``ServiceTemplate.save``); куратор должен это
+        # увидеть сразу, а не обнаружить потом.
+        reset = getattr(obj, "knowledge_reset", None)
+        if reset and any(reset.values()):
+            self.message_user(
+                request,
+                "У процедуры изменились значимые данные: подтверждённое знание о ней "
+                f"возвращено в черновик и требует повторной проверки — возможностей: "
+                f"{reset['capabilities']}, связей с целями: {reset['goal_links']}, "
+                f"противопоказаний: {reset.get('contraindications', 0)}. Что именно "
+                "изменилось — в журнале снятых подтверждений.",
+                level=messages.WARNING,
+            )
 
     def get_readonly_fields(self, request, obj=None):
         # MAP-AUTO-01: код, однажды поставленный, на форме не редактируется.
@@ -720,6 +766,14 @@ class CanonGapRequestAdmin(admin.ModelAdmin):
 # Путь ввода для куратора (владельца). Модели существовали с DRF-2606, но
 # вписать в них строку было нечем: ни формы, ни команды. Здесь — форма.
 #
+# **Подтверждать вправе не каждый, кто вправе изменять** (решение владельца
+# 02.10, блок A; DRF-2726). Право изменения даёт вести черновики. Сохранить
+# строку подтверждённой, изменить подтверждённую, вернуть её в черновик или
+# удалить может только тот, у кого есть отдельное право
+# ``services.approve_<модель>``. Кому его дать, решает владелец — через группы
+# и права в этой же админке; у суперпользователя оно есть всегда. Код имён не
+# знает.
+#
 # Одно правило держит обе формы: **подтверждает тот, кто сохранил.** Полей
 # «кто подтвердил» и «когда» в форме нет — их ставит ``save_model`` из
 # ``request.user`` и текущего времени, как у заявок о разрыве канона выше.
@@ -728,14 +782,22 @@ class CanonGapRequestAdmin(admin.ModelAdmin):
 # словами: база тоже откажет, но именем ограничения и уже после нажатия.
 
 _CLAIM_READONLY = (
+    "reset_notice",
+    "reviewed_by", "reviewed_at",
     "confirmed_by", "confirmed_at", "confirmed_rule", "rule_version",
     "created_at", "updated_at",
 )
+
+#: Поля формы, правка которых НЕ меняет содержания утверждения: статус и срок
+#: годности — решения куратора, отметка проверки — действие рецензента. Правка
+#: любого другого поля снимает прежнюю отметку проверки (DRF-2726).
+_NOT_CLAIM_CONTENT = frozenset({"status", "valid_until", "mark_reviewed"})
 
 _CLAIM_FIELDSET = (
     "Утверждение и основание",
     {
         "fields": (
+            "claim_type", "mark_reviewed",
             "status", "claim_scope", "prohibited_statement", "limitations",
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         ),
@@ -745,22 +807,180 @@ _CLAIM_FIELDSET = (
             "Автором подтверждения станет тот, кто сохраняет. "
             "Предмет запрета (prohibited statement) заполняется только у запрещённого "
             "утверждения: что именно нельзя утверждать. Он нужен внутреннему "
-            "проверяющему; клиенту не говорится."
+            "проверяющему; клиенту не говорится. "
+            "Тип утверждения решает, нужен ли рецензент: профессиональное, "
+            "физиологическое и медицинское подтверждаются только после отметки "
+            "проверки, которую ставит назначенный рецензент."
         ),
     },
 )
 
 _CONFIRMATION_FIELDSET = (
-    "Подтверждение (ставится при сохранении)",
+    "Проверка и подтверждение (ставятся при сохранении)",
     {"fields": _CLAIM_READONLY},
 )
+
+
+def _may_approve(user, model) -> bool:
+    """Есть ли у человека право подтверждать знание этой таблицы.
+
+    Нет пользователя — нет права: форма, собранная вне админки, подтвердить
+    не может.
+    """
+    if user is None:
+        return False
+    return user.has_perm(f"{model._meta.app_label}.approve_{model._meta.model_name}")
 
 
 class _ClaimAdminForm(forms.ModelForm):
     """Общая проверка основания — ошибки по полям, а не имена ограничений базы."""
 
+    #: Кто сохраняет. Ставит ``_ClaimAdmin.get_form`` на классе формы,
+    #: собранном под один запрос.
+    acting_user = None
+    #: Остаётся ли в силе прежняя отметка проверки (считает ``clean``,
+    #: читает ``_ClaimAdmin.save_model``).
+    review_kept = False
+    #: Изменилось ли содержание утверждения (считает ``clean``).
+    content_changed = False
+    #: Что именно изменилось в содержании: ``[{field, old, new}]`` — для журнала.
+    content_changes: list = []
+    #: Снято ли этим сохранением прежнее подтверждение (считает ``clean``).
+    approval_dropped = False
+
+    mark_reviewed = forms.BooleanField(
+        required=False,
+        label="Проверено мной как рецензентом",
+        help_text=(
+            "Отметку ставит назначенный рецензент — за себя. Она значит: утверждение "
+            "в нынешней формулировке проверено. Любая правка содержания её снимает."
+        ),
+    )
+
+    def _claim_template(self, cleaned):
+        """Процедура, о которой утверждение, — для области компетенции рецензента."""
+        return cleaned.get("template")
+
+    def _clean_review(self, cleaned) -> None:
+        """Проверка рецензентом: кто вправе отметить и хватает ли отметки (DRF-2726)."""
+        claim_type = cleaned.get("claim_type") or UNCLASSIFIED
+        marks = bool(cleaned.get("mark_reviewed"))
+        if marks:
+            if not requires_review(claim_type):
+                self.add_error(
+                    "mark_reviewed",
+                    forms.ValidationError(
+                        "Утверждение этого типа рецензент не проверяет. Укажите тип: "
+                        "профессиональное, физиологическое или медицинское.",
+                        code="review_not_applicable",
+                    ),
+                )
+                marks = False
+            elif not may_review(
+                self.acting_user, claim_type=claim_type, template=self._claim_template(cleaned),
+            ):
+                self.add_error(
+                    "mark_reviewed",
+                    forms.ValidationError(
+                        "У вас нет назначения рецензентом для утверждений этого типа "
+                        "в этой области. Рецензентов назначает владелец.",
+                        code="reviewer_competence_required",
+                    ),
+                )
+                marks = False
+
+        had_review = not self.instance._state.adding and self.instance.reviewed_by_id is not None
+        content_changed = bool(set(self.changed_data) - _NOT_CLAIM_CONTENT)
+        self.content_changed = content_changed
+        # ``self.instance`` ещё несёт прежние значения — отсюда «было».
+        self.content_changes = [
+            {
+                "field": name,
+                "old": str(getattr(self.instance, name, "") or ""),
+                "new": str(cleaned.get(name) or ""),
+            }
+            for name in self.changed_data if name not in _NOT_CLAIM_CONTENT
+        ] if not self.instance._state.adding else []
+        self.review_kept = had_review and not content_changed
+
+        if cleaned.get("status") != APPROVED:
+            return
+        if claim_type == UNCLASSIFIED:
+            if not self.has_error("claim_type"):
+                self.add_error(
+                    "claim_type",
+                    forms.ValidationError(
+                        "Подтвердить можно только утверждение с указанным типом.",
+                        code="claim_type_required",
+                    ),
+                )
+        elif requires_review(claim_type) and not (marks or self.review_kept):
+            if had_review and content_changed:
+                message = (
+                    "Содержание изменилось после проверки рецензентом — прежняя отметка "
+                    "к новой формулировке не относится. Подтвердить можно после новой проверки."
+                )
+            else:
+                message = (
+                    "Утверждение этого типа подтверждается только после проверки "
+                    "назначенным рецензентом. Отметки проверки нет."
+                )
+            self.add_error("status", forms.ValidationError(message, code="review_required"))
+        elif not requires_review(claim_type) and (self.instance._state.adding or self.changed_data):
+            # Тип объявляет тот, кого он ограничивает. Подтвердить утверждение
+            # без рецензента — решение держателя продуктовых границ, а не
+            # любого, у кого есть право подтверждения. Сохранение без правок
+            # права не требует — оно ничего не пишет.
+            if not may_approve_without_reviewer(self.acting_user) and not self.has_error("claim_type"):
+                self.add_error(
+                    "claim_type",
+                    forms.ValidationError(
+                        "Подтвердить утверждение без проверки рецензентом может только тот, "
+                        "кому владелец дал право продуктовых границ. Если утверждение "
+                        "профессиональное, физиологическое или медицинское — укажите этот "
+                        "тип и передайте рецензенту.",
+                        code="product_boundary_right_required",
+                    ),
+                )
+
     def clean(self):
         cleaned = super().clean()
+        # ``self.instance`` здесь ещё несёт значения из базы: форма переносит
+        # свои поля в экземпляр позже, в ``_post_clean``. ``_state.adding``, а
+        # не ``pk``: первичный ключ — UUID по умолчанию и есть у ещё не
+        # сохранённой строки.
+        was_approved = not self.instance._state.adding and self.instance.status == APPROVED
+        # Требование владельца (DRF-2726): смена ТИПА, СОДЕРЖАНИЯ или ИСТОЧНИКА
+        # снимает подтверждение — подтверждённой строка остаться не может.
+        # Правка сохраняется, а строка тем же сохранением уходит в черновик:
+        # подтвердить новую редакцию — отдельное действие. Не содержание —
+        # статус, срок годности и отметка рецензента (``_NOT_CLAIM_CONTENT``).
+        self.approval_dropped = (
+            was_approved
+            and cleaned.get("status") == APPROVED
+            and bool(set(self.changed_data) - _NOT_CLAIM_CONTENT)
+        )
+        if self.approval_dropped:
+            cleaned["status"] = ClaimEvidence.Status.SYSTEM_INFERENCE.value
+        self._clean_review(cleaned)
+        # Право подтверждения.
+        wants_approved = cleaned.get("status") == APPROVED
+        untouched = was_approved and wants_approved and not self.changed_data
+        if (was_approved or wants_approved) and not untouched:
+            if not _may_approve(self.acting_user, self._meta.model):
+                if was_approved:
+                    message = (
+                        "Эта строка подтверждена. Менять её и возвращать в черновик может "
+                        "только тот, кому владелец дал право подтверждения."
+                    )
+                else:
+                    message = (
+                        "Подтверждать знание может только тот, кому владелец дал право "
+                        "подтверждения. Черновик можно сохранить и без него."
+                    )
+                self.add_error(
+                    "status", forms.ValidationError(message, code="approval_right_required"),
+                )
         # В форме подтверждающий есть всегда — это тот, кто сохраняет; его
         # впишет ``save_model``. Поэтому из двух условий базы форма спрашивает
         # одно: источник.
@@ -795,12 +1015,34 @@ class ProcedureCapabilityAdminForm(_ClaimAdminForm):
         fields = (
             "template", "key", "text_client", "text_professional",
             "expected_effect", "result_timeframe", "variability_note",
+            "claim_type",
             "status", "claim_scope", "prohibited_statement", "limitations",
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         )
 
+    def dependent_links(self):
+        """Связи этой возможности с целями — утверждения, зависящие от неё."""
+        if self.instance._state.adding:
+            return CapabilityGoalLink.objects.none()
+        return CapabilityGoalLink.objects.filter(capability=self.instance)
+
     def clean(self):
         cleaned = super().clean()
+        # Связь с целью подтверждена и проверена как утверждение об ЭТОЙ
+        # возможности. Правка содержания возможности вернёт её подтверждённые
+        # связи в черновик и снимет с них проверку (делает ``save_model``) — а
+        # менять подтверждённое вправе не каждый (DRF-2726 п.2).
+        if self.content_changed and self.dependent_links().filter(status=APPROVED).exists():
+            if not _may_approve(self.acting_user, CapabilityGoalLink):
+                self.add_error(
+                    None,
+                    forms.ValidationError(
+                        "У этой возможности есть подтверждённые связи с целями. Правка "
+                        "содержания вернёт их в черновик и снимет с них проверку — это может "
+                        "сделать только тот, у кого есть право подтверждения связей.",
+                        code="linked_review_would_be_dropped",
+                    ),
+                )
         for field, message in timeframe_errors(
             field="result_timeframe",
             value=cleaned.get("result_timeframe") or "",
@@ -814,10 +1056,15 @@ class ProcedureCapabilityAdminForm(_ClaimAdminForm):
 
 
 class CapabilityGoalLinkAdminForm(_ClaimAdminForm):
+    def _claim_template(self, cleaned):
+        capability = cleaned.get("capability")
+        return capability.template if capability is not None else None
+
     class Meta:
         model = CapabilityGoalLink
         fields = (
             "capability", "goal", "course_pattern", "result_horizon", "variability_note",
+            "claim_type",
             "status", "claim_scope", "prohibited_statement", "limitations",
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         )
@@ -844,18 +1091,96 @@ class CapabilityGoalLinkAdminForm(_ClaimAdminForm):
         return cleaned
 
 
+class _NeedsReconfirmationFilter(admin.SimpleListFilter):
+    """Очередь куратора: что вернулось в черновик и ждёт повторной проверки."""
+
+    title = "повторная проверка"
+    parameter_name = "needs_reconfirmation"
+
+    def lookups(self, request, model_admin):
+        return [("yes", "Требует повторной проверки")]
+
+    def queryset(self, request, queryset):
+        if self.value() == "yes":
+            return (
+                queryset.exclude(status=APPROVED)
+                .filter(approval_resets__isnull=False, approval_resets__resolved_at__isnull=True)
+                .distinct()
+            )
+        return queryset
+
+
 class _ClaimAdmin(admin.ModelAdmin):
     """Общее у двух таблиц знания: кто сохранил «подтверждено», тот и подтвердил."""
 
     readonly_fields = _CLAIM_READONLY
-    list_filter = ("status", "claim_scope")
+    list_filter = ("status", "claim_scope", "claim_type", _NeedsReconfirmationFilter)
+
+    @admin.display(description="Требует повторной проверки")
+    def reset_notice(self, obj) -> str:
+        """Что и почему сняло подтверждение — пока строка не подтверждена заново."""
+        if obj is None or obj._state.adding or obj.status == obj.Status.APPROVED:
+            return "—"
+        last = obj.approval_resets.filter(resolved_at__isnull=True).first()
+        if last is None:
+            return "—"
+        return f"{last.created_at:%d.%m.%Y %H:%M} — подтверждение снято. {last.describe()}"
+
+    def get_form(self, request, obj=None, **kwargs):
+        # ``super().get_form`` собирает новый класс формы на каждый запрос —
+        # пользователь записывается на нём, а не на общем классе.
+        form = super().get_form(request, obj, **kwargs)
+        form.acting_user = request.user
+        return form
+
+    def has_delete_permission(self, request, obj=None):
+        # Удалить подтверждённое — то же, что отменить подтверждение.
+        allowed = super().has_delete_permission(request, obj)
+        if allowed and obj is not None and obj.status == obj.Status.APPROVED:
+            return _may_approve(request.user, type(obj))
+        return allowed
 
     def save_model(self, request, obj, form, change):
+        if change and not form.changed_data:
+            # «Сохранить» без единой правки не пишет ничего: ни отметку
+            # подтверждения, ни время изменения. Иначе открыть строку и нажать
+            # кнопку значило бы оставить в ней след.
+            return
+        # Что это сохранение отнимает у строки — для журнала снятых подтверждений.
+        lost_approval = form.approval_dropped
+        lost_review = (
+            obj.reviewed_by_id is not None
+            and not form.cleaned_data.get("mark_reviewed")
+            and not form.review_kept
+        )
+        if form.approval_dropped:
+            self.message_user(
+                request,
+                "Подтверждение снято: изменились тип, содержание или источник утверждения. "
+                "Правка сохранена черновиком; подтвердить новую редакцию — отдельным сохранением.",
+                level=messages.WARNING,
+            )
+        # Отметка проверки (DRF-2726): ставит рецензент — за себя; правка
+        # содержания снимает прежнюю, и об этом говорится вслух.
+        if form.cleaned_data.get("mark_reviewed"):
+            obj.reviewed_by = request.user
+            obj.reviewed_at = timezone.now()
+        elif not form.review_kept:
+            if obj.reviewed_by_id is not None:
+                self.message_user(
+                    request,
+                    "Отметка проверки рецензентом снята: содержание утверждения изменилось.",
+                    level=messages.WARNING,
+                )
+            obj.reviewed_by = None
+            obj.reviewed_at = None
         if obj.status == obj.Status.APPROVED:
-            # Сохранить подтверждённую строку с правкой — значит подтвердить
-            # то, что в ней теперь написано: иначе новая формулировка осталась
-            # бы под подтверждением прежней. Подтверждение правилом человек
-            # при этом заменяет своим.
+            # Сюда приходит новое подтверждение (черновик → «подтверждено»)
+            # либо правка подтверждённой строки, не меняющая содержания (срок
+            # годности, отметка рецензента): подпись — того, кто сохранил, и
+            # подтверждение правилом человек при этом заменяет своим. Правка
+            # типа, содержания или источника сюда не доходит: она снимает
+            # подтверждение ещё в форме (``approval_dropped``).
             #
             # Сохранение БЕЗ правок отметку не трогает: «Сохранить» на
             # открытой для чтения строке не должно переписывать, кто и когда
@@ -874,6 +1199,16 @@ class _ClaimAdmin(admin.ModelAdmin):
             obj.confirmed_rule = ""
             obj.rule_version = ""
         super().save_model(request, obj, form, change)
+        if lost_approval or lost_review:
+            kind = ClaimApprovalReset.kind_of(obj)
+            ClaimApprovalReset.objects.create(
+                reason=ClaimApprovalReset.Reason.CLAIM_EDITED, changes=form.content_changes,
+                claim_kind=kind, claim_label=str(obj)[:300],
+                was_approved=lost_approval, had_review=lost_review, **{kind: obj},
+            )
+        elif obj.status == obj.Status.APPROVED:
+            # Подтверждено заново — повторная проверка больше не нужна.
+            ClaimApprovalReset.resolve_for(obj)
 
 
 @admin.register(ProcedureCapability)
@@ -885,10 +1220,34 @@ class ProcedureCapabilityAdmin(_ClaimAdmin):
     """
 
     form = ProcedureCapabilityAdminForm
-    list_display = ("template", "key", "status", "claim_scope", "valid_until", "confirmed_by")
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        if not (change and form.content_changed):
+            return
+        # Адресный сброс: от возможности зависят ЕЁ связи с целями — и только
+        # они. Подтверждение и проверка связи относились к прежнему содержанию.
+        reset = reset_claims(
+            capabilities=ProcedureCapability.objects.none(),
+            goal_links=form.dependent_links(),
+            reason=ClaimApprovalReset.Reason.CAPABILITY_EDITED,
+            changes=form.content_changes,
+        )
+        if reset["goal_links"]:
+            self.message_user(
+                request,
+                "Содержание возможности изменилось: её связи с целями возвращены в черновик "
+                f"и требуют повторной проверки — {reset['goal_links']}.",
+                level=messages.WARNING,
+            )
+
+    list_display = (
+        "template", "key", "claim_type", "status", "claim_scope", "valid_until",
+        "reviewed_by", "confirmed_by",
+    )
     search_fields = ("key", "text_client", "template__name", "template__canonical_code")
     autocomplete_fields = ("template",)
-    list_select_related = ("template", "confirmed_by")
+    list_select_related = ("template", "confirmed_by", "reviewed_by")
     ordering = ("template", "key")
     fieldsets = (
         (
@@ -914,10 +1273,13 @@ class CapabilityGoalLinkAdmin(_ClaimAdmin):
     """Какой цели помогает возможность — отдельное утверждение со своим основанием."""
 
     form = CapabilityGoalLinkAdminForm
-    list_display = ("capability", "goal", "status", "claim_scope", "valid_until", "confirmed_by")
+    list_display = (
+        "capability", "goal", "claim_type", "status", "claim_scope", "valid_until",
+        "reviewed_by", "confirmed_by",
+    )
     search_fields = ("capability__key", "capability__template__name", "goal__key", "goal__label")
     autocomplete_fields = ("capability", "goal")
-    list_select_related = ("capability__template", "goal", "confirmed_by")
+    list_select_related = ("capability__template", "goal", "confirmed_by", "reviewed_by")
     ordering = ("capability", "goal")
     fieldsets = (
         (
@@ -937,14 +1299,81 @@ class CapabilityGoalLinkAdmin(_ClaimAdmin):
     )
 
 
+@admin.register(ClaimReviewer)
+class ClaimReviewerAdmin(admin.ModelAdmin):
+    """Назначения рецензентов (DRF-2726): кто вправе проверять утверждения какого типа.
+
+    Заводит владелец. Имён в коде нет; право управлять этой таблицей — обычные
+    права модели.
+    """
+
+    list_display = ("user", "claim_type", "category", "is_active", "updated_at")
+    list_filter = ("claim_type", "is_active")
+    raw_id_fields = ("user",)
+    fields = ("user", "claim_type", "category", "is_active")
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "category":
+            # Область — корневая категория; подкатегории она покрывает сама.
+            kwargs["queryset"] = ServiceCategory.objects.filter(parent__isnull=True)
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
+
+    def formfield_for_choice_field(self, db_field, request, **kwargs):
+        if db_field.name == "claim_type":
+            kwargs["choices"] = [
+                choice for choice in ClaimEvidence.ClaimType.choices
+                if choice[0] in ClaimEvidence.REVIEW_REQUIRED_CLAIM_TYPES
+            ]
+        return super().formfield_for_choice_field(db_field, request, **kwargs)
+
+
+@admin.register(ClaimApprovalReset)
+class ClaimApprovalResetAdmin(admin.ModelAdmin):
+    """Журнал снятых подтверждений (DRF-2726) — только чтение.
+
+    Что вернулось в черновик, когда и почему, с прежним и новым значением.
+    Строки пишет система; править и удалять их в админке нельзя.
+    """
+
+    list_display = (
+        "created_at", "reason", "claim_kind", "claim_label", "was_approved", "had_review",
+        "resolved_at", "what_changed",
+    )
+    # ``contraindication`` — DRF-2741: журнал один на всё знание о процедуре.
+    list_filter = ("reason", "claim_kind", "was_approved", "had_review")
+    search_fields = ("capability__key", "goal_link__capability__key", "capability__template__name")
+    list_select_related = ("capability__template", "goal_link__capability__template", "goal_link__goal")
+    readonly_fields = (
+        "created_at", "reason", "claim_kind", "claim_label", "capability", "goal_link", "contraindication",
+        "was_approved", "had_review", "resolved_at", "what_changed",
+    )
+    fields = readonly_fields
+
+    @admin.display(description="Что изменилось")
+    def what_changed(self, obj) -> str:
+        return obj.describe()
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 # ── Структурированные противопоказания, слот C8 (DRF-2741) ──────────────────
 #
-# Две подписи — два действия: рецензент отмечает «проверено», куратор ставит
-# «подтверждено». Оба — за себя и только при своём праве
-# (``services.review_procedurecontraindication`` /
-# ``services.approve_procedurecontraindication``); имён в коде нет, права
-# раздаёт владелец. Правка содержания снимает отметку проверки, и
-# подтверждённой строка после этого остаться не может.
+# Те же правила, что у остального знания (DRF-2726), на своём носителе:
+# * «проверено» ставит назначенный рецензент медицинских утверждений, чьи
+#   назначения покрывают всю область применения строки; право администратора
+#   и право подтверждения компетенцией не являются;
+# * «подтверждено» ставит держатель права
+#   ``services.approve_procedurecontraindication``; без отметки рецензента
+#   подтвердить нельзя никому;
+# * правка содержания или области подтверждённой строки тем же сохранением
+#   возвращает её в черновик, обе подписи снимаются, запись идёт в журнал.
 
 #: Правка этих полей формы содержания не меняет.
 _NOT_CONTRAINDICATION_CONTENT = frozenset({"status", "mark_reviewed"})
@@ -955,13 +1384,18 @@ class ProcedureContraindicationAdminForm(forms.ModelForm):
     acting_user = None
     #: Остаётся ли в силе прежняя отметка проверки (считает ``clean``).
     review_kept = False
+    #: Снято ли этим сохранением прежнее подтверждение (считает ``clean``).
+    approval_dropped = False
+    #: Что изменилось в содержании: ``[{field, old, new}]`` — для журнала.
+    content_changes: list = []
 
     mark_reviewed = forms.BooleanField(
         required=False,
         label="Проверено мной как рецензентом",
         help_text=(
-            "Отметку ставит рецензент — за себя: условие и действие в нынешней "
-            "формулировке проверены. Любая правка содержания её снимает."
+            "Отметку ставит назначенный рецензент медицинских утверждений — за себя: "
+            "условие и действие в нынешней формулировке проверены. Любая правка "
+            "содержания или области её снимает."
         ),
     )
 
@@ -972,35 +1406,57 @@ class ProcedureContraindicationAdminForm(forms.ModelForm):
             "source_ref", "evidence_source", "evidence_kind", "review_date", "status",
         )
 
-    def _has(self, codename: str) -> bool:
-        user = self.acting_user
-        return user is not None and user.has_perm(f"services.{codename}")
+    def _old_value(self, name: str) -> str:
+        if name in ("templates", "categories"):
+            return ", ".join(sorted(str(item) for item in getattr(self.instance, name).all()))
+        return str(getattr(self.instance, name, "") or "")
+
+    @staticmethod
+    def _new_value(value) -> str:
+        if hasattr(value, "all") or isinstance(value, (list, tuple)):
+            return ", ".join(sorted(str(item) for item in value))
+        return str(value or "")
 
     def clean(self):
         cleaned = super().clean()
         adding = self.instance._state.adding
-        status = cleaned.get("status") or ""
         was_approved = not adding and self.instance.status == APPROVED
+        changed_content = [name for name in self.changed_data if name not in _NOT_CONTRAINDICATION_CONTENT]
+        self.content_changes = [] if adding else [
+            {"field": name, "old": self._old_value(name), "new": self._new_value(cleaned.get(name))}
+            for name in changed_content
+        ]
+        # Правило сброса (DRF-2726): правка подтверждённой строки возвращает
+        # её в черновик тем же сохранением.
+        self.approval_dropped = was_approved and cleaned.get("status") == APPROVED and bool(changed_content)
+        if self.approval_dropped:
+            cleaned["status"] = ClaimEvidence.Status.SYSTEM_INFERENCE.value
+        status = cleaned.get("status") or ""
         wants_approved = status == APPROVED
         untouched = was_approved and wants_approved and not self.changed_data
 
+        templates = list(cleaned.get("templates") or [])
+        categories = list(cleaned.get("categories") or [])
         marks = bool(cleaned.get("mark_reviewed"))
-        if marks and not self._has("review_procedurecontraindication"):
+        if marks and not may_review_scope(
+            self.acting_user, claim_type=ProcedureContraindication.REVIEW_CLAIM_TYPE,
+            templates=templates, categories=categories,
+        ):
             self.add_error(
                 "mark_reviewed",
                 forms.ValidationError(
-                    "Отметить противопоказание проверенным может только рецензент — тот, "
-                    "кому владелец дал это право.",
-                    code="reviewer_right_required",
+                    "У вас нет назначения рецензентом медицинских утверждений, покрывающего "
+                    "всю область применения этого противопоказания. Рецензентов назначает владелец.",
+                    code="reviewer_competence_required",
                 ),
             )
             marks = False
         had_review = not adding and self.instance.reviewed_by_id is not None
-        content_changed = bool(set(self.changed_data) - _NOT_CONTRAINDICATION_CONTENT)
-        self.review_kept = had_review and not content_changed
+        self.review_kept = had_review and not changed_content
 
         if (was_approved or wants_approved) and not untouched:
-            if not self._has("approve_procedurecontraindication"):
+            user = self.acting_user
+            if user is None or not user.has_perm("services.approve_procedurecontraindication"):
                 self.add_error(
                     "status",
                     forms.ValidationError(
@@ -1013,18 +1469,17 @@ class ProcedureContraindicationAdminForm(forms.ModelForm):
             self.add_error(
                 "status",
                 forms.ValidationError(
-                    "Противопоказание подтверждается только после проверки рецензентом. "
-                    "Отметки проверки нет либо содержание изменилось после неё.",
+                    "Противопоказание подтверждается только после проверки назначенным "
+                    "рецензентом. Отметки проверки нет либо содержание изменилось после неё.",
                     code="review_required",
                 ),
             )
-        has_scope = bool(cleaned.get("templates")) or bool(cleaned.get("categories"))
         for field, message in approval_errors(
             status=status,
             source_ref=cleaned.get("source_ref") or "",
             evidence_kind=cleaned.get("evidence_kind") or "",
             review_date=cleaned.get("review_date"),
-            has_scope=has_scope,
+            has_scope=bool(templates or categories),
         ).items():
             if not self.has_error(field):
                 self.add_error(field, forms.ValidationError(message, code="approval_incomplete"))
@@ -1037,11 +1492,13 @@ class ProcedureContraindicationAdmin(admin.ModelAdmin):
 
     form = ProcedureContraindicationAdminForm
     list_display = ("key", "action", "status", "review_date", "reviewed_by", "confirmed_by")
-    list_filter = ("status", "action", "evidence_kind")
+    list_filter = ("status", "action", "evidence_kind", _NeedsReconfirmationFilter)
     search_fields = ("key", "condition")
     autocomplete_fields = ("templates", "categories")
     list_select_related = ("reviewed_by", "confirmed_by")
-    readonly_fields = ("reviewed_by", "reviewed_at", "confirmed_by", "confirmed_at", "created_at", "updated_at")
+    readonly_fields = (
+        "reset_notice", "reviewed_by", "reviewed_at", "confirmed_by", "confirmed_at", "created_at", "updated_at",
+    )
     fieldsets = (
         ("Условие и действие", {"fields": ("key", "condition", "action", "action_note")}),
         (
@@ -1066,9 +1523,23 @@ class ProcedureContraindicationAdmin(admin.ModelAdmin):
         ),
         (
             "Проверка и подтверждение (ставятся при сохранении)",
-            {"fields": ("reviewed_by", "reviewed_at", "confirmed_by", "confirmed_at", "created_at", "updated_at")},
+            {
+                "fields": (
+                    "reset_notice", "reviewed_by", "reviewed_at", "confirmed_by", "confirmed_at",
+                    "created_at", "updated_at",
+                ),
+            },
         ),
     )
+
+    @admin.display(description="Требует повторной проверки")
+    def reset_notice(self, obj) -> str:
+        if obj is None or obj._state.adding or obj.status == APPROVED:
+            return "—"
+        last = obj.approval_resets.filter(resolved_at__isnull=True).first()
+        if last is None:
+            return "—"
+        return f"{last.created_at:%d.%m.%Y %H:%M} — подтверждение снято. {last.describe()}"
 
     def get_form(self, request, obj=None, **kwargs):
         form = super().get_form(request, obj, **kwargs)
@@ -1084,6 +1555,19 @@ class ProcedureContraindicationAdmin(admin.ModelAdmin):
     def save_model(self, request, obj, form, change):
         if change and not form.changed_data:
             return  # «Сохранить» без единой правки не пишет ничего.
+        lost_approval = form.approval_dropped
+        lost_review = (
+            obj.reviewed_by_id is not None
+            and not form.cleaned_data.get("mark_reviewed")
+            and not form.review_kept
+        )
+        if lost_approval:
+            self.message_user(
+                request,
+                "Подтверждение снято: изменилось содержание или область противопоказания. "
+                "Правка сохранена черновиком; подтвердить новую редакцию — отдельным сохранением.",
+                level=messages.WARNING,
+            )
         if form.cleaned_data.get("mark_reviewed"):
             obj.reviewed_by = request.user
             obj.reviewed_at = timezone.now()
@@ -1103,3 +1587,11 @@ class ProcedureContraindicationAdmin(admin.ModelAdmin):
             obj.confirmed_by = None
             obj.confirmed_at = None
         super().save_model(request, obj, form, change)
+        if lost_approval or lost_review:
+            ClaimApprovalReset.objects.create(
+                reason=ClaimApprovalReset.Reason.CLAIM_EDITED, changes=form.content_changes,
+                claim_kind="contraindication", claim_label=str(obj)[:300], contraindication=obj,
+                was_approved=lost_approval, had_review=lost_review,
+            )
+        elif obj.status == APPROVED:
+            ClaimApprovalReset.resolve_for(obj)

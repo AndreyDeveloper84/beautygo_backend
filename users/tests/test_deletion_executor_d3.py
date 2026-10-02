@@ -428,6 +428,7 @@ class TestAClaimOutlivesItsReviewersErasure:
         said = ProcedureCapability.objects.create(
             template=template, key="even-tone", text_client="Выравнивает тон кожи",
             status=ClaimEvidence.Status.APPROVED,
+            claim_type=ClaimEvidence.ClaimType.PRODUCT,
             evidence_kind=ClaimEvidence.EvidenceKind.PROFESSIONAL_CONSENSUS,
             claim_scope=ClaimEvidence.ClaimScope.SUPPORTED,
             confirmed_by=person, confirmed_at=when, source_ref="owner-review-2606",
@@ -435,6 +436,7 @@ class TestAClaimOutlivesItsReviewersErasure:
         link = CapabilityGoalLink.objects.create(
             capability=said, goal=goal,
             status=ClaimEvidence.Status.APPROVED,
+            claim_type=ClaimEvidence.ClaimType.PRODUCT,
             evidence_kind=ClaimEvidence.EvidenceKind.PROFESSIONAL_CONSENSUS,
             claim_scope=ClaimEvidence.ClaimScope.SUPPORTED,
             confirmed_by=person, confirmed_at=when, source_ref="owner-review-2606",
