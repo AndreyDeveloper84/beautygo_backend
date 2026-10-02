@@ -6,7 +6,7 @@ from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
-from services.knowledge_intake import course_errors, provenance_errors
+from services.knowledge_intake import course_errors, provenance_errors, timeframe_errors
 from services.mapping.store import StoredReport
 from services.mapping.types import Decision
 from services.mapping_review import confirm_single_candidate, evidence_text, mark_canon_gap
@@ -765,10 +765,23 @@ class ProcedureCapabilityAdminForm(_ClaimAdminForm):
         model = ProcedureCapability
         fields = (
             "template", "key", "text_client", "text_professional",
-            "expected_effect", "result_timeframe",
+            "expected_effect", "result_timeframe", "variability_note",
             "status", "claim_scope", "limitations",
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         )
+
+    def clean(self):
+        cleaned = super().clean()
+        for field, message in timeframe_errors(
+            field="result_timeframe",
+            value=cleaned.get("result_timeframe") or "",
+            variability_note=cleaned.get("variability_note") or "",
+            evidence_source=cleaned.get("evidence_source") or "",
+            source_ref=cleaned.get("source_ref") or "",
+        ).items():
+            if not self.has_error(field):
+                self.add_error(field, forms.ValidationError(message, code="timeframe_incomplete"))
+        return cleaned
 
 
 class CapabilityGoalLinkAdminForm(_ClaimAdminForm):
@@ -790,6 +803,15 @@ class CapabilityGoalLinkAdminForm(_ClaimAdminForm):
         ).items():
             if not self.has_error(field):
                 self.add_error(field, forms.ValidationError(message, code="course_incomplete"))
+        for field, message in timeframe_errors(
+            field="result_horizon",
+            value=cleaned.get("result_horizon") or "",
+            variability_note=cleaned.get("variability_note") or "",
+            evidence_source=cleaned.get("evidence_source") or "",
+            source_ref=cleaned.get("source_ref") or "",
+        ).items():
+            if not self.has_error(field):
+                self.add_error(field, forms.ValidationError(message, code="timeframe_incomplete"))
         return cleaned
 
 
@@ -845,7 +867,11 @@ class ProcedureCapabilityAdmin(_ClaimAdmin):
             {
                 "fields": (
                     "template", "key", "text_client", "text_professional",
-                    "expected_effect", "result_timeframe",
+                    "expected_effect", "result_timeframe", "variability_note",
+                ),
+                "description": (
+                    "Срок результата — словами, не числом, и только вместе с оговоркой "
+                    "о разбросе, источником и ссылкой."
                 ),
             },
         ),
@@ -872,8 +898,8 @@ class CapabilityGoalLinkAdmin(_ClaimAdmin):
                     "capability", "goal", "course_pattern", "result_horizon", "variability_note",
                 ),
                 "description": (
-                    "Курс — словами, не числом, и только вместе с оговоркой о разбросе, "
-                    "источником и ссылкой."
+                    "Курс и горизонт результата — словами, не числом, и только вместе с "
+                    "оговоркой о разбросе, источником и ссылкой."
                 ),
             },
         ),
