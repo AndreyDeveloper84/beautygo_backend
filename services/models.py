@@ -1700,6 +1700,12 @@ class GoalDirection(models.Model):
 # которая держит правило «вывод системы ≠ подтверждённое человеком».
 
 
+#: Срок результата «без слов» — ни одной буквы, только цифры и знаки (DRF-2726).
+#: Одно выражение на базу (ограничения ниже), на входы
+#: (:func:`services.knowledge_intake.timeframe_errors`) и на шаг миграции.
+TIMEFRAME_WITHOUT_WORDS = r"^[^A-Za-zА-Яа-яЁё]*$"
+
+
 class ClaimEvidence(models.Model):
     """Основание утверждения — общее у возможности и у её связи с целью.
 
@@ -1817,7 +1823,8 @@ class ProcedureCapability(ClaimEvidence):
 
     **Срок результата — не самостоятельное число** (решение владельца 02.10,
     блок B; DRF-2726). ``result_timeframe`` у ПОДТВЕРЖДЁННОЙ строки не может
-    быть одним числом и не хранится без оговорки о разбросе
+    состоять из одних цифр и знаков («3», «3–5», «~10 %») и не хранится без
+    оговорки о разбросе
     (``variability_note``) и основания (источник + ссылка) — ограничения базы
     ниже. Черновик база не судит: черновик человеку не говорится, а строки,
     заведённые до этого правила, не должны ронять миграцию. Входы — форма и
@@ -1861,13 +1868,16 @@ class ProcedureCapability(ClaimEvidence):
                 ),
                 name="procedurecapability_approved_timeframe_grounded",
             ),
-            # И не одним числом.
+            # И словами: значение без единой буквы («3», «3–5», «~10 %») —
+            # число, а не срок. Строже, чем у курса: там ловится только одно
+            # число, и «3-5» проходит (названо пределом в DRF-2726).
             models.CheckConstraint(
                 condition=(
                     ~models.Q(status="approved")
-                    | ~models.Q(result_timeframe__regex=r"^\s*[0-9]+([.,][0-9]+)?\s*$")
+                    | models.Q(result_timeframe="")
+                    | ~models.Q(result_timeframe__regex=TIMEFRAME_WITHOUT_WORDS)
                 ),
-                name="procedurecapability_approved_timeframe_not_bare_number",
+                name="procedurecapability_approved_timeframe_in_words",
             ),
         ]
         ordering = ["template", "key"]
@@ -1903,7 +1913,8 @@ class CapabilityGoalLink(ClaimEvidence):
 
     **Горизонт результата — под той же защитой** (решение владельца 02.10,
     блок B; DRF-2726): ``result_horizon`` у подтверждённой связи не может
-    быть одним числом и не хранится без ``variability_note`` и основания.
+    состоять из одних цифр и знаков и не хранится без ``variability_note`` и
+    основания.
     Оговорка у связи одна — на курс и на горизонт. Черновик база не судит
     (причина — в докстринге :class:`ProcedureCapability`); входы спрашивают
     то же у любой строки.
@@ -1963,9 +1974,10 @@ class CapabilityGoalLink(ClaimEvidence):
             models.CheckConstraint(
                 condition=(
                     ~models.Q(status="approved")
-                    | ~models.Q(result_horizon__regex=r"^\s*[0-9]+([.,][0-9]+)?\s*$")
+                    | models.Q(result_horizon="")
+                    | ~models.Q(result_horizon__regex=TIMEFRAME_WITHOUT_WORDS)
                 ),
-                name="capabilitygoallink_approved_horizon_not_bare_number",
+                name="capabilitygoallink_approved_horizon_in_words",
             ),
         ]
 
