@@ -4,6 +4,7 @@ import logging
 import secrets
 import re
 from datetime import timedelta
+from enum import StrEnum
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -1355,11 +1356,42 @@ def _new_otp_code() -> str:
     return str(lowest + secrets.randbelow(9 * lowest))
 
 
+class OtpSendOutcome(StrEnum):
+    """Чем кончилась отправка кода — три состояния, не два (DRF-2652).
+
+    До листа ``OTPService.send_otp`` возвращал ``None`` и результат отправителя
+    не читал вовсе: человеку отвечали «код отправлен» и при отказе провайдера,
+    и при выключенной отправке. Склеивать можно по-разному, и обе склейки —
+    дефект:
+
+    * ``SENT`` + ``NOT_SENT`` — то, что было: человек ждёт кода, которого никто
+      не посылал;
+    * ``NOT_SENT`` + ``DEV_CODE`` — сломает вход в разработке: там код известен
+      заранее, и «не отправлено» — законный исход, а не сбой.
+    """
+
+    #: Провайдер принял сообщение.
+    SENT = "sent"
+    #: Режим разработки: отправка выключена, код — ``OTP_DEBUG_CODE``, человек
+    #: знает его без SMS. Это успех.
+    DEV_CODE = "dev_code"
+    #: Выдан настоящий код, и он не ушёл: провайдер отказал, не настроен, или
+    #: отправка выключена вне режима разработки.
+    NOT_SENT = "not_sent"
+
+
 class OTPService:
     """Handles OTP generation, sending, and verification."""
 
-    def send_otp(self, phone: str) -> None:
-        """Generate OTP and send via SMS."""
+    def send_otp(self, phone: str) -> OtpSendOutcome:
+        """Generate OTP, send via SMS, and say how the sending ended.
+
+        DRF-2652: исход возвращается, но ответы ручек от него ПОКА не зависят —
+        что отвечать человеку, когда код не ушёл, решает владелец. Здесь —
+        различение и след: несостоявшаяся отправка пишет ``otp.not_delivered``
+        (без номера и без кода), чтобы «сколько раз сказали „код отправлен“
+        зря» можно было посчитать.
+        """
         now = timezone.now()
 
         # Rate limiting: check last OTP for this phone
@@ -1370,7 +1402,8 @@ class OTPService:
                 raise RateLimitError()
 
         # Generate code
-        if settings.DEBUG and not getattr(settings, 'SMS_ENABLED', False):
+        dev_code = settings.DEBUG and not getattr(settings, 'SMS_ENABLED', False)
+        if dev_code:
             code = settings.OTP_DEBUG_CODE
         else:
             code = _new_otp_code()
@@ -1385,7 +1418,20 @@ class OTPService:
 
         # Send SMS (or log in dev mode)
         from .sms import SMSService
-        SMSService().send_otp(phone, code)
+        sender = SMSService()
+        if sender.send_otp(phone, code):
+            return OtpSendOutcome.SENT
+        if dev_code:
+            # Код известен заранее и выдан — отправлять было нечего.
+            return OtpSendOutcome.DEV_CODE
+        # Настоящий код выдан и не ушёл. Ни номера, ни кода в журнале: причина
+        # — одно из двух слов, подробности отказа провайдера пишет сам
+        # отправитель (``sms.transport_failed`` / ``sms.provider_error``).
+        logger.warning(
+            "otp.not_delivered reason=%s",
+            "send_failed" if sender.is_enabled() else "sending_disabled",
+        )
+        return OtpSendOutcome.NOT_SENT
 
     def consume_otp(self, phone: str, code: str) -> bool:
         """Consume an OTP code (single-use).
