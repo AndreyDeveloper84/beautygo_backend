@@ -65,9 +65,10 @@ def test_the_source_is_secrets_not_random(settings, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_the_issued_code_has_the_declared_length(settings):
+def test_the_issued_code_has_the_declared_length(settings, sms_delivered):
+    # DRF-2652: код, который не ушёл, в базе не остаётся — чтобы прочитать
+    # выданный код, отправка должна состояться.
     settings.DEBUG = False
-    settings.SMS_ENABLED = False
     settings.OTP_CODE_LENGTH = 6
     phone = "+79990002559"
 
@@ -80,11 +81,10 @@ def test_the_issued_code_has_the_declared_length(settings):
 
 
 @pytest.mark.django_db
-def test_the_issue_path_takes_its_code_from_secrets(settings, monkeypatch):
+def test_the_issue_path_takes_its_code_from_secrets(settings, monkeypatch, sms_delivered):
     """Не только функция, но и путь выдачи: обход ``_new_otp_code`` обратно к
     ``random`` с верной длиной прошёл бы узлы выше — этот его ловит."""
     settings.DEBUG = False
-    settings.SMS_ENABLED = False
     settings.OTP_CODE_LENGTH = 4
     phone = "+79990002560"
 

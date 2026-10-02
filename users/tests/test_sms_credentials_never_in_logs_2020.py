@@ -111,11 +111,17 @@ class TestTheDevModeBranch:
 
 @pytest.mark.django_db
 class TestTheOtpPathWithRealCode:
-    """Единственная конфигурация, где код случайный: DEBUG=False и отправка выключена."""
+    """Код случайный везде, кроме режима разработки (DEBUG и выключенная отправка).
 
-    def test_a_real_random_code_never_reaches_the_log(self, caplog, settings):
+    До DRF-2652 здесь стояло «DEBUG=False и отправка выключена»: такой код
+    теперь не сохраняется (его никто не получил), поэтому узел берёт
+    случайный код состоявшейся отправки.
+    """
+
+    def test_a_real_random_code_never_reaches_the_log(self, caplog, settings, sms_delivered):
+        # DRF-2652: недоставленный код в базе не остаётся; случайный код,
+        # который можно прочитать, — это код состоявшейся отправки.
         settings.DEBUG = False
-        settings.SMS_ENABLED = False
 
         with _capturing_the_sms_log(caplog):
             OTPService().send_otp(PHONE)
