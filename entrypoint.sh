@@ -31,6 +31,16 @@ fi
 echo "Applying migrations..."
 python manage.py migrate --noinput
 
+# DRF-2717: знание о процедурах из файла куратора
+# (services/seeds/procedure_knowledge.json). На стенде нет оболочки, поэтому
+# команда зовётся здесь, при каждом старте web. Она заводит только новые строки
+# и существующие не трогает; пока файла нет — печатает это и завершается
+# успехом. Сбой (например, код шаблона, которого нет на этом контуре) НЕ
+# останавливает сайт: знание — не условие его работы. Но и не глотается молча —
+# строка ниже уходит в stderr контейнера.
+echo "Seeding procedure knowledge..."
+python manage.py seed_procedure_knowledge || echo "WARNING: seed_procedure_knowledge failed - the site starts without the new knowledge rows" >&2
+
 echo "Collecting static files..."
 python manage.py collectstatic --noinput
 
