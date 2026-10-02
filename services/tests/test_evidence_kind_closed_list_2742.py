@@ -93,7 +93,10 @@ def admin_client(owner) -> Client:
 
 
 def _signed(owner: User) -> dict:
-    return {"status": "approved", "confirmed_by": owner, "confirmed_at": timezone.now(), "source_ref": "DOC-2742"}
+    return {
+        "status": "approved", "claim_type": "product",
+        "confirmed_by": owner, "confirmed_at": timezone.now(), "source_ref": "DOC-2742",
+    }
 
 
 def _refused_by(constraint: str, create) -> None:
@@ -195,6 +198,7 @@ def _form(template: ServiceTemplate, **overrides) -> dict:
         "expected_effect": "",
         "result_timeframe": "",
         "variability_note": "",
+        "claim_type": "product",
         "status": "system_inference",
         "claim_scope": "supported",
         "prohibited_statement": "",
@@ -249,6 +253,7 @@ class TestTheAdminFormOffersTheListOnly:
         data = {
             "capability": str(capability.pk), "goal": str(goal.pk),
             "course_pattern": "", "result_horizon": "", "variability_note": "",
+            "claim_type": "product",
             "status": "system_inference", "claim_scope": "supported", "prohibited_statement": "",
             "limitations": "", "evidence_source": "", "evidence_kind": "practice", "source_ref": "",
         }
@@ -308,7 +313,8 @@ class TestTheSeedKnowsTheListToo:
     def test_even_a_known_rule_cannot_approve_without_a_kind(self, template, tmp_path, monkeypatch) -> None:
         monkeypatch.setattr(knowledge_intake, "KNOWN_CONFIRMATION_RULES", frozenset({"owner_rule_2742"}))
         row = {
-            "template_code": "1.1.3", "key": "signed", "status": "approved", "claim_scope": "supported",
+            "template_code": "1.1.3", "key": "signed", "status": "approved", "claim_type": "product",
+            "claim_scope": "supported",
             "source_ref": "DOC-2742", "confirmed_rule": "owner_rule_2742", "rule_version": "1",
             "confirmed_at": "2026-10-02T09:00:00+03:00",
         }

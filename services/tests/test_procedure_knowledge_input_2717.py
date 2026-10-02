@@ -102,6 +102,7 @@ def _capability_form(template: ServiceTemplate, **overrides) -> dict:
         "text_professional": "",
         "expected_effect": "",
         "result_timeframe": "",
+        "claim_type": "product",
         "status": "system_inference",
         "claim_scope": "supported",
         "limitations": "",
@@ -137,7 +138,8 @@ def _refusal(path: Path) -> str:
 
 
 APPROVED_BY_RULE = {
-    "template_code": "1.1.3", "key": "signed", "status": "approved", "evidence_kind": "professional_consensus",
+    "template_code": "1.1.3", "key": "signed", "status": "approved", "claim_type": "product",
+    "evidence_kind": "professional_consensus",
     "claim_scope": "supported", "source_ref": "DOC-2717",
     "confirmed_rule": "owner_rule_2717", "rule_version": "1",
     "confirmed_at": "2026-10-02T09:00:00+03:00",
@@ -259,6 +261,7 @@ class TestApprovingNeedsASource:
         response = admin_client.post(reverse(ADD_LINK), {
             "capability": str(capability.pk), "goal": str(world["goal"].pk),
             "course_pattern": "", "result_horizon": "", "variability_note": "",
+            "claim_type": "product",
             "status": "approved", "claim_scope": "supported", "limitations": "",
             "evidence_source": "", "evidence_kind": "professional_consensus", "source_ref": "DOC-2717",
         })
@@ -278,7 +281,8 @@ class TestSavingWithoutAnEditKeepsTheSignature:
         return ProcedureCapability.objects.create(
             template=world["relaxing"], key="example_effect",
             text_client="Синтетическая формулировка",
-            status="approved", evidence_kind="professional_consensus", claim_scope="supported", source_ref="DOC-2717",
+            status="approved", claim_type="product", evidence_kind="professional_consensus",
+            claim_scope="supported", source_ref="DOC-2717",
             confirmed_rule="owner_rule_2717", rule_version="1", confirmed_at=timezone.now(),
         )
 
@@ -295,9 +299,13 @@ class TestSavingWithoutAnEditKeepsTheSignature:
         assert (approved_by_rule.confirmed_rule, approved_by_rule.confirmed_by_id) == ("owner_rule_2717", None)
         assert approved_by_rule.confirmed_at == stamped_at
 
-    def test_an_edit_is_signed_by_the_person_who_made_it(
+    def test_an_edit_drops_the_approval_it_was_given_under(
         self, admin_client, owner, world, approved_by_rule
     ) -> None:
+        """До DRF-2726 правка подтверждённой строки переподписывала её
+        сохранившим. Требование владельца: смена содержания снимает
+        подтверждение — и подпись правила, и статус; подтвердить новую редакцию
+        — отдельным сохранением."""
         response = admin_client.post(
             reverse(CHANGE_CAPABILITY, args=[approved_by_rule.pk]),
             _capability_form(
@@ -308,7 +316,10 @@ class TestSavingWithoutAnEditKeepsTheSignature:
 
         assert response.status_code == 302, response.context["adminform"].form.errors
         approved_by_rule.refresh_from_db()
-        assert (approved_by_rule.confirmed_rule, approved_by_rule.confirmed_by_id) == ("", owner.pk)
+        row = approved_by_rule
+        assert (row.status, row.text_client, row.confirmed_rule, row.confirmed_by_id) == (
+            "system_inference", "Новая формулировка", "", None,
+        )
 
 
 class TestTheCourseIsWordsWithAGround:
@@ -320,6 +331,7 @@ class TestTheCourseIsWordsWithAGround:
             "course_pattern": "",
             "result_horizon": "",
             "variability_note": "",
+            "claim_type": "product",
             "status": "system_inference",
             "claim_scope": "supported",
             "limitations": "",
@@ -374,7 +386,8 @@ class TestSeedingFromTheCuratorsFile:
     def test_a_second_run_adds_nothing_and_keeps_the_curators_hand(self, world, owner) -> None:
         _seed(EXAMPLE_FILE)
         ProcedureCapability.objects.filter(key="example_supported_effect").update(
-            status="approved", evidence_kind="professional_consensus", confirmed_by=owner, confirmed_at=timezone.now(),
+            status="approved", claim_type="product", evidence_kind="professional_consensus",
+            confirmed_by=owner, confirmed_at=timezone.now(),
             source_ref="DOC-2717", text_client="Правка куратора",
         )
 

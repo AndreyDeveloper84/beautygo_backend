@@ -60,6 +60,10 @@ EVERYDAY = [
     for action in ("add", "change", "delete", "view")
 ]
 APPROVE = ["approve_procedurecapability", "approve_capabilitygoallink"]
+#: Право продуктовых границ (DRF-2726 п.1): без него не подтвердить утверждение
+#: типа ``product``, которым пользуются эти узлы. Оно есть у всех участников —
+#: здесь проверяется право ПОДТВЕРЖДЕНИЯ, и отличаться должно только оно.
+BOUNDARY = ["approve_claim_without_reviewer"]
 
 
 def _staff(username: str, codenames: list[str]) -> User:
@@ -94,12 +98,12 @@ def goal() -> GoalOption:
 @pytest.fixture
 def editor() -> User:
     """Сотрудник с обычными правами на обе таблицы — без права подтверждения."""
-    return _staff("editor-2726", EVERYDAY)
+    return _staff("editor-2726", EVERYDAY + BOUNDARY)
 
 
 @pytest.fixture
 def approver() -> User:
-    return _staff("approver-2726", EVERYDAY + APPROVE)
+    return _staff("approver-2726", EVERYDAY + APPROVE + BOUNDARY)
 
 
 def _form(template: ServiceTemplate, **overrides) -> dict:
@@ -111,6 +115,7 @@ def _form(template: ServiceTemplate, **overrides) -> dict:
         "expected_effect": "",
         "result_timeframe": "",
         "variability_note": "",
+        "claim_type": "product",
         "status": "system_inference",
         "claim_scope": "supported",
         "prohibited_statement": "",
@@ -127,7 +132,8 @@ def _form(template: ServiceTemplate, **overrides) -> dict:
 def approved_row(template, approver) -> ProcedureCapability:
     return ProcedureCapability.objects.create(
         template=template, key="example_effect", text_client="Синтетическая формулировка",
-        status="approved", evidence_kind="professional_consensus", claim_scope="supported", source_ref="DOC-2726",
+        status="approved", claim_type="product", claim_scope="supported",
+        evidence_kind="professional_consensus", source_ref="DOC-2726",
         confirmed_by=approver, confirmed_at=timezone.now(),
     )
 
@@ -144,6 +150,7 @@ def _link_form(capability: ProcedureCapability, goal: GoalOption, **overrides) -
     data = {
         "capability": str(capability.pk), "goal": str(goal.pk),
         "course_pattern": "", "result_horizon": "", "variability_note": "",
+        "claim_type": "product",
         "status": "system_inference", "claim_scope": "supported", "prohibited_statement": "",
         "limitations": "", "evidence_source": "", "evidence_kind": "professional_consensus", "source_ref": "DOC-2726",
     }
@@ -255,7 +262,7 @@ class TestAnEditorKeepsDraftsOnly:
         нельзя снести, удалив её черновую возможность."""
         draft = ProcedureCapability.objects.create(template=template, key="draft-with-link")
         link = CapabilityGoalLink.objects.create(
-            capability=draft, goal=goal, status="approved", claim_scope="supported",
+            capability=draft, goal=goal, status="approved", claim_type="product", claim_scope="supported",
             evidence_kind="professional_consensus",
             source_ref="DOC-2726", confirmed_by=approver, confirmed_at=timezone.now(),
         )
@@ -287,7 +294,7 @@ class TestAnEditorKeepsDraftsOnly:
     ) -> None:
         capability = ProcedureCapability.objects.create(template=template, key="for-link")
         link = CapabilityGoalLink.objects.create(
-            capability=capability, goal=goal, status="approved", claim_scope="supported",
+            capability=capability, goal=goal, status="approved", claim_type="product", claim_scope="supported",
             evidence_kind="professional_consensus",
             source_ref="DOC-2726", confirmed_by=approver, confirmed_at=timezone.now(),
         )
@@ -312,7 +319,7 @@ class TestAnEditorKeepsDraftsOnly:
         ],
     )
     def test_the_right_for_one_table_does_not_open_the_other(self, template, goal, held, url, kind) -> None:
-        half = _staff(f"half-{kind}-2726", EVERYDAY + [held])
+        half = _staff(f"half-{kind}-2726", EVERYDAY + BOUNDARY + [held])
         capability = ProcedureCapability.objects.create(template=template, key="for-link")
         data = (
             _link_form(capability, goal, status="approved")
@@ -334,9 +341,17 @@ class TestTheApproverDoesAllOfIt:
         assert (row.status, row.confirmed_by_id) == ("approved", approver.pk)
 
     def test_editing_and_returning_to_draft_are_allowed(self, approver, template, approved_row) -> None:
+        """Править подтверждённое держатель права может. С DRF-2726 п.1 правка
+        содержания сама снимает подтверждение; вернуть его — новым сохранением."""
         client = _client(approver)
 
         edited = client.post(
+            reverse(CHANGE, args=[approved_row.pk]),
+            _form(template, status="approved", text_client="Правка подтверждающего"),
+        )
+        approved_row.refresh_from_db()
+        after_edit = (approved_row.status, approved_row.text_client)
+        approved_again = client.post(
             reverse(CHANGE, args=[approved_row.pk]),
             _form(template, status="approved", text_client="Правка подтверждающего"),
         )
@@ -345,9 +360,10 @@ class TestTheApproverDoesAllOfIt:
             _form(template, status="system_inference", text_client="Правка подтверждающего"),
         )
 
-        assert (edited.status_code, returned.status_code) == (302, 302)
+        assert (edited.status_code, approved_again.status_code, returned.status_code) == (302, 302, 302)
+        assert after_edit == ("system_inference", "Правка подтверждающего")
         approved_row.refresh_from_db()
-        assert (approved_row.status, approved_row.text_client) == ("system_inference", "Правка подтверждающего")
+        assert (approved_row.status, approved_row.confirmed_by_id) == ("system_inference", None)
 
     def test_deleting_an_approved_row_is_allowed(self, approver, approved_row) -> None:
         response = _client(approver).post(reverse(DELETE, args=[approved_row.pk]), {"post": "yes"})
@@ -376,7 +392,13 @@ class TestAFormWithoutAPersonCannotApprove:
 
         assert draft.is_valid(), draft.errors  # контроль: сама форма проходит
         assert not approved.is_valid()
-        assert set(approved.errors) == {"status"}
+        # Без пользователя нет ни права подтверждения (``status``), ни права
+        # продуктовых границ (``claim_type``, DRF-2726 п.1): оба отказа — по правам.
+        codes = {field: [e.code for e in errs] for field, errs in approved.errors.as_data().items()}
+        assert codes == {
+            "status": ["approval_right_required"],
+            "claim_type": ["product_boundary_right_required"],
+        }
 
 
 # ── Первое право — без оболочки ────────────────────────────────────────────
