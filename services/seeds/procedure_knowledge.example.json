@@ -1,0 +1,44 @@
+{
+  "_about": "ПРИМЕР ФОРМАТА, не знание. Тексты синтетические и в базу стенда не попадают: файл по умолчанию — procedure_knowledge.json, его кладёт куратор. Поля и их смысл — в докстринге команды seed_procedure_knowledge. Все строки здесь — черновики: подтверждает знание человек в админке.",
+  "capabilities": [
+    {
+      "template_code": "1.1.3",
+      "key": "example_supported_effect",
+      "text_client": "[пример формата] Формулировка для клиента — как это прозвучит человеку.",
+      "text_professional": "[пример формата] Формулировка для специалиста — точнее и строже.",
+      "expected_effect": "[пример формата] один проверяемый эффект",
+      "result_timeframe": "[пример формата] когда виден результат — словами",
+      "claim_scope": "supported",
+      "limitations": "[пример формата] чего НЕ обещаем и кому не подходит",
+      "evidence_source": "[пример формата] название источника",
+      "evidence_kind": "[пример формата] вид доказательства",
+      "source_ref": "EXAMPLE-SOURCE-1",
+      "goal_links": [
+        {
+          "goal": "relax",
+          "claim_scope": "supported",
+          "course_pattern": "[пример формата] характер курса словами, не числом",
+          "variability_note": "[пример формата] от чего зависит и у кого бывает иначе",
+          "result_horizon": "[пример формата] горизонт результата для этой цели",
+          "evidence_source": "[пример формата] название источника",
+          "source_ref": "EXAMPLE-SOURCE-2"
+        }
+      ]
+    },
+    {
+      "template_code": "1.1.3",
+      "key": "example_prohibited_promise",
+      "text_client": "",
+      "claim_scope": "prohibited_claim",
+      "limitations": "[пример формата] обещание, которое произносить нельзя, и почему",
+      "source_ref": "EXAMPLE-SOURCE-3"
+    },
+    {
+      "template_code": "1.1.2",
+      "key": "example_not_supported",
+      "text_client": "[пример формата] утверждение, которое не подтверждено",
+      "claim_scope": "not_supported",
+      "limitations": "[пример формата] почему не подтверждено"
+    }
+  ]
+}
