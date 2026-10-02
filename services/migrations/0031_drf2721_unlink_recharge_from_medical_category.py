@@ -9,8 +9,9 @@ services themselves stay in the catalog.
 
 Why a data migration and not the seed. ``seed_goal_options`` only creates
 missing links; an existing one is removed by ``--prune`` alone, and the deploy
-runs nothing but ``migrate`` (``entrypoint.sh``) — there is no shell on the
-stand to run the command from. Editing the seed file (same commit) keeps the
+never runs that command (``entrypoint.sh``: ``migrate`` and the procedure
+knowledge seed, nothing else) — there is no shell on the stand to run it from.
+Editing the seed file (same commit) keeps the
 link from being created again; this migration removes the row that is already
 there.
 
