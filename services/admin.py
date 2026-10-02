@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from services.knowledge_intake import (
+    APPROVED,
     course_errors,
     evidence_kind_errors,
     prohibition_errors,
@@ -717,6 +718,14 @@ class CanonGapRequestAdmin(admin.ModelAdmin):
 # Путь ввода для куратора (владельца). Модели существовали с DRF-2606, но
 # вписать в них строку было нечем: ни формы, ни команды. Здесь — форма.
 #
+# **Подтверждать вправе не каждый, кто вправе изменять** (решение владельца
+# 02.10, блок A; DRF-2726). Право изменения даёт вести черновики. Сохранить
+# строку подтверждённой, изменить подтверждённую, вернуть её в черновик или
+# удалить может только тот, у кого есть отдельное право
+# ``services.approve_<модель>``. Кому его дать, решает владелец — через группы
+# и права в этой же админке; у суперпользователя оно есть всегда. Код имён не
+# знает.
+#
 # Одно правило держит обе формы: **подтверждает тот, кто сохранил.** Полей
 # «кто подтвердил» и «когда» в форме нет — их ставит ``save_model`` из
 # ``request.user`` и текущего времени, как у заявок о разрыве канона выше.
@@ -753,11 +762,48 @@ _CONFIRMATION_FIELDSET = (
 )
 
 
+def _may_approve(user, model) -> bool:
+    """Есть ли у человека право подтверждать знание этой таблицы.
+
+    Нет пользователя — нет права: форма, собранная вне админки, подтвердить
+    не может.
+    """
+    if user is None:
+        return False
+    return user.has_perm(f"{model._meta.app_label}.approve_{model._meta.model_name}")
+
+
 class _ClaimAdminForm(forms.ModelForm):
     """Общая проверка основания — ошибки по полям, а не имена ограничений базы."""
 
+    #: Кто сохраняет. Ставит ``_ClaimAdmin.get_form`` на классе формы,
+    #: собранном под один запрос.
+    acting_user = None
+
     def clean(self):
         cleaned = super().clean()
+        # Право подтверждения. ``self.instance`` здесь ещё несёт значения из
+        # базы: форма переносит свои поля в экземпляр позже, в ``_post_clean``.
+        # ``_state.adding``, а не ``pk``: первичный ключ — UUID по умолчанию и
+        # есть у ещё не сохранённой строки.
+        was_approved = not self.instance._state.adding and self.instance.status == APPROVED
+        wants_approved = cleaned.get("status") == APPROVED
+        untouched = was_approved and wants_approved and not self.changed_data
+        if (was_approved or wants_approved) and not untouched:
+            if not _may_approve(self.acting_user, self._meta.model):
+                if was_approved:
+                    message = (
+                        "Эта строка подтверждена. Менять её и возвращать в черновик может "
+                        "только тот, кому владелец дал право подтверждения."
+                    )
+                else:
+                    message = (
+                        "Подтверждать знание может только тот, кому владелец дал право "
+                        "подтверждения. Черновик можно сохранить и без него."
+                    )
+                self.add_error(
+                    "status", forms.ValidationError(message, code="approval_right_required"),
+                )
         # В форме подтверждающий есть всегда — это тот, кто сохраняет; его
         # впишет ``save_model``. Поэтому из двух условий базы форма спрашивает
         # одно: источник.
@@ -847,7 +893,26 @@ class _ClaimAdmin(admin.ModelAdmin):
     readonly_fields = _CLAIM_READONLY
     list_filter = ("status", "claim_scope")
 
+    def get_form(self, request, obj=None, **kwargs):
+        # ``super().get_form`` собирает новый класс формы на каждый запрос —
+        # пользователь записывается на нём, а не на общем классе.
+        form = super().get_form(request, obj, **kwargs)
+        form.acting_user = request.user
+        return form
+
+    def has_delete_permission(self, request, obj=None):
+        # Удалить подтверждённое — то же, что отменить подтверждение.
+        allowed = super().has_delete_permission(request, obj)
+        if allowed and obj is not None and obj.status == obj.Status.APPROVED:
+            return _may_approve(request.user, type(obj))
+        return allowed
+
     def save_model(self, request, obj, form, change):
+        if change and not form.changed_data:
+            # «Сохранить» без единой правки не пишет ничего: ни отметку
+            # подтверждения, ни время изменения. Иначе открыть строку и нажать
+            # кнопку значило бы оставить в ней след.
+            return
         if obj.status == obj.Status.APPROVED:
             # Сохранить подтверждённую строку с правкой — значит подтвердить
             # то, что в ней теперь написано: иначе новая формулировка осталась
