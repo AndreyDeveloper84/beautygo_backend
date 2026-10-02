@@ -13,15 +13,22 @@
 * сохранение подтверждённой строки без правок право не требует и ничего не
   меняет;
 * человек с правом подтверждения делает всё это, и подпись — его;
-* форма, собранная без пользователя, подтвердить не может.
+* форма, собранная без пользователя, подтвердить не может;
+* первое право можно выдать без оболочки — командой, которую зовёт
+  ``entrypoint.sh``, учёткам из переменной окружения.
 
 Кому дать право, решает владелец; код имён не знает. Все тексты синтетические.
 """
 
 from __future__ import annotations
 
+import re
+from io import StringIO
+from pathlib import Path
+
 import pytest
-from django.contrib.auth.models import Permission
+from django.contrib.auth.models import Group, Permission
+from django.core.management import call_command
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
@@ -43,6 +50,9 @@ CHANGE = "admin:services_procedurecapability_change"
 DELETE = "admin:services_procedurecapability_delete"
 LIST = "admin:services_procedurecapability_changelist"
 ADD_LINK = "admin:services_capabilitygoallink_add"
+CHANGE_LINK = "admin:services_capabilitygoallink_change"
+DELETE_LINK = "admin:services_capabilitygoallink_delete"
+ENTRYPOINT = Path(__file__).resolve().parents[2] / "entrypoint.sh"
 
 EVERYDAY = [
     f"{action}_{model}"
@@ -123,8 +133,22 @@ def approved_row(template, approver) -> ProcedureCapability:
 
 
 def _status_error(response) -> None:
+    """Отказ именно по праву подтверждения — по коду ошибки, а не по имени поля."""
     assert response.status_code == 200  # форма возвращена, а не сохранена
-    assert set(response.context["adminform"].form.errors) == {"status"}
+    form = response.context["adminform"].form
+    assert set(form.errors) == {"status"}
+    assert [e.code for e in form.errors.as_data()["status"]] == ["approval_right_required"]
+
+
+def _link_form(capability: ProcedureCapability, goal: GoalOption, **overrides) -> dict:
+    data = {
+        "capability": str(capability.pk), "goal": str(goal.pk),
+        "course_pattern": "", "result_horizon": "", "variability_note": "",
+        "status": "system_inference", "claim_scope": "supported", "prohibited_statement": "",
+        "limitations": "", "evidence_source": "", "evidence_kind": "", "source_ref": "DOC-2726",
+    }
+    data.update(overrides)
+    return data
 
 
 class TestTheRightExists:
@@ -187,7 +211,7 @@ class TestAnEditorKeepsDraftsOnly:
     def test_saving_an_approved_row_untouched_needs_no_right_and_changes_nothing(
         self, editor, template, approved_row, approver
     ) -> None:
-        stamped_at = approved_row.confirmed_at
+        stamped_at, updated_at = approved_row.confirmed_at, approved_row.updated_at
 
         response = _client(editor).post(
             reverse(CHANGE, args=[approved_row.pk]), _form(template, status="approved"),
@@ -198,6 +222,7 @@ class TestAnEditorKeepsDraftsOnly:
         assert (approved_row.status, approved_row.confirmed_by_id, approved_row.confirmed_at) == (
             "approved", approver.pk, stamped_at,
         )
+        assert approved_row.updated_at == updated_at  # «ничего не меняет» — буквально
 
     def test_deleting_an_approved_row_is_refused(self, editor, approved_row) -> None:
         response = _client(editor).post(reverse(DELETE, args=[approved_row.pk]), {"post": "yes"})
@@ -205,13 +230,39 @@ class TestAnEditorKeepsDraftsOnly:
         assert response.status_code == 403
         assert ProcedureCapability.objects.filter(pk=approved_row.pk).exists()
 
-    def test_deleting_approved_rows_from_the_list_is_refused(self, editor, approved_row) -> None:
-        _client(editor).post(
-            reverse(LIST),
-            {"action": "delete_selected", "_selected_action": [str(approved_row.pk)], "post": "yes"},
+    def test_deleting_approved_rows_from_the_list_is_refused(self, editor, template, approved_row) -> None:
+        client = _client(editor)
+        draft = ProcedureCapability.objects.create(template=template, key="draft")
+
+        def delete_from_list(pk):
+            return client.post(
+                reverse(LIST), {"action": "delete_selected", "_selected_action": [str(pk)], "post": "yes"},
+            )
+
+        control = delete_from_list(draft.pk)
+        refused = delete_from_list(approved_row.pk)
+
+        # Контроль: тот же запрос черновик удаляет — значит, запрос составлен верно.
+        assert control.status_code == 302
+        assert not ProcedureCapability.objects.filter(pk=draft.pk).exists()
+        assert refused.status_code == 403
+        assert ProcedureCapability.objects.filter(pk=approved_row.pk).exists()
+
+    def test_deleting_a_draft_that_carries_an_approved_link_is_refused(
+        self, editor, approver, template, goal
+    ) -> None:
+        """Связь удаляется каскадом вместе с возможностью — подтверждённую связь
+        нельзя снести, удалив её черновую возможность."""
+        draft = ProcedureCapability.objects.create(template=template, key="draft-with-link")
+        link = CapabilityGoalLink.objects.create(
+            capability=draft, goal=goal, status="approved", claim_scope="supported",
+            source_ref="DOC-2726", confirmed_by=approver, confirmed_at=timezone.now(),
         )
 
-        assert ProcedureCapability.objects.filter(pk=approved_row.pk).exists()
+        response = _client(editor).post(reverse(DELETE, args=[draft.pk]), {"post": "yes"})
+
+        assert response.status_code == 403
+        assert CapabilityGoalLink.objects.filter(pk=link.pk).exists()
 
     def test_a_draft_can_still_be_deleted(self, editor, template) -> None:
         """Контроль: отказ выше вызван подтверждением, а не правом удаления."""
@@ -225,26 +276,49 @@ class TestAnEditorKeepsDraftsOnly:
     def test_the_goal_link_is_guarded_by_its_own_right(self, editor, template, goal) -> None:
         capability = ProcedureCapability.objects.create(template=template, key="for-link")
 
-        response = _client(editor).post(reverse(ADD_LINK), {
-            "capability": str(capability.pk), "goal": str(goal.pk),
-            "course_pattern": "", "result_horizon": "", "variability_note": "",
-            "status": "approved", "claim_scope": "supported", "prohibited_statement": "",
-            "limitations": "", "evidence_source": "", "evidence_kind": "", "source_ref": "DOC-2726",
-        })
+        response = _client(editor).post(reverse(ADD_LINK), _link_form(capability, goal, status="approved"))
 
         _status_error(response)
         assert CapabilityGoalLink.objects.count() == 0
 
-    def test_the_right_for_one_table_does_not_open_the_other(self, template, goal) -> None:
-        only_capabilities = _staff("half-2726", EVERYDAY + ["approve_procedurecapability"])
+    def test_an_approved_goal_link_is_neither_edited_nor_deleted(
+        self, editor, approver, template, goal
+    ) -> None:
         capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        link = CapabilityGoalLink.objects.create(
+            capability=capability, goal=goal, status="approved", claim_scope="supported",
+            source_ref="DOC-2726", confirmed_by=approver, confirmed_at=timezone.now(),
+        )
+        client = _client(editor)
 
-        response = _client(only_capabilities).post(reverse(ADD_LINK), {
-            "capability": str(capability.pk), "goal": str(goal.pk),
-            "course_pattern": "", "result_horizon": "", "variability_note": "",
-            "status": "approved", "claim_scope": "supported", "prohibited_statement": "",
-            "limitations": "", "evidence_source": "", "evidence_kind": "", "source_ref": "DOC-2726",
-        })
+        edited = client.post(
+            reverse(CHANGE_LINK, args=[link.pk]),
+            _link_form(capability, goal, status="approved", limitations="чужая правка"),
+        )
+        deleted = client.post(reverse(DELETE_LINK, args=[link.pk]), {"post": "yes"})
+
+        _status_error(edited)
+        assert deleted.status_code == 403
+        link.refresh_from_db()
+        assert (link.status, link.limitations) == ("approved", "")
+
+    @pytest.mark.parametrize(
+        ("held", "url", "kind"),
+        [
+            ("approve_procedurecapability", ADD_LINK, "link"),
+            ("approve_capabilitygoallink", ADD, "capability"),
+        ],
+    )
+    def test_the_right_for_one_table_does_not_open_the_other(self, template, goal, held, url, kind) -> None:
+        half = _staff(f"half-{kind}-2726", EVERYDAY + [held])
+        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        data = (
+            _link_form(capability, goal, status="approved")
+            if kind == "link"
+            else _form(template, status="approved")
+        )
+
+        response = _client(half).post(reverse(url), data)
 
         _status_error(response)
 
@@ -279,6 +353,18 @@ class TestTheApproverDoesAllOfIt:
         assert response.status_code == 302
         assert not ProcedureCapability.objects.filter(pk=approved_row.pk).exists()
 
+    def test_the_right_given_through_a_group_works(self, editor, template) -> None:
+        """Владелец раздаёт право группами — форма спрашивает ``has_perm``, а не
+        личный список прав."""
+        group = Group.objects.create(name="Кураторы знания 2726")
+        group.permissions.set(Permission.objects.filter(codename__in=APPROVE))
+        editor.groups.add(group)
+
+        response = _client(editor).post(reverse(ADD), _form(template, status="approved"))
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        assert ProcedureCapability.objects.get().confirmed_by_id == editor.pk
+
 
 class TestAFormWithoutAPersonCannotApprove:
     def test_no_user_no_approval(self, template) -> None:
@@ -289,3 +375,82 @@ class TestAFormWithoutAPersonCannotApprove:
         assert draft.is_valid(), draft.errors  # контроль: сама форма проходит
         assert not approved.is_valid()
         assert set(approved.errors) == {"status"}
+
+
+# ── Первое право — без оболочки ────────────────────────────────────────────
+
+
+def _grant(*usernames: str) -> tuple[str, str]:
+    out, err = StringIO(), StringIO()
+    call_command("grant_knowledge_approval", *usernames, stdout=out, stderr=err)
+    return out.getvalue(), err.getvalue()
+
+
+def _held(user: User) -> set[str]:
+    return set(user.user_permissions.values_list("codename", flat=True))
+
+
+class TestTheFirstRightIsGrantedWithoutAShell:
+    def test_the_named_staff_account_gets_exactly_the_two_approval_rights(self, editor, template) -> None:
+        before = _held(editor)
+
+        out, _ = _grant("editor-2726")
+
+        assert "granted=1" in out
+        assert _held(editor) - before == set(APPROVE)
+        assert not User.objects.get(pk=editor.pk).is_superuser
+        # И право действует: тот же сотрудник теперь подтверждает.
+        response = _client(User.objects.get(pk=editor.pk)).post(
+            reverse(ADD), _form(template, status="approved"),
+        )
+        assert response.status_code == 302, response.context["adminform"].form.errors
+
+    def test_without_arguments_the_names_come_from_the_environment(self, editor, monkeypatch) -> None:
+        monkeypatch.setenv("KNOWLEDGE_APPROVER_USERNAMES", " editor-2726 , ")
+
+        out, _ = _grant()
+
+        assert "granted=1" in out
+        assert set(APPROVE) <= _held(editor)
+
+    def test_an_empty_environment_grants_nobody(self, editor, monkeypatch) -> None:
+        monkeypatch.delenv("KNOWLEDGE_APPROVER_USERNAMES", raising=False)
+
+        out, _ = _grant()
+
+        assert "nothing to grant" in out
+        assert not set(APPROVE) & _held(editor)
+
+    def test_a_second_run_changes_nothing(self, editor) -> None:
+        _grant("editor-2726")
+
+        out, _ = _grant("editor-2726")
+
+        assert "granted=0 already_had=1" in out
+
+    @pytest.mark.parametrize("flaw", ["unknown", "not_staff", "inactive"])
+    def test_an_account_that_cannot_use_the_right_is_skipped_not_fatal(self, flaw) -> None:
+        if flaw != "unknown":
+            User.objects.create_user(
+                username="odd-2726", password="pw", role="admin",  # pragma: allowlist secret
+                is_staff=flaw != "not_staff", is_active=flaw != "inactive",
+            )
+
+        out, err = _grant("odd-2726")
+
+        assert "granted=0 already_had=0 skipped=1" in out
+        assert "WARNING" in err
+        assert "odd-2726" not in out + err  # имя учётки в журнал не пишется
+        assert not Permission.objects.filter(user__username="odd-2726").exists()
+
+    def test_the_entrypoint_calls_it_after_the_migrations_and_does_not_stop_on_failure(self) -> None:
+        lines = [
+            line.strip() for line in ENTRYPOINT.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+
+        migrate = next(i for i, line in enumerate(lines) if "manage.py migrate --noinput" in line)
+        grant = next(i for i, line in enumerate(lines) if "manage.py grant_knowledge_approval" in line)
+        gunicorn = next(i for i, line in enumerate(lines) if line.startswith("exec gunicorn"))
+        assert migrate < grant < gunicorn
+        assert re.search(r"grant_knowledge_approval\s*\|\|", lines[grant])

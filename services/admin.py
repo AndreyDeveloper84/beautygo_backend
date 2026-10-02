@@ -782,22 +782,25 @@ class _ClaimAdminForm(forms.ModelForm):
         cleaned = super().clean()
         # Право подтверждения. ``self.instance`` здесь ещё несёт значения из
         # базы: форма переносит свои поля в экземпляр позже, в ``_post_clean``.
-        was_approved = bool(self.instance.pk) and self.instance.status == APPROVED
+        # ``_state.adding``, а не ``pk``: первичный ключ — UUID по умолчанию и
+        # есть у ещё не сохранённой строки.
+        was_approved = not self.instance._state.adding and self.instance.status == APPROVED
         wants_approved = cleaned.get("status") == APPROVED
         untouched = was_approved and wants_approved and not self.changed_data
         if (was_approved or wants_approved) and not untouched:
             if not _may_approve(self.acting_user, self._meta.model):
+                if was_approved:
+                    message = (
+                        "Эта строка подтверждена. Менять её и возвращать в черновик может "
+                        "только тот, кому владелец дал право подтверждения."
+                    )
+                else:
+                    message = (
+                        "Подтверждать знание может только тот, кому владелец дал право "
+                        "подтверждения. Черновик можно сохранить и без него."
+                    )
                 self.add_error(
-                    "status",
-                    forms.ValidationError(
-                        "Подтверждать знание и менять подтверждённое может только тот, "
-                        "кому владелец дал право подтверждения. Черновик можно сохранить "
-                        "и без него."
-                        if not was_approved
-                        else "Эта строка подтверждена. Менять её и возвращать в черновик может "
-                        "только тот, кому владелец дал право подтверждения.",
-                        code="approval_right_required",
-                    ),
+                    "status", forms.ValidationError(message, code="approval_right_required"),
                 )
         # В форме подтверждающий есть всегда — это тот, кто сохраняет; его
         # впишет ``save_model``. Поэтому из двух условий базы форма спрашивает
@@ -895,6 +898,11 @@ class _ClaimAdmin(admin.ModelAdmin):
         return allowed
 
     def save_model(self, request, obj, form, change):
+        if change and not form.changed_data:
+            # «Сохранить» без единой правки не пишет ничего: ни отметку
+            # подтверждения, ни время изменения. Иначе открыть строку и нажать
+            # кнопку значило бы оставить в ней след.
+            return
         if obj.status == obj.Status.APPROVED:
             # Сохранить подтверждённую строку с правкой — значит подтвердить
             # то, что в ней теперь написано: иначе новая формулировка осталась
