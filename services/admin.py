@@ -27,8 +27,10 @@ from services.normalization import normalize_service_name
 from .models import (
     CanonGapRequest,
     CapabilityGoalLink,
+    ClaimApprovalReset,
     ClaimEvidence,
     ClaimReviewer,
+    reset_claims,
     DraftSalonService,
     ExternalBusyInterval,
     ExternalSourceMapping,
@@ -114,6 +116,22 @@ class ServiceTemplateAdmin(admin.ModelAdmin):
     list_editable = ('is_popular', 'sort_order')
     ordering = ('category', '-is_popular', 'sort_order', 'name')
     inlines = [RegionalPricingInline, ServiceTemplateSynonymInline]
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        # DRF-2726: значимая правка процедуры возвращает знание о ней в
+        # черновик (правило — в ``ServiceTemplate.save``); куратор должен это
+        # увидеть сразу, а не обнаружить потом.
+        reset = getattr(obj, "knowledge_reset", None)
+        if reset and any(reset.values()):
+            self.message_user(
+                request,
+                "У процедуры изменились значимые данные: подтверждённое знание о ней "
+                f"возвращено в черновик и требует повторной проверки — возможностей: "
+                f"{reset['capabilities']}, связей с целями: {reset['goal_links']}. Что именно "
+                "изменилось — в журнале снятых подтверждений.",
+                level=messages.WARNING,
+            )
 
     def get_readonly_fields(self, request, obj=None):
         # MAP-AUTO-01: код, однажды поставленный, на форме не редактируется.
@@ -741,6 +759,7 @@ class CanonGapRequestAdmin(admin.ModelAdmin):
 # словами: база тоже откажет, но именем ограничения и уже после нажатия.
 
 _CLAIM_READONLY = (
+    "reset_notice",
     "reviewed_by", "reviewed_at",
     "confirmed_by", "confirmed_at", "confirmed_rule", "rule_version",
     "created_at", "updated_at",
@@ -800,6 +819,10 @@ class _ClaimAdminForm(forms.ModelForm):
     review_kept = False
     #: Изменилось ли содержание утверждения (считает ``clean``).
     content_changed = False
+    #: Что именно изменилось в содержании: ``[{field, old, new}]`` — для журнала.
+    content_changes: list = []
+    #: Снято ли этим сохранением прежнее подтверждение (считает ``clean``).
+    approval_dropped = False
 
     mark_reviewed = forms.BooleanField(
         required=False,
@@ -845,6 +868,15 @@ class _ClaimAdminForm(forms.ModelForm):
         had_review = not self.instance._state.adding and self.instance.reviewed_by_id is not None
         content_changed = bool(set(self.changed_data) - _NOT_CLAIM_CONTENT)
         self.content_changed = content_changed
+        # ``self.instance`` ещё несёт прежние значения — отсюда «было».
+        self.content_changes = [
+            {
+                "field": name,
+                "old": str(getattr(self.instance, name, "") or ""),
+                "new": str(cleaned.get(name) or ""),
+            }
+            for name in self.changed_data if name not in _NOT_CLAIM_CONTENT
+        ] if not self.instance._state.adding else []
         self.review_kept = had_review and not content_changed
 
         if cleaned.get("status") != APPROVED:
@@ -889,12 +921,25 @@ class _ClaimAdminForm(forms.ModelForm):
 
     def clean(self):
         cleaned = super().clean()
-        self._clean_review(cleaned)
-        # Право подтверждения. ``self.instance`` здесь ещё несёт значения из
-        # базы: форма переносит свои поля в экземпляр позже, в ``_post_clean``.
-        # ``_state.adding``, а не ``pk``: первичный ключ — UUID по умолчанию и
-        # есть у ещё не сохранённой строки.
+        # ``self.instance`` здесь ещё несёт значения из базы: форма переносит
+        # свои поля в экземпляр позже, в ``_post_clean``. ``_state.adding``, а
+        # не ``pk``: первичный ключ — UUID по умолчанию и есть у ещё не
+        # сохранённой строки.
         was_approved = not self.instance._state.adding and self.instance.status == APPROVED
+        # Требование владельца (DRF-2726): смена ТИПА, СОДЕРЖАНИЯ или ИСТОЧНИКА
+        # снимает подтверждение — подтверждённой строка остаться не может.
+        # Правка сохраняется, а строка тем же сохранением уходит в черновик:
+        # подтвердить новую редакцию — отдельное действие. Не содержание —
+        # статус, срок годности и отметка рецензента (``_NOT_CLAIM_CONTENT``).
+        self.approval_dropped = (
+            was_approved
+            and cleaned.get("status") == APPROVED
+            and bool(set(self.changed_data) - _NOT_CLAIM_CONTENT)
+        )
+        if self.approval_dropped:
+            cleaned["status"] = ClaimEvidence.Status.SYSTEM_INFERENCE.value
+        self._clean_review(cleaned)
+        # Право подтверждения.
         wants_approved = cleaned.get("status") == APPROVED
         untouched = was_approved and wants_approved and not self.changed_data
         if (was_approved or wants_approved) and not untouched:
@@ -943,27 +988,26 @@ class ProcedureCapabilityAdminForm(_ClaimAdminForm):
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         )
 
-    def reviewed_links(self):
-        """Связи этой возможности с целями, несущие отметку проверки."""
+    def dependent_links(self):
+        """Связи этой возможности с целями — утверждения, зависящие от неё."""
         if self.instance._state.adding:
             return CapabilityGoalLink.objects.none()
-        return CapabilityGoalLink.objects.filter(capability=self.instance, reviewed_by__isnull=False)
+        return CapabilityGoalLink.objects.filter(capability=self.instance)
 
     def clean(self):
         cleaned = super().clean()
-        # Связь с целью проверена как утверждение об ЭТОЙ возможности. Правка
-        # содержания возможности снимет проверку у её связей и вернёт
-        # подтверждённые в черновик (делает ``save_model``) — а менять
-        # подтверждённое вправе не каждый (DRF-2726 п.2).
-        if self.content_changed and self.reviewed_links().filter(status=APPROVED).exists():
+        # Связь с целью подтверждена и проверена как утверждение об ЭТОЙ
+        # возможности. Правка содержания возможности вернёт её подтверждённые
+        # связи в черновик и снимет с них проверку (делает ``save_model``) — а
+        # менять подтверждённое вправе не каждый (DRF-2726 п.2).
+        if self.content_changed and self.dependent_links().filter(status=APPROVED).exists():
             if not _may_approve(self.acting_user, CapabilityGoalLink):
                 self.add_error(
                     None,
                     forms.ValidationError(
-                        "У этой возможности есть подтверждённые связи с целями, проверенные "
-                        "рецензентом. Правка содержания снимет их проверку и вернёт их в "
-                        "черновик — это может сделать только тот, у кого есть право "
-                        "подтверждения связей.",
+                        "У этой возможности есть подтверждённые связи с целями. Правка "
+                        "содержания вернёт их в черновик и снимет с них проверку — это может "
+                        "сделать только тот, у кого есть право подтверждения связей.",
                         code="linked_review_would_be_dropped",
                     ),
                 )
@@ -1015,11 +1059,36 @@ class CapabilityGoalLinkAdminForm(_ClaimAdminForm):
         return cleaned
 
 
+class _NeedsReconfirmationFilter(admin.SimpleListFilter):
+    """Очередь куратора: что вернулось в черновик и ждёт повторной проверки."""
+
+    title = "повторная проверка"
+    parameter_name = "needs_reconfirmation"
+
+    def lookups(self, request, model_admin):
+        return [("yes", "Требует повторной проверки")]
+
+    def queryset(self, request, queryset):
+        if self.value() == "yes":
+            return queryset.exclude(status=APPROVED).filter(approval_resets__isnull=False).distinct()
+        return queryset
+
+
 class _ClaimAdmin(admin.ModelAdmin):
     """Общее у двух таблиц знания: кто сохранил «подтверждено», тот и подтвердил."""
 
     readonly_fields = _CLAIM_READONLY
-    list_filter = ("status", "claim_scope", "claim_type")
+    list_filter = ("status", "claim_scope", "claim_type", _NeedsReconfirmationFilter)
+
+    @admin.display(description="Требует повторной проверки")
+    def reset_notice(self, obj) -> str:
+        """Что и почему сняло подтверждение — пока строка не подтверждена заново."""
+        if obj is None or obj._state.adding or obj.status == obj.Status.APPROVED:
+            return "—"
+        last = obj.approval_resets.first()
+        if last is None:
+            return "—"
+        return f"{last.created_at:%d.%m.%Y %H:%M} — подтверждение снято. {last.describe()}"
 
     def get_form(self, request, obj=None, **kwargs):
         # ``super().get_form`` собирает новый класс формы на каждый запрос —
@@ -1041,6 +1110,20 @@ class _ClaimAdmin(admin.ModelAdmin):
             # подтверждения, ни время изменения. Иначе открыть строку и нажать
             # кнопку значило бы оставить в ней след.
             return
+        # Что это сохранение отнимает у строки — для журнала снятых подтверждений.
+        lost_approval = form.approval_dropped
+        lost_review = (
+            obj.reviewed_by_id is not None
+            and not form.cleaned_data.get("mark_reviewed")
+            and not form.review_kept
+        )
+        if form.approval_dropped:
+            self.message_user(
+                request,
+                "Подтверждение снято: изменились тип, содержание или источник утверждения. "
+                "Правка сохранена черновиком; подтвердить новую редакцию — отдельным сохранением.",
+                level=messages.WARNING,
+            )
         # Отметка проверки (DRF-2726): ставит рецензент — за себя; правка
         # содержания снимает прежнюю, и об этом говорится вслух.
         if form.cleaned_data.get("mark_reviewed"):
@@ -1056,10 +1139,12 @@ class _ClaimAdmin(admin.ModelAdmin):
             obj.reviewed_by = None
             obj.reviewed_at = None
         if obj.status == obj.Status.APPROVED:
-            # Сохранить подтверждённую строку с правкой — значит подтвердить
-            # то, что в ней теперь написано: иначе новая формулировка осталась
-            # бы под подтверждением прежней. Подтверждение правилом человек
-            # при этом заменяет своим.
+            # Сюда приходит новое подтверждение (черновик → «подтверждено»)
+            # либо правка подтверждённой строки, не меняющая содержания (срок
+            # годности, отметка рецензента): подпись — того, кто сохранил, и
+            # подтверждение правилом человек при этом заменяет своим. Правка
+            # типа, содержания или источника сюда не доходит: она снимает
+            # подтверждение ещё в форме (``approval_dropped``).
             #
             # Сохранение БЕЗ правок отметку не трогает: «Сохранить» на
             # открытой для чтения строке не должно переписывать, кто и когда
@@ -1078,6 +1163,12 @@ class _ClaimAdmin(admin.ModelAdmin):
             obj.confirmed_rule = ""
             obj.rule_version = ""
         super().save_model(request, obj, form, change)
+        if lost_approval or lost_review:
+            kind = "capability" if isinstance(obj, ProcedureCapability) else "goal_link"
+            ClaimApprovalReset.objects.create(
+                reason=ClaimApprovalReset.Reason.CLAIM_EDITED, changes=form.content_changes,
+                was_approved=lost_approval, had_review=lost_review, **{kind: obj},
+            )
 
 
 @admin.register(ProcedureCapability)
@@ -1094,19 +1185,19 @@ class ProcedureCapabilityAdmin(_ClaimAdmin):
         super().save_model(request, obj, form, change)
         if not (change and form.content_changed):
             return
-        # Проверка связи относилась к прежнему содержанию возможности.
-        # Подтверждённые сначала уходят в черновик: подтверждённой без
-        # проверки связь проверяемого типа база не хранит.
-        reviewed = form.reviewed_links()
-        returned = reviewed.filter(status=APPROVED).update(
-            status=ClaimEvidence.Status.SYSTEM_INFERENCE, reviewed_by=None, reviewed_at=None,
+        # Адресный сброс: от возможности зависят ЕЁ связи с целями — и только
+        # они. Подтверждение и проверка связи относились к прежнему содержанию.
+        reset = reset_claims(
+            capabilities=ProcedureCapability.objects.none(),
+            goal_links=form.dependent_links(),
+            reason=ClaimApprovalReset.Reason.CAPABILITY_EDITED,
+            changes=form.content_changes,
         )
-        dropped = returned + reviewed.update(reviewed_by=None, reviewed_at=None)
-        if dropped:
+        if reset["goal_links"]:
             self.message_user(
                 request,
-                f"Содержание возможности изменилось: у её связей с целями снята проверка "
-                f"рецензентом — {dropped}; из них возвращено в черновик — {returned}.",
+                "Содержание возможности изменилось: её связи с целями возвращены в черновик "
+                f"и требуют повторной проверки — {reset['goal_links']}.",
                 level=messages.WARNING,
             )
 
@@ -1194,3 +1285,34 @@ class ClaimReviewerAdmin(admin.ModelAdmin):
                 if choice[0] in ClaimEvidence.REVIEW_REQUIRED_CLAIM_TYPES
             ]
         return super().formfield_for_choice_field(db_field, request, **kwargs)
+
+
+@admin.register(ClaimApprovalReset)
+class ClaimApprovalResetAdmin(admin.ModelAdmin):
+    """Журнал снятых подтверждений (DRF-2726) — только чтение.
+
+    Что вернулось в черновик, когда и почему, с прежним и новым значением.
+    Строки пишет система; править и удалять их в админке нельзя.
+    """
+
+    list_display = ("created_at", "reason", "capability", "goal_link", "was_approved", "had_review", "what_changed")
+    list_filter = ("reason", "was_approved", "had_review")
+    search_fields = ("capability__key", "goal_link__capability__key", "capability__template__name")
+    list_select_related = ("capability__template", "goal_link__capability__template", "goal_link__goal")
+    readonly_fields = (
+        "created_at", "reason", "capability", "goal_link", "was_approved", "had_review", "what_changed",
+    )
+    fields = readonly_fields
+
+    @admin.display(description="Что изменилось")
+    def what_changed(self, obj) -> str:
+        return obj.describe()
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

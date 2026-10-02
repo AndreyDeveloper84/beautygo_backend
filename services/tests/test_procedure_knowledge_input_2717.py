@@ -297,9 +297,13 @@ class TestSavingWithoutAnEditKeepsTheSignature:
         assert (approved_by_rule.confirmed_rule, approved_by_rule.confirmed_by_id) == ("owner_rule_2717", None)
         assert approved_by_rule.confirmed_at == stamped_at
 
-    def test_an_edit_is_signed_by_the_person_who_made_it(
+    def test_an_edit_drops_the_approval_it_was_given_under(
         self, admin_client, owner, world, approved_by_rule
     ) -> None:
+        """До DRF-2726 правка подтверждённой строки переподписывала её
+        сохранившим. Требование владельца: смена содержания снимает
+        подтверждение — и подпись правила, и статус; подтвердить новую редакцию
+        — отдельным сохранением."""
         response = admin_client.post(
             reverse(CHANGE_CAPABILITY, args=[approved_by_rule.pk]),
             _capability_form(
@@ -310,7 +314,10 @@ class TestSavingWithoutAnEditKeepsTheSignature:
 
         assert response.status_code == 302, response.context["adminform"].form.errors
         approved_by_rule.refresh_from_db()
-        assert (approved_by_rule.confirmed_rule, approved_by_rule.confirmed_by_id) == ("", owner.pk)
+        row = approved_by_rule
+        assert (row.status, row.text_client, row.confirmed_rule, row.confirmed_by_id) == (
+            "system_inference", "Новая формулировка", "", None,
+        )
 
 
 class TestTheCourseIsWordsWithAGround:

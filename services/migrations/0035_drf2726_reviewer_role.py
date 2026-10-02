@@ -290,4 +290,77 @@ class Migration(migrations.Migration):
                 ],
             },
         ),
+        # Журнал снятых подтверждений.
+        migrations.CreateModel(
+            name="ClaimApprovalReset",
+            fields=[
+                (
+                    "id",
+                    models.UUIDField(
+                        default=uuid.uuid4,
+                        editable=False,
+                        primary_key=True,
+                        serialize=False,
+                    ),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                (
+                    "reason",
+                    models.CharField(
+                        choices=[
+                            ("claim_edited", "Изменено само утверждение"),
+                            (
+                                "capability_edited",
+                                "Изменена возможность, о которой связь",
+                            ),
+                            ("procedure_changed", "Изменены значимые данные процедуры"),
+                            ("category_moved", "Категория процедуры перенесена"),
+                        ],
+                        max_length=24,
+                    ),
+                ),
+                ("changes", models.JSONField(default=list)),
+                ("was_approved", models.BooleanField(default=False)),
+                ("had_review", models.BooleanField(default=False)),
+                (
+                    "capability",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="approval_resets",
+                        to="services.procedurecapability",
+                    ),
+                ),
+                (
+                    "goal_link",
+                    models.ForeignKey(
+                        blank=True,
+                        null=True,
+                        on_delete=django.db.models.deletion.CASCADE,
+                        related_name="approval_resets",
+                        to="services.capabilitygoallink",
+                    ),
+                ),
+            ],
+            options={
+                "ordering": ["-created_at"],
+                "constraints": [
+                    models.CheckConstraint(
+                        condition=models.Q(
+                            models.Q(
+                                ("capability__isnull", False),
+                                ("goal_link__isnull", True),
+                            ),
+                            models.Q(
+                                ("capability__isnull", True),
+                                ("goal_link__isnull", False),
+                            ),
+                            _connector="OR",
+                        ),
+                        name="claimapprovalreset_exactly_one_claim",
+                    )
+                ],
+            },
+        ),
     ]

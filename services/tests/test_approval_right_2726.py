@@ -338,9 +338,17 @@ class TestTheApproverDoesAllOfIt:
         assert (row.status, row.confirmed_by_id) == ("approved", approver.pk)
 
     def test_editing_and_returning_to_draft_are_allowed(self, approver, template, approved_row) -> None:
+        """Править подтверждённое держатель права может. С DRF-2726 п.1 правка
+        содержания сама снимает подтверждение; вернуть его — новым сохранением."""
         client = _client(approver)
 
         edited = client.post(
+            reverse(CHANGE, args=[approved_row.pk]),
+            _form(template, status="approved", text_client="Правка подтверждающего"),
+        )
+        approved_row.refresh_from_db()
+        after_edit = (approved_row.status, approved_row.text_client)
+        approved_again = client.post(
             reverse(CHANGE, args=[approved_row.pk]),
             _form(template, status="approved", text_client="Правка подтверждающего"),
         )
@@ -349,9 +357,10 @@ class TestTheApproverDoesAllOfIt:
             _form(template, status="system_inference", text_client="Правка подтверждающего"),
         )
 
-        assert (edited.status_code, returned.status_code) == (302, 302)
+        assert (edited.status_code, approved_again.status_code, returned.status_code) == (302, 302, 302)
+        assert after_edit == ("system_inference", "Правка подтверждающего")
         approved_row.refresh_from_db()
-        assert (approved_row.status, approved_row.text_client) == ("system_inference", "Правка подтверждающего")
+        assert (approved_row.status, approved_row.confirmed_by_id) == ("system_inference", None)
 
     def test_deleting_an_approved_row_is_allowed(self, approver, approved_row) -> None:
         response = _client(approver).post(reverse(DELETE, args=[approved_row.pk]), {"post": "yes"})

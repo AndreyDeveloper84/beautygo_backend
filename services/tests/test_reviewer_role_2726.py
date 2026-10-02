@@ -49,6 +49,7 @@ from services import knowledge_intake
 from services.knowledge_review import may_review, requires_review
 from services.models import (
     CapabilityGoalLink,
+    ClaimApprovalReset,
     ClaimEvidence,
     ClaimReviewer,
     GoalOption,
@@ -466,18 +467,46 @@ class TestAnEditAfterTheReview:
             reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
         )
 
-    def test_a_new_wording_cannot_stay_approved_under_the_old_review(
-        self, approver, template, reviewed_and_approved, reviewer
+    def test_a_new_wording_does_not_stay_approved_under_the_old_review(
+        self, approver, template, reviewed_and_approved
     ) -> None:
+        """Сохраняющий оставил «подтверждено» — строка всё равно уходит в
+        черновик: правка сохранена, обе подписи сняты, и об этом сказано."""
         response = _client(approver).post(
             reverse(CHANGE, args=[reviewed_and_approved.pk]),
             _form(template, status="approved", text_client="Новая формулировка"),
         )
 
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        row = reviewed_and_approved
+        row.refresh_from_db()
+        assert (row.text_client, row.status, row.reviewed_by_id, row.confirmed_by_id) == (
+            "Новая формулировка", "system_inference", None, None,
+        )
+        told = " ".join(str(m) for m in get_messages(response.wsgi_request))
+        assert "Подтверждение снято" in told
+        assert "Отметка проверки рецензентом снята" in told
+
+    def test_a_reviewed_draft_edited_and_approved_in_one_save_is_refused(
+        self, approver, template, reviewer
+    ) -> None:
+        """Тот же обход с другой стороны: проверенный ЧЕРНОВИК поправить и тем
+        же сохранением подтвердить — под прежней отметкой нельзя."""
+        draft = ProcedureCapability.objects.create(
+            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            claim_type="medical", claim_scope="supported", source_ref="DOC-2726",
+            reviewed_by=reviewer, reviewed_at=timezone.now(),
+        )
+
+        response = _client(approver).post(
+            reverse(CHANGE, args=[draft.pk]),
+            _form(template, status="approved", text_client="Новая формулировка"),
+        )
+
         assert _errors(response) == {"status": ["review_required"]}
-        reviewed_and_approved.refresh_from_db()
-        assert (reviewed_and_approved.text_client, reviewed_and_approved.reviewed_by_id) == (
-            "Синтетическая формулировка", reviewer.pk,
+        draft.refresh_from_db()
+        assert (draft.status, draft.text_client, draft.reviewed_by_id) == (
+            "system_inference", "Синтетическая формулировка", reviewer.pk,
         )
 
     def test_a_new_wording_returned_to_draft_loses_the_review_and_says_so(
@@ -507,33 +536,43 @@ class TestAnEditAfterTheReview:
         assert reviewed_and_approved.valid_until is not None
 
     def test_the_curator_cannot_relabel_a_medical_claim_as_product_and_keep_it_approved(
-        self, approver, template, reviewed_and_approved, reviewer
+        self, approver, template, reviewed_and_approved
     ) -> None:
         """Обход, найденный ревью: сменить тип на тот, которому рецензент не
-        нужен, и оставить «подтверждено»."""
-        response = _client(approver).post(
-            reverse(CHANGE, args=[reviewed_and_approved.pk]),
-            _form(template, status="approved", claim_type="product"),
-        )
+        нужен, и оставить «подтверждено». Смена типа снимает подтверждение, а
+        подтвердить продуктовое заново куратор не вправе."""
+        client = _client(approver)
+        relabel = _form(template, status="approved", claim_type="product")
 
-        assert _errors(response) == {"claim_type": ["product_boundary_right_required"]}
+        first = client.post(reverse(CHANGE, args=[reviewed_and_approved.pk]), relabel)
         row = reviewed_and_approved
         row.refresh_from_db()
-        assert (row.claim_type, row.status, row.reviewed_by_id) == ("medical", "approved", reviewer.pk)
+        after_relabel = (row.claim_type, row.status, row.reviewed_by_id, row.confirmed_by_id)
+        second = client.post(reverse(CHANGE, args=[row.pk]), relabel)
 
-    def test_the_holder_of_the_product_boundary_may_relabel__and_signs_it(
+        assert first.status_code == 302, first.context["adminform"].form.errors
+        assert after_relabel == ("product", "system_inference", None, None)
+        assert _errors(second) == {"claim_type": ["product_boundary_right_required"]}
+        row.refresh_from_db()
+        assert row.status == "system_inference"
+
+    def test_the_holder_of_the_product_boundary_may_relabel__in_two_steps_and_signs_it(
         self, boundary_holder, template, reviewed_and_approved
     ) -> None:
         """Предел, литералом: держатель продуктовых границ может объявить
-        продуктовым и проверенное медицинское. Отметка рецензента при этом
-        снимается, а решение подписано его именем."""
-        response = _client(boundary_holder).post(
-            reverse(CHANGE, args=[reviewed_and_approved.pk]),
-            _form(template, status="approved", claim_type="product"),
-        )
+        продуктовым и проверенное медицинское — но не одним сохранением:
+        смена типа снимает подтверждение, новое подписано его именем."""
+        client = _client(boundary_holder)
+        relabel = _form(template, status="approved", claim_type="product")
 
-        assert response.status_code == 302, response.context["adminform"].form.errors
+        client.post(reverse(CHANGE, args=[reviewed_and_approved.pk]), relabel)
         row = reviewed_and_approved
+        row.refresh_from_db()
+        after_first = row.status
+        second = client.post(reverse(CHANGE, args=[row.pk]), relabel)
+
+        assert after_first == "system_inference"
+        assert second.status_code == 302, second.context["adminform"].form.errors
         row.refresh_from_db()
         assert (row.claim_type, row.status, row.reviewed_by_id, row.confirmed_by_id) == (
             "product", "approved", None, boundary_holder.pk,
@@ -551,6 +590,455 @@ class TestAnEditAfterTheReview:
         row.refresh_from_db()
         assert (row.reviewed_at, row.confirmed_at, row.updated_at) == before
         assert (row.reviewed_by_id, row.confirmed_by_id) == (reviewer.pk, approver.pk)
+
+
+class TestTheOwnersTwoRequirements:
+    """Два требования владельца к этому листу — литералом, чтобы не регрессировали."""
+
+    @pytest.fixture
+    def superuser(self) -> User:
+        return User.objects.create_superuser(
+            username="super-2726-req", password="pw",  # pragma: allowlist secret
+            email="super-2726-req@example.test", role="admin",
+        )
+
+    # 1. Суперпользователь не обходит обязательную рецензию.
+
+    @pytest.mark.parametrize("claim_type", ["medical", "professional", "physiological"])
+    def test_a_superuser_cannot_approve_a_reviewed_type_without_a_review(
+        self, superuser, template, claim_type
+    ) -> None:
+        response = _client(superuser).post(reverse(ADD), _form(template, claim_type=claim_type, status="approved"))
+
+        assert _errors(response) == {"status": ["review_required"]}
+        assert ProcedureCapability.objects.count() == 0
+
+    def test_a_superuser_approves_a_product_claim(self, superuser, template) -> None:
+        """Контроль: отказ выше вызван типом — продуктовое суперпользователь
+        подтверждает (третье право касается только ``product``)."""
+        response = _client(superuser).post(reverse(ADD), _form(template, claim_type="product", status="approved"))
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        assert ProcedureCapability.objects.get().status == "approved"
+
+    # 2. Смена типа, содержания или источника снимает подтверждение.
+
+    CHANGES = [
+        pytest.param({"claim_type": "professional"}, id="type"),
+        pytest.param({"text_client": "Другая формулировка"}, id="content"),
+        pytest.param({"source_ref": "DOC-2726-B"}, id="source_ref"),
+        pytest.param({"evidence_source": "другой источник"}, id="evidence_source"),
+    ]
+
+    @pytest.mark.parametrize("change", CHANGES)
+    def test_an_approved_product_claim_loses_its_approval(self, superuser, template, change) -> None:
+        """Даже у того, кто вправе всё: сохранить «подтверждено» вместе с
+        правкой нельзя — строка уходит в черновик."""
+        row = ProcedureCapability.objects.create(
+            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            claim_type="product", claim_scope="supported", **_signed(superuser),
+        )
+
+        response = _client(superuser).post(
+            reverse(CHANGE, args=[row.pk]),
+            _form(template, **{"claim_type": "product", "status": "approved", **change}),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        row.refresh_from_db()
+        assert (row.status, row.confirmed_by_id, row.confirmed_at) == ("system_inference", None, None)
+        assert any("Подтверждение снято" in str(m) for m in get_messages(response.wsgi_request))
+
+    @pytest.mark.parametrize("change", CHANGES)
+    def test_an_approved_reviewed_claim_loses_both_signatures(
+        self, superuser, reviewer, template, change
+    ) -> None:
+        row = ProcedureCapability.objects.create(
+            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            claim_type="medical", claim_scope="supported",
+            reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(superuser),
+        )
+
+        response = _client(superuser).post(
+            reverse(CHANGE, args=[row.pk]), _form(template, status="approved", **change),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        row.refresh_from_db()
+        assert (row.status, row.confirmed_by_id, row.reviewed_by_id) == ("system_inference", None, None)
+
+    def test_the_term_of_validity_alone_keeps_the_approval(self, superuser, template) -> None:
+        """Контроль: снимает подтверждение не любое сохранение, а правка типа,
+        содержания или источника."""
+        row = ProcedureCapability.objects.create(
+            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            claim_type="product", claim_scope="supported", **_signed(superuser),
+        )
+
+        response = _client(superuser).post(
+            reverse(CHANGE, args=[row.pk]),
+            _form(template, claim_type="product", status="approved",
+                  valid_until_0="2030-01-01", valid_until_1="00:00:00"),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        row.refresh_from_db()
+        assert (row.status, row.confirmed_by_id) == ("approved", superuser.pk)
+
+    def test_the_goal_link_loses_its_approval_too(self, superuser, template, goal) -> None:
+        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        link = CapabilityGoalLink.objects.create(
+            capability=capability, goal=goal, claim_type="product", claim_scope="supported",
+            **_signed(superuser),
+        )
+
+        response = _client(superuser).post(
+            reverse("admin:services_capabilitygoallink_change", args=[link.pk]),
+            {
+                "capability": str(capability.pk), "goal": str(goal.pk),
+                "course_pattern": "", "result_horizon": "", "variability_note": "",
+                "claim_type": "product", "status": "approved", "claim_scope": "supported",
+                "prohibited_statement": "", "limitations": "", "evidence_source": "",
+                "evidence_kind": "", "source_ref": "DOC-2726-B",
+            },
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        link.refresh_from_db()
+        assert (link.status, link.confirmed_by_id) == ("system_inference", None)
+
+
+class TestAChangeOfTheProcedureDropsTheApproval:
+    """Требование владельца: подтверждение не переносится на изменившийся предмет.
+
+    Пять узлов, которые владелец просил проверить отдельно: (1) body→face,
+    (2) medical→product, (3) смена источника, (4) новая версия каталога при
+    неизменном остальном — подтверждение остаётся, (5) неизменность доказать
+    нечем — подтверждать заново.
+    """
+
+    @pytest.fixture
+    def claims(self, template, goal, reviewer, approver):
+        capability = ProcedureCapability.objects.create(
+            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            claim_type="medical", claim_scope="supported",
+            reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
+        )
+        link = CapabilityGoalLink.objects.create(
+            capability=capability, goal=goal, claim_type="medical", claim_scope="supported",
+            reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
+        )
+        return capability, link
+
+    @staticmethod
+    def _states(claims) -> list[tuple]:
+        out = []
+        for row in claims:
+            row.refresh_from_db()
+            out.append((row.status, row.reviewed_by_id is not None, row.confirmed_by_id is not None))
+        return out
+
+    APPROVED_AND_REVIEWED = ("approved", True, True)
+    #: Черновик без отметки рецензента; след подтверждения остаётся.
+    RETURNED = ("system_inference", False, True)
+
+    # 1. Смена области компетенции body↔face.
+
+    def test_1_moving_the_procedure_from_face_to_body_returns_its_knowledge_to_draft(
+        self, template, body, claims
+    ) -> None:
+        template.category = body
+        template.save()
+
+        assert self._states(claims) == [self.RETURNED, self.RETURNED]
+
+    def test_1_moving_its_subcategory_under_another_root_does_the_same(self, template, body, claims) -> None:
+        subcategory = template.category
+        subcategory.parent = body
+        subcategory.save()
+
+        assert self._states(claims) == [self.RETURNED, self.RETURNED]
+
+    def test_1_rebinding_the_claim_to_a_procedure_of_another_area_drops_its_approval(
+        self, approver, template, body, claims, reviewer
+    ) -> None:
+        capability, _ = claims
+        elsewhere = ServiceTemplate.objects.create(
+            category=body, name="Процедура тела 2726-р", name_short="Процедура тела 2726-р",
+        )
+
+        response = _client(approver).post(
+            reverse(CHANGE, args=[capability.pk]),
+            _form(elsewhere, status="approved", text_client="Синтетическая формулировка"),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        capability.refresh_from_db()
+        assert (capability.template_id, capability.status, capability.reviewed_by_id) == (
+            elsewhere.pk, "system_inference", None,
+        )
+
+    # 2. medical → product.
+
+    def test_2_medical_to_product_returns_the_claim_to_draft(self, boundary_holder, template, claims) -> None:
+        """Даже у держателя продуктовых границ: смена типа — это draft, а не
+        переподпись. (Обычному куратору подтвердить продуктовое заново не даёт
+        третье право — ``test_the_curator_cannot_relabel_…``.)"""
+        capability, _ = claims
+
+        response = _client(boundary_holder).post(
+            reverse(CHANGE, args=[capability.pk]), _form(template, status="approved", claim_type="product"),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        capability.refresh_from_db()
+        assert (capability.claim_type, capability.status, capability.reviewed_by_id) == (
+            "product", "system_inference", None,
+        )
+
+    # 3. Смена источника.
+
+    @pytest.mark.parametrize("field", ["source_ref", "evidence_source"])
+    def test_3_a_new_source_returns_the_claim_to_draft(self, approver, template, claims, field) -> None:
+        capability, _ = claims
+
+        response = _client(approver).post(
+            reverse(CHANGE, args=[capability.pk]), _form(template, status="approved", **{field: "DOC-2726-NEW"}),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        capability.refresh_from_db()
+        assert (capability.status, capability.reviewed_by_id) == ("system_inference", None)
+
+    # 4. Новый номер версии каталога при неизменном остальном.
+
+    def test_4_a_new_catalogue_version_alone_keeps_the_approval(self, template, claims) -> None:
+        template.approval_rule_version = "canonical_catalog_2027-01.json"
+        template.approval_source_ref = "эталонный справочник владельца, издание 2027-01"
+        template.approved_at = timezone.now()
+        template.is_popular = not template.is_popular
+        template.save()
+
+        assert self._states(claims) == [self.APPROVED_AND_REVIEWED, self.APPROVED_AND_REVIEWED]
+
+    def test_4_saving_the_procedure_unchanged_keeps_the_approval(self, template, claims) -> None:
+        template.save()
+
+        assert self._states(claims) == [self.APPROVED_AND_REVIEWED, self.APPROVED_AND_REVIEWED]
+
+    # 5. Неизменность доказать нечем — подтверждать заново.
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            pytest.param("name", "Процедура 2726-р, новая редакция", id="name"),
+            pytest.param("contraindications", "новая оговорка", id="contraindications"),
+            pytest.param("requires_health_check", True, id="health_check"),
+            pytest.param("name_short", "Новая редакция", id="name_short"),
+            pytest.param("duration_default", 95, id="duration"),
+        ],
+    )
+    def test_5_a_new_version_that_changes_the_procedure_requires_a_new_confirmation(
+        self, template, claims, field, value
+    ) -> None:
+        """Версия каталога пришла вместе с правкой самой процедуры — подтверждение
+        не переносится."""
+        template.approval_rule_version = "canonical_catalog_2027-01.json"
+        setattr(template, field, value)
+        template.save()
+
+        assert self._states(claims) == [self.RETURNED, self.RETURNED]
+
+    def test_5_any_field_not_proven_neutral_counts_as_a_change__literally(self) -> None:
+        """Разрешительный список литералом. Поле, которого в нём нет, — в том
+        числе добавленное в модель позже — считается значимым: доказать по нему
+        неизменность нечем, и подтверждение автоматически не переносится."""
+        assert ServiceTemplate.KNOWLEDGE_NEUTRAL_FIELDS == {
+            "approval_rule_version", "approval_source_ref", "approved_at", "approved_by", "approved_rule",
+            "is_popular", "sort_order", "created_at", "updated_at",
+        }
+        every_field = {f.name for f in ServiceTemplate._meta.concrete_fields}
+        assert ServiceTemplate.KNOWLEDGE_NEUTRAL_FIELDS <= every_field  # в списке нет несуществующих имён
+        significant = every_field - ServiceTemplate.KNOWLEDGE_NEUTRAL_FIELDS - {"id"}
+        assert {"category", "name", "canonical_code", "requires_health_check", "contraindications"} <= significant
+
+    def test_when_dependencies_cannot_be_told_every_claim_of_this_procedure_is_reset(
+        self, template, claims, boundary_holder, goal
+    ) -> None:
+        """От какого поля процедуры зависит конкретное утверждение, нигде не
+        записано — значит, значимая правка возвращает в черновик ВСЕ утверждения
+        этой процедуры: и проверенные рецензентом, и продуктовое, которому
+        рецензент не нужен."""
+        product = ProcedureCapability.objects.create(
+            template=template, key="product-claim", claim_type="product", claim_scope="supported",
+            **_signed(boundary_holder),
+        )
+
+        template.name = "Процедура 2726-р, новая редакция"
+        template.save()
+
+        assert self._states(claims) == [self.RETURNED, self.RETURNED]
+        product.refresh_from_db()
+        assert product.status == "system_inference"
+
+    def test_a_draft_reviewed_claim_loses_its_review_too(self, template, body, reviewer) -> None:
+        draft = ProcedureCapability.objects.create(
+            template=template, key="reviewed-draft", claim_type="medical",
+            reviewed_by=reviewer, reviewed_at=timezone.now(),
+        )
+
+        template.category = body
+        template.save()
+
+        draft.refresh_from_db()
+        assert (draft.status, draft.reviewed_by_id) == ("system_inference", None)
+
+    def test_the_knowledge_of_other_procedures_is_untouched(self, template, body, claims, reviewer, approver) -> None:
+        """Контроль: возврат касается только знания об изменившейся процедуре."""
+        other = ServiceTemplate.objects.create(
+            category=template.category, name="Соседняя процедура 2726-р", name_short="Соседняя 2726-р",
+        )
+        neighbour = ProcedureCapability.objects.create(
+            template=other, key="neighbour", claim_type="medical", claim_scope="supported",
+            reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
+        )
+
+        template.category = body
+        template.save()
+
+        assert self._states([neighbour]) == [self.APPROVED_AND_REVIEWED]
+
+
+class TestTheCuratorSeesWhatWasReset:
+    """Требование владельца: причина, старое и новое значение, время, список
+    затронутых утверждений — и куратору показано, что нужна повторная проверка."""
+
+    @pytest.fixture
+    def claims(self, template, goal, reviewer, approver):
+        capability = ProcedureCapability.objects.create(
+            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            claim_type="medical", claim_scope="supported",
+            reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
+        )
+        link = CapabilityGoalLink.objects.create(
+            capability=capability, goal=goal, claim_type="medical", claim_scope="supported",
+            reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
+        )
+        return capability, link
+
+    @pytest.fixture
+    def owner(self) -> User:
+        return User.objects.create_superuser(
+            username="owner-2726-audit", password="pw",  # pragma: allowlist secret
+            email="owner-2726-audit@example.test", role="admin",
+        )
+
+    def test_a_change_of_the_procedure_is_journalled_per_claim_with_old_and_new(self, template, claims) -> None:
+        capability, link = claims
+        before = timezone.now()
+
+        template.name = "Процедура 2726-р, новая редакция"
+        template.save()
+
+        rows = list(ClaimApprovalReset.objects.order_by("created_at"))
+        assert {(r.capability_id, r.goal_link_id) for r in rows} == {(capability.pk, None), (None, link.pk)}
+        for row in rows:
+            assert row.reason == "procedure_changed"
+            assert row.changes == [
+                {"field": "name", "old": "Процедура 2726-р", "new": "Процедура 2726-р, новая редакция"},
+            ]
+            assert (row.was_approved, row.had_review) == (True, True)
+            assert row.created_at >= before
+
+    def test_a_move_to_another_area_names_both_areas(self, template, body, claims) -> None:
+        template.category = body
+        template.save()
+
+        row = ClaimApprovalReset.objects.filter(capability__isnull=False).get()
+        assert row.changes == [{"field": "category", "old": "Пилинги 2726-р", "new": "Тело 2726-р"}]
+
+    def test_a_new_catalogue_version_alone_writes_nothing(self, template, claims) -> None:
+        template.approval_rule_version = "canonical_catalog_2027-01.json"
+        template.save()
+
+        assert ClaimApprovalReset.objects.count() == 0
+
+    def test_the_procedure_admin_tells_the_curator_at_once(self, owner, template, claims) -> None:
+        url = reverse("admin:services_servicetemplate_change", args=[template.pk])
+        client = _client(owner)
+        form = client.get(url).context["adminform"].form
+        data = {name: ("" if value is None else value) for name, value in form.initial.items()}
+        data.update({k: v for k, v in client.get(url).context["adminform"].form.initial.items() if v is not None})
+        data["category"] = str(template.category_id)
+        data["contraindications"] = "новая оговорка"
+        for prefix in ("regional_prices", "synonyms"):
+            data.update({f"{prefix}-TOTAL_FORMS": "0", f"{prefix}-INITIAL_FORMS": "0"})
+        data = {k: v for k, v in data.items() if not isinstance(v, bool) or v}
+
+        response = client.post(url, data)
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        told = " ".join(str(m) for m in get_messages(response.wsgi_request))
+        assert "требует повторной проверки — возможностей: 1, связей с целями: 1" in told
+
+    def test_the_claim_page_and_the_queue_show_the_reset(self, owner, template, claims) -> None:
+        capability, _ = claims
+        template.contraindications = "новая оговорка"
+        template.save()
+        client = _client(owner)
+
+        page = client.get(reverse(CHANGE, args=[capability.pk]))
+        queue = client.get(reverse("admin:services_procedurecapability_changelist"), {"needs_reconfirmation": "yes"})
+        everything = client.get(reverse("admin:services_procedurecapability_changelist"))
+
+        notice = page.content.decode()
+        assert "подтверждение снято" in notice
+        assert "Изменены значимые данные процедуры" in notice
+        assert "новая оговорка" in notice
+        assert [row.pk for row in queue.context["cl"].result_list] == [capability.pk]
+        assert everything.status_code == 200
+
+    def test_an_untouched_claim_is_not_in_the_queue(self, owner, template) -> None:
+        ProcedureCapability.objects.create(template=template, key="plain-draft")
+
+        queue = _client(owner).get(
+            reverse("admin:services_procedurecapability_changelist"), {"needs_reconfirmation": "yes"},
+        )
+
+        assert list(queue.context["cl"].result_list) == []
+
+    def test_an_edit_of_the_claim_itself_is_journalled_with_old_and_new(
+        self, approver, template, claims
+    ) -> None:
+        capability, _ = claims
+
+        _client(approver).post(
+            reverse(CHANGE, args=[capability.pk]),
+            _form(template, status="approved", text_client="Новая формулировка"),
+        )
+
+        own = ClaimApprovalReset.objects.get(capability=capability)
+        assert own.reason == "claim_edited"
+        assert own.changes == [
+            {"field": "text_client", "old": "Синтетическая формулировка", "new": "Новая формулировка"},
+        ]
+        assert (own.was_approved, own.had_review) == (True, True)
+
+    def test_the_journal_is_read_only(self, owner, template, claims) -> None:
+        template.name = "Процедура 2726-р, новая редакция"
+        template.save()
+        row = ClaimApprovalReset.objects.first()
+        client = _client(owner)
+
+        listing = client.get(reverse("admin:services_claimapprovalreset_changelist"))
+        add = client.get(reverse("admin:services_claimapprovalreset_add"))
+        delete = client.post(
+            reverse("admin:services_claimapprovalreset_delete", args=[row.pk]), {"post": "yes"},
+        )
+
+        assert listing.status_code == 200
+        assert (add.status_code, delete.status_code) == (403, 403)
+        assert ClaimApprovalReset.objects.filter(pk=row.pk).exists()
 
 
 class TestAnEditOfTheCapabilityUnderAReviewedLink:
@@ -593,7 +1081,57 @@ class TestAnEditOfTheCapabilityUnderAReviewedLink:
         assert approved_link.confirmed_by_id == approver.pk  # след подтверждения остаётся
         assert (reviewed_draft.status, reviewed_draft.reviewed_by_id) == ("system_inference", None)
         told = [str(m) for m in get_messages(response.wsgi_request)]
-        assert any("снята проверка рецензентом — 2; из них возвращено в черновик — 1" in m for m in told)
+        assert any("возвращены в черновик и требуют повторной проверки — 2" in m for m in told)
+
+    def test_the_reset_is_addressed__only_the_links_of_the_edited_capability(
+        self, approver, template, capability, approved_link, reviewer
+    ) -> None:
+        """Адресный сброс: от возможности зависят ЕЁ связи. Вторая возможность
+        той же процедуры и её связь не тронуты."""
+        other_goal = GoalOption.objects.create(key="other-goal-2726-r", label="Другая цель")
+        sibling = ProcedureCapability.objects.create(
+            template=template, key="sibling", claim_type="medical", claim_scope="supported",
+            reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
+        )
+        sibling_link = CapabilityGoalLink.objects.create(
+            capability=sibling, goal=other_goal, claim_type="medical", claim_scope="supported",
+            reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
+        )
+
+        response = _client(approver).post(
+            reverse(CHANGE, args=[capability.pk]),
+            _form(template, claim_type="product", text_client="Новая формулировка"),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        approved_link.refresh_from_db()
+        sibling.refresh_from_db()
+        sibling_link.refresh_from_db()
+        assert approved_link.status == "system_inference"
+        assert (sibling.status, sibling.reviewed_by_id) == ("approved", reviewer.pk)
+        assert (sibling_link.status, sibling_link.reviewed_by_id) == ("approved", reviewer.pk)
+        journalled = ClaimApprovalReset.objects.get(goal_link=approved_link)
+        assert journalled.reason == "capability_edited"
+        assert not ClaimApprovalReset.objects.filter(goal_link=sibling_link).exists()
+
+    def test_an_approved_product_link_depends_on_its_capability_too(
+        self, boundary_holder, template, capability, goal
+    ) -> None:
+        """Связи рецензент мог быть и не нужен — она всё равно утверждает нечто
+        об этой возможности и уходит в черновик вместе с её правкой."""
+        link = CapabilityGoalLink.objects.create(
+            capability=capability, goal=goal, claim_type="product", claim_scope="supported",
+            **_signed(boundary_holder),
+        )
+
+        response = _client(boundary_holder).post(
+            reverse(CHANGE, args=[capability.pk]),
+            _form(template, claim_type="product", text_client="Новая формулировка"),
+        )
+
+        assert response.status_code == 302, response.context["adminform"].form.errors
+        link.refresh_from_db()
+        assert link.status == "system_inference"
 
     def test_without_the_right_to_change_approved_links_the_edit_is_refused(
         self, template, capability, approved_link, reviewer
