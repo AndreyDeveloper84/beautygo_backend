@@ -294,12 +294,21 @@ class TestUnknownIsSaidOutLoud:
         unsaid = _capability(
             template, key="wrinkles-permanent", text_client="Убирает морщины навсегда"
         )
-        _approve(unsaid, curator, claim_scope=scope)
+        # DRF-2726: у подтверждённого запрета обязателен предмет запрета — и он
+        # тоже не покидает каталог через эту ручку.
+        statement = (
+            {"prohibited_statement": "Обещание убрать морщины навсегда"}
+            if scope == C.PROHIBITED_CLAIM
+            else {}
+        )
+        _approve(unsaid, curator, claim_scope=scope, **statement)
 
         data = _read(api, template_id=str(template.id))
 
         assert [c["key"] for c in data["claims"]] == ["even-tone"]
         atoms = [str(a) for a in _atoms(data)]
+        assert "prohibited_statement" not in atoms
+        assert "Обещание убрать морщины навсегда" not in atoms
         assert "wrinkles-permanent" not in atoms
         assert "Убирает морщины навсегда" not in atoms
 
