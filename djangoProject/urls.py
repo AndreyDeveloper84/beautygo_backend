@@ -15,6 +15,7 @@ from services.internal_offer_api import (
     InternalSpecialistServiceOfferView,
     InternalSpecialistServiceSelectionView,
 )
+from services.knowledge_api import InternalProcedureKnowledgeView
 from users.internal_address_suggest_api import InternalAddressSuggestView
 from users.internal_canon_gap_api import (  # noqa: E402
     InternalCanonGapRequestDetailView,
@@ -316,6 +317,14 @@ urlpatterns = [
     path(
         'api/v1/internal/services/',
         include('services.internal_urls'),
+    ),
+    # DRF-2724 — знание о процедуре для бота: только подтверждённое,
+    # поддержанное и не истёкшее (services/capabilities.py). Не под /me/:
+    # о человеке в запросе ничего нет. Клиент её ещё не зовёт (теневой путь).
+    path(
+        'api/v1/internal/knowledge/procedures/',
+        InternalProcedureKnowledgeView.as_view(),
+        name='internal-procedure-knowledge',
     ),
     # S3A canonical catalog mirror (#1044 / #200) — new SalonService /
     # SpecialistService layer the bot (S3B) reads.
