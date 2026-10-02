@@ -801,15 +801,20 @@ class _ClaimAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         if obj.status == obj.Status.APPROVED:
-            # Сохранить подтверждённую строку — значит подтвердить то, что в
-            # ней сейчас написано. Отметка обновляется при каждом таком
-            # сохранении: иначе правка формулировки осталась бы под
-            # подтверждением прежнего текста. Подтверждение правилом (из
-            # засева) человек заменяет своим.
-            obj.confirmed_by = request.user
-            obj.confirmed_at = timezone.now()
-            obj.confirmed_rule = ""
-            obj.rule_version = ""
+            # Сохранить подтверждённую строку с правкой — значит подтвердить
+            # то, что в ней теперь написано: иначе новая формулировка осталась
+            # бы под подтверждением прежней. Подтверждение правилом человек
+            # при этом заменяет своим.
+            #
+            # Сохранение БЕЗ правок отметку не трогает: «Сохранить» на
+            # открытой для чтения строке не должно переписывать, кто и когда
+            # её подтвердил, — прежнего автора потом нигде не найти.
+            already_confirmed = bool(obj.confirmed_by_id or obj.confirmed_rule)
+            if not (change and already_confirmed and not form.changed_data):
+                obj.confirmed_by = request.user
+                obj.confirmed_at = timezone.now()
+                obj.confirmed_rule = ""
+                obj.rule_version = ""
         else:
             # Возврат в черновик снимает отметку: иначе у неподтверждённой
             # строки оставался бы автор подтверждения.
@@ -832,6 +837,7 @@ class ProcedureCapabilityAdmin(_ClaimAdmin):
     list_display = ("template", "key", "status", "claim_scope", "valid_until", "confirmed_by")
     search_fields = ("key", "text_client", "template__name", "template__canonical_code")
     autocomplete_fields = ("template",)
+    list_select_related = ("template", "confirmed_by")
     ordering = ("template", "key")
     fieldsets = (
         (
@@ -856,6 +862,7 @@ class CapabilityGoalLinkAdmin(_ClaimAdmin):
     list_display = ("capability", "goal", "status", "claim_scope", "valid_until", "confirmed_by")
     search_fields = ("capability__key", "capability__template__name", "goal__key", "goal__label")
     autocomplete_fields = ("capability", "goal")
+    list_select_related = ("capability__template", "goal", "confirmed_by")
     ordering = ("capability", "goal")
     fieldsets = (
         (

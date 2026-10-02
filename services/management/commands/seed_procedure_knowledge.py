@@ -14,20 +14,34 @@
   файла не должен возвращать подтверждённое к черновику файла. Сколько строк
   оставлено как есть — печатается.
 * Статус по умолчанию — ``system_inference`` (черновик, человеку не
-  говорится). ``approved`` из файла принимается только с полным основанием в
-  той же строке: ``confirmed_rule`` + ``rule_version`` + ``confirmed_at`` +
-  ``source_ref``. Подтверждение ЧЕЛОВЕКОМ делается в админке — в файле
-  человека назвать нечем.
+  говорится).
+* **Импорт — не подтверждение.** ``approved`` из файла принимается только
+  правилом из :data:`services.knowledge_intake.KNOWN_CONFIRMATION_RULES`, а
+  этот набор сегодня пуст — то есть из файла заводится только черновик, и
+  подтверждает его человек в админке. Строка ``approved`` с любым другим
+  ``confirmed_rule`` — ошибка файла, а не черновик: тихое понижение спрятало
+  бы от куратора, что его «подтверждено» не принято.
 * Сначала проверяет файл целиком, потом пишет. Любая ошибка — неизвестный код
-  шаблона, неизвестная цель, подтверждение без основания, курс голым числом —
-  печатается списком, и не пишется ничего.
+  шаблона, неизвестная цель, неизвестное поле, значение не того типа, слишком
+  длинный текст, подтверждение без основания, курс голым числом — печатается
+  списком, и не пишется ничего.
 
 Чего команда не делает
 ----------------------
-Знание не выдумывает и из названий услуг не выводит. Новое издание файла на
-уже заведённые строки не ложится (см. выше) — правка существующего делается
-в админке. Шаблоны и цели не заводит: им нужен ``seed_canonical_catalog`` и
-``seed_goal_options``, и порядок именно такой.
+* Знание не выдумывает и из названий услуг не выводит.
+* Новое издание файла на уже заведённые строки не ложится (см. выше) — правка
+  существующего делается в админке.
+* **Удалённое в админке возвращает.** Строка, которая есть в файле, при
+  следующем запуске заводится заново: команда не знает, что её удалили
+  намеренно. Чтобы убрать строку, пришедшую из файла, её убирают из файла —
+  или оставляют в базе не подтверждённой.
+* Шаблоны и цели не заводит: им нужны ``seed_canonical_catalog`` и
+  ``seed_goal_options``, и порядок именно такой.
+* Шаблон адресуется кодом эталонного справочника (``canonical_code``), и
+  только им. Код ставит не засев каталога, а начальное присвоение
+  (:func:`services.canonical_code.bootstrap_canonical_codes`, миграция 0024) —
+  тем шаблонам, что были в базе на тот момент. Шаблон без кода из файла не
+  адресуется: знание о нём вносится в админке.
 
 Файл
 ----
@@ -66,11 +80,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils.dateparse import parse_datetime
 
-from services.knowledge_intake import APPROVED, course_errors, provenance_errors
+from services.knowledge_intake import APPROVED, course_errors, provenance_errors, rule_problem
 from services.models import (
     CapabilityGoalLink,
     ClaimEvidence,
@@ -90,11 +105,12 @@ _CLAIM_TEXT = (
     "limitations", "evidence_source", "evidence_kind", "source_ref",
     "confirmed_rule", "rule_version",
 )
+_CLAIM_KEYS = frozenset({"status", "claim_scope", "confirmed_at", "valid_until", *_CLAIM_TEXT})
+_CAPABILITY_KEYS = _CLAIM_KEYS | {"template_code", "key", "goal_links", *_CAPABILITY_TEXT}
+_LINK_KEYS = _CLAIM_KEYS | {"goal", *_LINK_TEXT}
 
-
-def _text(row: dict[str, Any], name: str) -> str:
-    value = row.get(name)
-    return value.strip() if isinstance(value, str) else ""
+#: Эти поля проверены здесь словами для человека; модель их повторно не судит.
+_OWN_CHECKS = {"status", "claim_scope", "confirmed_by"}
 
 
 class _Problems:
@@ -107,49 +123,82 @@ class _Problems:
         self.lines.append(f"{where}: {message}")
 
 
+def _text(row: dict[str, Any], name: str, where: str, problems: _Problems) -> str:
+    """Строковое поле файла. Не строка — ошибка, а не молчаливая пустота."""
+    value = row.get(name)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        problems.add(where, f"{name} — ожидалась строка, получено {type(value).__name__}")
+        return ""
+    return value.strip()
+
+
+def _unknown_keys(row: dict[str, Any], allowed: frozenset[str], where: str, problems: _Problems) -> None:
+    for name in sorted(set(row) - allowed):
+        problems.add(where, f"неизвестное поле «{name}» (опечатка? допустимо: {sorted(allowed)})")
+
+
+def _moment(row: dict[str, Any], name: str, where: str, problems: _Problems) -> Any:
+    raw = row.get(name)
+    if raw in (None, ""):
+        return None
+    parsed = None
+    if isinstance(raw, str):
+        try:
+            parsed = parse_datetime(raw)
+        except ValueError:  # формат верный, а даты такой нет («30 февраля»)
+            parsed = None
+    if parsed is None or parsed.tzinfo is None:
+        problems.add(
+            where, f"{name} — нужна существующая дата и время с часовым поясом (ISO 8601), получено «{raw}»",
+        )
+        return None
+    return parsed
+
+
 def _claim_fields(row: dict[str, Any], where: str, problems: _Problems) -> dict[str, Any]:
     """Общие поля основания одной строки файла — проверенные, готовые к записи."""
-    status = _text(row, "status") or ClaimEvidence.Status.SYSTEM_INFERENCE.value
-    scope = _text(row, "claim_scope") or ClaimEvidence.ClaimScope.NOT_SUPPORTED.value
+    status = _text(row, "status", where, problems) or ClaimEvidence.Status.SYSTEM_INFERENCE.value
+    scope = _text(row, "claim_scope", where, problems) or ClaimEvidence.ClaimScope.NOT_SUPPORTED.value
     if status not in _STATUSES:
         problems.add(where, f"неизвестный status «{status}» (допустимо: {sorted(_STATUSES)})")
     if scope not in _SCOPES:
         problems.add(where, f"неизвестный claim_scope «{scope}» (допустимо: {sorted(_SCOPES)})")
 
-    fields: dict[str, Any] = {name: _text(row, name) for name in _CLAIM_TEXT}
+    fields: dict[str, Any] = {name: _text(row, name, where, problems) for name in _CLAIM_TEXT}
     fields["status"] = status
     fields["claim_scope"] = scope
+    fields["confirmed_at"] = _moment(row, "confirmed_at", where, problems)
+    fields["valid_until"] = _moment(row, "valid_until", where, problems)
 
-    for name in ("confirmed_at", "valid_until"):
-        raw = row.get(name)
-        fields[name] = None
-        if raw in (None, ""):
-            continue
-        parsed = parse_datetime(raw) if isinstance(raw, str) else None
-        if parsed is None or parsed.tzinfo is None:
-            problems.add(where, f"{name} — нужна дата и время с часовым поясом (ISO 8601), получено «{raw}»")
-        else:
-            fields[name] = parsed
-
-    rule_named = bool(fields["confirmed_rule"]) and bool(fields["rule_version"])
-    for field, message in provenance_errors(
-        status=status, source_ref=fields["source_ref"], has_confirmer=rule_named,
-    ).items():
-        if field == "status":
-            message = (
-                "approved из файла принимается только с названным правилом: "
-                "нужны confirmed_rule и rule_version (подтверждение человеком — в админке)."
-            )
-        problems.add(where, f"{field} — {message}")
-    if status == APPROVED and fields["confirmed_at"] is None:
-        problems.add(where, "confirmed_at — у подтверждённой строки должна быть дата подтверждения.")
-    if status != APPROVED:
+    if status == APPROVED:
+        # Импорт — не подтверждение: правило должно быть известным, а не любым.
+        unknown_rule = rule_problem(fields["confirmed_rule"], fields["rule_version"])
+        if unknown_rule:
+            problems.add(where, f"status approved — {unknown_rule}")
+        for field, message in provenance_errors(
+            status=status, source_ref=fields["source_ref"], has_confirmer=True,
+        ).items():
+            problems.add(where, f"{field} — {message}")
+        if fields["confirmed_at"] is None:
+            problems.add(where, "confirmed_at — у подтверждённой строки должна быть дата подтверждения.")
+    else:
         # Отметки подтверждения у черновика были бы утверждением, которого
         # никто не делал; из файла они в базу не едут.
         fields["confirmed_rule"] = ""
         fields["rule_version"] = ""
         fields["confirmed_at"] = None
     return fields
+
+
+def _model_problems(instance: Any, exclude: set[str], where: str, problems: _Problems) -> None:
+    """Длины, slug и прочее, что знает сама модель, — до записи, а не из базы."""
+    try:
+        instance.clean_fields(exclude=exclude | _OWN_CHECKS)
+    except ValidationError as exc:
+        for field, messages in exc.message_dict.items():
+            problems.add(where, f"{field} — {' '.join(messages)}")
 
 
 class Command(BaseCommand):
@@ -174,7 +223,9 @@ class Command(BaseCommand):
             )
             return
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except UnicodeDecodeError as exc:
+            raise CommandError(f"{path} is not UTF-8: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise CommandError(f"Invalid JSON in {path}: {exc}") from exc
         rows = payload.get("capabilities") if isinstance(payload, dict) else None
@@ -221,7 +272,7 @@ class Command(BaseCommand):
     def _plan(self, rows: list[Any]) -> tuple[list[dict[str, Any]], _Problems]:
         problems = _Problems()
         codes = {
-            row.get("template_code") for row in rows
+            row["template_code"].strip() for row in rows
             if isinstance(row, dict) and isinstance(row.get("template_code"), str)
         }
         templates = {
@@ -236,9 +287,10 @@ class Command(BaseCommand):
             if not isinstance(row, dict):
                 problems.add(where, "ожидался объект")
                 continue
-            code = _text(row, "template_code")
-            key = _text(row, "key")
+            code = _text(row, "template_code", where, problems)
+            key = _text(row, "key", where, problems)
             where = f"capabilities[{index}] {code or '?'}:{key or '?'}"
+            _unknown_keys(row, _CAPABILITY_KEYS, where, problems)
             template = templates.get(code)
             if not code:
                 problems.add(where, "template_code — не указан код шаблона процедуры")
@@ -246,7 +298,8 @@ class Command(BaseCommand):
                 problems.add(
                     where,
                     f"template_code «{code}» не найден среди шаблонов "
-                    "(сначала seed_canonical_catalog; код — ServiceTemplate.canonical_code)",
+                    "(код — ServiceTemplate.canonical_code; его нет у шаблонов, заведённых "
+                    "после начального присвоения кодов, и у черновых канонов)",
                 )
             if not key:
                 problems.add(where, "key — не указан ключ смысла")
@@ -255,7 +308,9 @@ class Command(BaseCommand):
             seen.add((code, key))
 
             fields = _claim_fields(row, where, problems)
-            fields.update({name: _text(row, name) for name in _CAPABILITY_TEXT})
+            fields.update({name: _text(row, name, where, problems) for name in _CAPABILITY_TEXT})
+            if key:
+                _model_problems(ProcedureCapability(key=key, **fields), {"template"}, where, problems)
 
             links: list[dict[str, Any]] = []
             raw_links = row.get("goal_links") or []
@@ -268,7 +323,8 @@ class Command(BaseCommand):
                 if not isinstance(raw, dict):
                     problems.add(link_where, "ожидался объект")
                     continue
-                goal_key = _text(raw, "goal")
+                _unknown_keys(raw, _LINK_KEYS, link_where, problems)
+                goal_key = _text(raw, "goal", link_where, problems)
                 goal = goals.get(goal_key)
                 if goal is None:
                     problems.add(
@@ -280,7 +336,9 @@ class Command(BaseCommand):
                     problems.add(link_where, "связь с этой целью у возможности в файле уже есть")
                 seen_goals.add(goal_key)
                 link_fields = _claim_fields(raw, link_where, problems)
-                link_fields.update({name: _text(raw, name) for name in _LINK_TEXT})
+                link_fields.update(
+                    {name: _text(raw, name, link_where, problems) for name in _LINK_TEXT}
+                )
                 for field, message in course_errors(
                     course_pattern=link_fields["course_pattern"],
                     variability_note=link_fields["variability_note"],
@@ -288,6 +346,9 @@ class Command(BaseCommand):
                     source_ref=link_fields["source_ref"],
                 ).items():
                     problems.add(link_where, f"{field} — {message}")
+                _model_problems(
+                    CapabilityGoalLink(**link_fields), {"capability", "goal"}, link_where, problems,
+                )
                 links.append({"goal": goal, "fields": link_fields})
 
             plan.append({"template": template, "key": key, "fields": fields, "links": links})
