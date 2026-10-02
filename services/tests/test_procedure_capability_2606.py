@@ -111,7 +111,9 @@ class TestOnlySupportedClaimsAreSaid:
         self, template, curator, scope
     ) -> None:
         _approve(_capability(template, key="said"), curator)
-        _approve(_capability(template, key="not-said"), curator, claim_scope=scope)
+        # DRF-2726: у подтверждённого запрета обязателен предмет запрета.
+        statement = {"prohibited_statement": "синтетика"} if scope == C.PROHIBITED_CLAIM else {}
+        _approve(_capability(template, key="not-said"), curator, claim_scope=scope, **statement)
 
         keys = [c.key for c in client_facing_capabilities(template).capabilities]
 
@@ -223,7 +225,7 @@ class TestGoalLinkHasItsOwnEvidence:
         assert len(client_facing_goal_links(capability)) == 1
 
         ProcedureCapability.objects.filter(pk=capability.pk).update(
-            claim_scope=C.PROHIBITED_CLAIM
+            claim_scope=C.PROHIBITED_CLAIM, prohibited_statement="синтетика",  # DRF-2726
         )
 
         assert client_facing_goal_links(capability) == ()  # capability in memory still says SUPPORTED
@@ -232,7 +234,7 @@ class TestGoalLinkHasItsOwnEvidence:
         "change",
         [
             {"claim_scope": C.NOT_SUPPORTED},
-            {"claim_scope": C.PROHIBITED_CLAIM},
+            {"claim_scope": C.PROHIBITED_CLAIM, "prohibited_statement": "синтетика"},  # DRF-2726
             {"valid_until": "past"},
             {"goal_inactive": True},
         ],

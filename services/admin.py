@@ -6,7 +6,12 @@ from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
-from services.knowledge_intake import course_errors, provenance_errors, timeframe_errors
+from services.knowledge_intake import (
+    course_errors,
+    prohibition_errors,
+    provenance_errors,
+    timeframe_errors,
+)
 from services.mapping.store import StoredReport
 from services.mapping.types import Decision
 from services.mapping_review import confirm_single_candidate, evidence_text, mark_canon_gap
@@ -727,12 +732,15 @@ _CLAIM_FIELDSET = (
     "Утверждение и основание",
     {
         "fields": (
-            "status", "claim_scope", "limitations",
+            "status", "claim_scope", "prohibited_statement", "limitations",
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         ),
         "description": (
             "«Подтверждено» можно сохранить только со ссылкой на источник. "
-            "Автором подтверждения станет тот, кто сохраняет."
+            "Автором подтверждения станет тот, кто сохраняет. "
+            "Предмет запрета (prohibited statement) заполняется только у запрещённого "
+            "утверждения: что именно нельзя утверждать. Он нужен внутреннему "
+            "проверяющему; клиенту не говорится."
         ),
     },
 )
@@ -757,6 +765,14 @@ class _ClaimAdminForm(forms.ModelForm):
             has_confirmer=True,
         ).items():
             self.add_error(field, forms.ValidationError(message, code="provenance_required"))
+        # ``text_client`` есть только у возможности; у связи с целью его нет.
+        for field, message in prohibition_errors(
+            claim_scope=cleaned.get("claim_scope") or "",
+            prohibited_statement=cleaned.get("prohibited_statement") or "",
+            text_client=cleaned.get("text_client") if "text_client" in self.fields else None,
+        ).items():
+            if not self.has_error(field):
+                self.add_error(field, forms.ValidationError(message, code="prohibition_incomplete"))
         return cleaned
 
 
@@ -766,7 +782,7 @@ class ProcedureCapabilityAdminForm(_ClaimAdminForm):
         fields = (
             "template", "key", "text_client", "text_professional",
             "expected_effect", "result_timeframe", "variability_note",
-            "status", "claim_scope", "limitations",
+            "status", "claim_scope", "prohibited_statement", "limitations",
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         )
 
@@ -789,7 +805,7 @@ class CapabilityGoalLinkAdminForm(_ClaimAdminForm):
         model = CapabilityGoalLink
         fields = (
             "capability", "goal", "course_pattern", "result_horizon", "variability_note",
-            "status", "claim_scope", "limitations",
+            "status", "claim_scope", "prohibited_statement", "limitations",
             "evidence_source", "evidence_kind", "source_ref", "valid_until",
         )
 
