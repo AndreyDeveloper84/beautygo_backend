@@ -24,8 +24,8 @@
 * Сначала проверяет файл целиком, потом пишет. Любая ошибка — неизвестный код
   шаблона, неизвестная цель, неизвестное поле, значение не того типа, слишком
   длинный текст, подтверждение без основания, курс или срок результата голым
-  числом либо без оговорки и источника — печатается списком, и не пишется
-  ничего.
+  числом либо без оговорки и источника, запрет без предмета — печатается
+  списком, и не пишется ничего.
 
 Чего команда не делает
 ----------------------
@@ -62,6 +62,8 @@
         "result_timeframe": "...",         # словами, не числом; только вместе с
         "variability_note": "...",         # оговоркой, источником и ссылкой
         "claim_scope": "supported",        # | not_supported | prohibited_claim
+        "prohibited_statement": "",        # только у prohibited_claim и там обязателен:
+                                           # что именно нельзя утверждать
         "limitations": "...", "evidence_source": "...", "evidence_kind": "...",
         "source_ref": "...",
         "goal_links": [{"goal": "relax",   # GoalOption.key
@@ -91,6 +93,7 @@ from django.utils.dateparse import parse_datetime
 from services.knowledge_intake import (
     APPROVED,
     course_errors,
+    prohibition_errors,
     provenance_errors,
     rule_problem,
     timeframe_errors,
@@ -113,7 +116,7 @@ _CAPABILITY_TEXT = (
 )
 _LINK_TEXT = ("course_pattern", "result_horizon", "variability_note")
 _CLAIM_TEXT = (
-    "limitations", "evidence_source", "evidence_kind", "source_ref",
+    "limitations", "prohibited_statement", "evidence_source", "evidence_kind", "source_ref",
     "confirmed_rule", "rule_version",
 )
 _CLAIM_KEYS = frozenset({"status", "claim_scope", "confirmed_at", "valid_until", *_CLAIM_TEXT})
@@ -200,6 +203,14 @@ def _claim_fields(row: dict[str, Any], where: str, problems: _Problems) -> dict[
         fields["confirmed_rule"] = ""
         fields["rule_version"] = ""
         fields["confirmed_at"] = None
+
+    # ``text_client`` есть только у возможности; у связи с целью ключа нет.
+    for field, message in prohibition_errors(
+        claim_scope=scope,
+        prohibited_statement=fields["prohibited_statement"],
+        text_client=_text(row, "text_client", where, _Problems()) if "text_client" in row else None,
+    ).items():
+        problems.add(where, f"{field} — {message}")
     return fields
 
 
