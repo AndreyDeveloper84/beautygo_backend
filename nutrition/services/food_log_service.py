@@ -180,12 +180,27 @@ class FoodLogService:
         # это честнее и отказа, и нуля. Причина пробела наружу не
         # выводится — п. 3 DRF-2335 ждёт слова владельца.
         m = data.portion_multiplier
+        # DRF-2761 — оценка калорий ИИ, если справочник промахнулся. Берётся
+        # только СОХРАНЁННАЯ (та, что показана человеку в карточке): модель
+        # при записи не зовётся, иначе в дневник легло бы не то число,
+        # которое он подтвердил (§109 шаг 6). В ``calories`` оценка не идёт.
+        ai_calories = None
+        if facts is None:
+            from nutrition.services.ai_calorie_estimate import ai_calories_for
+
+            ai_calories = ai_calories_for(
+                data.dish_name,
+                portion_g=MANUAL_DISH_BASELINE_G,
+                user_id=data.user_id,
+                may_call_model=False,
+            )
         return FoodLog.objects.create(
             user_id=data.user_id,
             scan=None,
             dish_name=facts.matched_dish if facts is not None else data.dish_name.strip(),
             portion_multiplier=m,
             calories=_scale(facts.kcal if facts else None, m),
+            ai_calories=_scale(ai_calories, m),
             protein_g=_scale(facts.protein_g if facts else None, m),
             fat_g=_scale(facts.fat_g if facts else None, m),
             carbs_g=_scale(facts.carbs_g if facts else None, m),

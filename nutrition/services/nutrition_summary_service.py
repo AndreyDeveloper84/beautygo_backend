@@ -138,7 +138,7 @@ class NutritionSummaryService:
             # список записей значило бы обменять запросы на трафик.
             .select_related("scan")
             .only(
-                "id", "dish_name", "calories", "protein_g", "fat_g", "carbs_g",
+                "id", "dish_name", "calories", "ai_calories", "protein_g", "fat_g", "carbs_g",
                 "meal_type", "logged_at", "entry_origin", "user_id", "scan_id",
                 "scan__id", "scan__image",
             )
