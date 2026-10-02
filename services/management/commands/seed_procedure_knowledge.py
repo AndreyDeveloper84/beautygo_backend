@@ -64,7 +64,10 @@
         "claim_scope": "supported",        # | not_supported | prohibited_claim
         "prohibited_statement": "",        # только у prohibited_claim и там обязателен:
                                            # что именно нельзя утверждать
-        "limitations": "...", "evidence_source": "...", "evidence_kind": "...",
+        "limitations": "...", "evidence_source": "...",
+        "evidence_kind": "professional_consensus",  # пусто либо из закрытого списка:
+        #   clinical_guideline | systematic_review | rct | manufacturer_ifu |
+        #   regulatory_document | professional_consensus | legal_rule | product_policy
         "source_ref": "...",
         "goal_links": [{"goal": "relax",   # GoalOption.key
                         "course_pattern": "...", "variability_note": "...",
@@ -93,6 +96,7 @@ from django.utils.dateparse import parse_datetime
 from services.knowledge_intake import (
     APPROVED,
     course_errors,
+    evidence_kind_errors,
     prohibition_errors,
     provenance_errors,
     rule_problem,
@@ -124,7 +128,7 @@ _CAPABILITY_KEYS = _CLAIM_KEYS | {"template_code", "key", "goal_links", *_CAPABI
 _LINK_KEYS = _CLAIM_KEYS | {"goal", *_LINK_TEXT}
 
 #: Эти поля проверены здесь словами для человека; модель их повторно не судит.
-_OWN_CHECKS = {"status", "claim_scope", "confirmed_by"}
+_OWN_CHECKS = {"status", "claim_scope", "confirmed_by", "evidence_kind"}
 
 
 class _Problems:
@@ -191,6 +195,11 @@ def _claim_fields(
     fields["claim_scope"] = scope
     fields["confirmed_at"] = _moment(row, "confirmed_at", where, problems)
     fields["valid_until"] = _moment(row, "valid_until", where, problems)
+
+    for field, message in evidence_kind_errors(
+        status=status, evidence_kind=fields["evidence_kind"],
+    ).items():
+        problems.add(where, f"{field} — {message}")
 
     if status == APPROVED:
         # Импорт — не подтверждение: правило должно быть известным, а не любым.

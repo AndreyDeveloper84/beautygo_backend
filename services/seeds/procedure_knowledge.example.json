@@ -12,7 +12,7 @@
       "claim_scope": "supported",
       "limitations": "[пример формата] чего НЕ обещаем и кому не подходит",
       "evidence_source": "[пример формата] название источника",
-      "evidence_kind": "[пример формата] вид доказательства",
+      "evidence_kind": "professional_consensus",
       "source_ref": "EXAMPLE-SOURCE-1",
       "goal_links": [
         {

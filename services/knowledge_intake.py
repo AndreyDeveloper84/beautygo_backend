@@ -212,6 +212,49 @@ def timeframe_errors(
     return errors
 
 
+#: Виды доказательства — закрытый список (решение владельца №4 от 02.10,
+#: DRF-2742). Копия ``ClaimEvidence.EvidenceKind``; равенство держит узел.
+EVIDENCE_KINDS = (
+    "clinical_guideline",
+    "systematic_review",
+    "rct",
+    "manufacturer_ifu",
+    "regulatory_document",
+    "professional_consensus",
+    "legal_rule",
+    "product_policy",
+)
+
+
+def evidence_kind_errors(*, status: str, evidence_kind: str) -> dict[str, str]:
+    """Что не так с видом доказательства.
+
+    У любой строки вид — пусто либо один из :data:`EVIDENCE_KINDS`: свободный
+    текст («протокол салона», «маркетинг салона») не принимается. У
+    подтверждённой строки вид обязателен — пустой в список не входит.
+
+    Чего проверка НЕ может: убедиться, что источник действительно такого вида.
+    Назвать маркетинговый буклет «клинической рекомендацией» код не помешает —
+    это проверяет рецензент.
+    """
+    kind = (evidence_kind or "").strip()
+    if kind and kind not in EVIDENCE_KINDS:
+        return {
+            "evidence_kind": (
+                f"«{kind}» — не вид доказательства из закрытого списка "
+                f"({', '.join(EVIDENCE_KINDS)}). Маркетинг салона доказательством не является."
+            )
+        }
+    if status == APPROVED and not kind:
+        return {
+            "evidence_kind": (
+                "У подтверждённого утверждения должен быть вид доказательства — "
+                "один из закрытого списка."
+            )
+        }
+    return {}
+
+
 PROHIBITED_CLAIM = "prohibited_claim"
 
 
@@ -267,7 +310,9 @@ __all__ = [
     "APPROVED",
     "KNOWN_CONFIRMATION_RULES",
     "PROHIBITED_CLAIM",
+    "EVIDENCE_KINDS",
     "course_errors",
+    "evidence_kind_errors",
     "prohibition_errors",
     "provenance_errors",
     "rule_problem",
