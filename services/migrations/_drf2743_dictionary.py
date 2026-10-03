@@ -134,9 +134,16 @@ def to_dictionary(capability_model, binding_model, link_model, reset_model) -> d
             row.key = _free_key(key, _suffix(row.template), taken)
             row.save(update_fields=["key"])
         counts["renamed"] += len(others)
+        siblings = ", ".join(row.key for row in group)
         for row, row_links in zip(group, links):
             label = f"{row.template.name} · {row.key}"[:300]
-            change = [{"field": "key", "old": old_keys[row.pk], "new": row.key}]
+            # Причина — не правка этой строки, а соседи под тем же ключом с
+            # другим содержанием или другими связями: куратор решает, одна это
+            # возможность или разные.
+            change = [
+                {"field": "key", "old": old_keys[row.pk], "new": row.key},
+                {"field": "одинаковый key, разное содержание (DRF-2743)", "old": key, "new": siblings},
+            ]
             if _has_something_to_lose(row):
                 journal.append(reset_model(
                     reason="claim_edited", changes=change, claim_kind="capability", claim_label=label,

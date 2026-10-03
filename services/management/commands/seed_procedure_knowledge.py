@@ -472,7 +472,11 @@ class Command(BaseCommand):
         existing = {
             capability.key: {t.pk for t in capability.templates.all()}
             for capability in ProcedureCapability.objects.filter(
-                key__in=[row.get("key") for row in rows if isinstance(row, dict)]
+                # Ключ — как его читает разбор строки: без пробелов по краям.
+                key__in=[
+                    row["key"].strip() for row in rows
+                    if isinstance(row, dict) and isinstance(row.get("key"), str)
+                ]
             ).prefetch_related("templates")
         }
 

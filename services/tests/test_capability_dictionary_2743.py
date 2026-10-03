@@ -398,6 +398,14 @@ class TestAFileBindsAnEntryToItsProcedures:
         assert "existing left as is: 1 capabilities" in output
         assert (set(entry.templates.all()), entry.text_client) == ({massage, wrap}, "правка в админке")
 
+    def test_spaces_around_the_key_do_not_hide_an_existing_entry(self, tmp_path, massage, wrap) -> None:
+        ProcedureCapability.objects.create(templates=[massage], key="shared")
+
+        with pytest.raises(CommandError) as raised:
+            _seed(tmp_path, [{"template_codes": ["1.1.4"], "key": " shared "}])
+
+        assert "привязана к другим процедурам" in str(raised.value)
+
     def test_an_existing_entry_bound_elsewhere_is_refused_with_its_links(self, tmp_path, massage, wrap) -> None:
         """Связь из файла написана про процедуры файла — к записи с другими
         процедурами она не ложится, и файл не пишется вовсе."""
@@ -478,6 +486,11 @@ class TestTheMigrationOnRowsThatWereThereBefore:
         apart_b = Capability.objects.create(template=fourth, key="apart", **signed, **text).pk
         apart_link = Link.objects.create(capability_id=apart_a, goal=relax, **signed).pk
         Link.objects.create(capability_id=apart_b, goal=calm, **signed)
+        # Те же цели, но связь другого содержания — тоже не сводится.
+        course_a = Capability.objects.create(template=first, key="course", **signed, **text).pk
+        course_b = Capability.objects.create(template=second, key="course", **signed, **text).pk
+        Link.objects.create(capability_id=course_a, goal=relax, **signed)
+        Link.objects.create(capability_id=course_b, goal=relax, limitations="другая оговорка", **signed)
         # Разное содержание — переименование, в том числе процедуре без кода.
         differ_a = Capability.objects.create(template=first, key="differ", **signed, **text).pk
         differ_b = Capability.objects.create(
@@ -518,12 +531,21 @@ class TestTheMigrationOnRowsThatWereThereBefore:
         assert state(apart_b) == ("apart-1-1-4", "system_inference", user.id)
         assert NewLink.objects.get(pk=apart_link).status == "system_inference"
         assert NewLink.objects.get(capability_id=apart_b).status == "system_inference"
+        siblings = {
+            "field": "одинаковый key, разное содержание (DRF-2743)", "old": "apart", "new": "apart, apart-1-1-4",
+        }
         journalled = NewReset.objects.get(capability_id=apart_b)
         assert (journalled.reason, journalled.changes, journalled.was_approved) == (
-            "claim_edited", [{"field": "key", "old": "apart", "new": "apart-1-1-4"}], True,
+            "claim_edited", [{"field": "key", "old": "apart", "new": "apart-1-1-4"}, siblings], True,
         )
+        # Выжившая под ключом тоже в журнале — с причиной, а не с выдуманной правкой.
+        assert NewReset.objects.get(capability_id=apart_a).changes == [
+            {"field": "key", "old": "apart", "new": "apart"}, siblings,
+        ]
         assert journalled.claim_label == "Процедура 4 · apart-1-1-4"
         assert NewReset.objects.get(goal_link_id=apart_link).claim_label == "Процедура 1 · apart → relax-2743-m"
+        assert state(course_a) == ("course", "system_inference", user.id)
+        assert state(course_b) == ("course-1-1-2", "system_inference", user.id)
         # Разное содержание — отдельные записи, ключи с кодом процедуры, все в черновике, след цел.
         assert state(differ_a) == ("differ", "system_inference", user.id)
         assert state(differ_b) == ("differ-1-1-3", "system_inference", user.id)
@@ -534,4 +556,4 @@ class TestTheMigrationOnRowsThatWereThereBefore:
         assert state(taken_a)[0] == "taken"
         # Черновик, которому нечего терять, в журнал не пишется.
         assert not NewReset.objects.filter(capability_id=taken_b).exists()
-        assert Entry.objects.count() == 10
+        assert Entry.objects.count() == 12
