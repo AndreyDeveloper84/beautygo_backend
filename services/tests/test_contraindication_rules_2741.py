@@ -302,6 +302,12 @@ class TestWhoMayReviewAContraindication:
         assert not may([], [face])
         assert not may([])  # пустая область — только рецензент без ограничения области
 
+    def test_a_withdrawn_appointment_does_not_count(self, template) -> None:
+        former = _staff("former-2741", EVERYDAY)
+        ClaimReviewer.objects.create(user=former, claim_type="medical", is_active=False)
+
+        assert not may_review_scope(former, claim_type="medical", templates=[template], categories=[])
+
     def test_other_claim_types_admin_rights_and_the_approval_right_do_not_count(self, template, approver) -> None:
         physiological = _staff("physio-2741", EVERYDAY)
         ClaimReviewer.objects.create(user=physiological, claim_type="physiological")
