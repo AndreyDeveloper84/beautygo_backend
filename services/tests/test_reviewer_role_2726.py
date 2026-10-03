@@ -1141,6 +1141,21 @@ class TestTheCuratorSeesWhatWasReset:
         ]
         assert (own.was_approved, own.had_review) == (True, True)
 
+    def test_an_edit_saved_as_a_draft_by_hand_is_journalled_as_a_lost_approval(
+        self, approver, template, claims
+    ) -> None:
+        """DRF-2741: сохранявший сам выбрал «черновик» и тем же сохранением
+        поправил текст — в журнале строка была подтверждённой, она ею и была."""
+        capability, _ = claims
+
+        _client(approver).post(
+            reverse(CHANGE, args=[capability.pk]),
+            _form(template, status="system_inference", text_client="Новая формулировка"),
+        )
+
+        own = ClaimApprovalReset.objects.get(capability=capability)
+        assert (own.was_approved, own.had_review) == (True, True)
+
     def test_a_new_approval_closes_the_reset_and_a_later_return_to_draft_does_not_reopen_it(
         self, owner, template, claims
     ) -> None:
