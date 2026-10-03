@@ -189,11 +189,14 @@ class TestScanPath:
         # (NULL here: the client app does not pass an origin).
         # DRF-2455 — у записи появился признак снимка: поверхность узнаёт
         # о фото до того, как запросит файл.
+        # DRF-2761 — и поле оценки калорий ИИ: отдельное от ``calories``,
+        # у записи из скана всегда null (оценка — только текстовый путь).
         assert set(body.keys()) == {
             "has_photo",
-            "id", "dish_name", "calories", "protein_g",
+            "id", "dish_name", "calories", "ai_calories", "protein_g",
             "fat_g", "carbs_g", "meal_type", "logged_at", "entry_origin",
         }
+        assert body["ai_calories"] is None
         assert body["entry_origin"] is None
         assert body["dish_name"] == "Борщ"
         assert body["calories"] == 147.0

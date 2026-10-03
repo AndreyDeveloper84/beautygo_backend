@@ -867,6 +867,13 @@ FOOD_SCAN_PRICE_OUTPUT_USD_PER_1M = os.environ.get("FOOD_SCAN_PRICE_OUTPUT_USD_P
 # простоем чужого справочника нельзя. Сборка — только через
 # nutrition/services/nutrition_lookup_factory.py.
 USDA_LOOKUP_ENABLED = os.environ.get("USDA_LOOKUP_ENABLED", "false").lower() == "true"
+# DRF-2761 — оценка калорий ИИ при промахе справочника (решение владельца
+# 02.10.2026, пересмотр вопроса 40). Выключено по умолчанию, как официальный
+# источник выше: включение на стенде — отдельное решение. Число показывается
+# только с пометкой «Оценка ИИ» и не входит ни в суммы, ни в сравнение с целью.
+AI_CALORIE_ESTIMATE_ENABLED = (
+    os.environ.get("AI_CALORIE_ESTIMATE_ENABLED", "false").lower() == "true"
+)
 USDA_API_KEY = os.environ.get("USDA_API_KEY", "")
 
 # Service-to-service token for /api/v1/nutrition/internal/* endpoints (DRF-246).

@@ -372,6 +372,9 @@ class FoodLogEntrySerializer(serializers.ModelSerializer):
             "has_photo",
             "dish_name",
             "calories",
+            # DRF-2761 — оценка калорий ИИ. Отдельным полем: ``calories`` при
+            # ней null. Показывать только с пометкой «Оценка ИИ».
+            "ai_calories",
             "protein_g",
             "fat_g",
             "carbs_g",
