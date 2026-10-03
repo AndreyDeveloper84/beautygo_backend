@@ -425,7 +425,7 @@ class TestSeedingFromTheCuratorsFile:
     def test_a_padded_template_code_is_still_found(self, world, tmp_path) -> None:
         _seed(_write(tmp_path, [{"template_code": " 1.1.3 ", "key": "padded"}]))
 
-        assert ProcedureCapability.objects.get().template_id == world["relaxing"].pk
+        assert list(ProcedureCapability.objects.get().templates.all()) == [world["relaxing"]]
 
 
 class TestAnImportIsNotAnApproval:

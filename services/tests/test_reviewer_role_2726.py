@@ -781,8 +781,8 @@ class TestAChangeOfTheProcedureDropsTheApproval:
 
         assert response.status_code == 302, response.context["adminform"].form.errors
         capability.refresh_from_db()
-        assert (capability.template_id, capability.status, capability.reviewed_by_id) == (
-            elsewhere.pk, "system_inference", None,
+        assert (list(capability.templates.all()), capability.status, capability.reviewed_by_id) == (
+            [elsewhere], "system_inference", None,
         )
 
     # 2. medical → product.

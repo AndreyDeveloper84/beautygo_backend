@@ -28,6 +28,18 @@ from django.db import migrations, models
 from . import _drf2743_dictionary as dictionary
 
 
+def _flush_deferred_checks(schema_editor) -> None:
+    """Проверить отложенные внешние ключи сейчас, а не в конце транзакции.
+
+    Миграция идёт одной транзакцией. Шаг переноса меняет и удаляет строки, а
+    проверки внешних ключей в PostgreSQL отложены до конца транзакции; пока они
+    висят, следующий ``ALTER TABLE`` той же таблицы падает («pending trigger
+    events») — то есть ``migrate`` на стенде встал бы на первой же лежащей строке.
+    """
+    if schema_editor.connection.vendor == "postgresql":
+        schema_editor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+
+
 def _forward(apps, schema_editor):
     counts = dictionary.to_dictionary(
         apps.get_model("services", "ProcedureCapability"),
@@ -39,6 +51,7 @@ def _forward(apps, schema_editor):
         f"  capabilities -> dictionary: merged={counts['merged']} "
         f"renamed={counts['renamed']} returned to draft={counts['demoted']}"
     )
+    _flush_deferred_checks(schema_editor)
 
 
 def _backward(apps, schema_editor):
@@ -46,6 +59,7 @@ def _backward(apps, schema_editor):
         apps.get_model("services", "ProcedureCapability"),
         apps.get_model("services", "CapabilityTemplate"),
     )
+    _flush_deferred_checks(schema_editor)
 
 
 class Migration(migrations.Migration):
