@@ -1168,6 +1168,9 @@ class _ClaimAdmin(admin.ModelAdmin):
     readonly_fields = _CLAIM_READONLY
     list_filter = ("status", "claim_scope", "claim_type", _NeedsReconfirmationFilter)
 
+    def _after_row_saved(self, obj, form, change) -> None:
+        """Что дописать сразу за строкой, до журнала (связи «многие ко многим»)."""
+
     @admin.display(description="Требует повторной проверки")
     def reset_notice(self, obj) -> str:
         """Что и почему сняло подтверждение — пока строка не подтверждена заново."""
@@ -1255,6 +1258,7 @@ class _ClaimAdmin(admin.ModelAdmin):
             obj.confirmed_rule = ""
             obj.rule_version = ""
         super().save_model(request, obj, form, change)
+        self._after_row_saved(obj, form, change)
         if lost_approval or lost_review:
             kind = ClaimApprovalReset.kind_of(obj)
             ClaimApprovalReset.objects.create(
@@ -1269,7 +1273,7 @@ class _ClaimAdmin(admin.ModelAdmin):
 
 @admin.register(ProcedureCapability)
 class ProcedureCapabilityAdmin(_ClaimAdmin):
-    """Что процедура умеет — одна возможность одной процедуры (DRF-2606).
+    """Что процедура умеет — запись общего словаря возможностей (DRF-2606, DRF-2743).
 
     ``key`` вводится руками и из формулировки не выводится (решение владельца
     29.09): автозаполнения из ``text_client`` здесь нет намеренно.
@@ -1331,10 +1335,11 @@ class ProcedureCapabilityAdmin(_ClaimAdmin):
     def procedure_names(self, obj) -> str:
         return ", ".join(sorted(template.name for template in obj.templates.all())) or "—"
 
-    def save_related(self, request, form, formsets, change):
-        super().save_related(request, form, formsets, change)
+    def _after_row_saved(self, obj, form, change) -> None:
+        # Привязки пишутся сразу за строкой, до записей журнала: иначе подпись
+        # в журнале называла бы прежние процедуры.
         if "procedures" in form.changed_data or not change:
-            form.instance.templates.set(form.cleaned_data["procedures"])
+            obj.templates.set(form.cleaned_data["procedures"])
 
 
 @admin.register(CapabilityGoalLink)

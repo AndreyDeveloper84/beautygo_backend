@@ -466,6 +466,15 @@ class Command(BaseCommand):
             t.canonical_code: t for t in ServiceTemplate.objects.filter(canonical_code__in=codes)
         }
         goals = {g.key: g for g in GoalOption.objects.all()}
+        # DRF-2743: запись словаря ищется по ``key`` — существующая могла быть
+        # привязана к другим процедурам. Связи из файла к ней тогда не
+        # добавляются: связь, написанная про одни процедуры, легла бы на другие.
+        existing = {
+            capability.key: {t.pk for t in capability.templates.all()}
+            for capability in ProcedureCapability.objects.filter(
+                key__in=[row.get("key") for row in rows if isinstance(row, dict)]
+            ).prefetch_related("templates")
+        }
 
         plan: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -482,6 +491,12 @@ class Command(BaseCommand):
                 problems.add(where, "key — не указан ключ смысла")
             elif key in seen:
                 problems.add(where, "такой key в файле уже есть: запись словаря одна на все процедуры")
+            elif key in existing and bound and existing[key] != {t.pk for t in bound}:
+                problems.add(
+                    where,
+                    "запись с таким key уже есть в словаре и привязана к другим процедурам; "
+                    "файл существующую запись не меняет — привязки правятся в админке",
+                )
             seen.add(key)
 
             fields = _claim_fields(row, where, problems, has_client_text=True)

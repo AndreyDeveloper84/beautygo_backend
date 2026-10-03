@@ -49,7 +49,8 @@ def _forward(apps, schema_editor):
     )
     print(
         f"  capabilities -> dictionary: merged={counts['merged']} "
-        f"renamed={counts['renamed']} returned to draft={counts['demoted']}"
+        f"renamed={counts['renamed']} returned to draft={counts['demoted']} "
+        f"goal links returned to draft={counts['links_demoted']}"
     )
     _flush_deferred_checks(schema_editor)
 

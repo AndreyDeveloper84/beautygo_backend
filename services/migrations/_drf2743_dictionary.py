@@ -17,16 +17,22 @@
 --------------
 1. Каждой строке — привязка к её прежней процедуре.
 2. Строки с одним ``key`` сводятся в одну запись, только если у них ПОЛНОСТЬЮ
-   одинаковы содержание, основание, статус и подписи, а связи с целями не
-   пересекаются по цели. Тогда остаётся самая ранняя строка, ей переходят
-   привязки, связи с целями и записи журнала снятых подтверждений остальных,
-   остальные удаляются. Ничего не теряется: каждое из сведённых утверждений
-   было тем же утверждением о своей процедуре.
+   одинаковы содержание, основание, статус и подписи, И одинаковы связи с
+   целями: те же цели с тем же содержанием связи. Тогда остаётся самая ранняя
+   строка с её связями, ей переходят привязки и записи журнала остальных;
+   связи остальных — те же утверждения — удаляются, их записи журнала
+   переходят к связям выжившей. Ничего не теряется и ничего не расширяется:
+   каждое сведённое утверждение — и возможность, и каждая её связь — уже было
+   тем же утверждением о своей процедуре. Связь, одобренная про одну
+   процедуру, к другой не переезжает.
 3. При ЛЮБОМ расхождении строки остаются отдельными записями: самая ранняя
    сохраняет ``key``, остальным ``key`` дополняется кодом процедуры
    (``temporary_relaxation-1-1-3``), и ВСЕ строки этого ``key`` возвращаются
-   в черновик со снятой отметкой рецензента. Что из них одна возможность, а
-   что разные, код решить не может — решает куратор.
+   в черновик со снятой отметкой рецензента, а их подтверждённые и
+   проверенные связи с целями — следом, как при правке возможности в
+   админке. Каждая такая строка пишется в журнал снятых подтверждений, чтобы
+   попасть в очередь куратора. Что из них одна возможность, а что разные,
+   код решить не может — решает куратор.
 
 Чего шаг не делает
 ------------------
@@ -48,6 +54,9 @@ from collections import defaultdict
 #: раз и сводят) и служебное время.
 NOT_COMPARED = frozenset({"id", "template", "created_at", "updated_at"})
 
+#: Поля связи с целью, по которым связи НЕ сравниваются.
+LINK_NOT_COMPARED = frozenset({"id", "capability", "created_at", "updated_at"})
+
 #: Поле ``key`` — ``SlugField(max_length=64)``.
 KEY_LENGTH = 64
 
@@ -68,10 +77,25 @@ def _free_key(base: str, suffix: str, taken: set[str]) -> str:
     return candidate
 
 
+def _links(link_model, capability_id, compared) -> dict:
+    """Связи строки: ``{goal_id: (связь, сравниваемые значения)}``."""
+    return {
+        link.goal_id: (link, tuple(getattr(link, name) for name in compared))
+        for link in link_model.objects.filter(capability_id=capability_id)
+    }
+
+
+def _has_something_to_lose(row) -> bool:
+    return row.status == "approved" or row.reviewed_by_id is not None
+
+
 def to_dictionary(capability_model, binding_model, link_model, reset_model) -> dict[str, int]:
     """Привязать строки к их процедурам и свести одинаковые ключи; вернуть числа."""
     compared = [
         f.attname for f in capability_model._meta.concrete_fields if f.name not in NOT_COMPARED
+    ]
+    link_compared = [
+        f.attname for f in link_model._meta.concrete_fields if f.name not in LINK_NOT_COMPARED
     ]
     rows = list(capability_model.objects.select_related("template").order_by("created_at", "pk"))
     binding_model.objects.bulk_create(
@@ -81,34 +105,60 @@ def to_dictionary(capability_model, binding_model, link_model, reset_model) -> d
     for row in rows:
         groups[row.key].append(row)
     taken = set(groups)
-    counts = {"merged": 0, "renamed": 0, "demoted": 0}
+    counts = {"merged": 0, "renamed": 0, "demoted": 0, "links_demoted": 0}
+    journal = []
     for key, group in groups.items():
         if len(group) == 1:
             continue
         survivor, others = group[0], group[1:]
-        goals = [
-            set(link_model.objects.filter(capability_id=row.pk).values_list("goal_id", flat=True))
-            for row in group
-        ]
-        goals_disjoint = sum(len(g) for g in goals) == len(set().union(*goals))
+        links = [_links(link_model, row.pk, link_compared) for row in group]
+        same_links = all(
+            {goal: values for goal, (_, values) in row_links.items()}
+            == {goal: values for goal, (_, values) in links[0].items()}
+            for row_links in links[1:]
+        )
         same = all(
             getattr(row, name) == getattr(survivor, name) for row in others for name in compared
         )
-        if same and goals_disjoint:
-            for row in others:
+        if same and same_links:
+            for row, row_links in zip(others, links[1:]):
                 binding_model.objects.filter(capability_id=row.pk).update(capability_id=survivor.pk)
-                link_model.objects.filter(capability_id=row.pk).update(capability_id=survivor.pk)
                 reset_model.objects.filter(capability_id=row.pk).update(capability_id=survivor.pk)
-                row.delete()
+                for goal, (link, _) in row_links.items():
+                    reset_model.objects.filter(goal_link_id=link.pk).update(goal_link_id=links[0][goal][0].pk)
+                row.delete()  # его связи — те же утверждения, что у выжившей, — уходят каскадом
             counts["merged"] += len(others)
             continue
+        old_keys = {row.pk: row.key for row in group}
         for row in others:
             row.key = _free_key(key, _suffix(row.template), taken)
             row.save(update_fields=["key"])
         counts["renamed"] += len(others)
-        counts["demoted"] += capability_model.objects.filter(pk__in=[row.pk for row in group]).update(
+        for row, row_links in zip(group, links):
+            label = f"{row.template.name} · {row.key}"[:300]
+            change = [{"field": "key", "old": old_keys[row.pk], "new": row.key}]
+            if _has_something_to_lose(row):
+                journal.append(reset_model(
+                    reason="claim_edited", changes=change, claim_kind="capability", claim_label=label,
+                    capability_id=row.pk, was_approved=row.status == "approved",
+                    had_review=row.reviewed_by_id is not None,
+                ))
+                counts["demoted"] += 1
+            for link, _ in row_links.values():
+                if _has_something_to_lose(link):
+                    journal.append(reset_model(
+                        reason="capability_edited", changes=change, claim_kind="goal_link",
+                        claim_label=f"{label} → {link.goal.key}"[:300], goal_link_id=link.pk,
+                        was_approved=link.status == "approved", had_review=link.reviewed_by_id is not None,
+                    ))
+                    counts["links_demoted"] += 1
+        capability_model.objects.filter(pk__in=[row.pk for row in group]).update(
             status="system_inference", reviewed_by=None, reviewed_at=None,
         )
+        link_model.objects.filter(capability_id__in=[row.pk for row in group]).update(
+            status="system_inference", reviewed_by=None, reviewed_at=None,
+        )
+    reset_model.objects.bulk_create(journal)
     return counts
 
 

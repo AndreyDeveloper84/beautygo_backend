@@ -242,6 +242,24 @@ class TestTheBindingIsContent:
             "new": ", ".join(sorted(t.name for t in posted)),
         }]
 
+    def test_the_journal_names_the_new_procedures(self, holder, owner, massage, wrap) -> None:
+        entry = ProcedureCapability.objects.create(templates=[massage], key="shared_relaxation", **_approved(owner))
+
+        _client(holder).post(reverse(CHANGE, args=[entry.pk]), _form(wrap, status="approved"))
+
+        assert ClaimApprovalReset.objects.get(capability=entry).claim_label == "Обёртывание 2743 · shared_relaxation"
+
+    def test_one_without_the_approval_right_cannot_change_the_procedures_of_an_approved_entry(
+        self, owner, massage, wrap
+    ) -> None:
+        curator = _staff("curator-2743", EVERYDAY)
+        entry = ProcedureCapability.objects.create(templates=[massage], key="shared_relaxation", **_approved(owner))
+
+        response = _client(curator).post(reverse(CHANGE, args=[entry.pk]), _form(massage, wrap, status="approved"))
+
+        assert _codes(response) == {"status": ["approval_right_required"]}
+        assert list(ProcedureCapability.objects.get(pk=entry.pk).templates.all()) == [massage]
+
     def test_an_untouched_binding_keeps_the_approval(self, holder, owner, massage, wrap) -> None:
         entry = ProcedureCapability.objects.create(
             templates=[massage, wrap], key="shared_relaxation", **_approved(owner),
@@ -371,14 +389,30 @@ class TestAFileBindsAnEntryToItsProcedures:
 
         assert "такой key в файле уже есть" in message
 
-    def test_an_existing_entry_gets_no_new_procedures_from_the_file(self, tmp_path, massage, wrap) -> None:
-        ProcedureCapability.objects.create(templates=[massage], key="shared", text_client="правка в админке")
+    def test_an_existing_entry_with_the_same_procedures_is_left_as_is(self, tmp_path, massage, wrap) -> None:
+        ProcedureCapability.objects.create(templates=[massage, wrap], key="shared", text_client="правка в админке")
 
-        output = _seed(tmp_path, [{"template_codes": ["1.1.3", "1.1.4"], "key": "shared", "text_client": "из файла"}])
+        output = _seed(tmp_path, [{"template_codes": ["1.1.4", "1.1.3"], "key": "shared", "text_client": "из файла"}])
 
         entry = ProcedureCapability.objects.get(key="shared")
         assert "existing left as is: 1 capabilities" in output
-        assert (list(entry.templates.all()), entry.text_client) == ([massage], "правка в админке")
+        assert (set(entry.templates.all()), entry.text_client) == ({massage, wrap}, "правка в админке")
+
+    def test_an_existing_entry_bound_elsewhere_is_refused_with_its_links(self, tmp_path, massage, wrap) -> None:
+        """Связь из файла написана про процедуры файла — к записи с другими
+        процедурами она не ложится, и файл не пишется вовсе."""
+        GoalOption.objects.create(key="relax-2743", label="Цель 2743")
+        existing = ProcedureCapability.objects.create(templates=[massage], key="shared")
+        path = tmp_path / "knowledge.json"
+        path.write_text(json.dumps({"capabilities": [{
+            "template_codes": ["1.1.4"], "key": "shared", "goal_links": [{"goal": "relax-2743"}],
+        }]}, ensure_ascii=False), encoding="utf-8")
+
+        with pytest.raises(CommandError) as raised:
+            call_command("seed_procedure_knowledge", "--file", str(path), stdout=StringIO())
+
+        assert "привязана к другим процедурам" in str(raised.value)
+        assert (list(existing.templates.all()), CapabilityGoalLink.objects.count()) == ([massage], 0)
 
 
 # ── Миграция 0040 на строках, лежавших до неё ─────────────────────────────
@@ -417,33 +451,43 @@ class TestTheMigrationOnRowsThatWereThereBefore:
             for n, code in ((1, "1.1.1"), (2, "1.1.2"), (3, "1.1.3"), (4, "1.1.4"), (5, None))
         )
         Goal = old.get_model("services", "GoalOption")
-        relax, calm = Goal.objects.create(key="relax-2743-m", label="Цель 1"), Goal.objects.create(
-            key="calm-2743-m", label="Цель 2",
-        )
+        relax = Goal.objects.create(key="relax-2743-m", label="Цель 1")
+        calm = Goal.objects.create(key="calm-2743-m", label="Цель 2")
         user = User.objects.create_user(username="mig-2743", password="x", role="admin")
         stamp = timezone.now()
         signed = {
             "status": "approved", "claim_type": "product", "claim_scope": "supported",
             "evidence_kind": "product_policy", "source_ref": "DOC-2743", "confirmed_by_id": user.id,
-            "confirmed_at": stamp, "text_client": "Одинаковая формулировка",
+            "confirmed_at": stamp,
         }
-        alone = Capability.objects.create(template=first, key="alone", **signed).pk
-        same_a = Capability.objects.create(template=first, key="same", **signed).pk
-        same_b = Capability.objects.create(template=second, key="same", **signed).pk
-        Link.objects.create(capability_id=same_a, goal=relax)
-        moved_link = Link.objects.create(capability_id=same_b, goal=calm).pk
+        text = {"text_client": "Одинаковая формулировка"}
+        alone = Capability.objects.create(template=first, key="alone", **signed, **text).pk
+        # Одинаковые строки с одинаковыми связями — сводятся.
+        same_a = Capability.objects.create(template=first, key="same", **signed, **text).pk
+        same_b = Capability.objects.create(template=second, key="same", **signed, **text).pk
+        kept_link = Link.objects.create(capability_id=same_a, goal=relax, **signed).pk
+        twin_link = Link.objects.create(capability_id=same_b, goal=relax, **signed).pk
         moved_reset = Reset.objects.create(
             reason="procedure_changed", claim_kind="capability", claim_label="same", capability_id=same_b,
         ).pk
-        differ_a = Capability.objects.create(template=first, key="differ", **signed).pk
-        differ_b = Capability.objects.create(
-            template=third, key="differ", **{**signed, "text_client": "Другая формулировка"},
+        twin_reset = Reset.objects.create(
+            reason="procedure_changed", claim_kind="goal_link", claim_label="same → relax", goal_link_id=twin_link,
         ).pk
-        differ_c = Capability.objects.create(template=fifth, key="differ", **signed).pk
-        clash_a = Capability.objects.create(template=first, key="clash", **signed).pk
-        clash_b = Capability.objects.create(template=fourth, key="clash", **signed).pk
-        Link.objects.create(capability_id=clash_a, goal=relax)
-        Link.objects.create(capability_id=clash_b, goal=relax)
+        # Одинаковые строки, но связи про разные цели — связь одной процедуры к другой не переезжает.
+        apart_a = Capability.objects.create(template=first, key="apart", **signed, **text).pk
+        apart_b = Capability.objects.create(template=fourth, key="apart", **signed, **text).pk
+        apart_link = Link.objects.create(capability_id=apart_a, goal=relax, **signed).pk
+        Link.objects.create(capability_id=apart_b, goal=calm, **signed)
+        # Разное содержание — переименование, в том числе процедуре без кода.
+        differ_a = Capability.objects.create(template=first, key="differ", **signed, **text).pk
+        differ_b = Capability.objects.create(
+            template=third, key="differ", **signed, text_client="Другая формулировка",
+        ).pk
+        differ_c = Capability.objects.create(template=fifth, key="differ", **signed, **text).pk
+        # Ключ, который переименование заняло бы, уже есть.
+        Capability.objects.create(template=second, key="taken-1-1-3", **text)
+        taken_a = Capability.objects.create(template=first, key="taken", **signed, **text).pk
+        taken_b = Capability.objects.create(template=third, key="taken", text_client="Иная").pk
 
         new = self._migrate(THE_MIGRATION)  # не падает — это и есть свойство выкладки
         Entry = new.get_model("services", "ProcedureCapability")  # noqa: N806
@@ -457,22 +501,37 @@ class TestTheMigrationOnRowsThatWereThereBefore:
             row = Entry.objects.get(pk=pk)
             return row.key, row.status, row.confirmed_by_id
 
-        # Одна строка — одна запись со своей процедурой.
+        # Одна строка — одна запись со своей процедурой, подтверждение на месте.
         assert procedures(alone) == {"Процедура 1"}
         assert state(alone) == ("alone", "approved", user.id)
-        # Одинаковое — сведено: одна запись, две процедуры, связь и журнал перешли.
+        # Сведено: одна запись, две процедуры, одна связь; журнал перешёл к выжившим.
         assert not Entry.objects.filter(pk=same_b).exists()
         assert procedures(same_a) == {"Процедура 1", "Процедура 2"}
         assert state(same_a) == ("same", "approved", user.id)
-        assert NewLink.objects.get(pk=moved_link).capability_id == same_a
+        assert list(NewLink.objects.filter(capability_id=same_a).values_list("pk", "status")) == [
+            (kept_link, "approved"),
+        ]
         assert NewReset.objects.get(pk=moved_reset).capability_id == same_a
-        # Расходящееся — отдельные записи, ключи с кодом процедуры, все в черновике, след цел.
+        assert NewReset.objects.get(pk=twin_reset).goal_link_id == kept_link
+        # Связи про разные цели — не сводится; записи и их связи в черновике и в журнале.
+        assert state(apart_a) == ("apart", "system_inference", user.id)
+        assert state(apart_b) == ("apart-1-1-4", "system_inference", user.id)
+        assert NewLink.objects.get(pk=apart_link).status == "system_inference"
+        assert NewLink.objects.get(capability_id=apart_b).status == "system_inference"
+        journalled = NewReset.objects.get(capability_id=apart_b)
+        assert (journalled.reason, journalled.changes, journalled.was_approved) == (
+            "claim_edited", [{"field": "key", "old": "apart", "new": "apart-1-1-4"}], True,
+        )
+        assert journalled.claim_label == "Процедура 4 · apart-1-1-4"
+        assert NewReset.objects.get(goal_link_id=apart_link).claim_label == "Процедура 1 · apart → relax-2743-m"
+        # Разное содержание — отдельные записи, ключи с кодом процедуры, все в черновике, след цел.
         assert state(differ_a) == ("differ", "system_inference", user.id)
         assert state(differ_b) == ("differ-1-1-3", "system_inference", user.id)
-        assert Entry.objects.get(pk=differ_c).key == f"differ-{fifth.pk.hex[:8]}"
-        assert Entry.objects.get(pk=differ_c).status == "system_inference"
+        assert state(differ_c) == (f"differ-{fifth.pk.hex[:8]}", "system_inference", user.id)
         assert procedures(differ_b) == {"Процедура 3"}
-        # Одинаковое содержание, но связи с одной целью — не сводится.
-        assert state(clash_a) == ("clash", "system_inference", user.id)
-        assert state(clash_b) == ("clash-1-1-4", "system_inference", user.id)
-        assert Entry.objects.count() == 7
+        # Занятый ключ не перезаписывается — берётся следующий свободный.
+        assert Entry.objects.get(pk=taken_b).key == "taken-1-1-3-2"
+        assert state(taken_a)[0] == "taken"
+        # Черновик, которому нечего терять, в журнал не пишется.
+        assert not NewReset.objects.filter(capability_id=taken_b).exists()
+        assert Entry.objects.count() == 10
