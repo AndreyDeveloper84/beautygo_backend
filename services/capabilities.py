@@ -67,7 +67,9 @@ def client_facing_capabilities(
     """Возможности процедуры, которые можно сказать человеку, и явное состояние."""
     now = now or timezone.now()
     rows = list(
-        ProcedureCapability.objects.filter(_client_facing_q(now), template=template).order_by(
+        # DRF-2743: запись словаря привязана к нескольким процедурам — та же
+        # запись приходит для каждой из них с тем же ``claim_id``.
+        ProcedureCapability.objects.filter(_client_facing_q(now), templates=template).order_by(
             "key"
         )
     )
