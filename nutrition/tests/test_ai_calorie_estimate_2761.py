@@ -15,8 +15,10 @@
   записи null, итог дня её не суммирует и считает «не посчитано», счёт дней
   «в ориентире» её день не засчитывает, сохранённое блюдо числа не несёт,
   ориентир профиля не меняется;
-* e5 — флаг здоровья, несовершеннолетие, неназванный субъект → оценки нет и
-  модель не зовётся; человеку с флагом не отдаётся и сохранённая;
+* e5 — расстройство пищевого поведения, несовершеннолетие, неназванный
+  субъект → оценки нет и модель не зовётся; такому человеку не отдаётся и
+  сохранённая. Остальные состояния анкеты оценку не закрывают (решение
+  владельца 02.10: набор — ``{eating_disorder, minor}``);
 * e6 — отказ модели — промах, не 5xx: сеть, таймаут, не-JSON, отказ модели,
   число вне правдоподобного;
 * e7 — выключено по умолчанию;
@@ -307,32 +309,11 @@ class TestWhoGetsNoEstimate:
         "profile",
         [
             {"health_flags": {"eating_disorder": True}},
-            {"health_flags": {"pregnant": True}},
-            {"health_flags": {"breastfeeding": True}},
-            {"health_flags": {"diabetes_t1": True}},
-            {"health_flags": {"diabetes_t2": True}},
-            {"health_flags": {"prediabetes": True}},
-            {"health_flags": {"hypertension": True}},
-            {"health_flags": {"gi_problems": True}},
-            {"health_flags": {"thyroid": True}},
-            {"health_flags": {"meds": True}},
             {"age": 17},
-            {"age": 30, "health_flags": {"allergies": True, "pregnant": True}},
+            {"age": 30, "health_flags": {"allergies": True, "eating_disorder": True}},
+            {"age": 16, "health_flags": {"pregnant": True}},
         ],
-        ids=[
-            "eating-disorder",
-            "pregnant",
-            "breastfeeding",
-            "diabetes-t1",
-            "diabetes-t2",
-            "prediabetes",
-            "hypertension",
-            "gi-problems",
-            "thyroid",
-            "meds",
-            "minor",
-            "one-blocking-among-others",
-        ],
+        ids=["eating-disorder", "minor", "eating-disorder-among-others", "minor-and-pregnant"],
     )
     def test_e5_no_estimate_and_no_model_call(self, client, person, profile):
         NutritionProfile.objects.create(user=person, **profile)
@@ -346,35 +327,46 @@ class TestWhoGetsNoEstimate:
         assert AICalorieEstimate.objects.count() == 0
 
     def test_e5_the_blocking_set_is_the_decided_one(self):
-        """Состав — решение владельца (iii, вариант «б»). Литералом."""
-        assert ace.BLOCKING_RESTRICTIONS == frozenset(
-            {
-                "eating_disorder",
-                "minor",
-                "pregnant",
-                "breastfeeding",
-                "diabetes_t1",
-                "diabetes_t2",
-                "prediabetes",
-                "hypertension",
-                "gi_problems",
-                "thyroid",
-                "meds",
-            }
-        )
+        """Состав — решение владельца 02.10.2026. Литералом."""
+        assert ace.BLOCKING_RESTRICTIONS == frozenset({"eating_disorder", "minor"})
 
     @pytest.mark.parametrize(
         "profile",
         [
             {"age": 18},
+            {"health_flags": {"pregnant": True}},
+            {"health_flags": {"breastfeeding": True}},
+            {"health_flags": {"diabetes_t1": True}},
+            {"health_flags": {"diabetes_t2": True}},
+            {"health_flags": {"prediabetes": True}},
+            {"health_flags": {"hypertension": True}},
+            {"health_flags": {"gi_problems": True}},
+            {"health_flags": {"thyroid": True}},
+            {"health_flags": {"meds": True}},
             {"health_flags": {"allergies": True}},
             {"health_flags": {"menopause": True}},
             {"health_flags": {"diet_skipped": True, "weight_skipped": True}},
-            {"health_flags": {"pregnant": False, "eating_disorder": False}},
+            {"health_flags": {"eating_disorder": False}},
         ],
-        ids=["adult", "allergies", "menopause", "skipped-questions", "flags-set-to-false"],
+        ids=[
+            "adult",
+            "pregnant",
+            "breastfeeding",
+            "diabetes-t1",
+            "diabetes-t2",
+            "prediabetes",
+            "hypertension",
+            "gi-problems",
+            "thyroid",
+            "meds",
+            "allergies",
+            "menopause",
+            "skipped-questions",
+            "eating-disorder-set-to-false",
+        ],
     )
-    def test_e5_what_is_not_a_restriction_does_not_block(self, client, person, profile):
+    def test_e5_what_the_owner_released_does_not_block(self, client, person, profile):
+        """Владелец ослабил всё, кроме РПП и несовершеннолетия: оценка есть."""
         NutritionProfile.objects.create(user=person, **profile)
         patcher, _ = _model_answers(_kcal(250))
         with patcher:
@@ -382,25 +374,22 @@ class TestWhoGetsNoEstimate:
 
         assert data["kcal_ai_estimate"] == 250.0
 
-    def test_e5_narrowing_to_the_eating_disorder_alone_is_one_constant(
-        self, client, person, monkeypatch
-    ):
-        """Владелец может сузить правило до одного РПП — это правка набора."""
-        monkeypatch.setattr(ace, "BLOCKING_RESTRICTIONS", frozenset({"eating_disorder"}))
+    def test_e5_the_rule_is_one_constant(self, client, person, monkeypatch):
+        """Изменить правило — изменить набор: логика его не знает по именам."""
         NutritionProfile.objects.create(user=person, health_flags={"pregnant": True})
         patcher, _ = _model_answers(_kcal(250))
         with patcher:
-            pregnant = _estimate(client).json()["data"]["kcal_ai_estimate"]
-        NutritionProfile.objects.filter(user=person).update(
-            health_flags={"eating_disorder": True}
-        )
-        AICalorieEstimate.objects.all().delete()
-        patcher, _ = _model_answers(_kcal(250))
-        with patcher:
-            eating_disorder = _estimate(client).json()["data"]["kcal_ai_estimate"]
+            released = _estimate(client).json()["data"]["kcal_ai_estimate"]
 
-        assert pregnant == 250.0
-        assert eating_disorder is None
+        monkeypatch.setattr(
+            ace, "BLOCKING_RESTRICTIONS", frozenset({"eating_disorder", "minor", "pregnant"})
+        )
+        patcher, _ = _model_answers()
+        with patcher:
+            blocked = _estimate(client).json()["data"]["kcal_ai_estimate"]
+
+        assert released == 250.0
+        assert blocked is None
 
     def test_e5_twin_a_person_with_a_clean_profile_gets_it(self, client, person):
         NutritionProfile.objects.create(
@@ -453,6 +442,7 @@ class TestModelFailureIsAMiss:
             "not json at all",
             json.dumps(["a", "list"]),
             json.dumps({"error": "not a food"}),
+            json.dumps({"error": "not a food", "kcal_per_100g": 250}),
             json.dumps({"calories": 250}),
             json.dumps({"kcal_per_100g": "250"}),
             json.dumps({"kcal_per_100g": True}),
@@ -469,6 +459,7 @@ class TestModelFailureIsAMiss:
             "not-json",
             "json-list",
             "model-declined",
+            "model-declined-but-sent-a-number",
             "wrong-key",
             "number-as-string",
             "boolean",
@@ -493,6 +484,18 @@ class TestModelFailureIsAMiss:
         assert data["matched_dish"] == UNKNOWN_DISH
         assert model.chat.completions.create.call_count == 1
         assert AICalorieEstimate.objects.count() == 0
+
+    def test_e6_an_unexpected_failure_inside_the_estimate_is_still_a_miss(
+        self, client, person, caplog
+    ):
+        """Не предусмотренный сбой — тоже не 5xx: оценка не стоит человеку карточки."""
+        with patch.object(ace, "_estimate_and_store", side_effect=RuntimeError("bug")):
+            resp = _estimate(client, portion_g=200)
+
+        assert resp.status_code == status.HTTP_200_OK, resp.json()
+        assert resp.json()["data"]["kcal_ai_estimate"] is None
+        assert resp.json()["data"]["matched_dish"] == UNKNOWN_DISH
+        assert "nutrition.ai_calories.failed" in caplog.text
 
     @pytest.mark.parametrize("value", [0, 0.5, 250, 900])
     def test_e6_twin_plausible_numbers_are_accepted(self, client, person, value):
