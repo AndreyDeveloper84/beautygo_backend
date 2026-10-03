@@ -141,7 +141,7 @@ def reviewer() -> User:
 
 def _form(template: ServiceTemplate, **overrides) -> dict:
     data = {
-        "template": str(template.pk),
+        "procedures": [str(template.pk)],
         "key": "example_effect",
         "text_client": "Синтетическая формулировка",
         "text_professional": "",
@@ -188,7 +188,7 @@ class TestTheDatabaseKeepsTheTwoSignaturesApart:
     def test_an_approved_product_claim_needs_no_reviewer(self, template, approver) -> None:
         """Контроль: подтверждённая строка вообще сохраняется."""
         ProcedureCapability.objects.create(
-            template=template, key="product", claim_type="product", **_signed(approver),
+            templates=[template], key="product", claim_type="product", **_signed(approver),
         )
 
         assert ProcedureCapability.objects.get().reviewed_by_id is None
@@ -196,7 +196,7 @@ class TestTheDatabaseKeepsTheTwoSignaturesApart:
     def test_an_approved_claim_without_a_type_is_refused(self, template, approver) -> None:
         _refused_by(
             "procedurecapability_approved_has_claim_type",
-            lambda: ProcedureCapability.objects.create(template=template, key="untyped", **_signed(approver)),
+            lambda: ProcedureCapability.objects.create(templates=[template], key="untyped", **_signed(approver)),
         )
 
     @pytest.mark.parametrize("claim_type", ["professional", "physiological", "medical"])
@@ -206,12 +206,12 @@ class TestTheDatabaseKeepsTheTwoSignaturesApart:
         _refused_by(
             "procedurecapability_approved_review_when_required",
             lambda: ProcedureCapability.objects.create(
-                template=template, key="unreviewed", claim_type=claim_type, **_signed(approver),
+                templates=[template], key="unreviewed", claim_type=claim_type, **_signed(approver),
             ),
         )
 
         ProcedureCapability.objects.create(
-            template=template, key="reviewed", claim_type=claim_type,
+            templates=[template], key="reviewed", claim_type=claim_type,
             reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
         )
         row = ProcedureCapability.objects.get()
@@ -228,8 +228,8 @@ class TestTheDatabaseKeepsTheTwoSignaturesApart:
         assert not requires_review("unclassified")
 
     def test_a_draft_is_not_judged(self, template) -> None:
-        ProcedureCapability.objects.create(template=template, key="draft", claim_type="medical")
-        ProcedureCapability.objects.create(template=template, key="untyped-draft")
+        ProcedureCapability.objects.create(templates=[template], key="draft", claim_type="medical")
+        ProcedureCapability.objects.create(templates=[template], key="untyped-draft")
 
         assert ProcedureCapability.objects.count() == 2
 
@@ -237,12 +237,12 @@ class TestTheDatabaseKeepsTheTwoSignaturesApart:
         _refused_by(
             "procedurecapability_review_is_whole",
             lambda: ProcedureCapability.objects.create(
-                template=template, key="half", claim_type="medical", reviewed_by=reviewer,
+                templates=[template], key="half", claim_type="medical", reviewed_by=reviewer,
             ),
         )
 
     def test_the_goal_link_carries_the_same_rules(self, template, goal, approver) -> None:
-        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[template], key="for-link")
 
         _refused_by(
             "capabilitygoallink_approved_has_claim_type",
@@ -447,7 +447,7 @@ class TestTheAdminKeepsTheTwoSignaturesApart:
         body_reviewer = _staff("body-2726-r", EVERYDAY)
         ClaimReviewer.objects.create(user=face_reviewer, claim_type="medical", category=face)
         ClaimReviewer.objects.create(user=body_reviewer, claim_type="medical", category=body)
-        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[template], key="for-link")
         data = {
             "capability": str(capability.pk), "goal": str(goal.pk),
             "course_pattern": "", "result_horizon": "", "variability_note": "",
@@ -469,7 +469,7 @@ class TestAnEditAfterTheReview:
     @pytest.fixture
     def reviewed_and_approved(self, template, reviewer, approver) -> ProcedureCapability:
         return ProcedureCapability.objects.create(
-            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            templates=[template], key="example_effect", text_client="Синтетическая формулировка",
             claim_type="medical", claim_scope="supported",
             reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
         )
@@ -500,7 +500,7 @@ class TestAnEditAfterTheReview:
         """Тот же обход с другой стороны: проверенный ЧЕРНОВИК поправить и тем
         же сохранением подтвердить — под прежней отметкой нельзя."""
         draft = ProcedureCapability.objects.create(
-            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            templates=[template], key="example_effect", text_client="Синтетическая формулировка",
             claim_type="medical", claim_scope="supported", source_ref="DOC-2726",
             reviewed_by=reviewer, reviewed_at=timezone.now(),
         )
@@ -642,7 +642,7 @@ class TestTheOwnersTwoRequirements:
         """Даже у того, кто вправе всё: сохранить «подтверждено» вместе с
         правкой нельзя — строка уходит в черновик."""
         row = ProcedureCapability.objects.create(
-            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            templates=[template], key="example_effect", text_client="Синтетическая формулировка",
             claim_type="product", claim_scope="supported", **_signed(superuser),
         )
 
@@ -661,7 +661,7 @@ class TestTheOwnersTwoRequirements:
         self, superuser, reviewer, template, change
     ) -> None:
         row = ProcedureCapability.objects.create(
-            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            templates=[template], key="example_effect", text_client="Синтетическая формулировка",
             claim_type="medical", claim_scope="supported",
             reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(superuser),
         )
@@ -678,7 +678,7 @@ class TestTheOwnersTwoRequirements:
         """Контроль: снимает подтверждение не любое сохранение, а правка типа,
         содержания или источника."""
         row = ProcedureCapability.objects.create(
-            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            templates=[template], key="example_effect", text_client="Синтетическая формулировка",
             claim_type="product", claim_scope="supported", **_signed(superuser),
         )
 
@@ -693,7 +693,7 @@ class TestTheOwnersTwoRequirements:
         assert (row.status, row.confirmed_by_id) == ("approved", superuser.pk)
 
     def test_the_goal_link_loses_its_approval_too(self, superuser, template, goal) -> None:
-        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[template], key="for-link")
         link = CapabilityGoalLink.objects.create(
             capability=capability, goal=goal, claim_type="product", claim_scope="supported",
             **_signed(superuser),
@@ -727,7 +727,7 @@ class TestAChangeOfTheProcedureDropsTheApproval:
     @pytest.fixture
     def claims(self, template, goal, reviewer, approver):
         capability = ProcedureCapability.objects.create(
-            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            templates=[template], key="example_effect", text_client="Синтетическая формулировка",
             claim_type="medical", claim_scope="supported",
             reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
         )
@@ -941,7 +941,7 @@ class TestAChangeOfTheProcedureDropsTheApproval:
         этой процедуры: и проверенные рецензентом, и продуктовое, которому
         рецензент не нужен."""
         product = ProcedureCapability.objects.create(
-            template=template, key="product-claim", claim_type="product", claim_scope="supported",
+            templates=[template], key="product-claim", claim_type="product", claim_scope="supported",
             **_signed(boundary_holder),
         )
 
@@ -954,7 +954,7 @@ class TestAChangeOfTheProcedureDropsTheApproval:
 
     def test_a_draft_reviewed_claim_loses_its_review_too(self, template, body, reviewer) -> None:
         draft = ProcedureCapability.objects.create(
-            template=template, key="reviewed-draft", claim_type="medical",
+            templates=[template], key="reviewed-draft", claim_type="medical",
             reviewed_by=reviewer, reviewed_at=timezone.now(),
         )
 
@@ -970,7 +970,7 @@ class TestAChangeOfTheProcedureDropsTheApproval:
             category=template.category, name="Соседняя процедура 2726-р", name_short="Соседняя 2726-р",
         )
         neighbour = ProcedureCapability.objects.create(
-            template=other, key="neighbour", claim_type="medical", claim_scope="supported",
+            templates=[other], key="neighbour", claim_type="medical", claim_scope="supported",
             reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
         )
 
@@ -987,7 +987,7 @@ class TestTheCuratorSeesWhatWasReset:
     @pytest.fixture
     def claims(self, template, goal, reviewer, approver):
         capability = ProcedureCapability.objects.create(
-            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            templates=[template], key="example_effect", text_client="Синтетическая формулировка",
             claim_type="medical", claim_scope="supported",
             reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
         )
@@ -1116,7 +1116,7 @@ class TestTheCuratorSeesWhatWasReset:
         assert everything.status_code == 200
 
     def test_an_untouched_claim_is_not_in_the_queue(self, owner, template) -> None:
-        ProcedureCapability.objects.create(template=template, key="plain-draft")
+        ProcedureCapability.objects.create(templates=[template], key="plain-draft")
 
         queue = _client(owner).get(
             reverse("admin:services_procedurecapability_changelist"), {"needs_reconfirmation": "yes"},
@@ -1275,7 +1275,7 @@ class TestAnEditOfTheCapabilityUnderAReviewedLink:
     @pytest.fixture
     def capability(self, template) -> ProcedureCapability:
         return ProcedureCapability.objects.create(
-            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            templates=[template], key="example_effect", text_client="Синтетическая формулировка",
             claim_type="product", claim_scope="supported", source_ref="DOC-2726",
             evidence_kind="professional_consensus",
         )
@@ -1319,7 +1319,7 @@ class TestAnEditOfTheCapabilityUnderAReviewedLink:
         той же процедуры и её связь не тронуты."""
         other_goal = GoalOption.objects.create(key="other-goal-2726-r", label="Другая цель")
         sibling = ProcedureCapability.objects.create(
-            template=template, key="sibling", claim_type="medical", claim_scope="supported",
+            templates=[template], key="sibling", claim_type="medical", claim_scope="supported",
             reviewed_by=reviewer, reviewed_at=timezone.now(), **_signed(approver),
         )
         sibling_link = CapabilityGoalLink.objects.create(

@@ -106,7 +106,7 @@ class TestTheDatabaseTiesTheStatementToTheProhibition:
     def test_an_approved_prohibition_with_its_statement_is_stored(self, template, owner) -> None:
         """Контроль: подтверждённый запрет вообще сохраняется."""
         ProcedureCapability.objects.create(
-            template=template, key="ban", claim_scope="prohibited_claim",
+            templates=[template], key="ban", claim_scope="prohibited_claim",
             prohibited_statement=STATEMENT, **_approved(owner),
         )
 
@@ -116,7 +116,7 @@ class TestTheDatabaseTiesTheStatementToTheProhibition:
         _refused_by(
             "procedurecapability_approved_prohibition_has_statement",
             lambda: ProcedureCapability.objects.create(
-                template=template, key="ban", claim_scope="prohibited_claim", **_approved(owner),
+                templates=[template], key="ban", claim_scope="prohibited_claim", **_approved(owner),
             ),
         )
 
@@ -132,19 +132,19 @@ class TestTheDatabaseTiesTheStatementToTheProhibition:
         _refused_by(
             "procedurecapability_prohibition_only_on_prohibited_claim",
             lambda: ProcedureCapability.objects.create(
-                template=template, key="not-a-ban", claim_scope=scope,
+                templates=[template], key="not-a-ban", claim_scope=scope,
                 prohibited_statement=STATEMENT, **signed,
             ),
         )
 
     def test_a_draft_prohibition_without_a_statement_is_not_judged(self, template) -> None:
         """Условие выкладки: черновик запрета без предмета для базы законен."""
-        ProcedureCapability.objects.create(template=template, key="draft-ban", claim_scope="prohibited_claim")
+        ProcedureCapability.objects.create(templates=[template], key="draft-ban", claim_scope="prohibited_claim")
 
         assert ProcedureCapability.objects.count() == 1
 
     def test_the_goal_link_carries_the_same_two_rules(self, template, goal, owner) -> None:
-        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[template], key="for-link")
 
         _refused_by(
             "capabilitygoallink_approved_prohibition_has_statement",
@@ -171,7 +171,7 @@ class TestTheDatabaseTiesTheStatementToTheProhibition:
 class TestTheProhibitionNeverReachesTheClientReader:
     def test_an_approved_prohibition_leaves_the_procedure_unknown(self, template, owner) -> None:
         ProcedureCapability.objects.create(
-            template=template, key="ban", claim_scope="prohibited_claim",
+            templates=[template], key="ban", claim_scope="prohibited_claim",
             prohibited_statement=STATEMENT, **_approved(owner),
         )
 
@@ -183,11 +183,11 @@ class TestTheProhibitionNeverReachesTheClientReader:
     def test_next_to_supported_knowledge_only_the_supported_row_is_returned(self, template, owner) -> None:
         """Контроль: читатель что-то отдаёт — и среди отданного запрета нет."""
         ProcedureCapability.objects.create(
-            template=template, key="ban", claim_scope="prohibited_claim",
+            templates=[template], key="ban", claim_scope="prohibited_claim",
             prohibited_statement=STATEMENT, **_approved(owner),
         )
         ProcedureCapability.objects.create(
-            template=template, key="effect", claim_scope="supported", **_approved(owner),
+            templates=[template], key="effect", claim_scope="supported", **_approved(owner),
         )
 
         readout = client_facing_capabilities(template)
@@ -196,7 +196,7 @@ class TestTheProhibitionNeverReachesTheClientReader:
 
     def test_a_prohibited_goal_link_is_not_returned(self, template, goal, owner) -> None:
         capability = ProcedureCapability.objects.create(
-            template=template, key="effect", claim_scope="supported", **_approved(owner),
+            templates=[template], key="effect", claim_scope="supported", **_approved(owner),
         )
         CapabilityGoalLink.objects.create(
             capability=capability, goal=goal, claim_scope="prohibited_claim",
@@ -241,7 +241,7 @@ class TestTheSharedRule:
 
 def _capability_form(template: ServiceTemplate, **overrides) -> dict:
     data = {
-        "template": str(template.pk),
+        "procedures": [str(template.pk)],
         "key": "example_ban",
         "text_client": "",
         "text_professional": "",
@@ -309,7 +309,7 @@ class TestTheAdminFormAsksForTheStatement:
         запрещённого обещания оказался бы у строки, которая может стать
         клиентской. Отказ — по полю, а не ошибкой базы."""
         ban = ProcedureCapability.objects.create(
-            template=template, key="example_ban", claim_scope="prohibited_claim",
+            templates=[template], key="example_ban", claim_scope="prohibited_claim",
             prohibited_statement=STATEMENT,
         )
 
@@ -323,7 +323,7 @@ class TestTheAdminFormAsksForTheStatement:
         assert ban.claim_scope == "prohibited_claim"
 
     def test_the_link_form_asks_the_same(self, template, goal) -> None:
-        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[template], key="for-link")
         data = {
             "capability": str(capability.pk), "goal": str(goal.pk),
             "course_pattern": "", "result_horizon": "", "variability_note": "",

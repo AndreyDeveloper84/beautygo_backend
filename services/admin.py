@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from django import forms
 from django.contrib import admin, messages
+from django.contrib.admin.widgets import AutocompleteSelectMultiple
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
@@ -18,7 +19,6 @@ from services.knowledge_intake import (
 from services.knowledge_review import (
     UNCLASSIFIED,
     may_approve_without_reviewer,
-    may_review,
     may_review_scope,
     requires_review,
 )
@@ -871,9 +871,25 @@ class _ClaimAdminForm(forms.ModelForm):
         ),
     )
 
-    def _claim_template(self, cleaned):
-        """Процедура, о которой утверждение, — для области компетенции рецензента."""
-        return cleaned.get("template")
+    #: Поле формы → откуда прежнее значение в строке (для журнала правок).
+    _STORED_AS: dict[str, str] = {}
+
+    def _claim_templates(self, cleaned) -> list:
+        """Процедуры, о которых утверждение, — для области компетенции рецензента.
+
+        DRF-2743: запись словаря привязана к нескольким процедурам, и рецензент
+        должен быть вправе проверять по каждой.
+        """
+        return list(cleaned.get("procedures") or [])
+
+    @staticmethod
+    def _journal_value(value) -> str:
+        """Значение поля строкой для журнала; у привязок — имена процедур."""
+        if hasattr(value, "all"):
+            value = value.all()
+        if isinstance(value, (list, tuple)) or hasattr(value, "model"):
+            return ", ".join(sorted(str(item.name if hasattr(item, "name") else item) for item in value))
+        return str(value or "")
 
     def _clean_review(self, cleaned) -> None:
         """Проверка рецензентом: кто вправе отметить и хватает ли отметки (DRF-2726)."""
@@ -890,8 +906,9 @@ class _ClaimAdminForm(forms.ModelForm):
                     ),
                 )
                 marks = False
-            elif not may_review(
-                self.acting_user, claim_type=claim_type, template=self._claim_template(cleaned),
+            elif not may_review_scope(
+                self.acting_user, claim_type=claim_type, templates=self._claim_templates(cleaned),
+                categories=[],
             ):
                 self.add_error(
                     "mark_reviewed",
@@ -910,8 +927,8 @@ class _ClaimAdminForm(forms.ModelForm):
         self.content_changes = [
             {
                 "field": name,
-                "old": str(getattr(self.instance, name, "") or ""),
-                "new": str(cleaned.get(name) or ""),
+                "old": self._journal_value(getattr(self.instance, self._STORED_AS.get(name, name), "")),
+                "new": self._journal_value(cleaned.get(name)),
             }
             for name in self.changed_data if name not in _NOT_CLAIM_CONTENT
         ] if not self.instance._state.adding else []
@@ -1025,10 +1042,30 @@ class _ClaimAdminForm(forms.ModelForm):
 
 
 class ProcedureCapabilityAdminForm(_ClaimAdminForm):
+    #: Привязки записи словаря к процедурам (DRF-2743). Своим полем формы, а
+    #: не полем модели: связь идёт через таблицу :class:`CapabilityTemplate`,
+    #: которая запрещает удалить процедуру с привязанным знанием, а такую связь
+    #: админка сама не редактирует. Пишет ``ProcedureCapabilityAdmin.save_related``.
+    procedures = forms.ModelMultipleChoiceField(
+        queryset=ServiceTemplate.objects.all(),
+        label="Процедуры",
+        widget=AutocompleteSelectMultiple(ProcedureCapability._meta.get_field("templates"), admin.site),
+        help_text=(
+            "К каким процедурам канона относится эта возможность. Добавить или убрать "
+            "процедуру у подтверждённой записи — правка: подтверждение снимается."
+        ),
+    )
+    _STORED_AS = {"procedures": "templates"}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not self.instance._state.adding:
+            self.fields["procedures"].initial = list(self.instance.templates.all())
+
     class Meta:
         model = ProcedureCapability
         fields = (
-            "template", "key", "text_client", "text_professional",
+            "key", "text_client", "text_professional",
             "expected_effect", "result_timeframe", "variability_note",
             "claim_type",
             "status", "claim_scope", "prohibited_statement", "limitations",
@@ -1071,9 +1108,9 @@ class ProcedureCapabilityAdminForm(_ClaimAdminForm):
 
 
 class CapabilityGoalLinkAdminForm(_ClaimAdminForm):
-    def _claim_template(self, cleaned):
+    def _claim_templates(self, cleaned) -> list:
         capability = cleaned.get("capability")
-        return capability.template if capability is not None else None
+        return list(capability.templates.all()) if capability is not None else []
 
     class Meta:
         model = CapabilityGoalLink
@@ -1261,30 +1298,43 @@ class ProcedureCapabilityAdmin(_ClaimAdmin):
             )
 
     list_display = (
-        "template", "key", "claim_type", "status", "claim_scope", "valid_until",
+        "key", "procedure_names", "claim_type", "status", "claim_scope", "valid_until",
         "reviewed_by", "confirmed_by",
     )
-    search_fields = ("key", "text_client", "template__name", "template__canonical_code")
-    autocomplete_fields = ("template",)
-    list_select_related = ("template", "confirmed_by", "reviewed_by")
-    ordering = ("template", "key")
+    search_fields = ("key", "text_client", "templates__name", "templates__canonical_code")
+    list_select_related = ("confirmed_by", "reviewed_by")
+    ordering = ("key",)
     fieldsets = (
         (
             "Возможность",
             {
                 "fields": (
-                    "template", "key", "text_client", "text_professional",
+                    "procedures", "key", "text_client", "text_professional",
                     "expected_effect", "result_timeframe", "variability_note",
                 ),
                 "description": (
-                    "Срок результата — словами, не числом, и только вместе с оговоркой "
-                    "о разбросе, источником и ссылкой."
+                    "Запись общего словаря: одна возможность — для всех процедур, к которым "
+                    "она привязана. Добавить или убрать процедуру у подтверждённой записи — "
+                    "правка: подтверждение снимается. Срок результата — словами, не числом, "
+                    "и только вместе с оговоркой о разбросе, источником и ссылкой."
                 ),
             },
         ),
         _CLAIM_FIELDSET,
         _CONFIRMATION_FIELDSET,
     )
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("templates")
+
+    @admin.display(description="Процедуры")
+    def procedure_names(self, obj) -> str:
+        return ", ".join(sorted(template.name for template in obj.templates.all())) or "—"
+
+    def save_related(self, request, form, formsets, change):
+        super().save_related(request, form, formsets, change)
+        if "procedures" in form.changed_data or not change:
+            form.instance.templates.set(form.cleaned_data["procedures"])
 
 
 @admin.register(CapabilityGoalLink)
@@ -1296,9 +1346,12 @@ class CapabilityGoalLinkAdmin(_ClaimAdmin):
         "capability", "goal", "claim_type", "status", "claim_scope", "valid_until",
         "reviewed_by", "confirmed_by",
     )
-    search_fields = ("capability__key", "capability__template__name", "goal__key", "goal__label")
+    search_fields = ("capability__key", "capability__templates__name", "goal__key", "goal__label")
     autocomplete_fields = ("capability", "goal")
-    list_select_related = ("capability__template", "goal", "confirmed_by", "reviewed_by")
+    list_select_related = ("capability", "goal", "confirmed_by", "reviewed_by")
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).prefetch_related("capability__templates")
     ordering = ("capability", "goal")
     fieldsets = (
         (
@@ -1361,10 +1414,10 @@ class ClaimApprovalResetAdmin(admin.ModelAdmin):
     # ``contraindication`` — DRF-2741: журнал один на всё знание о процедуре.
     list_filter = ("reason", "claim_kind", "was_approved", "had_review")
     search_fields = (
-        "capability__key", "goal_link__capability__key", "capability__template__name",
+        "capability__key", "goal_link__capability__key", "capability__templates__name",
         "contraindication__key", "claim_label",
     )
-    list_select_related = ("capability__template", "goal_link__capability__template", "goal_link__goal")
+    list_select_related = ("capability", "goal_link__capability", "goal_link__goal")
     readonly_fields = (
         "created_at", "reason", "claim_kind", "claim_label", "capability", "goal_link", "contraindication",
         "was_approved", "had_review", "resolved_at", "what_changed",
