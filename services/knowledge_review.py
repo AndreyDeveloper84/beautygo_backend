@@ -96,10 +96,32 @@ def may_review(user, *, claim_type: str, template: ServiceTemplate | None) -> bo
     return appointments.filter(scope).exists()
 
 
+def may_review_scope(user, *, claim_type: str, templates, categories) -> bool:
+    """Вправе ли человек проверить утверждение с ОБЛАСТЬЮ применения (DRF-2741).
+
+    У противопоказания область — несколько процедур и категорий. Рецензент
+    должен быть вправе проверять по КАЖДОЙ из них: назначение без области
+    покрывает всё; назначение на область — её процедуры и подкатегории. Пустая
+    область — только рецензент без ограничения области.
+    """
+    if user is None or not getattr(user, "is_active", False) or not getattr(user, "pk", None):
+        return False
+    if not requires_review(claim_type):
+        return False
+    appointments = ClaimReviewer.objects.filter(user=user, claim_type=claim_type, is_active=True)
+    if appointments.filter(category__isnull=True).exists():
+        return True
+    covered = set(appointments.values_list("category_id", flat=True))
+    areas = [(t.category_id, t.category.parent_id) for t in templates]
+    areas += [(c.pk, c.parent_id) for c in categories]
+    return bool(areas) and all(own in covered or parent in covered for own, parent in areas)
+
+
 __all__ = [
     "UNCLASSIFIED",
     "WITHOUT_REVIEWER_PERMISSION",
     "may_approve_without_reviewer",
     "may_review",
+    "may_review_scope",
     "requires_review",
 ]

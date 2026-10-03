@@ -8,6 +8,8 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models, transaction
+from django.db.models.signals import pre_delete
+from django.dispatch import receiver
 from django.utils import timezone
 from django.utils.text import slugify
 
@@ -96,6 +98,14 @@ class ServiceCategory(models.Model):
                     reset_claims_of_procedure(
                         template, reason=ClaimApprovalReset.Reason.CATEGORY_MOVED, changes=[change],
                     )
+                # DRF-2741: противопоказание, чья область названа этой
+                # категорией либо корнем, который она покинула или под который
+                # пришла, — состав процедур в его области изменился. Новый
+                # корень отдельно не называется: он — родитель этой категории.
+                reset_contraindications(
+                    contraindications_in_scope(category_ids=[self.pk, was_parent[0]]),
+                    reason=ClaimApprovalReset.Reason.CATEGORY_MOVED, changes=[change],
+                )
 
     def _stored_parent_if_moved(self) -> tuple[Any] | None:
         """``(прежний parent_id,)``, если это сохранение переносит категорию; иначе ``None``."""
@@ -404,6 +414,14 @@ class ServiceTemplate(models.Model):
         if self.canonical_code == "":
             self.canonical_code = None
         changes = self._significant_changes()
+        adding = self._state.adding
+        # DRF-2741: откуда процедура уходит. Противопоказание, названное
+        # прежней категорией, теряет её из области — читать прежнюю категорию
+        # нужно до записи.
+        left_category_id = (
+            type(self).objects.filter(pk=self.pk).values_list("category_id", flat=True).first()
+            if any(change["field"] == "category" for change in changes) else None
+        )
         # Запись и сброс — одной транзакцией: иначе при сбое сброса правка
         # уже лежит в базе, повторное сохранение разницы не увидит, и
         # подтверждения переживут правку.
@@ -417,6 +435,23 @@ class ServiceTemplate(models.Model):
                 )
                 if changes else None
             )
+            if left_category_id is not None:
+                self.knowledge_reset["contraindications"] += reset_contraindications(
+                    contraindications_in_scope(category_ids=[left_category_id]),
+                    reason=ClaimApprovalReset.Reason.PROCEDURE_CHANGED, changes=changes,
+                )
+            if adding:
+                # DRF-2741: новая процедура молча попала бы под противопоказание,
+                # область которого названа её категорией, — а рецензент проверял
+                # правило для прежнего состава.
+                self.knowledge_reset = {
+                    "capabilities": 0, "goal_links": 0,
+                    "contraindications": reset_contraindications(
+                        contraindications_in_scope(category_ids=[self.category_id]),
+                        reason=ClaimApprovalReset.Reason.SCOPE_CHANGED,
+                        changes=[{"field": "templates", "old": "", "new": self.name}],
+                    ),
+                }
 
     #: Поля процедуры, правка которых заведомо НЕ меняет того, о чём утверждает
     #: знание о ней (DRF-2726, требование владельца): штамп версии каталога
@@ -1822,7 +1857,9 @@ def _same_text(before: Any, after: Any) -> bool:
     )
 
 
-def reset_claims(*, capabilities, goal_links, reason: str, changes: list[dict[str, str]]) -> dict[str, int]:
+def reset_claims(
+    *, capabilities, goal_links, reason: str, changes: list[dict[str, str]], contraindications=None,
+) -> dict[str, int]:
     """Снять подтверждение и проверку с ЭТИХ утверждений и записать, почему (DRF-2726).
 
     Требование владельца: подтверждение не переносится на изменившийся
@@ -1843,9 +1880,12 @@ def reset_claims(*, capabilities, goal_links, reason: str, changes: list[dict[st
     # Журнал и сброс — вместе или никак: строка в черновике без записи в
     # журнале не попала бы в очередь куратора.
     with transaction.atomic():
-        for name, rows, kind in (
-            ("capabilities", capabilities, "capability"), ("goal_links", goal_links, "goal_link"),
-        ):
+        groups = [("capabilities", capabilities, "capability"), ("goal_links", goal_links, "goal_link")]
+        if contraindications is not None:
+            # DRF-2741: правило безопасности, область которого изменилась, —
+            # такое же знание о процедуре, и подтверждается заново.
+            groups.append(("contraindications", contraindications, "contraindication"))
+        for name, rows, kind in groups:
             affected = list(
                 rows.filter(models.Q(status="approved") | models.Q(reviewed_by__isnull=False))
             )
@@ -1884,8 +1924,44 @@ def reset_claims_of_procedure(template: Any, *, reason: str, changes: list[dict[
     return reset_claims(
         capabilities=ProcedureCapability.objects.filter(template=template),
         goal_links=CapabilityGoalLink.objects.filter(capability__template=template),
+        contraindications=contraindications_in_scope(template=template, category_ids=[template.category_id]),
         reason=reason, changes=changes,
     )
+
+
+def contraindications_in_scope(*, template: Any = None, category_ids: Any = ()) -> Any:
+    """Противопоказания, чья область применения задевает эту процедуру или эти категории (DRF-2741).
+
+    Область строки названа процедурами и/или категориями. Категория покрывает
+    свои процедуры, корневая — и процедуры своих подкатегорий (так же её
+    читает :func:`services.knowledge_review.may_review_scope`), поэтому вместе
+    с категорией берётся её корень.
+
+    Правило, названное категорией, — знание о КАЖДОЙ её процедуре. Отсюда
+    следствие, которое стоит знать куратору: значимая правка, появление,
+    перенос или удаление любой процедуры категории возвращает такое правило в
+    черновик. Правило, названное процедурами поимённо, соседние процедуры не
+    задевают.
+    """
+    ids = [pk for pk in category_ids if pk is not None]
+    scope = models.Q(categories__in=ids) | models.Q(
+        categories__in=ServiceCategory.objects.filter(pk__in=ids).values("parent_id")
+    )
+    if template is not None:
+        scope |= models.Q(templates=template)
+    # Через ``pk__in``: строка с двумя совпавшими связями пришла бы дважды и
+    # дважды попала бы в журнал.
+    return ProcedureContraindication.objects.filter(
+        pk__in=ProcedureContraindication.objects.filter(scope).values("pk")
+    )
+
+
+def reset_contraindications(rows: Any, *, reason: str, changes: list[dict[str, str]]) -> int:
+    """Вернуть в черновик ЭТИ противопоказания; сколько строк затронуто."""
+    return reset_claims(
+        capabilities=ProcedureCapability.objects.none(), goal_links=CapabilityGoalLink.objects.none(),
+        contraindications=rows, reason=reason, changes=changes,
+    )["contraindications"]
 
 
 #: Срок результата «без слов» — ни одной буквы, только цифры и знаки (DRF-2726).
@@ -2346,6 +2422,9 @@ class ClaimApprovalReset(models.Model):
         CATEGORY_MOVED = "category_moved", "Категория процедуры перенесена"
         #: Изменена цель, о которой говорит связь.
         GOAL_CHANGED = "goal_changed", "Изменена цель, о которой связь"
+        #: В области применения противопоказания появилась или исчезла процедура
+        #: либо категория (DRF-2741).
+        SCOPE_CHANGED = "scope_changed", "Изменился состав области применения"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -2360,8 +2439,16 @@ class ClaimApprovalReset(models.Model):
     goal_link = models.ForeignKey(
         CapabilityGoalLink, on_delete=models.SET_NULL, null=True, blank=True, related_name="approval_resets",
     )
+    contraindication = models.ForeignKey(
+        "services.ProcedureContraindication", on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="approval_resets",
+    )
     claim_kind = models.CharField(
-        max_length=16, choices=[("capability", "Возможность"), ("goal_link", "Связь с целью")],
+        max_length=16,
+        choices=[
+            ("capability", "Возможность"), ("goal_link", "Связь с целью"),
+            ("contraindication", "Противопоказание"),
+        ],
     )
     claim_label = models.CharField(max_length=300, blank=True, default="")
     #: Когда утверждение подтвердили заново. Пусто — повторная проверка ещё нужна.
@@ -2376,20 +2463,33 @@ class ClaimApprovalReset(models.Model):
         constraints = [
             # Строка — не более чем об одном утверждении (после его удаления — ни об одном).
             models.CheckConstraint(
-                condition=models.Q(capability__isnull=True) | models.Q(goal_link__isnull=True),
+                condition=(
+                    (models.Q(capability__isnull=True) & models.Q(goal_link__isnull=True))
+                    | (models.Q(capability__isnull=True) & models.Q(contraindication__isnull=True))
+                    | (models.Q(goal_link__isnull=True) & models.Q(contraindication__isnull=True))
+                ),
                 name="claimapprovalreset_at_most_one_claim",
             ),
         ]
 
     @property
     def claim(self):
-        return self.capability or self.goal_link or self.claim_label
+        return self.capability or self.goal_link or self.contraindication or self.claim_label
+
+    @staticmethod
+    def kind_of(claim) -> str:
+        if isinstance(claim, ProcedureCapability):
+            return "capability"
+        if isinstance(claim, CapabilityGoalLink):
+            return "goal_link"
+        return "contraindication"
 
     @classmethod
     def resolve_for(cls, claim) -> int:
         """Утверждение подтверждено заново — его открытые записи закрываются."""
-        kind = "capability" if isinstance(claim, ProcedureCapability) else "goal_link"
-        return cls.objects.filter(resolved_at__isnull=True, **{kind: claim}).update(resolved_at=timezone.now())
+        return cls.objects.filter(
+            resolved_at__isnull=True, **{cls.kind_of(claim): claim},
+        ).update(resolved_at=timezone.now())
 
     def describe(self) -> str:
         """Одна строка для куратора: причина и что изменилось."""
@@ -2465,3 +2565,175 @@ class ClaimReviewer(models.Model):
     def __str__(self) -> str:
         area = self.category.name if self.category_id else "любая область"
         return f"{self.user} · {self.get_claim_type_display()} · {area}"
+
+
+class ProcedureContraindication(models.Model):
+    """Противопоказание: условие → что делать (DRF-2741, слот C8).
+
+    Решение владельца №2 от 02.10: C8 хранится структурированным набором —
+    условие, действие из закрытого списка, источник, область применения, дата
+    пересмотра, рецензент; «один непроверяемый текстовый блок недостаточен».
+    Строка — одно условие и одно действие; общий набор для нескольких процедур
+    — одна строка с несколькими процедурами в области применения, а не копии.
+
+    Это НОСИТЕЛЬ. Читателя на пути ответа нет, клиенту отсюда ничего не
+    говорится; текстовое поле ``ServiceTemplate.contraindications`` и гейт
+    здоровья живут как жили. Набор — маршрутизация, а не диагностика:
+    отсутствие условия в таблице не доказывает безопасность человеку.
+
+    Две подписи, как у остального знания (DRF-2726): ``reviewed_by`` —
+    рецензент проверил условие и действие, ``confirmed_by`` — куратор утвердил
+    использование. C8 владелец назвал требующим профильной проверки ВСЕГДА,
+    поэтому типа утверждения у строки нет: проверяет её назначенный рецензент
+    медицинских утверждений (:data:`REVIEW_CLAIM_TYPE`), чьи назначения
+    покрывают всю область применения строки.
+
+    Подтверждённая строка без источника, вида доказательства, даты пересмотра,
+    отметки рецензента и подписи не хранится (ограничение базы). Область
+    применения — связи «многие ко многим», базой не проверяются: её у
+    подтверждённой строки спрашивают входы.
+
+    Правило сброса то же, что у остального знания: правка содержания или
+    области снимает подтверждение; значимая правка процедуры из области
+    применения возвращает строку в черновик
+    (:func:`reset_claims_of_procedure`). Область меняется и без правки самой
+    строки — когда процедура или категория из неё удалена, а в категорию
+    пришла новая процедура; это тоже сброс (:func:`contraindications_in_scope`).
+
+    Предел: прямые ``rule.templates.add()`` / ``.remove()`` из кода правило
+    сброса не видят — как ``QuerySet.update()`` у остального знания; не видят
+    его и процедуры, заведённые мимо ``save()`` (``bulk_create``,
+    ``loaddata``). В дереве таких писателей нет: область пишут форма админки
+    и засев новой строки, процедуры — ``save()``.
+
+    При удалении категории вместе с её процедурами журнал называет удалённую
+    процедуру, а не категорию: процедуры уходят первыми, и правилу после
+    первой из них терять уже нечего.
+
+    ``key`` — стабильный машинный идентификатор, как у возможности: по нему
+    засев из файла узнаёт уже заведённую строку.
+    """
+
+    #: Тип утверждения, рецензент которого проверяет противопоказания.
+    REVIEW_CLAIM_TYPE = "medical"
+
+    class Action(models.TextChoices):
+        """Что делать при условии — закрытый список (решение владельца №2)."""
+
+        EXCLUDE = "exclude", "Исключить (не проводить / исключить зону)"
+        POSTPONE = "postpone", "Отложить"
+        REFER_TO_DOCTOR = "refer_to_doctor", "Направить к врачу"
+        EMERGENCY = "emergency", "Экстренная помощь"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    key = models.SlugField(max_length=64, unique=True)
+    #: Условие — словами: при чём правило срабатывает.
+    condition = models.TextField()
+    action = models.CharField(max_length=16, choices=Action.choices)
+    #: Уточнение действия («исключить зону», «только после разрешения врача»).
+    action_note = models.TextField(blank=True, default="")
+    #: Область применения: процедуры канона и/или категории (класс процедур).
+    templates = models.ManyToManyField(ServiceTemplate, blank=True, related_name="contraindication_rules")
+    categories = models.ManyToManyField(ServiceCategory, blank=True, related_name="+")
+    #: Уточнение области словами («особенно при интенсивной технике»).
+    scope_note = models.TextField(blank=True, default="")
+
+    source_ref = models.CharField(max_length=200, blank=True, default="")
+    evidence_source = models.CharField(max_length=300, blank=True, default="")
+    evidence_kind = models.CharField(
+        max_length=64, blank=True, default="", choices=ClaimEvidence.EvidenceKind.choices,
+    )
+    #: Когда строку нужно проверить заново.
+    review_date = models.DateField(null=True, blank=True)
+
+    # PROTECT у обеих подписей — по той же причине, что у ``confirmed_by``
+    # знания (DRF-2612): CHECK ниже требует их у подтверждённой строки.
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(
+        max_length=24, choices=ClaimEvidence.Status.choices, default=ClaimEvidence.Status.SYSTEM_INFERENCE,
+    )
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True, related_name="+",
+    )
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["key"]
+        permissions = [
+            ("approve_procedurecontraindication", "Может подтверждать противопоказания"),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(condition=""), name="procedurecontraindication_condition_not_blank",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(action__in=["exclude", "postpone", "refer_to_doctor", "emergency"]),
+                name="procedurecontraindication_action_known",
+            ),
+            # Отметка проверки цельная: человек и время — вместе или никак.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(reviewed_by__isnull=True) & models.Q(reviewed_at__isnull=True))
+                    | (models.Q(reviewed_by__isnull=False) & models.Q(reviewed_at__isnull=False))
+                ),
+                name="procedurecontraindication_review_is_whole",
+            ),
+            # Подтверждённое противопоказание — с источником, видом
+            # доказательства, датой пересмотра и обеими подписями.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(status="approved")
+                    | (
+                        ~models.Q(source_ref="")
+                        & models.Q(
+                            evidence_kind__in=[
+                                "clinical_guideline", "systematic_review", "rct", "manufacturer_ifu",
+                                "regulatory_document", "professional_consensus", "legal_rule",
+                                "product_policy",
+                            ]
+                        )
+                        & models.Q(review_date__isnull=False)
+                        & models.Q(reviewed_by__isnull=False)
+                        & models.Q(reviewed_at__isnull=False)
+                        & models.Q(confirmed_by__isnull=False)
+                        & models.Q(confirmed_at__isnull=False)
+                    )
+                ),
+                name="procedurecontraindication_approved_complete",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.key} → {self.get_action_display()}"
+
+
+# Удаление процедуры или категории убирает её из области применения молча:
+# строки связи «многие ко многим» уходят каскадом, а правка строки при этом не
+# происходит. Подтверждённое противопоказание осталось бы подтверждённым с
+# другой — возможно, пустой — областью (DRF-2741). ``pre_delete``, а не
+# ``delete()`` модели: при каскаде от категории ``delete()`` процедуры не
+# вызывается. Сигнал идёт внутри транзакции удаления.
+
+
+@receiver(pre_delete, sender=ServiceTemplate)
+def _a_deleted_procedure_leaves_the_scope(sender: Any, instance: Any, **kwargs: Any) -> None:
+    reset_contraindications(
+        contraindications_in_scope(template=instance, category_ids=[instance.category_id]),
+        reason=ClaimApprovalReset.Reason.SCOPE_CHANGED,
+        changes=[{"field": "templates", "old": instance.name, "new": ""}],
+    )
+
+
+@receiver(pre_delete, sender=ServiceCategory)
+def _a_deleted_category_leaves_the_scope(sender: Any, instance: Any, **kwargs: Any) -> None:
+    reset_contraindications(
+        contraindications_in_scope(category_ids=[instance.pk]),
+        reason=ClaimApprovalReset.Reason.SCOPE_CHANGED,
+        changes=[{"field": "categories", "old": instance.name, "new": ""}],
+    )
