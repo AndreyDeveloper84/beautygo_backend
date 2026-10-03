@@ -118,9 +118,11 @@ FIELDS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
          "targets_method_versions": "версии методик расчёта ориентиров, не данные о человеке"},
     ),
     "nutrition.FoodLog": (
-        {**_same("dish_name", "portion_multiplier", "calories", "protein_g", "fat_g", "carbs_g",
-                 *_NUTRIENTS, "micronutrients_source", "meal_type", "entry_origin", "logged_at",
-                 "created_at"),
+        # DRF-2761 — ``ai_calories`` (оценка калорий ИИ) — запись дневника
+        # человека, как и ``calories``: выгружается.
+        {**_same("dish_name", "portion_multiplier", "calories", "ai_calories", "protein_g",
+                 "fat_g", "carbs_g", *_NUTRIENTS, "micronutrients_source", "meal_type",
+                 "entry_origin", "logged_at", "created_at"),
          "scan": "from_scan"},
         {"id": _KEY, "user": _OWNER, "idempotency_key": _REPEAT},
     ),

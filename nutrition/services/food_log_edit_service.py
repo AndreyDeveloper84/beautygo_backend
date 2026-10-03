@@ -98,10 +98,14 @@ def update_food_log(
             ratio = portion_multiplier / log.portion_multiplier
             for field in _MACRO_FIELDS:
                 setattr(log, field, _scale(getattr(log, field), ratio))
+            # DRF-2761 — оценка ИИ считана на порцию и меняется вместе с ней.
+            log.ai_calories = _scale(log.ai_calories, ratio)
             for field in _MICRONUTRIENT_FIELDS:
                 setattr(log, field, _scale_micro(getattr(log, field), ratio))
             log.portion_multiplier = portion_multiplier
-            changed += ["portion_multiplier", *_MACRO_FIELDS, *_MICRONUTRIENT_FIELDS]
+            changed += [
+                "portion_multiplier", "ai_calories", *_MACRO_FIELDS, *_MICRONUTRIENT_FIELDS,
+            ]
             corrected = _CORRECTED_ORIGIN.get(log.entry_origin)
             if corrected is not None:
                 log.entry_origin = corrected
