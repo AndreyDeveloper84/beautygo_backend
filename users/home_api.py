@@ -14,8 +14,11 @@ them so changing one is a contract change.
 
 ## Caching strategy
 
-Only ``popular_categories`` is cached (TTL 1h, key ``home:popular_categories``)
-because it's user-agnostic and changes only with catalog growth. The
+Only ``popular_categories`` is cached (TTL 1h) because it changes only with
+catalog growth. It is NOT user-agnostic: demo salons (DRF-2420) are counted
+only for a test persona, so the cache holds one entry per audience
+(``home:popular_categories:client`` / ``:demo``) — a test persona's answer
+must never be served to a real client from the cache. The
 other sections are per-user and depend on time/location, caching them
 adds complexity for marginal speedup. RecommendationEngine internally
 caches ``nearby_specialists`` with its own 5-minute TTL keyed on filter
@@ -60,6 +63,13 @@ LIMIT_NEARBY = 6
 LIMIT_RECENT = 5
 
 CACHE_KEY_POPULAR_CATEGORIES = "home:popular_categories"
+
+
+def popular_categories_cache_key(sees_demo: bool) -> str:
+    """Ключ кэша полки «популярное» — свой для каждой аудитории (DRF-2420)."""
+    return f"{CACHE_KEY_POPULAR_CATEGORIES}:{'demo' if sees_demo else 'client'}"
+
+
 CACHE_TTL_POPULAR_CATEGORIES = 3600  # 1 hour
 
 
@@ -103,7 +113,7 @@ class HomeView(APIView):
         payload = {
             "upcoming_appointments": self._upcoming_appointments(user),
             "favorite_specialists": self._favorite_specialists(user),
-            "popular_categories": self._popular_categories(),
+            "popular_categories": self._popular_categories(user),
             "nearby_specialists": self._nearby_specialists(user, lat, lon),
             "recent_activity": self._recent_activity(user),
         }
@@ -194,8 +204,15 @@ class HomeView(APIView):
             for s in specialists
         ]
 
-    def _popular_categories(self) -> list[dict[str, Any]]:
-        cached = default_cache.get(CACHE_KEY_POPULAR_CATEGORIES)
+    def _popular_categories(self, user) -> list[dict[str, Any]]:
+        from users.sellable import is_test_persona
+
+        # DRF-2420 — демо-салон считается только для тестовой личности, и
+        # признак входит в ключ кэша: иначе ответ, посчитанный для неё, час
+        # раздавался бы всем.
+        sees_demo = is_test_persona(user)
+        cache_key = popular_categories_cache_key(sees_demo)
+        cached = default_cache.get(cache_key)
         if cached is not None:
             return cached
 
@@ -206,7 +223,7 @@ class HomeView(APIView):
         # ноль у КАЖДОЙ категории и выглядела как «пока никого нет».
         # Разрешение категории с запасным путём через шаблон живёт в
         # ``services.catalog_reads``.
-        counts = category_specialist_counts()
+        counts = category_specialist_counts(sees_demo=sees_demo)
         qs = ServiceCategory.objects.all()
         rows = [
             {
@@ -227,9 +244,7 @@ class HomeView(APIView):
             {k: v for k, v in row.items() if k != "_sort_order"}
             for row in rows[:LIMIT_CATEGORIES]
         ]
-        default_cache.set(
-            CACHE_KEY_POPULAR_CATEGORIES, result, timeout=CACHE_TTL_POPULAR_CATEGORIES,
-        )
+        default_cache.set(cache_key, result, timeout=CACHE_TTL_POPULAR_CATEGORIES)
         return result
 
     @staticmethod
