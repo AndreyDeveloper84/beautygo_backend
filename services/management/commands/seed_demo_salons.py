@@ -57,6 +57,21 @@ DRF-1430 это закрыл: движок соединяется с салон�
 отдельное решение владельца, и оно должно быть одним явным действием,
 а не побочным эффектом сида.
 
+График — только если файл его называет
+--------------------------------------
+Без графика (``SpecialistWorkingHours``) у мастера нет ни одного слота,
+сколько бы услуг у него ни было. Салон в файле может нести блок
+``working_hours`` — ``{"working_days": [0..6], "start": "10:00",
+"end": "19:00"}``, понедельник = 0. Тогда каждому мастеру салона, у
+которого графика ещё НЕТ, пишется недельный шаблон: рабочие дни с этими
+часами, остальные — выходные с пустыми временами. Пишет та же
+``replace_weekly_schedule``, что у трёх дверей расписания, а проверяет
+тот же ``SchedulePutSerializer`` — до первой записи, как пояс.
+
+График, который уже есть, сид не трогает: его мог поставить мастер или
+салон, и повторный прогон не вправе его откатить. Салон без блока —
+прежнее поведение (основной демо-сид графика не задаёт).
+
 Сухой прогон — поведение по умолчанию
 -------------------------------------
 Без ``--apply`` команда ничего не пишет. Печатает, сколько появится
@@ -98,6 +113,7 @@ from django.db import transaction
 
 from services.goal_coverage import goal_master_coverage
 from services.mapping_status import promote_linked_undecided
+from appointments.models import SpecialistWorkingHours
 from services.models import SalonService, ServiceTemplate, SpecialistService
 from tenants.models import Tenant
 from tenants.protected_slugs import PROTECTED_SLUGS  # noqa: F401 — реэкспорт, см. ниже
@@ -132,6 +148,10 @@ class _Counts:
         "reused_users",
         "reused_salon_services",
         "reused_specialist_services",
+        # Мастера, которым записан график из блока ``working_hours``, и те,
+        # у кого он уже был и остался как есть.
+        "working_hours_written",
+        "working_hours_kept",
         # Переход ``unmapped → review_required`` по своим строкам (DRF-2429).
         "mapping_promoted",
         "mapping_still_unmapped",
@@ -196,6 +216,7 @@ class Command(BaseCommand):
         self._refuse_protected(salons, protected)
         self._refuse_unresolved_templates(salons)
         self._refuse_invalid_timezones(salons)
+        self._refuse_invalid_working_hours(salons)
 
         apply_changes = options["apply"]
         before = goal_master_coverage()
@@ -247,6 +268,46 @@ class Command(BaseCommand):
                 + ", ".join(f"{slug}: {tz!r}" for slug, tz in bad)
                 + ". Example: Europe/Moscow."
             )
+
+    @staticmethod
+    def _weekly_template(block: dict) -> list[dict]:
+        """Блок файла → семь дней в форме ``SchedulePutSerializer``."""
+        working = set(block.get("working_days", []))
+        return [
+            {
+                "day_of_week": day,
+                "is_working_day": day in working,
+                "start_time": block.get("start") if day in working else None,
+                "end_time": block.get("end") if day in working else None,
+                "break_start": None,
+                "break_end": None,
+            }
+            for day in range(7)
+        ]
+
+    @classmethod
+    def _refuse_invalid_working_hours(cls, salons: list[dict]) -> None:
+        """График из файла проверяет тот же сериализатор, что двери расписания.
+
+        Отказ — до записи и со списком всех плохих салонов: опечатка в
+        часах иначе стала бы графиком каждого мастера салона.
+        """
+        from users.schedule_api import SchedulePutSerializer
+
+        bad = []
+        for salon in salons:
+            block = salon.get("working_hours")
+            if block is None:
+                continue
+            days = block.get("working_days")
+            if not days or not all(isinstance(d, int) and 0 <= d <= 6 for d in days):
+                bad.append(f"{salon['slug']}: working_days must list weekdays 0..6")
+                continue
+            check = SchedulePutSerializer(data={"schedule": cls._weekly_template(block)})
+            if not check.is_valid():
+                bad.append(f"{salon['slug']}: {check.errors}")
+        if bad:
+            raise CommandError("Invalid working_hours in seed file: " + "; ".join(bad))
 
     @staticmethod
     def _refuse_unresolved_templates(salons: list[dict]) -> None:
@@ -343,6 +404,7 @@ class Command(BaseCommand):
             tenant = self._upsert_tenant(salon, counts)
             specialists = self._upsert_specialists(salon, tenant, counts)
             self._upsert_services(salon, tenant, specialists, counts)
+            self._upsert_working_hours(salon, specialists, counts)
         self._promote_own_rows(salons, counts)
         return counts
 
@@ -387,6 +449,9 @@ class Command(BaseCommand):
                 "is_active": False,
                 "is_demo": True,
                 "address": salon.get("address", ""),
+                # Город — у салона: пустой город = салон вне любого
+                # городского ответа поиска (``Tenant.city``).
+                "city": salon.get("city", ""),
             },
         )
         if created:
@@ -395,7 +460,7 @@ class Command(BaseCommand):
             counts.reused_tenants += 1
             # Имя обновляем, is_active — никогда: владелец мог включить
             # салон осознанно, и повторный сид не вправе это отменить.
-            # Адрес дописываем только в пустой: заданный оператором не трогаем.
+            # Адрес и город дописываем только в пустые: заданные оператором не трогаем.
             fields = []
             # Признак демонстрационности ДОПИСЫВАЕТСЯ и существующему салону:
             # салоны, заведённые до DRF-2420, иначе остались бы без него, а
@@ -409,6 +474,9 @@ class Command(BaseCommand):
             if not tenant.address and salon.get("address"):
                 tenant.address = salon["address"]
                 fields.append("address")
+            if not tenant.city and salon.get("city"):
+                tenant.city = salon["city"]
+                fields.append("city")
             if fields:
                 tenant.save(update_fields=fields)
         return tenant
@@ -524,6 +592,28 @@ class Command(BaseCommand):
                 )
                 counts.specialist_services += int(made)
                 counts.reused_specialist_services += int(not made)
+
+    @classmethod
+    def _upsert_working_hours(
+        cls,
+        salon: dict,
+        specialists: dict[str, SpecialistProfile],
+        counts: _Counts,
+    ) -> None:
+        block = salon.get("working_hours")
+        if block is None:
+            return
+        from users.schedule_api import SchedulePutSerializer, replace_weekly_schedule
+
+        check = SchedulePutSerializer(data={"schedule": cls._weekly_template(block)})
+        check.is_valid(raise_exception=True)
+        week = check.validated_data["schedule"]
+        for profile in specialists.values():
+            if SpecialistWorkingHours.objects.filter(specialist=profile).exists():
+                counts.working_hours_kept += 1
+                continue
+            replace_weekly_schedule(profile, week)
+            counts.working_hours_written += 1
 
     @staticmethod
     def _template_map(salon: dict) -> dict[tuple[str, str], ServiceTemplate]:
@@ -647,6 +737,11 @@ class Command(BaseCommand):
                 f"users={counts.reused_users} "
                 f"salon_services={counts.reused_salon_services} "
                 f"links={counts.reused_specialist_services}"
+            )
+        if counts.working_hours_written or counts.working_hours_kept:
+            self.stdout.write(
+                f"{prefix}working_hours: written={counts.working_hours_written} "
+                f"kept_existing={counts.working_hours_kept}"
             )
         # Охват — первым: ноль «без привязки» честен только при непустом.
         self.stdout.write(
