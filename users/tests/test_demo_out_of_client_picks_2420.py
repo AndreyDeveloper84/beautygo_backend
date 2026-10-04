@@ -630,6 +630,26 @@ class TestP6TheHomePopularCategories:
         assert (default[massage], default.get(demo_only.id, 0)) == (1, 0)
         assert (persona[massage], persona[demo_only.id]) == (2, 1)
 
+    def test_the_legacy_catalog_layer_is_counted_by_the_same_rule(
+        self, both_salons, client_person, test_person
+    ):
+        """Счётчик складывает два слоя каталога; у легаси-услуги мастера демо-салона — то же правило."""
+        from decimal import Decimal
+
+        from services.models import Service
+
+        category = ServiceCategory.objects.create(slug="demo2420-cuts", name="Демо-стрижки")
+        Service.objects.create(
+            specialist=both_salons["demo"], name="Стрижка", price=Decimal("1000"),
+            duration_minutes=30, is_active=True, category=category,
+        )
+
+        client = self._counts(client_person)
+        persona = self._counts(test_person)
+
+        assert (client["Массаж"], client.get("Демо-стрижки", 0)) == (1, 0)
+        assert persona["Демо-стрижки"] == 1
+
     def test_a_cached_persona_answer_is_not_served_to_a_client(
         self, both_salons, demo_only, test_person, client_person
     ):
