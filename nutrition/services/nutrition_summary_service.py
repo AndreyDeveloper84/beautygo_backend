@@ -32,7 +32,7 @@ from datetime import date, datetime, time, timedelta, timezone
 
 from django.conf import settings
 from django.db.models import Count, Q, Sum
-from django.db.models.functions import TruncDate
+from django.db.models.functions import Coalesce, TruncDate
 
 from nutrition.models import FoodLog, NutritionProfile
 from nutrition.services.targets_state import calories_confirmed
@@ -53,6 +53,14 @@ class SummaryTotals:
     #: ложь, что «0 ккал» у отдельной записи. Число, не текст: формулировка
     #: для человека ждёт слова владельца (OWNER_QUESTIONS).
     unscored_entries: int = 0
+    #: DRF-2766 (фаза 2, решение владельца 04.10, п.3) — оценки ИИ входят в
+    #: калории дня. Сколько записей вошло в ``calories`` оценкой, а не
+    #: проверенным числом: итог тогда приблизительный («≈ …, включая оценки
+    #: ИИ»), и поверхность обязана это сказать.
+    calories_ai_included: int = 0
+    #: DRF-2766 — сколько записей дня без КАКОГО-ЛИБО значения калорий (ни
+    #: проверенного, ни оценки). Нулём они не считаются; итог при них неполный.
+    calories_unscored: int = 0
 
 
 @dataclass(frozen=True)
@@ -147,8 +155,11 @@ class NutritionSummaryService:
 
         # One DB hit for totals, one for entries — entries query reuses
         # the (user, -logged_at) index defined on FoodLog.
+        # DRF-2766 (фаза 2) — калории дня: у каждой записи её число —
+        # проверенное, а если его нет, оценка ИИ. Проверенное и оценка одной
+        # порции не складываются по построению: на записи берётся одно.
         agg = qs.aggregate(
-            calories=Sum("calories"),
+            calories=Sum(Coalesce("calories", "ai_calories")),
             protein_g=Sum("protein_g"),
             fat_g=Sum("fat_g"),
             carbs_g=Sum("carbs_g"),
@@ -169,12 +180,18 @@ class NutritionSummaryService:
         # DRF-2371 — если записи есть, а посчитанных нет, сумма не ноль, а
         # отсутствие: ноль читался бы как «ел и не получил калорий». Пустой
         # день по-прежнему ноль — там и правда ничего не ели.
+        calories_ai_included = qs.filter(
+            calories__isnull=True, ai_calories__isnull=False
+        ).count()
+        calories_unscored = qs.filter(calories__isnull=True, ai_calories__isnull=True).count()
         totals = SummaryTotals(
-            calories=_round1(agg["calories"], empty_is_zero=not unscored),
+            calories=_round1(agg["calories"], empty_is_zero=not calories_unscored),
             protein_g=_round1(agg["protein_g"], empty_is_zero=not unscored),
             fat_g=_round1(agg["fat_g"], empty_is_zero=not unscored),
             carbs_g=_round1(agg["carbs_g"], empty_is_zero=not unscored),
             unscored_entries=unscored,
+            calories_ai_included=calories_ai_included,
+            calories_unscored=calories_unscored,
         )
 
         # DRF-2217 — вода из ``WaterEntry`` за те же сутки, что еда выше.
