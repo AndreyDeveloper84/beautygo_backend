@@ -175,8 +175,13 @@ def category_service_counts(
     return counts
 
 
-def category_specialist_counts() -> dict[uuid.UUID, int]:
+def category_specialist_counts(*, sees_demo: bool = False) -> dict[uuid.UUID, int]:
     """Сколько РАЗНЫХ мастеров держат активную услугу в каждой категории.
+
+    ``sees_demo`` — видит ли смотрящий демонстрационные салоны (DRF-2420,
+    :func:`users.sellable.demo_scope_q`). По умолчанию — нет: мастера демо-салона
+    не считаются, иначе полка «популярное» обычного клиента ранжировала бы
+    категории по вымышленным мастерам, которых он потом не найдёт.
 
     Отличается от :func:`category_service_counts` единицей счёта: там
     услуги, здесь мастера. Один мастер с тремя услугами в категории — это
@@ -189,12 +194,13 @@ def category_specialist_counts() -> dict[uuid.UUID, int]:
     294 пары, а единственный вызывающий кэширует результат на час.
     """
     from services.models import Service, SpecialistService
+    from users.sellable import demo_scope_q
 
     per_category: dict[uuid.UUID, set[uuid.UUID]] = {}
 
     legacy = (
         Service.objects
-        .filter(sellable_legacy_q(), category__isnull=False)
+        .filter(sellable_legacy_q(), demo_scope_q(sees_demo, "specialist"), category__isnull=False)
         .values_list("category_id", "specialist_id")
     )
     for category_id, specialist_id in legacy:
@@ -202,7 +208,7 @@ def category_specialist_counts() -> dict[uuid.UUID, int]:
 
     canonical = (
         SpecialistService.objects
-        .filter(sellable_offer_q())
+        .filter(sellable_offer_q(), demo_scope_q(sees_demo, "specialist"))
         .annotate(resolved_category=resolved_category_id_expression("salon_service__"))
         .filter(resolved_category__isnull=False)
         .values_list("resolved_category", "specialist_id")
