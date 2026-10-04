@@ -2482,6 +2482,9 @@ class InternalDiaryDaysView(APIView):
                             "meals_count": drf_serializers.IntegerField(),
                             "kcal": drf_serializers.FloatField(allow_null=True),
                             "has_entries": drf_serializers.BooleanField(),
+                            "uncounted_meals": drf_serializers.IntegerField(),
+                            # DRF-2766 — записей, вошедших в kcal оценкой ИИ.
+                            "kcal_ai_included": drf_serializers.IntegerField(),
                         },
                         many=True,
                     ),

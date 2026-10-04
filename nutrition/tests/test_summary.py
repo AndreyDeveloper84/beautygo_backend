@@ -151,6 +151,10 @@ class TestEmptyDay:
             # DRF-2371 — сколько блюд дня осталось без расчёта. Для пустого
             # дня это ноль, и ноль здесь честен: записей нет вовсе.
             "unscored_entries",
+            # DRF-2766 (фаза 2) — сколько записей вошло в калории оценкой ИИ
+            # и сколько без какого-либо значения калорий.
+            "calories_ai_included",
+            "calories_unscored",
         }
         # Backwards compat: ai_comment is null when caller didn't ask.
         assert body["ai_comment"] is None

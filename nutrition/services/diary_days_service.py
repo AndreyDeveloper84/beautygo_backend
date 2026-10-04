@@ -74,7 +74,11 @@ class DiaryDay:
     kcal: float | None
     has_entries: bool
     #: Сколько записей дня остались без расчёта. Число, не текст.
+    #: DRF-2766 (фаза 2): без КАКОГО-ЛИБО значения калорий — запись с оценкой
+    #: ИИ сюда больше не попадает, она вошла в ``kcal``.
     uncounted_meals: int = 0
+    #: DRF-2766 — сколько записей вошло в ``kcal`` оценкой ИИ (итог «≈»).
+    kcal_ai_included: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -83,6 +87,7 @@ class DiaryDay:
             "kcal": self.kcal,
             "has_entries": self.has_entries,
             "uncounted_meals": self.uncounted_meals,
+            "kcal_ai_included": self.kcal_ai_included,
         }
 
 
@@ -114,18 +119,24 @@ def diary_days(user, *, date_from: date, date_to: date, tz: tzinfo | None = None
     kcal: dict[date, float] = defaultdict(float)
     counted: dict[date, int] = defaultdict(int)
     uncounted: dict[date, int] = defaultdict(int)
-    for logged_at, calories in (
+    ai_included: dict[date, int] = defaultdict(int)
+    for logged_at, calories, ai_calories in (
         FoodLog.objects.filter(user=user, logged_at__gte=start, logged_at__lt=end)
-        .values_list("logged_at", "calories")
+        .values_list("logged_at", "calories", "ai_calories")
     ):
         local_day = logged_at.astimezone(tz).date()
         counts[local_day] += 1
+        # DRF-2766 (фаза 2) — у записи её число: проверенное, а если его нет,
+        # оценка ИИ; одно на запись, проверенное бьёт оценку.
+        value = calories if calories is not None else ai_calories
         # DRF-2371 — запись без расчёта считается пропуском, а не нулём.
-        if calories is None:
+        if value is None:
             uncounted[local_day] += 1
             continue
+        if calories is None:
+            ai_included[local_day] += 1
         counted[local_day] += 1
-        kcal[local_day] += float(calories)
+        kcal[local_day] += float(value)
 
     rows: list[DiaryDay] = []
     for i in range(span):
@@ -138,6 +149,7 @@ def diary_days(user, *, date_from: date, date_to: date, tz: tzinfo | None = None
                 kcal=round(kcal[day], 1) if counted.get(day) else None,
                 has_entries=n > 0,
                 uncounted_meals=uncounted.get(day, 0),
+                kcal_ai_included=ai_included.get(day, 0),
             )
         )
     return rows
