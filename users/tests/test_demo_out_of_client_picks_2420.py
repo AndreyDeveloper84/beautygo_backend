@@ -603,8 +603,7 @@ class TestP6TheHomePopularCategories:
 
         api = APIClient()
         api.defaults["HTTP_X_APP_TYPE"] = "client"
-        if viewer is not None:
-            api.force_authenticate(user=viewer)
+        api.force_authenticate(user=viewer)
         response = api.get(self.HOME_URL)
         assert response.status_code == 200, response.content
         rows = response.json()["data"]["popular_categories"]
@@ -621,10 +620,15 @@ class TestP6TheHomePopularCategories:
 
         assert (counts["Массаж"], counts["Демо-маникюр"]) == (2, 1)
 
-    def test_an_anonymous_visitor_is_counted_as_a_client(self, both_salons, demo_only):
-        counts = self._counts(None)
+    def test_the_counter_hides_demo_unless_asked(self, both_salons, demo_only):
+        """Умолчание — правило клиента: вызывающий, забывший спросить, демо не получит."""
+        from services.catalog_reads import category_specialist_counts
 
-        assert (counts["Массаж"], counts.get("Демо-маникюр", 0)) == (1, 0)
+        default, persona = category_specialist_counts(), category_specialist_counts(sees_demo=True)
+        massage = both_salons["real"].specialist_services.get().salon_service.template.category_id
+
+        assert (default[massage], default.get(demo_only.id, 0)) == (1, 0)
+        assert (persona[massage], persona[demo_only.id]) == (2, 1)
 
     def test_a_cached_persona_answer_is_not_served_to_a_client(
         self, both_salons, demo_only, test_person, client_person
