@@ -143,20 +143,29 @@ def specialist_service_text_q(needle: str) -> Q:
 
 
 def category_service_counts(
-    *, specialist_ids=None,
+    *, specialist_ids=None, sees_demo: bool = False,
 ) -> dict[uuid.UUID, int]:
     """Сколько активных услуг в каждой категории (оба слоя каталога).
 
-    ``specialist_ids`` — ограничение пула мастеров; ``None`` = все.
+    ``specialist_ids`` — ограничение пула мастеров. Пул уже несёт правило
+    видимости вызывающего (полка 3 берёт его из ``_catalog_pool`` с
+    ``demo_visibility_q``), поэтому поверх него ничего не добавляется.
+    ``None`` = все мастера — и тогда действует правило клиента (DRF-2420):
+    мастера демонстрационных салонов не считаются, если ``sees_demo`` не
+    сказано явно. Вызывающий без пула, забывший спросить, демо не получит.
     Возвращает ``{category_id: count}``; категории без услуг отсутствуют.
     """
     from services.models import Service, SpecialistService
+    from users.sellable import demo_scope_q
 
     legacy = Service.objects.filter(sellable_legacy_q(), category__isnull=False)
     canonical = SpecialistService.objects.filter(sellable_offer_q())
     if specialist_ids is not None:
         legacy = legacy.filter(specialist_id__in=specialist_ids)
         canonical = canonical.filter(specialist_id__in=specialist_ids)
+    else:
+        legacy = legacy.filter(demo_scope_q(sees_demo, "specialist"))
+        canonical = canonical.filter(demo_scope_q(sees_demo, "specialist"))
 
     counts: dict[uuid.UUID, int] = {}
     for row in legacy.values("category_id").annotate(n=Count("id", distinct=True)):
