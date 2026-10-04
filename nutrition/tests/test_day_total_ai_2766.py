@@ -170,6 +170,18 @@ class TestTheWire:
         assert row["meals_count"] == 3
 
 
+class TestTheWeekNeverCountsAPortionTwice:
+    def test_a_week_row_with_both_values_counts_the_verified_one(self, owner):
+        _entry(owner, kcal=147.0, ai=999.0, macros=(4.8, 6.6, 20.1), dish="борщ")
+
+        resp = _client().get(DAYS_URL, {"from": DAY.isoformat(), "to": DAY.isoformat()})
+
+        (row,) = resp.json()["data"]["days"]
+        assert row["meals_count"] == 1
+        assert row["kcal"] == 147.0
+        assert row["kcal_ai_included"] == 0
+
+
 class TestConclusionsStayVerified:
     def test_the_day_comment_is_still_not_asked_when_an_entry_has_no_macros(self, owner):
         """Комментарий дня — вывод: при записи без БЖУ (оценка) не запрашивается."""
