@@ -11,10 +11,10 @@
 * e3 — показанное = записанное: модель зовётся один раз, при показе; запись
   берёт сохранённое число и модель не зовёт; сохранённого нет — запись без
   оценки;
-* e4 — оценка не управляет целями и сравнением: ``FoodLog.calories`` у такой
-  записи null, итог дня её не суммирует и считает «не посчитано», счёт дней
-  «в ориентире» её день не засчитывает, сохранённое блюдо числа не несёт,
-  ориентир профиля не меняется;
+* e4 — оценка не управляет целями: ``FoodLog.calories`` у такой записи null,
+  счёт дней «в ориентире» её день не засчитывает, сохранённое блюдо числа не
+  несёт, ориентир профиля не меняется. Итог дня с 04.10 её ВКЛЮЧАЕТ и
+  называет это (DRF-2766 фаза 2, пересмотр iv), по БЖУ она «не посчитано»;
 * e5 — оценка калорийности блюда доступна всем, включая расстройство
   пищевого поведения и несовершеннолетних (решение владельца 04.10, DRF-2766:
   набор ограничений пуст; прежде, 02.10, — ``{eating_disorder, minor}``).
@@ -255,7 +255,10 @@ class TestTheEstimateDrivesNothing:
         assert row.ai_calories == 250.0
         assert row.calories is None
 
-    def test_e4_the_day_total_does_not_add_it_and_says_one_entry_is_unscored(self, client, person):
+    def test_e4_the_day_total_includes_it_since_04_10_and_says_so(self, client, person):
+        """DRF-2766 фаза 2 (решение владельца 04.10, п.3) пересматривает iv:
+        оценка входит в калории дня, итог называет, сколько записей — оценкой.
+        БЖУ у оценки нет: по ним запись по-прежнему «не посчитано»."""
         row = self._ai_row(client, person)
         with patch("ai.services.llm_client.get_openai_client"):
             _log(client, KNOWN_DISH)
@@ -265,8 +268,10 @@ class TestTheEstimateDrivesNothing:
             user_id=person.id, day=row.logged_at.astimezone(UTC).date()
         )
 
-        # В сумме — только проверенная запись; оценка числится «не посчитано».
-        assert summary.totals.calories == pytest.approx(verified.calories)
+        assert row.ai_calories is not None
+        assert summary.totals.calories == pytest.approx(verified.calories + row.ai_calories)
+        assert summary.totals.calories_ai_included == 1
+        assert summary.totals.calories_unscored == 0
         assert summary.totals.unscored_entries == 1
 
     def test_e4_a_day_with_an_estimate_does_not_count_as_within_the_target(self, client, person):
