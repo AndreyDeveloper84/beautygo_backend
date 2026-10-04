@@ -329,6 +329,22 @@ class TestP2bTheServiceCounterWithoutAPool:
 
         assert category_service_counts(sees_demo=True)[self._massage(both_salons)] == 2
 
+    def test_the_legacy_layer_follows_the_same_default(self, both_salons):
+        from decimal import Decimal
+
+        from services.catalog_reads import category_service_counts
+        from services.models import Service
+
+        category = ServiceCategory.objects.create(slug="demo2420-legacy", name="Демо-легаси")
+        Service.objects.create(
+            specialist=both_salons["demo"], name="Стрижка", price=Decimal("1000"),
+            duration_minutes=30, is_active=True, category=category,
+        )
+
+        assert category_service_counts()[self._massage(both_salons)] == 1  # боевая услуга на месте
+        assert category_service_counts().get(category.id, 0) == 0
+        assert category_service_counts(sees_demo=True)[category.id] == 1
+
     def test_a_given_pool_is_trusted_as_it_is(self, both_salons):
         """Пул тестовой личности несёт демо-мастера — счётчик его не вырезает."""
         from services.catalog_reads import category_service_counts
