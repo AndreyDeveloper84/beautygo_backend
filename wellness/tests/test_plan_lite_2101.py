@@ -30,11 +30,18 @@
 from __future__ import annotations
 
 import ast
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 
 import pytest
 from django.utils import timezone
+from freezegun import freeze_time
+
+# DRF-2202: ``SimpleRateThrottle.timer = time.time`` берётся при импорте класса.
+# Импортированный впервые ВНУТРИ ``freeze_time`` — запоминает подменную функцию
+# freezegun, и вызов ``self.timer()`` падает TypeError. Импорт здесь, до любой
+# заморозки, — иначе узел зелёный в прогоне файла и красный в одиночку.
+import rest_framework.throttling  # noqa: E402, F401
 from rest_framework.test import APIClient
 
 from goals.models import ClientGoal
@@ -248,17 +255,47 @@ def _ctx(client: APIClient) -> dict:
     return resp.json()["data"]
 
 
+#: DRF-2202 — мгновения, в которые узел обязан быть зелёным. Код считает неделю
+#: от ``timezone.localdate()`` (пояс проекта, Europe/Moscow); прежний узел считал
+#: её от ``timezone.now()`` в UTC и краснел каждое воскресенье 21–24 UTC — там
+#: по Москве уже понедельник и новая неделя. Литералы, а не «сейчас»: момент
+#: запуска CI больше ничего не решает.
+_WEEK_CLOCK_MOMENTS = [
+    ("2026-10-04T23:00:00Z", "sunday-23-utc-is-monday-02-msk"),  # 04.10, #638 упал здесь
+    ("2026-10-04T21:00:30Z", "monday-00-00-msk"),
+    ("2026-10-04T20:59:30Z", "sunday-23-59-msk-last-minute-of-week"),
+    ("2026-09-30T12:00:00Z", "wednesday-noon-control"),
+]
+
+
 class TestRead:
+    @pytest.mark.parametrize(
+        "moment",
+        [m for m, _ in _WEEK_CLOCK_MOMENTS],
+        ids=[i for _, i in _WEEK_CLOCK_MOMENTS],
+    )
     def test_wellness_context_carries_plan_lite_with_done_count_by_bucket(
-        self, owner, goal,
+        self, owner, goal, moment,
     ) -> None:
         """per_week log_food — ДНИ с записью (две записи в один день — один
-        день), per_day log_water — записи за сегодня, не больше target."""
+        день), per_day log_water — записи за сегодня, не больше target.
+
+        Неделя считается тем же способом, что в коде (``localdate`` → понедельник),
+        и записи ставятся в начало этой недели по местному времени — не позже
+        «сейчас», каким бы ни был момент."""
+        with freeze_time(moment):
+            self._assert_week_counts(owner, goal)
+
+    @staticmethod
+    def _assert_week_counts(owner, goal) -> None:
         _post(_api(), goal, [FOOD_3_PER_WEEK, WATER_2_PER_DAY])
         now = timezone.now()
-        week_start = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        day1 = week_start + timedelta(hours=9)
-        for at in (day1, day1 + timedelta(hours=3)):  # один день, две записи
+        today = timezone.localdate()
+        week_start = today - timedelta(days=today.weekday())
+        # Первые секунды недели по местному времени: в любой момент из списка это
+        # уже прошлое (самый ранний — понедельник 00:00:30 МСК).
+        day1 = timezone.make_aware(datetime.combine(week_start, time(0, 0, 5)))
+        for at in (day1, day1 + timedelta(seconds=10)):  # один день, две записи
             FoodLog.objects.create(
                 user=owner, dish_name="борщ", portion_multiplier=1.0, calories=100.0,
                 meal_type="lunch", entry_origin=FoodLog.EntryOrigin.TEXT_ESTIMATED_CONFIRMED,
@@ -275,7 +312,7 @@ class TestRead:
         assert by_type["log_food"]["target_count"] == 3
         assert by_type["log_water"]["done_count"] == 2
         assert by_type["log_water"]["target_count"] == 2
-        assert by_type["log_food"]["bucket"]["start"] == week_start.date().isoformat()
+        assert by_type["log_food"]["bucket"]["start"] == week_start.isoformat()
 
     def test_plan_lite_is_present_even_though_gates_d_and_o_are_closed(self, owner, goal) -> None:
         """Гейт O к плану без наблюдений не относится; документ остаётся
