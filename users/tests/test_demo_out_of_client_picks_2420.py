@@ -309,6 +309,51 @@ class TestP2TheCategoryCounters:
         assert {both_salons["real"].id, both_salons["demo"].id} <= ids
 
 
+class TestP2bTheServiceCounterWithoutAPool:
+    """`services.catalog_reads.category_service_counts` без пула мастеров.
+
+    Живой вызывающий передаёт пул (полка 3, P2). Без пула счётчик берёт всех —
+    и тогда обязан держать правило клиента сам: умолчание fail-closed.
+    """
+
+    def _massage(self, both_salons):
+        return both_salons["real"].specialist_services.get().salon_service.template.category_id
+
+    def test_without_a_pool_demo_is_not_counted_by_default(self, both_salons):
+        from services.catalog_reads import category_service_counts
+
+        assert category_service_counts()[self._massage(both_salons)] == 1  # боевая услуга на месте
+
+    def test_without_a_pool_demo_is_counted_when_asked(self, both_salons):
+        from services.catalog_reads import category_service_counts
+
+        assert category_service_counts(sees_demo=True)[self._massage(both_salons)] == 2
+
+    def test_the_legacy_layer_follows_the_same_default(self, both_salons):
+        from decimal import Decimal
+
+        from services.catalog_reads import category_service_counts
+        from services.models import Service
+
+        category = ServiceCategory.objects.create(slug="demo2420-legacy", name="Демо-легаси")
+        Service.objects.create(
+            specialist=both_salons["demo"], name="Стрижка", price=Decimal("1000"),
+            duration_minutes=30, is_active=True, category=category,
+        )
+
+        assert category_service_counts()[self._massage(both_salons)] == 1  # боевая услуга на месте
+        assert category_service_counts().get(category.id, 0) == 0
+        assert category_service_counts(sees_demo=True)[category.id] == 1
+
+    def test_a_given_pool_is_trusted_as_it_is(self, both_salons):
+        """Пул тестовой личности несёт демо-мастера — счётчик его не вырезает."""
+        from services.catalog_reads import category_service_counts
+
+        both = [both_salons["real"].id, both_salons["demo"].id]
+
+        assert category_service_counts(specialist_ids=both)[self._massage(both_salons)] == 2
+
+
 class TestP3TheHomeEngine:
     """Движок главной Mini App: `ai/.../recommendation_engine.py`."""
 
