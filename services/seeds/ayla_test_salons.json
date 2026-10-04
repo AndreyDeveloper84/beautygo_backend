@@ -1,0 +1,93 @@
+{
+  "meta": {
+    "purpose": "Два тест-салона владельца для пилотного смоука записи: массаж и эстетика (решение владельца, путь A, 04.10.2026). Не демонстрационная витрина для клиентов: салоны заводятся is_demo=True и видны только тестовым личностям (users/sellable.py, demo_scope_q).",
+    "naming_policy": "Как в demo_salons_2026-08.json: названия салонов заданы владельцем и прямо называют себя тестовыми; имена мастеров и адреса — вымышленные. Телефоны не заводятся (User.phone = NULL): любой правдоподобный номер — чей-то настоящий. Отзывов нет (reviews_count = 0); рейтинг стоит только потому, что движок подбора отсекает ниже AI_SPECIALIST_MIN_RATING = 4.0.",
+    "price_policy": "Чистка и маска — цены и длительности тех же строк demo_salons_2026-08.json (источник venesa, см. его meta.sources). Массаж — тестовые круглые цены (price_src = 'test'): прайса настоящего массажного салона здесь нет, и салон не продаёт услуги настоящим людям.",
+    "templates": "Все четыре пары (категория-лист, шаблон) — канонические из services/seeds/canonical_catalog_2026-07.json: 1.1.1 и 1.1.4 (Базовый ручной массаж), 4.2.3 (Чистки лица), 4.4.1 (Маски и профессиональные уходовые комплексы). Ни одна не требует анкеты здоровья (requires_health_check = false).",
+    "safety": "Те же три замка, что у demo_salons: сид заводит выключенными, включает только `seed_demo_salons --file services/seeds/ayla_test_salons.json --activate --apply`, и только слаги ЭТОГО файла. formula-tela защищён PROTECTED_SLUGS.",
+    "working_hours": "Блок working_hours у салона — недельный график каждого его мастера: пн–сб 10:00–19:00, вс выходной (понедельник = 0). Без графика слотов нет. Сид пишет график только мастеру, у которого его ещё нет.",
+    "sources": {
+      "venesa": "см. meta.sources в services/seeds/demo_salons_2026-08.json"
+    }
+  },
+  "salons": [
+    {
+      "slug": "ayla-test-massage",
+      "name": "Ayla Тест — Массаж",
+      "format": "тест-салон массажа",
+      "city": "Пенза",
+      "address": "Пенза, ул. Несуществующая, д. 1 (тест-данные)",
+      "timezone": "Europe/Moscow",
+      "note": "Тест-салон владельца для смоука записи. Один мастер, две услуги массажа.",
+      "working_hours": {"working_days": [0, 1, 2, 3, 4, 5], "start": "10:00", "end": "19:00"},
+      "specialists": [
+        {
+          "ref": "atm-massage",
+          "username": "test.ayla-test-massage.master",
+          "display_name": "Вероника Пробная",
+          "role": "массажист",
+          "experience_years": 5,
+          "rating": "4.8",
+          "bio": "Тестовый мастер: классический массаж и массаж спины."
+        }
+      ],
+      "services": [
+        {
+          "category": "Базовый ручной массаж",
+          "template": "Классический массаж всего тела",
+          "price": 3000,
+          "duration_minutes": 60,
+          "price_src": "test",
+          "by": ["atm-massage"]
+        },
+        {
+          "category": "Базовый ручной массаж",
+          "template": "Массаж спины",
+          "price": 1500,
+          "duration_minutes": 30,
+          "price_src": "test",
+          "by": ["atm-massage"]
+        }
+      ]
+    },
+    {
+      "slug": "ayla-test-esthetics",
+      "name": "Ayla Тест — Эстетика",
+      "format": "тест-салон эстетики лица",
+      "city": "Пенза",
+      "address": "Пенза, ул. Несуществующая, д. 2 (тест-данные)",
+      "timezone": "Europe/Moscow",
+      "note": "Тест-салон владельца для смоука записи. Один мастер, две услуги ухода за лицом.",
+      "working_hours": {"working_days": [0, 1, 2, 3, 4, 5], "start": "10:00", "end": "19:00"},
+      "specialists": [
+        {
+          "ref": "ate-cosmo",
+          "username": "test.ayla-test-esthetics.master",
+          "display_name": "Злата Опытная",
+          "role": "косметолог-эстетист",
+          "experience_years": 6,
+          "rating": "4.8",
+          "bio": "Тестовый мастер: ультразвуковая чистка и уходовые маски."
+        }
+      ],
+      "services": [
+        {
+          "category": "Чистки лица",
+          "template": "Ультразвуковая чистка лица",
+          "price": 5000,
+          "duration_minutes": 60,
+          "price_src": "venesa",
+          "by": ["ate-cosmo"]
+        },
+        {
+          "category": "Маски и профессиональные уходовые комплексы",
+          "template": "Альгинатная маска",
+          "price": 3500,
+          "duration_minutes": 30,
+          "price_src": "venesa",
+          "by": ["ate-cosmo"]
+        }
+      ]
+    }
+  ]
+}
