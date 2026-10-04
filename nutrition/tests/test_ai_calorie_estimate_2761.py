@@ -15,10 +15,12 @@
   записи null, итог дня её не суммирует и считает «не посчитано», счёт дней
   «в ориентире» её день не засчитывает, сохранённое блюдо числа не несёт,
   ориентир профиля не меняется;
-* e5 — расстройство пищевого поведения, несовершеннолетие, неназванный
-  субъект → оценки нет и модель не зовётся; такому человеку не отдаётся и
-  сохранённая. Остальные состояния анкеты оценку не закрывают (решение
-  владельца 02.10: набор — ``{eating_disorder, minor}``);
+* e5 — оценка калорийности блюда доступна всем, включая расстройство
+  пищевого поведения и несовершеннолетних (решение владельца 04.10, DRF-2766:
+  набор ограничений пуст; прежде, 02.10, — ``{eating_disorder, minor}``).
+  Механизм одной константы цел: вписанный ключ закрывает и новую, и
+  сохранённую оценку. Неназванный субъект оценки по-прежнему не получает —
+  это не ограничение здоровья, а «не знаем, кто спрашивает»;
 * e6 — отказ модели — промах, не 5xx: сеть, таймаут, не-JSON, отказ модели,
   число вне правдоподобного;
 * e7 — выключено по умолчанию;
@@ -301,10 +303,10 @@ class TestTheEstimateDrivesNothing:
         assert (profile.daily_kcal, profile.daily_protein_g) == (2000, 90)
 
 
-# ─── e5: кому оценку нельзя ──────────────────────────────────────────────────
+# ─── e5: кому оценку показывать ─────────────────────────────────────────────
 
 
-class TestWhoGetsNoEstimate:
+class TestWhoGetsTheEstimate:
     @pytest.mark.parametrize(
         "profile",
         [
@@ -315,20 +317,20 @@ class TestWhoGetsNoEstimate:
         ],
         ids=["eating-disorder", "minor", "eating-disorder-among-others", "minor-and-pregnant"],
     )
-    def test_e5_no_estimate_and_no_model_call(self, client, person, profile):
+    def test_e5_eating_disorder_and_minors_get_it_since_04_10(self, client, person, profile):
+        """DRF-2766: «для всех» включает РПП и несовершеннолетних."""
         NutritionProfile.objects.create(user=person, **profile)
         patcher, model = _model_answers(_kcal(250))
         with patcher:
             data = _estimate(client).json()["data"]
 
-        assert data["kcal_ai_estimate"] is None
-        assert data["source"] is None
-        assert model.chat.completions.create.call_count == 0
-        assert AICalorieEstimate.objects.count() == 0
+        assert data["kcal_ai_estimate"] == 250.0
+        assert data["source"] == ace.AI_SOURCE
+        assert model.chat.completions.create.call_count == 1
 
     def test_e5_the_blocking_set_is_the_decided_one(self):
-        """Состав — решение владельца 02.10.2026. Литералом."""
-        assert ace.BLOCKING_RESTRICTIONS == frozenset({"eating_disorder", "minor"})
+        """Состав — решение владельца 04.10.2026: пусто. Литералом."""
+        assert ace.BLOCKING_RESTRICTIONS == frozenset()
 
     @pytest.mark.parametrize(
         "profile",
@@ -366,7 +368,7 @@ class TestWhoGetsNoEstimate:
         ],
     )
     def test_e5_what_the_owner_released_does_not_block(self, client, person, profile):
-        """Владелец ослабил всё, кроме РПП и несовершеннолетия: оценка есть."""
+        """Никакое состояние анкеты оценку не закрывает."""
         NutritionProfile.objects.create(user=person, **profile)
         patcher, _ = _model_answers(_kcal(250))
         with patcher:
@@ -401,19 +403,39 @@ class TestWhoGetsNoEstimate:
 
         assert data["kcal_ai_estimate"] == 250.0
 
-    def test_e5_a_stored_estimate_is_withheld_from_a_flagged_person_too(self, client, person):
-        """Оценку мог запросить другой человек; человеку с флагом она не отдаётся."""
+    def test_e5_a_stored_estimate_reaches_a_person_with_an_eating_disorder(self, client, person):
+        """Оценку мог запросить другой человек; с 04.10 она отдаётся и при РПП."""
         AICalorieEstimate.objects.create(
             search_key=UNKNOWN_DISH, kcal_per_100g=250, model="m"
         )
         NutritionProfile.objects.create(user=person, health_flags={"eating_disorder": True})
+        patcher, model = _model_answers()
+        with patcher:
+            data = _estimate(client).json()["data"]
+            log = _log(client)
+
+        assert data["kcal_ai_estimate"] == 250.0
+        assert model.chat.completions.create.call_count == 0
+        assert log.status_code == status.HTTP_201_CREATED
+        assert log.json()["data"]["ai_calories"] is not None
+
+    def test_e5_a_key_written_into_the_set_withholds_the_stored_one_too(
+        self, client, person, monkeypatch
+    ):
+        """Механизм цел: вписанный ключ закрывает и сохранённую оценку."""
+        AICalorieEstimate.objects.create(
+            search_key=UNKNOWN_DISH, kcal_per_100g=250, model="m"
+        )
+        NutritionProfile.objects.create(user=person, health_flags={"eating_disorder": True})
+        monkeypatch.setattr(ace, "BLOCKING_RESTRICTIONS", frozenset({"eating_disorder"}))
         patcher, _ = _model_answers()
         with patcher:
             data = _estimate(client).json()["data"]
             log = _log(client)
 
-        assert data["kcal_ai_estimate"] is None
         assert log.status_code == status.HTTP_201_CREATED
+        assert data["matched_dish"] == UNKNOWN_DISH
+        assert data["kcal_ai_estimate"] is None
         assert log.json()["data"]["ai_calories"] is None
 
     @pytest.mark.parametrize("subject", [None, "bot:nobody-2761", "no-colon-here"])
