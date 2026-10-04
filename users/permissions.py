@@ -154,14 +154,36 @@ class IsBotServiceWithVerifiedClient(permissions.BasePermission):
     3. ``request.user`` is replaced by the resolved User so views can
        use the same per-user queryset filters as the mobile path.
 
-    Defense-in-depth (lives in the **view**, not here): the view MUST
-    cross-check the request body's ``client_id`` field against
-    ``request.user.id``. The bearer token alone is a single secret;
-    if it leaks, an attacker holding it could impersonate any user by
-    forging only the header. Forcing the body to independently name
-    the same user means a leaked token still requires the attacker to
-    also know the victim's specific Ayla user-id — a second factor
-    that limits blast radius.
+    What this class does NOT give — read before relying on it (DRF-2421):
+
+    * **The person is whoever ``X-External-User-ID`` names.** The bearer
+      token is the only secret on this path; the header value is a
+      messenger id, not a secret. Whoever holds the token can act as any
+      person by naming them in the header.
+    * **A second factor exists only where the view adds one**, and today
+      that is a minority. Census of 05.10.2026 (``c62a2aec``), held by
+      ``users/tests/test_bot_service_second_factor_census_2421.py``:
+
+      - **A — the view compares a user id it was sent with
+        ``request.user.id``** (403 on mismatch): booking create, payment
+        create, payment retry (body ``client_id``) and the three card views
+        (path ``{ayla_user_id}``);
+      - **B — ``IsTenantAdmin`` beside this class**: the salon booking and
+        customer-lookup views. There ``client_id`` names the customer, a
+        different person from the acting administrator, so a ``client_id``
+        cross-check would be wrong, not missing;
+      - **C — the header alone**: everything else, including views that
+        WRITE a person's data (cancel / reschedule a booking, select a goal,
+        change a goal's state, create / close a plan).
+
+    * **Group A's check does not stop a token holder either.**
+      ``GET /api/v1/internal/me/identity/`` is in group C and returns the
+      person's canonical id — the very value group A compares against. A
+      token holder gets it with one more request.
+
+    Earlier text here said the view MUST cross-check ``client_id``. That
+    described an intent, not the code, and a reader who believed it took
+    group C for protected.
 
     Why this is not just ``IsServiceAccount`` with extra steps: that
     class deliberately leaves user resolution to the view (nutrition
@@ -204,8 +226,9 @@ class IsBotServiceWithVerifiedClient(permissions.BasePermission):
 
         # Replace AnonymousUser (the request authenticator never ran
         # for this permission-only auth path) with the resolved Ayla
-        # User. Downstream code — including the view's defense-in-depth
-        # cross-check — reads request.user.
+        # User. Downstream code — including the views that cross-check a
+        # user id they were sent (group A in the class docstring) — reads
+        # request.user.
         request.user = user
         return True
 
