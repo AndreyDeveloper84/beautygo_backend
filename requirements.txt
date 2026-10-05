@@ -14,7 +14,7 @@ Pillow==11.3.0
 
 # S3-compatible storage (Minio / AWS S3)
 django-storages==1.14.6
-boto3==1.43.102
+boto3==1.43.107
 
 # Social Auth (OAuth providers)
 requests==2.34.2
@@ -27,11 +27,11 @@ requests==2.34.2
 # sentry-sdk: пин держится на ИХ требованиях, и сломать резолв может правка
 # соседа, а не этой строки.
 urllib3==2.8.0
-PyJWT==2.15.0
+PyJWT==2.15.1
 cryptography==44.0.3
 
 # Environment
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 
 # Observability — error monitoring + structured logging.
 # Sentry SDK no-ops when SENTRY_DSN env is empty, so dev / CI stay quiet.
