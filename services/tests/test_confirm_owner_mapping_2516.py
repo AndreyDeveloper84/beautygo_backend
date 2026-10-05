@@ -239,6 +239,11 @@ REMOVED_0510 = frozenset({
 })
 
 
+#: Отпечаток SHA-256 разобранных троек записи 25.09 — не секрет, а закрепление
+#: закрытой записи (детектор секретов видит в нём высокую энтропию).
+RECORD_2509_DIGEST = "aed7dc2b0a15e26e31cdf73e8a06d3981939e65981d61da16216be6cac48291b"  # pragma: allowlist secret
+
+
 class TestTheRevisionOfOctoberFifth:
     """Пересмотр 05.10 убрал ровно пять названных строк и не тронул остальные.
 
@@ -268,9 +273,7 @@ class TestTheRevisionOfOctoberFifth:
         triples = [list(t) for t in read_document(DOCUMENT_2509)]
         payload = json.dumps(triples, ensure_ascii=False).encode("utf-8")
         digest = hashlib.sha256(payload).hexdigest()
-        assert digest == "aed7dc2b0a15e26e31cdf73e8a06d3981939e65981d61da16216be6cac48291b", (
-            "закрытая запись 25.09 изменена"
-        )
+        assert digest == RECORD_2509_DIGEST, "закрытая запись 25.09 изменена"
         text = DOCUMENT_2509.read_text(encoding="utf-8")
         assert "## Подтверждено: 36 строк" in text
         assert OWNER_LIST_SOURCE_REF != "docs/" + DOCUMENT_2509.name
