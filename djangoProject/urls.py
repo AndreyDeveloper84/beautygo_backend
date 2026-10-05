@@ -16,6 +16,7 @@ from services.internal_offer_api import (
     InternalSpecialistServiceSelectionView,
 )
 from services.knowledge_api import InternalProcedureKnowledgeView
+from users.consent_events_api import ConsentEventView
 from users.internal_address_suggest_api import InternalAddressSuggestView
 from users.internal_canon_gap_api import (  # noqa: E402
     InternalCanonGapRequestDetailView,
@@ -101,6 +102,13 @@ urlpatterns = [
     path(
         'api/v1/internal/me/goals/state/',
         include('goals.state_urls'),
+    ),
+    # DRF-2776 — смена согласия от бота: каталог применяет её у себя
+    # (стирание данных при отзыве, стоп рассылки). Контракт — в модуле ручки.
+    path(
+        'api/v1/internal/me/consent-events/',
+        ConsentEventView.as_view(),
+        name='internal-consent-events',
     ),
     # DRF-1344 — wellness-context read для решающего слоя бота: только
     # коды состояний (никогда значения наблюдений), fail-closed через
