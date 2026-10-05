@@ -182,23 +182,32 @@ def dispatch_outbox_events() -> dict:
     """
     processed = 0
     failed = 0
-    skipped = 0
 
     with transaction.atomic():
         # Lock the batch; ``skip_locked`` makes parallel workers cooperate
         # rather than block on each other.
+        #
+        # DRF-2773 — исчерпанная строка (``error_count >= MAX``) в батч НЕ
+        # берётся. Раньше она выбиралась и пропускалась, а ``processed_at``
+        # не получала — то есть навсегда занимала место в голове очереди.
+        # Сто таких строк (неизвестный топик или обработчик, упавший пять
+        # раз) забирали весь батч каждый тик, и независимые события не
+        # обрабатывались вовсе — измерено исполнением. Так же решил
+        # публикатор в бот: окончательно упавшая строка выпадает из выборки,
+        # а не стоит в ней (``bot_delivery_status='dead'``).
         rows = list(
             OutboxEvent.objects
             .select_for_update(skip_locked=True)
-            .filter(processed_at__isnull=True)
+            .filter(processed_at__isnull=True, error_count__lt=MAX_HANDLER_ATTEMPTS)
             .order_by('created_at')[:BATCH_SIZE]
         )
+        # Смысл счётчика прежний — «сколько исчерпанных строк лежит», — но
+        # считается он отдельно, а не местами в батче.
+        skipped = OutboxEvent.objects.filter(
+            processed_at__isnull=True, error_count__gte=MAX_HANDLER_ATTEMPTS,
+        ).count()
 
         for event in rows:
-            if event.error_count >= MAX_HANDLER_ATTEMPTS:
-                skipped += 1
-                continue
-
             handler = EVENT_HANDLERS.get(event.topic)
             if handler is None:
                 # Unknown topic — store an error and skip rather than blow
