@@ -115,7 +115,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from goals.wiring import goal_category_ids_for
+from goals.wiring import goal_category_ids_for, saved_goal_key_for
 from recommendation.api import (
     NeedOrigin,
     NeedSpec,
@@ -502,7 +502,7 @@ class CatalogRecommendationsView(APIView):
         # сейчас старше выбранного когда-то (OD-1). Ключ цели уходит
         # в нужду, а связку «цель → категории» разворачивает домен —
         # там же, где она курируется.
-        goal_key = None if goal else _saved_goal_key(request.user)
+        goal_key = None if goal else saved_goal_key_for(request.user)
         goal_category_ids = None if goal else goal_category_ids_for(request.user)
         need = NeedSpec(
             origin=NeedOrigin.USER_EXPLICIT if goal else NeedOrigin.GOAL,
@@ -573,21 +573,3 @@ class CatalogRecommendationsView(APIView):
             "layer_2_ayla_picks": layer_2,
             "layer_3_explore": layer_3,
         })
-
-
-def _saved_goal_key(client) -> str | None:
-    """Ключ сохранённой цели человека, если фильтр цели включён.
-
-    Через ``goals.wiring``: флаг ``GOAL_RESOLUTION_ENABLED`` читается
-    ровно в одном месте репозитория, и это место — не здесь.
-    """
-    from goals.models import ClientGoal
-
-    if goal_category_ids_for(client) is None:
-        return None
-    goal = (
-        ClientGoal.objects.filter(client=client, state=ClientGoal.State.ACTIVE)
-        .order_by("-selected_at")
-        .first()
-    )
-    return goal.goal_key if goal and goal.goal_key else None
