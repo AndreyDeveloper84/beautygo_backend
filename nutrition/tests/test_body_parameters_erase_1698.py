@@ -97,8 +97,10 @@ class TestErasureIsCompleteAndKeepsTheDiary:
         data = resp.json()["data"]
         assert data["profile_existed"] is True
         assert data["targets_cleared"] is True
+        # Шесть параметров §2 и ``weight_range`` — тот же вес меньшего
+        # разрешения (DRF-2776): раньше он переживал отзыв.
         assert set(data["erased"]) == {
-            "weight_kg", "height_cm", "age", "gender", "activity_coefficient", "goal",
+            "weight_kg", "height_cm", "age", "gender", "weight_range", "activity_coefficient", "goal",
         }
         p = NutritionProfile.objects.get(pk=full_profile.pk)
         assert (p.weight_kg, p.height_cm, p.age, p.gender) == (None, None, None, "")
