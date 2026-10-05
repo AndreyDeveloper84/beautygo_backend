@@ -1122,3 +1122,62 @@ class SpecialistIdentityLinkRequest(models.Model):
 
     def __str__(self) -> str:
         return f"{self.profile_id} {self.external_user_id} {self.result}"
+
+
+class ConsentState(models.Model):
+    """Последнее известное каталогу состояние согласия человека по типу (DRF-2776).
+
+    Не реестр: реестр согласий живёт в боте. Здесь — только то, что нужно
+    каталогу, чтобы применять смены в правильном порядке (побеждает последнее
+    по ``granted_at``) и чтобы рассылка знала об отзыве. Отсутствие строки —
+    «каталогу не сообщали», а не «согласия нет».
+    """
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="consent_states")
+    consent_type = models.CharField(max_length=40)
+    granted = models.BooleanField()
+    granted_at = models.DateTimeField()
+    event_id = models.CharField(max_length=64)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "consent_type"], name="consentstate_user_type_uniq"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.user_id} {self.consent_type}={'granted' if self.granted else 'withdrawn'}"
+
+
+class ConsentEventReceipt(models.Model):
+    """Квитанция доставки смены согласия от бота: что пришло и что каталог сделал (DRF-2776).
+
+    Решение владельца 05.10 (D): журнал фиксирует изменение и результат
+    доставки. Уникальность ``event_id`` — идемпотентность: бот доставляет по
+    крайней мере один раз. ``erased`` — имена стёртых полей, без значений.
+    """
+
+    class Outcome(models.TextChoices):
+        APPLIED = "applied", "Применено"
+        DUPLICATE = "duplicate", "Повтор"
+        IGNORED = "ignored", "Тип каталогу не нужен"
+        STALE = "stale", "Старше известного"
+        NO_SUBJECT = "no_subject", "Человек каталогу не известен"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    event_id = models.CharField(max_length=64, unique=True)
+    #: SET_NULL: квитанция переживает удаление человека без указания на него.
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="consent_event_receipts",
+    )
+    consent_type = models.CharField(max_length=40)
+    granted = models.BooleanField()
+    granted_at = models.DateTimeField()
+    granted_via = models.CharField(max_length=80, blank=True, default="")
+    outcome = models.CharField(max_length=16, choices=Outcome.choices)
+    erased = models.JSONField(default=list, blank=True)
+    received_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f"{self.event_id} {self.consent_type} {self.outcome}"

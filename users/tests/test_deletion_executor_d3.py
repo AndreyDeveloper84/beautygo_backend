@@ -1261,3 +1261,33 @@ class TestLinkedProxyDataIsErased:
         assert out2.completed
         assert sorted(ok.calls[0]["external_user_ids"]) == ["bot:max:d3-1", PREBINDING_PROXY]
         assert _no_external_ids_in(req.steps) and req.steps["external_user_ids_count"] == 2
+
+
+class TestConsentEventsOfThePersonAreHandled:
+    """DRF-2776: состояние согласий уходит вместе с человеком, квитанции
+    доставки остаются журналом без указания на него."""
+
+    def test_states_are_deleted_and_receipts_lose_the_person(self, person):
+        from users.models import ConsentEventReceipt, ConsentState
+
+        stamp = timezone.now()
+        ConsentState.objects.create(
+            user=person, consent_type="food_diary_processing", granted=False, granted_at=stamp, event_id="ev-del-1",
+        )
+        receipt = ConsentEventReceipt.objects.create(
+            event_id="ev-del-1", user=person, consent_type="food_diary_processing", granted=False,
+            granted_at=stamp, outcome="applied",
+        )
+        stranger = User.objects.create(username="bot:max:stranger-2776", role="client", is_proxy=True)
+        ConsentState.objects.create(
+            user=stranger, consent_type="health", granted=True, granted_at=stamp, event_id="ev-del-2",
+        )
+
+        out = execute(ensure_deletion_request(person, initiator="bot").request, bot_client=_BotOk())
+
+        assert out.completed
+        assert not ConsentState.objects.filter(user=person).exists()
+        receipt.refresh_from_db()
+        assert (receipt.user_id, receipt.outcome, receipt.consent_type) == (None, "applied", "food_diary_processing")
+        assert out.steps["anonymised"]["users.ConsentEventReceipt.user"] == 1
+        assert ConsentState.objects.filter(user=stranger).count() == 1
