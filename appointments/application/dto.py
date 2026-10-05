@@ -91,6 +91,12 @@ class CancelBookingDTO:
     # unavailable or the slot was closed, and telling the client "other"
     # when the salon said "мастер заболел" throws that away.
     reason_code: Optional[str] = None
+    # DRF-2785 — optimistic concurrency for a caller that showed the person a
+    # specific time (the master's «Не смогу» in the bot). Checked INSIDE the
+    # locked transaction, not by the caller: a reschedule committing between
+    # the caller's read and this lock would otherwise be cancelled at a time
+    # nobody saw. None keeps every existing caller's behaviour.
+    expected_version: Optional[int] = None
 
     def __post_init__(self) -> None:
         """DRF-1156: refuse an initiator outside the closed vocabulary.

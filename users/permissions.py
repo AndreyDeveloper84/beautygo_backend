@@ -974,6 +974,25 @@ class IsInternalBearerForSpecialistSubject(IsInternalBearerForSubject):
         return profile.user if profile is not None else None
 
 
+class IsInternalBearerForLinkedSpecialistSubject(IsInternalBearerForSpecialistSubject):
+    """Same gate, LINKED master only — the provisioned-workspace claim opens nothing (DRF-2785).
+
+    The claim of owner ruling G1 (12.09) is «workspace setup, NOT identity»:
+    it lets a not-yet-linked header fill in its own DRAFT workspace. A
+    client's booking is not workspace setup. A profile can be DRAFT and
+    still carry real bookings (moderation moves ACTIVE → DRAFT and leaves
+    them), and for a salon-provisioned master the claim value is typed in
+    by the salon admin — a wrong MAX id would hand a stranger the right to
+    cancel or move real clients' visits. So on booking writes only the
+    linked subject passes.
+    """
+
+    def provisioned_workspace_owner(
+        self, external_user_id: str, subject_id: str, actor: Any,
+    ) -> Any | None:
+        return None
+
+
 class IsInternalBearerForSalonSubject(IsInternalBearerForSubject):
     """Same gate, URL names a SALON by slug the actor administers (DRF-2117).
 

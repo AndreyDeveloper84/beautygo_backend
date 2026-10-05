@@ -88,7 +88,8 @@ EVENT_VERSIONS: dict[str, int] = {
     # data: {module_name, severity, metric}; людей нет по построению.
     "system.module.health.degraded": 1,
     # DRF-2785 — мастер подтвердил запись; статус не меняется.
-    # data: appointment_id, specialist_id, version, acknowledged_at, start_at.
+    # data: appointment_id, client_id, specialist_id, start_at, version,
+    # acknowledged_at, acknowledged_by, acknowledged_by_user_id (ids only).
     "booking.acknowledged": 1,
 }
 

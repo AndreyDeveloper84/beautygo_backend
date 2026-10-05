@@ -70,7 +70,7 @@ from appointments.domain.exceptions import (
 from appointments.domain.value_objects import OperationalActor
 from appointments.models import Appointment
 from users.models import SpecialistProfile
-from users.permissions import IsInternalBearerForSpecialistSubject
+from users.permissions import IsInternalBearerForLinkedSpecialistSubject
 from users.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
@@ -134,7 +134,7 @@ class _SpecialistBookingBase(APIView):
     # Пусто, как у салонных ручек: JWT-аутентификатор по умолчанию ответил бы
     # 401 на служебный Bearer раньше, чем спросят разрешение.
     authentication_classes: list = []
-    permission_classes = [IsInternalBearerForSpecialistSubject]
+    permission_classes = [IsInternalBearerForLinkedSpecialistSubject]
     subject_url_kwarg = "specialist_id"
 
     def _locked_own_booking(self, specialist_id, appointment_id):
@@ -176,8 +176,17 @@ class _SpecialistBookingBase(APIView):
         ``None`` здесь, независимо от фильтра в запросе выше. Салонного
         полномочия эта поверхность не даёт (``tenant=None``): ответ — только
         ``specialist`` или ``None``.
+
+        И второе условие, которого у мобильного пути нет, а здесь — общий
+        служебный токен: мастер должен ВСЁ ЕЩЁ работать в салоне записи.
+        Активная связь ``staff`` (мастер салона) или ``admin`` (соло-мастер —
+        владелец своего кабинета) с этим салоном и живой салон. Ушедший
+        мастер, чью связь салон отозвал, и выключенный салон не отменяют и
+        не двигают клиентские визиты из бота — ответ тот же 404.
         """
         from appointments.authz import resolve_booking_operator
+        from tenants.models import Tenant
+        from users.models import TenantUserRelationship
 
         profile = (
             SpecialistProfile.objects.select_related("user")
@@ -187,7 +196,17 @@ class _SpecialistBookingBase(APIView):
             return None
         acting = SimpleNamespace(user=profile.user, tenant=None)
         actor = resolve_booking_operator(acting, appointment)
-        return actor if actor == OperationalActor.SPECIALIST.value else None
+        if actor != OperationalActor.SPECIALIST.value:
+            return None
+        if not Tenant.all_objects.filter(pk=appointment.tenant_id, is_active=True).exists():
+            return None
+        works_there = TenantUserRelationship.objects.filter(
+            user=profile.user,
+            tenant_id=appointment.tenant_id,
+            is_active=True,
+            role__in=(TenantUserRelationship.Role.STAFF, TenantUserRelationship.Role.ADMIN),
+        ).exists()
+        return actor if works_there else None
 
     @staticmethod
     def _not_found() -> Response:
@@ -243,18 +262,21 @@ class InternalSpecialistBookingCancelView(_SpecialistBookingBase):
         appointment = self._own_booking(specialist_id, appointment_id)
         if appointment is None or self._authority(specialist_id, appointment) is None:
             return self._not_found()
-        expected_version = body.validated_data.get("expected_version")
-        if expected_version is not None and appointment.version != expected_version:
-            return self._stale(appointment, expected_version)
 
+        # Версия сверяется сервисом ПОД блокировкой строки, не здесь: перенос,
+        # закоммиченный между этим чтением и блокировкой, иначе отменился бы
+        # по времени, которого мастер не видел.
         dto = CancelBookingDTO(
             booking_id=appointment.id,
             initiator_user_id=appointment.specialist.user_id,
             initiator_role=OperationalActor.SPECIALIST.value,
             reason=body.validated_data.get("reason", ""),
+            expected_version=body.validated_data.get("expected_version"),
         )
         try:
             CancelBookingService().execute(dto)
+        except StaleVersionError as exc:
+            return error_response("STALE_VERSION", str(exc), status_code=409)
         except CancellationNotAllowedError as exc:
             return error_response("CANCELLATION_NOT_ALLOWED", str(exc), status_code=422)
         except InvalidStateTransitionError as exc:

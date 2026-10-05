@@ -323,3 +323,99 @@ class TestSubject:
         assert resp.status_code == 403, resp.content
         appt.refresh_from_db()
         assert appt.status == Appointment.Status.CONFIRMED
+
+
+class TestReviewFindings:
+    """Три находки ревью (DRF-2785) — каждая своим узлом."""
+
+    def test_cancel_version_is_checked_under_the_lock_not_on_the_views_read(
+        self, master, customer, monkeypatch,
+    ):
+        """Перенос закоммичен между чтением ручки и блокировкой сервиса.
+
+        Ручка видит снимок v1 (мастер видел 15:00), строка уже v2. Проверка на
+        чтении ручки этого не заметит; заметить обязан сервис под блокировкой.
+        """
+        from appointments.internal_specialist_api import InternalSpecialistBookingCancelView
+
+        appt = _booking(master, customer)
+        stale = Appointment.objects.select_related("specialist", "specialist__user").get(pk=appt.pk)
+        Appointment.objects.filter(pk=appt.pk).update(version=2)
+        monkeypatch.setattr(
+            InternalSpecialistBookingCancelView, "_own_booking",
+            staticmethod(lambda specialist_id, appointment_id: stale),
+        )
+
+        resp = _api().post(_url(master.pk, appt.pk, "cancel"), {"expected_version": 1}, format="json")
+
+        assert resp.status_code == 409, resp.content
+        assert resp.data["error"]["code"] == "STALE_VERSION"
+        appt.refresh_from_db()
+        assert appt.status == Appointment.Status.CONFIRMED
+        assert _events(OutboxEvent.Topic.BOOKING_CANCELLED) == []
+
+    @pytest.mark.parametrize("action", ACTIONS)
+    def test_the_draft_workspace_claim_opens_no_booking_write(self, action, salon, customer):
+        """Профиль DRAFT с заявкой на кабинет и с НАСТОЯЩЕЙ записью (модерация
+        вернула его в DRAFT). Заголовок-заявка без связи — 403 на каждой ручке."""
+        claim = "bot:max:2785777"
+        profile = _master(salon, username="sb2785_draft", phone="+79995402003", external_id=None)
+        appt = _booking(profile, customer, hours_from_now=-3 if action in ("complete", "no-show") else 48)
+        SpecialistProfile.objects.filter(pk=profile.pk).update(
+            status=SpecialistProfile.ProfileStatus.DRAFT, provisioned_external_user_id=claim,
+        )
+
+        resp = _api(claim).post(_url(profile.pk, appt.pk, action), _body(action, appt), format="json")
+
+        assert resp.status_code == 403, resp.content
+        appt.refresh_from_db()
+        assert appt.status == Appointment.Status.CONFIRMED
+        assert OutboxEvent.objects.count() == 0
+
+    def test_the_claim_itself_is_still_honoured_by_the_workspace_gate(self, salon):
+        """Положительная пара: та же заявка проходит общий сторож кабинета —
+        закрыта именно поверхность записей, а не заявка вообще."""
+        from users.permissions import (
+            IsInternalBearerForLinkedSpecialistSubject,
+            IsInternalBearerForSpecialistSubject,
+        )
+
+        claim = "bot:max:2785778"
+        profile = _master(salon, username="sb2785_draft2", phone="+79995402004", external_id=None)
+        SpecialistProfile.objects.filter(pk=profile.pk).update(
+            status=SpecialistProfile.ProfileStatus.DRAFT, provisioned_external_user_id=claim,
+        )
+        owner = IsInternalBearerForSpecialistSubject().provisioned_workspace_owner(claim, str(profile.pk), None)
+        assert owner is not None and owner.pk == profile.user_id
+        assert IsInternalBearerForLinkedSpecialistSubject().provisioned_workspace_owner(
+            claim, str(profile.pk), None,
+        ) is None
+
+    @pytest.mark.parametrize("action", ACTIONS)
+    def test_a_master_whose_staff_relationship_was_revoked_is_404(self, action, master, customer):
+        """Узел, который проходит МИМО фильтра запроса: запись своя, мастер
+        связан — отказывает только ``_authority``."""
+        from users.models import TenantUserRelationship
+
+        appt = _booking(master, customer, hours_from_now=-3 if action in ("complete", "no-show") else 48)
+        revoked = TenantUserRelationship.objects.filter(
+            user=master.user, tenant=master.tenant, is_active=True,
+        ).update(is_active=False)
+        assert revoked >= 1, "положительный контроль: связь мастера с салоном была"
+
+        resp = _api().post(_url(master.pk, appt.pk, action), _body(action, appt), format="json")
+
+        assert resp.status_code == 404, resp.content
+        appt.refresh_from_db()
+        assert appt.status == Appointment.Status.CONFIRMED
+        assert OutboxEvent.objects.count() == 0
+
+    def test_a_deactivated_salon_is_404(self, master, customer):
+        appt = _booking(master, customer)
+        Tenant.all_objects.filter(pk=master.tenant_id).update(is_active=False)
+
+        resp = _api().post(_url(master.pk, appt.pk, "cancel"), {}, format="json")
+
+        assert resp.status_code == 404, resp.content
+        appt.refresh_from_db()
+        assert appt.status == Appointment.Status.CONFIRMED
