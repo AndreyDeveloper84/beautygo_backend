@@ -42,6 +42,13 @@ from users.internal_service_locations_api import (
     InternalSpecialistServiceLocationView,
     InternalSpecialistServiceLocationsView,
 )
+from appointments.internal_specialist_api import (
+    InternalSpecialistBookingAcknowledgeView,
+    InternalSpecialistBookingCancelView,
+    InternalSpecialistBookingCompleteView,
+    InternalSpecialistBookingNoShowView,
+    InternalSpecialistBookingRescheduleView,
+)
 from users.internal_reviews_api import InternalSpecialistReviewsView
 from users.internal_specialist_identity_api import InternalSpecialistIdentityLinkView
 from users.internal_schedule_api import (
@@ -288,6 +295,35 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/reviews/',
         InternalSpecialistReviewsView.as_view(),
         name='internal-specialist-reviews',
+    ),
+    # DRF-2785 (вариант «в» владельца 05.10) — мастер над СВОЕЙ клиентской
+    # записью из бота: «Подтверждаю» (статус не меняется), «Не смогу»
+    # (отмена без вины клиента), закрыть визит, неявка, перенос. Под
+    # субъектом; чужая запись — 404. Explicit routes BEFORE the include.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/appointments/<uuid:appointment_id>/acknowledge/',
+        InternalSpecialistBookingAcknowledgeView.as_view(),
+        name='internal-specialist-booking-acknowledge',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/appointments/<uuid:appointment_id>/cancel/',
+        InternalSpecialistBookingCancelView.as_view(),
+        name='internal-specialist-booking-cancel',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/appointments/<uuid:appointment_id>/complete/',
+        InternalSpecialistBookingCompleteView.as_view(),
+        name='internal-specialist-booking-complete',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/appointments/<uuid:appointment_id>/no-show/',
+        InternalSpecialistBookingNoShowView.as_view(),
+        name='internal-specialist-booking-no-show',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/appointments/<uuid:appointment_id>/reschedule/',
+        InternalSpecialistBookingRescheduleView.as_view(),
+        name='internal-specialist-booking-reschedule',
     ),
     # DRF-1796 (M4) — готовность к публикации, «Опубликовать» (DRAFT → PENDING,
     # идемпотентно по ключу команды), «Проверить статус». ACTIVE — только

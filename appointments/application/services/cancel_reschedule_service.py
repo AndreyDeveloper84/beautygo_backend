@@ -153,6 +153,7 @@ class CancelBookingService:
             refund_percent=refund_percent,
             reason=dto.reason,
             trusted_reason_code=dto.reason_code,
+            expected_version=dto.expected_version,
         )
 
         # Acceptance #5: booking cancelled ⇒ the hold is released
@@ -183,10 +184,18 @@ class CancelBookingService:
         refund_percent: float,
         reason: str | None,
         trusted_reason_code: str | None = None,
+        expected_version: int | None = None,
     ) -> None:
         from appointments.models import Appointment
 
         appointment = Appointment.objects.select_for_update().get(id=booking_id)
+
+        # DRF-2785 — under the lock, the same place reschedule checks it.
+        if expected_version is not None and appointment.version != expected_version:
+            raise StaleVersionError(
+                f"Appointment {booking_id} expected_version={expected_version} "
+                f"but current version is {appointment.version}"
+            )
 
         current_status = BookingStatus(appointment.status)
         new_status = BookingStateMachine.transition(
@@ -558,6 +567,10 @@ class RescheduleBookingService:
                 "new_start_at": new_interval.start_at.isoformat(),
                 "old_start_at": old_start_at.isoformat(),
                 "rescheduled_by": rescheduled_by,
+                # DRF-2785 — the version AFTER this move, as on the canonical
+                # topic above: the legacy consumer can keep the mirror's
+                # version current too. New OPTIONAL field (§4.1), non-breaking.
+                "version": new_version,
             },
             user_id=appointment.client_id,
             tenant_id=tenant_id_for_event,

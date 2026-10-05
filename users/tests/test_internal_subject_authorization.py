@@ -583,6 +583,24 @@ GUARDED_OTHERWISE_SPECIALIST: dict[str, str] = {
 
 #: Subject-маршруты мастера, чьи отрицательные тесты живут в своём наборе.
 SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
+    # DRF-2785 — мастер над своей записью: чужой профиль, без заголовка,
+    # провижининг, прокси без связи → 403 на каждой ручке; чужая запись → 404
+    # (TestForeignBooking) рядом с положительной парой.
+    "internal-specialist-booking-acknowledge": (
+        "appointments/tests/test_specialist_booking_actions_2785.py::TestSubject"
+    ),
+    "internal-specialist-booking-cancel": (
+        "appointments/tests/test_specialist_booking_actions_2785.py::TestSubject"
+    ),
+    "internal-specialist-booking-complete": (
+        "appointments/tests/test_specialist_booking_actions_2785.py::TestSubject"
+    ),
+    "internal-specialist-booking-no-show": (
+        "appointments/tests/test_specialist_booking_actions_2785.py::TestSubject"
+    ),
+    "internal-specialist-booking-reschedule": (
+        "appointments/tests/test_specialist_booking_actions_2785.py::TestSubject"
+    ),
     "internal-specialist-working-hours": (
         "users/tests/test_internal_working_hours_1815.py::TestSubject"
     ),
