@@ -354,6 +354,10 @@ class TestNearbyIsCatalogNotRecommendation:
     RECOMMENDATION_ARTEFACTS = {
         "match_reasons", "score", "top_reasons", "why", "reasons",
         "recommendation_reasons", "explanation",
+        # Идентификаторы решения канонического резолвера: их несёт только
+        # Recommendation (В-12, «все показанные Recommendation несут
+        # decision_id»). Каталог с ними выдавал бы себя за решение (DRF-2771).
+        "decision_id", "recommendation_id", "recommendation_status",
     }
 
     def test_section_carries_no_personal_fit_explanation(self, auth_client):
