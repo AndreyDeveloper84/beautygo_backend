@@ -22,6 +22,7 @@ from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import serializers
 from rest_framework.request import Request
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from core.errors import ErrorCode
@@ -58,6 +59,11 @@ class ConsentEventView(APIView):
 
     authentication_classes: list = []
     permission_classes = [IsInternalBearer]
+    # Своё ведро, а не общее анонимное (30/мин на адрес): бот доставляет со
+    # своего одного адреса и разбирает накопившееся пачкой. 429 бот читает
+    # как временный отказ — согласовано.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "consent_events_internal"
 
     @extend_schema(
         tags=["internal"],

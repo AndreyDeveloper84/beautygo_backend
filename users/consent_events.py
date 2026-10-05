@@ -41,9 +41,18 @@ from datetime import datetime
 
 from django.db import IntegrityError, transaction
 
+from nutrition.management.commands.clear_targets_without_provenance import (
+    PROVENANCE_FIELDS,
+    TARGET_FIELDS,
+)
 from nutrition.services.health_withdrawal import erase_health_flags
-from nutrition.services.personal_calculation_withdrawal import erase_personal_calculation_inputs
-from users.models import ConsentEventReceipt, ConsentState
+from nutrition.services.personal_calculation_withdrawal import (
+    DERIVED_EMPTY_BY_FIELD,
+    WITHDRAWN_FIELDS,
+    erase_personal_calculation_inputs,
+)
+from nutrition.services.targets_state import KIND_SOURCE_FIELD, KIND_STAMP_FIELD
+from users.models import ConsentEventReceipt, ConsentState, User
 
 logger = logging.getLogger(__name__)
 
@@ -76,9 +85,24 @@ class AppliedEvent:
         return {"event_id": self.event_id, "outcome": self.outcome, "erased": list(self.erased)}
 
 
+#: Всё, что стирает отзыв ``personal_calculation``, — для квитанции. Сама
+#: функция отвечает своим вызывающим только входами (её ответ — контракт
+#: пользовательской ручки «Отключить и удалить»), а квитанция обязана назвать
+#: и ориентиры, и провенанс, и выведенное: «журнал фиксирует результат».
+PERSONAL_CALCULATION_ERASED: tuple[str, ...] = (
+    *WITHDRAWN_FIELDS,
+    *DERIVED_EMPTY_BY_FIELD,
+    *TARGET_FIELDS,
+    *PROVENANCE_FIELDS,
+    *KIND_SOURCE_FIELD.values(),
+    *KIND_STAMP_FIELD.values(),
+)
+
+
 def _erase(user, consent_type: str) -> tuple[str, ...]:
     if consent_type == PERSONAL_CALCULATION:
-        return tuple(erase_personal_calculation_inputs(user).erased)
+        outcome = erase_personal_calculation_inputs(user)
+        return PERSONAL_CALCULATION_ERASED if outcome.profile_existed else ()
     if consent_type == HEALTH:
         return tuple(erase_health_flags(user).erased)
     return ()
@@ -102,6 +126,14 @@ def apply_consent_event(user, event: ConsentEvent) -> AppliedEvent:
                 return AppliedEvent(event.event_id, Outcome.DUPLICATE, tuple(seen.erased))
 
             erased: tuple[str, ...] = ()
+            if user is not None:
+                # Все смены согласия ОДНОГО человека — по очереди. Блокировка
+                # строки состояния не годится: при первом событии строки ещё
+                # нет, и два события разошлись бы — старшее записало бы своё
+                # поверх младшего без проверки порядка, а запоздавший отзыв
+                # стёр бы данные после повторного согласия. Строка человека
+                # есть всегда.
+                User.objects.select_for_update().filter(pk=user.pk).first()
             if user is None:
                 outcome = Outcome.NO_SUBJECT
             elif event.consent_type not in HANDLED_TYPES:

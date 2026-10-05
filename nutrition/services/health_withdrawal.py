@@ -1,26 +1,35 @@
-"""Отзыв согласия ``health`` — удаление флагов здоровья ОДНОГО человека (DRF-2776).
+"""Отзыв согласия ``health`` — удаление сведений о здоровье ОДНОГО человека (DRF-2776).
 
 Решение владельца 05.10 (D-1, DRF-2434): при отзыве согласия ``health``
-данные, собранные под ним, удаляются. В каталоге под ним живут
-``NutritionProfile.health_flags`` — беременность, грудное вскармливание и
-другие состояния, которые анкета питания спрашивает.
+данные, собранные под ним, удаляются. В каталоге они живут в
+``NutritionProfile`` — и не в одном поле.
 
-### Почему вместе с флагами стираются микронутриентные ориентиры
+### Что стирается
 
-``nutrition_profile_service.compute_rda`` поднимает их от флагов: при
-беременности железо 27 мг и омега-3 1.4 г, при вскармливании железо 9 мг и
-кальций 1000 мг. Стереть флаг и оставить ``daily_iron_mg = 27`` — значит
-оставить беременность записанной числом. Решение fail-closed — главное окно,
-05.10.
-
-Калории и жидкость флагами здоровья не считаются — они остаются; их
-провенанс (``targets_source``, снимок входов) не трогается.
+* **Флаги здоровья** в ``health_flags`` — беременность, вскармливание,
+  расстройство пищевого поведения и всё, что не названо ниже как ответ о
+  питании. Список неизвестного считается здоровьем: fail-closed.
+* **Весь ориентир по калориям** (``targets_state.KIND_FIELDS["calories"]``) и
+  его подпись (``calories_source = none``, ``calories_confirmed_at = NULL``).
+  Флаги здоровья решают, считается ли ориентир вообще (фактор здоровья —
+  отказ с именем), и поднимают микронутриенты: при беременности железо 27 мг.
+  Стереть флаг и оставить число — значит оставить беременность записанной
+  числом. Стереть только микронутриенты нельзя: вид остался бы «посчитан и
+  подтверждён» с пустыми полями, и следующий расчёт ушёл бы в предложение
+  рядом, а не на место. Ориентир по жидкости здоровьем не считается — он
+  остаётся.
+* **Предложение рядом** (``pending_proposal``) — оно несёт те же значения и
+  вернуло бы их первым же подтверждением (тот же класс, что DRF-2192).
+* **Причины отказа** ``health_factor_<имя>`` в ``last_overrides_applied`` —
+  они называют состояние словами.
 
 ### Что НЕ трогается
 
-Параметры тела — у них своё согласие (``personal_calculation``) и своя
-функция (:mod:`nutrition.services.personal_calculation_withdrawal`). История
-дневника (``FoodLog`` и др.) — не данные здоровья.
+Ответы о питании, которые лежат в том же JSON по историческим причинам:
+``vegan``, ``vegetarian``, ``diet_preference_skipped`` (:data:`DIET_KEYS`) —
+это не здоровье, и стереть пропуск значило бы задать вопрос о диете заново.
+Параметры тела — у них своё согласие (``personal_calculation``). История
+дневника — не данные здоровья.
 """
 
 from __future__ import annotations
@@ -30,21 +39,31 @@ from dataclasses import dataclass
 from django.db import transaction
 
 from nutrition.models import NutritionProfile
-
-#: Ориентиры, которые ``compute_rda`` поднимает от флагов здоровья.
-HEALTH_DEPENDENT_TARGETS: tuple[str, ...] = (
-    "daily_vitamin_d_iu",
-    "daily_vitamin_b12_mcg",
-    "daily_vitamin_c_mg",
-    "daily_iron_mg",
-    "daily_calcium_mg",
-    "daily_magnesium_mg",
-    "daily_omega3_g",
-    "daily_fiber_g",
+from nutrition.services.diet_type import DIET_SKIPPED_FLAG
+from nutrition.services.targets_state import (
+    KIND_CALORIES,
+    KIND_FIELDS,
+    KIND_SOURCE_FIELD,
+    KIND_STAMP_FIELD,
 )
 
-#: Что стирается — имена полей, без значений: их возвращает квитанция.
-ERASED_FIELDS: tuple[str, ...] = ("health_flags", *HEALTH_DEPENDENT_TARGETS)
+#: Ключи ``health_flags``, которые НЕ про здоровье: ответы о питании.
+DIET_KEYS = frozenset({"vegan", "vegetarian", DIET_SKIPPED_FLAG})
+
+#: Ориентир по калориям целиком — флаги здоровья решают его судьбу.
+CALORIE_TARGETS: tuple[str, ...] = KIND_FIELDS[KIND_CALORIES]
+
+#: Что стирается — имена полей, без значений.
+ERASED_FIELDS: tuple[str, ...] = (
+    "health_flags",
+    *CALORIE_TARGETS,
+    KIND_SOURCE_FIELD[KIND_CALORIES],
+    KIND_STAMP_FIELD[KIND_CALORIES],
+    "pending_proposal",
+    "last_overrides_applied",
+)
+
+_HEALTH_REASON_PREFIX = "health_factor_"
 
 
 class IncompleteErasure(RuntimeError):
@@ -57,8 +76,15 @@ class HealthWithdrawalOutcome:
     profile_existed: bool
 
 
+def _health_reasons(overrides) -> list:
+    return [
+        item for item in (overrides or [])
+        if isinstance(item, dict) and str(item.get("reason", "")).startswith(_HEALTH_REASON_PREFIX)
+    ]
+
+
 def erase_health_flags(user) -> HealthWithdrawalOutcome:
-    """Стереть флаги здоровья и ориентиры, поднятые от них. Идемпотентно.
+    """Стереть сведения о здоровье и всё, что от них посчитано. Идемпотентно.
 
     Нет профиля — нечего стирать, и это не ошибка.
     """
@@ -68,15 +94,24 @@ def erase_health_flags(user) -> HealthWithdrawalOutcome:
 
     with transaction.atomic():
         p = NutritionProfile.objects.select_for_update().get(pk=profile.pk)
-        p.health_flags = {}
-        for field in HEALTH_DEPENDENT_TARGETS:
+        p.health_flags = {k: v for k, v in (p.health_flags or {}).items() if k in DIET_KEYS}
+        for field in CALORIE_TARGETS:
             setattr(p, field, None)
+        setattr(p, KIND_SOURCE_FIELD[KIND_CALORIES], NutritionProfile.TargetsSource.NONE)
+        setattr(p, KIND_STAMP_FIELD[KIND_CALORIES], None)
+        p.pending_proposal = None
+        p.last_overrides_applied = [
+            item for item in (p.last_overrides_applied or []) if item not in _health_reasons(p.last_overrides_applied)
+        ]
         p.save(update_fields=[*ERASED_FIELDS, "updated_at"])
 
         p.refresh_from_db()
-        residual = [f for f in HEALTH_DEPENDENT_TARGETS if getattr(p, f) is not None]
-        if p.health_flags:
-            residual = ["health_flags", *residual]
+        residual = [k for k in (p.health_flags or {}) if k not in DIET_KEYS]
+        residual += [f for f in CALORIE_TARGETS if getattr(p, f) is not None]
+        if p.pending_proposal is not None:
+            residual.append("pending_proposal")
+        if _health_reasons(p.last_overrides_applied):
+            residual.append("last_overrides_applied")
         if residual:
             raise IncompleteErasure(f"left={residual}")
 

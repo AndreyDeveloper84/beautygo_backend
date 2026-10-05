@@ -52,16 +52,19 @@ def profile(person):
         user=person,
         gender="female", age=30, height_cm=165, weight_kg=60.0, weight_range="55-65",
         activity_coefficient=1.6, goal="lose", pace="moderate", timezone="Europe/Samara",
-        health_flags={"pregnant": True},
+        health_flags={"pregnant": True, "vegetarian": True},
         bmr=1400, daily_kcal=1800, daily_protein_g=90, daily_fat_g=60, daily_carbs_g=200,
         daily_water_ml=2100, daily_vitamin_d_iu=600, daily_vitamin_b12_mcg=2.6,
         daily_vitamin_c_mg=85, daily_iron_mg=27, daily_calcium_mg=1000, daily_magnesium_mg=350,
         daily_omega3_g=1.4, daily_fiber_g=28,
-        targets_source=NutritionProfile.TargetsSource.AYLA_PROPOSED,
+        targets_source=NutritionProfile.TargetsSource.AYLA_CALCULATED,
+        calories_source=NutritionProfile.TargetsSource.AYLA_CALCULATED, calories_confirmed_at=T0,
+        fluids_source=NutritionProfile.TargetsSource.AYLA_CALCULATED, fluids_confirmed_at=T0,
         targets_input_snapshot={"weight_kg": 60.0, "height_cm": 165},
         targets_computed_at=T0, targets_confirmed_at=T0,
+        pending_proposal={"kinds": ["calories"], "values": {"daily_kcal": 1750, "daily_iron_mg": 27}},
         goal_overridden_by="bmi_guard", bmi_warning_overridden_at=T0,
-        last_overrides_applied=["bmi_low_goal_maintain"],
+        last_overrides_applied=[{"reason": "health_factor_pregnant"}, {"reason": "manual_kcal"}],
     )
 
 
@@ -152,8 +155,12 @@ class TestWithdrawingThePersonalCalculation:
     def test_the_whole_set_and_everything_derived_from_it_is_erased(self, person, profile):
         data = _data(_post(_event("ev-0000010", "personal_calculation", False)))
 
+        from users.consent_events import PERSONAL_CALCULATION_ERASED
+
         assert data["outcome"] == "applied"
         assert set(BODY_FIELDS) <= set(data["erased"])
+        assert data["erased"] == list(PERSONAL_CALCULATION_ERASED)
+        assert {"pending_proposal", "targets_input_snapshot", "daily_kcal", "weight_range"} <= set(data["erased"])
         p = NutritionProfile.objects.get(pk=profile.pk)
         assert (p.gender, p.age, p.height_cm, p.weight_kg, p.weight_range, p.activity_coefficient, p.goal) == (
             "", None, None, None, "", None, "",
@@ -171,7 +178,9 @@ class TestWithdrawingThePersonalCalculation:
         _data(_post(_event("ev-0000011", "personal_calculation", False)))
 
         p = NutritionProfile.objects.get(pk=profile.pk)
-        assert (p.health_flags, p.pace, p.timezone) == ({"pregnant": True}, "moderate", "Europe/Samara")
+        assert (p.health_flags, p.pace, p.timezone) == (
+            {"pregnant": True, "vegetarian": True}, "moderate", "Europe/Samara",
+        )
         assert FoodLog.objects.filter(user=person).count() == 1
 
     def test_a_grant_records_the_state_and_erases_nothing(self, person, profile):
@@ -186,23 +195,38 @@ class TestWithdrawingThePersonalCalculation:
 
 
 class TestWithdrawingHealth:
-    def test_the_flags_and_the_targets_raised_by_them_are_erased(self, person, profile):
+    def test_health_flags_go_and_diet_answers_stay(self, person, profile):
         data = _data(_post(_event("ev-0000020", "health", False)))
 
         assert data["outcome"] == "applied"
-        p = NutritionProfile.objects.get(pk=profile.pk)
-        assert p.health_flags == {}
-        assert (p.daily_iron_mg, p.daily_calcium_mg, p.daily_omega3_g, p.daily_fiber_g) == (None, None, None, None)
-        assert set(data["erased"]) == {
-            "health_flags", "daily_vitamin_d_iu", "daily_vitamin_b12_mcg", "daily_vitamin_c_mg",
-            "daily_iron_mg", "daily_calcium_mg", "daily_magnesium_mg", "daily_omega3_g", "daily_fiber_g",
-        }
+        assert NutritionProfile.objects.get(pk=profile.pk).health_flags == {"vegetarian": True}
 
-    def test_the_body_and_the_calorie_target_stay(self, person, profile):
-        _data(_post(_event("ev-0000021", "health", False)))
+    def test_the_calorie_target_raised_by_the_flags_goes_coherently(self, person, profile):
+        """Весь вид «калории» и его подпись: иначе вид остался бы «посчитан и
+        подтверждён» с пустыми полями, а железо 27 мг — беременностью числом."""
+        from nutrition.services.health_withdrawal import ERASED_FIELDS
+
+        data = _data(_post(_event("ev-0000021", "health", False)))
 
         p = NutritionProfile.objects.get(pk=profile.pk)
-        assert (p.weight_kg, p.daily_kcal, p.daily_water_ml) == (60.0, 1800, 2100)
+        assert (p.daily_kcal, p.bmr, p.daily_iron_mg, p.daily_omega3_g) == (None, None, None, None)
+        assert (p.calories_source, p.calories_confirmed_at) == (NutritionProfile.TargetsSource.NONE, None)
+        assert data["erased"] == list(ERASED_FIELDS)
+
+    def test_the_proposal_and_the_named_health_reason_go_and_other_reasons_stay(self, person, profile):
+        _data(_post(_event("ev-0000022", "health", False)))
+
+        p = NutritionProfile.objects.get(pk=profile.pk)
+        assert p.pending_proposal is None
+        assert p.last_overrides_applied == [{"reason": "manual_kcal"}]
+
+    def test_the_body_and_the_fluid_target_stay(self, person, profile):
+        _data(_post(_event("ev-0000023", "health", False)))
+
+        p = NutritionProfile.objects.get(pk=profile.pk)
+        assert (p.weight_kg, p.daily_water_ml, p.fluids_source) == (
+            60.0, 2100, NutritionProfile.TargetsSource.AYLA_CALCULATED,
+        )
 
 
 # ── Порядок и идемпотентность ─────────────────────────────────────────────
@@ -317,8 +341,11 @@ class TestTheErasureOfAPersonKnowsTheNewPointers:
         from nutrition import views
         from users import consent_events, deletion_executor, forget_all_catalog
 
+        import re
+
         for module in (views, deletion_executor, forget_all_catalog, consent_events):
-            assert "erase_personal_calculation_inputs" in inspect.getsource(module), module.__name__
+            calls = re.findall(r"^[^#\n]*\berase_personal_calculation_inputs\(", inspect.getsource(module), re.M)
+            assert calls, f"{module.__name__} не вызывает общую функцию стирания"
 
 
 # ── Предел D-2: пути записи дневника мимо согласия (DRF-2777) ──────────────
