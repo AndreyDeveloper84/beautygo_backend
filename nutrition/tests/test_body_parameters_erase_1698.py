@@ -112,6 +112,24 @@ class TestErasureIsCompleteAndKeepsTheDiary:
         assert FoodLog.objects.filter(user=proxy_user).count() == 1
         assert WaterEntry.objects.filter(user=proxy_user).count() == 1
 
+    def test_fields_that_used_to_survive_the_withdrawal_are_erased(self, api, headers, full_profile):
+        """DRF-2776: вес диапазоном, выведенное из ИМТ и подпись подтверждения
+        ориентира переживали отзыв на этой ручке (и на исполнителе удаления, и в
+        «забыть всё» — функция одна)."""
+        from datetime import datetime, timezone as dt_tz
+
+        stamp = datetime(2026, 10, 5, tzinfo=dt_tz.utc)
+        NutritionProfile.objects.filter(pk=full_profile.pk).update(
+            weight_range="55-65", goal_overridden_by="bmi_guard", bmi_warning_overridden_at=stamp,
+            last_overrides_applied=["bmi_low_goal_maintain"], targets_confirmed_at=stamp,
+        )
+
+        assert api.delete(ERASE_URL, **headers).status_code == 200
+
+        p = NutritionProfile.objects.get(pk=full_profile.pk)
+        assert (p.weight_range, p.goal_overridden_by, p.bmi_warning_overridden_at) == ("", "", None)
+        assert (p.last_overrides_applied, p.targets_confirmed_at) == ([], None)
+
     def test_untouched_fields_stay(self, api, headers, full_profile):
         full_profile.timezone = "Europe/Samara"
         full_profile.diet_preference = "vegan"
