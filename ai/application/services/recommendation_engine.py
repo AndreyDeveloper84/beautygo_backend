@@ -11,15 +11,24 @@
 именно порядок, перечислены в ``RANKED_OUTPUT_CONSUMERS`` — каждый с
 задачей, которая его снимет.
 
-Per DRF-105 / M3. Scoring model:
+Per DRF-105 / M3. Scoring model — four factors (``WEIGHT_*`` below):
 
-  rating          30%
-  distance        25%
-  service match   15%
-  client history  10%
+  rating          37.5%
+  distance        31.25%
+  service match   18.75%
+  client history  12.5%
 
-Each component returns 0.0-1.0; final score is the weighted sum, also
-0.0-1.0. Higher = better recommendation.
+Each component returns 0.0-1.0; final score is the weighted sum of the
+KNOWN components, also 0.0-1.0. Higher = better recommendation. Distance
+may be unknown (``None``, §8): it then drops out and the remaining weights
+renormalise (``ScoreBreakdown.composite``).
+
+Availability is NOT a factor. It used to weigh 20% and returned ``1.0`` for
+everyone (candidates are already filtered by ``is_booking_enabled``), so it
+was removed as a fiction and the other four renormalised by ``1/0.80`` —
+see the comment above ``WEIGHT_RATING`` and the named gap where
+``_score_availability`` used to be; guard:
+``ai/tests/test_availability_fiction_removed.py``.
 
 Designed to be **the** ranker. ``SpecialistContextBuilder`` (used by AI
 chat to pick candidates for the LLM prompt) delegates here. The
@@ -30,13 +39,12 @@ recommendation API endpoint (Phase 6, when added) will also call this.
 Cache-aside via Django default cache. Key: ``ai:recs:{client_or_anon}:{filter_hash}``.
 TTL 5 min (`AI_REC_CACHE_TTL` env). Bypass with ``use_cache=False`` for tests.
 
-## Availability score caveat
+## Availability — a named gap, not a score
 
-True slot count per specialist would call ``AvailabilityQueryService``
-N times — too expensive for a single recommendation pass. MVP uses a
-**cheap proxy**: ``is_booking_enabled`` (binary) + presence of
-``working_hours`` rows for the upcoming week. Real slot integration
-is a Phase 6 follow-up — flagged via TODO in ``_score_availability``.
+Ranking does not account for whether a master has free time. A real
+input would cost N ``AvailabilityQueryService`` calls on the hot path;
+the availability contract is DRF-1637. Until then there is no
+availability component, and the guard above refuses a weight without it.
 """
 from __future__ import annotations
 
