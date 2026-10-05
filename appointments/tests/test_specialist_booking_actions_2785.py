@@ -190,6 +190,10 @@ class TestAcknowledge:
 
         assert resp.status_code == 409, resp.content
         assert resp.data["error"]["code"] == "STALE_VERSION"
+        # Текущие время и версия — чтобы бот переспросил мастера, а не угадывал.
+        details = resp.data["error"]["details"]
+        assert details["current_version"] == 1
+        assert details["start_at"] == appt.start_datetime.isoformat()
         appt.refresh_from_db()
         assert appt.master_acknowledged_at is None
         assert _events(OutboxEvent.Topic.BOOKING_ACKNOWLEDGED) == []
@@ -354,6 +358,7 @@ class TestReviewFindings:
 
         assert resp.status_code == 409, resp.content
         assert resp.data["error"]["code"] == "STALE_VERSION"
+        assert resp.data["error"]["details"]["current_version"] == 2, "версия строки, не снимка"
         appt.refresh_from_db()
         assert appt.status == Appointment.Status.CONFIRMED
         assert _events(OutboxEvent.Topic.BOOKING_CANCELLED) == []

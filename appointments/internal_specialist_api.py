@@ -214,10 +214,23 @@ class _SpecialistBookingBase(APIView):
 
     @staticmethod
     def _stale(appointment, expected_version) -> Response:
+        """409 с ТЕКУЩИМ временем и версией в ``details``.
+
+        Бот показывает мастеру, на что тот отвечает: запись перенесли — он
+        видит новое время и решает заново. Без этого боту оставалось бы
+        повторить вызов с угаданной версией, то есть подтвердить время,
+        которого мастер не видел. Людей в ``details`` нет.
+        """
         return error_response(
             "STALE_VERSION",
             f"Appointment {appointment.id} expected_version={expected_version} "
             f"but current version is {appointment.version}.",
+            details={
+                "current_version": appointment.version,
+                "start_at": appointment.start_datetime.isoformat(),
+                "end_at": appointment.end_datetime.isoformat(),
+                "status": appointment.status,
+            },
             status_code=409,
         )
 
@@ -275,8 +288,9 @@ class InternalSpecialistBookingCancelView(_SpecialistBookingBase):
         )
         try:
             CancelBookingService().execute(dto)
-        except StaleVersionError as exc:
-            return error_response("STALE_VERSION", str(exc), status_code=409)
+        except StaleVersionError:
+            appointment.refresh_from_db()
+            return self._stale(appointment, body.validated_data.get("expected_version"))
         except CancellationNotAllowedError as exc:
             return error_response("CANCELLATION_NOT_ALLOWED", str(exc), status_code=422)
         except InvalidStateTransitionError as exc:
@@ -315,8 +329,9 @@ class InternalSpecialistBookingRescheduleView(_SpecialistBookingBase):
             RescheduleBookingService().execute(dto)
         except SlotNotAvailableError as exc:
             return error_response("SLOT_NOT_AVAILABLE", str(exc), status_code=409)
-        except StaleVersionError as exc:
-            return error_response("STALE_VERSION", str(exc), status_code=409)
+        except StaleVersionError:
+            appointment.refresh_from_db()
+            return self._stale(appointment, body.validated_data["expected_version"])
         except AppointmentTerminalError as exc:
             return error_response("APPOINTMENT_TERMINAL", str(exc), status_code=409)
         except RescheduleNotAllowedError as exc:
