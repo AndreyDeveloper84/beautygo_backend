@@ -277,6 +277,60 @@ class TestOrderAndRepeats:
         assert NutritionProfile.objects.get(pk=profile.pk).weight_kg is None
 
 
+@pytest.mark.django_db(transaction=True)
+class TestTwoEventsAtOnce:
+    """Два первых события одного человека одновременно: строки состояния ещё
+    нет, и блокировать её нечем. Старшее согласие задерживается сразу после
+    чтения состояния; младший отзыв за это время проходит целиком. Без
+    очереди на человека старшее записалось бы поверх младшего — состояние
+    читалось бы «дано», и рассылка вернулась бы тому, кто отозвал."""
+
+    def test_an_older_grant_held_up_mid_flight_does_not_overwrite_a_newer_withdrawal(self):
+        import threading
+
+        from django.db import connection
+
+        from users import consent_events
+        from users.consent_events import ConsentEvent, apply_consent_event
+
+        person = User.objects.create(username="bot:max:2776-race", role="client", is_proxy=True)
+        grant = ConsentEvent("ev-race-grant", "food_diary_processing", True, T0)
+        withdrawal = ConsentEvent("ev-race-withdraw", "food_diary_processing", False, T0 + timedelta(hours=1))
+        grant_has_read = threading.Event()
+        withdrawal_done = threading.Event()
+        original = consent_events._is_stale
+
+        def held_up(state, event):
+            verdict = original(state, event)
+            if event.event_id == grant.event_id:
+                grant_has_read.set()
+                withdrawal_done.wait(timeout=3)  # с очередью отзыв ждёт нас — не дождёмся, идём дальше
+            return verdict
+
+        def run(event, done=None):
+            try:
+                apply_consent_event(User.objects.get(pk=person.pk), event)
+            finally:
+                if done is not None:
+                    done.set()
+                connection.close()
+
+        with patch.object(consent_events, "_is_stale", held_up):
+            first = threading.Thread(target=run, args=(grant,))
+            first.start()
+            assert grant_has_read.wait(timeout=10)
+            second = threading.Thread(target=run, args=(withdrawal, withdrawal_done))
+            second.start()
+            first.join(timeout=20)
+            second.join(timeout=20)
+
+        state = ConsentState.objects.get(user=person, consent_type="food_diary_processing")
+        assert (state.granted, state.event_id) == (False, "ev-race-withdraw")
+        assert set(ConsentEventReceipt.objects.values_list("event_id", "outcome")) == {
+            ("ev-race-grant", "applied"), ("ev-race-withdraw", "applied"),
+        }
+
+
 # ── D-2: бьюти-инсайт ─────────────────────────────────────────────────────
 
 
