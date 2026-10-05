@@ -94,6 +94,13 @@ EVENT_HANDLERS: dict[str, EventHandler] = {
     OutboxEvent.Topic.SYSTEM_MODULE_HEALTH_DEGRADED: _log_handler(
         "system.module.health.degraded",
     ),
+    # DRF-2785 — потребитель только внешний (бот говорит клиенту «мастер
+    # подтвердил»), но локальный обработчик обязан быть по той же причине,
+    # что у системного сигнала выше: диспетчер выбирает все необработанные
+    # строки, и без обработчика строка висела бы вечно.
+    OutboxEvent.Topic.BOOKING_ACKNOWLEDGED: _log_handler(
+        "booking.acknowledged",
+    ),
 }
 
 

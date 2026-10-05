@@ -76,6 +76,19 @@ BOT_ALLOWED_EVENT_NAMES = frozenset(
 # to the bot under this name.
 INTERNAL_ONLY_TOPICS = frozenset({"booking.no_show"})
 
+# Topics Ayla now emits whose name the bot's ingest allowlist does not carry
+# YET. Each entry names what has to happen on the bot side; until then the
+# topic must stay off OUTBOX_EXTERNAL_DELIVERY_TOPICS (see the test below),
+# so the rows stay local and nothing reaches the bot to be rejected. When the
+# bot PR lands, move the name into BOT_ALLOWED_EVENT_NAMES above and delete
+# the entry here.
+AWAITING_BOT_ALLOWLIST: dict[str, str] = {
+    "booking.acknowledged": (
+        "DRF-2785: bot adds the name to apps/eventbus/ingest_envelope."
+        "ALLOWED_EVENT_NAMES and a consumer (client text «мастер подтвердил»)"
+    ),
+}
+
 
 # --- fixtures (mirror the #509/#511 setup) ---------------------------------
 
@@ -175,12 +188,32 @@ class TestTaxonomyConformance:
             t for t in declared
             if t.startswith("booking.") or t.startswith("payment.")
         }
-        offenders = booking_payment - BOT_ALLOWED_EVENT_NAMES - INTERNAL_ONLY_TOPICS
+        offenders = (
+            booking_payment - BOT_ALLOWED_EVENT_NAMES - INTERNAL_ONLY_TOPICS
+            - set(AWAITING_BOT_ALLOWLIST)
+        )
         assert not offenders, (
             f"OutboxEvent.Topic declares booking/payment topics the bot "
             f"ingest allowlist rejects (→ 422/DLQ): {sorted(offenders)}. "
             "Either the name drifted or it must be marked internal-only."
         )
+
+    def test_a_topic_awaiting_the_bot_is_not_shipped_by_default(self):
+        """The escape hatch above holds only while the topic stays local.
+
+        The default allowlist (no env) must not carry it; a stand that adds
+        it before the bot accepts the name would ship rows into a 422/DLQ.
+        """
+        from django.conf import settings as live
+        assert AWAITING_BOT_ALLOWLIST, "empty — remove this test with the dict"
+        for topic in AWAITING_BOT_ALLOWLIST:
+            assert topic not in BOT_ALLOWED_EVENT_NAMES, (
+                f"{topic}: the bot accepts it now — move it out of AWAITING_BOT_ALLOWLIST"
+            )
+            assert topic in {v for v, _l in OutboxEvent.Topic.choices}
+            assert topic not in (live.OUTBOX_EXTERNAL_DELIVERY_TOPICS or ()), (
+                f"{topic} is shipped while the bot ingest still rejects it"
+            )
 
     def test_no_show_is_not_a_cross_service_name(self):
         """Guard the modeling decision: booking.no_show must never be in
@@ -192,6 +225,15 @@ class TestTaxonomyConformance:
 
 @pytest.mark.django_db
 class TestBookingCreatedPayload:
+    def test_created_carries_the_version_from_the_row(
+        self, client_user, specialist, service,
+    ):
+        """DRF-2785 — the bot's mirror must know the version from birth:
+        the master's «Подтверждаю» on a never-moved booking sends it."""
+        appt = _create_booking(client_user, specialist, service)
+        evt = OutboxEvent.objects.get(topic=OutboxEvent.Topic.BOOKING_CREATED)
+        assert evt.data["version"] == appt.version == 1
+
     def test_created_carries_consumer_required_keys(
         self, client_user, specialist, service,
     ):

@@ -188,6 +188,29 @@ class Appointment(models.Model):
     # expected_version yet" and "version 0" aren't confusable in logs.
     version = models.PositiveIntegerField(default=1)
 
+    # DRF-2785 (решение владельца 05.10, вариант «в») — мастер ответил на
+    # клиентскую запись «✅ Подтверждаю». Это ФАКТ ответа, а не статус:
+    # запись без предоплаты уже CONFIRMED с момента создания (DRF-1007), и
+    # модель записи этим не меняется — слот, напоминания и всё, что читает
+    # ``status``, видят то же, что и без подтверждения.
+    #
+    # Версия хранится рядом со временем, потому что подтверждение относится
+    # к КОНКРЕТНОМУ времени визита: после переноса ``version`` растёт, и
+    # «мастер подтвердил» становится видимо устаревшим
+    # (``master_acknowledged_version != version``), а не молча переносится
+    # на время, которого мастер не видел.
+    master_acknowledged_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Когда мастер подтвердил запись (DRF-2785). Статус не меняет.",
+    )
+    master_acknowledged_version = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text=(
+            "Appointment.version, к которой относится подтверждение мастера. "
+            "Не равна version — подтверждение было до переноса."
+        ),
+    )
+
     class Meta:
         ordering = ['-start_datetime']
         verbose_name = 'Запись'
@@ -912,6 +935,13 @@ class OutboxEvent(models.Model):
         SYSTEM_MODULE_HEALTH_DEGRADED = (
             "system.module.health.degraded",
             "Модуль деградировал (системный сигнал)",
+        )
+        # DRF-2785 — мастер ответил «✅ Подтверждаю» на клиентскую запись.
+        # Статус записи НЕ меняется (вариант «в» владельца 05.10); событие
+        # нужно боту, чтобы сказать клиенту «мастер подтвердил запись».
+        BOOKING_ACKNOWLEDGED = (
+            "booking.acknowledged",
+            "Мастер подтвердил запись",
         )
 
     class BotDeliveryStatus(models.TextChoices):
