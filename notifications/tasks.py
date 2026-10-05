@@ -364,9 +364,17 @@ def dispatch_beauty_insights() -> dict:
 
     # Active users: at least one FoodLog in the last week. Skip dormant
     # accounts so we don't burn LLM tokens on cold users.
+    # DRF-2776 (решение владельца 05.10, D-2): инсайт строится LLM по дневнику
+    # питания и чтит согласие ``food_diary_processing``. Кто его отозвал — тому
+    # не шлём. Неизвестное состояние — не отзыв (решение (б) главного окна):
+    # запись в дневник идёт под этим согласием, а пути записи мимо него —
+    # DRF-2777, предел назван узлом-xfail.
+    from users.consent_events import food_diary_withdrawn_user_ids
+
     active_user_ids = list(
         FoodLog.objects
         .filter(logged_at__gte=now - timedelta(days=7))
+        .exclude(user_id__in=food_diary_withdrawn_user_ids())
         .values_list("user_id", flat=True).distinct()
     )[: dj_settings.BEAUTY_INSIGHT_USER_CAP]
 

@@ -138,6 +138,11 @@ REST_FRAMEWORK = {
         # Scoped: service-to-service /nutrition/internal/* — looser than
         # client-app rate; bot fans out across many BotUsers.
         'food_scan_internal': '60/min',
+        # DRF-2776 — смены согласия от бота. Бот доставляет с одного адреса и
+        # разбирает накопившееся пачкой (сегодня в его ящике 65 событий);
+        # отказ здесь — задержка отзыва, а не защита от перебора: ручка
+        # закрыта токеном. 300 — соседи `food_photo_internal`.
+        'consent_events_internal': '300/min',
         # DRF-2607 — MAX signature → salon administrator's token. Not the
         # client-login bucket `auth` (10/min guards ONE person's login against
         # guessing): this exchange is service-to-service — the bot spreads it

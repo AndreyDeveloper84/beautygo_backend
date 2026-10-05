@@ -201,6 +201,7 @@ DELETE: dict[str, str] = {
     "appointments.IdempotencyKey.user": "строки (кэш тел запросов)",
     # личность
     "users.UserPersonalContext.user": "erase_personal_context(initiator=deletion_executor)",
+    "users.ConsentState.user": "строки (последнее известное состояние согласия, DRF-2776)",
     "users.SocialAccount.user": "строки",
     "users.DeviceToken.user": "строки",
     "users.AnonymousSession.user": "строки",
@@ -229,6 +230,10 @@ ANONYMISE: dict[str, str] = {
     "billing.SpecialistSubscription.user": "payment_method_id/card_brand стереть сразу (D8)",
     "billing.BillingConsent.user": "revoked_at=now",
     "analytics.AnalyticsEvent.actor": "NULL (события без значений — счётчики, AMD-010)",
+    "users.ConsentEventReceipt.user": (
+        "NULL — квитанция доставки смены согласия (тип, исход, время, имена стёртых полей) "
+        "остаётся без указания на человека (DRF-2776)"
+    ),
     "users.SalonAdminLinkRequest.user": (
         "NULL; external_user_id → deleted:<pk прокси> — аудит операции (кто, когда, какой салон) "
         "остаётся, MAX-идентификатор не переживает удаление личности (DRF-2085)"
@@ -659,6 +664,8 @@ def _erase_catalog(user) -> dict:
     from reviews.models import Review
     from users.models import (
         AnonymousSession,
+        ConsentEventReceipt,
+        ConsentState,
         DeviceToken,
         FavoriteSpecialist,
         Profile,
@@ -887,6 +894,12 @@ def _erase_catalog(user) -> dict:
     anonymised["analytics.AnalyticsEvent.actor"] = AnalyticsEvent.objects.filter(
         actor=user
     ).update(actor=None)
+    # DRF-2776 — состояние согласий человека не нужно без человека;
+    # квитанции доставки остаются журналом, но без указания на него.
+    _delete("users.ConsentState", ConsentState.objects.filter(user=user))
+    anonymised["users.ConsentEventReceipt.user"] = ConsentEventReceipt.objects.filter(
+        user=user
+    ).update(user=None)
 
     # 7a. Строковый субъект (SUBJECT_REF, DRF-1906 ч.2). Снимок контекста решения:
     # содержимое стирается, строка остаётся — ссылка набора цела, digest доказывает,
@@ -1026,6 +1039,7 @@ def _residue(user, *, external_name: str | None = None) -> dict[str, int]:
         TenantUserRelationship,
         UserPersonalContext,
     )
+    from users.models import ConsentEventReceipt, ConsentState
     from wellness.models import DesiredOutcome, PersonalPlan, PlanAction, ProgressObservation
     from ai.models import Conversation
     from analytics.models import AnalyticsEvent
@@ -1079,6 +1093,8 @@ def _residue(user, *, external_name: str | None = None) -> dict[str, int]:
             user=user, is_active=True
         ),
         "analytics.AnalyticsEvent.actor": AnalyticsEvent.objects.filter(actor=user),
+        "users.ConsentState": ConsentState.objects.filter(user=user),
+        "users.ConsentEventReceipt.user": ConsentEventReceipt.objects.filter(user=user),
         "users.SalonAdminLinkRequest.user": SalonAdminLinkRequest.objects.filter(user=user),
         "users.SpecialistIdentityLinkRequest.user": (
             SpecialistIdentityLinkRequest.objects.filter(user=user)

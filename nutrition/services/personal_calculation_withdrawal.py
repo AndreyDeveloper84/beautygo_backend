@@ -33,6 +33,15 @@
 
 ``FoodLog`` / ``WaterEntry`` / ``FoodScan`` — история дневника; ``timezone``,
 ``diet_preference``, ``health_flags``, ``pace`` — не параметры расчёта по §2.
+``health_flags`` стираются отзывом своего согласия (``health``) —
+:mod:`nutrition.services.health_withdrawal`.
+
+### Что добавлено 05.10 (DRF-2776)
+
+``weight_range``, три поля, выведенные из ИМТ, и ``targets_confirmed_at``
+(:data:`DERIVED_EMPTY_BY_FIELD`). Найдено, когда функцию подключали к
+событию отзыва от бота: раньше они переживали отзыв на всех трёх входах —
+ручке «Отключить и удалить», исполнителе удаления и «забыть всё».
 """
 
 from __future__ import annotations
@@ -54,13 +63,29 @@ from nutrition.management.commands.purge_unconsented_body_parameters import (
 from nutrition.models import NutritionProfile
 from nutrition.services.targets_state import KIND_SOURCE_FIELD, KIND_STAMP_FIELD
 
-#: Шесть параметров §2 = четыре столбца §144 + активность и цель.
-WITHDRAWN_FIELDS: tuple[str, ...] = (*PURGED_FIELDS, "activity_coefficient", "goal")
+#: Шесть параметров §2 = четыре столбца §144 + активность и цель — плюс
+#: ``weight_range`` (DRF-2776): тот же вес меньшего разрешения, закрытый и на
+#: входе (``personal_calculation_consent.PERSONAL_CALCULATION_FIELDS``).
+#: Оставить его значило бы оставить вес.
+WITHDRAWN_FIELDS: tuple[str, ...] = (*PURGED_FIELDS, "weight_range", "activity_coefficient", "goal")
 
 _EMPTY_BY_FIELD = {
     **EMPTY_VALUE_BY_FIELD,
+    "weight_range": "",
     "activity_coefficient": NutritionProfile._meta.get_field("activity_coefficient").default,
     "goal": "",
+}
+
+#: Выведенное из ИМТ и подпись подтверждения ориентира (DRF-2776). Поля
+#: ``goal_overridden_by`` / ``bmi_warning_overridden_at`` /
+#: ``last_overrides_applied`` записывают, что расчёт сделал из веса и роста
+#: («цель снижения заменена: ИМТ низкий»), — то есть хранят тело словами.
+#: ``targets_confirmed_at`` без ориентира — подпись под тем, чего нет.
+DERIVED_EMPTY_BY_FIELD = {
+    "goal_overridden_by": "",
+    "bmi_warning_overridden_at": None,
+    "last_overrides_applied": [],
+    "targets_confirmed_at": None,
 }
 
 
@@ -109,14 +134,17 @@ def erase_personal_calculation_inputs(user) -> WithdrawalOutcome:
         for field in KIND_STAMP_FIELD.values():
             setattr(p, field, None)
 
-        # 2. Входы.
+        # 2. Входы — и то, что расчёт из них вывел.
         for f in WITHDRAWN_FIELDS:
             setattr(p, f, _EMPTY_BY_FIELD[f])
+        for f, empty in DERIVED_EMPTY_BY_FIELD.items():
+            setattr(p, f, empty)
         p.targets_input_snapshot = _strip_purged(p.targets_input_snapshot)
 
         p.save(
             update_fields=[
                 *TARGET_FIELDS, *PROVENANCE_FIELDS, *WITHDRAWN_FIELDS,
+                *DERIVED_EMPTY_BY_FIELD,
                 *KIND_SOURCE_FIELD.values(), *KIND_STAMP_FIELD.values(),
                 "updated_at",
             ]
@@ -126,6 +154,7 @@ def erase_personal_calculation_inputs(user) -> WithdrawalOutcome:
         p.refresh_from_db()
         residual_targets = [f for f in TARGET_FIELDS if getattr(p, f) is not None]
         residual_inputs = [f for f in WITHDRAWN_FIELDS if getattr(p, f) != _EMPTY_BY_FIELD[f]]
+        residual_inputs += [f for f, empty in DERIVED_EMPTY_BY_FIELD.items() if getattr(p, f) != empty]
         left_in_snapshot = _names_left_in(p.targets_input_snapshot)
         if p.pending_proposal is not None:
             left_in_snapshot = [*left_in_snapshot, "pending_proposal"]
