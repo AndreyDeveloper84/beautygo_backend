@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 from drf_spectacular.utils import OpenApiResponse, extend_schema
@@ -37,9 +38,34 @@ from users.deletion_requests import deletion_block_for, deletion_refusal
 
 from ._serializers import ResolveRequestSerializer, ResolveResponseSerializer, decision_to_payload
 from ._source_binding import CandidateSourceNotConfigured, get_candidate_source
-from .api import RecommendationRequest, SafetyState, Surface, resolve
+from .api import NeedOrigin, NeedSpec, RecommendationRequest, SafetyState, Surface, resolve
 
 logger = logging.getLogger(__name__)
+
+
+def _with_saved_goal(need: NeedSpec, subject) -> NeedSpec:
+    """Нужда «по цели» без ключа — ключ сохранённой цели того, кого спрашивают.
+
+    Домашняя полка мини-приложения шлёт ``need.origin=GOAL`` без
+    ``goal_key``: бот цели человека не знает, и знать её не должен — она
+    живёт здесь. Без подстановки резолвер подбирал так, будто цели нет
+    (источник без фильтра цели, S2 «нужда не названа»), хотя путь
+    приложения каталога (``users/catalog_recommendations_api``) тому же
+    человеку подставлял его цель. Правило то же и читатель тот же —
+    :func:`goals.wiring.saved_goal_key_for`, под тем же флагом.
+
+    Названный в теле ключ не перекрывается: сказанное в запросе старше
+    сохранённого (OD-1). Другие происхождения нужды не трогаются — у
+    «памяти» и «явных слов» своя семантика.
+    """
+    from goals.wiring import saved_goal_key_for
+
+    if need.origin is not NeedOrigin.GOAL or need.goal_key:
+        return need
+    saved = saved_goal_key_for(subject)
+    if not saved:
+        return need
+    return dataclasses.replace(need, goal_key=saved)
 
 
 class RecommendationResolveView(APIView):
@@ -91,7 +117,7 @@ class RecommendationResolveView(APIView):
                 subject_ref=str(request.user.id),
                 surface=Surface(serializer.validated_data["surface"]),
                 scope=serializer.build_scope(),
-                need=serializer.build_need(),
+                need=_with_saved_goal(serializer.build_need(), request.user),
                 constraints=serializer.build_constraints(),
                 safety_state=SafetyState(serializer.validated_data["safety_state"]),
                 tie_break_seed=serializer.validated_data.get("tie_break_seed"),

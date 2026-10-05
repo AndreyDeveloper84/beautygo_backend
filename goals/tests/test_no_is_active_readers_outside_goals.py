@@ -202,7 +202,12 @@ def test_nobody_outside_goals_reads_clientgoal_is_active() -> None:
         if MODEL_NAME in src and _binds_clientgoal(src)
     )
     assert census, "ни одного модуля вне goals/ с привязкой к ClientGoal — измерялся не тот предмет"
-    for expected in ("users/catalog_recommendations_api.py", "core/management/commands/surface_state.py"):
+    # Положительный контроль — модули, которые ClientGoal ЗАВЕДОМО берут.
+    # `users/catalog_recommendations_api.py` здесь был до DRF-2772: его
+    # читатель сохранённой цели переехал в `goals.wiring.saved_goal_key_for`
+    # (один читатель на обе поверхности), и модуль ClientGoal больше не
+    # трогает. На его место — `users/identity_card.py`, импорт модели.
+    for expected in ("users/identity_card.py", "core/management/commands/surface_state.py"):
         assert expected in census, (expected, census)
 
     offenders = {
