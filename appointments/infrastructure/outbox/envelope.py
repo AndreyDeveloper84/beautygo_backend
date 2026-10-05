@@ -87,6 +87,9 @@ EVENT_VERSIONS: dict[str, int] = {
     # DRF-2196 (а1, §64) — системный сигнал; user_id и tenant_id = null.
     # data: {module_name, severity, metric}; людей нет по построению.
     "system.module.health.degraded": 1,
+    # DRF-2785 — мастер подтвердил запись; статус не меняется.
+    # data: appointment_id, specialist_id, version, acknowledged_at, start_at.
+    "booking.acknowledged": 1,
 }
 
 
