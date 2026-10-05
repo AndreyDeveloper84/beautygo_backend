@@ -225,6 +225,15 @@ class TestTaxonomyConformance:
 
 @pytest.mark.django_db
 class TestBookingCreatedPayload:
+    def test_created_carries_the_version_from_the_row(
+        self, client_user, specialist, service,
+    ):
+        """DRF-2785 — the bot's mirror must know the version from birth:
+        the master's «Подтверждаю» on a never-moved booking sends it."""
+        appt = _create_booking(client_user, specialist, service)
+        evt = OutboxEvent.objects.get(topic=OutboxEvent.Topic.BOOKING_CREATED)
+        assert evt.data["version"] == appt.version == 1
+
     def test_created_carries_consumer_required_keys(
         self, client_user, specialist, service,
     ):

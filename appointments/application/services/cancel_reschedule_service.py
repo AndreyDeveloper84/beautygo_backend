@@ -567,6 +567,10 @@ class RescheduleBookingService:
                 "new_start_at": new_interval.start_at.isoformat(),
                 "old_start_at": old_start_at.isoformat(),
                 "rescheduled_by": rescheduled_by,
+                # DRF-2785 — the version AFTER this move, as on the canonical
+                # topic above: the legacy consumer can keep the mirror's
+                # version current too. New OPTIONAL field (§4.1), non-breaking.
+                "version": new_version,
             },
             user_id=appointment.client_id,
             tenant_id=tenant_id_for_event,

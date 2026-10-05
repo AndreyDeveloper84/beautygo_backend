@@ -263,6 +263,10 @@ class TestCloseAndMove:
         assert resp.status_code == 200, resp.content
         revision = AppointmentRevision.objects.get(appointment=appt)
         assert revision.actor_role == "specialist"
+        # DRF-2785 — the legacy topic carries the version too, so a mirror
+        # fed by it stays current for the next expected_version.
+        [legacy] = _events(OutboxEvent.Topic.BOOKING_RESCHEDULED)
+        assert legacy.payload["data"]["version"] == 2
         assert revision.basis == "internal_bot"
         assert revision.actor_id == master.user_id
 
