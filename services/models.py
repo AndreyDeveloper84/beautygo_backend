@@ -164,6 +164,25 @@ class ServiceTemplate(models.Model):
         PROVISIONAL = "provisional", "Черновой"
         APPROVED = "approved", "Одобрен"
 
+    class ServiceFamily(models.TextChoices):
+        """Семейство body-care услуги — контракт Body Care v0.1 §2.1 (CAT-1).
+
+        Четыре значения первой версии контракта, и только они: семейство
+        решает, какие факты конфигурации салон обязан назвать (CAT-5) и
+        какие вопросы скрининга задаются (бот). Услуга вне body-care —
+        стрижка, маникюр — семейства не имеет: ``NULL``, а не пятое
+        значение «прочее». «Прочее» читалось бы как классифицированное.
+
+        Значения — строчные, как у остальных перечислений этого файла;
+        написание контракта (``BODY_WRAP``) — имя члена. Перевод на провод
+        — дело API (CAT-11), а не хранения.
+        """
+
+        BODY_WRAP = "body_wrap", "Обёртывание"
+        SPA_BODY = "spa_body", "SPA-уход за телом"
+        MECHANICAL_SCRUB = "mechanical_scrub", "Механический скраб"
+        ACID_CARE = "acid_care", "Кислотный уход"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     category = models.ForeignKey(
         ServiceCategory,
@@ -279,6 +298,35 @@ class ServiceTemplate(models.Model):
     #: Основание одобрения — разбор, реестр владельца, тикет.
     approval_source_ref = models.CharField(max_length=200, blank=True, default="")
 
+    # -- Body Care: семейство и версии (контракт v0.1 §2.1, CAT-1) ----------
+    # Решение владельца D-3 (06.10): расширять ServiceTemplate, а не заводить
+    # отдельный CanonicalService. Здесь — только фундамент: что за семейство
+    # и по каким версиям канона и политик оно оценивалось. Скрининг,
+    # пределы (LIM) и классификатор кислот сюда не входят — они ждут
+    # решений клиники и юриста (D-1, D-2, D-4).
+    service_family = models.CharField(
+        max_length=24,
+        choices=ServiceFamily.choices,
+        null=True,
+        blank=True,
+        help_text="Семейство body-care; пусто — услуга вне body-care",
+    )
+    #: Версия канонического описания услуги. Обязательна, как только
+    #: назначено семейство (CheckConstraint ниже): решение о безопасности,
+    #: принятое по канону без версии, нельзя потом воспроизвести.
+    canonical_version = models.CharField(max_length=32, blank=True, default="")
+    #: Версия клинической политики, по которой оценивается услуга.
+    #: Пусто — клиническая политика ещё не утверждена (D-2/D-4); не
+    #: обязательна, чтобы канон можно было завести до клиники.
+    clinical_policy_version = models.CharField(max_length=32, blank=True, default="")
+    #: Версия политики владельца (что салону разрешено предлагать).
+    owner_policy_version = models.CharField(max_length=32, blank=True, default="")
+    #: Юридический статус. Семантика значений не утверждена — ждёт юриста
+    #: РФ (D-1), поэтому ни словаря, ни умолчания: ``NULL`` значит
+    #: «не определён», и читатель обязан понимать это как «не разрешено»
+    #: (fail-closed), а не как «разрешено, потому что не запрещено».
+    legal_status = models.CharField(max_length=32, null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -360,6 +408,27 @@ class ServiceTemplate(models.Model):
                     | ~models.Q(health_check_rule_version="")
                 ),
                 name="servicetemplate_health_check_rule_carries_version",
+            ),
+            # Body Care CAT-1: назначенное семейство без версии канона —
+            # решение, которое нельзя воспроизвести. Услуга вне body-care
+            # (семейство NULL) версии не требует.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(service_family__isnull=True)
+                    | ~models.Q(canonical_version="")
+                ),
+                name="servicetemplate_family_requires_canonical_version",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(service_family__isnull=True)
+                    | models.Q(
+                        service_family__in=[
+                            "body_wrap", "spa_body", "mechanical_scrub", "acid_care",
+                        ]
+                    )
+                ),
+                name="servicetemplate_service_family_known",
             ),
         ]
 
