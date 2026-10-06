@@ -252,6 +252,20 @@ def _resolve_layer(
     )
 
 
+def _separation_log_fields(decision: RecommendationDecision) -> str:
+    """``stage=S2 state=SPLIT best_group=1`` — разделение лучшего яруса для лога (DRF-2805).
+
+    ``stage=-`` — ни одна стадия не разделила (поле ``None`` у резолвера:
+    ``NOT_SPLIT``, один кандидат, пусто). Ключ=значение — та же форма, что у
+    переписи рядом, чтобы строку можно было разобрать одним правилом.
+    """
+    stage = decision.separation_stage.value if decision.separation_stage else "-"
+    return (
+        f"stage={stage} state={decision.separation_state.value} "
+        f"best_group={decision.best_group_size}"
+    )
+
+
 def _shelf(decision: RecommendationDecision | None, *, limit: int) -> dict[str, Any]:
     """Полка = строки решения ПЛЮС коды, объясняющие пустоту.
 
@@ -558,14 +572,20 @@ class CatalogRecommendationsView(APIView):
         # это не диагностика края, а единственное, по чему видно движение:
         # подтвердили связь — число переехало из одной колонки в другую.
         # Замер пилота 08.09 после миграции: 206 / 59 / 0.
+        #
+        # DRF-2805 — какая стадия разделила лучший ярус полки 2 и сколько в нём
+        # кандидатов. Видно было только в ответе резолвера, а стендовая
+        # проверка ранжирования (R0, DRF-2789) — чтение лога, без ORM.
+        # Только наблюдаемость: на выдачу не влияет.
         logger.info(
             "catalog.recommendations user_id=%s goal=%r goal_key=%r safety=%s "
-            "l1=%d l2=%d l3_cats=%d l2_codes=%s l2_census[%s]",
+            "l1=%d l2=%d l3_cats=%d l2_codes=%s l2_census[%s] l2_separation[%s]",
             request.user.id, goal, goal_key, safety_state.value,
             len(layer_1["items"]), len(layer_2["items"]),
             len(layer_3.get("categories", [])),
             layer_2["reason_codes"],
             layer_2_decision.census.as_log_fields(),
+            _separation_log_fields(layer_2_decision),
         )
 
         return success_response({

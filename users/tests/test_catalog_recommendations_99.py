@@ -890,3 +890,56 @@ class TestSalonStateGatesThePool:
         picks = {i["candidate"]["id"] for i in r.json()["data"]["layer_2_ayla_picks"]["items"]}
         assert _key(healthy) in picks
         assert _key(orphan) not in picks
+
+
+@pytest.mark.django_db
+class TestShelfLogCarriesSeparation:
+    """DRF-2805 — строка лога полки несёт разделение лучшего яруса полки 2.
+
+    Стендовая проверка ранжирования (R0, DRF-2789) — чтение этой строки: какая
+    стадия разделила лучший ярус и сколько в нём кандидатов. Только наблюдаемость.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
+    @staticmethod
+    def _post_and_read_the_line(body) -> str:
+        """Строка, которую ручка отдала логгеру, — отрендеренная из его аргументов.
+
+        Через обёртку логгера модуля, а не caplog: настройка логирования проекта
+        может не пускать записи к корню, и пустой caplog выглядел бы как «строки нет».
+        """
+        from unittest import mock
+
+        import users.catalog_recommendations_api as api_module
+
+        with mock.patch.object(api_module.logger, "info", wraps=api_module.logger.info) as info:
+            response = _api().post(URL, body, format="json")
+        assert response.status_code == 200, response.content
+        lines = [
+            call.args[0] % call.args[1:] for call in info.call_args_list
+            if call.args and str(call.args[0]).startswith("catalog.recommendations ")
+        ]
+        assert len(lines) == 1, lines
+        return lines[0]
+
+    def test_a_split_names_the_stage_and_the_best_group(self, customer, tenant_new, manicure_category):
+        exact = _make_specialist(tenant_new, suffix="2805", name="Exact")
+        partial = _make_specialist(tenant_new, suffix="2806", name="Partial")
+        _make_service(exact, manicure_category, name="Маникюр")
+        _make_service(partial, manicure_category, name="Покрытие гель-лаком")
+
+        line = self._post_and_read_the_line(_body(goal="маникюр"))
+
+        assert "l2_separation[stage=S2 state=SPLIT best_group=1]" in line
+
+    def test_no_split_is_said_as_such(self, customer, tenant_new, manicure_category):
+        """Нужда не названа — S2 молчит, ярус один: ``stage=-``, а не выдуманная стадия."""
+        for i in range(2):
+            _make_service(_make_specialist(tenant_new, suffix=f"281{i}", name=f"Tie {i}"), manicure_category)
+
+        line = self._post_and_read_the_line(_body())
+
+        assert "l2_separation[stage=- state=NOT_SPLIT best_group=2]" in line
