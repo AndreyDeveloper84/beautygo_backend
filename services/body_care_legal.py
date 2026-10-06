@@ -38,12 +38,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from services.models import ServiceTemplate
+from services.models import OfferingConfigFact, ServiceTemplate
 
 Family = ServiceTemplate.ServiceFamily
 LC = ServiceTemplate.LegalServiceClass
 
-SYSTEM_DERIVED = "system_derived"
+#: Тот же словарь провенанса, что у фактов конфигурации (CAT-4, §5).
+SYSTEM_DERIVED = OfferingConfigFact.SourceType.SYSTEM_DERIVED.value
 RULE = "bc-7a2-default"
 #: Меняется вместе с любой правкой правила: кандидат, предложенный по
 #: правилу без версии, нельзя потом воспроизвести.

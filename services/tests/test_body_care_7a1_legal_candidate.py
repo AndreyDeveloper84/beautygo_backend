@@ -62,7 +62,9 @@ def test_wrap_and_scrub_get_a_non_medical_candidate(category, family) -> None:
 
     assert candidate.value == LC.NON_MEDICAL_COSMETIC
     assert candidate.subject is True
-    assert candidate.provenance == SYSTEM_DERIVED
+    # Литерал, а не импортированная константа: узел из константы не ловит
+    # смену константы. Значение — из словаря провенанса CAT-4.
+    assert candidate.provenance == "system_derived" == SYSTEM_DERIVED
     assert (candidate.rule, candidate.rule_version) == (RULE, RULE_VERSION)
     assert RULE_VERSION
 
