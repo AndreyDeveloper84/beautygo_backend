@@ -38,6 +38,9 @@ pytestmark = pytest.mark.django_db
 
 URL = "/api/v1/nutrition/food-log/"
 
+#: DRF-2777 — клиентская ручка пишет дневник только под утверждённым основанием.
+ATTESTED = {"consent": {"type": "food_diary_processing", "document_version": "food-diary-v1"}}
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -112,6 +115,7 @@ class TestAuthAndAppType:
         c = APIClient()
         c.defaults["HTTP_X_APP_TYPE"] = "client"
         resp = c.post(URL, {
+            **ATTESTED,
             "dish_name": "борщ", "portion_multiplier": 1.0,
             "meal_type": "lunch",
         }, format="json")
@@ -122,6 +126,7 @@ class TestAuthAndAppType:
         c.defaults["HTTP_X_APP_TYPE"] = "pro"
         c.force_authenticate(user=client_user)
         resp = c.post(URL, {
+            **ATTESTED,
             "dish_name": "борщ", "portion_multiplier": 1.0,
             "meal_type": "lunch",
         }, format="json")
@@ -136,6 +141,7 @@ class TestAuthAndAppType:
 class TestValidation:
     def test_neither_scan_nor_dish_returns_400(self, auth_client):
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json")
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
@@ -143,6 +149,7 @@ class TestValidation:
 
     def test_missing_meal_type_returns_400(self, auth_client):
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "борщ", "portion_multiplier": 1.0,
         }, format="json")
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
@@ -150,6 +157,7 @@ class TestValidation:
 
     def test_invalid_meal_type_returns_400(self, auth_client):
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "борщ", "portion_multiplier": 1.0,
             "meal_type": "elevenses",
         }, format="json")
@@ -157,6 +165,7 @@ class TestValidation:
 
     def test_zero_multiplier_returns_400(self, auth_client):
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "борщ", "portion_multiplier": 0,
             "meal_type": "lunch",
         }, format="json")
@@ -164,6 +173,7 @@ class TestValidation:
 
     def test_blank_dish_name_with_no_scan_returns_400(self, auth_client):
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "", "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json")
         assert resp.status_code == status.HTTP_400_BAD_REQUEST
@@ -179,6 +189,7 @@ class TestScanPath:
         self, auth_client, client_user, borscht_scan,
     ):
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "scan_id": str(borscht_scan.id),
             "portion_multiplier": 1.0,
             "meal_type": "lunch",
@@ -211,6 +222,7 @@ class TestScanPath:
         self, auth_client, borscht_scan,
     ):
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "scan_id": str(borscht_scan.id),
             "portion_multiplier": 2.0,
             "meal_type": "dinner",
@@ -231,6 +243,7 @@ class TestScanPath:
             nutrition={"kcal": 147.0, "protein_g": 4.8, "fat_g": 6.6, "carbs_g": 20.1},
         )
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "scan_id": str(foreign_scan.id),
             "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json")
@@ -254,6 +267,7 @@ class TestScanPath:
             nutrition=None,
         )
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "scan_id": str(scan.id),
             "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json")
@@ -290,6 +304,7 @@ class TestScanPath:
             },
         )
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "scan_id": str(scan.id),
             "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json")
@@ -301,6 +316,7 @@ class TestScanPath:
     ):
         when = "2026-04-29T08:30:00Z"
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "scan_id": str(borscht_scan.id),
             "portion_multiplier": 1.0, "meal_type": "breakfast",
             "logged_at": when,
@@ -319,6 +335,7 @@ class TestManualPath:
     def test_creates_log_from_seed_dish(self, auth_client, client_user):
         # Borscht seed: 49 kcal/100g. multiplier=1.0 → 49 kcal (100g baseline)
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "борщ",
             "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json")
@@ -334,6 +351,7 @@ class TestManualPath:
     def test_multiplier_3x_borscht_baseline_100g(self, auth_client):
         # multiplier=3.0 against 100g baseline = 300g of borscht = 147 kcal
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "борщ",
             "portion_multiplier": 3.0, "meal_type": "dinner",
         }, format="json")
@@ -342,6 +360,7 @@ class TestManualPath:
 
     def test_alias_resolves_via_lookup(self, auth_client):
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "украинский борщ",  # alias → борщ
             "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json")
@@ -356,6 +375,7 @@ class TestManualPath:
         название справочника значило бы записать другое блюдо.
         """
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "ризотто с трюфелем",
             "portion_multiplier": 1.0, "meal_type": "dinner",
         }, format="json")
@@ -376,6 +396,7 @@ class TestIdempotency:
         key = str(uuid4())
 
         resp1 = auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "борщ",
             "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json", HTTP_X_IDEMPOTENCY_KEY=key)
@@ -383,6 +404,7 @@ class TestIdempotency:
         first_id = resp1.json()["data"]["id"]
 
         resp2 = auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "плов",  # different payload; should be ignored
             "portion_multiplier": 5.0, "meal_type": "dinner",
         }, format="json", HTTP_X_IDEMPOTENCY_KEY=key)
@@ -397,6 +419,7 @@ class TestIdempotency:
 
         for _ in range(3):
             auth_client.post(URL, {
+                **ATTESTED,
                 "dish_name": "борщ",
                 "portion_multiplier": 1.0, "meal_type": "lunch",
             }, format="json", HTTP_X_IDEMPOTENCY_KEY=str(uuid4()))
@@ -406,6 +429,7 @@ class TestIdempotency:
     def test_no_key_creates_new_each_time(self, auth_client, client_user):
         for _ in range(2):
             auth_client.post(URL, {
+                **ATTESTED,
                 "dish_name": "борщ",
                 "portion_multiplier": 1.0, "meal_type": "lunch",
             }, format="json")
@@ -421,6 +445,7 @@ class TestIdempotency:
         key = str(uuid4())
 
         auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "борщ",
             "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json", HTTP_X_IDEMPOTENCY_KEY=key)
@@ -449,6 +474,7 @@ class TestPriority:
         # If both scan_id and dish_name come in, scan is more authoritative
         # (provider already saw the photo).
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "scan_id": str(borscht_scan.id),
             "dish_name": "плов",  # would resolve via lookup but should be ignored
             "portion_multiplier": 1.0, "meal_type": "lunch",
