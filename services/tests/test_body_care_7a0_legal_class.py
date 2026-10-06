@@ -147,7 +147,8 @@ def test_a_practitioner_class_without_confirmation_is_refused(template, lawyer, 
 
 
 def test_the_legal_confirmation_does_not_cover_the_practitioner_class(template, lawyer) -> None:
-    """Решение юриста о классе не подтверждает решение клиники о квалификации."""
+    """Решение юриста о классе не подтверждает решение клиники о квалификации:
+    у квалификации есть дата и основание, но нет СВОЕГО подтвердившего."""
     _refused(
         template,
         "servicetemplate_practitioner_class_requires_confirmation",
@@ -156,6 +157,8 @@ def test_the_legal_confirmation_does_not_cover_the_practitioner_class(template, 
         legal_class_confirmed_at=timezone.now(),
         legal_class_source_ref="решение юриста",
         required_practitioner_class=PC.PHYSICIAN_COSMETOLOGIST,
+        practitioner_class_confirmed_at=timezone.now(),
+        practitioner_class_source_ref="решение клиники",
     )
 
 
