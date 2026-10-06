@@ -22,10 +22,15 @@
 1. семейства нет → ``not_subject``;
 2. канон ``retired`` → ``retired``;
 3. требования (CAT-5) — ``conflict`` → ``blocked``;
+3a. §7A-6: класс медицинский, а проверенной лицензии салона нет или канон
+   вне её объёма → ``UNVERIFIED_LICENSE_STATE`` (сейчас ``blocked``);
 4. требования — ``incomplete`` → ``incomplete``;
+4a. §7A-6: юридический класс не подтверждён человеком (``NULL`` или
+   ``legal_review_required``) → ``review_required``;
 5. требования ``complete``, но действующего ревью нет → ``review_required``;
-6. требования ``complete`` и ревью той же версии конфигурации с тем же
-   отпечатком фактов → ``ready_for_screening``.
+6. требования ``complete``, класс подтверждён, лицензия (если нужна)
+   проверена, ревью той же версии конфигурации с тем же отпечатком фактов →
+   ``ready_for_screening``.
 
 Неопределённость сворачивается вниз: умолчание — никогда не READY.
 
@@ -36,8 +41,18 @@
 конфигурации на ``SalonService`` (``config_reviewed_*``) с провенансом и
 версией, которую проверили.
 
-Входов §7A (лицензия, адрес, квалификация → ``blocked``) пока нет — они
-подключатся в фазе §7A.
+### Входы §7A (§7A-6, DRF-2842)
+
+Сюда сворачиваются только гейты **уровня предложения**: подтверждённый
+юридический класс (§7A-0) и лицензия салона (§7A-2, то же правило
+``license_state_of``). Гейты мастера — адрес (§7A-3) и квалификация
+(§7A-4) — сюда не входят: у предложения нет одного мастера; их читают
+CAT-10-ext и гейт записи. Медицинский класс у канона вне body-care
+(пилинги лица) остаётся ``not_subject`` здесь и гейтится отдельно
+(DRF-2843): ``not_subject`` по-прежнему значит «весь каталог вне Body Care».
+
+Следствие: пока юридический класс body-care канона не подтверждён
+человеком, его предложения не бывают READY.
 
 ### Чем READY не является (владелец, 06.10)
 
@@ -84,6 +99,13 @@ from services.body_care_requirements import (
     REQUIREMENTS,
     evaluate,
 )
+from services.body_care_license import (
+    CLASS_UNCONFIRMED as LICENSE_CLASS_UNCONFIRMED,
+    NOT_VERIFIED as LICENSE_NOT_VERIFIED,
+    SCOPE_MISMATCH as LICENSE_SCOPE_MISMATCH,
+    license_state_of,
+    verified_coverage,
+)
 from services.models import OfferingConfigFact, SalonService, ServiceTemplate
 
 NOT_SUBJECT = "not_subject"
@@ -97,6 +119,14 @@ RETIRED = "retired"
 VALIDATION_STATES = (INCOMPLETE, REVIEW_REQUIRED, READY_FOR_SCREENING, BLOCKED, RETIRED)
 
 _RETIRED_LIFECYCLE = ServiceTemplate.Lifecycle.RETIRED
+
+#: §7A-6: во что сворачивается медицинский класс без проверенной лицензии
+#: салона или вне её объёма. BLOCKED — fixture F-BC-016 и fail-closed
+#: (решение главного окна, 06.10; вопрос владельцу A2(3)). Если владелец
+#: ответит «REVIEW», меняется эта строка: значение уйдёт ниже INCOMPLETE.
+UNVERIFIED_LICENSE_STATE = BLOCKED
+
+_LICENSE_FAILED = frozenset({LICENSE_NOT_VERIFIED, LICENSE_SCOPE_MISMATCH})
 
 #: Колонки факта, входящие в отпечаток, — все, кроме служебного ``id`` и
 #: ссылки на предложение. Новая колонка факта должна попасть сюда
@@ -142,7 +172,7 @@ def config_fingerprint(fact_rows: Iterable[dict]) -> str:
     return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
 
 
-def _state(row: dict, fact_rows: list[dict]) -> str:
+def _state(row: dict, fact_rows: list[dict], license_state: str) -> str:
     family = row["template__service_family"]
     if not family:
         return NOT_SUBJECT
@@ -152,8 +182,13 @@ def _state(row: dict, fact_rows: list[dict]) -> str:
     check = evaluate(family, facts, REQUIREMENTS)
     if check.state == REQ_CONFLICT:
         return BLOCKED
+    license_failed = license_state in _LICENSE_FAILED
+    if license_failed and UNVERIFIED_LICENSE_STATE == BLOCKED:
+        return BLOCKED
     if check.state != REQ_COMPLETE:
         return INCOMPLETE
+    if license_failed or license_state == LICENSE_CLASS_UNCONFIRMED:
+        return REVIEW_REQUIRED
     version = row["configuration_version"]
     if (
         version
@@ -174,7 +209,7 @@ def _fact_rows(salon_service_ids) -> dict[object, list[dict]]:
 
 
 def validation_states(salon_service_ids: Iterable[object]) -> dict[object, str]:
-    """``{pk предложения: состояние}`` для пула — два запроса, без N+1.
+    """``{pk предложения: состояние}`` для пула — три запроса, без N+1.
 
     Точка входа для CAT-10 (допустимость к рекомендации). Значения —
     одно из ``VALIDATION_STATES`` или ``NOT_SUBJECT``. Отсутствующий в
@@ -185,7 +220,10 @@ def validation_states(salon_service_ids: Iterable[object]) -> dict[object, str]:
         row["pk"]: row
         for row in SalonService.objects.filter(pk__in=ids).values(
             "pk",
+            "tenant_id",
+            "template_id",
             "template__service_family",
+            "template__legal_service_class",
             "template__lifecycle",
             "configuration_version",
             "config_reviewed_version",
@@ -193,7 +231,11 @@ def validation_states(salon_service_ids: Iterable[object]) -> dict[object, str]:
         )
     }
     facts = _fact_rows(rows)
-    return {pk: _state(row, facts.get(pk, [])) for pk, row in rows.items()}
+    verified_tenants, covered = verified_coverage({r["tenant_id"] for r in rows.values()})
+    return {
+        pk: _state(row, facts.get(pk, []), license_state_of(row, verified_tenants, covered))
+        for pk, row in rows.items()
+    }
 
 
 def record_config_review(
