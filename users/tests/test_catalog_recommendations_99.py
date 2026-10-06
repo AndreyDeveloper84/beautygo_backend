@@ -986,3 +986,47 @@ class TestPreferencesOnTheShelf:
         items = _api().post(URL, _body(), format="json").json()["data"]["layer_1_your_places"]["items"]
 
         assert len({item["tier"] for item in items}) == 1
+
+    def test_a_root_category_preference_reaches_services_on_its_leaves(
+        self, customer, customer_known_tur, tenant_known, manicure_category, massage_category,
+    ):
+        """Услуги висят на листьях, клиент называет корень: «ногти», а не «маникюр»."""
+        root = ServiceCategory.objects.create(name="Ногти", slug="nails-2816")
+        manicure_category.parent = root
+        manicure_category.save(update_fields=["parent"])
+        anna = _make_specialist(tenant_known, suffix="2820", name="Анна")
+        other = _make_specialist(tenant_known, suffix="2821", name="Другая")
+        _make_service(anna, manicure_category, name="Маникюр")
+        _make_service(other, massage_category, name="Массаж")
+        body = _body(preferences=[{"kind": "category", "ref": str(root.id), "origin": "current_request"}])
+
+        items = _api().post(URL, body, format="json").json()["data"]["layer_1_your_places"]["items"]
+
+        tiers = {item["candidate"]["id"]: item["tier"] for item in items}
+        assert tiers[_key(anna)] < tiers[_key(other)]
+
+    def test_only_x_on_the_shelf_reads_as_soft(
+        self, customer, customer_known_tur, tenant_known, manicure_category,
+    ):
+        """Полка — витрина: «только Анна» поднимает Анну и никого не прячет."""
+        anna = _make_specialist(tenant_known, suffix="2822", name="Анна")
+        other = _make_specialist(tenant_known, suffix="2823", name="Другая")
+        _make_service(anna, manicure_category, name="Маникюр")
+        _make_service(other, manicure_category, name="Маникюр")
+        body = _body(preferences=[
+            {"kind": "master", "ref": _key(anna), "strength": "hard", "origin": "current_request"},
+        ])
+
+        items = _api().post(URL, body, format="json").json()["data"]["layer_1_your_places"]["items"]
+
+        tiers = {item["candidate"]["id"]: item["tier"] for item in items}
+        assert set(tiers) == {_key(anna), _key(other)}, "жёсткое на полке не опустошает её"
+        assert tiers[_key(anna)] < tiers[_key(other)]
+
+    def test_preferences_may_be_null(self, customer, customer_known_tur, tenant_known, manicure_category):
+        anna = _make_specialist(tenant_known, suffix="2824", name="Анна")
+        _make_service(anna, manicure_category, name="Маникюр")
+
+        response = _api().post(URL, _body(preferences=None), format="json")
+
+        assert response.status_code == 200, response.content

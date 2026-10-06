@@ -265,6 +265,7 @@ def apply_eligibility(
     budget = request.constraints.price_max
     need_is_stated = request.need.is_stated
     hard_preferences, _, _ = effective_preferences(request.preferences)
+    hard_by_kind = _by_kind(hard_preferences)
 
     for facts in candidates:
         cid = facts.ref.id
@@ -339,7 +340,12 @@ def apply_eligibility(
         # O-1: «только X» — жёсткое условие, и только из ТЕКУЩЕГО запроса.
         # Стоит ПОСЛЕ проверок процедуры и связи: предпочтение работает на
         # допустимых кандидатах и ничего из них не отменяет.
-        if not all(satisfies_preference(facts, p) for p in hard_preferences):
+        # Внутри вида — ИЛИ («Анна или Мария»), между видами — И («Анна, и
+        # только в этом салоне»).
+        if not all(
+            any(satisfies_preference(facts, p, need_is_stated=need_is_stated) for p in same_kind)
+            for same_kind in hard_by_kind.values()
+        ):
             excluded.append(
                 ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD)
             )
@@ -618,19 +624,48 @@ def effective_preferences(
     )
 
 
-def satisfies_preference(facts: CandidateFacts, preference: Preference) -> bool:
+def _by_kind(preferences: Sequence[Preference]) -> dict[PreferenceKind, tuple[Preference, ...]]:
+    out: dict[PreferenceKind, list[Preference]] = {}
+    for p in preferences:
+        out.setdefault(p.kind, []).append(p)
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def _candidate_categories(facts: CandidateFacts, *, need_is_stated: bool) -> frozenset[UUID]:
+    """Категории, с которыми сверяется предпочтение категории.
+
+    Нужда названа — категории той услуги, которой мастер на неё ответил;
+    не названа — категории всех его предложений. Лист и родитель — оба:
+    услуги висят на листьях, а клиент называет корень.
+    """
+    refs = facts.matched_category_refs if need_is_stated else facts.category_refs
+    if facts.matched_goal_category_ref is not None:
+        refs = refs | {facts.matched_goal_category_ref}
+    return refs
+
+
+def satisfies_preference(
+    facts: CandidateFacts, preference: Preference, *, need_is_stated: bool = False,
+) -> bool:
     """Отвечает ли кандидат предпочтению — по виду предпочтения."""
     if preference.kind is PreferenceKind.MASTER:
         return facts.ref.id == preference.ref
     if preference.kind is PreferenceKind.SALON:
         return facts.tenant_ref == preference.ref
     if preference.kind is PreferenceKind.CATEGORY:
-        return preference.ref in facts.category_refs or facts.matched_goal_category_ref == preference.ref
+        return preference.ref in _candidate_categories(facts, need_is_stated=need_is_stated)
     return False  # pragma: no cover — закрытое перечисление
 
 
+#: Порядок измерений внутри одного происхождения: мастер, салон, категория.
+_PREFERENCE_DIMENSIONS = (PreferenceKind.MASTER, PreferenceKind.SALON, PreferenceKind.CATEGORY)
+
+
 def stage_contextual(
-    candidates: Sequence[CandidateFacts], preferences: Sequence[Preference] = (),
+    candidates: Sequence[CandidateFacts],
+    preferences: Sequence[Preference] = (),
+    *,
+    need_is_stated: bool = False,
 ) -> StageOutput:
     """Прошлый успешный опыт. Только `COMPLETED` — и это не сокращение.
 
@@ -651,21 +686,39 @@ def stage_contextual(
     keys: dict[UUID, float] = {}
     codes: dict[UUID, frozenset[ReasonCode]] = {}
     evidence: dict[UUID, tuple[EvidenceItem, ...]] = {}
+    inactive_for: set[UUID] = set()
+    now_by_kind, memory_by_kind = _by_kind(soft_current), _by_kind(soft_memory)
+    category_in_play = PreferenceKind.CATEGORY in now_by_kind or PreferenceKind.CATEGORY in memory_by_kind
+
+    def hits(facts: CandidateFacts, by_kind) -> tuple[bool, ...]:
+        return tuple(
+            any(satisfies_preference(facts, p, need_is_stated=need_is_stated) for p in by_kind.get(kind, ()))
+            for kind in _PREFERENCE_DIMENSIONS
+        )
 
     for facts in candidates:
         cid = facts.ref.id
-        # O-1 (DRF-2816): лексикографически ВНУТРИ стадии — совпадения с
-        # предпочтениями текущего запроса, затем с подтверждённой памятью,
-        # затем история визитов. Кодирование в одно число — разряды, а не
-        # веса: старший разряд всегда перевешивает любые младшие.
-        now = sum(satisfies_preference(facts, p) for p in soft_current)
-        remembered = sum(satisfies_preference(facts, p) for p in soft_memory)
+        # §29.4: категорий кандидата не знаем — предпочтение категории о нём
+        # молчит, а не ставит его ниже. Стадия замолкает про его группу.
+        if category_in_play and not _candidate_categories(facts, need_is_stated=need_is_stated):
+            inactive_for.add(cid)
+        # O-1 (DRF-2816): лексикографически ВНУТРИ стадии, без весов и сумм —
+        # да/нет по измерениям в закреплённом порядке: текущий запрос
+        # (мастер, салон, категория), затем подтверждённая память (то же),
+        # затем история визитов. Число собрано разрядами: любой старший
+        # признак перевешивает все младшие вместе, два совпадения не
+        # «стоят» одного более важного.
+        now, remembered = hits(facts, now_by_kind), hits(facts, memory_by_kind)
         pref_codes: set[ReasonCode] = set()
-        if now:
+        if any(now):
             pref_codes.add(ReasonCode.CONTEXT_PREFERENCE_CURRENT_REQUEST)
-        if remembered:
+        if any(remembered):
             pref_codes.add(ReasonCode.CONTEXT_PREFERENCE_CONFIRMED_MEMORY)
-        pref_key = now * _PREF_NOW_PLACE + remembered * _PREF_MEMORY_PLACE
+        pref_key = 0
+        for bit in now + remembered:
+            pref_key = pref_key * 2 + int(bit)
+        # Младший разряд — история 0..2: основание 3.
+        pref_key *= 3
         if not has_history:
             keys[cid] = float(pref_key)
             codes[cid] = frozenset(pref_codes or {ReasonCode.CONTEXT_NOT_APPLICABLE})
@@ -689,14 +742,12 @@ def stage_contextual(
             keys[cid] = float(pref_key)
             codes[cid] = frozenset(pref_codes or {ReasonCode.CONTEXT_NOT_APPLICABLE})
 
-    return StageOutput(StageId.S4, active=True, keys=keys, codes=codes, evidence=evidence)
-
-
-#: Разряды ключа S4 (O-1). Предпочтений в запросе не больше
-#: ``MAX_PREFERENCES`` (сериализатор), история — 0..2, поэтому младший
-#: разряд никогда не дотягивается до старшего.
-_PREF_NOW_PLACE = 10_000
-_PREF_MEMORY_PLACE = 100
+    return StageOutput(
+        StageId.S4, active=len(inactive_for) < len(candidates), keys=keys, codes=codes,
+        evidence=evidence, inactive_for=frozenset(inactive_for),
+        inactive_reason=None if len(inactive_for) < len(candidates)
+        else "предпочтение категории, а категорий ни у кого из кандидатов не знаем",
+    )
 
 
 # ---------------------------------------------------------------------------

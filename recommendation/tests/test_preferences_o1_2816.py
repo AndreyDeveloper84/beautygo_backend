@@ -15,9 +15,11 @@
 from __future__ import annotations
 
 import uuid
+from unittest import mock
 
 import pytest
 
+from recommendation import _serializers as serializers_module
 from recommendation._pipeline import resolve
 from recommendation._reason_codes import ReasonCode
 from recommendation._serializers import MAX_PREFERENCES, ResolveRequestSerializer, build_preferences
@@ -141,10 +143,11 @@ class TestCurrentOverHistory:
 
     def test_different_dimensions_both_work(self):
         """Назван мастер сейчас; категория — из памяти. Категория работает."""
-        massage = uuid.uuid4()
-        named_now = make_facts()
+        massage, manicure = uuid.uuid4(), uuid.uuid4()
+        # Категории известны у всех: неизвестные молчат (§29.4), это отдельный узел.
+        named_now = make_facts(category_refs=frozenset({manicure}))
         in_remembered_category = make_facts(category_refs=frozenset({massage}))
-        neither = make_facts()
+        neither = make_facts(category_refs=frozenset({manicure}))
 
         decision = _resolve(
             [named_now, in_remembered_category, neither],
@@ -168,15 +171,18 @@ class TestCurrentOverHistory:
 
 
 class TestWhatDoesNotParticipate:
-    def test_an_agent_inference_is_dropped(self, caplog):
+    def test_an_agent_inference_is_dropped(self):
         items = [
             {"kind": "master", "ref": uuid.uuid4(), "strength": "soft", "origin": "agent_inference"},
             {"kind": "salon", "ref": uuid.uuid4(), "strength": "soft", "origin": "current_request"},
         ]
 
-        prefs = build_preferences(items)
+        with mock.patch.object(serializers_module.logger, "warning") as warning:
+            prefs = build_preferences(items)
 
         assert [p.kind for p in prefs] == [PreferenceKind.SALON]
+        assert warning.call_count == 1
+        assert "agent_inference" in warning.call_args.args
 
     def test_the_wire_accepts_preferences_and_caps_their_number(self):
         base = {
@@ -213,8 +219,105 @@ class TestWhatDoesNotParticipate:
 def test_salon_and_category_preferences_match_their_dimension(kind_attr):
     target = uuid.uuid4()
     hit = make_facts(tenant_ref=target) if kind_attr == "salon" else make_facts(category_refs=frozenset({target}))
-    miss = make_facts()
+    miss = make_facts(category_refs=frozenset({uuid.uuid4()}))
 
     decision = _resolve([hit, miss], Preference(kind=PreferenceKind(kind_attr), ref=target, origin=NOW))
 
     assert _tiers(decision)[hit.ref.id] < _tiers(decision)[miss.ref.id]
+
+
+class TestReviewFixesV2:
+    """Находки ревью O-1 (DRF-2816 v2): каждая — узлом, красным на e158d2d8."""
+
+    def test_two_hard_masters_mean_either_of_them(self):
+        """«Анна или Мария»: внутри вида — ИЛИ, а не «и та, и другая сразу» (никто)."""
+        anna, maria, other = make_facts(), make_facts(), make_facts()
+
+        decision = _resolve([anna, maria, other], _master(anna.ref.id, HARD), _master(maria.ref.id, HARD))
+
+        assert {c.candidate_ref.id for c in decision.ordered} == {anna.ref.id, maria.ref.id}
+        assert [e.candidate_ref.id for e in decision.excluded] == [other.ref.id]
+
+    def test_hard_preferences_of_different_kinds_all_apply(self):
+        """Между видами — И: «Анна или Мария, и только в этом салоне»."""
+        salon = uuid.uuid4()
+        anna_here, maria_elsewhere = make_facts(tenant_ref=salon), make_facts()
+
+        decision = _resolve(
+            [anna_here, maria_elsewhere],
+            _master(anna_here.ref.id, HARD), _master(maria_elsewhere.ref.id, HARD),
+            Preference(kind=PreferenceKind.SALON, ref=salon, strength=HARD, origin=NOW),
+        )
+
+        assert [c.candidate_ref.id for c in decision.ordered] == [anna_here.ref.id]
+
+    def test_with_a_stated_need_category_is_read_from_the_matched_service(self):
+        """Спросили маникюр; «лучше там, где массаж» — мастер, совпавший маникюром, массажем не отвечает."""
+        massage, manicure = uuid.uuid4(), uuid.uuid4()
+        also_massage = make_facts(
+            match_level=MatchLevel.SERVICE_PARTIAL, category_refs=frozenset({massage, manicure}),
+            matched_category_refs=frozenset({manicure}),
+        )
+        matched_by_massage = make_facts(
+            match_level=MatchLevel.SERVICE_PARTIAL, category_refs=frozenset({massage}),
+            matched_category_refs=frozenset({massage}),
+        )
+
+        decision = _resolve(
+            [also_massage, matched_by_massage],
+            Preference(kind=PreferenceKind.CATEGORY, ref=massage, origin=NOW),
+            need=NeedSpec(origin=NeedOrigin.USER_EXPLICIT, raw_text="маникюр"),
+        )
+
+        tiers = _tiers(decision)
+        assert tiers[matched_by_massage.ref.id] < tiers[also_massage.ref.id]
+
+    def test_one_stronger_match_outweighs_two_weaker_ones(self):
+        """Не сумма: мастер (старшее измерение) выше салона и категории вместе."""
+        salon, category = uuid.uuid4(), uuid.uuid4()
+        named_master = make_facts(category_refs=frozenset({uuid.uuid4()}))
+        salon_and_category = make_facts(tenant_ref=salon, category_refs=frozenset({category}))
+
+        decision = _resolve(
+            [salon_and_category, named_master],
+            _master(named_master.ref.id),
+            Preference(kind=PreferenceKind.SALON, ref=salon, origin=NOW),
+            Preference(kind=PreferenceKind.CATEGORY, ref=category, origin=NOW),
+        )
+
+        tiers = _tiers(decision)
+        assert tiers[named_master.ref.id] < tiers[salon_and_category.ref.id]
+
+    def test_unknown_categories_are_not_demoted(self):
+        """§29.4: категорий не знаем — предпочтение категории молчит, а не ставит ниже."""
+        massage = uuid.uuid4()
+        in_category = make_facts(category_refs=frozenset({massage}))
+        unknown = make_facts()
+
+        decision = _resolve(
+            [in_category, unknown], Preference(kind=PreferenceKind.CATEGORY, ref=massage, origin=NOW),
+        )
+
+        tiers = _tiers(decision)
+        assert tiers[in_category.ref.id] == tiers[unknown.ref.id]
+
+    def test_the_cap_holds_in_process_too(self):
+        too_many = tuple(_master(uuid.uuid4()) for _ in range(MAX_PREFERENCES + 1))
+
+        with pytest.raises(ValueError, match="предпочтений"):
+            RecommendationRequest(
+                request_id="r", subject_ref="s", surface=Surface.MINIAPP_HOME,
+                scope=Scope(ScopeMode.MARKETPLACE), need=NeedSpec(origin=NeedOrigin.MEMORY),
+                preferences=too_many,
+            )
+
+    def test_the_wire_accepts_null_preferences(self):
+        data = {
+            "request_id": "r", "surface": "MINIAPP_HOME", "scope": {"mode": "MARKETPLACE"},
+            "need": {"origin": "MEMORY"}, "safety_state": "NOT_APPLICABLE", "preferences": None,
+        }
+
+        serializer = ResolveRequestSerializer(data=data)
+
+        assert serializer.is_valid(), serializer.errors
+        assert serializer.build_preferences() == ()

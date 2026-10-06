@@ -106,6 +106,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import replace
 from typing import Any
 
 from django.db.models import QuerySet
@@ -126,6 +127,7 @@ from recommendation.api import (
     Scope,
     ScopeMode,
     PreferenceSerializer,
+    PreferenceStrength,
     Surface,
     build_preferences,
     resolve,
@@ -166,7 +168,9 @@ class RecommendationsRequestSerializer(serializers.Serializer):
     # резолвера. Применяются к ОБЕИМ полкам: в полке 1 «твои места» «мой
     # мастер Анна» из уже посещённого салона поднимается наверх; смысл
     # полок не меняется (полка 2 по-прежнему без салонов из истории).
-    preferences = PreferenceSerializer(many=True, required=False, max_length=MAX_PREFERENCES)
+    preferences = PreferenceSerializer(
+        many=True, required=False, allow_null=True, max_length=MAX_PREFERENCES,
+    )
     # Поля безопасности здесь НЕТ намеренно — см. модульный докстринг.
     # Принять его значило бы завести ровно ту конструкцию, которую владелец
     # запретил поимённо (§72): «поля нет → NOT_APPLICABLE» неотличимо от
@@ -505,7 +509,14 @@ class CatalogRecommendationsView(APIView):
         serializer = RecommendationsRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         goal = (serializer.validated_data.get("goal") or "").strip()
-        preferences = build_preferences(serializer.validated_data.get("preferences"))
+        # «Только X» на полке читается как мягкое: полка — витрина, а не
+        # ответ на вопрос, и жёсткое условие опустошило бы её целиком
+        # (вторая полка без салонов из истории — и без Анны). Жёсткое
+        # работает в ручке резолвера, где его сказали в разговоре.
+        preferences = tuple(
+            replace(p, strength=PreferenceStrength.SOFT)
+            for p in build_preferences(serializer.validated_data.get("preferences"))
+        )
 
         # Константа поверхности, не производная от запроса (§72).
         # Ни `get`, ни `or`, ни умолчания сериализатора: значение известно

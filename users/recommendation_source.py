@@ -111,6 +111,14 @@ def build_candidate_source(*, viewer=None) -> "SpecialistCandidateSource":
     return SpecialistCandidateSource(viewer=viewer)
 
 
+def _category_refs(services) -> frozenset[UUID]:
+    """Категории услуг — лист и его родитель (O-1, DRF-2816)."""
+    refs: set[UUID] = set()
+    for s in services:
+        refs.update(r for r in (s.category_id, s.category_parent_id) if r)
+    return frozenset(refs)
+
+
 class SpecialistCandidateSource:
     """`CandidateSource` над `SpecialistProfile`. Провайдеры, `kind=PROVIDER`."""
 
@@ -322,8 +330,12 @@ class SpecialistCandidateSource:
             matched_service_ref=matched_service_id,
             matched_goal_category_ref=matched_category_id,
             goal_fit_depth=goal_fit_depth,
-            # O-1: категории предложений мастера — для предпочтения категории.
-            category_refs=frozenset(s.category_id for s in services if s.category_id),
+            # O-1: категории предложений мастера — лист И родитель: услуги
+            # висят на листьях, клиент называет корень («массаж»).
+            category_refs=_category_refs(services),
+            matched_category_refs=_category_refs(
+                [s for s in services if s.id == matched_service_id] if matched_service_id else [],
+            ),
             is_bookable=bool(specialist.is_booking_enabled),
             # Расписание: подтверждать нечем — `WorkingHours` заполнены
             # у четырёх мастеров из тридцати одного (§29.5). Третье

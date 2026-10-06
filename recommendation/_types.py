@@ -325,6 +325,10 @@ class NeedSpec:
         return bool(self.capability_refs or self.canonical_service_refs or self.goal_key or self.raw_text)
 
 
+#: Предпочтений в одном запросе — не больше (провод и вызов в процессе).
+MAX_PREFERENCES = 20
+
+
 class PreferenceKind(StrEnum):
     """На ЧТО направлено предпочтение клиента (O-1, решение владельца 06.10)."""
 
@@ -404,6 +408,11 @@ class RecommendationRequest:
     def __post_init__(self) -> None:
         if self.k < 1:
             raise ValueError("k — сколько будет показано; ноль показанных это не запрос, а его отсутствие")
+        if len(self.preferences) > MAX_PREFERENCES:
+            raise ValueError(
+                f"предпочтений {len(self.preferences)} > {MAX_PREFERENCES}: предел держит и провод, "
+                "и вызов в процессе (O-1)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -457,6 +466,12 @@ class CandidateFacts:
     #: O-1 — категории предложений мастера (своя, иначе шаблона): на них
     #: проверяется предпочтение категории.
     category_refs: frozenset[UUID] = frozenset()
+    #: O-1: категории (лист и родитель) той услуги, которой мастер ответил
+    #: на НАЗВАННУЮ нужду. Когда нужда названа, предпочтение категории
+    #: сверяется с ней, а не с любым предложением мастера: «массаж» у
+    #: мастера, совпавшего по маникюру, — не ответ на «маникюр, лучше там,
+    #: где массаж». Пусто — не знаем.
+    matched_category_refs: frozenset[UUID] = frozenset()
 
     # -- S3: транзакционная пригодность -------------------------------------
     is_bookable: bool | None = None

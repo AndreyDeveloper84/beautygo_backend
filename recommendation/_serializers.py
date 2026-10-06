@@ -28,6 +28,7 @@ from ._types import (
     Constraint,
     ConstraintKind,
     NeedOrigin,
+    MAX_PREFERENCES,
     NeedSpec,
     Preference,
     PreferenceKind,
@@ -84,11 +85,6 @@ class _NeedSerializer(serializers.Serializer):
     canonical_service_refs = serializers.ListField(child=serializers.UUIDField(), required=False, default=list)
     goal_key = serializers.CharField(required=False, allow_null=True, default=None)
     raw_text = serializers.CharField(required=False, allow_null=True, default=None)
-
-
-#: Предпочтений в одном запросе — не больше. Держит разряды ключа S4
-#: (``_stages._PREF_*_PLACE``) непересекающимися.
-MAX_PREFERENCES = 20
 
 
 class PreferenceSerializer(serializers.Serializer):
@@ -154,7 +150,9 @@ class ResolveRequestSerializer(serializers.Serializer):
     safety_state = serializers.ChoiceField(choices=[s.value for s in SafetyState])
     tie_break_seed = serializers.CharField(required=False, allow_null=True, default=None)
     k = serializers.IntegerField(required=False, min_value=1, max_value=50, default=3)
-    preferences = PreferenceSerializer(many=True, required=False, max_length=MAX_PREFERENCES)
+    preferences = PreferenceSerializer(
+        many=True, required=False, allow_null=True, max_length=MAX_PREFERENCES,
+    )
 
     def build_preferences(self) -> tuple[Preference, ...]:
         return build_preferences(self.validated_data.get("preferences"))
