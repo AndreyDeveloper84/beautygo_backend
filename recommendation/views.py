@@ -77,18 +77,19 @@ def _with_saved_goal(need: NeedSpec, subject) -> NeedSpec:
     return dataclasses.replace(need, goal_key=saved)
 
 
-def _cross_salon_safe(preferences: tuple, scope) -> tuple:
-    """Память о мастере или салоне не входит в межсалонное ранжирование.
+def _cross_salon_safe(preferences: tuple) -> tuple:
+    """Память о мастере или салоне эта ручка не применяет НИКОГДА.
 
     Любимый мастер — отношение клиента с ОДНИМ салоном (NEVER_CROSSES,
     24.08; узкое дополнение владельца 06.10 — только личная полка «Твои
-    места»). Эта ручка без ``tenant_refs`` межсалонная, поэтому
-    ``confirmed_memory`` вида master/salon здесь отбрасывается. Проводка
-    бота, отправившая фаворита не туда, не становится утечкой. Сказанное
-    в текущем запросе и категория из памяти остаются.
+    места»). Область здесь присылает бот, а ``tenant_refs`` от бота — не
+    «свои салоны» клиента: истории салонов он не знает (DRF-1626), а
+    ``tenant_refs=[салон B]`` с фаворитом из A и было бы утечкой. Поэтому
+    ``confirmed_memory`` вида master/salon отбрасывается при любой
+    области. Законный путь памяти — режим «свои салоны», где салоны
+    выводит сервер (DRF-2831). Сказанное в текущем запросе и категория
+    из памяти остаются.
     """
-    if scope.tenant_refs:
-        return preferences
     kept = tuple(
         p for p in preferences
         if not (p.origin is PreferenceOrigin.CONFIRMED_MEMORY
@@ -157,7 +158,7 @@ class RecommendationResolveView(APIView):
                 safety_state=SafetyState(serializer.validated_data["safety_state"]),
                 tie_break_seed=serializer.validated_data.get("tie_break_seed"),
                 k=serializer.validated_data["k"],
-                preferences=_cross_salon_safe(serializer.build_preferences(), serializer.build_scope()),
+                preferences=_cross_salon_safe(serializer.build_preferences()),
             ),
             source=source,
         )

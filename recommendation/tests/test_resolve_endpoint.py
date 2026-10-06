@@ -242,6 +242,33 @@ class TestCrossSalonPreferenceGuard:
 
         assert len(set(tiers.values())) == 1, "фаворит из памяти не поднимает в межсалонной выдаче"
 
+    def test_a_favourite_does_not_rank_a_scope_the_bot_names_either(self, customer, settings):
+        """tenant_refs присылает бот — это не «свои салоны» клиента (DRF-1626).
+
+        Фаворит из салона A при ``tenant_refs=[салон B]`` поднял бы мастера в B —
+        межсалонная утечка. Память о мастере эта ручка не применяет ни при какой
+        области; законный путь — режим «свои салоны» на сервере (DRF-2831).
+        """
+        salon_b = uuid.uuid4()
+        _FIXTURE_CANDIDATES.clear()
+        _FIXTURE_CANDIDATES.extend([make_facts(tenant_ref=salon_b), make_facts(tenant_ref=salon_b)])
+        settings.RECOMMENDATION_CANDIDATE_SOURCE = (
+            "recommendation.tests.test_resolve_endpoint.fixture_source_factory"
+        )
+        favourite = str(_FIXTURE_CANDIDATES[0].ref.id)
+        try:
+            r = _api().post(URL, _body(
+                scope={"mode": "MARKETPLACE", "tenant_refs": [str(salon_b)]},
+                preferences=[{"kind": "master", "ref": favourite, "origin": "confirmed_memory"}],
+            ), format="json")
+        finally:
+            _FIXTURE_CANDIDATES.clear()
+
+        assert r.status_code == 200, r.content
+        tiers = {row["candidate"]["id"]: row["tier"] for row in r.json()["data"]["ordered"]}
+        assert len(tiers) == 2, "контроль: оба кандидата салона B в выдаче"
+        assert len(set(tiers.values())) == 1, "фаворит не поднимает в области, названной ботом"
+
     def test_the_same_master_named_now_still_works(self, customer, bound_source):
         """Контроль: сказанное в текущем запросе — не память об отношениях; работает."""
         named = str(bound_source[0].ref.id)
