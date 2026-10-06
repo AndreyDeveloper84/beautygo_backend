@@ -213,6 +213,34 @@ class ServiceTemplate(models.Model):
         MECHANICAL_SCRUB = "mechanical_scrub", "Механический скраб"
         ACID_CARE = "acid_care", "Кислотный уход"
 
+    class LegalServiceClass(models.TextChoices):
+        """Юридический класс услуги в РФ — контракт v0.2 §7A.1 (§7A-0).
+
+        Ровно четыре значения контракта. ``NULL`` — класс не установлен; и
+        ``NULL``, и ``LEGAL_REVIEW_REQUIRED`` читатель понимает как «не
+        разрешено» (fail-closed). Какой процедуре какой класс — решение
+        юриста (D-1); здесь значения никому не присваиваются.
+        """
+
+        NON_MEDICAL_COSMETIC = "non_medical_cosmetic", "Немедицинская косметическая"
+        MEDICAL_COSMETOLOGY = "medical_cosmetology", "Медицинская косметология"
+        MEDICAL_OTHER = "medical_other", "Иная медицинская"
+        LEGAL_REVIEW_REQUIRED = "legal_review_required", "Нужна юридическая проверка"
+
+    class PractitionerClass(models.TextChoices):
+        """Требуемая квалификация исполнителя — контракт v0.2 §7A.4 (§7A-0).
+
+        Пять значений «минимума» контракта. ``NULL`` — требование не
+        установлено (не «любой мастер»). Какая квалификация нужна какой
+        процедуре — решение клиники (D-2).
+        """
+
+        COSMETIC_ESTHETICIAN = "cosmetic_esthetician", "Косметик-эстетист"
+        NURSE_COSMETOLOGY = "nurse_cosmetology", "Медсестра по косметологии"
+        PHYSICIAN_COSMETOLOGIST = "physician_cosmetologist", "Врач-косметолог"
+        MEDICAL_SPECIALIST = "medical_specialist", "Врач-специалист"
+        PROTOCOL_SPECIFIC = "protocol_specific", "По протоколу"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     category = models.ForeignKey(
         ServiceCategory,
@@ -369,6 +397,50 @@ class ServiceTemplate(models.Model):
     #: (fail-closed), а не как «разрешено, потому что не запрещено».
     legal_status = models.CharField(max_length=32, null=True, blank=True)
 
+    # -- Body Care §7A-0: юридический класс и требуемая квалификация --------
+    # Контракт v0.2 §2.1 / §7A.1 / §7A.4. Только поля: значения процедурам
+    # ставят юрист (класс, D-1) и клиника (квалификация, D-2). ``NULL`` и
+    # ``LEGAL_REVIEW_REQUIRED`` — «не разрешено»: гейт читает это в §7A-6.
+    legal_service_class = models.CharField(
+        max_length=24,
+        choices=LegalServiceClass.choices,
+        null=True,
+        blank=True,
+        help_text="Юридический класс (§7A.1); пусто — не установлен, читается как «не разрешено»",
+    )
+    required_practitioner_class = models.CharField(
+        max_length=24,
+        choices=PractitionerClass.choices,
+        null=True,
+        blank=True,
+        help_text="Требуемая квалификация исполнителя (§7A.4); пусто — не установлена",
+    )
+    # Оба значения — ПОДТВЕРЖДЁННЫЕ, и пишет их только человек (главное
+    # окно, 06.10, по запрету владельца «класс без автора нельзя»):
+    # заданное значение требует кто + когда + основание (CheckConstraint).
+    # Варианта «правило» нет: системный вывод класса (§7A-1, «кандидат»)
+    # живёт в отдельной паре и гейт не открывает. Класс (юрист, D-1) и
+    # квалификация (клиника, D-2) — разные решения, у каждого свой
+    # провенанс. Кто вправе подтверждать — слой прав, не база.
+    legal_class_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    legal_class_confirmed_at = models.DateTimeField(null=True, blank=True)
+    legal_class_source_ref = models.CharField(max_length=200, blank=True, default="")
+    practitioner_class_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    practitioner_class_confirmed_at = models.DateTimeField(null=True, blank=True)
+    practitioner_class_source_ref = models.CharField(max_length=200, blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -507,6 +579,57 @@ class ServiceTemplate(models.Model):
                     )
                 ),
                 name="servicetemplate_service_family_known",
+            ),
+            # Body Care §7A-0: мимо ORM в базу не попадает класс или
+            # квалификация вне словаря контракта.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(legal_service_class__isnull=True)
+                    | models.Q(
+                        legal_service_class__in=[
+                            "non_medical_cosmetic", "medical_cosmetology",
+                            "medical_other", "legal_review_required",
+                        ]
+                    )
+                ),
+                name="servicetemplate_legal_service_class_known",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(required_practitioner_class__isnull=True)
+                    | models.Q(
+                        required_practitioner_class__in=[
+                            "cosmetic_esthetician", "nurse_cosmetology",
+                            "physician_cosmetologist", "medical_specialist",
+                            "protocol_specific",
+                        ]
+                    )
+                ),
+                name="servicetemplate_practitioner_class_known",
+            ),
+            # §7A-0: класс и квалификация без автора, даты и основания в базу
+            # не попадают — ни через ORM, ни через ``update()``.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(legal_service_class__isnull=True)
+                    | (
+                        models.Q(legal_class_confirmed_by__isnull=False)
+                        & models.Q(legal_class_confirmed_at__isnull=False)
+                        & ~models.Q(legal_class_source_ref="")
+                    )
+                ),
+                name="servicetemplate_legal_class_requires_confirmation",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(required_practitioner_class__isnull=True)
+                    | (
+                        models.Q(practitioner_class_confirmed_by__isnull=False)
+                        & models.Q(practitioner_class_confirmed_at__isnull=False)
+                        & ~models.Q(practitioner_class_source_ref="")
+                    )
+                ),
+                name="servicetemplate_practitioner_class_requires_confirmation",
             ),
         ]
 
