@@ -14,6 +14,9 @@
 * полная конфигурация без ревью — ``review_required``, не READY;
 * ревью той же версии — ``ready_for_screening``; изменили конфигурацию —
   ревью устарело, снова ``review_required``;
+* отпечаток фактов: правка значения, замена источника, новая строка после
+  ревью — ``review_required`` без подъёма версии; отпечаток покрывает
+  каждую колонку факта;
 * ревью — решение с провенансом (CheckConstraint'ы), перепись удаления его
   решает;
 * пул — два запроса; неизвестный ``pk`` в ответ не попадает.
@@ -35,7 +38,10 @@ from services.body_care_validation import (
     READY_FOR_SCREENING,
     RETIRED,
     REVIEW_REQUIRED,
+    FINGERPRINT_COLUMNS,
     VALIDATION_STATES,
+    config_fingerprint,
+    record_config_review,
     validation_state,
     validation_states,
 )
@@ -108,13 +114,8 @@ def _complete(offering) -> None:
         )
 
 
-def _review(offering, curator, version="cfg-1") -> None:
-    SalonService.objects.filter(pk=offering.pk).update(
-        config_reviewed_by=curator,
-        config_reviewed_at=timezone.now(),
-        config_review_source_ref="ревью куратора",
-        config_reviewed_version=version,
-    )
+def _review(offering, curator) -> None:
+    record_config_review(offering, by=curator, source_ref="ревью куратора")
 
 
 # ─── словарь ─────────────────────────────────────────────────────────────────
@@ -196,13 +197,80 @@ def test_changing_the_configuration_makes_the_review_stale(tenant, category, cur
     assert validation_state(wrap) == REVIEW_REQUIRED
 
 
-def test_an_unversioned_configuration_is_never_ready(tenant, category, curator) -> None:
-    """Пустая версия конфигурации не «совпадает» с пустой версией ревью."""
+def test_an_unversioned_configuration_is_never_ready(tenant, category) -> None:
+    """Пустая версия конфигурации не «совпадает» с пустой версией ревью —
+    даже когда записанный отпечаток совпал бы с фактами."""
     wrap = _offering(tenant, category, "Обёртывание без версии")
     _complete(wrap)
-    SalonService.objects.filter(pk=wrap.pk).update(configuration_version="")
+    rows = OfferingConfigFact.objects.filter(salon_service=wrap).values(*FINGERPRINT_COLUMNS)
+    SalonService.objects.filter(pk=wrap.pk).update(
+        configuration_version="", config_reviewed_fingerprint=config_fingerprint(rows)
+    )
 
     assert validation_state(wrap) == REVIEW_REQUIRED
+
+
+def test_an_unversioned_configuration_cannot_be_reviewed(tenant, category, curator) -> None:
+    wrap = _offering(tenant, category, "Обёртывание без версии для ревью")
+    SalonService.objects.filter(pk=wrap.pk).update(configuration_version="")
+
+    with pytest.raises(ValueError, match="без версии"):
+        _review(wrap, curator)
+
+
+# ─── отпечаток: любая правка факта делает ревью неактуальным ────────────────
+
+
+def test_editing_a_fact_value_after_review_makes_it_stale(tenant, category, curator) -> None:
+    wrap = _offering(tenant, category, "Обёртывание с новой экспозицией")
+    _complete(wrap)
+    _review(wrap, curator)
+    OfferingConfigFact.objects.filter(salon_service=wrap, field=F.EXPOSURE_SECONDS).update(value=2400)
+
+    assert validation_state(wrap) == REVIEW_REQUIRED
+
+
+def test_replacing_a_facts_source_after_review_makes_it_stale(tenant, category, curator) -> None:
+    """Замена источника при том же значении — тоже правка конфигурации."""
+    wrap = _offering(tenant, category, "Обёртывание с новой инструкцией")
+    _complete(wrap)
+    _review(wrap, curator)
+    OfferingConfigFact.objects.filter(salon_service=wrap, field=F.EXPOSURE_SECONDS).update(
+        source_ref="инструкция v4", source_version="4"
+    )
+
+    assert validation_state(wrap) == REVIEW_REQUIRED
+
+
+def test_adding_a_fact_after_review_makes_it_stale(tenant, category, curator) -> None:
+    wrap = _offering(tenant, category, "Обёртывание с уходом")
+    _complete(wrap)
+    _review(wrap, curator)
+    OfferingConfigFact.objects.create(
+        salon_service=wrap,
+        field=F.AFTERCARE,
+        state=St.KNOWN,
+        value="крем",
+        source_ref="инструкция",
+        source_type="manufacturer_instruction",
+    )
+
+    assert validation_state(wrap) == REVIEW_REQUIRED
+
+
+def test_the_fingerprint_does_not_depend_on_row_order(tenant, category) -> None:
+    wrap = _offering(tenant, category, "Обёртывание порядок")
+    _complete(wrap)
+    rows = list(OfferingConfigFact.objects.filter(salon_service=wrap).values(*FINGERPRINT_COLUMNS))
+
+    assert config_fingerprint(rows) == config_fingerprint(reversed(rows))
+
+
+def test_the_fingerprint_covers_every_fact_column() -> None:
+    """Новая колонка факта, забытая в отпечатке, правилась бы мимо ревью."""
+    columns = {f.attname for f in OfferingConfigFact._meta.concrete_fields}
+
+    assert set(FINGERPRINT_COLUMNS) == columns - {"id", "salon_service_id"}
 
 
 # ─── ревью — решение с провенансом ──────────────────────────────────────────
@@ -228,6 +296,7 @@ def test_review_by_person_and_rule_together_is_refused(tenant, category, curator
                 config_reviewed_at=timezone.now(),
                 config_review_source_ref="x",
                 config_reviewed_version="cfg-1",
+                config_reviewed_fingerprint="f" * 64,
             )
 
 
@@ -238,6 +307,21 @@ def test_a_review_rule_without_version_is_refused(tenant, category) -> None:
         with transaction.atomic():
             SalonService.objects.filter(pk=wrap.pk).update(
                 config_review_rule="auto",
+                config_reviewed_at=timezone.now(),
+                config_review_source_ref="x",
+                config_reviewed_version="cfg-1",
+                config_reviewed_fingerprint="f" * 64,
+            )
+
+
+def test_a_review_without_fingerprint_is_refused(tenant, category, curator) -> None:
+    """Ревью мимо ``record_config_review`` без отпечатка база не примет."""
+    wrap = _offering(tenant, category, "Ревью без отпечатка")
+
+    with pytest.raises(IntegrityError, match="salonservice_config_review_requires_provenance"):
+        with transaction.atomic():
+            SalonService.objects.filter(pk=wrap.pk).update(
+                config_reviewed_by=curator,
                 config_reviewed_at=timezone.now(),
                 config_review_source_ref="x",
                 config_reviewed_version="cfg-1",

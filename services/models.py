@@ -1125,8 +1125,8 @@ class SalonService(models.Model):
     # §7: REVIEW_REQUIRED — «факты есть, но требуется policy/legal/protocol
     # review». Если бы полнота фактов сама давала READY_FOR_SCREENING, этого
     # ревью не было бы вовсе. Поэтому READY — только при ЯВНОМ ревью, и оно
-    # привязано к версии конфигурации: изменили конфигурацию — ревью
-    # устарело, предложение снова REVIEW_REQUIRED. Хранится решение, а не
+    # привязано к версии конфигурации и к отпечатку её фактов: изменили
+    # конфигурацию — ревью устарело, предложение снова REVIEW_REQUIRED. Хранится решение, а не
     # состояние: состояние вычисляет ``services.body_care_validation``.
     # Форма провенанса — «кто ИЛИ правило», как у ``approved_*``.
     config_reviewed_by = models.ForeignKey(
@@ -1143,6 +1143,12 @@ class SalonService(models.Model):
     #: Какую версию конфигурации проверили. Ревью действует, только пока
     #: она равна ``configuration_version``.
     config_reviewed_version = models.CharField(max_length=32, blank=True, default="")
+    #: Отпечаток фактов конфигурации, которые видел ревьюер (SHA-256, см.
+    #: ``body_care_validation.config_fingerprint``). Ревью действует, только
+    #: пока отпечаток текущих фактов с ним совпадает: любая правка факта —
+    #: значение, состояние, источник, удаление строки — делает ревью
+    #: неактуальным без ручного подъёма версии (решение главного окна, 06.10).
+    config_reviewed_fingerprint = models.CharField(max_length=64, blank=True, default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1157,6 +1163,7 @@ class SalonService(models.Model):
                     | (
                         models.Q(config_reviewed_at__isnull=False)
                         & ~models.Q(config_review_source_ref="")
+                        & ~models.Q(config_reviewed_fingerprint="")
                         & (
                             models.Q(config_reviewed_by__isnull=False)
                             | ~models.Q(config_review_rule="")
