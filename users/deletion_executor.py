@@ -299,6 +299,13 @@ RETAIN: dict[str, str] = {
     "tenants.MedicalLicense.verified_by": (
         "провенанс проверки медицинской лицензии салона (Body Care §7A-2), актор — сотрудник"
     ),
+    # Body Care §7A-4. Кто проверил квалификацию мастера — сотрудник-ревьюер,
+    # это его запись. Сами строки квалификации стёртого мастера удаляются
+    # (``_erase_qualifications``); у живых строк обнуление ревьюера нарушило
+    # бы CHECK «проверка: все три поля или ни одного».
+    "users.PractitionerQualification.verified_by": (
+        "провенанс проверки квалификации мастера (Body Care §7A-4), актор — сотрудник"
+    ),
     "services.CanonGapRequest.decided_by": (
         "провенанс решения владельца по заявке о разрыве канона (§143), актор — сотрудник"
     ),
@@ -864,6 +871,8 @@ def _erase_catalog(user) -> dict:
         _erase_solo_tenant(sp, anonymised, kept)
         # DRF-1803 — зона выезда: город работы мастера; на строку ничто не ссылается.
         _erase_service_areas(sp, anonymised)
+        # Body Care §7A-4 — квалификация: профессиональные данные мастера.
+        _erase_qualifications(sp, anonymised)
 
     # 7. Аккаунт. Контекст — ДО обезличивания событий аналитики: erase
     # пишет своё аудит-событие с actor=user, и оно тоже обязано потерять актора.
@@ -1005,6 +1014,20 @@ def _erase_own_place(sp, anonymised: dict, kept: dict) -> None:
     place.status = LocationStatus.INACTIVE
     place.save(update_fields=[*OWN_PLACE_ERASED_TEXT_FIELDS, "latitude", "longitude", "status", "updated_at"])
     anonymised["tenants.ServiceLocation.own"] = anonymised.get("tenants.ServiceLocation.own", 0) + 1
+
+
+def _erase_qualifications(sp, anonymised: dict) -> None:
+    """Квалификации мастера (Body Care §7A-4): класс, протокол и основание
+    проверки — данные о человеке; строки удаляются (решение главного окна,
+    06.10, 152-ФЗ). Допуск проверяется в момент подбора и записи; история
+    прошлых записей живёт в appointments, а не здесь."""
+    from users.models import PractitionerQualification
+
+    deleted, _ = PractitionerQualification.objects.filter(specialist=sp).delete()
+    if deleted:
+        anonymised["users.PractitionerQualification.deleted"] = (
+            anonymised.get("users.PractitionerQualification.deleted", 0) + deleted
+        )
 
 
 def _erase_service_areas(sp, anonymised: dict) -> None:
@@ -1198,6 +1221,11 @@ def _own_place_residue(sp) -> dict[str, int]:
             or tenant.latitude is not None
         ):
             found["tenants.Tenant.solo"] = 1
+    from users.models import PractitionerQualification
+
+    qualifications = PractitionerQualification.objects.filter(specialist=sp).count()
+    if qualifications:
+        found["users.PractitionerQualification"] = qualifications
     areas = ServiceArea.objects.filter(specialist=sp).count()
     if areas:
         found["tenants.ServiceArea"] = areas
