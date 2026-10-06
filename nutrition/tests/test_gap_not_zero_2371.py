@@ -42,6 +42,9 @@ pytestmark = pytest.mark.django_db
 
 URL = "/api/v1/nutrition/food-log/"
 
+#: DRF-2777 — клиентская ручка пишет дневник только под утверждённым основанием.
+ATTESTED = {"consent": {"type": "food_diary_processing", "document_version": "food-diary-v1"}}
+
 
 @pytest.fixture
 def client_user(db):
@@ -92,6 +95,7 @@ class TestK1ScanWithoutPortionIsStillLogged:
         self, auth_client, client_user, scan_without_portion,
     ):
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "scan_id": str(scan_without_portion.id),
             "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json")
@@ -118,6 +122,7 @@ class TestK1ScanWithoutPortionIsStillLogged:
             },
         )
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "scan_id": str(scan.id), "portion_multiplier": 1.0, "meal_type": "lunch",
         }, format="json")
 
@@ -128,6 +133,7 @@ class TestK1ScanWithoutPortionIsStillLogged:
 class TestK2DishOutsideTheCatalogIsStillLogged:
     def test_an_unknown_dish_is_logged_under_the_name_the_person_typed(self, auth_client):
         resp = auth_client.post(URL, {
+            **ATTESTED,
             "dish_name": "ризотто с трюфелем",
             "portion_multiplier": 1.0, "meal_type": "dinner",
         }, format="json")

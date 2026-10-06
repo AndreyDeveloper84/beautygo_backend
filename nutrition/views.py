@@ -61,6 +61,12 @@ from nutrition.serializers import (
     WaterTodayResponseSerializer,
     WaterTodayResponseSerializerV3,
 )
+from nutrition.services.food_diary_consent import (
+    FOOD_DIARY_PROCESSING,
+    FoodDiaryConsentRequired,
+    require_attested_basis,
+    require_not_withdrawn,
+)
 from nutrition.services.personal_calculation_consent import (
     PERSONAL_CALCULATION,
     PersonalCalculationConsentRequired,
@@ -517,6 +523,21 @@ class InternalFoodScanView(APIView):
         )
 
 
+def _food_diary_consent_refusal(user, exc: FoodDiaryConsentRequired) -> Response:
+    """DRF-2777 — отказ записи в дневник без основания ``food_diary_processing``.
+
+    422 и свой код, как у параметров тела: «нет основания» чинится согласием
+    человека, а не телом запроса.
+    """
+    logger.info("nutrition.food_diary.consent_refused user=%s reason=%s", user.pk, exc.reason)
+    return error_response(
+        exc.code,
+        str(exc),
+        details={"consent_type": FOOD_DIARY_PROCESSING, "reason": exc.reason},
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+    )
+
+
 def _create_food_log_for(user, serializer_data: dict, request: Request) -> Response:
     """Shared body for FoodLogCreateView + InternalFoodLogView (DRF-247).
 
@@ -582,6 +603,12 @@ class FoodLogCreateView(APIView):
         },
     )
     def post(self, request: Request) -> Response:
+        # DRF-2777 — внешнее клиентское приложение (бот эту ручку не зовёт)
+        # обязано утвердить основание; известный отзыв побеждает утверждение.
+        try:
+            require_attested_basis(request.user.id, request.data)
+        except FoodDiaryConsentRequired as exc:
+            return _food_diary_consent_refusal(request.user, exc)
         serializer = FoodLogCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(
@@ -733,6 +760,12 @@ class InternalFoodLogView(APIView):
                 f"X-External-User-ID невалиден: {exc}",
             )
 
+        # DRF-2777 — согласие проверяет бот до вызова; здесь только рассинхрон:
+        # известный отзыв — отказ, неизвестное состояние — не отзыв.
+        try:
+            require_not_withdrawn(user.id)
+        except FoodDiaryConsentRequired as exc:
+            return _food_diary_consent_refusal(user, exc)
         serializer = FoodLogCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(
@@ -1014,6 +1047,12 @@ class InternalFoodLogRestoreView(APIView):
         user, refusal = _food_log_actor(request)
         if refusal is not None:
             return refusal
+        # DRF-2777 — восстановление возвращает запись в дневник: то же правило,
+        # что у новой записи бот-пути.
+        try:
+            require_not_withdrawn(user.id)
+        except FoodDiaryConsentRequired as exc:
+            return _food_diary_consent_refusal(user, exc)
         try:
             log = restore_food_log(user_id=user.id, log_id=pk)
         except FoodLogEditError as exc:
@@ -1702,6 +1741,12 @@ class InternalWaterCreateView(APIView):
                 f"X-External-User-ID невалиден: {exc}",
             )
 
+        # DRF-2777 — запись воды пишет зеркало в дневник (FoodLog). Бот держит
+        # её под тем же согласием; здесь только рассинхрон — известный отзыв.
+        try:
+            require_not_withdrawn(user.id)
+        except FoodDiaryConsentRequired as exc:
+            return _food_diary_consent_refusal(user, exc)
         serializer = WaterEntryCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(
@@ -1826,6 +1871,11 @@ class InternalWaterRestoreView(APIView):
                 f"X-External-User-ID невалиден: {exc}",
             )
 
+        # DRF-2777 — восстановление воды возвращает и зеркало в дневник.
+        try:
+            require_not_withdrawn(user.id)
+        except FoodDiaryConsentRequired as exc:
+            return _food_diary_consent_refusal(user, exc)
         try:
             entry = WaterEntryService().restore(user.id, pk)
         except EntryNotFoundError:
