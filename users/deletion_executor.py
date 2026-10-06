@@ -266,6 +266,13 @@ RETAIN: dict[str, str] = {
     "services.ServiceTemplate.retired_by": (
         "провенанс вывода канона из оборота (Body Care CAT-2), актор — сотрудник"
     ),
+    # Body Care CAT-4. Кто зафиксировал факт конфигурации предложения. Это
+    # провенанс факта о салоне, а не данные человека-клиента; актор —
+    # сотрудник салона или куратор. Обнуление стёрло бы, кто отвечает за
+    # факт о безопасности услуги.
+    "services.OfferingConfigFact.captured_by": (
+        "провенанс факта конфигурации предложения (Body Care CAT-4), актор — сотрудник"
+    ),
     "services.ServiceTemplateSynonym.confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "services.SalonService.mapping_confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "services.DraftSalonService.confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",

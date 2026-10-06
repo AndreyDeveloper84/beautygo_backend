@@ -1340,6 +1340,23 @@ class OfferingConfigFact(models.Model):
         NOT_PROVIDED = "not_provided", "Не предоставлено"
         CONFLICT = "conflict", "Противоречие"
 
+    class SourceType(models.TextChoices):
+        """Откуда взят факт — контракт §5, ровно семь значений (CAT-4).
+
+        ``SYSTEM_DERIVED`` в словаре есть, но §5 запрещает его для
+        клинического факта, которого нет в политике. Какие из 19 полей
+        «клинические», контракт не перечисляет (вопрос владельцу Q2) —
+        поэтому запрет здесь не реализован, а не угадан.
+        """
+
+        MANUFACTURER_INSTRUCTION = "manufacturer_instruction", "Инструкция производителя"
+        PROTOCOL_DOCUMENT = "protocol_document", "Документ протокола"
+        OWNER_INPUT = "owner_input", "Ввод владельца"
+        SALON_INPUT = "salon_input", "Ввод салона"
+        PHYSICIAN_POLICY = "physician_policy", "Политика врача"
+        CANONICAL_POLICY = "canonical_policy", "Каноническая политика"
+        SYSTEM_DERIVED = "system_derived", "Выведено системой"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     salon_service = models.ForeignKey(
         SalonService,
@@ -1354,6 +1371,35 @@ class OfferingConfigFact(models.Model):
     #: Откуда известно значение. Обязательно у KNOWN: известный факт без
     #: источника через месяц неотличим от догадки (контракт §5).
     source_ref = models.CharField(max_length=200, blank=True, default="")
+    # -- Провенанс факта (контракт §5, Body Care CAT-4) ---------------------
+    #: Вид источника. NULL законен у факта, который ещё не известен
+    #: (UNKNOWN / NOT_PROVIDED / NOT_APPLICABLE): провенанса у отсутствия нет,
+    #: и пустой вид источника там не читается как «проверено». У KNOWN —
+    #: обязателен (CheckConstraint ниже).
+    source_type = models.CharField(
+        max_length=32,
+        choices=SourceType.choices,
+        null=True,
+        blank=True,
+    )
+    #: Версия источника — например, редакция инструкции производителя.
+    source_version = models.CharField(max_length=64, blank=True, default="")
+    #: Когда факт зафиксирован (не путать с датой самого источника).
+    captured_at = models.DateTimeField(null=True, blank=True)
+    #: Кто зафиксировал факт — «кто ИЛИ правило», та же форма, что у
+    #: ``approved_by``/``approved_rule`` и ``retired_by``/``retired_rule``:
+    #: ручной ввод салона или владельца — человек, загрузка из инструкции
+    #: или производное — правило с версией. PROTECT: провенанс не должен
+    #: молча исчезать при удалении учётки (в переписи удаления — RETAIN).
+    captured_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    captured_rule = models.CharField(max_length=100, blank=True, default="")
+    capture_rule_version = models.CharField(max_length=32, blank=True, default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1395,6 +1441,36 @@ class OfferingConfigFact(models.Model):
                     | (models.Q(value__isnull=False) & ~models.Q(source_ref=""))
                 ),
                 name="offeringconfigfact_known_requires_value_and_source",
+            ),
+            # CAT-4, §5: известный факт несёт и ВИД источника, а не только
+            # ссылку на него — иначе «инструкция производителя» и «так сказал
+            # салон» неразличимы для того, кто решает о безопасности.
+            models.CheckConstraint(
+                condition=~models.Q(state="known") | models.Q(source_type__isnull=False),
+                name="offeringconfigfact_known_requires_source_type",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(source_type__isnull=True)
+                    | models.Q(
+                        source_type__in=[
+                            "manufacturer_instruction", "protocol_document", "owner_input",
+                            "salon_input", "physician_policy", "canonical_policy",
+                            "system_derived",
+                        ]
+                    )
+                ),
+                name="offeringconfigfact_source_type_known",
+            ),
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(captured_by__isnull=False) & ~models.Q(captured_rule="")
+                ),
+                name="offeringconfigfact_capture_is_who_xor_rule",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(captured_rule="") | ~models.Q(capture_rule_version=""),
+                name="offeringconfigfact_capture_rule_carries_version",
             ),
             # §4: «не знаем», «не применимо», «не ответили» значения не несут —
             # иначе значение при UNKNOWN однажды прочтут как известное.
