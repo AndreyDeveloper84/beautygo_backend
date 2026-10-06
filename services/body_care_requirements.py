@@ -124,7 +124,7 @@ REQUIREMENTS: dict[str, FamilyRequirements] = {
 }
 
 
-def _check(
+def evaluate(
     family: str | None,
     facts: Mapping[str, str],
     requirements: Mapping[str, FamilyRequirements],
@@ -174,7 +174,7 @@ def check_configurations(
         salon_service_id__in=families
     ).values_list("salon_service_id", "field", "state"):
         facts[sid][fname] = state
-    return {sid: _check(fam, facts.get(sid, {}), requirements) for sid, fam in families.items()}
+    return {sid: evaluate(fam, facts.get(sid, {}), requirements) for sid, fam in families.items()}
 
 
 def check_configuration(

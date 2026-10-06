@@ -1121,11 +1121,71 @@ class SalonService(models.Model):
     #: конфигурация не описана; ни один факт ещё не утверждён.
     configuration_version = models.CharField(max_length=32, blank=True, default="")
 
+    # -- Ревью конфигурации (Body Care CAT-6, контракт §7) -------------------
+    # §7: REVIEW_REQUIRED — «факты есть, но требуется policy/legal/protocol
+    # review». Если бы полнота фактов сама давала READY_FOR_SCREENING, этого
+    # ревью не было бы вовсе. Поэтому READY — только при ЯВНОМ ревью, и оно
+    # привязано к версии конфигурации и к отпечатку её фактов: изменили
+    # конфигурацию — ревью устарело, предложение снова REVIEW_REQUIRED. Хранится решение, а не
+    # состояние: состояние вычисляет ``services.body_care_validation``.
+    # Форма провенанса — «кто ИЛИ правило», как у ``approved_*``.
+    config_reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    config_review_rule = models.CharField(max_length=100, blank=True, default="")
+    config_review_rule_version = models.CharField(max_length=32, blank=True, default="")
+    config_reviewed_at = models.DateTimeField(null=True, blank=True)
+    config_review_source_ref = models.CharField(max_length=200, blank=True, default="")
+    #: Какую версию конфигурации проверили. Ревью действует, только пока
+    #: она равна ``configuration_version``.
+    config_reviewed_version = models.CharField(max_length=32, blank=True, default="")
+    #: Отпечаток фактов конфигурации, которые видел ревьюер (SHA-256, см.
+    #: ``body_care_validation.config_fingerprint``). Ревью действует, только
+    #: пока отпечаток текущих фактов с ним совпадает: любая правка факта —
+    #: значение, состояние, источник, удаление строки — делает ревью
+    #: неактуальным без ручного подъёма версии (решение главного окна, 06.10).
+    config_reviewed_fingerprint = models.CharField(max_length=64, blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
+            # Body Care CAT-6: ревью конфигурации — решение, и провенанс у него
+            # тот же, что у подтверждения связи: дата, основание, кто ИЛИ правило.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(config_reviewed_version="")
+                    | (
+                        models.Q(config_reviewed_at__isnull=False)
+                        & ~models.Q(config_review_source_ref="")
+                        & ~models.Q(config_reviewed_fingerprint="")
+                        & (
+                            models.Q(config_reviewed_by__isnull=False)
+                            | ~models.Q(config_review_rule="")
+                        )
+                    )
+                ),
+                name="salonservice_config_review_requires_provenance",
+            ),
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(config_reviewed_by__isnull=False)
+                    & ~models.Q(config_review_rule="")
+                ),
+                name="salonservice_config_review_is_who_xor_rule",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(config_review_rule="")
+                    | ~models.Q(config_review_rule_version="")
+                ),
+                name="salonservice_config_review_rule_carries_version",
+            ),
             models.UniqueConstraint(
                 fields=["tenant", "template", "name"],
                 name="salonservice_tenant_template_name_uniq",
