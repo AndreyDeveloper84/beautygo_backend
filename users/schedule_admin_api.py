@@ -46,7 +46,7 @@ from .authentication import AylaServiceBearerAuthentication
 from .max_salon_admin_auth import SalonAdminTokenAuthentication, auth_method
 from .permissions import (
     IsProApp,
-    IsTenantAdminOrPlatformAdmin,
+    IsTenantAdminOrBookingDeskRead,
     ServiceCredentialIsReadOnly,
 )
 from .response import error_response, success_response
@@ -57,7 +57,9 @@ logger = logging.getLogger(__name__)
 _ADMIN_PERMISSIONS = [
     permissions.IsAuthenticated,
     IsProApp,
-    IsTenantAdminOrPlatformAdmin,
+    # DRF-2826: + the salon's receptionist, READ-only — sees the schedule,
+    # does not move availability (time off, exceptions, template, closures).
+    IsTenantAdminOrBookingDeskRead,
     # DRF-1297 B-1. Only ever subtracts: abstains for a JWT caller, and
     # refuses anything that is not GET/HEAD/OPTIONS when the caller
     # authenticated with the Ayla service Bearer. This is what makes it

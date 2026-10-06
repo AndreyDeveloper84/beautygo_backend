@@ -567,6 +567,48 @@ class IsTenantAdmin(permissions.BasePermission):
         ).exists()
 
 
+#: The roles that may run the booking desk of a salon (DRF-2826).
+_BOOKING_DESK_ROLES = ("admin", "receptionist")
+
+
+def _active_role_in(request: Any, roles: tuple[str, ...]) -> bool:
+    user = request.user
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    request_tenant = getattr(request, "tenant", None)
+    if request_tenant is None:
+        return False
+    from users.models import TenantUserRelationship
+
+    return TenantUserRelationship.objects.filter(
+        user=user,
+        tenant=request_tenant,
+        role__in=roles,
+        is_active=True,
+    ).exists()
+
+
+class IsTenantBookingDesk(permissions.BasePermission):
+    """The booking desk of THIS tenant: an active ``admin`` OR ``receptionist`` (DRF-2826).
+
+    Owner decision 06.10: the receptionist runs the booking cycle of one
+    salon — create, reschedule, cancel, complete, no-show, find the customer
+    being booked, read the day. Exactly that surface takes this class instead
+    of :class:`IsTenantAdmin`; everything else (roles, linking, availability,
+    closures, settings) keeps :class:`IsTenantAdmin` and refuses a
+    receptionist.
+
+    Same two factors as :class:`IsTenantAdmin`: the tenant comes from
+    middleware (``request.tenant``), never from the body, and the grant must
+    be active THERE — a receptionist of salon A has nothing in salon B.
+    """
+
+    message = "Доступ только для администратора или ресепшна салона"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        return _active_role_in(request, _BOOKING_DESK_ROLES)
+
+
 class IsTenantAdminOrPlatformAdmin(permissions.BasePermission):
     """Salon administrator of THIS tenant, or Ayla platform staff (DRF-1062).
 
@@ -606,6 +648,29 @@ class IsTenantAdminOrPlatformAdmin(permissions.BasePermission):
             is_active=True,
         ).exists()
 
+
+class IsTenantAdminOrBookingDeskRead(IsTenantAdminOrPlatformAdmin):
+    """Admin / platform staff as before — plus the receptionist, read-only (DRF-2826).
+
+    For the schedule surface (``users/schedule_admin_api.py``). Owner
+    decision 06.10: the receptionist SEES the schedule (week, time off,
+    date exceptions, closures, impact) to book against it, but does not
+    move a master's availability — time off, date exceptions, the weekly
+    template and salon closures stay with the owner / admin. So a
+    receptionist passes on ``GET`` / ``HEAD`` / ``OPTIONS`` only.
+
+    It only ever adds a read for one role; every write still needs exactly
+    what :class:`IsTenantAdminOrPlatformAdmin` needs.
+    """
+
+    message = "Изменять график может только администратор салона"
+
+    def has_permission(self, request: Any, view: Any) -> bool:
+        if super().has_permission(request, view):
+            return True
+        if request.method not in permissions.SAFE_METHODS:
+            return False
+        return _active_role_in(request, ("receptionist",))
 
 # ---------------------------------------------------------------------------
 # DRF-1617 / B-2.1 — the internal token stops meaning "any subject".

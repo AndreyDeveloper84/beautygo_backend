@@ -61,6 +61,33 @@ def has_tenant_admin_grant(request: Any) -> bool:
     ).exists()
 
 
+def has_booking_desk_grant(request: Any) -> bool:
+    """True when the caller runs the booking desk of the addressed tenant (DRF-2826).
+
+    Mirrors ``users.permissions.IsTenantBookingDesk``: an active ``admin`` OR
+    ``receptionist`` grant in ``request.tenant``. The receptionist acts on a
+    booking in the same capacity as the administrator — for the salon
+    (``OperationalActor.SALON``) — which is what the owner's 06.10 decision
+    gives the front desk: the booking cycle, not the salon's settings.
+    """
+    user = getattr(request, "user", None)
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    request_tenant = getattr(request, "tenant", None)
+    if request_tenant is None:
+        return False
+    from users.models import TenantUserRelationship
+    return TenantUserRelationship.objects.filter(
+        user=user,
+        tenant=request_tenant,
+        role__in=(
+            TenantUserRelationship.Role.ADMIN,
+            TenantUserRelationship.Role.RECEPTIONIST,
+        ),
+        is_active=True,
+    ).exists()
+
+
 def may_operate_on_bookings(request: Any) -> bool:
     """Cheap pre-lock gate: could this caller act on *some* booking?
 
@@ -72,7 +99,7 @@ def may_operate_on_bookings(request: Any) -> bool:
     user = getattr(request, "user", None)
     if not user or not getattr(user, "is_authenticated", False):
         return False
-    return bool(getattr(user, "is_specialist", False)) or has_tenant_admin_grant(request)
+    return bool(getattr(user, "is_specialist", False)) or has_booking_desk_grant(request)
 
 
 def resolve_booking_operator(request: Any, appointment: Any) -> str | None:
@@ -99,7 +126,7 @@ def resolve_booking_operator(request: Any, appointment: Any) -> str | None:
     if (
         request_tenant is not None
         and appointment.tenant_id == request_tenant.id
-        and has_tenant_admin_grant(request)
+        and has_booking_desk_grant(request)
     ):
         return OperationalActor.SALON.value
 

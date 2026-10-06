@@ -80,7 +80,7 @@ from appointments.domain.value_objects import (
 )
 from appointments.models import Appointment
 from appointments.serializers import AppointmentDetailSerializer
-from users.permissions import IsBotServiceWithVerifiedClient, IsTenantAdmin
+from users.permissions import IsBotServiceWithVerifiedClient, IsTenantBookingDesk
 from users.response import error_response, success_response
 
 logger = logging.getLogger(__name__)
@@ -134,9 +134,14 @@ logger = logging.getLogger(__name__)
 # tenant, and recording their action as `salon` would be false. Schedule
 # edits (DRF-1062) are unattributed configuration, so the wider
 # permission is right there and not here. Raised as an owner question.
+#
+# DRF-2826: the second factor is `IsTenantBookingDesk` — the same (person,
+# tenant) proof as `IsTenantAdmin`, widened to the salon's receptionist
+# (owner decision 06.10: the front desk runs the booking cycle). Attribution
+# is unchanged: a receptionist acts for the salon, `initiator_role=salon`.
 _SALON_WRITE_PERMISSIONS = [
     IsBotServiceWithVerifiedClient,
-    IsTenantAdmin,
+    IsTenantBookingDesk,
 ]
 
 

@@ -30,7 +30,7 @@ from appointments.application.services.tenant_day_service import (
 from users.authentication import AylaServiceBearerAuthentication
 from users.permissions import (
     IsProApp,
-    IsTenantAdmin,
+    IsTenantBookingDesk,
     ServiceCredentialIsReadOnly,
 )
 from users.response import error_response, success_response
@@ -68,7 +68,8 @@ class TenantDayView(APIView):
     permission_classes = [
         permissions.IsAuthenticated,
         IsProApp,
-        IsTenantAdmin,
+        # DRF-2826: the receptionist reads the day too — the booking desk.
+        IsTenantBookingDesk,
         # The view is GET-only, so this is belt-and-braces rather than
         # load-bearing here -- but it is what stops a later `post` on
         # this class from inheriting Ayla's read grant by accident.

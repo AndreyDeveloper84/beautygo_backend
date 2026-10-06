@@ -56,6 +56,13 @@ class _SalonAdminLinkRequestSerializer(serializers.Serializer):
         max_length=64, required=False, allow_blank=True, default="",
     )
     idempotency_key = serializers.CharField(max_length=64, min_length=8)
+    # DRF-2826: ``receptionist`` — только с личностью администратора салона.
+    role = serializers.ChoiceField(
+        choices=["admin", "receptionist"], required=False, default="admin",
+    )
+    assigned_by_external_user_id = serializers.CharField(
+        max_length=200, required=False, allow_blank=True, default="",
+    )
 
 
 class _SalonAdminLinkResponseSerializer(serializers.Serializer):
@@ -116,6 +123,8 @@ class InternalSalonAdminLinkView(APIView):
                 actor=data["actor"],
                 correlation_id=data["correlation_id"],
                 idempotency_key=data["idempotency_key"],
+                role=data["role"],
+                assigned_by_external_user_id=data["assigned_by_external_user_id"],
             )
         except SalonAdminLinkRefused as exc:
             return error_response(
