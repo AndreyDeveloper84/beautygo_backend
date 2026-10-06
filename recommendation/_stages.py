@@ -142,6 +142,14 @@ class StageOutput:
     evidence: Mapping[UUID, tuple[EvidenceItem, ...]] = field(default_factory=dict)
     #: Кандидаты, которым запрещён первый ярус (K5).
     tier_one_forbidden: frozenset[UUID] = frozenset()
+    #: Стадия из нескольких измерений (S4, O-1): ключ — кортеж, сравнение
+    #: по измерениям по очереди. Если задан, группа делится по нему, а не по
+    #: ``keys``.
+    lex_keys: Mapping[UUID, tuple[int, ...]] = field(default_factory=dict)
+    #: С какого измерения значение кандидата неизвестно (§29.4 по измерению):
+    #: подгруппа, где он стоит, дальше этого измерения не делится. Старшие
+    #: измерения работают; неизвестное молчит вместе со всеми младшими.
+    unknown_from: Mapping[UUID, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -341,7 +349,9 @@ def apply_eligibility(
         # Стоит ПОСЛЕ проверок процедуры и связи: предпочтение работает на
         # допустимых кандидатах и ничего из них не отменяет.
         # Внутри вида — ИЛИ («Анна или Мария»), между видами — И («Анна, и
-        # только в этом салоне»).
+        # только в этом салоне»). «Только массаж» при неизвестных категориях
+        # кандидата исключает: жёсткое условие подтверждается, а не
+        # предполагается (как известный бюджет при неизвестной цене ниже).
         if not all(
             any(satisfies_preference(facts, p, need_is_stated=need_is_stated) for p in same_kind)
             for same_kind in hard_by_kind.values()
@@ -684,11 +694,19 @@ def stage_contextual(
         )
 
     keys: dict[UUID, float] = {}
+    lex_keys: dict[UUID, tuple[int, ...]] = {}
+    unknown_from: dict[UUID, int] = {}
     codes: dict[UUID, frozenset[ReasonCode]] = {}
     evidence: dict[UUID, tuple[EvidenceItem, ...]] = {}
-    inactive_for: set[UUID] = set()
     now_by_kind, memory_by_kind = _by_kind(soft_current), _by_kind(soft_memory)
-    category_in_play = PreferenceKind.CATEGORY in now_by_kind or PreferenceKind.CATEGORY in memory_by_kind
+    # Первое измерение категории, которое участвует: текущего запроса (2),
+    # иначе памяти (3 + 2). Неизвестные категории замораживают с него.
+    category_position = (
+        _PREFERENCE_DIMENSIONS.index(PreferenceKind.CATEGORY) if PreferenceKind.CATEGORY in now_by_kind
+        else len(_PREFERENCE_DIMENSIONS) + _PREFERENCE_DIMENSIONS.index(PreferenceKind.CATEGORY)
+        if PreferenceKind.CATEGORY in memory_by_kind
+        else None
+    )
 
     def hits(facts: CandidateFacts, by_kind) -> tuple[bool, ...]:
         return tuple(
@@ -698,26 +716,30 @@ def stage_contextual(
 
     for facts in candidates:
         cid = facts.ref.id
-        # §29.4: категорий кандидата не знаем — предпочтение категории о нём
-        # молчит, а не ставит его ниже. Стадия замолкает про его группу.
-        if category_in_play and not _candidate_categories(facts, need_is_stated=need_is_stated):
-            inactive_for.add(cid)
+        # §29.4 по измерению: категорий кандидата не знаем — молчит только
+        # сравнение по категории и всё младшее. «Мой мастер Анна» (старше)
+        # работает, даже если у соседа услуги без категорий.
+        if category_position is not None and not _candidate_categories(facts, need_is_stated=need_is_stated):
+            unknown_from[cid] = category_position
         # O-1 (DRF-2816): лексикографически ВНУТРИ стадии, без весов и сумм —
         # да/нет по измерениям в закреплённом порядке: текущий запрос
         # (мастер, салон, категория), затем подтверждённая память (то же),
-        # затем история визитов. Число собрано разрядами: любой старший
-        # признак перевешивает все младшие вместе, два совпадения не
-        # «стоят» одного более важного.
+        # затем история визитов. Любой старший признак перевешивает все
+        # младшие вместе: два совпадения не «стоят» одного более важного.
         now, remembered = hits(facts, now_by_kind), hits(facts, memory_by_kind)
         pref_codes: set[ReasonCode] = set()
         if any(now):
             pref_codes.add(ReasonCode.CONTEXT_PREFERENCE_CURRENT_REQUEST)
         if any(remembered):
             pref_codes.add(ReasonCode.CONTEXT_PREFERENCE_CONFIRMED_MEMORY)
+        history = 2 if (has_history and facts.prior_completed_visit) else (
+            1 if (has_history and facts.prior_completed_same_category) else 0
+        )
+        lex_keys[cid] = tuple(int(bit) for bit in now + remembered) + (history,)
+        # То же число одной величиной — для журнала; делит группу ``lex_keys``.
         pref_key = 0
         for bit in now + remembered:
             pref_key = pref_key * 2 + int(bit)
-        # Младший разряд — история 0..2: основание 3.
         pref_key *= 3
         if not has_history:
             keys[cid] = float(pref_key)
@@ -743,10 +765,8 @@ def stage_contextual(
             codes[cid] = frozenset(pref_codes or {ReasonCode.CONTEXT_NOT_APPLICABLE})
 
     return StageOutput(
-        StageId.S4, active=len(inactive_for) < len(candidates), keys=keys, codes=codes,
-        evidence=evidence, inactive_for=frozenset(inactive_for),
-        inactive_reason=None if len(inactive_for) < len(candidates)
-        else "предпочтение категории, а категорий ни у кого из кандидатов не знаем",
+        StageId.S4, active=True, keys=keys, codes=codes, evidence=evidence,
+        lex_keys=lex_keys, unknown_from=unknown_from,
     )
 
 

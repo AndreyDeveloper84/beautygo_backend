@@ -106,7 +106,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import replace
 from typing import Any
 
 from django.db.models import QuerySet
@@ -127,7 +126,6 @@ from recommendation.api import (
     Scope,
     ScopeMode,
     PreferenceSerializer,
-    PreferenceStrength,
     Surface,
     build_preferences,
     resolve,
@@ -509,14 +507,11 @@ class CatalogRecommendationsView(APIView):
         serializer = RecommendationsRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         goal = (serializer.validated_data.get("goal") or "").strip()
-        # «Только X» на полке читается как мягкое: полка — витрина, а не
-        # ответ на вопрос, и жёсткое условие опустошило бы её целиком
-        # (вторая полка без салонов из истории — и без Анны). Жёсткое
-        # работает в ручке резолвера, где его сказали в разговоре.
-        preferences = tuple(
-            replace(p, strength=PreferenceStrength.SOFT)
-            for p in build_preferences(serializer.validated_data.get("preferences"))
-        )
+        # Решение владельца 06.10: «только Анна» — жёсткое условие подбора и
+        # на полке. Полка 1 сужается до Анны; полка 2 (без салонов из истории)
+        # пустеет — другими мастерами «Новых мест» на «только Анна» не
+        # отвечаем. Объяснить пустоту и спросить про альтернативы — дело бота.
+        preferences = build_preferences(serializer.validated_data.get("preferences"))
 
         # Константа поверхности, не производная от запроса (§72).
         # Ни `get`, ни `or`, ни умолчания сериализатора: значение известно

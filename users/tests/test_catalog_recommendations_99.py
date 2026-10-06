@@ -1005,23 +1005,46 @@ class TestPreferencesOnTheShelf:
         tiers = {item["candidate"]["id"]: item["tier"] for item in items}
         assert tiers[_key(anna)] < tiers[_key(other)]
 
-    def test_only_x_on_the_shelf_reads_as_soft(
-        self, customer, customer_known_tur, tenant_known, manicure_category,
+    def test_only_anna_is_never_answered_with_another_master(
+        self, customer, customer_known_tur, tenant_known, tenant_new, manicure_category,
     ):
-        """Полка — витрина: «только Анна» поднимает Анну и никого не прячет."""
+        """Приёмка владельца 06.10, узел 2: «только Анна» — жёсткий scope и на полке.
+
+        Полка 1 сужается до Анны; полка 2 пустеет, а не отвечает мастером из
+        «Новых мест». Объяснить и спросить про альтернативы — дело бота.
+        """
         anna = _make_specialist(tenant_known, suffix="2822", name="Анна")
         other = _make_specialist(tenant_known, suffix="2823", name="Другая")
-        _make_service(anna, manicure_category, name="Маникюр")
-        _make_service(other, manicure_category, name="Маникюр")
+        fresh = _make_specialist(tenant_new, suffix="2825", name="Новая")
+        for master in (anna, other, fresh):
+            _make_service(master, manicure_category, name="Маникюр")
         body = _body(preferences=[
             {"kind": "master", "ref": _key(anna), "strength": "hard", "origin": "current_request"},
         ])
 
-        items = _api().post(URL, body, format="json").json()["data"]["layer_1_your_places"]["items"]
+        data = _api().post(URL, body, format="json").json()["data"]
 
-        tiers = {item["candidate"]["id"]: item["tier"] for item in items}
-        assert set(tiers) == {_key(anna), _key(other)}, "жёсткое на полке не опустошает её"
-        assert tiers[_key(anna)] < tiers[_key(other)]
+        assert [i["candidate"]["id"] for i in data["layer_1_your_places"]["items"]] == [_key(anna)]
+        assert data["layer_2_ayla_picks"]["items"] == []
+
+    def test_a_familiar_anna_rises_on_shelf_1_and_stays_off_shelf_2(
+        self, customer, customer_known_tur, tenant_known, tenant_new, manicure_category,
+    ):
+        """Приёмка владельца 06.10, узел 1: мягкое «моя Анна» — наверх полки 1, в полку 2 не попадает."""
+        anna = _make_specialist(tenant_known, suffix="2826", name="Анна")
+        other = _make_specialist(tenant_known, suffix="2827", name="Другая")
+        fresh = _make_specialist(tenant_new, suffix="2828", name="Новая")
+        for master in (anna, other, fresh):
+            _make_service(master, manicure_category, name="Маникюр")
+        body = _body(preferences=[{"kind": "master", "ref": _key(anna), "origin": "current_request"}])
+
+        data = _api().post(URL, body, format="json").json()["data"]
+
+        l1 = {i["candidate"]["id"]: i["tier"] for i in data["layer_1_your_places"]["items"]}
+        l2 = {i["candidate"]["id"] for i in data["layer_2_ayla_picks"]["items"]}
+        assert l1[_key(anna)] < l1[_key(other)]
+        assert _key(anna) not in l2
+        assert l2 == {_key(fresh)}, "полка 2 — новые места, как и без предпочтения"
 
     def test_preferences_may_be_null(self, customer, customer_known_tur, tenant_known, manicure_category):
         anna = _make_specialist(tenant_known, suffix="2824", name="Анна")

@@ -15,15 +15,18 @@
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from unittest import mock
 
 import pytest
 
 from recommendation import _serializers as serializers_module
-from recommendation._pipeline import resolve
+from recommendation._pipeline import _split_group, resolve
 from recommendation._reason_codes import ReasonCode
+from recommendation._stages import stage_contextual
 from recommendation._serializers import MAX_PREFERENCES, ResolveRequestSerializer, build_preferences
 from recommendation._types import (
+    Constraint,
     MappingStatus,
     MatchLevel,
     NeedOrigin,
@@ -38,6 +41,7 @@ from recommendation._types import (
     ScopeMode,
     StageId,
     Surface,
+    UserConstraints,
 )
 from recommendation.tests.conftest import make_facts
 
@@ -58,6 +62,15 @@ def _resolve(facts, *prefs, need=None):
         request_id="r-o1", subject_ref="s", surface=Surface.MINIAPP_HOME, scope=Scope(ScopeMode.MARKETPLACE),
         need=need or NeedSpec(origin=NeedOrigin.MEMORY), safety_state=SafetyState.NOT_APPLICABLE,
         tie_break_seed="seed-o1", k=10, preferences=tuple(prefs),
+    ), source=_Fixed(facts))
+
+
+def _resolve_with_budget(facts, budget, *prefs):
+    return resolve(RecommendationRequest(
+        request_id="r-o1", subject_ref="s", surface=Surface.MINIAPP_HOME, scope=Scope(ScopeMode.MARKETPLACE),
+        need=NeedSpec(origin=NeedOrigin.MEMORY), safety_state=SafetyState.NOT_APPLICABLE,
+        tie_break_seed="seed-o1", k=10, preferences=tuple(prefs),
+        constraints=UserConstraints(price_max=Constraint.known(budget)),
     ), source=_Fixed(facts))
 
 
@@ -321,3 +334,62 @@ class TestReviewFixesV2:
 
         assert serializer.is_valid(), serializer.errors
         assert serializer.build_preferences() == ()
+
+
+class TestOwnerAcceptance:
+    """Приёмка владельца 06.10, узел 3: предпочтение не отменяет соответствие и обязательные ограничения."""
+
+    def test_a_preferred_master_over_budget_is_still_excluded(self):
+        anna = make_facts(price=Decimal("3000"))
+        other = make_facts(price=Decimal("1000"))
+
+        decision = _resolve_with_budget([anna, other], Decimal("1500"), _master(anna.ref.id))
+
+        assert [c.candidate_ref.id for c in decision.ordered] == [other.ref.id]
+        assert [(e.candidate_ref.id, e.reason_code) for e in decision.excluded] == [
+            (anna.ref.id, ReasonCode.ELIG_EXCLUDED_BUDGET),
+        ]
+
+    def test_only_anna_over_budget_gives_an_empty_answer_not_another_master(self):
+        anna = make_facts(price=Decimal("3000"))
+        other = make_facts(price=Decimal("1000"))
+
+        decision = _resolve_with_budget([anna, other], Decimal("1500"), _master(anna.ref.id, HARD))
+
+        assert decision.ordered == ()
+
+
+class TestPerDimensionFreeze:
+    """Ревью v2 #1: неизвестные категории глушат только категорию и младшее, не всю стадию."""
+
+    def test_unknown_categories_next_door_do_not_silence_my_master(self):
+        massage = uuid.uuid4()
+        anna = make_facts(category_refs=frozenset({massage}))
+        uncategorised, in_massage = make_facts(), make_facts(category_refs=frozenset({massage}))
+
+        decision = _resolve(
+            [uncategorised, in_massage, anna],
+            _master(anna.ref.id),
+            Preference(kind=PreferenceKind.CATEGORY, ref=massage, origin=MEMORY),
+        )
+
+        tiers = _tiers(decision)
+        assert tiers[anna.ref.id] < tiers[in_massage.ref.id]
+        assert tiers[anna.ref.id] < tiers[uncategorised.ref.id]
+        assert tiers[in_massage.ref.id] == tiers[uncategorised.ref.id], "неизвестное не понижено"
+
+    def test_visit_history_is_not_silenced_by_a_category_known_elsewhere(self):
+        """Категории известны у всех — история работает под категорией как обычно."""
+        massage = uuid.uuid4()
+        visited = make_facts(category_refs=frozenset({uuid.uuid4()}), prior_completed_visit=True)
+        new = make_facts(category_refs=frozenset({uuid.uuid4()}))
+
+        # Стадия напрямую: история при NOT_APPLICABLE закрывает выдачу (§72) — не предмет узла.
+        output = stage_contextual(
+            [new, visited], (Preference(kind=PreferenceKind.CATEGORY, ref=massage, origin=NOW),),
+        )
+        verdicts = {new.ref.id: {}, visited.ref.id: {}}
+
+        parts = _split_group([new.ref.id, visited.ref.id], output, verdicts)
+
+        assert parts == [[visited.ref.id], [new.ref.id]]
