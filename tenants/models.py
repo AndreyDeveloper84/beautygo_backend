@@ -473,3 +473,5 @@ class Tenant(models.Model):
 from .service_location import LocationKind, LocationStatus, ServiceLocation  # noqa: E402,F401
 # `ServiceArea` (DRF-1803) — зона выезда мастера, тоже отдельным модулем.
 from .service_area import AreaCoverage, AreaKind, ServiceArea  # noqa: E402,F401
+# `MedicalLicense` (Body Care §7A-2, DRF-2838) — лицензия салона, тоже отдельным модулем.
+from .medical_license import MedicalLicense  # noqa: E402,F401
