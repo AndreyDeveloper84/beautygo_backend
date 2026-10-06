@@ -23,7 +23,7 @@ from enum import StrEnum
 #: Версия реестра. Любое добавление, удаление или изменение смысла кода —
 #: новая версия; она уезжает в `policy_versions` ответа, иначе решение
 #: невоспроизводимо задним числом (контракт §6.3).
-REGISTRY_VERSION = "1.0.0"
+REGISTRY_VERSION = "1.1.0"
 
 
 class ReasonCode(StrEnum):
@@ -55,6 +55,16 @@ class ReasonCode(StrEnum):
     MATCH_SERVICE_PARTIAL = "MATCH_SERVICE_PARTIAL"
     MATCH_CAPABILITY_ONLY = "MATCH_CAPABILITY_ONLY"
     MATCH_GOAL_CATEGORY = "MATCH_GOAL_CATEGORY"
+    # DRF-2789 (1.1.0) — глубина совпадения с целью, всегда рядом с
+    # MATCH_GOAL_CATEGORY: чем именно совпадение по цели держится.
+    # PRIMARY / SECONDARY / EXPANDED говорят о ПОЛОЖЕНИИ категории в
+    # курируемой цели и только о нём — не о том, что процедура доказанно
+    # помогает (канон §17 claim-модели). Об эффективности — только
+    # CONFIRMED_CAPABILITY, и только из подтверждённой CapabilityGoalLink.
+    MATCH_GOAL_CONFIRMED_CAPABILITY = "MATCH_GOAL_CONFIRMED_CAPABILITY"
+    MATCH_GOAL_PRIMARY_CATEGORY = "MATCH_GOAL_PRIMARY_CATEGORY"
+    MATCH_GOAL_SECONDARY_CATEGORY = "MATCH_GOAL_SECONDARY_CATEGORY"
+    MATCH_GOAL_EXPANDED_CATEGORY = "MATCH_GOAL_EXPANDED_CATEGORY"
     MATCH_UNDETERMINED = "MATCH_UNDETERMINED"
 
     # -- S3: транзакционная пригодность ------------------------------------
