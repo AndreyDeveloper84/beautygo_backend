@@ -404,6 +404,11 @@ class CandidateFacts:
     match_level: MatchLevel = MatchLevel.UNDETERMINED
     matched_service_ref: UUID | None = None
     matched_goal_category_ref: UUID | None = None
+    #: DRF-2789 — глубина совпадения с целью, только у уровня GOAL_CATEGORY:
+    #: 4 подтверждённая связь процедуры с целью, 3 основная категория прямо,
+    #: 2 лист под основным корнем, 1 побочная прямо, 0 лист под побочным корнем.
+    #: ``None`` — не совпадение по цели.
+    goal_fit_depth: int | None = None
 
     # -- S3: транзакционная пригодность -------------------------------------
     is_bookable: bool | None = None

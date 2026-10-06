@@ -76,7 +76,7 @@ from decimal import Decimal
 from typing import Sequence
 from uuid import UUID
 
-from goals.wiring import goal_category_ids_for_key
+from goals.wiring import goal_category_positions_for_key
 from recommendation.api import (
     CandidateFacts,
     CandidateKind,
@@ -88,6 +88,7 @@ from recommendation.api import (
     ScheduleState,
     Scope,
 )
+from services.capabilities import template_ids_helping_goal
 from services.catalog_reads import catalog_services_for, catalog_services_prefetch
 from services.offer_sellable import sellable_offer_q
 from services.models import DraftSalonService, SpecialistService
@@ -125,7 +126,13 @@ class SpecialistCandidateSource:
             return []
 
         mapping = self._mapping_by_specialist([s.id for s in specialists])
-        goal_categories = goal_category_ids_for_key(need.goal_key)
+        # Одно раскрытие цели на оба вопроса: какие категории (фильтр
+        # совпадения) и где каждая стоит в цели (глубина, DRF-2789).
+        goal_positions = goal_category_positions_for_key(need.goal_key)
+        goal_categories = tuple(goal_positions) or None
+        helping_templates = (
+            template_ids_helping_goal(need.goal_key) if goal_categories else frozenset()
+        )
         needle = (need.raw_text or "").strip().casefold()
 
         facts = [
@@ -134,6 +141,8 @@ class SpecialistCandidateSource:
                 mapping=mapping.get(specialist.id, _MappingFacts()),
                 needle=needle,
                 goal_categories=goal_categories,
+                goal_positions=goal_positions,
+                helping_templates=helping_templates,
             )
             for specialist in specialists
         ]
@@ -210,6 +219,8 @@ class SpecialistCandidateSource:
             # без второго чтения и без догадки, какая услуга совпала.
             facts.status_by_service[salon.id] = salon.mapping_status
             if salon.template_id is not None:
+                facts.template_by_service[salon.id] = salon.template_id
+            if salon.template_id is not None:
                 facts.has_template = True
                 if salon.id in confirmed_salon_ids:
                     facts.human_confirmed_ref = f"draft_confirmed:{salon.id}"
@@ -246,6 +257,8 @@ class SpecialistCandidateSource:
         mapping: "_MappingFacts",
         needle: str,
         goal_categories: tuple[UUID, ...] | None,
+        goal_positions=None,
+        helping_templates: frozenset = frozenset(),
     ) -> CandidateFacts:
         # ОБА слоя каталога, а не только канонический.
         #
@@ -262,8 +275,9 @@ class SpecialistCandidateSource:
         services = catalog_services_for(specialist)
         has_offer = bool(services)
 
-        match_level, matched_service_id, matched_category_id = self._match(
+        match_level, matched_service_id, matched_category_id, goal_fit_depth = self._match(
             services, needle=needle, goal_categories=goal_categories, mapping=mapping,
+            goal_positions=goal_positions, helping_templates=helping_templates,
         )
         return CandidateFacts(
             # Ключ ПОЛЬЗОВАТЕЛЯ, а не профиля. Разница не косметическая:
@@ -307,6 +321,7 @@ class SpecialistCandidateSource:
             match_level=match_level,
             matched_service_ref=matched_service_id,
             matched_goal_category_ref=matched_category_id,
+            goal_fit_depth=goal_fit_depth,
             is_bookable=bool(specialist.is_booking_enabled),
             # Расписание: подтверждать нечем — `WorkingHours` заполнены
             # у четырёх мастеров из тридцати одного (§29.5). Третье
@@ -325,7 +340,9 @@ class SpecialistCandidateSource:
         needle: str,
         goal_categories: tuple[UUID, ...] | None,
         mapping: "_MappingFacts",
-    ) -> tuple[MatchLevel, UUID | None, UUID | None]:
+        goal_positions=None,
+        helping_templates: frozenset = frozenset(),
+    ) -> tuple[MatchLevel, UUID | None, UUID | None, int | None]:
         """Соответствие нужде на сегодняшних данных. Честно слабое.
 
         Настоящая точность совпадения — стемминг и `_match_precision` из
@@ -359,7 +376,7 @@ class SpecialistCandidateSource:
         if needle:
             exact = [s for s in services if s.name.strip().casefold() == needle]
             if exact:
-                return MatchLevel.SERVICE_EXACT, mapping.best_of(exact), None
+                return MatchLevel.SERVICE_EXACT, mapping.best_of(exact), None, None
 
             partial = [
                 s for s in services
@@ -368,17 +385,25 @@ class SpecialistCandidateSource:
                 or needle in (s.category_slug or "").casefold()
             ]
             if partial:
-                return MatchLevel.SERVICE_PARTIAL, mapping.best_of(partial), None
+                return MatchLevel.SERVICE_PARTIAL, mapping.best_of(partial), None, None
 
         if goal_categories:
             allowed = set(goal_categories)
             in_goal = [s for s in services if s.category_id in allowed]
             if in_goal:
-                chosen_id = mapping.best_of(in_goal)
-                chosen = next(s for s in in_goal if s.id == chosen_id)
-                return MatchLevel.GOAL_CATEGORY, chosen.id, chosen.category_id
+                # DRF-2789: из услуг мастера в цели — лучшая по статусу связи,
+                # затем по глубине. Это выбор строки, которой мастер отвечает
+                # на цель, а не порядок мастеров: порядок — дело резолвера.
+                def depth(s) -> int:
+                    return goal_fit_depth(
+                        s, positions=goal_positions or {},
+                        helping_templates=helping_templates, mapping=mapping,
+                    )
 
-        return MatchLevel.UNDETERMINED, None, None
+                chosen = mapping.best_of_with(in_goal, secondary=depth)
+                return MatchLevel.GOAL_CATEGORY, chosen.id, chosen.category_id, depth(chosen)
+
+        return MatchLevel.UNDETERMINED, None, None, None
 
     @staticmethod
     def _rating(specialist: SpecialistProfile) -> RatingValue | None:
@@ -398,6 +423,31 @@ class SpecialistCandidateSource:
         if specialist.rating is None or Decimal(specialist.rating) == 0:
             return None
         return RatingValue(Decimal(specialist.rating), specialist.reviews_count or 0)
+
+
+def goal_fit_depth(service, *, positions, helping_templates, mapping) -> int:
+    """Насколько глубоко услуга отвечает цели — DRF-2789 (R0 умного ранжирования).
+
+    4 — шаблон услуги подтверждённо помогает этой цели (``CapabilityGoalLink``,
+    оба утверждения подтверждены: ``services.capabilities``);
+    3 — основная категория цели, связана прямо;
+    2 — лист под основным корнем цели (досталась раскрытием);
+    1 — побочная категория цели, связана прямо;
+    0 — лист под побочным корнем.
+    Основная всегда выше побочной; раскрытие различает только внутри класса
+    (см. ``goals.resolution.GoalCategoryPosition``).
+
+    Только для услуги, уже совпавшей по цели: допуска это не меняет, это
+    глубина внутри уровня ``GOAL_CATEGORY``. Легаси-строка шаблона не имеет —
+    у неё глубина только по категории.
+    """
+    template_id = mapping.template_by_service.get(service.id)
+    if template_id is not None and template_id in helping_templates:
+        return 4
+    position = positions.get(service.category_id)
+    if position is None:
+        return 0
+    return position.rank
 
 
 class _MappingFacts:
@@ -422,6 +472,9 @@ class _MappingFacts:
     def __init__(self) -> None:
         self.has_service = False
         self.has_template = False
+        #: `SalonService.id` → `template_id` (DRF-2789: подтверждённая связь
+        #: процедуры с целью ищется по шаблону услуги).
+        self.template_by_service: dict[UUID, UUID] = {}
         self.requires_health_check = False
         self.human_confirmed_ref: str | None = None
         #: `SalonService.id` → статус связи, как он записан в домене.
@@ -488,6 +541,22 @@ class _MappingFacts:
             services,
             key=lambda s: self._RANK[self._as_status(self.status_by_service.get(s.id))],
         ).id
+
+    def best_of_with(self, services, *, secondary):
+        """Как :meth:`best_of`, но при равном статусе связи — по ``secondary``.
+
+        Сначала статус: допуск к рекомендации требует VERIFIED у той самой
+        услуги, которой мастер совпал, и строка с лучшей глубиной, но без
+        проверенной связи, выбила бы мастера из выдачи. При равенстве обоих —
+        первая, как у ``best_of``. Возвращает строку, не id.
+        """
+        return max(
+            services,
+            key=lambda s: (
+                self._RANK[self._as_status(self.status_by_service.get(s.id))],
+                secondary(s),
+            ),
+        )
 
     @classmethod
     def _as_status(cls, raw: str | None) -> MappingStatus:

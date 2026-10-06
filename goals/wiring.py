@@ -58,7 +58,12 @@ from django.conf import settings
 from services.models import GoalOption
 
 from .models import ClientGoal
-from .resolution import _categories_for_option, resolve_goal_category_ids
+from .resolution import (
+    GoalCategoryPosition,
+    _categories_for_option,
+    category_positions_for_option,
+    resolve_goal_category_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +148,21 @@ def goal_category_ids_for_key(goal_key: str | None) -> tuple[UUID, ...] | None:
     if option is None:
         return None
     return tuple(_categories_for_option(option)) or None
+
+
+def goal_category_positions_for_key(goal_key: str | None) -> dict[UUID, GoalCategoryPosition]:
+    """Категории цели по ключу вместе с их положением (DRF-2789). Пусто — цели нет.
+
+    Тот же разрез, что у :func:`goal_category_ids_for_key`, и то же раскрытие:
+    ключи результата в том же порядке. Флаг ``GOAL_RESOLUTION_ENABLED`` не
+    читается по той же причине.
+    """
+    if not goal_key:
+        return {}
+    option = GoalOption.objects.filter(key=goal_key).first()
+    if option is None:
+        return {}
+    return category_positions_for_option(option)
 
 
 def _log_unresolved(client) -> None:
