@@ -447,7 +447,7 @@ def goal_fit_depth(service, *, positions, helping_templates, mapping) -> int:
     position = positions.get(service.category_id)
     if position is None:
         return 0
-    return (2 if position.primary else 0) + (1 if position.direct else 0)
+    return position.rank
 
 
 class _MappingFacts:

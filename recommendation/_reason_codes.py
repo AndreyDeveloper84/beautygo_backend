@@ -57,6 +57,10 @@ class ReasonCode(StrEnum):
     MATCH_GOAL_CATEGORY = "MATCH_GOAL_CATEGORY"
     # DRF-2789 (1.1.0) — глубина совпадения с целью, всегда рядом с
     # MATCH_GOAL_CATEGORY: чем именно совпадение по цели держится.
+    # PRIMARY / SECONDARY / EXPANDED говорят о ПОЛОЖЕНИИ категории в
+    # курируемой цели и только о нём — не о том, что процедура доказанно
+    # помогает (канон §17 claim-модели). Об эффективности — только
+    # CONFIRMED_CAPABILITY, и только из подтверждённой CapabilityGoalLink.
     MATCH_GOAL_CONFIRMED_CAPABILITY = "MATCH_GOAL_CONFIRMED_CAPABILITY"
     MATCH_GOAL_PRIMARY_CATEGORY = "MATCH_GOAL_PRIMARY_CATEGORY"
     MATCH_GOAL_SECONDARY_CATEGORY = "MATCH_GOAL_SECONDARY_CATEGORY"

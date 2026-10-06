@@ -23,6 +23,7 @@ DRF-1308: цели курируются на корневых категория
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -32,6 +33,8 @@ from services.goal_resolution import expand_categories_with_descendants
 from services.models import GoalOption, GoalOptionCategory, ServiceCategory
 
 from .models import ClientGoal
+
+logger = logging.getLogger(__name__)
 
 
 def _categories_for_option(option: GoalOption) -> list[UUID]:
@@ -64,55 +67,72 @@ def _bound_links(option: GoalOption) -> list[tuple[UUID, int]]:
 
 @dataclass(frozen=True)
 class GoalCategoryPosition:
-    """Где категория стоит в цели — для глубины совпадения (DRF-2789, R0).
+    """Где категория стоит в цели — для глубины совпадения (DRF-2789, R0, вариант А владельца).
 
-    ``direct`` — категория сама связана с целью владельцем; ``False`` —
-    досталась раскрытием связанного корня. ``primary`` — категория относится
-    к основной связи цели (наименьший ``sort_order``): сама связана так или
-    лежит под таким корнем. Связей с одинаковым наименьшим ``sort_order``
-    несколько — основные все они: порядок, которого владелец не задал, здесь
-    не выдумывается.
+    ``primary`` — категория относится к ОСНОВНОЙ ветке цели: сама связана
+    основной связью или лежит под основным корнем. Основная связь — та, у
+    которой ``sort_order`` наименьший И единственный; если наименьший делят
+    несколько связей или порядок не задан вовсе (все по умолчанию 0) — основной
+    ветки нет: неоднозначный приоритет не становится молча «основным».
+    ``direct`` — категория сама связана с целью; ``False`` — досталась
+    раскрытием связанного корня.
 
-    Почему подкатегория НАСЛЕДУЕТ класс своего корня (ревью DRF-2789).
-    Владелец связывает цели и с корнями, и с листьями, а услуги висят на
-    листьях. Если лист под основным корнем считать «раскрытым» и ставить ниже
-    любой прямой связи, услуга из побочной категории обгоняет услугу из
-    основной — то есть порядок «основная > побочная» переворачивается
-    (body_shape: основной корень «Аппаратный массаж…», побочный лист
-    «Лимфодренаж…»). Поэтому раскрытие различает только ВНУТРИ класса.
+    Решение владельца 06.10 (вариант А): потомок НАСЛЕДУЕТ класс ветки, и само
+    раскрытие не опускает его ниже прямой связи побочной ветки. Раскрытие
+    различает только внутри класса. Положение в дереве — это курируемая
+    принадлежность к цели, а не утверждение об эффективности процедуры:
+    об эффективности говорит только подтверждённая ``CapabilityGoalLink``.
     """
 
     direct: bool
     primary: bool
+
+    @property
+    def rank(self) -> int:
+        """Порядок внутри уровня «категория цели»: класс ветки важнее раскрытия."""
+        return (2 if self.primary else 0) + (1 if self.direct else 0)
 
 
 def category_positions_for_option(option: GoalOption) -> dict[UUID, GoalCategoryPosition]:
     """Категории цели в порядке :func:`_categories_for_option` — с их положением.
 
     Ключи и их порядок — ровно то, что отдаёт ``_categories_for_option``:
-    одно раскрытие на оба вопроса («какие категории» и «где каждая стоит»),
-    иначе два ответа о том же курируемом факте разошлись бы. Раньше
-    ``sort_order`` связи терялся при раскрытии в множество, и все
-    совпадения по цели были равны.
+    одно раскрытие на оба вопроса («какие категории» и «где каждая стоит»).
+
+    **Несколько путей к категории** (связана прямо И лежит под связанным
+    корнем) дают ОДНО положение — лучшее по ``rank`` среди всех путей.
+    Максимум не зависит от порядка обхода, а словарь не держит дублей.
     """
     bound = _bound_links(option)
     if not bound:
         return {}
-    primary_order = min(order for _, order in bound)
-    primary_of_bound = {cid: order == primary_order for cid, order in bound}
+    orders = [order for _, order in bound]
+    lowest = min(orders)
+    has_primary = orders.count(lowest) == 1
+    if not has_primary:
+        logger.warning(
+            "goals.positions.ambiguous_primary goal=%s lowest_sort_order=%s links=%d — "
+            "основной ветки нет, все связи считаются побочными (fail-closed)",
+            option.key, lowest, orders.count(lowest),
+        )
+    primary_of_bound = {cid: has_primary and order == lowest for cid, order in bound}
     expanded = expand_categories_with_descendants([cid for cid, _ in bound])
     parent_of = dict(
-        ServiceCategory.objects.filter(pk__in=[c for c in expanded if c not in primary_of_bound])
-        .values_list("id", "parent_id")
+        ServiceCategory.objects.filter(pk__in=expanded).values_list("id", "parent_id")
     )
     positions: dict[UUID, GoalCategoryPosition] = {}
     for cid in expanded:
+        paths = []
         if cid in primary_of_bound:
-            positions[cid] = GoalCategoryPosition(direct=True, primary=primary_of_bound[cid])
-        else:
-            positions[cid] = GoalCategoryPosition(
-                direct=False, primary=primary_of_bound.get(parent_of.get(cid), False),
-            )
+            paths.append(GoalCategoryPosition(direct=True, primary=primary_of_bound[cid]))
+        parent = parent_of.get(cid)
+        if parent in primary_of_bound:
+            paths.append(GoalCategoryPosition(direct=False, primary=primary_of_bound[parent]))
+        # Пути нет только у категории, которой раскрытие не должно было дать:
+        # побочная по умолчанию, без «основного» из воздуха.
+        positions[cid] = max(paths, key=lambda pos: pos.rank) if paths else GoalCategoryPosition(
+            direct=False, primary=False,
+        )
     return positions
 
 

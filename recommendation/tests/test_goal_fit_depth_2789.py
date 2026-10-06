@@ -163,6 +163,18 @@ def four(tenant, tree, curator):
     return masters
 
 
+def _branches(tag: str, *, primary_order=0, secondary_order=1):
+    """Цель с основным КОРНЕМ (и его листом) и побочной ПРЯМОЙ категорией. Имена синтетические:
+    классификация конкретных процедур берётся из подтверждённых связей, а не из фикстур."""
+    root = ServiceCategory.objects.create(slug=f"d2789-{tag}-root", name=f"Основной корень {tag}")
+    leaf = ServiceCategory.objects.create(slug=f"d2789-{tag}-leaf", name=f"Лист основного {tag}", parent=root)
+    side = ServiceCategory.objects.create(slug=f"d2789-{tag}-side", name=f"Побочная {tag}")
+    goal = GoalOption.objects.create(key=f"goal-{tag}-2789", label=f"Цель {tag}")
+    GoalOptionCategory.objects.create(goal_option=goal, category=root, sort_order=primary_order)
+    GoalOptionCategory.objects.create(goal_option=goal, category=side, sort_order=secondary_order)
+    return {"goal": goal, "primary_root": root, "primary_leaf": leaf, "secondary_direct": side}
+
+
 def _resolve(goal_key):
     need = NeedSpec(origin=NeedOrigin.GOAL, goal_key=goal_key)
     source = SpecialistCandidateSource()
@@ -253,20 +265,14 @@ class TestTheLevelStillDominates:
 
 class TestReviewFindings:
     def test_a_leaf_under_the_primary_root_beats_a_direct_secondary_category(self, tenant):
-        """Основной корень P (sort 0) с листом P1, побочный лист S (sort 1) — форма
-        body_shape на пилоте. Услуга на P1 выше услуги на S."""
-        p = ServiceCategory.objects.create(slug="d2789-p", name="Аппаратный 2789")
-        p1 = ServiceCategory.objects.create(slug="d2789-p1", name="RF 2789", parent=p)
-        s = ServiceCategory.objects.create(slug="d2789-s", name="Лимфодренаж 2789")
-        goal = GoalOption.objects.create(key="shape-2789", label="Фигура 2789")
-        GoalOptionCategory.objects.create(goal_option=goal, category=p, sort_order=0)
-        GoalOptionCategory.objects.create(goal_option=goal, category=s, sort_order=1)
+        """Предусловие 1 варианта А: потомок основной ветки выше прямой побочной связи."""
+        branch = _branches("inv")
         under_primary = _master(tenant, "21")
         secondary = _master(tenant, "22")
-        _offer(tenant, under_primary, p1, name="RF-лифтинг тела")
-        _offer(tenant, secondary, s, name="Лимфодренажный")
+        _offer(tenant, under_primary, branch["primary_leaf"], name="Услуга под основным корнем")
+        _offer(tenant, secondary, branch["secondary_direct"], name="Услуга побочной связи")
 
-        decision = _resolve(goal.key)
+        decision = _resolve(branch["goal"].key)
 
         tier = {str(c.candidate_ref.id): c.tier for c in decision.ordered}
         assert tier[_user_id(under_primary)] < tier[_user_id(secondary)], tier
@@ -314,3 +320,117 @@ class TestReviewFindings:
         )
 
         assert facts.goal_fit_depth == 4
+
+
+class TestOwnerOptionA:
+    """Решение владельца 06.10 (вариант А, docs/вариант А.md) — пять предусловий до слияния.
+
+    Предусловие 1 — ``TestReviewFindings.test_a_leaf_under_the_primary_root_beats_a_direct_secondary_category``.
+    """
+
+    def test_2_depth_inside_a_branch_does_not_change_its_class(self, tenant):
+        """Корень основной ветки и его лист — оба класса «основная» и оба выше побочной;
+        раскрытие различает только внутри класса."""
+        branch = _branches("cls")
+        on_root = _master(tenant, "31")
+        on_leaf = _master(tenant, "32")
+        side = _master(tenant, "33")
+        _offer(tenant, on_root, branch["primary_root"], name="Услуга на корне")
+        _offer(tenant, on_leaf, branch["primary_leaf"], name="Услуга на листе")
+        _offer(tenant, side, branch["secondary_direct"], name="Услуга побочной")
+
+        decision = _resolve(branch["goal"].key)
+
+        by = {str(c.candidate_ref.id): c for c in decision.ordered}
+        for master in (on_root, on_leaf):
+            assert ReasonCode.MATCH_GOAL_PRIMARY_CATEGORY in by[_user_id(master)].reason_codes
+            assert by[_user_id(master)].tier < by[_user_id(side)].tier
+        assert ReasonCode.MATCH_GOAL_SECONDARY_CATEGORY in by[_user_id(side)].reason_codes
+
+    @pytest.mark.parametrize("links_first", ["root", "leaf"])
+    def test_3_several_paths_give_one_unambiguous_position(self, links_first):
+        """Категория связана прямо как побочная И лежит под основным корнем: одно положение
+        (лучший путь), не зависит от порядка заведения связей, без дублей."""
+        from goals.resolution import _categories_for_option, category_positions_for_option
+
+        root = ServiceCategory.objects.create(slug=f"d2789-mp-root-{links_first}", name=f"Корень МП {links_first}")
+        leaf = ServiceCategory.objects.create(
+            slug=f"d2789-mp-leaf-{links_first}", name=f"Лист МП {links_first}", parent=root,
+        )
+        goal = GoalOption.objects.create(key=f"goal-mp-{links_first}-2789", label=f"Цель МП {links_first}")
+        links = [(root, 0), (leaf, 1)] if links_first == "root" else [(leaf, 1), (root, 0)]
+        for category, order in links:
+            GoalOptionCategory.objects.create(goal_option=goal, category=category, sort_order=order)
+
+        positions = category_positions_for_option(goal)
+
+        assert list(positions) == _categories_for_option(goal), "те же ключи и порядок, что у фильтра"
+        assert len(positions) == len(set(positions)) == 2
+        assert positions[leaf.pk].primary is True and positions[leaf.pk].direct is False
+        assert positions[root.pk].primary is True and positions[root.pk].direct is True
+
+    @pytest.mark.parametrize("orders", [(0, 0), (5, 5)], ids=["default-zero", "shared-lowest"])
+    def test_4_an_ambiguous_priority_is_not_silently_primary(self, orders, tenant):
+        """Наименьший sort_order у двух связей (в т. ч. по умолчанию 0) — основной ветки нет."""
+        branch = _branches(f"amb{orders[0]}", primary_order=orders[0], secondary_order=orders[1])
+        master = _master(tenant, f"4{orders[0]}")
+        _offer(tenant, master, branch["primary_leaf"], name="Услуга под неоднозначным корнем")
+
+        [facts] = SpecialistCandidateSource().fetch(
+            scope=Scope(ScopeMode.MARKETPLACE), need=NeedSpec(origin=NeedOrigin.GOAL, goal_key=branch["goal"].key),
+        )
+        decision = _resolve(branch["goal"].key)
+
+        assert facts.goal_fit_depth == 0, "лист под корнем без основного класса — побочный раскрытый"
+        [only] = decision.ordered
+        assert ReasonCode.MATCH_GOAL_PRIMARY_CATEGORY not in only.reason_codes
+
+    def test_4_positive_control_a_unique_lowest_order_is_primary(self, tenant):
+        branch = _branches("uniq", primary_order=0, secondary_order=1)
+        master = _master(tenant, "49")
+        _offer(tenant, master, branch["primary_leaf"], name="Услуга под однозначным корнем")
+
+        [facts] = SpecialistCandidateSource().fetch(
+            scope=Scope(ScopeMode.MARKETPLACE), need=NeedSpec(origin=NeedOrigin.GOAL, goal_key=branch["goal"].key),
+        )
+
+        assert facts.goal_fit_depth == 2
+
+    def test_5_tree_position_claims_no_effect(self, four, tree):
+        """Объяснение по положению в дереве не утверждает эффективность: у кандидатов
+        глубины 0–3 нет кода подтверждённой возможности, и свидетельство — только о
+        совпадении по цели и о проверенной связи услуги, а не об эффекте процедуры."""
+        from recommendation._evidence import EvidenceKind
+
+        decision = _resolve(tree["goal"].key)
+        by = {str(c.candidate_ref.id): c for c in decision.ordered}
+
+        for key in ("d2", "d1", "d0"):
+            candidate = by[_user_id(four[key])]
+            assert ReasonCode.MATCH_GOAL_CONFIRMED_CAPABILITY not in candidate.reason_codes, key
+            kinds = {item.kind for item in candidate.evidence}
+            assert kinds <= {EvidenceKind.SERVICE_MATCH, EvidenceKind.CAPABILITY_MAPPING}, (key, kinds)
+            match = [item for item in candidate.evidence if item.kind is EvidenceKind.SERVICE_MATCH]
+            assert match and all(item.value is MatchLevel.GOAL_CATEGORY for item in match), key
+        # Положительный контроль: эффект утверждает только подтверждённая связь цели.
+        assert ReasonCode.MATCH_GOAL_CONFIRMED_CAPABILITY in by[_user_id(four["d3"])].reason_codes
+
+    def test_safety_still_wins_over_the_deepest_goal_match(self):
+        """Правило внутри стадии цели не перебивает безопасность: кандидат глубины 4 с
+        услугой, требующей проверки здоровья, исключён на S1 при NOT_APPLICABLE."""
+        from recommendation._stages import StagePolicy, apply_eligibility
+
+        deep_but_unsafe = make_facts(
+            match_level=MatchLevel.GOAL_CATEGORY, matched_service_ref=uuid.uuid4(),
+            matched_goal_category_ref=uuid.uuid4(), goal_fit_depth=4, requires_health_check=True,
+        )
+        request = RecommendationRequest(
+            request_id="r", subject_ref="s", surface=Surface.MINIAPP_HOME, scope=Scope(ScopeMode.MARKETPLACE),
+            need=NeedSpec(origin=NeedOrigin.GOAL, goal_key="relax"), safety_state=SafetyState.NOT_APPLICABLE,
+            tie_break_seed="s", k=3,
+        )
+
+        result = apply_eligibility([deep_but_unsafe], request, StagePolicy())
+
+        assert result.admitted == ()
+        assert [e.reason_code for e in result.excluded] == [ReasonCode.ELIG_EXCLUDED_SAFETY]
