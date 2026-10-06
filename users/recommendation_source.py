@@ -322,6 +322,8 @@ class SpecialistCandidateSource:
             matched_service_ref=matched_service_id,
             matched_goal_category_ref=matched_category_id,
             goal_fit_depth=goal_fit_depth,
+            # O-1: категории предложений мастера — для предпочтения категории.
+            category_refs=frozenset(s.category_id for s in services if s.category_id),
             is_bookable=bool(specialist.is_booking_enabled),
             # Расписание: подтверждать нечем — `WorkingHours` заполнены
             # у четырёх мастеров из тридцати одного (§29.5). Третье

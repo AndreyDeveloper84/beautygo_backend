@@ -117,6 +117,7 @@ from rest_framework.views import APIView
 
 from goals.wiring import goal_category_ids_for, saved_goal_key_for
 from recommendation.api import (
+    MAX_PREFERENCES,
     NeedOrigin,
     NeedSpec,
     RecommendationDecision,
@@ -124,7 +125,9 @@ from recommendation.api import (
     SafetyState,
     Scope,
     ScopeMode,
+    PreferenceSerializer,
     Surface,
+    build_preferences,
     resolve,
 )
 from services.catalog_reads import category_service_counts, specialist_service_text_q
@@ -159,6 +162,11 @@ class RecommendationsRequestSerializer(serializers.Serializer):
         required=False, max_length=64, allow_blank=True,
         help_text="Что человек ищет сейчас. Уходит в NeedSpec.raw_text.",
     )
+    # O-1 (DRF-2816) — предпочтения клиента, та же схема, что у ручки
+    # резолвера. Применяются к ОБЕИМ полкам: в полке 1 «твои места» «мой
+    # мастер Анна» из уже посещённого салона поднимается наверх; смысл
+    # полок не меняется (полка 2 по-прежнему без салонов из истории).
+    preferences = PreferenceSerializer(many=True, required=False, max_length=MAX_PREFERENCES)
     # Поля безопасности здесь НЕТ намеренно — см. модульный докстринг.
     # Принять его значило бы завести ровно ту конструкцию, которую владелец
     # запретил поимённо (§72): «поля нет → NOT_APPLICABLE» неотличимо от
@@ -226,6 +234,7 @@ def _resolve_layer(
     seed: str | None,
     k: int,
     viewer,
+    preferences: tuple = (),
 ) -> RecommendationDecision:
     """Один вызов границы. Порядок — его, границы — наши."""
     return resolve(
@@ -238,6 +247,7 @@ def _resolve_layer(
             safety_state=safety_state,
             tie_break_seed=seed,
             k=k,
+            preferences=preferences,
         ),
         # DRF-2420 — источник знает СПРАШИВАЮЩЕГО: от него зависит, попадёт
         # ли в пул демонстрационный салон. Полка этого не решает и порядка не
@@ -495,6 +505,7 @@ class CatalogRecommendationsView(APIView):
         serializer = RecommendationsRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         goal = (serializer.validated_data.get("goal") or "").strip()
+        preferences = build_preferences(serializer.validated_data.get("preferences"))
 
         # Константа поверхности, не производная от запроса (§72).
         # Ни `get`, ни `or`, ни умолчания сериализатора: значение известно
@@ -542,6 +553,7 @@ class CatalogRecommendationsView(APIView):
             seed=seed,
             k=LAYER_1_LIMIT,
             viewer=request.user,
+            preferences=preferences,
         ) if history_tenant_ids else None
 
         layer_2_decision = _resolve_layer(
@@ -556,6 +568,7 @@ class CatalogRecommendationsView(APIView):
             seed=seed,
             k=LAYER_2_LIMIT,
             viewer=request.user,
+            preferences=preferences,
         )
 
         layer_1 = _shelf(layer_1_decision, limit=LAYER_1_LIMIT)

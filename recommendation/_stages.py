@@ -58,6 +58,10 @@ from ._types import (
     MappingStatus,
     MatchLevel,
     NeedSpec,
+    Preference,
+    PreferenceKind,
+    PreferenceOrigin,
+    PreferenceStrength,
     RecommendationRequest,
     SafetyState,
     ScheduleState,
@@ -260,6 +264,7 @@ def apply_eligibility(
         safety_blocks_all = True
     budget = request.constraints.price_max
     need_is_stated = request.need.is_stated
+    hard_preferences, _, _ = effective_preferences(request.preferences)
 
     for facts in candidates:
         cid = facts.ref.id
@@ -329,6 +334,14 @@ def apply_eligibility(
         if not eligible:
             excluded.append(
                 ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE)
+            )
+            continue
+        # O-1: «только X» — жёсткое условие, и только из ТЕКУЩЕГО запроса.
+        # Стоит ПОСЛЕ проверок процедуры и связи: предпочтение работает на
+        # допустимых кандидатах и ничего из них не отменяет.
+        if not all(satisfies_preference(facts, p) for p in hard_preferences):
+            excluded.append(
+                ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD)
             )
             continue
         granted.add(ReasonCode.ELIG_CAPABILITY_VERIFIED)
@@ -573,7 +586,52 @@ def stage_transaction_fit(
 # S4 — контекстная персонализация
 # ---------------------------------------------------------------------------
 
-def stage_contextual(candidates: Sequence[CandidateFacts]) -> StageOutput:
+def effective_preferences(
+    preferences: Sequence[Preference],
+) -> tuple[tuple[Preference, ...], tuple[Preference, ...], tuple[Preference, ...]]:
+    """(жёсткие текущего запроса, мягкие текущего запроса, мягкие из памяти) — O-1.
+
+    * **Текущий запрос важнее истории — по виду.** Если в запросе назван
+      мастер, предпочтение мастера из памяти не учитывается вовсе; память о
+      категории при этом работает.
+    * **Жёстко отсекает только сказанное сейчас.** «Только Анна» из памяти
+      читается как мягкое: устаревшее условие не прячет всех кандидатов.
+    * Повторы схлопываются: одно и то же предпочтение дважды не считается.
+    """
+    current = [p for p in preferences if p.origin is PreferenceOrigin.CURRENT_REQUEST]
+    named_now = {p.kind for p in current}
+    hard = tuple(dict.fromkeys(p for p in current if p.strength is PreferenceStrength.HARD))
+    soft_current = tuple(dict.fromkeys(
+        (p.kind, p.ref) for p in current if p.strength is PreferenceStrength.SOFT
+    ))
+    soft_memory = tuple(dict.fromkeys(
+        (p.kind, p.ref) for p in preferences
+        if p.origin is PreferenceOrigin.CONFIRMED_MEMORY and p.kind not in named_now
+    ))
+    as_pref = lambda pairs, origin: tuple(  # noqa: E731 — локальная форма
+        Preference(kind=k, ref=r, strength=PreferenceStrength.SOFT, origin=origin) for k, r in pairs
+    )
+    return (
+        hard,
+        as_pref(soft_current, PreferenceOrigin.CURRENT_REQUEST),
+        as_pref(soft_memory, PreferenceOrigin.CONFIRMED_MEMORY),
+    )
+
+
+def satisfies_preference(facts: CandidateFacts, preference: Preference) -> bool:
+    """Отвечает ли кандидат предпочтению — по виду предпочтения."""
+    if preference.kind is PreferenceKind.MASTER:
+        return facts.ref.id == preference.ref
+    if preference.kind is PreferenceKind.SALON:
+        return facts.tenant_ref == preference.ref
+    if preference.kind is PreferenceKind.CATEGORY:
+        return preference.ref in facts.category_refs or facts.matched_goal_category_ref == preference.ref
+    return False  # pragma: no cover — закрытое перечисление
+
+
+def stage_contextual(
+    candidates: Sequence[CandidateFacts], preferences: Sequence[Preference] = (),
+) -> StageOutput:
     """Прошлый успешный опыт. Только `COMPLETED` — и это не сокращение.
 
     Канон §10.3: `shown ≠ engaged ≠ booked ≠ completed ≠ liked`. Показ,
@@ -582,11 +640,12 @@ def stage_contextual(candidates: Sequence[CandidateFacts]) -> StageOutput:
     `_load_history_specialist_ids` читает именно `COMPLETED` — это
     правильное чтение, и оно переиспользуется без изменений.
     """
+    _, soft_current, soft_memory = effective_preferences(preferences)
     has_history = any(f.prior_completed_visit or f.prior_completed_same_category for f in candidates)
-    if not has_history:
+    if not has_history and not soft_current and not soft_memory:
         return StageOutput(
             StageId.S4, active=False,
-            inactive_reason="завершённых визитов нет — персонализировать нечем",
+            inactive_reason="ни предпочтений клиента, ни завершённых визитов — персонализировать нечем",
         )
 
     keys: dict[UUID, float] = {}
@@ -595,9 +654,25 @@ def stage_contextual(candidates: Sequence[CandidateFacts]) -> StageOutput:
 
     for facts in candidates:
         cid = facts.ref.id
+        # O-1 (DRF-2816): лексикографически ВНУТРИ стадии — совпадения с
+        # предпочтениями текущего запроса, затем с подтверждённой памятью,
+        # затем история визитов. Кодирование в одно число — разряды, а не
+        # веса: старший разряд всегда перевешивает любые младшие.
+        now = sum(satisfies_preference(facts, p) for p in soft_current)
+        remembered = sum(satisfies_preference(facts, p) for p in soft_memory)
+        pref_codes: set[ReasonCode] = set()
+        if now:
+            pref_codes.add(ReasonCode.CONTEXT_PREFERENCE_CURRENT_REQUEST)
+        if remembered:
+            pref_codes.add(ReasonCode.CONTEXT_PREFERENCE_CONFIRMED_MEMORY)
+        pref_key = now * _PREF_NOW_PLACE + remembered * _PREF_MEMORY_PLACE
+        if not has_history:
+            keys[cid] = float(pref_key)
+            codes[cid] = frozenset(pref_codes or {ReasonCode.CONTEXT_NOT_APPLICABLE})
+            continue
         if facts.prior_completed_visit:
-            keys[cid] = 2.0
-            codes[cid] = frozenset({ReasonCode.CONTEXT_PRIOR_COMPLETED_VISIT})
+            keys[cid] = float(pref_key) + 2.0
+            codes[cid] = frozenset({ReasonCode.CONTEXT_PRIOR_COMPLETED_VISIT} | pref_codes)
             evidence[cid] = (
                 EvidenceItem(
                     kind=EvidenceKind.PRIOR_VISIT,
@@ -608,13 +683,20 @@ def stage_contextual(candidates: Sequence[CandidateFacts]) -> StageOutput:
                 ),
             )
         elif facts.prior_completed_same_category:
-            keys[cid] = 1.0
-            codes[cid] = frozenset({ReasonCode.CONTEXT_PRIOR_SAME_CATEGORY})
+            keys[cid] = float(pref_key) + 1.0
+            codes[cid] = frozenset({ReasonCode.CONTEXT_PRIOR_SAME_CATEGORY} | pref_codes)
         else:
-            keys[cid] = 0.0
-            codes[cid] = frozenset({ReasonCode.CONTEXT_NOT_APPLICABLE})
+            keys[cid] = float(pref_key)
+            codes[cid] = frozenset(pref_codes or {ReasonCode.CONTEXT_NOT_APPLICABLE})
 
     return StageOutput(StageId.S4, active=True, keys=keys, codes=codes, evidence=evidence)
+
+
+#: Разряды ключа S4 (O-1). Предпочтений в запросе не больше
+#: ``MAX_PREFERENCES`` (сериализатор), история — 0..2, поэтому младший
+#: разряд никогда не дотягивается до старшего.
+_PREF_NOW_PLACE = 10_000
+_PREF_MEMORY_PLACE = 100
 
 
 # ---------------------------------------------------------------------------

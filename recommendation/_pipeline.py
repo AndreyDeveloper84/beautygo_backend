@@ -173,7 +173,7 @@ def _run_ranking_stages(
     return {
         StageId.S2: stage_semantic_fit(survivors, request.need),
         StageId.S3: stage_transaction_fit(survivors, request, policy),
-        StageId.S4: stage_contextual(survivors),
+        StageId.S4: stage_contextual(survivors, request.preferences),
         StageId.S5: stage_quality(survivors, policy),
     }
 
@@ -362,4 +362,8 @@ def _decision_codes(
         codes.add(ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE)
     if not ordered and any(e.reason_code is ReasonCode.ELIG_EXCLUDED_SAFETY for e in excluded):
         codes.add(ReasonCode.ELIG_EXCLUDED_SAFETY)
+    if not ordered and any(e.reason_code is ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD for e in excluded):
+        # O-1: «только X», а X среди допустимых нет — сигнал уточнить, а не
+        # молча подставить другого.
+        codes.add(ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD)
     return tuple(sorted(codes))

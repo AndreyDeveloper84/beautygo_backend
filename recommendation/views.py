@@ -122,6 +122,7 @@ class RecommendationResolveView(APIView):
                 safety_state=SafetyState(serializer.validated_data["safety_state"]),
                 tie_break_seed=serializer.validated_data.get("tie_break_seed"),
                 k=serializer.validated_data["k"],
+                preferences=serializer.build_preferences(),
             ),
             source=source,
         )

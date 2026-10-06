@@ -943,3 +943,46 @@ class TestShelfLogCarriesSeparation:
         line = self._post_and_read_the_line(_body())
 
         assert "l2_separation[stage=- state=NOT_SPLIT best_group=2]" in line
+
+
+@pytest.mark.django_db
+class TestPreferencesOnTheShelf:
+    """O-1 (DRF-2816), вариант (а): предпочтение работает и в полке 1 «твои места».
+
+    «Мой мастер Анна» из уже посещённого салона в полку 2 не попадает (там
+    салоны из истории исключены — смысл полок не меняется). Поэтому
+    предпочтение применяется в полке 1: Анна наверху среди твоих мест.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
+    def test_a_preferred_master_tops_your_places(
+        self, customer, customer_known_tur, tenant_known, manicure_category,
+    ):
+        anna = _make_specialist(tenant_known, suffix="2816", name="Анна")
+        other = _make_specialist(tenant_known, suffix="2817", name="Другая")
+        _make_service(anna, manicure_category, name="Маникюр")
+        _make_service(other, manicure_category, name="Маникюр")
+        body = _body(preferences=[{"kind": "master", "ref": _key(anna), "origin": "current_request"}])
+
+        items = _api().post(URL, body, format="json").json()["data"]["layer_1_your_places"]["items"]
+
+        assert [item["candidate"]["id"] for item in items][0] == _key(anna)
+        tiers = {item["candidate"]["id"]: item["tier"] for item in items}
+        assert tiers[_key(anna)] < tiers[_key(other)]
+        assert "CONTEXT_PREFERENCE_CURRENT_REQUEST" in items[0]["reason_codes"]
+
+    def test_without_preferences_your_places_stay_a_tie(
+        self, customer, customer_known_tur, tenant_known, manicure_category,
+    ):
+        """Положительный контроль: без предпочтения оба в одном ярусе — порядок дала не случайность."""
+        anna = _make_specialist(tenant_known, suffix="2818", name="Анна")
+        other = _make_specialist(tenant_known, suffix="2819", name="Другая")
+        _make_service(anna, manicure_category, name="Маникюр")
+        _make_service(other, manicure_category, name="Маникюр")
+
+        items = _api().post(URL, _body(), format="json").json()["data"]["layer_1_your_places"]["items"]
+
+        assert len({item["tier"] for item in items}) == 1

@@ -325,6 +325,48 @@ class NeedSpec:
         return bool(self.capability_refs or self.canonical_service_refs or self.goal_key or self.raw_text)
 
 
+class PreferenceKind(StrEnum):
+    """На ЧТО направлено предпочтение клиента (O-1, решение владельца 06.10)."""
+
+    MASTER = "master"      #: мастер — id пользователя мастера, как у кандидата
+    SALON = "salon"        #: салон — id тенанта
+    CATEGORY = "category"  #: категория услуг — id ServiceCategory
+
+
+class PreferenceStrength(StrEnum):
+    """«Предпочитаю Анну» — мягкое; «только Анна» — жёсткое (O-1)."""
+
+    SOFT = "soft"
+    HARD = "hard"
+
+
+class PreferenceOrigin(StrEnum):
+    """Откуда предпочтение. Вывода агента здесь НЕТ и не будет (O-1).
+
+    «Неподтверждённые выводы агента не участвуют в выборе как установленные
+    предпочтения» — поэтому у перечисления только сказанное сейчас и
+    подтверждённое самим человеком в памяти.
+    """
+
+    CURRENT_REQUEST = "current_request"
+    CONFIRMED_MEMORY = "confirmed_memory"
+
+
+@dataclass(frozen=True)
+class Preference:
+    """Предпочтение клиента в запросе — O-1.
+
+    Прямое слово клиента — сигнал без SafetyResult для этого предпочтения;
+    обязательные проверки процедуры при этом сохраняются: предпочтение
+    работает только на допустимых кандидатах (S1 выше него).
+    """
+
+    kind: PreferenceKind
+    ref: UUID
+    strength: PreferenceStrength = PreferenceStrength.SOFT
+    origin: PreferenceOrigin = PreferenceOrigin.CURRENT_REQUEST
+
+
 @dataclass(frozen=True)
 class UserConstraints:
     price_max: Constraint = UNKNOWN
@@ -355,6 +397,9 @@ class RecommendationRequest:
     tie_break_seed: str | None = None
     k: int = 3
     policy_pins: PolicyPins | None = None
+    #: O-1 (DRF-2816) — предпочтения клиента: сказанное сейчас и
+    #: подтверждённое в памяти. Пусто — поведение как до O-1.
+    preferences: tuple["Preference", ...] = ()
 
     def __post_init__(self) -> None:
         if self.k < 1:
@@ -409,6 +454,9 @@ class CandidateFacts:
     #: 2 лист под основным корнем, 1 побочная прямо, 0 лист под побочным корнем.
     #: ``None`` — не совпадение по цели.
     goal_fit_depth: int | None = None
+    #: O-1 — категории предложений мастера (своя, иначе шаблона): на них
+    #: проверяется предпочтение категории.
+    category_refs: frozenset[UUID] = frozenset()
 
     # -- S3: транзакционная пригодность -------------------------------------
     is_bookable: bool | None = None
