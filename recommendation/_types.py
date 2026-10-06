@@ -409,6 +409,13 @@ class CandidateFacts:
     #: 2 лист под основным корнем, 1 побочная прямо, 0 лист под побочным корнем.
     #: ``None`` — не совпадение по цели.
     goal_fit_depth: int | None = None
+    #: CAT-10 (чинит C1) — готовность конфигурации ТОЙ услуги, которой мастер
+    #: совпал. ``True`` — услуга вне Body Care (``not_subject``) или body-care
+    #: в состоянии ``ready_for_screening``; ``False`` — body-care в одном из
+    #: ``incomplete`` / ``review_required`` / ``blocked`` / ``retired``.
+    #: ``None`` — источник готовность не сообщает: гейт не применяется (так
+    #: ведут себя все источники до подключения CAT-6).
+    config_ready: bool | None = None
 
     # -- S3: транзакционная пригодность -------------------------------------
     is_bookable: bool | None = None

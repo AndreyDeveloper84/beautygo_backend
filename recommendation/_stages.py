@@ -331,6 +331,16 @@ def apply_eligibility(
                 ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE)
             )
             continue
+        # CAT-10 (чинит C1): связь VERIFIED ещё не значит, что body-care
+        # процедуру можно рекомендовать — её конфигурация должна быть готова
+        # к скринингу (CAT-6 READY). Гейт на ЧТЕНИИ: состояние может упасть
+        # после верификации связи, и это ловится здесь без пересмотра связи.
+        # ``None`` — источник не сообщает (вне Body Care или до CAT-6).
+        if facts.config_ready is False:
+            excluded.append(
+                ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY)
+            )
+            continue
         granted.add(ReasonCode.ELIG_CAPABILITY_VERIFIED)
         if mapping_item is not None:
             items.append(mapping_item)
