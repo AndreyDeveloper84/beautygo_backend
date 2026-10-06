@@ -28,7 +28,7 @@ from services.body_care_qualification import (
     qualification_states,
 )
 from services.models import ServiceCategory, ServiceTemplate
-from users.models import PractitionerQualification, SpecialistProfile, User
+from users.models import DeletionRequest, PractitionerQualification, SpecialistProfile, User
 
 pytestmark = pytest.mark.django_db
 
@@ -170,6 +170,24 @@ def test_erasure_leaves_other_masters_alone(master, reviewer) -> None:
     _erase_qualifications(master, {})
 
     assert PractitionerQualification.objects.filter(specialist=other).count() == 1
+
+
+def test_account_erasure_end_to_end_removes_the_qualifications(master, reviewer) -> None:
+    """Не помощник напрямую, а исполнитель заявки: шаг стирания вызывается."""
+    from users.deletion_executor import BotConfirmation, execute
+    from users.deletion_requests import ensure_deletion_request
+
+    class _BotOk:
+        def confirm(self, **kw):
+            return BotConfirmation(True, {"all_ok": True, "steps": ["memory_delete"], "flag_cleared": True})
+
+    _qualify(master, PC.NURSE_COSMETOLOGY, reviewer)
+    req = ensure_deletion_request(master.user, initiator="bot").request
+
+    out = execute(req, bot_client=_BotOk())
+
+    assert out.status == DeletionRequest.Status.COMPLETED, out
+    assert not PractitionerQualification.objects.filter(specialist=master).exists()
 
 
 def test_a_left_qualification_is_reported_as_residue(master) -> None:
