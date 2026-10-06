@@ -220,3 +220,32 @@ def _forbidden_keys(node) -> set:
         for value in node:
             found |= _forbidden_keys(value)
     return found
+
+
+@pytest.mark.django_db
+class TestCrossSalonPreferenceGuard:
+    """Защита в глубину (06.10): межсалонная ручка не ранжирует по памяти о мастере/салоне."""
+
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
+    def _tiers(self, preference):
+        r = _api().post(URL, _body(preferences=[preference]), format="json")
+        assert r.status_code == 200, r.content
+        return {row["candidate"]["id"]: row["tier"] for row in r.json()["data"]["ordered"]}
+
+    def test_a_remembered_favourite_does_not_rank_the_marketplace(self, customer, bound_source):
+        favourite = str(bound_source[0].ref.id)
+
+        tiers = self._tiers({"kind": "master", "ref": favourite, "origin": "confirmed_memory"})
+
+        assert len(set(tiers.values())) == 1, "фаворит из памяти не поднимает в межсалонной выдаче"
+
+    def test_the_same_master_named_now_still_works(self, customer, bound_source):
+        """Контроль: сказанное в текущем запросе — не память об отношениях; работает."""
+        named = str(bound_source[0].ref.id)
+
+        tiers = self._tiers({"kind": "master", "ref": named, "origin": "current_request"})
+
+        assert tiers[named] < min(t for cid, t in tiers.items() if cid != named)

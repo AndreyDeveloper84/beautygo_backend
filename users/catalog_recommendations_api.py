@@ -126,6 +126,8 @@ from recommendation.api import (
     Scope,
     ScopeMode,
     PreferenceSerializer,
+    PreferenceStrength,
+    ReasonCode,
     Surface,
     build_preferences,
     resolve,
@@ -574,11 +576,21 @@ class CatalogRecommendationsView(APIView):
             seed=seed,
             k=LAYER_2_LIMIT,
             viewer=request.user,
-            preferences=preferences,
+            # Полка 2 межсалонная — предпочтений она НЕ получает. Любимый
+            # мастер — отношение с одним салоном (NEVER_CROSSES, 24.08):
+            # тот же человек в чужом салоне не поднимается фаворитом из
+            # «твоих мест». То же — категория из памяти.
         )
 
         layer_1 = _shelf(layer_1_decision, limit=LAYER_1_LIMIT)
-        layer_2 = _shelf(layer_2_decision, limit=LAYER_2_LIMIT)
+        # «Только Анна» (владелец 06.10): «Новыми местами» на него не
+        # отвечаем — полка 2 пуста и объясняет себя кодом. Жёсткое в неё не
+        # передаётся: Анна в чужом салоне — тоже межсалонный фаворит.
+        layer_2 = (
+            {"items": [], "reason_codes": [ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD.value]}
+            if any(p.strength is PreferenceStrength.HARD for p in preferences)
+            else _shelf(layer_2_decision, limit=LAYER_2_LIMIT)
+        )
         layer_3 = _build_layer_3(list(
             _catalog_pool(
                 goal=goal, goal_category_ids=goal_category_ids,

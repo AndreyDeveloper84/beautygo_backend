@@ -38,7 +38,16 @@ from users.deletion_requests import deletion_block_for, deletion_refusal
 
 from ._serializers import ResolveRequestSerializer, ResolveResponseSerializer, decision_to_payload
 from ._source_binding import CandidateSourceNotConfigured, get_candidate_source
-from .api import NeedOrigin, NeedSpec, RecommendationRequest, SafetyState, Surface, resolve
+from .api import (
+    NeedOrigin,
+    NeedSpec,
+    PreferenceKind,
+    PreferenceOrigin,
+    RecommendationRequest,
+    SafetyState,
+    Surface,
+    resolve,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +75,32 @@ def _with_saved_goal(need: NeedSpec, subject) -> NeedSpec:
     if not saved:
         return need
     return dataclasses.replace(need, goal_key=saved)
+
+
+def _cross_salon_safe(preferences: tuple, scope) -> tuple:
+    """Память о мастере или салоне не входит в межсалонное ранжирование.
+
+    Любимый мастер — отношение клиента с ОДНИМ салоном (NEVER_CROSSES,
+    24.08; узкое дополнение владельца 06.10 — только личная полка «Твои
+    места»). Эта ручка без ``tenant_refs`` межсалонная, поэтому
+    ``confirmed_memory`` вида master/salon здесь отбрасывается. Проводка
+    бота, отправившая фаворита не туда, не становится утечкой. Сказанное
+    в текущем запросе и категория из памяти остаются.
+    """
+    if scope.tenant_refs:
+        return preferences
+    kept = tuple(
+        p for p in preferences
+        if not (p.origin is PreferenceOrigin.CONFIRMED_MEMORY
+                and p.kind in (PreferenceKind.MASTER, PreferenceKind.SALON))
+    )
+    if len(kept) != len(preferences):
+        logger.warning(
+            "recommendation.preference.cross_salon_dropped count=%d — память о мастере/салоне "
+            "не ранжирует межсалонную выдачу (NEVER_CROSSES)",
+            len(preferences) - len(kept),
+        )
+    return kept
 
 
 class RecommendationResolveView(APIView):
@@ -122,7 +157,7 @@ class RecommendationResolveView(APIView):
                 safety_state=SafetyState(serializer.validated_data["safety_state"]),
                 tie_break_seed=serializer.validated_data.get("tie_break_seed"),
                 k=serializer.validated_data["k"],
-                preferences=serializer.build_preferences(),
+                preferences=_cross_salon_safe(serializer.build_preferences(), serializer.build_scope()),
             ),
             source=source,
         )
