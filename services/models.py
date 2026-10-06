@@ -159,10 +159,40 @@ class ServiceTemplate(models.Model):
         заведённый кодом, миграцией или чужой рукой, никем не проверен
         по определению. Умолчание `APPROVED` означало бы, что каждая
         новая строка сама себя одобрила.
+
+        ### Body Care CAT-2: ещё два состояния, та же ось
+
+        Контракт Body Care v0.1 §2.1 требует у канона статус
+        DRAFT / CANDIDATE / ACTIVE / RETIRED. Решение (главное окно, 06.10):
+        расширить эту ось, а не заводить вторую. Сопоставление::
+
+            контракт   здесь
+            DRAFT      provisional   — существующее значение, не переименовано
+            CANDIDATE  candidate     — предложен к активации, ждёт проверки
+            ACTIVE     approved      — существующее значение, не переименовано
+            RETIRED    retired       — выведен из оборота
+
+        Существующие значения не переименованы: это миграция данных по
+        всем строкам ради слова. Все читатели оси спрашивают ``== approved``
+        и поэтому читают оба новых состояния как «не одобрено» — новое
+        значение безопасно по умолчанию.
+
+        ``retired`` — решение, и провенанс у него тот же, что у одобрения:
+        дата, основание и «кто ИЛИ правило» (CheckConstraint'ы ниже).
+        ``candidate`` провенанса не требует: это предложение, а не решение.
+
+        **Чего вывод из оборота НЕ делает сам.** Рекомендуемость сегодня —
+        ``SalonService.mapping_status == VERIFIED``, и статус канона она не
+        видит: связь салона с выведенным каноном остаётся в подборе.
+        Закрыть это — связать допустимость со статусом (CAT-10); до тех
+        пор такие связи считает ``check_canon_invariants``
+        (``verified_on_retired``), чтобы дыра не молчала.
         """
 
         PROVISIONAL = "provisional", "Черновой"
+        CANDIDATE = "candidate", "Кандидат"
         APPROVED = "approved", "Одобрен"
+        RETIRED = "retired", "Выведен"
 
     class ServiceFamily(models.TextChoices):
         """Семейство body-care услуги — контракт Body Care v0.1 §2.1 (CAT-1).
@@ -297,6 +327,18 @@ class ServiceTemplate(models.Model):
     approved_at = models.DateTimeField(null=True, blank=True)
     #: Основание одобрения — разбор, реестр владельца, тикет.
     approval_source_ref = models.CharField(max_length=200, blank=True, default="")
+    #: Body Care CAT-2: кто вывел канон из оборота. Та же форма, что у
+    #: одобрения: «кто ИЛИ правило», правило с версией, дата и основание.
+    retired_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True, blank=True,
+        related_name="+",
+    )
+    retired_rule = models.CharField(max_length=100, blank=True, default="")
+    retirement_rule_version = models.CharField(max_length=32, blank=True, default="")
+    retired_at = models.DateTimeField(null=True, blank=True)
+    retirement_source_ref = models.CharField(max_length=200, blank=True, default="")
 
     # -- Body Care: семейство и версии (контракт v0.1 §2.1, CAT-1) ----------
     # Решение владельца D-3 (06.10): расширять ServiceTemplate, а не заводить
@@ -408,6 +450,42 @@ class ServiceTemplate(models.Model):
                     | ~models.Q(health_check_rule_version="")
                 ),
                 name="servicetemplate_health_check_rule_carries_version",
+            ),
+            # Body Care CAT-2: вывод из оборота — решение того же веса, что
+            # одобрение, и провенанс у него тот же.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(lifecycle="retired")
+                    | (
+                        models.Q(retired_at__isnull=False)
+                        & ~models.Q(retirement_source_ref="")
+                        & (
+                            models.Q(retired_by__isnull=False)
+                            | ~models.Q(retired_rule="")
+                        )
+                    )
+                ),
+                name="servicetemplate_retired_requires_provenance",
+            ),
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(retired_by__isnull=False)
+                    & ~models.Q(retired_rule="")
+                ),
+                name="servicetemplate_retirement_is_who_xor_rule",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(retired_rule="")
+                    | ~models.Q(retirement_rule_version="")
+                ),
+                name="servicetemplate_retirement_rule_carries_version",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    lifecycle__in=["provisional", "candidate", "approved", "retired"]
+                ),
+                name="servicetemplate_lifecycle_known",
             ),
             # Body Care CAT-1: назначенное семейство без версии канона —
             # решение, которое нельзя воспроизвести. Услуга вне body-care
