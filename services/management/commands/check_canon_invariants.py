@@ -36,6 +36,14 @@
     retired_without_basis    положительная стража для вывода из оборота —
                              та же роль, что у approved_without_basis
     candidate_templates      очередь кандидатов на активацию
+    known_system_derived_facts  Body Care CAT-4: сколько ИЗВЕСТНЫХ фактов
+                             конфигурации предложений взяты системой
+                             (``source_type=SYSTEM_DERIVED``). По §18
+                             runtime body-care факты не выдумывает, так что
+                             число ожидается около нуля. НЕ нарушение и не
+                             гейт — какие поля запрещают SYSTEM_DERIVED,
+                             решает клиника (D-4); это канарейка: растущее
+                             число значит «система изобретает факты».
 
 Третья строка — не украшение. Первые две могут быть нулями оттого, что
 запрос неверен, и тогда «дыры нет» читалось бы как хорошая новость.
@@ -52,7 +60,7 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
-from services.models import SalonService, ServiceTemplate
+from services.models import OfferingConfigFact, SalonService, ServiceTemplate
 
 
 class Command(BaseCommand):
@@ -100,6 +108,12 @@ class Command(BaseCommand):
             lifecycle=ServiceTemplate.Lifecycle.CANDIDATE,
         ).count()
 
+        # Body Care CAT-4: канарейка, не нарушение — в `violations` не входит.
+        known_system_derived_facts = OfferingConfigFact.objects.filter(
+            state=OfferingConfigFact.State.KNOWN,
+            source_type=OfferingConfigFact.SourceType.SYSTEM_DERIVED,
+        ).count()
+
         # MAP-AUTO-01: сколько канонов без логической идентичности. Не
         # нарушение само по себе — 40 строк DRF-196 и PROVISIONAL-каноны
         # кода не имеют законно; число нужно, чтобы видеть, дошёл ли
@@ -122,6 +136,7 @@ class Command(BaseCommand):
         self.stdout.write(f"verified_on_retired     : {verified_on_retired}")
         self.stdout.write(f"retired_without_basis   : {retired_without_basis}")
         self.stdout.write(f"candidate_templates     : {candidate_templates}")
+        self.stdout.write(f"known_system_derived_facts : {known_system_derived_facts}")
         self.stdout.write(f"templates_without_canonical_code : {templates_without_canonical_code}")
 
         violations = (
