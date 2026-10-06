@@ -1116,6 +1116,11 @@ class SalonService(models.Model):
     #: одного типа значило бы запретить те, которых мы ещё не видели.
     mapping_source_ref = models.CharField(max_length=200, blank=True, default="")
 
+    #: Body Care CAT-3 (контракт v0.1 §3): версия конфигурации, к которой
+    #: относятся факты :class:`OfferingConfigFact` этого предложения. Пусто —
+    #: конфигурация не описана; ни один факт ещё не утверждён.
+    configuration_version = models.CharField(max_length=32, blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -1259,8 +1264,151 @@ class SalonService(models.Model):
             return template.duration_default
         return None
 
+    def config_fact(self, field: str) -> tuple[str, object]:
+        """Состояние и значение факта конфигурации — ``(state, value)``.
+
+        Body Care CAT-3, контракт §4: «UNKNOWN не преобразуется в
+        разрешение». Поэтому **отсутствие строки читается как
+        ``UNKNOWN``**, а не как «ограничений нет»: салон, ничего не
+        сказавший про время экспозиции, не сказал «любое».
+        Неизвестное имя поля — ошибка вызывающего, а не ``UNKNOWN``:
+        опечатка в имени иначе молча читалась бы как неизвестный факт.
+        """
+        if field not in OfferingConfigFact.Field.values:
+            raise ValueError(f"unknown configuration field: {field!r}")
+        fact = self.config_facts.filter(field=field).first()
+        if fact is None:
+            return OfferingConfigFact.State.UNKNOWN, None
+        return fact.state, fact.value
+
     def __str__(self) -> str:
         return f"{self.name} @ {self.tenant.slug}"
+
+
+class OfferingConfigFact(models.Model):
+    """Факт конфигурации предложения салона — Body Care CAT-3 (контракт §3.1, §4).
+
+    Решение владельца D-3 (06.10): ``SalonService`` и есть ``SalonOffering``
+    контракта; факты конфигурации — отдельная таблица на него, по строке на
+    поле. Почему не столбцы: полей девятнадцать, у каждого пять состояний и
+    свой источник, и ``NULL`` в столбце не различил бы «неизвестно» от «не
+    применимо» — контракт §4 прямо запрещает ``null`` как единственный смысл.
+
+    ### Пять состояний (§4)
+
+    ``KNOWN``           значение есть и у него есть источник (``source_ref``)
+    ``UNKNOWN``         не знаем; значения нет — и это НЕ разрешение
+    ``NOT_APPLICABLE``  для этой услуги поле не имеет смысла
+    ``NOT_PROVIDED``    салон спросили — салон не ответил
+    ``CONFLICT``        источники расходятся; расходящиеся варианты могут
+                        лежать в ``value``
+
+    Нет строки — то же, что ``UNKNOWN`` (:meth:`SalonService.config_fact`).
+
+    Полный провенанс факта (``source_type``, ``source_version``,
+    ``captured_at/by``, ``confidence`` — контракт §5) — это CAT-4; здесь
+    только ``source_ref``, без которого ``KNOWN`` не принимается вовсе.
+    """
+
+    class Field(models.TextChoices):
+        """Поля конфигурации — ровно список контракта §3.1, закрытый."""
+
+        PRODUCT_NAME = "product_name", "Продукт"
+        PRODUCT_ARTICLE = "product_article", "Артикул"
+        MANUFACTURER = "manufacturer", "Производитель"
+        INSTRUCTION_VERSION = "instruction_version", "Версия инструкции"
+        INSTRUCTION_REGION = "instruction_region", "Регион инструкции"
+        APPLICATION_AREA = "application_area", "Зона нанесения"
+        APPLICATION_AREA_SIZE = "application_area_size", "Размер зоны"
+        MODE = "mode", "Режим"
+        EXPOSURE_SECONDS = "exposure_seconds", "Время экспозиции, с"
+        APPLICATION_COUNT = "application_count", "Число нанесений"
+        COVERING_TYPE = "covering_type", "Тип укрытия"
+        REMOVAL_METHOD = "removal_method", "Способ снятия"
+        AFTERCARE = "aftercare", "Уход после"
+        ADDITIONAL_MODALITY = "additional_modality", "Дополнительная модальность"
+        HEAT_MODE = "heat_mode", "Тепловой режим"
+        COLD_MODE = "cold_mode", "Холодовой режим"
+        COMPRESSION_MODE = "compression_mode", "Компрессия"
+        DEVICE_REFERENCE = "device_reference", "Аппарат"
+        PROTOCOL_SOURCE = "protocol_source", "Источник протокола"
+
+    class State(models.TextChoices):
+        KNOWN = "known", "Известно"
+        UNKNOWN = "unknown", "Неизвестно"
+        NOT_APPLICABLE = "not_applicable", "Не применимо"
+        NOT_PROVIDED = "not_provided", "Не предоставлено"
+        CONFLICT = "conflict", "Противоречие"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    salon_service = models.ForeignKey(
+        SalonService,
+        on_delete=models.CASCADE,
+        related_name="config_facts",
+    )
+    field = models.CharField(max_length=32, choices=Field.choices)
+    state = models.CharField(max_length=16, choices=State.choices)
+    #: Значение факта. Тип у полей разный (секунды, строки, ссылки), поэтому
+    #: JSON. Пусто у UNKNOWN / NOT_APPLICABLE / NOT_PROVIDED — CheckConstraint.
+    value = models.JSONField(null=True, blank=True)
+    #: Откуда известно значение. Обязательно у KNOWN: известный факт без
+    #: источника через месяц неотличим от догадки (контракт §5).
+    source_ref = models.CharField(max_length=200, blank=True, default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            # Один факт на поле у предложения: два «известных» значения одного
+            # поля — это CONFLICT, и он выражается состоянием, а не дублем.
+            models.UniqueConstraint(
+                fields=["salon_service", "field"],
+                name="offeringconfigfact_one_fact_per_field",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    field__in=[
+                        "product_name", "product_article", "manufacturer",
+                        "instruction_version", "instruction_region",
+                        "application_area", "application_area_size", "mode",
+                        "exposure_seconds", "application_count", "covering_type",
+                        "removal_method", "aftercare", "additional_modality",
+                        "heat_mode", "cold_mode", "compression_mode",
+                        "device_reference", "protocol_source",
+                    ]
+                ),
+                name="offeringconfigfact_field_known",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    state__in=[
+                        "known", "unknown", "not_applicable", "not_provided", "conflict",
+                    ]
+                ),
+                name="offeringconfigfact_state_known",
+            ),
+            # §4: KNOWN — это значение с источником.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(state="known")
+                    | (models.Q(value__isnull=False) & ~models.Q(source_ref=""))
+                ),
+                name="offeringconfigfact_known_requires_value_and_source",
+            ),
+            # §4: «не знаем», «не применимо», «не ответили» значения не несут —
+            # иначе значение при UNKNOWN однажды прочтут как известное.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(state__in=["unknown", "not_applicable", "not_provided"])
+                    | models.Q(value__isnull=True)
+                ),
+                name="offeringconfigfact_absent_states_carry_no_value",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.field}={self.state} @ {self.salon_service_id}"
 
 
 class SpecialistService(models.Model):
