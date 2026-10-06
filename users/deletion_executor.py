@@ -258,6 +258,14 @@ RETAIN: dict[str, str] = {
     "services.ServiceTemplate.health_check_confirmed_by": (
         "провенанс подтверждения флага гейта здоровья (§95), актор — сотрудник"
     ),
+    # Body Care CAT-2 (DRF-2792). Кто вывел канон из оборота. НЕ обнуляется по
+    # той же причине, что ``approved_by``: CHECK
+    # ``servicetemplate_retired_requires_provenance`` требует у ``retired``
+    # автора или правила — NULL нарушил бы схему, а снятие вывода вернуло бы
+    # канон в оборот приватным действием сотрудника.
+    "services.ServiceTemplate.retired_by": (
+        "провенанс вывода канона из оборота (Body Care CAT-2), актор — сотрудник"
+    ),
     "services.ServiceTemplateSynonym.confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "services.SalonService.mapping_confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "services.DraftSalonService.confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",

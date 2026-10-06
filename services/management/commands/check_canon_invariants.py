@@ -28,6 +28,14 @@
     provisional_templates    очередь одобрения куратора
     approved_without_basis   положительная стража: ограничение схемы
                              живо, здесь обязан быть ноль
+    verified_on_retired      Body Care CAT-2: сколько связей салонов всё ещё
+                             VERIFIED на ВЫВЕДЕННОМ каноне. Подбор статус
+                             канона не видит, и такая связь остаётся
+                             рекомендуемой — пока допустимость не связана
+                             со статусом (CAT-10). Нарушение.
+    retired_without_basis    положительная стража для вывода из оборота —
+                             та же роль, что у approved_without_basis
+    candidate_templates      очередь кандидатов на активацию
 
 Третья строка — не украшение. Первые две могут быть нулями оттого, что
 запрос неверен, и тогда «дыры нет» читалось бы как хорошая новость.
@@ -75,6 +83,23 @@ class Command(BaseCommand):
             approval_source_ref="",
         ).count()
 
+        # Body Care CAT-2. Выведенный канон со связями VERIFIED — дыра, а не
+        # вопрос: подбор (`mapping_status == VERIFIED`) статуса канона не
+        # видит, и связь остаётся рекомендуемой. Закрывает её CAT-10.
+        verified_on_retired = SalonService.objects.filter(
+            mapping_status=SalonService.MappingStatus.VERIFIED,
+            template__lifecycle=ServiceTemplate.Lifecycle.RETIRED,
+        ).count()
+
+        retired_without_basis = ServiceTemplate.objects.filter(
+            lifecycle=ServiceTemplate.Lifecycle.RETIRED,
+            retirement_source_ref="",
+        ).count()
+
+        candidate_templates = ServiceTemplate.objects.filter(
+            lifecycle=ServiceTemplate.Lifecycle.CANDIDATE,
+        ).count()
+
         # MAP-AUTO-01: сколько канонов без логической идентичности. Не
         # нарушение само по себе — 40 строк DRF-196 и PROVISIONAL-каноны
         # кода не имеют законно; число нужно, чтобы видеть, дошёл ли
@@ -94,13 +119,23 @@ class Command(BaseCommand):
         self.stdout.write(f"verified_on_provisional : {verified_on_provisional}")
         self.stdout.write(f"provisional_templates   : {provisional_templates}")
         self.stdout.write(f"approved_without_basis  : {approved_without_basis}")
+        self.stdout.write(f"verified_on_retired     : {verified_on_retired}")
+        self.stdout.write(f"retired_without_basis   : {retired_without_basis}")
+        self.stdout.write(f"candidate_templates     : {candidate_templates}")
         self.stdout.write(f"templates_without_canonical_code : {templates_without_canonical_code}")
 
-        violations = verified_on_provisional + approved_without_basis
+        violations = (
+            verified_on_provisional
+            + approved_without_basis
+            + verified_on_retired
+            + retired_without_basis
+        )
         if violations:
             self.stdout.write(self.style.WARNING(
                 f"нарушений: {violations}. `verified_on_provisional` — не поломка, "
-                "а незакрытый вопрос владельцу; `approved_without_basis` — поломка "
+                "а незакрытый вопрос владельцу; `verified_on_retired` — выведенный "
+                "канон всё ещё в подборе через VERIFIED-связи (до CAT-10); "
+                "`approved_without_basis` и `retired_without_basis` — поломка "
                 "схемы, ограничение обойдено `update()`."
             ))
             if options["fail_on_violations"]:

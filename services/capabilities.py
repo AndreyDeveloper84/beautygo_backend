@@ -97,9 +97,30 @@ def client_facing_goal_links(
     )
 
 
+def template_ids_helping_goal(goal_key: str, *, now: datetime | None = None) -> frozenset:
+    """Шаблоны, у которых подтверждено «процедура умеет X» И «X помогает этой цели».
+
+    DRF-2789 (R0 умного ранжирования): сильнейший сигнал глубины совпадения
+    с целью. Правило то же, что у :func:`client_facing_goal_links`: оба
+    утверждения подтверждены, поддержаны и не истекли, цель активна; вывод
+    системы (``inference``) не считается. Здесь, а не у читателя: этот
+    модуль — единственная санкционированная точка чтения знания.
+    """
+    now = now or timezone.now()
+    return frozenset(
+        CapabilityGoalLink.objects.filter(
+            _client_facing_q(now),
+            _client_facing_q(now, prefix="capability__"),
+            goal__key=goal_key,
+            goal__is_active=True,
+        ).values_list("capability__template_id", flat=True)
+    )
+
+
 __all__ = [
     "CapabilityReadout",
     "KnowledgeState",
     "client_facing_capabilities",
     "client_facing_goal_links",
+    "template_ids_helping_goal",
 ]
