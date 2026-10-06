@@ -449,8 +449,17 @@ def stage_semantic_fit(candidates: Sequence[CandidateFacts], need: NeedSpec) -> 
 
     for facts in candidates:
         level = _effective_match_level(facts)
-        keys[facts.ref.id] = float(MATCH_RANK[level])
-        codes[facts.ref.id] = frozenset({MATCH_CODE[level]})
+        depth = facts.goal_fit_depth if level is MatchLevel.GOAL_CATEGORY else None
+        # DRF-2789 (R0): глубина цели — дробная часть ключа уровня. Она
+        # различает только внутри «категории цели» и не может поднять его
+        # выше совпадения по названию: максимум 1.3 < 2.
+        keys[facts.ref.id] = float(MATCH_RANK[level]) + (
+            _GOAL_DEPTH_STEP * depth if depth is not None else 0.0
+        )
+        level_codes = {MATCH_CODE[level]}
+        if depth is not None:
+            level_codes.add(GOAL_DEPTH_CODE[depth])
+        codes[facts.ref.id] = frozenset(level_codes)
         if level is not MatchLevel.UNDETERMINED:
             evidence[facts.ref.id] = (
                 EvidenceItem(
@@ -467,6 +476,19 @@ def stage_semantic_fit(candidates: Sequence[CandidateFacts], need: NeedSpec) -> 
             )
 
     return StageOutput(StageId.S2, active=True, keys=keys, codes=codes, evidence=evidence)
+
+
+#: Шаг глубины цели внутри уровня: 0.1. Четыре значения глубины (0–3) дают
+#: не больше 0.3 — меньше расстояния между соседними уровнями (1.0).
+_GOAL_DEPTH_STEP = 0.1
+
+#: Код объяснения на каждую глубину (DRF-2789).
+GOAL_DEPTH_CODE: dict[int, ReasonCode] = {
+    3: ReasonCode.MATCH_GOAL_CONFIRMED_CAPABILITY,
+    2: ReasonCode.MATCH_GOAL_PRIMARY_CATEGORY,
+    1: ReasonCode.MATCH_GOAL_SECONDARY_CATEGORY,
+    0: ReasonCode.MATCH_GOAL_EXPANDED_CATEGORY,
+}
 
 
 def _effective_match_level(facts: CandidateFacts) -> MatchLevel:

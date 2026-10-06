@@ -23,6 +23,7 @@ DRF-1308: цели курируются на корневых категория
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from uuid import UUID
 
 from django.db.models.functions import Lower
@@ -50,6 +51,45 @@ def _categories_for_option(option: GoalOption) -> list[UUID]:
         .values_list("category_id", flat=True)
     )
     return expand_categories_with_descendants(bound)
+
+
+@dataclass(frozen=True)
+class GoalCategoryPosition:
+    """Где категория стоит в цели — для глубины совпадения (DRF-2789, R0).
+
+    ``direct`` — категория сама связана с целью владельцем; ``False`` —
+    досталась раскрытием связанного корня. ``primary`` — прямая связь с
+    наименьшим ``sort_order``: основная категория цели. Связей с одинаковым
+    наименьшим ``sort_order`` несколько — основные все они: порядок, которого
+    владелец не задал, здесь не выдумывается.
+    """
+
+    direct: bool
+    primary: bool
+
+
+def category_positions_for_option(option: GoalOption) -> dict[UUID, GoalCategoryPosition]:
+    """Категории цели в порядке :func:`_categories_for_option` — с их положением.
+
+    Ключи и их порядок — ровно то, что отдаёт ``_categories_for_option``:
+    одно раскрытие на оба вопроса («какие категории» и «где каждая стоит»),
+    иначе два ответа о том же курируемом факте разошлись бы. Раньше
+    ``sort_order`` связи терялся при раскрытии в множество, и все
+    совпадения по цели были равны.
+    """
+    bound = list(
+        GoalOptionCategory.objects.filter(goal_option=option)
+        .order_by("sort_order")
+        .values_list("category_id", "sort_order")
+    )
+    if not bound:
+        return {}
+    primary_order = min(order for _, order in bound)
+    direct = {cid: order == primary_order for cid, order in bound}
+    return {
+        cid: GoalCategoryPosition(direct=cid in direct, primary=direct.get(cid, False))
+        for cid in expand_categories_with_descendants([cid for cid, _ in bound])
+    }
 
 
 def resolve_goal_category_ids(client) -> list[UUID] | None:
