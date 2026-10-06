@@ -79,7 +79,13 @@ def test_a_new_offering_has_no_configuration_version(offering) -> None:
 
 
 def test_known_with_value_and_source_is_accepted(offering) -> None:
-    fact = _fact(offering, state=St.KNOWN, value=900, source_ref="инструкция производителя v3")
+    fact = _fact(
+        offering,
+        state=St.KNOWN,
+        source_type="manufacturer_instruction",
+        value=900,
+        source_ref="инструкция производителя v3",
+    )
 
     fact.refresh_from_db()
     assert (fact.state, fact.value) == (St.KNOWN, 900)
@@ -88,13 +94,13 @@ def test_known_with_value_and_source_is_accepted(offering) -> None:
 def test_known_without_a_source_is_refused(offering) -> None:
     with pytest.raises(IntegrityError, match="offeringconfigfact_known_requires_value_and_source"):
         with transaction.atomic():
-            _fact(offering, state=St.KNOWN, value=900)
+            _fact(offering, state=St.KNOWN, source_type="manufacturer_instruction", value=900)
 
 
 def test_known_without_a_value_is_refused(offering) -> None:
     with pytest.raises(IntegrityError, match="offeringconfigfact_known_requires_value_and_source"):
         with transaction.atomic():
-            _fact(offering, state=St.KNOWN, source_ref="инструкция")
+            _fact(offering, state=St.KNOWN, source_type="manufacturer_instruction", source_ref="инструкция")
 
 
 # ─── «не знаем / не применимо / не ответили» — без значения ─────────────────
@@ -129,7 +135,7 @@ def test_one_fact_per_field_per_offering(offering) -> None:
 
     with pytest.raises(IntegrityError, match="offeringconfigfact_one_fact_per_field"):
         with transaction.atomic():
-            _fact(offering, state=St.KNOWN, value=900, source_ref="инструкция")
+            _fact(offering, state=St.KNOWN, source_type="manufacturer_instruction", value=900, source_ref="инструкция")
 
 
 def test_an_unknown_field_does_not_reach_the_database_even_past_the_orm(offering) -> None:
@@ -165,7 +171,7 @@ def test_a_missing_fact_reads_as_unknown_not_as_permission(offering) -> None:
 
 def test_a_present_fact_reads_as_itself(offering) -> None:
     _fact(offering, field=F.HEAT_MODE, state=St.NOT_APPLICABLE)
-    _fact(offering, state=St.KNOWN, value=900, source_ref="инструкция")
+    _fact(offering, state=St.KNOWN, source_type="manufacturer_instruction", value=900, source_ref="инструкция")
 
     assert offering.config_fact(F.HEAT_MODE) == (St.NOT_APPLICABLE, None)
     assert offering.config_fact(F.EXPOSURE_SECONDS) == (St.KNOWN, 900)
