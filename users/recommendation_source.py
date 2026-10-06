@@ -428,11 +428,14 @@ class SpecialistCandidateSource:
 def goal_fit_depth(service, *, positions, helping_templates, mapping) -> int:
     """Насколько глубоко услуга отвечает цели — DRF-2789 (R0 умного ранжирования).
 
-    3 — шаблон услуги подтверждённо помогает этой цели (``CapabilityGoalLink``,
+    4 — шаблон услуги подтверждённо помогает этой цели (``CapabilityGoalLink``,
     оба утверждения подтверждены: ``services.capabilities``);
-    2 — категория услуги — основная категория цели;
-    1 — побочная категория цели;
-    0 — категория досталась раскрытием связанного корня.
+    3 — основная категория цели, связана прямо;
+    2 — лист под основным корнем цели (досталась раскрытием);
+    1 — побочная категория цели, связана прямо;
+    0 — лист под побочным корнем.
+    Основная всегда выше побочной; раскрытие различает только внутри класса
+    (см. ``goals.resolution.GoalCategoryPosition``).
 
     Только для услуги, уже совпавшей по цели: допуска это не меняет, это
     глубина внутри уровня ``GOAL_CATEGORY``. Легаси-строка шаблона не имеет —
@@ -440,11 +443,11 @@ def goal_fit_depth(service, *, positions, helping_templates, mapping) -> int:
     """
     template_id = mapping.template_by_service.get(service.id)
     if template_id is not None and template_id in helping_templates:
-        return 3
+        return 4
     position = positions.get(service.category_id)
-    if position is None or not position.direct:
+    if position is None:
         return 0
-    return 2 if position.primary else 1
+    return (2 if position.primary else 0) + (1 if position.direct else 0)
 
 
 class _MappingFacts:

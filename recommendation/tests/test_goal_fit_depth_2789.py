@@ -3,11 +3,15 @@
 До R0 при запросе по цели все совпадения были уровнем ``GOAL_CATEGORY`` = 1:
 один ярус, порядок решала ротация. Теперь внутри уровня — глубина:
 
-    3  шаблон услуги подтверждённо помогает этой цели (CapabilityGoalLink,
+    4  шаблон услуги подтверждённо помогает этой цели (CapabilityGoalLink,
        оба утверждения подтверждены)
-    2  основная категория цели (наименьший sort_order связи)
-    1  побочная категория цели
-    0  категория досталась раскрытием связанного корня
+    3  основная категория цели (наименьший sort_order связи), связана прямо
+    2  лист под основным корнем цели
+    1  побочная категория цели, связана прямо
+    0  лист под побочным корнем
+
+Основная всегда выше побочной: лист НАСЛЕДУЕТ класс своего корня (ревью —
+иначе лист под основным корнем проигрывал прямой побочной связи).
 
 Что заперто:
 
@@ -15,7 +19,10 @@
   четыре яруса в этом порядке, ``separation_stage`` = S2 (до R0 — NOT_SPLIT);
 - каждая глубина объяснена своим кодом рядом с MATCH_GOAL_CATEGORY;
 - уровень доминирует: совпадение по названию выше любой глубины цели;
-- неподтверждённое знание (вывод системы) глубины 3 не даёт;
+- неподтверждённое знание глубины 4 не даёт: вывод системы, подтверждённая
+  связь при неподтверждённой возможности, истёкшая связь, выключенная цель;
+- лист под основным корнем выше прямой побочной категории;
+- из двух VERIFIED услуг мастера берётся более глубокая;
 - у кандидатов не по цели глубины нет (§29.4: стадия не выдумывает данных);
 - из двух услуг мастера в цели берётся VERIFIED, а не глубокая без проверенной связи.
 """
@@ -117,17 +124,30 @@ def _offer(tenant, master, category, *, name, verified=True) -> SalonService:
     return salon_service
 
 
-def _helps(template, goal, curator, *, approved=True) -> None:
-    """«Процедура умеет X» и «X помогает цели»; approved=False — вывод системы."""
-    signed = {
+def _signed(curator, approved: bool, **extra) -> dict:
+    base = {
         "status": "approved", "claim_type": "product", "claim_scope": "supported",
         "evidence_kind": "professional_consensus", "source_ref": "DOC-2789",
         "confirmed_by": curator, "confirmed_at": timezone.now(),
     } if approved else {"claim_scope": "supported", "source_ref": "DOC-2789"}
+    return {**base, **extra}
+
+
+def _helps(template, goal, curator, *, approved=True, capability_approved=None, link_extra=None) -> None:
+    """«Процедура умеет X» и «X помогает цели».
+
+    ``approved=False`` — оба утверждения вывод системы; ``capability_approved``
+    отдельно — подтверждена связь, а возможность нет; ``link_extra`` — поля
+    связи сверху (например, истёкший ``valid_until``).
+    """
+    cap_ok = approved if capability_approved is None else capability_approved
     capability = ProcedureCapability.objects.create(
-        template=template, key=f"calm-{uuid.uuid4().hex[:6]}", text_client="Синтетическая формулировка", **signed,
+        template=template, key=f"calm-{uuid.uuid4().hex[:6]}", text_client="Синтетическая формулировка",
+        **_signed(curator, cap_ok),
     )
-    CapabilityGoalLink.objects.create(capability=capability, goal=goal, **signed)
+    CapabilityGoalLink.objects.create(
+        capability=capability, goal=goal, **_signed(curator, approved, **(link_extra or {})),
+    )
 
 
 @pytest.fixture
@@ -215,7 +235,7 @@ class TestTheLevelStillDominates:
         name_match = make_facts(match_level=MatchLevel.SERVICE_PARTIAL, matched_service_ref=uuid.uuid4())
         deep_goal = make_facts(
             match_level=MatchLevel.GOAL_CATEGORY, matched_service_ref=uuid.uuid4(),
-            matched_goal_category_ref=uuid.uuid4(), goal_fit_depth=3,
+            matched_goal_category_ref=uuid.uuid4(), goal_fit_depth=4,
         )
         out = stage_semantic_fit([name_match, deep_goal], NeedSpec(origin=NeedOrigin.GOAL, goal_key="relax"))
 
@@ -223,9 +243,74 @@ class TestTheLevelStillDominates:
 
     def test_candidates_outside_the_goal_level_carry_no_depth_code(self):
         name_match = make_facts(
-            match_level=MatchLevel.SERVICE_PARTIAL, matched_service_ref=uuid.uuid4(), goal_fit_depth=3,
+            match_level=MatchLevel.SERVICE_PARTIAL, matched_service_ref=uuid.uuid4(), goal_fit_depth=4,
         )
         out = stage_semantic_fit([name_match], NeedSpec(origin=NeedOrigin.USER_EXPLICIT, raw_text="массаж"))
 
         assert out.codes[name_match.ref.id] == frozenset({ReasonCode.MATCH_SERVICE_PARTIAL})
         assert out.keys[name_match.ref.id] == 3.0, "глубина вне уровня цели ключа не трогает"
+
+
+class TestReviewFindings:
+    def test_a_leaf_under_the_primary_root_beats_a_direct_secondary_category(self, tenant):
+        """Основной корень P (sort 0) с листом P1, побочный лист S (sort 1) — форма
+        body_shape на пилоте. Услуга на P1 выше услуги на S."""
+        p = ServiceCategory.objects.create(slug="d2789-p", name="Аппаратный 2789")
+        p1 = ServiceCategory.objects.create(slug="d2789-p1", name="RF 2789", parent=p)
+        s = ServiceCategory.objects.create(slug="d2789-s", name="Лимфодренаж 2789")
+        goal = GoalOption.objects.create(key="shape-2789", label="Фигура 2789")
+        GoalOptionCategory.objects.create(goal_option=goal, category=p, sort_order=0)
+        GoalOptionCategory.objects.create(goal_option=goal, category=s, sort_order=1)
+        under_primary = _master(tenant, "21")
+        secondary = _master(tenant, "22")
+        _offer(tenant, under_primary, p1, name="RF-лифтинг тела")
+        _offer(tenant, secondary, s, name="Лимфодренажный")
+
+        decision = _resolve(goal.key)
+
+        tier = {str(c.candidate_ref.id): c.tier for c in decision.ordered}
+        assert tier[_user_id(under_primary)] < tier[_user_id(secondary)], tier
+
+    def test_of_two_verified_rows_the_deeper_one_is_chosen(self, tenant, tree):
+        """Две VERIFIED услуги мастера в цели; побочная идёт ПЕРВОЙ в порядке каталога
+        (по имени), основная — второй. Берётся основная: глубина решает при равном статусе."""
+        master = _master(tenant, "23")
+        _offer(tenant, master, tree["b"], name="А-побочная")
+        primary = _offer(tenant, master, tree["a"], name="Я-основная")
+
+        [facts] = SpecialistCandidateSource().fetch(
+            scope=Scope(ScopeMode.MARKETPLACE), need=NeedSpec(origin=NeedOrigin.GOAL, goal_key=tree["goal"].key),
+        )
+
+        assert facts.matched_service_ref == primary.pk
+        assert facts.goal_fit_depth == 3
+
+    @pytest.mark.parametrize("case", ["capability_unapproved", "link_expired", "goal_inactive"])
+    def test_knowledge_that_is_not_client_facing_gives_no_top_depth(self, case, tenant, tree, curator):
+        master = _master(tenant, "24")
+        service = _offer(tenant, master, tree["b"], name="Ароматерапия-проверка")
+        if case == "capability_unapproved":
+            _helps(service.template, tree["goal"], curator, capability_approved=False)
+        elif case == "link_expired":
+            _helps(service.template, tree["goal"], curator,
+                   link_extra={"valid_until": timezone.now() - timezone.timedelta(days=1)})
+        else:
+            _helps(service.template, tree["goal"], curator)
+            GoalOption.objects.filter(pk=tree["goal"].pk).update(is_active=False)
+
+        [facts] = SpecialistCandidateSource().fetch(
+            scope=Scope(ScopeMode.MARKETPLACE), need=NeedSpec(origin=NeedOrigin.GOAL, goal_key=tree["goal"].key),
+        )
+
+        assert facts.goal_fit_depth == 1, case
+
+    def test_positive_control_the_same_link_approved_gives_top_depth(self, tenant, tree, curator):
+        master = _master(tenant, "25")
+        service = _offer(tenant, master, tree["b"], name="Ароматерапия-контроль")
+        _helps(service.template, tree["goal"], curator)
+
+        [facts] = SpecialistCandidateSource().fetch(
+            scope=Scope(ScopeMode.MARKETPLACE), need=NeedSpec(origin=NeedOrigin.GOAL, goal_key=tree["goal"].key),
+        )
+
+        assert facts.goal_fit_depth == 4

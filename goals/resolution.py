@@ -29,7 +29,7 @@ from uuid import UUID
 from django.db.models.functions import Lower
 
 from services.goal_resolution import expand_categories_with_descendants
-from services.models import GoalOption, GoalOptionCategory
+from services.models import GoalOption, GoalOptionCategory, ServiceCategory
 
 from .models import ClientGoal
 
@@ -45,12 +45,21 @@ def _categories_for_option(option: GoalOption) -> list[UUID]:
     Порядок сохраняется: сначала корень (по ``sort_order`` связи), сразу
     за ним его подкатегории.
     """
-    bound = list(
+    return expand_categories_with_descendants([cid for cid, _ in _bound_links(option)])
+
+
+def _bound_links(option: GoalOption) -> list[tuple[UUID, int]]:
+    """Связи цели с категориями по ``sort_order`` — ОДИН запрос на оба читателя.
+
+    И фильтр совпадения (:func:`_categories_for_option`), и положение категорий
+    (:func:`category_positions_for_option`) берут связи отсюда: условие,
+    добавленное в одну копию запроса, не может молча разойтись с другой.
+    """
+    return list(
         GoalOptionCategory.objects.filter(goal_option=option)
         .order_by("sort_order")
-        .values_list("category_id", flat=True)
+        .values_list("category_id", "sort_order")
     )
-    return expand_categories_with_descendants(bound)
 
 
 @dataclass(frozen=True)
@@ -58,10 +67,19 @@ class GoalCategoryPosition:
     """Где категория стоит в цели — для глубины совпадения (DRF-2789, R0).
 
     ``direct`` — категория сама связана с целью владельцем; ``False`` —
-    досталась раскрытием связанного корня. ``primary`` — прямая связь с
-    наименьшим ``sort_order``: основная категория цели. Связей с одинаковым
-    наименьшим ``sort_order`` несколько — основные все они: порядок, которого
-    владелец не задал, здесь не выдумывается.
+    досталась раскрытием связанного корня. ``primary`` — категория относится
+    к основной связи цели (наименьший ``sort_order``): сама связана так или
+    лежит под таким корнем. Связей с одинаковым наименьшим ``sort_order``
+    несколько — основные все они: порядок, которого владелец не задал, здесь
+    не выдумывается.
+
+    Почему подкатегория НАСЛЕДУЕТ класс своего корня (ревью DRF-2789).
+    Владелец связывает цели и с корнями, и с листьями, а услуги висят на
+    листьях. Если лист под основным корнем считать «раскрытым» и ставить ниже
+    любой прямой связи, услуга из побочной категории обгоняет услугу из
+    основной — то есть порядок «основная > побочная» переворачивается
+    (body_shape: основной корень «Аппаратный массаж…», побочный лист
+    «Лимфодренаж…»). Поэтому раскрытие различает только ВНУТРИ класса.
     """
 
     direct: bool
@@ -77,19 +95,25 @@ def category_positions_for_option(option: GoalOption) -> dict[UUID, GoalCategory
     ``sort_order`` связи терялся при раскрытии в множество, и все
     совпадения по цели были равны.
     """
-    bound = list(
-        GoalOptionCategory.objects.filter(goal_option=option)
-        .order_by("sort_order")
-        .values_list("category_id", "sort_order")
-    )
+    bound = _bound_links(option)
     if not bound:
         return {}
     primary_order = min(order for _, order in bound)
-    direct = {cid: order == primary_order for cid, order in bound}
-    return {
-        cid: GoalCategoryPosition(direct=cid in direct, primary=direct.get(cid, False))
-        for cid in expand_categories_with_descendants([cid for cid, _ in bound])
-    }
+    primary_of_bound = {cid: order == primary_order for cid, order in bound}
+    expanded = expand_categories_with_descendants([cid for cid, _ in bound])
+    parent_of = dict(
+        ServiceCategory.objects.filter(pk__in=[c for c in expanded if c not in primary_of_bound])
+        .values_list("id", "parent_id")
+    )
+    positions: dict[UUID, GoalCategoryPosition] = {}
+    for cid in expanded:
+        if cid in primary_of_bound:
+            positions[cid] = GoalCategoryPosition(direct=True, primary=primary_of_bound[cid])
+        else:
+            positions[cid] = GoalCategoryPosition(
+                direct=False, primary=primary_of_bound.get(parent_of.get(cid), False),
+            )
+    return positions
 
 
 def resolve_goal_category_ids(client) -> list[UUID] | None:
