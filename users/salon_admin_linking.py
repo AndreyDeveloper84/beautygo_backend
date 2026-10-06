@@ -38,6 +38,18 @@ ruling'а, пункт за пунктом:
     + лог с correlation_id; внешний id в лог не пишется (``pii_guard``
     считает идентификаторы каналов персональными данными).
 
+DRF-2826 (решение владельца 06.10, замещает ruling 18.09 ТОЛЬКО в перечне
+назначаемых ролей): кроме ``admin`` операция назначает ``receptionist`` —
+стойку записи одного салона. Назначает её авторизованный администратор
+ЭТОГО салона: его MAX-личность приходит в ``assigned_by_external_user_id`` и
+проверяется тем же :class:`users.permissions.IsTenantAdmin`, что стоит на
+салонной поверхности. Ресепшн сам роли не назначает и не повышает; админ
+другого салона — отказ ``assigner_not_admin``. Учётка ресепшна — свежая
+``client`` с TUR ``receptionist`` (власть в салоне — из TUR, не из
+``User.role``); привязка — обычной целью ``client``. Все прочие проверки
+(свежая учётка, личность не связана, идемпотентность, readback) — те же.
+Существующие учётки и назначения не меняются.
+
 Что операция НЕ делает — и это её scope: не трогает существующие учётки
 и TUR, не перепривязывает, не выдаёт роль, отличную от admin, не
 принимает id учётки на вход. Утёкший credential = право завести
@@ -56,7 +68,7 @@ from django.db import transaction
 
 from tenants.models import Tenant
 from users.models import SalonAdminLinkRequest, TenantUserRelationship, User
-from users.permissions import IsTenantAdmin
+from users.permissions import IsTenantAdmin, IsTenantBookingDesk
 from users.services import (
     INITIATOR_BOT_SALON_ADMIN_LINK,
     IdentityBindingError,
@@ -77,6 +89,14 @@ USERNAME_PREFIX = "salon-admin:"
 #: salon_admin» — запрещено). В каталоге это ``TenantUserRelationship.Role.ADMIN``.
 LINK_ROLE = TenantUserRelationship.Role.ADMIN
 
+#: DRF-2826 — роли, которые операция назначает. ``admin`` — как в ruling
+#: 18.09 (оператор); ``receptionist`` — только с подтверждением
+#: администратора этого салона.
+ASSIGNABLE_ROLES: tuple[str, ...] = (
+    TenantUserRelationship.Role.ADMIN,
+    TenantUserRelationship.Role.RECEPTIONIST,
+)
+
 REASON_INVALID_EXTERNAL_ID = "invalid_external_user_id"
 REASON_TENANT_NOT_FOUND = "tenant_not_found"
 REASON_TENANT_INACTIVE = "tenant_inactive"
@@ -85,6 +105,8 @@ REASON_IDENTITY_ALREADY_BOUND = "identity_already_bound"
 REASON_IDEMPOTENCY_KEY_REUSED = "idempotency_key_reused"
 REASON_BIND_REFUSED = "bind_refused"
 REASON_READBACK_FAILED = "readback_failed"
+REASON_ROLE_NOT_ASSIGNABLE = "role_not_assignable"
+REASON_ASSIGNER_NOT_ADMIN = "assigner_not_admin"
 
 #: HTTP-статус по причине — ручка отдаёт один код ошибки и причину именем.
 STATUS_BY_REASON: dict[str, int] = {
@@ -96,6 +118,8 @@ STATUS_BY_REASON: dict[str, int] = {
     REASON_IDEMPOTENCY_KEY_REUSED: 409,
     REASON_BIND_REFUSED: 409,
     REASON_READBACK_FAILED: 500,
+    REASON_ROLE_NOT_ASSIGNABLE: 400,
+    REASON_ASSIGNER_NOT_ADMIN: 403,
 }
 
 
@@ -128,13 +152,32 @@ def _refuse(reason: str, *, correlation_id: str, tenant_slug: str, **details) ->
     return SalonAdminLinkRefused(reason, **details)
 
 
-def _readback(tenant: Tenant, external_user_id: str, user: User) -> bool:
-    """Пункт 9: тот же резолвер и та же permission, что на салонной поверхности."""
+def _readback(tenant: Tenant, external_user_id: str, user: User, role: str = LINK_ROLE) -> bool:
+    """Пункт 9: тот же резолвер и те же permission, что на салонной поверхности.
+
+    ``admin`` — ``IsTenantAdmin`` отвечает «да». ``receptionist`` (DRF-2826) —
+    стойка записи «да» (``IsTenantBookingDesk``) И ``IsTenantAdmin`` «нет»:
+    ресепшн не стал администратором.
+    """
     resolved = resolve_external_user_readonly(external_user_id)
     if resolved is None or resolved.pk != user.pk or resolved.is_proxy:
         return False
     probe = SimpleNamespace(user=resolved, tenant=tenant)
+    if role == TenantUserRelationship.Role.RECEPTIONIST:
+        return IsTenantBookingDesk().has_permission(probe, None) and not IsTenantAdmin().has_permission(
+            probe, None
+        )
     return IsTenantAdmin().has_permission(probe, None)
+
+
+def _assigner_is_admin_of(tenant: Tenant, assigned_by_external_user_id: str) -> bool:
+    """DRF-2826: назначающий ресепшна — активный администратор ЭТОГО салона."""
+    if not assigned_by_external_user_id or not is_valid_external_user_id(assigned_by_external_user_id):
+        return False
+    assigner = resolve_external_user_readonly(assigned_by_external_user_id)
+    if assigner is None:
+        return False
+    return IsTenantAdmin().has_permission(SimpleNamespace(user=assigner, tenant=tenant), None)
 
 
 def link_salon_admin(
@@ -144,6 +187,8 @@ def link_salon_admin(
     actor: str,
     correlation_id: str = "",
     idempotency_key: str,
+    role: str = LINK_ROLE,
+    assigned_by_external_user_id: str = "",
 ) -> SalonAdminLink:
     """Завести свежего администратора салона и связать с ним MAX-личность.
 
@@ -153,6 +198,8 @@ def link_salon_admin(
     """
     if not is_valid_external_user_id(external_user_id):
         raise _refuse(REASON_INVALID_EXTERNAL_ID, correlation_id=correlation_id, tenant_slug=tenant_slug)
+    if role not in ASSIGNABLE_ROLES:
+        raise _refuse(REASON_ROLE_NOT_ASSIGNABLE, correlation_id=correlation_id, tenant_slug=tenant_slug)
 
     # Пункт 3 — салон существует и активен. ``all_objects``: неактивный
     # салон отличаем от несуществующего по имени, а не одним 404.
@@ -161,6 +208,10 @@ def link_salon_admin(
         raise _refuse(REASON_TENANT_NOT_FOUND, correlation_id=correlation_id, tenant_slug=tenant_slug)
     if not tenant.is_active:
         raise _refuse(REASON_TENANT_INACTIVE, correlation_id=correlation_id, tenant_slug=tenant_slug)
+    if role == TenantUserRelationship.Role.RECEPTIONIST and not _assigner_is_admin_of(
+        tenant, assigned_by_external_user_id
+    ):
+        raise _refuse(REASON_ASSIGNER_NOT_ADMIN, correlation_id=correlation_id, tenant_slug=tenant_slug)
 
     with transaction.atomic():
         # Пункт 8 — ключ идемпотентности. Строка есть → либо тот же запрос
@@ -181,11 +232,18 @@ def link_salon_admin(
             user = prior.user
             relationship = (
                 TenantUserRelationship.objects.filter(
-                    user=user, tenant=tenant, role=LINK_ROLE, is_active=True,
+                    user=user, tenant=tenant, role=role, is_active=True,
                 ).first()
                 if user is not None
                 else None
             )
+            if user is not None and relationship is None and TenantUserRelationship.objects.filter(
+                user=user, tenant=tenant, role__in=ASSIGNABLE_ROLES, is_active=True,
+            ).exists():
+                # Тот же ключ, другая роль — другое тело (DRF-2826).
+                raise _refuse(
+                    REASON_IDEMPOTENCY_KEY_REUSED, correlation_id=correlation_id, tenant_slug=tenant_slug,
+                )
             if user is None or relationship is None:
                 raise _refuse(REASON_READBACK_FAILED, correlation_id=correlation_id, tenant_slug=tenant_slug)
             result = SalonAdminLink(
@@ -212,7 +270,8 @@ def link_salon_admin(
             # здесь выдача — решение оператора (пункт 7, ``granted_by=admin``).
             user = User(
                 username=f"{USERNAME_PREFIX}{tenant.slug}:{uuid.uuid4().hex[:12]}",
-                role="admin",
+                # Ресепшн — клиентская учётка, власть — из TUR (DRF-2826).
+                role="admin" if role == LINK_ROLE else "client",
                 is_proxy=False,
                 is_guest=False,
                 is_staff=False,
@@ -225,7 +284,7 @@ def link_salon_admin(
             relationship = TenantUserRelationship.objects.create(
                 user=user,
                 tenant=tenant,
-                role=LINK_ROLE,
+                role=role,
                 is_active=True,
                 granted_by=TenantUserRelationship.GrantedBy.ADMIN,
             )
@@ -238,7 +297,7 @@ def link_salon_admin(
                     user.pk,
                     initiator=INITIATOR_BOT_SALON_ADMIN_LINK,
                     request_id=correlation_id or None,
-                    target_roles=(LINK_ROLE,),
+                    target_roles=(LINK_ROLE,) if role == LINK_ROLE else ("client",),
                 )
             except (IdentityBindingError, InvalidExternalUserIDError) as exc:
                 # Исключение внутри atomic откатывает учётку и TUR вместе с ним.
@@ -260,7 +319,7 @@ def link_salon_admin(
             )
 
     # Пункт 9 — после коммита, по настоящим строкам.
-    if not _readback(tenant, external_user_id, result.user):
+    if not _readback(tenant, external_user_id, result.user, role):
         raise _refuse(REASON_READBACK_FAILED, correlation_id=correlation_id, tenant_slug=tenant_slug)
 
     logger.info(
@@ -272,6 +331,7 @@ def link_salon_admin(
 
 
 __all__ = [
+    "ASSIGNABLE_ROLES",
     "LINK_ROLE",
     "SalonAdminLink",
     "SalonAdminLinkRefused",

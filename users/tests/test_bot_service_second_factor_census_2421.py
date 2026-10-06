@@ -9,7 +9,8 @@ this file holds it.
 Every concrete view guarded by the permission must sit in exactly one group:
 
 * **A** — the view compares a user id it was sent with ``request.user.id``;
-* **B** — ``IsTenantAdmin`` stands beside the permission;
+* **B** — ``IsTenantAdmin`` (or, since DRF-2826, the booking desk's
+  ``IsTenantBookingDesk``) stands beside the permission;
 * **C** — the header alone. Listed by name: a new view that lands here
   without being added to this list turns the build red, so «header only»
   is always a decision someone wrote down, never a default.
@@ -186,8 +187,18 @@ def test_group_a_really_cross_checks() -> None:
     assert lying == [], "listed as cross-checking the actor, but no such comparison is in the view"
 
 
+#: The tenant-grant second factors group B accepts. DRF-2826: the booking
+#: desk (``IsTenantBookingDesk`` — an active admin OR receptionist grant in
+#: ``request.tenant``) is the same kind of factor as ``IsTenantAdmin``: the
+#: tenant from middleware, the grant active there; it admits one more role.
+B_SECOND_FACTORS = ("IsTenantAdmin", "IsTenantBookingDesk")
+
+
 def test_group_b_really_has_the_tenant_admin_permission() -> None:
-    missing = sorted(v for v in B_TENANT_ADMIN if "IsTenantAdmin" not in VIEWS[v]["perms"])
+    missing = sorted(
+        v for v in B_TENANT_ADMIN
+        if not any(name in VIEWS[v]["perms"] for name in B_SECOND_FACTORS)
+    )
     assert missing == []
 
 
