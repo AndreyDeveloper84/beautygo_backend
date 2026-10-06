@@ -813,6 +813,13 @@ class TenantUserRelationship(models.Model):
     - ``staff`` — specialist working in a salon. Full employer data
       access. Multi-tenant for mobility (Q2: master moves salon).
     - ``admin`` — tenant owner / manager. Same as staff + admin perms.
+    - ``receptionist`` — the front desk of ONE salon (DRF-2826, owner
+      decision 06.10): sees the schedule, runs the booking cycle (create,
+      reschedule, cancel, complete, no-show), finds the customer it books.
+      Not the owner's powers: no roles, no availability edits, no salon
+      settings, no exports, no diaries, no health details. Server-side:
+      :class:`users.permissions.IsTenantBookingDesk` /
+      :class:`users.permissions.IsTenantAdminOrBookingDeskRead`.
 
     Staff-specific side-fields (hire_date, commission_rate, etc.)
     live on a separate ``StaffEmployment`` model when needed — keeps
@@ -823,6 +830,7 @@ class TenantUserRelationship(models.Model):
         CUSTOMER = "customer", "Customer"
         STAFF = "staff", "Staff"
         ADMIN = "admin", "Admin"
+        RECEPTIONIST = "receptionist", "Receptionist"
 
     class GrantedBy(models.TextChoices):
         SELF = "self", "Self (user-initiated)"
@@ -847,7 +855,8 @@ class TenantUserRelationship(models.Model):
         help_text=(
             "customer: granted on booking via Variant E. "
             "staff: specialist working in the salon. "
-            "admin: tenant owner / manager."
+            "admin: tenant owner / manager. "
+            "receptionist: front desk of one salon — bookings, not settings (DRF-2826)."
         ),
     )
     is_active = models.BooleanField(default=True, db_index=True)
