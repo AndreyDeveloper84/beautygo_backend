@@ -82,7 +82,12 @@ def curator(db):
     return User.objects.create_user(username="cat6-curator", password="x")
 
 
-def _offering(tenant, category, name, family=Family.BODY_WRAP, **template_fields) -> SalonService:
+def _offering(
+    tenant, category, name, family=Family.BODY_WRAP, legal_class="non_medical_cosmetic", **template_fields
+) -> SalonService:
+    """По умолчанию юридический класс подтверждён немедицинским: с §7A-6 без
+    подтверждённого класса предложение не бывает READY, а узлы этого файла —
+    про конфигурацию и ревью. Узлы §7A-6 передают свой класс или ``None``."""
     tpl = ServiceTemplate.objects.create(
         category=category,
         name=f"Канон {name}",
@@ -91,6 +96,14 @@ def _offering(tenant, category, name, family=Family.BODY_WRAP, **template_fields
         canonical_version="1" if family else "",
         **template_fields,
     )
+    if legal_class is not None and family:
+        lawyer, _ = User.objects.get_or_create(username="cat6-lawyer")
+        ServiceTemplate.objects.filter(pk=tpl.pk).update(
+            legal_service_class=legal_class,
+            legal_class_confirmed_by=lawyer,
+            legal_class_confirmed_at=timezone.now(),
+            legal_class_source_ref="решение юриста",
+        )
     return SalonService.objects.create(
         tenant=tenant,
         category=category,
@@ -337,7 +350,8 @@ def test_the_erasure_census_decides_the_reviewer_pointer() -> None:
 # ─── пакетная форма для CAT-10 ──────────────────────────────────────────────
 
 
-def test_the_pool_is_read_in_two_queries(tenant, category, curator, django_assert_num_queries) -> None:
+def test_the_pool_is_read_in_three_queries(tenant, category, curator, django_assert_num_queries) -> None:
+    """Предложения, факты и лицензии салонов (§7A-6) — по одному запросу на пул."""
     haircut = _offering(tenant, category, "Стрижка пула", family=None)
     ready = _offering(tenant, category, "Обёртывание пула готовое")
     _complete(ready)
@@ -345,7 +359,7 @@ def test_the_pool_is_read_in_two_queries(tenant, category, curator, django_asser
     bare = _offering(tenant, category, "Обёртывание пула пустое")
     ids = [haircut.pk, ready.pk, bare.pk]
 
-    with django_assert_num_queries(2):
+    with django_assert_num_queries(3):
         result = validation_states(ids)
 
     assert result == {haircut.pk: NOT_SUBJECT, ready.pk: READY_FOR_SCREENING, bare.pk: INCOMPLETE}

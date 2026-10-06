@@ -62,7 +62,13 @@ LC = ServiceTemplate.LegalServiceClass
 LICENSE_REQUIRED_CLASSES = frozenset({LC.MEDICAL_COSMETOLOGY.value, LC.MEDICAL_OTHER.value})
 
 
-def _state(row: dict, verified_tenants: set, covered: set) -> str:
+def license_state_of(row: dict, verified_tenants: set, covered: set) -> str:
+    """Состояние по строке предложения и покрытию из ``verified_coverage``.
+
+    ``row`` — ключи ``tenant_id``, ``template_id``, ``template__service_family``,
+    ``template__legal_service_class``. Общая точка для ``license_states`` и
+    свёртки в состояние CAT-6 (§7A-6) — правило одно.
+    """
     legal_class = row["template__legal_service_class"]
     if legal_class in LICENSE_REQUIRED_CLASSES:
         if row["tenant_id"] not in verified_tenants:
@@ -91,15 +97,21 @@ def license_states(salon_service_ids: Iterable[object]) -> dict[object, str]:
             "template__legal_service_class",
         )
     )
+    verified_tenants, covered = verified_coverage({r["tenant_id"] for r in rows})
+    return {r["pk"]: license_state_of(r, verified_tenants, covered) for r in rows}
+
+
+def verified_coverage(tenant_ids) -> tuple[set, set]:
+    """Один запрос: салоны с проверенной лицензией и пары (салон, канон) в её объёме."""
     verified_tenants: set = set()
     covered: set = set()
     for tenant_id, template_id in MedicalLicense.objects.filter(
-        tenant_id__in={r["tenant_id"] for r in rows}, verified_by__isnull=False
+        tenant_id__in=tenant_ids, verified_by__isnull=False
     ).values_list("tenant_id", "covered_templates"):
         verified_tenants.add(tenant_id)
         if template_id is not None:
             covered.add((tenant_id, template_id))
-    return {r["pk"]: _state(r, verified_tenants, covered) for r in rows}
+    return verified_tenants, covered
 
 
 def license_state(salon_service: SalonService) -> str:
