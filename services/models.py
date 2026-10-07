@@ -1554,8 +1554,80 @@ class SalonService(models.Model):
                 {"category": "category is required for off-taxonomy custom services."}
             )
 
+    #: Поля подтверждения связи: что именно снимается, когда подтверждение
+    #: перестаёт относиться к канону услуги (DRF-2883).
+    _MAPPING_CONFIRMATION_FIELDS = (
+        "mapping_confirmed_by_id", "mapping_confirmed_rule",
+        "mapping_rule_version", "mapping_confirmed_at",
+    )
+
+    def canon_changed_under_a_standing_confirmation(self) -> bool:
+        """Канон сменили, а подтверждение связи осталось прежним (DRF-2883).
+
+        Связь подтверждают для конкретного канона. Сменить канон и оставить
+        статус, автора и дату — значит рекомендовать услугу как канон Б по
+        подтверждению, выданному для канона А. Тот же род, что область,
+        заданная связью: смысл подтверждения определяется ссылкой, а ссылку
+        можно сменить, не трогая само подтверждение.
+
+        ``False``, если в этом же сохранении пришло новое подтверждение —
+        другая дата, другой автор или другое правило: тот, кто сменил канон,
+        подтвердил связь заново.
+        """
+        if self._state.adding or self.mapping_status != self.MappingStatus.VERIFIED:
+            return False
+        stored = (
+            type(self).objects.filter(pk=self.pk)
+            .values("template_id", "mapping_status", *self._MAPPING_CONFIRMATION_FIELDS)
+            .first()
+        )
+        if stored is None or stored["mapping_status"] != self.MappingStatus.VERIFIED:
+            return False
+        if stored["template_id"] == self.template_id:
+            return False
+        return all(
+            self._same_confirmation_value(stored[name], getattr(self, name))
+            for name in self._MAPPING_CONFIRMATION_FIELDS
+        )
+
+    @staticmethod
+    def _same_confirmation_value(stored: object, given: object) -> bool:
+        """Дата сравнивается до секунды: форма админки возвращает её без
+        микросекунд, и усечённая прежняя дата не должна сойти за новое
+        подтверждение."""
+        if hasattr(stored, "microsecond") and hasattr(given, "microsecond"):
+            return stored.replace(microsecond=0) == given.replace(microsecond=0)
+        return stored == given
+
+    def _drop_a_confirmation_given_for_another_canon(self, save_kwargs: dict) -> None:
+        """Подтверждение, выданное для прежнего канона, не переносится на новый.
+
+        Связь возвращается в очередь проверки: ``review_required`` — «связь
+        есть, но происхождения недостаточно». Автор, правило и дата
+        снимаются; основание (``mapping_source_ref``) остаётся как след того,
+        откуда связь взялась, — подтверждением оно не служит.
+
+        ``QuerySet.update()`` сюда не заходит — известный предел правил
+        уровня модели.
+        """
+        if not self.canon_changed_under_a_standing_confirmation():
+            return
+        self.mapping_status = self.MappingStatus.REVIEW_REQUIRED
+        self.mapping_confirmed_by = None
+        self.mapping_confirmed_rule = ""
+        self.mapping_rule_version = ""
+        self.mapping_confirmed_at = None
+        update_fields = save_kwargs.get("update_fields")
+        if update_fields is not None:
+            save_kwargs["update_fields"] = [
+                *update_fields,
+                "mapping_status", "mapping_confirmed_by", "mapping_confirmed_rule",
+                "mapping_rule_version", "mapping_confirmed_at",
+            ]
+
     def save(self, *args: Any, **kwargs: Any) -> None:
         self.clean()
+        self._drop_a_confirmation_given_for_another_canon(kwargs)
         super().save(*args, **kwargs)
 
     def resolved_duration(self) -> int | None:
