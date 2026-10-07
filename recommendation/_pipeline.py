@@ -174,7 +174,7 @@ def _run_ranking_stages(
         StageId.S2: stage_semantic_fit(survivors, request.need),
         StageId.S3: stage_transaction_fit(survivors, request, policy),
         StageId.S4: stage_contextual(survivors, request.preferences, need_is_stated=request.need.is_stated),
-        StageId.S5: stage_quality(survivors, policy),
+        StageId.S5: stage_quality(survivors, policy, need_is_stated=request.need.is_stated),
     }
 
 
