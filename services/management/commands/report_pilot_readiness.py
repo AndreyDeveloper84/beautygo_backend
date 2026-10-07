@@ -1,4 +1,4 @@
-"""``manage.py report_pilot_readiness [--tenant <slug>]`` — три числа, три решения.
+"""``manage.py report_pilot_readiness [--tenant <slug>]`` — числа под решения владельца.
 
 **Только чтение.** У команды нет ``--apply`` и нет ни одной записи: она
 считает и печатает. Запускает владелец на стенде.
@@ -166,6 +166,24 @@ class Command(BaseCommand):
         self.stdout.write(f"активных мастеров:        {total_masters}")
         self.stdout.write(f"  фото есть:              {with_photo:>4}  {_share(with_photo, total_masters)}")
         self.stdout.write(f"  фото нет:               {total_masters - with_photo:>4}")
+        self.stdout.write("")
+
+        # ── 4. допуск к рекомендации и флаг fail-closed (DRF-2866) ──────
+        from services.body_care_admission import CLASS_UNCONFIRMED, FLAG, admission_census
+
+        census = admission_census([tenant.slug] if tenant is not None else None)
+        self.stdout.write("== 4. Допуск к рекомендации и классификация (DRF-2866) ==")
+        self.stdout.write(
+            f"флаг {FLAG}: {'ВКЛЮЧЁН' if census.flag_now else 'выключен — обход открыт'}"
+        )
+        self.stdout.write(f"активных предложений:               {census.total}")
+        self.stdout.write(f"  допущено сегодня:                 {len(census.available('today'))}")
+        self.stdout.write(f"  допущено после включения флага:   {len(census.available('after'))}")
+        self.stdout.write(f"  с неизвестной областью:           {len(census.unclassified)}")
+        self.stdout.write(
+            f"  класс не подтверждён:             {census.reasons('after').get(CLASS_UNCONFIRMED, 0)}"
+        )
+        self.stdout.write("подробно и по причинам: manage.py body_care_admission_dry_run")
         self.stdout.write("")
         self.stdout.write(
             "Ссылок на сами фото, имён и контактов в отчёте нет — только числа по группам."
