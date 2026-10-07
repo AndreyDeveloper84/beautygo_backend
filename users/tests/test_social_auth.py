@@ -8,7 +8,6 @@ from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from users.migrations._owner_provenance_account import USERNAME as OWNER_PROVENANCE_USERNAME
 from users.models import SocialAccount, User
 from users.social_auth import (
     SocialAuthService,
@@ -479,8 +478,7 @@ class TestSocialAuthContainment:
         mock_http.assert_not_called()
         mock_find.assert_not_called()
         # No user or SocialAccount created.
-        # Учётку провенанса заводит миграция users/0031 — она в базе до запроса.
-        assert not User.objects.exclude(username=OWNER_PROVENANCE_USERNAME).exists()
+        assert User.objects.count() == 0
         assert SocialAccount.objects.count() == 0
         # Provider token is never echoed back.
         assert token not in response.content.decode()

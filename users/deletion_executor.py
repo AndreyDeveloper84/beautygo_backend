@@ -194,6 +194,7 @@ DELETE: dict[str, str] = {
     "goals.GoalAnketaRun.client": "строки (+ответы каскадом)",
     "wellness.DesiredOutcome.user": "строки (после PlanOutcomeLink)",
     "wellness.PersonalPlan.user": "строки (после PlanOutcomeLink)",
+    "wellness.Plan.subject_user": "строки (+ревизии PlanRevision каскадом; до ClientGoal)",
     "wellness.ProgressObservation.user": "строки (superseded_by внутри набора)",
     # диалоги, уведомления, кэши
     "ai.Conversation.user": "строки, включая мягко удалённые (all_objects)",
@@ -730,6 +731,7 @@ def _erase_catalog(user) -> dict:
     from wellness.models import (
         DesiredOutcome,
         PersonalPlan,
+        Plan,
         PlanAction,
         PlanOutcomeLink,
         ProgressObservation,
@@ -783,6 +785,10 @@ def _erase_catalog(user) -> dict:
     # падало бы ProtectedError.
     _delete("wellness.PlanAction", PlanAction.objects.filter(plan__user=user))
     _delete("wellness.PersonalPlan", PersonalPlan.objects.filter(user=user))
+    # DRF-2857 — durable-план: ревизии (иммутабельные снимки шагов) уходят
+    # каскадом от плана, поэтому счёт включает и их. До ClientGoal: план
+    # стирается, а не остаётся с goal=NULL.
+    _delete("wellness.Plan", Plan.objects.filter(subject_user=user))
     _delete("wellness.DesiredOutcome", DesiredOutcome.objects.filter(user=user))
     # PROTECT на superseded_by внутри набора: снять указатели, потом строки.
     ProgressObservation.objects.filter(user=user).update(superseded_by=None)
@@ -1106,7 +1112,7 @@ def _residue(user, *, external_name: str | None = None) -> dict[str, int]:
         UserPersonalContext,
     )
     from users.models import ConsentEventReceipt, ConsentState
-    from wellness.models import DesiredOutcome, PersonalPlan, PlanAction, ProgressObservation
+    from wellness.models import DesiredOutcome, PersonalPlan, Plan, PlanAction, ProgressObservation
     from ai.models import Conversation
     from analytics.models import AnalyticsEvent
     from recommendation.models import ContextSnapshot, RecommendationSet
@@ -1132,6 +1138,7 @@ def _residue(user, *, external_name: str | None = None) -> dict[str, int]:
         "wellness.DesiredOutcome": DesiredOutcome.objects.filter(user=user),
         "wellness.PersonalPlan": PersonalPlan.objects.filter(user=user),
         "wellness.PlanAction": PlanAction.objects.filter(plan__user=user),
+        "wellness.Plan": Plan.objects.filter(subject_user=user),
         "wellness.ProgressObservation": ProgressObservation.objects.filter(user=user),
         "ai.Conversation": Conversation.all_objects.filter(user=user),
         "notifications.Notification": Notification.objects.filter(user=user),

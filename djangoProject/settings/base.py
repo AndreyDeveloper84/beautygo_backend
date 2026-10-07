@@ -634,6 +634,13 @@ SMS_ENABLED = os.environ.get("SMS_ENABLED", "false").lower() == "true"
 # (штатный отказ, не 5xx — общий breaker бота считает постоянный 5xx
 # аварией), чтение отдаёт plan_lite: null.
 PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() == "true"
+
+# DRF-2857 — durable Plan (Plan Engine, WP1). Default CLOSED. Включён →
+# писатель Plan Lite отказывает (409 PLAN_LITE_SUPERSEDED_BY_ENGINE), чтение и
+# закрытие Lite работают; новый план человека сохраняется как wellness.Plan.
+# Выключен → писатели Plan отвечают 404 PLAN_ENGINE_DISABLED, чтение отдаёт
+# plan: null; уже сохранённые Plan/PlanRevision остаются в базе.
+PLAN_ENGINE_ENABLED = os.environ.get("PLAN_ENGINE_ENABLED", "false").lower() == "true"
 SMS_RU_SENDER = os.environ.get("SMS_RU_SENDER", "")  # Empty = default sender
 SMS_RU_TIMEOUT = 10  # HTTP timeout in seconds
 

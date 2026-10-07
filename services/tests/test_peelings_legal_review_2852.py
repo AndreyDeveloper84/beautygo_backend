@@ -12,9 +12,10 @@
 * провенанс полный: класс, кто, когда, основание;
 * чужой канон — и пилинг с другим pk тоже — не тронут;
 * класс, поставленный человеком, шаг не переписывает;
-* без учётки владельца, с выключенной учёткой и с не-пилингом под pk шаг
-  падает и ничего не пишет;
-* миграция берёт автором именную учётку владельца, найденную по ключу;
+* без автора, с автором, которого нет в базе, с учёткой, которой нельзя
+  доверять, и с не-пилингом под pk шаг падает и ничего не пишет;
+* миграция заводит именную учётку владельца, когда ей есть что записать, и
+  пишет ею; на базе без этих канонов и при уже стоящем классе учётки нет;
 * обратный ход снимает только своё;
 * на базе без этих канонов шаг ничего не делает.
 """
@@ -88,7 +89,11 @@ def _offer(salon, category, template) -> SalonService:
 
 
 def _close(by):
-    return peelings.close(ServiceTemplate, User, confirmed_by_id=by.pk, now=timezone.now())
+    return peelings.close(ServiceTemplate, User, author=lambda: by.pk, now=timezone.now())
+
+
+def _nobody():
+    return None
 
 
 def _snapshot(templates):
@@ -116,7 +121,7 @@ def test_the_four_peelings_are_closed_for_the_license_gate(canons, category, sal
 def test_the_provenance_is_complete(canons, owner) -> None:
     now = timezone.now()
 
-    peelings.close(ServiceTemplate, User, confirmed_by_id=owner.pk, now=now)
+    peelings.close(ServiceTemplate, User, author=lambda: owner.pk, now=now)
 
     assert _snapshot(canons) == [
         {
@@ -167,7 +172,7 @@ def test_a_class_set_by_a_human_is_not_rewritten(canons, owner) -> None:
 def test_a_database_without_these_canons_is_left_alone(category) -> None:
     _canon(category, "Гликолевый пилинг")
 
-    counts = peelings.close(ServiceTemplate, User, confirmed_by_id=None, now=timezone.now())
+    counts = peelings.close(ServiceTemplate, User, author=_nobody, now=timezone.now())
 
     assert counts == {"found": 0, "closed": 0, "already_classed": 0}
     assert not ServiceTemplate.objects.filter(legal_service_class__isnull=False).exists()
@@ -178,14 +183,14 @@ def test_a_database_without_these_canons_is_left_alone(category) -> None:
 
 def test_no_named_author_refuses_and_writes_nothing(canons) -> None:
     with pytest.raises(peelings.CannotAttribute, match="учётки владельца нет"):
-        peelings.close(ServiceTemplate, User, confirmed_by_id=None, now=timezone.now())
+        peelings.close(ServiceTemplate, User, author=_nobody, now=timezone.now())
 
     assert not ServiceTemplate.objects.filter(legal_service_class__isnull=False).exists()
 
 
 def test_an_author_absent_from_the_database_refuses(canons) -> None:
     with pytest.raises(peelings.CannotAttribute, match="в базе нет"):
-        peelings.close(ServiceTemplate, User, confirmed_by_id=uuid.uuid4(), now=timezone.now())
+        peelings.close(ServiceTemplate, User, author=uuid.uuid4, now=timezone.now())
 
     assert not ServiceTemplate.objects.filter(legal_service_class__isnull=False).exists()
 
@@ -235,36 +240,58 @@ def test_the_reverse_leaves_a_later_human_decision(canons, owner) -> None:
     assert _snapshot([decided, reviewed]) == before
 
 
-def test_the_migration_refuses_when_there_is_no_owner_account(canons) -> None:
-    User.objects.filter(username=owner_account.USERNAME).delete()
-
-    with pytest.raises(peelings.CannotAttribute, match="учётки владельца нет"):
-        MIGRATION.close_peelings(live_apps, None)
-
-    assert not ServiceTemplate.objects.filter(legal_service_class__isnull=False).exists()
-
-
 # ─── миграция и её литералы ──────────────────────────────────────────────────
 
 
-@pytest.fixture
-def owner_row(db):
-    """Именная учётка владельца. Заводится здесь, а не берётся от накатки:
-    транзакционный узел, отработавший раньше, смывает таблицы."""
-    pk, _ = owner_account.ensure(User, unusable_password=make_password(None))
-    return User.objects.get(pk=pk)
+def _account():
+    return User.objects.filter(username=owner_account.USERNAME).first()
 
 
-def test_the_migration_names_the_owner_account_as_the_author(canons, owner_row) -> None:
-    author = owner_row
+def test_the_migration_makes_the_owner_account_and_names_it_the_author(canons) -> None:
+    """На базе с этими канонами учётки ещё нет — шаг заводит её и пишет ею."""
+    assert _account() is None
 
     MIGRATION.close_peelings(live_apps, None)
+
+    author = _account()
+    assert str(author.pk) == owner_account.FIXED_ID
+    assert not author.has_usable_password()
     assert ServiceTemplate.objects.filter(
         legal_service_class=LC.LEGAL_REVIEW_REQUIRED, legal_class_confirmed_by=author
     ).count() == 4
 
     MIGRATION.reopen_peelings(live_apps, None)
     assert not ServiceTemplate.objects.filter(legal_service_class__isnull=False).exists()
+
+
+def test_the_migration_uses_an_owner_account_that_is_already_there(canons) -> None:
+    pk, _ = owner_account.ensure(User, unusable_password=make_password(None))
+
+    MIGRATION.close_peelings(live_apps, None)
+
+    assert User.objects.filter(username=owner_account.USERNAME).count() == 1
+    assert ServiceTemplate.objects.filter(legal_class_confirmed_by_id=pk).count() == 4
+
+
+def test_a_database_without_these_canons_gets_no_owner_account(category) -> None:
+    """Учётка не заводится там, где решению владельца не о чем говорить."""
+    _canon(category, "Гликолевый пилинг")
+
+    MIGRATION.close_peelings(live_apps, None)
+
+    assert _account() is None
+
+
+def test_canons_that_already_have_a_class_need_no_owner_account(canons, owner) -> None:
+    ServiceTemplate.objects.filter(pk__in=peelings.PEELING_TEMPLATE_IDS).update(
+        legal_service_class=LC.MEDICAL_COSMETOLOGY, legal_class_confirmed_by=owner,
+        legal_class_confirmed_at=timezone.now(), legal_class_source_ref="решение юриста",
+    )
+
+    MIGRATION.close_peelings(live_apps, None)
+
+    assert _account() is None
+    assert ServiceTemplate.objects.filter(legal_service_class=LC.MEDICAL_COSMETOLOGY).count() == 4
 
 
 def test_the_migration_literals_match_the_model() -> None:
@@ -277,10 +304,13 @@ def test_the_migration_literals_match_the_model() -> None:
         assert str(uuid.UUID(pk)) == pk
 
 
-def test_the_migration_refuses_when_the_owner_account_is_switched_off(canons, owner_row) -> None:
-    User.objects.filter(pk=owner_row.pk).update(is_active=False)
+@pytest.mark.parametrize("flaw", [{"is_active": False}, {"is_proxy": True}])
+def test_the_migration_refuses_an_owner_account_it_cannot_trust(canons, flaw) -> None:
+    """Выключенная учётка и чужая личность под ключом владельца — не автор."""
+    owner_account.ensure(User, unusable_password=make_password(None))
+    User.objects.filter(username=owner_account.USERNAME).update(**flaw)
 
-    with pytest.raises(peelings.CannotAttribute, match="учётки владельца нет"):
+    with pytest.raises(owner_account.NotAProvenanceAccount):
         MIGRATION.close_peelings(live_apps, None)
 
     assert not ServiceTemplate.objects.filter(legal_service_class__isnull=False).exists()

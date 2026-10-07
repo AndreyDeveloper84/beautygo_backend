@@ -9,7 +9,9 @@ wellness-context (DRF-1344): Bearer service token + X-External-User-ID,
   необязателен — без него активная цель вызывающего, PR-1b;
   ``template_version`` — версия шаблона цели, DRF-2123 → ``PersonalPlan.source``
   = ``template:<goal_key>:v<N>``, иначе ``manual``). 201 — создан; 409
-  ``PLAN_LITE_ALREADY_ACTIVE`` — активный уже есть; 404 ``NOT_FOUND`` —
+  ``PLAN_LITE_ALREADY_ACTIVE`` — активный уже есть; 409
+  ``PLAN_LITE_SUPERSEDED_BY_ENGINE`` — включён Plan Engine (DRF-2857), новый
+  план сохраняется как durable ``wellness.Plan``; 404 ``NOT_FOUND`` —
   цель не у этого человека / не активна / активной цели нет; 400 — форма
   или версии шаблона у этой цели нет.
 - ``DELETE`` — закрыть активный план (append-only). 404 — активного нет.
@@ -42,6 +44,7 @@ from .plan_lite import (
     NoActivePlan,
     PlanAlreadyActive,
     PlanLiteDisabled,
+    SupersededByEngine,
     TemplateNotFound,
     close_plan,
     create_plan,
@@ -96,6 +99,12 @@ class PlanLiteView(APIView):
             )
         except PlanLiteDisabled:
             return _disabled()
+        except SupersededByEngine:
+            return error_response(
+                "PLAN_LITE_SUPERSEDED_BY_ENGINE",
+                "Новый план сохраняется через Plan Engine",
+                status_code=status.HTTP_409_CONFLICT,
+            )
         except InvalidTemplateVersion as exc:
             return error_response(
                 "VALIDATION_ERROR", str(exc), details={"reason": "template_version_not_found"},

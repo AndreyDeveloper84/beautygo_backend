@@ -1,29 +1,27 @@
 """Именная учётка владельца для провенанса (решение владельца 07.10).
 
-Миграция ``0031`` схему не меняет — это данные; узлы зовут шаг напрямую на
-живой модели. На строку, оставленную накаткой, узлы не опираются: она есть
-в свежей базе, но транзакционный узел, отработавший раньше в том же
-прогоне, смывает таблицы. Каждый узел начинает с чистого ключа.
+Своей миграции у учётки нет: её заводит миграция, которой нужен автор, и
+только когда ей есть что записать. Поэтому в базе узла учётки нет, пока узел
+не заведёт её сам.
 
 Узлы держат:
 
 * учётка заводится с фиксированным pk и именем владельца;
 * войти ею нельзя и прав у неё нет;
-* повторный прогон ничего не меняет;
+* на свежей базе учётки нет — её не заводит ни одна накатка;
+* повторный вызов ничего не меняет;
 * учётку, заведённую раньше руками, шаг не правит, а ссылка по ключу
   находит её по её собственному pk;
 * ключ, занятый внешней, гостевой или тестовой личностью, — отказ, и
   авторство такой учётке не приписывается;
-* выключенной учётке авторство не приписывается.
+* выключенной учётке авторство не приписывается, и ``ensure`` её не берёт.
 """
 
 from __future__ import annotations
 
-import importlib
 import uuid
 
 import pytest
-from django.apps import apps as live_apps
 from django.contrib.auth.hashers import make_password
 
 from users.migrations import _owner_provenance_account as owner_account
@@ -31,24 +29,21 @@ from users.models import User
 
 pytestmark = pytest.mark.django_db
 
-MIGRATION = importlib.import_module("users.migrations.0031_owner_provenance_account")
-
 
 @pytest.fixture
 def clean(db):
-    User.objects.filter(username=owner_account.USERNAME).delete()
+    """Имя фикстуры — напоминание: узел начинает без учётки."""
+    assert not User.objects.filter(username=owner_account.USERNAME).exists()
 
 
 def _ensure():
     return owner_account.ensure(User, unusable_password=make_password(None))
 
 
-def test_the_migration_step_makes_the_account(clean) -> None:
-    MIGRATION.ensure_account(live_apps, None)
-
-    account = User.objects.get(username=owner_account.USERNAME)
-    assert str(account.pk) == owner_account.FIXED_ID
-    assert not account.has_usable_password()
+def test_a_fresh_database_has_no_account() -> None:
+    """Учётку в каждой базе не заводит ни одна миграция."""
+    assert not User.objects.filter(username=owner_account.USERNAME).exists()
+    assert owner_account.account_id(User) is None
 
 
 def test_the_account_is_made_with_the_fixed_pk_and_the_owner_name(clean) -> None:
@@ -78,7 +73,6 @@ def test_a_second_run_changes_nothing(clean) -> None:
     before = User.objects.filter(username=owner_account.USERNAME).values().get()
 
     pk, created = _ensure()
-    MIGRATION.ensure_account(live_apps, None)
 
     assert created is False
     assert str(pk) == owner_account.FIXED_ID
@@ -116,6 +110,8 @@ def test_a_switched_off_account_is_not_an_author(clean) -> None:
     User.objects.filter(username=owner_account.USERNAME).update(is_active=False)
 
     assert owner_account.account_id(User) is None
+    with pytest.raises(owner_account.NotAProvenanceAccount, match="выключена"):
+        _ensure()
 
 
 def test_no_account_means_no_author(clean) -> None:
