@@ -106,9 +106,20 @@ from services.body_care_license import (
     license_state_of,
     verified_coverage,
 )
+from services.body_care_scope import (
+    NOT_SUBJECT as SCOPE_NOT_SUBJECT,
+    UNCLASSIFIED as SCOPE_UNCLASSIFIED,
+    classification_stamp,
+    scope_of,
+)
 from services.models import OfferingConfigFact, SalonService, ServiceTemplate
 
 NOT_SUBJECT = "not_subject"
+#: Маркер, как и ``NOT_SUBJECT``, — не состояние §7: классификация канона
+#: неизвестна (``body_care_scope.scope_of``), и проверка **не снята**.
+#: Потребитель обязан закрыть строку; литерал — контракт с источником
+#: рекомендаций (``users.recommendation_source.config_readiness``).
+UNCLASSIFIED = "unclassified"
 INCOMPLETE = "incomplete"
 REVIEW_REQUIRED = "review_required"
 READY_FOR_SCREENING = "ready_for_screening"
@@ -153,12 +164,18 @@ def _canonical(value: object) -> object:
     return value
 
 
-def config_fingerprint(fact_rows: Iterable[dict]) -> str:
-    """SHA-256 набора фактов конфигурации — не зависит от порядка строк.
+def config_fingerprint(fact_rows: Iterable[dict], classification: list) -> str:
+    """SHA-256 фактов конфигурации и классификации канона.
 
-    ``fact_rows`` — словари с ключами ``FINGERPRINT_COLUMNS``. Пустой набор
-    тоже имеет отпечаток: «фактов не было» — это состояние, которое видел
-    ревьюер.
+    ``fact_rows`` — словари с ключами ``FINGERPRINT_COLUMNS``; от порядка
+    строк отпечаток не зависит. Пустой набор тоже имеет отпечаток: «фактов
+    не было» — это состояние, которое видел ревьюер.
+
+    ``classification`` — ``body_care_scope.classification_stamp``: область,
+    семейство и версия канона. Ревью проверяло конфигурацию канона именно
+    этой классификации; смена любого из трёх делает его неактуальным.
+    Строка классификации идёт первой и отдельно от фактов, поэтому с
+    фактом её не спутать.
     """
     lines = sorted(
         json.dumps(
@@ -169,12 +186,28 @@ def config_fingerprint(fact_rows: Iterable[dict]) -> str:
         )
         for row in fact_rows
     )
-    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+    head = json.dumps(classification, ensure_ascii=False, default=str)
+    return hashlib.sha256("\n".join([head, *lines]).encode("utf-8")).hexdigest()
+
+
+def _classification(row: dict) -> list:
+    return classification_stamp(
+        scope=row["template__body_care_scope"],
+        family=row["template__service_family"],
+        canonical_version=row["template__canonical_version"] or "",
+    )
 
 
 def _state(row: dict, fact_rows: list[dict], license_state: str) -> str:
     family = row["template__service_family"]
-    if not family:
+    scope = scope_of(
+        has_canon=row["template_id"] is not None,
+        scope=row["template__body_care_scope"],
+        family=family,
+    )
+    if scope == SCOPE_UNCLASSIFIED:
+        return UNCLASSIFIED
+    if scope == SCOPE_NOT_SUBJECT:
         return NOT_SUBJECT
     if row["template__lifecycle"] == _RETIRED_LIFECYCLE:
         return RETIRED
@@ -193,7 +226,7 @@ def _state(row: dict, fact_rows: list[dict], license_state: str) -> str:
     if (
         version
         and row["config_reviewed_version"] == version
-        and row["config_reviewed_fingerprint"] == config_fingerprint(fact_rows)
+        and row["config_reviewed_fingerprint"] == config_fingerprint(fact_rows, _classification(row))
     ):
         return READY_FOR_SCREENING
     return REVIEW_REQUIRED
@@ -212,7 +245,7 @@ def validation_states(salon_service_ids: Iterable[object]) -> dict[object, str]:
     """``{pk предложения: состояние}`` для пула — три запроса, без N+1.
 
     Точка входа для CAT-10 (допустимость к рекомендации). Значения —
-    одно из ``VALIDATION_STATES`` или ``NOT_SUBJECT``. Отсутствующий в
+    одно из ``VALIDATION_STATES``, ``NOT_SUBJECT`` или ``UNCLASSIFIED``. Отсутствующий в
     базе ``pk`` в ответ не попадает.
     """
     ids = list(salon_service_ids)
@@ -222,7 +255,9 @@ def validation_states(salon_service_ids: Iterable[object]) -> dict[object, str]:
             "pk",
             "tenant_id",
             "template_id",
+            "template__body_care_scope",
             "template__service_family",
+            "template__canonical_version",
             "template__legal_service_class",
             "template__lifecycle",
             "configuration_version",
@@ -259,7 +294,14 @@ def record_config_review(
     version = salon_service.configuration_version
     if not version:
         raise ValueError("конфигурация без версии: ревью не к чему привязать")
-    fingerprint = config_fingerprint(_fact_rows([salon_service.pk]).get(salon_service.pk, []))
+    canon = (
+        SalonService.objects.filter(pk=salon_service.pk)
+        .values("template__body_care_scope", "template__service_family", "template__canonical_version")
+        .get()
+    )
+    fingerprint = config_fingerprint(
+        _fact_rows([salon_service.pk]).get(salon_service.pk, []), _classification(canon)
+    )
     fields = {
         "config_reviewed_by": by,
         "config_review_rule": rule,
