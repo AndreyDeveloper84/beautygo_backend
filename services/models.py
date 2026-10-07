@@ -2102,6 +2102,37 @@ class SpecialistService(models.Model):
         """Вердикт гейта — см. :meth:`resolved_health_check` (DRF-2614)."""
         return self.resolved_health_check()[0]
 
+    def resolved_health_check_with_origin(self) -> tuple[bool | None, str, bool]:
+        """Вердикт гейта, его основание и ПОДТВЕРЖДЕНО ЛИ это основание (DRF-2877).
+
+        Решение владельца 07.10 (S2): неподтверждённое «проверка не нужна» —
+        «неизвестно», неподтверждённое «нужна» — «требование ещё не
+        подтверждено». Потребителю нужен один признак на все основания, а
+        не свой разбор каждого слоя::
+
+            template_confirmed  флаг канона просмотрен человеком      да
+            template_inferred   флаг канона выведен правилом           нет
+            salon               ответ салона — по его происхождению
+            specialist          требование поднял мастер               нет
+            unknown             никто не отвечал                       нет
+
+        У ребра своего происхождения ещё нет, поэтому ``specialist`` —
+        «нет»; когда появится, изменится эта строка, а не потребители.
+
+        Вердикт и основание — ровно те, что у :meth:`resolved_health_check`:
+        каскад здесь не повторяется. Сам вердикт этот метод не меняет — что
+        из неподтверждённого открывает запись, решает правило записи, а его
+        включает владелец.
+        """
+        verdict, basis = self.resolved_health_check()
+        if basis == "template_confirmed":
+            confirmed = True
+        elif basis == "salon":
+            confirmed = self.salon_service.health_check_answer_confirmed
+        else:
+            confirmed = False
+        return verdict, basis, confirmed
+
     def resolved_health_check(self) -> tuple[bool | None, str]:
         """Вердикт гейта и ЕГО ОСНОВАНИЕ — одним расчётом (DRF-2614).
 

@@ -303,6 +303,24 @@ class SalonServiceAdminForm(forms.ModelForm):
         SalonService.MappingStatus.NOT_RECOMMENDABLE,
     })
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Происхождение ответа о проверке здоровья — не обязательное поле
+        # формы. У колонки есть умолчание, и форма, которая о поле не знает
+        # (действия разбора, прежние вызовы), не должна из-за него падать:
+        # отсутствие значения читается как «оставить как есть».
+        if 'health_check_origin' in self.fields:
+            self.fields['health_check_origin'].required = False
+
+    def clean_health_check_origin(self):
+        """Не прислали — остаётся прежнее; у новой услуги — «не подтверждён»."""
+        value = self.cleaned_data.get('health_check_origin')
+        if value:
+            return value
+        if self.instance.pk:
+            return self.instance.health_check_origin
+        return SalonService.HealthCheckAnswerOrigin.UNSET
+
     def _clean_health_check_answer(self, cleaned) -> None:
         """Происхождение ответа «нужна ли проверка перед услугой» (S2).
 

@@ -13,8 +13,10 @@
 * неподтверждённый ответ не несёт ни автора, ни даты;
 * смена ответа под прежним подтверждением снимает подтверждение — и через
   ``update_fields`` тоже; новое подтверждение в том же сохранении остаётся;
-* форма админки говорит оператору по полю и до сохранения;
-* вердикт гейта записи и его основание не меняются;
+* форма админки говорит оператору по полю и до сохранения; форма, которая
+  происхождение не прислала, не падает и ничего не подтверждает;
+* вердикт гейта записи и его основание не меняются; единый вызов у ребра
+  добавляет к ним один признак — подтверждено ли основание;
 * сидер, копирующий флаг канона, ответом салона не становится;
 * перепись читает новое поле без правки; указатель на подтвердившего решён
   переписью удаления.
@@ -249,6 +251,12 @@ def _form(curator, offer, **over):
     return model_admin.get_form(request, offer)(data=data, instance=offer)
 
 
+def model_admin_form(curator, offer=None):
+    request = RequestFactory().get("/")
+    request.user = curator
+    return django_admin.site._registry[SalonService].get_form(request, offer)
+
+
 def _codes(form, field) -> list[str]:
     return [e.code for e in form.errors.as_data().get(field, [])]
 
@@ -286,6 +294,31 @@ def test_the_form_names_the_field_instead_of_a_constraint(salon, category, curat
 
     assert not form.is_valid()
     assert code in _codes(form, field), form.errors
+
+
+def test_a_form_that_does_not_send_the_origin_keeps_what_was_there(salon, category, curator) -> None:
+    """Форма, которая о новом поле не знает, не падает и ничего не подтверждает."""
+    silent = {
+        "health_check_origin": "", "health_check_confirmed_by": "", "health_check_source_ref": "",
+        "health_check_confirmed_at_0": "", "health_check_confirmed_at_1": "",
+    }
+    plain = _offer(salon, category, requires_health_check=False)
+
+    form = _form(curator, plain, **silent)
+
+    assert form.is_valid(), form.errors
+    form.save()
+    assert _stored(plain)["health_check_origin"] == Origin.UNSET
+
+    new = model_admin_form(curator)(data={
+        "tenant": str(salon.pk), "template": "", "category": str(category.pk), "name": "Новая услуга",
+        "duration_minutes": "60", "base_price": "3000", "is_active": True,
+        "source": SalonService.Source.MANUAL, "mapping_status": SalonService.MappingStatus.UNMAPPED,
+        "requires_health_check": "false",
+    })
+
+    assert new.is_valid(), new.errors
+    assert new.save().health_check_origin == Origin.UNSET
 
 
 def test_the_form_tells_the_operator_the_answer_changed_under_its_confirmation(salon, category, curator) -> None:
@@ -329,6 +362,87 @@ def test_the_gate_verdict_and_its_basis_do_not_depend_on_the_origin(salon, categ
     ]
 
     assert verdicts == [(answer, "salon"), (answer, "salon")]
+
+
+# ─── единый вызов: вердикт, основание, подтверждено ли ───────────────────────
+
+
+def _edge(salon, offer, username, *, raised=False):
+    user = User.objects.create_user(username=username, password="x")
+    master = SpecialistProfile.objects.create(
+        user=user, tenant=salon, display_name="Мастер", status=SpecialistProfile.ProfileStatus.ACTIVE,
+    )
+    return SpecialistService.objects.create(
+        salon_service=offer, specialist=master, duration_minutes=60, price=Decimal("3000"),
+        requires_health_check=raised,
+    )
+
+
+def _canon(category, curator, name, *, flag, confirmed) -> ServiceTemplate:
+    canon = ServiceTemplate.objects.create(
+        category=category, name=name, name_short=name[:40], requires_health_check=flag,
+    )
+    if confirmed:
+        ServiceTemplate.objects.filter(pk=canon.pk).update(
+            health_check_origin=ServiceTemplate.HealthCheckOrigin.CONFIRMED,
+            health_check_confirmed_by=curator, health_check_confirmed_at=timezone.now(),
+            health_check_source_ref="разбор владельца",
+        )
+    return canon
+
+
+def test_one_call_says_whether_the_basis_of_the_verdict_is_confirmed(salon, category, curator) -> None:
+    clear = _canon(category, curator, "Просмотрен, не нужна", flag=False, confirmed=True)
+    gated = _canon(category, curator, "Просмотрен, нужна", flag=True, confirmed=True)
+    draft_clear = _canon(category, curator, "Выведен, не нужна", flag=False, confirmed=False)
+    draft_gated = _canon(category, curator, "Выведен, нужна", flag=True, confirmed=False)
+    cases = {
+        "канон просмотрен: нужна": (_offer(salon, category, template=gated, name="1"), False),
+        "канон выведен: нужна": (_offer(salon, category, template=draft_gated, name="2"), False),
+        "канон просмотрен: не нужна": (_offer(salon, category, template=clear, name="3"), False),
+        "канон выведен: не нужна": (_offer(salon, category, template=draft_clear, name="4"), False),
+        "салон без подтверждения: не нужна": (_offer(salon, category, requires_health_check=False, name="5"), False),
+        "салон подтверждённо: не нужна": (_confirmed(salon, category, curator, answer=False, name="6"), False),
+        "салон подтверждённо: нужна": (_confirmed(salon, category, curator, answer=True, name="7"), False),
+        "мастер поднял": (_offer(salon, category, template=clear, name="8"), True),
+        "никто не отвечал": (_offer(salon, category, name="9"), False),
+        # Салон пол канона не опускает — даже подтверждённым «не нужна».
+        "канон выведен нужна, салон подтверждённо не нужна": (
+            _confirmed(salon, category, curator, answer=False, template=draft_gated, name="10"), False,
+        ),
+        # Подтверждённый ответ салона открывает и без просмотра флага канона.
+        "канон выведен не нужна, салон подтверждённо не нужна": (
+            _confirmed(salon, category, curator, answer=False, template=draft_clear, name="11"), False,
+        ),
+        # Поднятое без подтверждения побеждает подтверждённое «не нужна» канона.
+        "канон просмотрен не нужна, салон без подтверждения нужна": (
+            _offer(salon, category, template=clear, requires_health_check=True, name="12"), False,
+        ),
+    }
+
+    answers = {}
+    for n, (label, (offer, raised)) in enumerate(cases.items()):
+        # Ребро перечитывается из базы: объекты в руках старше правки происхождения.
+        edge = SpecialistService.objects.get(pk=_edge(salon, offer, f"hc-origin-master-{n}", raised=raised).pk)
+        answer = edge.resolved_health_check_with_origin()
+        # Каскад не повторяется: вердикт и основание — те же, что у гейта.
+        assert answer[:2] == edge.resolved_health_check(), label
+        answers[label] = answer
+
+    assert answers == {
+        "канон просмотрен: нужна": (True, "template_confirmed", True),
+        "канон выведен: нужна": (True, "template_inferred", False),
+        "канон просмотрен: не нужна": (False, "template_confirmed", True),
+        "канон выведен: не нужна": (False, "template_inferred", False),
+        "салон без подтверждения: не нужна": (False, "salon", False),
+        "салон подтверждённо: не нужна": (False, "salon", True),
+        "салон подтверждённо: нужна": (True, "salon", True),
+        "мастер поднял": (True, "specialist", False),
+        "никто не отвечал": (None, "unknown", False),
+        "канон выведен нужна, салон подтверждённо не нужна": (True, "template_inferred", False),
+        "канон выведен не нужна, салон подтверждённо не нужна": (False, "salon", True),
+        "канон просмотрен не нужна, салон без подтверждения нужна": (True, "salon", False),
+    }
 
 
 # ─── сидер, перепись, удаление ───────────────────────────────────────────────
