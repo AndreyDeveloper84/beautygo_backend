@@ -45,6 +45,7 @@ from services.body_care_validation import (
     validation_state,
     validation_states,
 )
+from services.body_care_scope import classification_stamp
 from services.models import OfferingConfigFact, SalonService, ServiceCategory, ServiceTemplate
 from tenants.models import Tenant
 from users.models import User
@@ -112,6 +113,17 @@ def _offering(
         duration_minutes=60,
         base_price=Decimal("3000"),
         configuration_version="cfg-1",
+    )
+
+
+def _stamp(offering) -> list:
+    """Классификация канона предложения — та же, что входит в отпечаток ревью."""
+    canon = offering.template
+    canon.refresh_from_db()
+    return classification_stamp(
+        scope=canon.body_care_scope,
+        family=canon.service_family,
+        canonical_version=canon.canonical_version,
     )
 
 
@@ -217,7 +229,7 @@ def test_an_unversioned_configuration_is_never_ready(tenant, category) -> None:
     _complete(wrap)
     rows = OfferingConfigFact.objects.filter(salon_service=wrap).values(*FINGERPRINT_COLUMNS)
     SalonService.objects.filter(pk=wrap.pk).update(
-        configuration_version="", config_reviewed_fingerprint=config_fingerprint(rows)
+        configuration_version="", config_reviewed_fingerprint=config_fingerprint(rows, _stamp(wrap))
     )
 
     assert validation_state(wrap) == REVIEW_REQUIRED
@@ -276,7 +288,7 @@ def test_the_fingerprint_does_not_depend_on_row_order(tenant, category) -> None:
     _complete(wrap)
     rows = list(OfferingConfigFact.objects.filter(salon_service=wrap).values(*FINGERPRINT_COLUMNS))
 
-    assert config_fingerprint(rows) == config_fingerprint(reversed(rows))
+    assert config_fingerprint(rows, _stamp(wrap)) == config_fingerprint(reversed(rows), _stamp(wrap))
 
 
 def test_the_fingerprint_covers_every_fact_column() -> None:

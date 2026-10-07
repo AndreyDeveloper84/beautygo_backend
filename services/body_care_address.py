@@ -32,7 +32,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from services.body_care_license import LICENSE_REQUIRED_CLASSES
-from services.models import SalonService, ServiceTemplate
+from services.body_care_scope import legal_checks_waived
+from services.models import SalonService
 from tenants.models import LocationStatus, MedicalLicense
 from users.models import SpecialistProfile
 
@@ -50,17 +51,15 @@ ADDRESS_STATES = (
 #: Код §21 (бот-реестр) для отказного состояния этого гейта.
 CODES = {ADDRESS_MISMATCH: "LICENSE_ADDRESS_MISMATCH"}
 
-LC = ServiceTemplate.LegalServiceClass
-
 
 def _state(offering: dict, master: dict, covering: set, licensed: set) -> str:
     legal_class = offering["template__legal_service_class"]
     if legal_class not in LICENSE_REQUIRED_CLASSES:
-        if not offering["template__service_family"] and legal_class is None:
+        # То же правило, что у лицензии (§7A-2): снимает проверку только
+        # подтверждённый немедицинский класс.
+        if legal_checks_waived(legal_class=legal_class, family=offering["template__service_family"]):
             return NOT_REQUIRED
-        if legal_class is None or legal_class == LC.LEGAL_REVIEW_REQUIRED:
-            return CLASS_UNCONFIRMED
-        return NOT_REQUIRED
+        return CLASS_UNCONFIRMED
     place = master["works_at_id"]
     if place is None or master["works_at__status"] != LocationStatus.CONFIRMED:
         return LOCATION_UNKNOWN

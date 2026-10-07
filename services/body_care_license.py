@@ -8,10 +8,10 @@
 
 ### Состояния
 
-``not_required``       класс подтверждён немедицинским, либо канон вне
-                       body-care без медицинского класса;
+``not_required``       класс подтверждён немедицинским;
 ``class_unconfirmed``  класс не подтверждён (``NULL``) или
-                       ``legal_review_required`` — гейт не открывает,
+                       ``legal_review_required`` — у любого канона и у
+                       предложения без канона; гейт не открывает,
                        §7A-6 свернёт это в REVIEW_REQUIRED;
 ``not_verified``       класс медицинский, а проверенной лицензии у салона
                        нет — код ``MEDICAL_LICENSE_NOT_VERIFIED``;
@@ -31,6 +31,13 @@ D-1** (главное окно, 06.10). Явно медицинский клас
 у канона нет семейства body-care: «вне body-care» не отменяет
 подтверждённого медицинского класса.
 
+Класс проверяется независимо от области классификации канона
+(``body_care_scope``): «вне Body Care» не значит «немедицинская». Правило
+«неизвестный класс не снимает проверку» — под флагом
+``BODY_CARE_UNCLASSIFIED_FAIL_CLOSED`` (``body_care_scope.legal_checks_waived``);
+при выключенном флаге канон без семейства и без класса по-прежнему
+отвечает ``not_required``.
+
 Адрес — §7A-3 (по месту мастера), свёртка в CAT-6 — §7A-6; здесь их нет.
 Отзыв или истечение лицензии после проверки база не видит — DRF-2839.
 """
@@ -39,6 +46,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from services.body_care_scope import legal_checks_waived
 from services.models import SalonService, ServiceTemplate
 from tenants.models import MedicalLicense
 
@@ -76,11 +84,9 @@ def license_state_of(row: dict, verified_tenants: set, covered: set) -> str:
         if (row["tenant_id"], row["template_id"]) not in covered:
             return SCOPE_MISMATCH
         return VERIFIED
-    if not row["template__service_family"] and legal_class is None:
+    if legal_checks_waived(legal_class=legal_class, family=row["template__service_family"]):
         return NOT_REQUIRED
-    if legal_class is None or legal_class == LC.LEGAL_REVIEW_REQUIRED:
-        return CLASS_UNCONFIRMED
-    return NOT_REQUIRED
+    return CLASS_UNCONFIRMED
 
 
 def license_states(salon_service_ids: Iterable[object]) -> dict[object, str]:

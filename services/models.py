@@ -213,6 +213,23 @@ class ServiceTemplate(models.Model):
         MECHANICAL_SCRUB = "mechanical_scrub", "Механический скраб"
         ACID_CARE = "acid_care", "Кислотный уход"
 
+    class BodyCareScope(models.TextChoices):
+        """Подлежит ли канон контракту Body Care — классификация, не допуск.
+
+        Решение владельца 07.10: отсутствие семейства перестаёт значить
+        «вне Body Care». ``NULL`` — классификация **неизвестна**, и
+        неизвестное не допускается; «вне Body Care» — положительное
+        значение, которое кто-то подтвердил.
+
+        ``NOT_BODY_CARE`` говорит только то, что проверка конфигурации
+        Body Care к канону не применяется. О юридическом классе,
+        противопоказаниях и готовности оно не говорит ничего — их
+        проверяют свои гейты.
+        """
+
+        BODY_CARE = "body_care", "Подлежит Body Care"
+        NOT_BODY_CARE = "not_body_care", "Вне Body Care"
+
     class LegalServiceClass(models.TextChoices):
         """Юридический класс услуги в РФ — контракт v0.2 §7A.1 (§7A-0).
 
@@ -381,6 +398,35 @@ class ServiceTemplate(models.Model):
         blank=True,
         help_text="Семейство body-care; пусто — услуга вне body-care",
     )
+    # -- Область классификации (решение владельца 07.10) -------------------
+    # Отдельная ось рядом с семейством: ``NULL`` — неизвестно, и читатель
+    # обязан понимать это как «не допущено» (``body_care_scope.scope_of``).
+    # ``body_care`` без семейства допустимо — «подлежит, семейство не
+    # определено»: услуга тела вне четырёх семейств контракта записывается
+    # честно и остаётся закрытой. Семейство без ``body_care`` база не
+    # примет (CheckConstraint ниже).
+    body_care_scope = models.CharField(
+        max_length=16,
+        choices=BodyCareScope.choices,
+        null=True,
+        blank=True,
+        help_text="Подлежит ли Body Care; пусто — классификация неизвестна, читается как «не допущено»",
+    )
+    #: Кто подтвердил область. Взаимоисключающе с ``scope_confirmed_rule`` —
+    #: «кто ИЛИ какое правило», та же форма, что у одобрения канона (§93):
+    #: раздел эталонного справочника подтверждается правилом с версией,
+    #: канон без кода — человеком.
+    scope_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    scope_confirmed_rule = models.CharField(max_length=100, blank=True, default="")
+    scope_rule_version = models.CharField(max_length=32, blank=True, default="")
+    scope_confirmed_at = models.DateTimeField(null=True, blank=True)
+    scope_source_ref = models.CharField(max_length=200, blank=True, default="")
     #: Версия канонического описания услуги. Обязательна, как только
     #: назначено семейство (CheckConstraint ниже): решение о безопасности,
     #: принятое по канону без версии, нельзя потом воспроизвести.
@@ -580,6 +626,55 @@ class ServiceTemplate(models.Model):
                 ),
                 name="servicetemplate_service_family_known",
             ),
+            # Область классификации: словарь, согласованность с семейством
+            # и провенанс. Семейство утверждает «подлежит Body Care», поэтому
+            # семейство при неизвестной области или при ``not_body_care`` —
+            # противоречие. Обратное не требуется: ``body_care`` без
+            # семейства — «подлежит, семейство не определено».
+            models.CheckConstraint(
+                condition=(
+                    models.Q(body_care_scope__isnull=True)
+                    | models.Q(body_care_scope__in=["body_care", "not_body_care"])
+                ),
+                name="servicetemplate_body_care_scope_known",
+            ),
+            models.CheckConstraint(
+                # ``IS NOT NULL`` назван явно: сравнение NULL с 'body_care'
+                # даёт NULL, а CHECK отклоняет только FALSE — без него
+                # семейство при неизвестной области прошло бы.
+                condition=(
+                    models.Q(service_family__isnull=True)
+                    | (
+                        models.Q(body_care_scope__isnull=False)
+                        & models.Q(body_care_scope="body_care")
+                    )
+                ),
+                name="servicetemplate_family_requires_body_care_scope",
+            ),
+            # Заданная область требует: кто ИЛИ правило (не оба и не ни
+            # одного), когда и основание; правило — с версией.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(body_care_scope__isnull=True)
+                    | (
+                        models.Q(scope_confirmed_at__isnull=False)
+                        & ~models.Q(scope_source_ref="")
+                        & (
+                            (
+                                models.Q(scope_confirmed_by__isnull=False)
+                                & models.Q(scope_confirmed_rule="")
+                                & models.Q(scope_rule_version="")
+                            )
+                            | (
+                                models.Q(scope_confirmed_by__isnull=True)
+                                & ~models.Q(scope_confirmed_rule="")
+                                & ~models.Q(scope_rule_version="")
+                            )
+                        )
+                    )
+                ),
+                name="servicetemplate_body_care_scope_requires_provenance",
+            ),
             # Body Care §7A-0: мимо ORM в базу не попадает класс или
             # квалификация вне словаря контракта.
             models.CheckConstraint(
@@ -655,6 +750,35 @@ class ServiceTemplate(models.Model):
                 ),
             })
 
+    #: Правило, которым область ставится канону с назначенным семейством.
+    #: То же, что в миграции ``0048`` (расхождение сторожит узел).
+    SCOPE_BY_FAMILY_RULE = "family_implies_body_care"
+    SCOPE_BY_FAMILY_RULE_VERSION = "1"
+
+    def _scope_follows_family(self, save_kwargs: dict) -> None:
+        """Назначенное семейство утверждает область — записать её правилом.
+
+        Только когда область ещё неизвестна: поставленную человеком область
+        правило не переписывает, а противоречие (семейство при
+        ``not_body_care``) оставляет базе — она его отклонит. ``update()``
+        сюда не заходит: там область обязан назвать вызывающий.
+        """
+        if not self.service_family or self.body_care_scope is not None:
+            return
+        self.body_care_scope = self.BodyCareScope.BODY_CARE
+        self.scope_confirmed_by = None
+        self.scope_confirmed_rule = self.SCOPE_BY_FAMILY_RULE
+        self.scope_rule_version = self.SCOPE_BY_FAMILY_RULE_VERSION
+        self.scope_confirmed_at = timezone.now()
+        self.scope_source_ref = "семейство Body Care назначено каноном"
+        update_fields = save_kwargs.get("update_fields")
+        if update_fields is not None:
+            save_kwargs["update_fields"] = [
+                *update_fields,
+                "body_care_scope", "scope_confirmed_by", "scope_confirmed_rule",
+                "scope_rule_version", "scope_confirmed_at", "scope_source_ref",
+            ]
+
     def clean(self) -> None:
         self._assert_canonical_code_immutable()
         # Durations may be null on canonical rows that are not yet timed;
@@ -683,6 +807,7 @@ class ServiceTemplate(models.Model):
         self._assert_canonical_code_immutable()
         if self.canonical_code == "":
             self.canonical_code = None
+        self._scope_follows_family(kwargs)
         changes = self._significant_changes()
         adding = self._state.adding
         # DRF-2741: откуда процедура уходит. Противопоказание, названное

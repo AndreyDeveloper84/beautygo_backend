@@ -44,9 +44,17 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
+from services.body_care_scope import (
+    NOT_SUBJECT as SCOPE_NOT_SUBJECT,
+    UNCLASSIFIED as SCOPE_UNCLASSIFIED,
+    scope_of,
+)
 from services.models import OfferingConfigFact, SalonService, ServiceTemplate
 
 NOT_SUBJECT = "not_subject"
+#: Классификация канона неизвестна (``body_care_scope.scope_of``): требования
+#: не к чему приложить. Не «не подлежит» — проверка не снята.
+UNCLASSIFIED = "unclassified"
 INCOMPLETE = "incomplete"
 CONFLICT = "conflict"
 COMPLETE = "complete"
@@ -166,15 +174,31 @@ def check_configurations(
     попадает: «не нашли» и «не подлежит» не должны выглядеть одинаково.
     """
     ids = list(salon_service_ids)
-    families = dict(
-        SalonService.objects.filter(pk__in=ids).values_list("pk", "template__service_family")
-    )
+    rows = {
+        row["pk"]: row
+        for row in SalonService.objects.filter(pk__in=ids).values(
+            "pk", "template_id", "template__body_care_scope", "template__service_family"
+        )
+    }
     facts: dict[object, dict[str, str]] = defaultdict(dict)
     for sid, fname, state in OfferingConfigFact.objects.filter(
-        salon_service_id__in=families
+        salon_service_id__in=rows
     ).values_list("salon_service_id", "field", "state"):
         facts[sid][fname] = state
-    return {sid: evaluate(fam, facts.get(sid, {}), requirements) for sid, fam in families.items()}
+    return {sid: _check(row, facts.get(sid, {}), requirements) for sid, row in rows.items()}
+
+
+def _check(row: dict, facts: Mapping[str, str], requirements) -> ConfigCheck:
+    scope = scope_of(
+        has_canon=row["template_id"] is not None,
+        scope=row["template__body_care_scope"],
+        family=row["template__service_family"],
+    )
+    if scope == SCOPE_UNCLASSIFIED:
+        return ConfigCheck(UNCLASSIFIED, reason="классификация канона неизвестна")
+    if scope == SCOPE_NOT_SUBJECT:
+        return ConfigCheck(NOT_SUBJECT, reason="услуга вне body-care")
+    return evaluate(row["template__service_family"], facts, requirements)
 
 
 def check_configuration(
