@@ -104,7 +104,8 @@ class StagePolicy:
     #: Флаг говорит «условие выполнено», значение порога — решение владельца.
     availability_ranking_enabled: bool = False
 
-    #: §8.3. `None` = порог не назначен, `CONFIRMED` не выдаётся.
+    #: §8.3. `None` = порог по умолчанию (`_evidence.N_SUBSTANTIATED`,
+    #: решение владельца 07.10: 5 отзывов); число — свой порог политики.
     n_substantiated: int | None = None
 
     @classmethod
@@ -120,9 +121,11 @@ class StagePolicy:
         HTTP-проекция получала жёсткое умолчание, и одна политика имела
         два значения в одном процессе.
 
-        Пороги `availability_ranking_enabled` и `n_substantiated` —
-        `CONTROLLED_POLICY`, оба висят у владельца. Когда он их назовёт,
-        читать их будет этот метод, и ровно одно место.
+        Порог рейтинга владелец назвал (07.10.2026, DRF-2884): он один на
+        все поверхности и живёт в `_evidence.N_SUBSTANTIATED`; политика
+        своего не несёт. `availability_ranking_enabled` —
+        `CONTROLLED_POLICY`, висит у владельца; когда он его назовёт,
+        читать его будет этот метод, и ровно одно место.
         """
         return cls()
 
