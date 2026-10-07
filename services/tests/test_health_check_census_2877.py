@@ -17,6 +17,7 @@
   ни «не нужна»;
 * список последствий — предложения, которые сегодня проходят запись и
   перестанут; то, что неизвестно уже сегодня, в него не входит;
+* непродаваемое ребро (выключено, цена 0, мастер на паузе) не считается;
 * ничего не пишется — счётчиком запросов; людей в выводе нет.
 """
 
@@ -230,6 +231,23 @@ def test_an_offer_passes_if_any_of_its_masters_does(salon, category, staff, mast
     assert sorted(e.after for e in row.edges) == [PASSES, UNDEFINED]
     assert row.passes("today") and row.passes("after") and not row.stops
     assert row.master_raises == 1
+
+
+@pytest.mark.parametrize("flaw", ["выключенное ребро", "цена ноль", "мастер на паузе"])
+def test_an_edge_that_does_not_sell_is_not_counted(salon, category, staff, master, flaw) -> None:
+    """Запись идёт только по продаваемому ребру — тем же правилом, что на пути продажи."""
+    offer = _offer(salon, category, master, "Маникюр", canon=_canon(category, staff, flag=False, confirmed=True))
+    assert len(_by_name(health_check_census([salon.slug]))["Маникюр"].edges) == 1  # положительная пара
+
+    if flaw == "выключенное ребро":
+        SpecialistService.objects.filter(salon_service=offer).update(is_active=False)
+    elif flaw == "цена ноль":
+        SpecialistService.objects.filter(salon_service=offer).update(price=Decimal("0"))
+    else:
+        SpecialistProfile.objects.filter(pk=master.pk).update(is_booking_enabled=False)
+
+    row = _by_name(health_check_census([salon.slug]))["Маникюр"]
+    assert row.edges == () and not row.sellable and not row.stops
 
 
 def test_the_counts_name_who_decides_today(pool, salon) -> None:
