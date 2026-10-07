@@ -23,7 +23,7 @@ from enum import StrEnum
 #: Версия реестра. Любое добавление, удаление или изменение смысла кода —
 #: новая версия; она уезжает в `policy_versions` ответа, иначе решение
 #: невоспроизводимо задним числом (контракт §6.3).
-REGISTRY_VERSION = "1.6.0"
+REGISTRY_VERSION = "1.7.0"
 
 
 class ReasonCode(StrEnum):
@@ -121,6 +121,12 @@ class ReasonCode(StrEnum):
     # -- S5: качество -------------------------------------------------------
     QUALITY_RATING_SUBSTANTIATED = "QUALITY_RATING_SUBSTANTIATED"
     QUALITY_RATING_UNSUBSTANTIATED_IGNORED = "QUALITY_RATING_UNSUBSTANTIATED_IGNORED"
+    # DRF-2884 (1.7.0) — оценка подтверждена, но в выборе не участвовала:
+    # нужда не названа, соответствия ей нет, а рейтинг учитывается только
+    # ПОСЛЕ соответствия запросу (решение владельца 07.10, канон §9.1).
+    # Отдельно от UNSUBSTANTIATED_IGNORED: там не хватило отзывов, здесь
+    # отзывов достаточно — не к чему приложить.
+    QUALITY_RATING_NOT_APPLIED_NEED_NOT_STATED = "QUALITY_RATING_NOT_APPLIED_NEED_NOT_STATED"
     QUALITY_NO_EVIDENCE = "QUALITY_NO_EVIDENCE"
 
     # -- S6: ничьи ----------------------------------------------------------
