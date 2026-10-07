@@ -10,9 +10,9 @@
 * единица — активное предложение; выключенное в перепись не попадает,
   предложение без продаваемого мастера стоит отдельно и в «после» не идёт;
 * «сегодня» — вердикт самого гейта записи, а не свой расчёт;
-* «после»: подтверждённое «нужна» у канона — проверка клиента;
-  подтверждённое «не нужна» без поднятых требований — проходит; всё
-  остальное — условия услуги не определены, с причинами;
+* «после» читает одно: основание сегодняшнего вердикта подтверждено —
+  вердикт как есть; не подтверждено — условия услуги не определены, с
+  причиной по основанию; каскад тот же, что у гейта;
 * ответ салона без происхождения подтверждённым не считается — ни «нужна»,
   ни «не нужна»;
 * список последствий — предложения, которые сегодня проходят запись и
@@ -33,13 +33,14 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
+from services import health_check_census as census_module
 from services.health_check_census import (
     CANON_FLAG_INFERRED,
-    CANON_MISSING,
     CLIENT_CHECK,
     MASTER_RAISE_UNCONFIRMED,
+    NOBODY_ANSWERED,
     PASSES,
-    SALON_RAISE_UNCONFIRMED,
+    SALON_ANSWER_UNCONFIRMED,
     UNDEFINED,
     UNKNOWN,
     health_check_census,
@@ -188,11 +189,47 @@ def test_after_the_rule_only_a_confirmed_canon_decides(pool, salon) -> None:
         "Лазер": (CLIENT_CHECK, ()),
         "Массаж": (UNDEFINED, (CANON_FLAG_INFERRED,)),
         "Пилинг": (UNDEFINED, (CANON_FLAG_INFERRED,)),
-        "Услуга без канона": (UNDEFINED, (CANON_MISSING,)),
-        "Обёртывание": (UNDEFINED, (SALON_RAISE_UNCONFIRMED,)),
+        "Услуга без канона": (UNDEFINED, (SALON_ANSWER_UNCONFIRMED,)),
+        # Поднятое без подтверждения требование побеждает подтверждённое
+        # «не нужна» канона — тем же каскадом, что у гейта, и не теряется.
+        "Обёртывание": (UNDEFINED, (SALON_ANSWER_UNCONFIRMED,)),
         "Чистка": (UNDEFINED, (MASTER_RAISE_UNCONFIRMED,)),
-        "Немая услуга": (UNDEFINED, (CANON_MISSING,)),
+        "Немая услуга": (UNDEFINED, (NOBODY_ANSWERED,)),
     }
+
+
+def test_the_rule_reads_one_thing_whether_the_basis_is_confirmed(pool, salon, monkeypatch) -> None:
+    """Подтверждённый ответ салона — такое же основание, как просмотренный флаг канона.
+
+    Полей происхождения у ответа салона ещё нет, поэтому «подтверждён»
+    здесь подменяется: когда поле появится, перепись прочтёт его сама.
+    """
+    monkeypatch.setattr(census_module, "salon_answer_confirmed", lambda offer: True)
+
+    rows = _by_name(health_check_census([salon.slug]))
+    after = {name: (_one(row).after, _one(row).reasons) for name, row in rows.items() if row.edges}
+
+    # Салон подтверждённо сказал «не нужна» / «нужна» — вердикт как есть.
+    assert after["Услуга без канона"] == (PASSES, ())
+    assert after["Обёртывание"] == (CLIENT_CHECK, ())
+    # Остальные основания подтверждение салона не затрагивает.
+    assert after["Массаж"] == (UNDEFINED, (CANON_FLAG_INFERRED,))
+    assert after["Чистка"] == (UNDEFINED, (MASTER_RAISE_UNCONFIRMED,))
+    assert after["Немая услуга"] == (UNDEFINED, (NOBODY_ANSWERED,))
+    assert after["Маникюр"] == (PASSES, ())
+
+
+def test_an_inferred_canon_floor_is_not_lifted_by_a_confirmed_salon_no(
+    salon, category, staff, master, monkeypatch,
+) -> None:
+    """Поднятый пол канона салон не опускает — даже подтверждённым «не нужна»."""
+    monkeypatch.setattr(census_module, "salon_answer_confirmed", lambda offer: True)
+    _offer(salon, category, master, "Пилинг", canon=_canon(category, staff, flag=True, confirmed=False), answer=False)
+
+    row = _by_name(health_check_census([salon.slug]))["Пилинг"]
+
+    assert (_one(row).today, _one(row).basis) == (CLIENT_CHECK, "template_inferred")
+    assert (_one(row).after, _one(row).reasons) == (UNDEFINED, (CANON_FLAG_INFERRED,))
 
 
 def test_a_salon_answer_without_an_author_is_not_a_confirmed_answer(pool, salon) -> None:

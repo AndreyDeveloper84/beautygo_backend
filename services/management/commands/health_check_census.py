@@ -57,10 +57,10 @@ OUTCOMES = {
     UNDEFINED: "условия услуги не определены",
 }
 REASONS = {
-    "canon_missing": "у услуги нет канона",
     "canon_flag_inferred": "флаг канона выведен правилом, человеком не просмотрен",
-    "salon_raise_unconfirmed": "салон поднял требование, подтверждения нет",
+    "salon_answer_unconfirmed": "ответ салона без подтверждения (автора и даты нет)",
     "master_raise_unconfirmed": "мастер поднял требование, подтверждения нет",
+    "nobody_answered": "никто не отвечал и канона нет",
 }
 ANSWER = {None: "не отвечал", True: "нужна", False: "не нужна"}
 
@@ -113,7 +113,7 @@ class Command(BaseCommand):
         ):
             label = "нет канона" if flag is None else f"{ANSWER[flag]}, {_origin(confirmed)}"
             write(f"  {label}: {count}")
-        write(f"мастеров подняли требование сами: {census.reasons().get('master_raise_unconfirmed', 0)}")
+        write(f"мастеров подняли требование сами: {sum(r.master_raises for r in census.rows)}")
         write("")
 
         today, after = census.outcomes("today"), census.outcomes("after")

@@ -25,12 +25,16 @@
 
 Исход после правила владельца — три значения, и два из них нельзя путать:
 
-``passes``        канон подтверждённо говорит «не нужна», и никто не поднял
-                  неподтверждённое требование;
-``client_check``  канон подтверждённо говорит «нужна» — проверку проходит
-                  **клиент**;
-``undefined``     всё остальное: условия услуги в каталоге не определены.
-                  Адресат — ответственный за данные услуги, **не клиент**.
+``passes``        вердикт «не нужна» стоит на подтверждённом основании;
+``client_check``  вердикт «нужна» стоит на подтверждённом основании —
+                  проверку проходит **клиент**;
+``undefined``     основание вердикта не подтверждено, в какую бы сторону он
+                  ни был: условия услуги в каталоге не определены. Адресат —
+                  ответственный за данные услуги, **не клиент**.
+
+Подтверждённое основание — просмотренный флаг канона либо подтверждённый
+ответ салона. Каскад тот же, что у гейта: поднятое без подтверждения
+требование побеждает «не нужна» канона.
 
 ### Происхождение ответа салона
 
@@ -65,11 +69,12 @@ UNDEFINED = "undefined"
 TODAY_OUTCOMES = (PASSES, CLIENT_CHECK, UNKNOWN)
 AFTER_OUTCOMES = (PASSES, CLIENT_CHECK, UNDEFINED)
 
-#: Почему после правила условия услуги «не определены».
-CANON_MISSING = "canon_missing"
+#: Почему после правила условия услуги «не определены» — по основанию
+#: сегодняшнего вердикта.
 CANON_FLAG_INFERRED = "canon_flag_inferred"
-SALON_RAISE_UNCONFIRMED = "salon_raise_unconfirmed"
+SALON_ANSWER_UNCONFIRMED = "salon_answer_unconfirmed"
 MASTER_RAISE_UNCONFIRMED = "master_raise_unconfirmed"
+NOBODY_ANSWERED = "nobody_answered"
 
 NO_CANON = "нет канона"
 NO_CODE = "без кода"
@@ -87,31 +92,41 @@ def salon_answer_confirmed(offer: SalonService) -> bool:
     return getattr(offer, "health_check_origin", None) == "confirmed"
 
 
-def after_outcome(edge: SpecialistService) -> tuple[str, tuple[str, ...]]:
-    """Исход после правила владельца и причины, если условия не определены."""
-    offer = edge.salon_service
-    canon = offer.template
-    confirmed = (
-        canon is not None
-        and canon.health_check_origin == ServiceTemplate.HealthCheckOrigin.CONFIRMED
-    )
-    if confirmed and canon.requires_health_check:
-        return CLIENT_CHECK, ()
+def basis_confirmed(edge: SpecialistService, basis: str) -> bool:
+    """Подтверждено ли основание вердикта человеком или названным правилом.
 
-    reasons: list[str] = []
-    if canon is None:
-        reasons.append(CANON_MISSING)
-    elif not confirmed:
-        reasons.append(CANON_FLAG_INFERRED)
-    # Неподтверждённое «нужна» само опрос клиента не запускает и запись не
-    # открывает — в обе стороны требование не подтверждено.
-    if offer.requires_health_check is True and not salon_answer_confirmed(offer):
-        reasons.append(SALON_RAISE_UNCONFIRMED)
-    if edge.requires_health_check:
-        reasons.append(MASTER_RAISE_UNCONFIRMED)
-    if reasons:
-        return UNDEFINED, tuple(reasons)
-    return PASSES, ()
+    Один признак на все основания: канон — по происхождению его флага, салон
+    — по происхождению его ответа; поднятое мастером требование и «никто не
+    отвечал» подтверждёнными не бывают (у ребра своего провенанса нет).
+    """
+    if basis == "template_confirmed":
+        return True
+    if basis == "salon":
+        return salon_answer_confirmed(edge.salon_service)
+    return False
+
+
+#: Основание неподтверждённого вердикта → причина «условия не определены».
+_REASON_BY_BASIS = {
+    "template_inferred": CANON_FLAG_INFERRED,
+    "salon": SALON_ANSWER_UNCONFIRMED,
+    "specialist": MASTER_RAISE_UNCONFIRMED,
+    "unknown": NOBODY_ANSWERED,
+}
+
+
+def after_outcome(edge: SpecialistService) -> tuple[str, tuple[str, ...]]:
+    """Исход после правила владельца и причина, если условия не определены.
+
+    Правило читает одно: основание сегодняшнего вердикта подтверждено —
+    вердикт как есть; не подтверждено — условия услуги не определены. Каскад
+    тот же, что у гейта (``resolved_health_check``), поэтому поднятое без
+    подтверждения требование побеждает «не нужна» канона и не теряется.
+    """
+    verdict, basis = edge.resolved_health_check()
+    if basis_confirmed(edge, basis) and verdict is not None:
+        return (CLIENT_CHECK if verdict else PASSES), ()
+    return UNDEFINED, (_REASON_BY_BASIS.get(basis, NOBODY_ANSWERED),)
 
 
 @dataclass(frozen=True)
@@ -120,6 +135,8 @@ class EdgeVerdict:
     basis: str
     after: str
     reasons: tuple[str, ...]
+    #: Мастер сам поднял требование на этом ребре.
+    raised: bool = False
 
 
 @dataclass(frozen=True)
@@ -151,7 +168,7 @@ class OfferRow:
 
     @property
     def master_raises(self) -> int:
-        return sum(MASTER_RAISE_UNCONFIRMED in e.reasons for e in self.edges)
+        return sum(e.raised for e in self.edges)
 
 
 @dataclass
@@ -203,7 +220,10 @@ def health_check_census(tenant_slugs: Iterable[str] | None = None) -> Census:
         verdict, basis = edge.resolved_health_check()
         after, reasons = after_outcome(edge)
         edges.setdefault(edge.salon_service_id, []).append(
-            EdgeVerdict(today=_TODAY[verdict], basis=basis, after=after, reasons=reasons)
+            EdgeVerdict(
+                today=_TODAY[verdict], basis=basis, after=after, reasons=reasons,
+                raised=bool(edge.requires_health_check),
+            )
         )
 
     census = Census()
