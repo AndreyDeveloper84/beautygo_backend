@@ -221,9 +221,8 @@ def test_the_reverse_restores_the_state_before(canons, category, salon, owner) -
 def test_the_reverse_leaves_a_later_human_decision(canons, owner) -> None:
     _close(owner)
     decided = canons[0]
-    ServiceTemplate.objects.filter(pk=decided.pk).update(
-        legal_service_class=LC.NON_MEDICAL_COSMETIC, legal_class_source_ref="решение юриста"
-    )
+    # Класс и основание меняются порознь: отбор обратного хода держит оба.
+    ServiceTemplate.objects.filter(pk=decided.pk).update(legal_service_class=LC.NON_MEDICAL_COSMETIC)
     reviewed = canons[1]
     ServiceTemplate.objects.filter(pk=reviewed.pk).update(legal_class_source_ref="юрист: оставить")
     before = _snapshot([decided, reviewed])
