@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from uuid import UUID
 
 from rest_framework import serializers
@@ -49,6 +50,10 @@ from ._types import (
 #: Поля, которых в ответе границы быть не может. Проверяется тестом W1:
 #: имя, добавленное завтра, сломает сегодняшний прогон.
 logger = logging.getLogger(__name__)
+
+#: Основа имени короче этого совпала бы с половиной салона; у бота тот же минимум.
+NAME_STEM_MIN_LENGTH = 3
+MAX_NAME_STEMS = 4
 
 FORBIDDEN_RESPONSE_FIELDS = frozenset({"reasoning_text", "reason_text", "why_text", "score", "match_score"})
 
@@ -116,10 +121,20 @@ class PreferenceSerializer(serializers.Serializer):
 
     Строкой, а не UUID: незнакомое значение отбрасывает одно предпочтение,
     а не весь запрос.
+
+    ``name`` + ``name_stems`` (DRF-2855) — мастер из памяти по ИМЕНИ: бот
+    хранит имя, а не id. Ровно одно из ``ref`` / ``name``; основы даёт бот —
+    морфологии в каталоге нет. Имя — только мастер и только из памяти, и
+    разрешается оно только в режиме «свои салоны» (см. ручку).
     """
 
     kind = serializers.ChoiceField(choices=[k.value for k in PreferenceKind])
-    ref = serializers.UUIDField()
+    ref = serializers.UUIDField(required=False)
+    name = serializers.CharField(max_length=128, required=False)
+    name_stems = serializers.ListField(
+        child=serializers.CharField(min_length=NAME_STEM_MIN_LENGTH, max_length=64),
+        required=False, min_length=1, max_length=MAX_NAME_STEMS,
+    )
     strength = serializers.ChoiceField(
         choices=[s.value for s in PreferenceStrength], required=False, default=PreferenceStrength.SOFT.value,
     )
@@ -127,6 +142,35 @@ class PreferenceSerializer(serializers.Serializer):
     source_tenant_id = serializers.CharField(
         max_length=64, required=False, allow_null=True, allow_blank=True,
     )
+
+    def validate(self, attrs: dict) -> dict:
+        has_ref, has_name = "ref" in attrs, "name" in attrs
+        if has_ref == has_name:
+            raise serializers.ValidationError("ровно одно из ref / name")
+        if not has_name:
+            if "name_stems" in attrs:
+                raise serializers.ValidationError("name_stems без name")
+            return attrs
+        if "name_stems" not in attrs:
+            raise serializers.ValidationError("name требует name_stems: морфологии в каталоге нет")
+        if attrs["kind"] != PreferenceKind.MASTER.value:
+            raise serializers.ValidationError("по имени называется только мастер")
+        if attrs["origin"] != PreferenceOrigin.CONFIRMED_MEMORY.value:
+            raise serializers.ValidationError("имя разрешается только для подтверждённой памяти")
+        return attrs
+
+
+@dataclass(frozen=True)
+class NamedMaster:
+    """Мастер из памяти, названный по имени, — до разрешения (DRF-2855).
+
+    Самого имени здесь нет намеренно: искать нужно по основам, а имя, которое
+    никуда не передано, не попадёт ни в лог, ни в ответ.
+    """
+
+    stems: tuple[str, ...]
+    #: Салон, где память записана; ``None`` — во всех своих салонах.
+    tenant_ref: UUID | None = None
 
 
 #: Виды, у которых память — отношение клиента с одним салоном.
@@ -153,6 +197,9 @@ def build_preferences(items) -> tuple[Preference, ...]:
     allowed = {o.value for o in PreferenceOrigin}
     out: list[Preference] = []
     for item in items or ():
+        if "name" in item:
+            # Имя — не предпочтение, пока оно не разрешено: см. `named_masters`.
+            continue
         if item["origin"] not in allowed:
             logger.warning(
                 "recommendation.preference.dropped origin=%r kind=%s — не сказано сейчас и "
@@ -174,6 +221,25 @@ def build_preferences(items) -> tuple[Preference, ...]:
         out.append(Preference(
             kind=kind, ref=item["ref"], strength=PreferenceStrength(item["strength"]),
             origin=origin, tenant_ref=tenant_ref,
+        ))
+    return tuple(out)
+
+
+def named_masters(items) -> tuple[NamedMaster, ...]:
+    """Мастера, названные по имени, — в порядке запроса. Память без известного салона не едет."""
+    out: list[NamedMaster] = []
+    for item in items or ():
+        if "name" not in item:
+            continue
+        tenant_ref = _memory_tenant_ref(item)
+        if tenant_ref is _UNSCOPED:
+            logger.warning(
+                "recommendation.preference.dropped kind=master — память по имени без известного "
+                "салона происхождения не участвует (O-1b)"
+            )
+            continue
+        out.append(NamedMaster(
+            stems=tuple(s.strip().casefold() for s in item["name_stems"]), tenant_ref=tenant_ref,
         ))
     return tuple(out)
 
@@ -212,6 +278,9 @@ class ResolveRequestSerializer(serializers.Serializer):
 
     def build_preferences(self) -> tuple[Preference, ...]:
         return build_preferences(self.validated_data.get("preferences"))
+
+    def named_masters(self) -> tuple[NamedMaster, ...]:
+        return named_masters(self.validated_data.get("preferences"))
 
     def build_scope(self) -> Scope:
         raw = self.validated_data["scope"]
@@ -290,6 +359,14 @@ class _PolicyVersionsSerializer(serializers.Serializer):
     tie_break_policy_version = serializers.CharField(allow_null=True)
 
 
+class _PreferenceResolutionSerializer(serializers.Serializer):
+    """Чем кончилось разрешение имени. Ни имени, ни id — только исход и число."""
+
+    kind = serializers.ChoiceField(choices=[PreferenceKind.MASTER.value])
+    status = serializers.ChoiceField(choices=["resolved", "not_found", "ambiguous"])
+    matches = serializers.IntegerField(min_value=0)
+
+
 class ResolveResponseSerializer(serializers.Serializer):
     """Форма ответа. У неё есть владелец, и владелец — этот файл (§2.1 C3)."""
 
@@ -311,11 +388,18 @@ class ResolveResponseSerializer(serializers.Serializer):
     candidate_count = serializers.IntegerField(min_value=0)
     # O2 (§9): до калибровки по тени — всегда null.
     separation_score = serializers.FloatField(allow_null=True, min_value=0.0, max_value=1.0)
+    # DRF-2855 (1.2.0): по одному элементу на мастера, названного по имени, в порядке запроса.
+    preference_resolution = _PreferenceResolutionSerializer(many=True)
 
 
-def decision_to_payload(decision: RecommendationDecision) -> dict:
-    """Разложить решение в тело ответа. Ни строки для показа, ни балла."""
+def decision_to_payload(decision: RecommendationDecision, *, preference_resolution=()) -> dict:
+    """Разложить решение в тело ответа. Ни строки для показа, ни балла.
+
+    ``preference_resolution`` — исходы разрешения имён (DRF-2855); считает их
+    ручка, а не резолвер: имя — дело границы, решение имён не знает.
+    """
     return {
+        "preference_resolution": [dict(item) for item in preference_resolution],
         "decision_id": decision.decision_id,
         "request_id": decision.request_id,
         "resolver_spec_version": decision.policy_versions.resolver_spec_version,

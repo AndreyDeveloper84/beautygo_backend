@@ -79,7 +79,7 @@ from ._types import (
 #: 1.1.0 — DRF-1934: добавочные поля O1 — separation_stage / best_group_size /
 #: candidate_count / separation_state / separation_score (null) — минор: мажор 1
 #: разбирается прежним клиентом.
-RESOLVER_SPEC_VERSION = "1.1.0"
+RESOLVER_SPEC_VERSION = "1.2.0"
 
 #: Ротация — чистая функция пары (seed, id); версия отдельная, потому что
 #: смена ключа меняет экспозицию и обязана быть видна в истории решений.
