@@ -67,6 +67,7 @@ from ._types import (
     SafetyState,
     ScheduleState,
     Scope,
+    ScopeMode,
     StageId,
 )
 
@@ -183,19 +184,24 @@ def apply_scope(candidates: Sequence[CandidateFacts], scope: Scope) -> Admission
 
     include = set(scope.tenant_refs)
     exclude = set(scope.exclude_tenant_refs)
+    # O-1b: в режиме «свои салоны» список — ограничение, даже когда он пуст.
+    # Пустое `include` в MARKETPLACE значит «весь маркетплейс»; здесь оно
+    # значит «своих салонов нет», и молча расширить область было бы утечкой.
+    own_salons_only = scope.mode is ScopeMode.OWN_SALONS
 
     for facts in candidates:
         cid = facts.ref.id
         granted: set[ReasonCode] = set()
 
-        if include or exclude:
-            if facts.tenant_ref is None or (include and facts.tenant_ref not in include) \
+        if include or exclude or own_salons_only:
+            if facts.tenant_ref is None \
+                    or ((include or own_salons_only) and facts.tenant_ref not in include) \
                     or facts.tenant_ref in exclude:
                 excluded.append(ExcludedCandidate(facts.ref, StageId.S0, ReasonCode.SCOPE_EXCLUDED_OUT_OF_TENANT))
                 continue
             if include:
                 granted.add(ReasonCode.SCOPE_WITHIN_TENANT)
-        if not include and not exclude:
+        if not include and not exclude and not own_salons_only:
             granted.add(ReasonCode.SCOPE_CROSS_TENANT_ALLOWED)
 
         if scope.city is not None:
@@ -643,19 +649,22 @@ def effective_preferences(
     * **Жёстко отсекает только сказанное сейчас.** «Только Анна» из памяти
       читается как мягкое: устаревшее условие не прячет всех кандидатов.
     * Повторы схлопываются: одно и то же предпочтение дважды не считается.
+    * Салон, которым предпочтение сужено (O-1b), — часть его тождества:
+      «Анна в салоне A» и «Анна везде» — разные предпочтения.
     """
     current = [p for p in preferences if p.origin is PreferenceOrigin.CURRENT_REQUEST]
     named_now = {p.kind for p in current}
     hard = tuple(dict.fromkeys(p for p in current if p.strength is PreferenceStrength.HARD))
     soft_current = tuple(dict.fromkeys(
-        (p.kind, p.ref) for p in current if p.strength is PreferenceStrength.SOFT
+        (p.kind, p.ref, p.tenant_ref) for p in current if p.strength is PreferenceStrength.SOFT
     ))
     soft_memory = tuple(dict.fromkeys(
-        (p.kind, p.ref) for p in preferences
+        (p.kind, p.ref, p.tenant_ref) for p in preferences
         if p.origin is PreferenceOrigin.CONFIRMED_MEMORY and p.kind not in named_now
     ))
-    as_pref = lambda pairs, origin: tuple(  # noqa: E731 — локальная форма
-        Preference(kind=k, ref=r, strength=PreferenceStrength.SOFT, origin=origin) for k, r in pairs
+    as_pref = lambda triples, origin: tuple(  # noqa: E731 — локальная форма
+        Preference(kind=k, ref=r, strength=PreferenceStrength.SOFT, origin=origin, tenant_ref=t)
+        for k, r, t in triples
     )
     return (
         hard,
@@ -687,7 +696,13 @@ def _candidate_categories(facts: CandidateFacts, *, need_is_stated: bool) -> fro
 def satisfies_preference(
     facts: CandidateFacts, preference: Preference, *, need_is_stated: bool = False,
 ) -> bool:
-    """Отвечает ли кандидат предпочтению — по виду предпочтения."""
+    """Отвечает ли кандидат предпочтению — по виду предпочтения.
+
+    Предпочтение, суженное до салона (O-1b), вне этого салона не действует:
+    тот же мастер в другом салоне — не тот, кого клиент там выбрал.
+    """
+    if preference.tenant_ref is not None and facts.tenant_ref != preference.tenant_ref:
+        return False
     if preference.kind is PreferenceKind.MASTER:
         return facts.ref.id == preference.ref
     if preference.kind is PreferenceKind.SALON:

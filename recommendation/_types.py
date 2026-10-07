@@ -56,6 +56,15 @@ class Surface(StrEnum):
 class ScopeMode(StrEnum):
     SALON = "SALON"
     MARKETPLACE = "MARKETPLACE"
+    #: O-1b (DRF-2831) — «свои салоны» клиента. Салоны называет СЕРВЕР по
+    #: отношениям клиента, а не вызывающий: только в этом режиме память о
+    #: мастере и салоне участвует в выборе (NEVER_CROSSES, 24.08).
+    OWN_SALONS = "OWN_SALONS"
+
+
+#: Значение ``source_tenant_id`` у предпочтения из памяти, записанного в
+#: общем боте, а не в боте одного салона: действует во всех своих салонах.
+MEMORY_SOURCE_GLOBAL_BOT = "global_bot"
 
 
 class SafetyState(StrEnum):
@@ -308,6 +317,11 @@ class Scope:
     §14.6). `MARKETPLACE` допускает ноль (весь маркетплейс) или список как
     явное сужение, плюс `exclude_tenant_refs` для обратного сужения
     («всё, кроме тех, где человек уже был»).
+
+    `OWN_SALONS` (O-1b) — `tenant_refs` заполняет сервер салонами клиента.
+    Пустой список здесь значит «своих салонов нет» и даёт ПУСТУЮ выдачу, а
+    не весь маркетплейс: в отличие от `MARKETPLACE`, отсутствие салонов —
+    не отсутствие ограничения.
     """
 
     mode: ScopeMode
@@ -321,6 +335,8 @@ class Scope:
             raise ValueError("SALON требует ровно одного tenant_ref (§4.1)")
         if self.mode is ScopeMode.SALON and self.exclude_tenant_refs:
             raise ValueError("exclude_tenant_refs бессмысленно внутри одного салона")
+        if self.mode is ScopeMode.OWN_SALONS and self.exclude_tenant_refs:
+            raise ValueError("OWN_SALONS: салоны называет сервер, исключать из них нечем")
         if self.radius_km is not None and self.radius_km <= 0:
             raise ValueError("radius_km задан — значит положителен; отсутствие радиуса выражается None (UNSET)")
         overlap = set(self.tenant_refs) & set(self.exclude_tenant_refs)
@@ -392,6 +408,10 @@ class Preference:
     ref: UUID
     strength: PreferenceStrength = PreferenceStrength.SOFT
     origin: PreferenceOrigin = PreferenceOrigin.CURRENT_REQUEST
+    #: O-1b — салон, в котором предпочтение записано. Задан — предпочтение
+    #: действует только на кандидатов этого салона; ``None`` — на всех в
+    #: области запроса.
+    tenant_ref: UUID | None = None
 
 
 @dataclass(frozen=True)
