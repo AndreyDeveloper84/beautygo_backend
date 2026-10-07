@@ -351,6 +351,16 @@ def apply_eligibility(
                 ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE)
             )
             continue
+        # CAT-10 (чинит C1): связь VERIFIED ещё не значит, что body-care
+        # процедуру можно рекомендовать — её конфигурация должна быть готова
+        # к скринингу (CAT-6 READY). Гейт на ЧТЕНИИ: состояние может упасть
+        # после верификации связи, и это ловится здесь без пересмотра связи.
+        # ``None`` — услуга вне Body Care: гейт к ней не относится.
+        if facts.config_ready is False:
+            excluded.append(
+                ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY)
+            )
+            continue
         # O-1: «только X» — жёсткое условие, и только из ТЕКУЩЕГО запроса.
         # Стоит ПОСЛЕ проверок процедуры и связи: предпочтение работает на
         # допустимых кандидатах и ничего из них не отменяет.
