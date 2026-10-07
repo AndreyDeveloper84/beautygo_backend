@@ -45,6 +45,7 @@ from .api import (
     PreferenceOrigin,
     RecommendationRequest,
     SafetyState,
+    ScopeMode,
     Surface,
     resolve,
 )
@@ -86,9 +87,9 @@ def _cross_salon_safe(preferences: tuple) -> tuple:
     «свои салоны» клиента: истории салонов он не знает (DRF-1626), а
     ``tenant_refs=[салон B]`` с фаворитом из A и было бы утечкой. Поэтому
     ``confirmed_memory`` вида master/salon отбрасывается при любой
-    области. Законный путь памяти — режим «свои салоны», где салоны
-    выводит сервер (DRF-2831). Сказанное в текущем запросе и категория
-    из памяти остаются.
+    области, которую назвал бот. Законный путь памяти — режим «свои
+    салоны», где салоны выводит сервер (:func:`_within_own_salons`).
+    Сказанное в текущем запросе и категория из памяти остаются.
     """
     kept = tuple(
         p for p in preferences
@@ -99,6 +100,26 @@ def _cross_salon_safe(preferences: tuple) -> tuple:
         logger.warning(
             "recommendation.preference.cross_salon_dropped count=%d — память о мастере/салоне "
             "не ранжирует межсалонную выдачу (NEVER_CROSSES)",
+            len(preferences) - len(kept),
+        )
+    return kept
+
+
+def _within_own_salons(preferences: tuple, own_salons: tuple) -> tuple:
+    """Память о мастере/салоне в режиме «свои салоны» — O-1b (DRF-2831).
+
+    Здесь она законна: область вывел сервер, и в ней только салоны, с
+    которыми у клиента есть отношения. Предпочтение, суженное до салона,
+    который своим не является (отношения отозваны, id чужой), отбрасывается:
+    сузить до него нечего, а расширять до «всех своих» — значит применить
+    память там, где её не записывали.
+    """
+    own = set(own_salons)
+    kept = tuple(p for p in preferences if p.tenant_ref is None or p.tenant_ref in own)
+    if len(kept) != len(preferences):
+        logger.warning(
+            "recommendation.preference.foreign_salon_dropped count=%d — салон происхождения "
+            "памяти не входит в свои салоны клиента",
             len(preferences) - len(kept),
         )
     return kept
@@ -146,19 +167,31 @@ class RecommendationResolveView(APIView):
                 status_code=503,
             )
 
+        scope = serializer.build_scope()
+        preferences = serializer.build_preferences()
+        if scope.mode is ScopeMode.OWN_SALONS:
+            # Салоны клиента называет сервер — по тому же правилу, что полка
+            # «Твои места». Бот их не присылает и прислать не может (схема).
+            from users.own_salons import own_salon_ids
+
+            scope = dataclasses.replace(scope, tenant_refs=own_salon_ids(request.user))
+            preferences = _within_own_salons(preferences, scope.tenant_refs)
+        else:
+            preferences = _cross_salon_safe(preferences)
+
         decision = resolve(
             RecommendationRequest(
                 request_id=serializer.validated_data["request_id"],
                 # Кого спрашивают — говорит аутентификация, а не тело запроса.
                 subject_ref=str(request.user.id),
                 surface=Surface(serializer.validated_data["surface"]),
-                scope=serializer.build_scope(),
+                scope=scope,
                 need=_with_saved_goal(serializer.build_need(), request.user),
                 constraints=serializer.build_constraints(),
                 safety_state=SafetyState(serializer.validated_data["safety_state"]),
                 tie_break_seed=serializer.validated_data.get("tie_break_seed"),
                 k=serializer.validated_data["k"],
-                preferences=_cross_salon_safe(serializer.build_preferences()),
+                preferences=preferences,
             ),
             source=source,
         )
@@ -171,9 +204,10 @@ class RecommendationResolveView(APIView):
         outgoing.is_valid(raise_exception=True)
 
         logger.info(
-            "recommendation.resolve request_id=%s surface=%s ordered=%d excluded=%d tiers=%d",
+            "recommendation.resolve request_id=%s surface=%s scope=%s ordered=%d excluded=%d tiers=%d",
             decision.request_id,
             serializer.validated_data["surface"],
+            scope.mode.value,
             len(decision.ordered),
             len(decision.excluded),
             len({c.tier for c in decision.ordered}),

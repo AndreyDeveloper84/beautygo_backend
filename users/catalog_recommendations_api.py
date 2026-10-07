@@ -134,7 +134,8 @@ from recommendation.api import (
 )
 from services.catalog_reads import category_service_counts, specialist_service_text_q
 from services.models import ServiceCategory
-from users.models import SpecialistProfile, TenantUserRelationship
+from users.models import SpecialistProfile
+from users.own_salons import own_salon_ids
 from users.permissions import IsBotServiceWithVerifiedClient
 from users.recommendation_source import SpecialistCandidateSource
 from users.response import success_response
@@ -521,15 +522,7 @@ class CatalogRecommendationsView(APIView):
         # эта ручка является, а не тем, что ей прислали.
         safety_state = SafetyState.NOT_APPLICABLE
 
-        history_tenant_ids = list(
-            TenantUserRelationship.objects
-            .filter(
-                user=request.user,
-                is_active=True,
-                role=TenantUserRelationship.Role.CUSTOMER,
-            )
-            .values_list("tenant_id", flat=True)
-        )
+        history_tenant_ids = list(own_salon_ids(request.user))
 
         # Курируемая цель говорит, только когда человек молчит: сказанное
         # сейчас старше выбранного когда-то (OD-1). Ключ цели уходит

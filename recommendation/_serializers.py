@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+from uuid import UUID
 
 from rest_framework import serializers
 
@@ -29,6 +30,7 @@ from ._types import (
     ConstraintKind,
     NeedOrigin,
     MAX_PREFERENCES,
+    MEMORY_SOURCE_GLOBAL_BOT,
     NeedSpec,
     Preference,
     PreferenceKind,
@@ -78,6 +80,18 @@ class _ScopeSerializer(serializers.Serializer):
     city = serializers.CharField(required=False, allow_null=True, default=None)
     radius_km = serializers.FloatField(required=False, allow_null=True, default=None)
 
+    def validate(self, attrs: dict) -> dict:
+        # O-1b: «свои салоны» выводит сервер. Список от вызывающего здесь —
+        # не подсказка, а попытка назвать чужую область своей (DRF-1626):
+        # отказ, а не молчаливое игнорирование.
+        if attrs["mode"] == ScopeMode.OWN_SALONS.value and (
+            attrs.get("tenant_refs") or attrs.get("exclude_tenant_refs")
+        ):
+            raise serializers.ValidationError(
+                "OWN_SALONS: tenant_refs и exclude_tenant_refs не принимаются — салоны клиента определяет сервер"
+            )
+        return attrs
+
 
 class _NeedSerializer(serializers.Serializer):
     origin = serializers.ChoiceField(choices=[o.value for o in NeedOrigin])
@@ -93,6 +107,15 @@ class PreferenceSerializer(serializers.Serializer):
     ``origin`` — строкой, а не закрытым выбором: незнакомое происхождение (в т. ч.
     вывод агента) не роняет запрос, а отбрасывается в :func:`build_preferences`
     с записью в лог. Неподтверждённое не участвует — и не ломает полку.
+
+    ``source_tenant_id`` (O-1b) — где записана память о мастере или салоне:
+
+    * поля нет или ``"global_bot"`` — общий бот: действует во всех своих салонах;
+    * id салона — действует только в нём;
+    * ``null`` — происхождение неизвестно: предпочтение не едет.
+
+    Строкой, а не UUID: незнакомое значение отбрасывает одно предпочтение,
+    а не весь запрос.
     """
 
     kind = serializers.ChoiceField(choices=[k.value for k in PreferenceKind])
@@ -101,6 +124,28 @@ class PreferenceSerializer(serializers.Serializer):
         choices=[s.value for s in PreferenceStrength], required=False, default=PreferenceStrength.SOFT.value,
     )
     origin = serializers.CharField(max_length=64)
+    source_tenant_id = serializers.CharField(
+        max_length=64, required=False, allow_null=True, allow_blank=True,
+    )
+
+
+#: Виды, у которых память — отношение клиента с одним салоном.
+_SALON_BOUND_KINDS = frozenset({PreferenceKind.MASTER, PreferenceKind.SALON})
+
+_UNSCOPED = object()
+
+
+def _memory_tenant_ref(item: dict):
+    """Салон памяти о мастере/салоне: ``None`` — все свои, UUID — один, ``_UNSCOPED`` — не едет."""
+    if "source_tenant_id" not in item or item["source_tenant_id"] == MEMORY_SOURCE_GLOBAL_BOT:
+        return None
+    raw = item["source_tenant_id"]
+    if raw is None:
+        return _UNSCOPED
+    try:
+        return UUID(raw)
+    except ValueError:
+        return _UNSCOPED
 
 
 def build_preferences(items) -> tuple[Preference, ...]:
@@ -115,9 +160,20 @@ def build_preferences(items) -> tuple[Preference, ...]:
                 item["origin"], item["kind"],
             )
             continue
+        kind, origin = PreferenceKind(item["kind"]), PreferenceOrigin(item["origin"])
+        tenant_ref = None
+        if origin is PreferenceOrigin.CONFIRMED_MEMORY and kind in _SALON_BOUND_KINDS:
+            tenant_ref = _memory_tenant_ref(item)
+            if tenant_ref is _UNSCOPED:
+                logger.warning(
+                    "recommendation.preference.dropped kind=%s — память без известного салона "
+                    "происхождения не участвует (O-1b)",
+                    item["kind"],
+                )
+                continue
         out.append(Preference(
-            kind=PreferenceKind(item["kind"]), ref=item["ref"],
-            strength=PreferenceStrength(item["strength"]), origin=PreferenceOrigin(item["origin"]),
+            kind=kind, ref=item["ref"], strength=PreferenceStrength(item["strength"]),
+            origin=origin, tenant_ref=tenant_ref,
         ))
     return tuple(out)
 
