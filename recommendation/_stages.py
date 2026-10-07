@@ -47,6 +47,7 @@ from ._evidence import (
     rating_strength,
 )
 from ._reason_codes import ReasonCode
+from ._admission import ALL_CHECKS, AdmissionCheck, answers_from_collapsed_gates, first_unmet
 from ._types import (
     MATCH_CODE,
     MATCH_RANK,
@@ -55,8 +56,6 @@ from ._types import (
     ConstraintKind,
     ExcludedCandidate,
     MappingCensus,
-    ConfigGate,
-    LegalGate,
     MappingStatus,
     MatchLevel,
     NeedSpec,
@@ -106,6 +105,15 @@ class StagePolicy:
 
     #: §8.3. `None` = порог не назначен, `CONFIRMED` не выдаётся.
     n_substantiated: int | None = None
+
+    #: DRF-2888 — какие проверки допуска каталога применяет S1. По умолчанию
+    #: все. Набор меньше полного существует ровно для диагностического
+    #: прогона (решение владельца 07.10): его собирает management-команда,
+    #: а ручка `resolve` политику не принимает вовсе — отключить проверку
+    #: запросом нельзя по построению. В набор входят только проверки
+    #: допуска: безопасность, область запроса, «неактивен / не умеет»,
+    #: бюджет и «только X» отсюда не отключаются.
+    admission_checks: frozenset = frozenset(ALL_CHECKS)
 
     @classmethod
     def from_settings(cls) -> "StagePolicy":
@@ -230,30 +238,6 @@ def apply_scope(candidates: Sequence[CandidateFacts], scope: Scope) -> Admission
 # S1 — жёсткая допустимость. Компенсации баллом нет (R2)
 # ---------------------------------------------------------------------------
 
-#: Значения, с которыми строка проходит гейт. Всё остальное исключает.
-_CONFIG_OPEN = frozenset({ConfigGate.NOT_SUBJECT, ConfigGate.READY})
-
-#: Значение гейта → код исключения: у каждой причины свой (владелец 07.10).
-#: Значение, которого здесь нет, закрывается как «не определено» — умолчание
-#: в ``.get`` ниже: новое значение перечисления не может открыть по недосмотру.
-_CONFIG_EXCLUSION = {
-    ConfigGate.UNCLASSIFIED: ReasonCode.ELIG_EXCLUDED_CATALOG_UNCLASSIFIED,
-    ConfigGate.NOT_READY: ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY,
-    ConfigGate.UNDETERMINED: ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED,
-}
-
-_LEGAL_EXCLUSION = {
-    LegalGate.CLASS_UNCONFIRMED: ReasonCode.ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED,
-    LegalGate.LICENSE_NOT_VERIFIED: ReasonCode.ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED,
-    LegalGate.LICENSE_SCOPE_MISMATCH: ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
-    LegalGate.LOCATION_UNKNOWN: ReasonCode.ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN,
-    LegalGate.ADDRESS_MISMATCH: ReasonCode.ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH,
-    LegalGate.QUALIFICATION_REQUIREMENT_UNCONFIRMED: ReasonCode.ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED,
-    LegalGate.QUALIFICATION_NOT_VERIFIED: ReasonCode.ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED,
-    LegalGate.UNDETERMINED: ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED,
-}
-
-
 def apply_eligibility(
     candidates: Sequence[CandidateFacts],
     request: RecommendationRequest,
@@ -371,43 +355,29 @@ def apply_eligibility(
             excluded.append(ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_NOT_CAPABLE))
             continue
 
-        eligible, mapping_item = _mapping_admission(facts, policy)
-        if not eligible:
-            excluded.append(
-                ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE)
+        # Допуск каталога — восемь именованных проверок (DRF-2888): связь,
+        # канон не выведен, область, конфигурация, юр. класс, лицензия, адрес,
+        # квалификация. Кандидат несёт ответ КАЖДОЙ; исключает первая
+        # несошедшаяся из включённых — в том же порядке, в каком они стояли
+        # здесь цепочкой условий (CAT-10, CAT-10-ext, DRF-2866, DRF-2793).
+        # Гейт на ЧТЕНИИ: состояние может упасть после верификации связи, и
+        # это ловится здесь без пересмотра связи.
+        answers = facts.admission
+        if answers is None:
+            answers = answers_from_collapsed_gates(
+                mapping_status=facts.mapping_status, canon_retired=facts.canon_retired,
+                config_gate=facts.config_gate, legal_gate=facts.legal_gate,
             )
+        unmet = first_unmet(answers, enabled=policy.admission_checks)
+        if unmet is not None:
+            excluded.append(ExcludedCandidate(facts.ref, StageId.S1, unmet.reason))
             continue
-        # DRF-2793: вторая половина той же проверки «канон + связь». Связь
-        # проверена, но канон выведен из оборота — вывод канона статус связи
-        # не трогает, поэтому читается здесь, на каждом решении. Раньше области
-        # и готовности: что именно не готово у выведенного канона, уже неважно.
-        if facts.canon_retired is True:
-            excluded.append(
-                ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_CANON_RETIRED)
-            )
-            continue
-        # CAT-10 (чинит C1): связь VERIFIED ещё не значит, что body-care
-        # процедуру можно рекомендовать — её конфигурация должна быть готова
-        # к скринингу (CAT-6 READY). Гейт на ЧТЕНИИ: состояние может упасть
-        # после верификации связи, и это ловится здесь без пересмотра связи.
-        # Перед готовностью — область (П2): канон, про который не сказано,
-        # подлежит ли он Body Care, закрыт своей причиной, а не пропущен.
-        # ``None`` — у строки нет канонической связи: гейт к ней не относится.
-        if facts.config_gate is not None and facts.config_gate not in _CONFIG_OPEN:
-            excluded.append(ExcludedCandidate(
-                facts.ref, StageId.S1,
-                _CONFIG_EXCLUSION.get(facts.config_gate, ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED),
-            ))
-            continue
-        # CAT-10-ext: юридические условия §7A — лицензия салона, адрес и
-        # квалификация мастера. По подтверждённому классу канона, а не по
-        # семейству: медицинский класс вне Body Care готовность выше не видит.
-        if facts.legal_gate is not None and facts.legal_gate is not LegalGate.CLEARED:
-            excluded.append(ExcludedCandidate(
-                facts.ref, StageId.S1,
-                _LEGAL_EXCLUSION.get(facts.legal_gate, ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED),
-            ))
-            continue
+        # Свидетельство «связь подтверждена» выдаётся только когда связь
+        # действительно проверена И подтверждена: с отключённой проверкой
+        # (диагностика) кандидат проходит без него — отчёт не утверждает
+        # того, чего не проверяли.
+        mapping_checked = AdmissionCheck.MAPPING in policy.admission_checks
+        eligible, mapping_item = _mapping_admission(facts, policy) if mapping_checked else (False, None)
         # O-1: «только X» — жёсткое условие, и только из ТЕКУЩЕГО запроса.
         # Стоит ПОСЛЕ проверок процедуры и связи: предпочтение работает на
         # допустимых кандидатах и ничего из них не отменяет.
@@ -423,7 +393,8 @@ def apply_eligibility(
                 ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD)
             )
             continue
-        granted.add(ReasonCode.ELIG_CAPABILITY_VERIFIED)
+        if eligible:
+            granted.add(ReasonCode.ELIG_CAPABILITY_VERIFIED)
         if mapping_item is not None:
             items.append(mapping_item)
 
