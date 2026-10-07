@@ -15,6 +15,8 @@ dry-run по активным предложениям». Команду пус�
 * неизвестная область считается по предложениям и раскладывается по
   разделам кода; предложение без канона — отдельной строкой;
 * ничего не пишется — счётчиком запросов, не докстрокой;
+* мастер считается правилом пути продажи: выключенное ребро, нулевая цена,
+  пауза и неопубликованный профиль мастером не считаются;
 * людей в выводе нет;
 * ``--fail-on-unclassified`` отвечает кодом выхода.
 """
@@ -212,6 +214,32 @@ def test_the_unknown_scope_is_counted_by_offers_and_grouped_by_section(pool, sal
     assert sorted((r.section, r.name) for r in census.unclassified) == [
         ("1.4", "Лимфодренаж"), (NO_CODE, "Авторский уход"), (NO_CANON, "Услуга без канона"),
     ]
+
+
+@pytest.mark.parametrize(
+    "flaw",
+    ["выключенное ребро", "цена ноль", "мастер на паузе", "мастер не опубликован"],
+)
+def test_an_edge_that_does_not_sell_is_not_a_master(salon, category, staff, flaw) -> None:
+    """Мастер считается тем же правилом, что и на пути продажи."""
+    master = _master(salon, "dryrun-flawed-master")
+    offer = _offer(
+        salon, category, staff, master, "Массаж шеи", code="1.1.5",
+        scope=Scope.NOT_BODY_CARE, legal_class=LC.NON_MEDICAL_COSMETIC,
+    )
+    assert _by_name(admission_census([salon.slug]))["Массаж шеи"].today.available  # положительная пара
+
+    if flaw == "выключенное ребро":
+        SpecialistService.objects.filter(salon_service=offer).update(is_active=False)
+    elif flaw == "цена ноль":
+        SpecialistService.objects.filter(salon_service=offer).update(price=Decimal("0"))
+    elif flaw == "мастер на паузе":
+        SpecialistProfile.objects.filter(pk=master.pk).update(is_booking_enabled=False)
+    else:
+        SpecialistProfile.objects.filter(pk=master.pk).update(status=SpecialistProfile.ProfileStatus.DRAFT)
+
+    row = _by_name(admission_census([salon.slug]))["Массаж шеи"]
+    assert (row.sellable_masters, row.today.reasons) == (0, (NO_SELLABLE_MASTER,))
 
 
 @pytest.mark.parametrize("flag", [False, True], ids=["флаг-выключен", "флаг-включён"])
