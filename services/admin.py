@@ -303,8 +303,84 @@ class SalonServiceAdminForm(forms.ModelForm):
         SalonService.MappingStatus.NOT_RECOMMENDABLE,
     })
 
+    def _clean_health_check_answer(self, cleaned) -> None:
+        """Происхождение ответа «нужна ли проверка перед услугой» (S2).
+
+        База держит то же самое ограничениями; форма говорит по полю и до
+        сохранения — иначе оператор получил бы имя ограничения, а при смене
+        ответа под прежним подтверждением — тихий сброс.
+        """
+        Origin = SalonService.HealthCheckAnswerOrigin
+        origin = cleaned.get('health_check_origin')
+        answer = cleaned.get('requires_health_check')
+        who = cleaned.get('health_check_confirmed_by')
+        rule = (cleaned.get('health_check_confirmed_rule') or '').strip()
+        version = (cleaned.get('health_check_rule_version') or '').strip()
+        at = cleaned.get('health_check_confirmed_at')
+
+        if origin != Origin.CONFIRMED:
+            if who is not None or rule or version or at is not None:
+                self.add_error('health_check_origin', forms.ValidationError(
+                    'Заполнены автор или дата подтверждения, а ответ отмечен как '
+                    'неподтверждённый. Либо отметьте «подтверждён», либо очистите '
+                    'автора, правило и дату.',
+                    code='health_check_unset_carries_confirmation',
+                ))
+            return
+
+        if answer is None:
+            self.add_error('requires_health_check', forms.ValidationError(
+                'Подтвердить можно только ответ: «нужна» или «не нужна». '
+                'Подтверждённого «салон не отвечал» не бывает.',
+                code='health_check_confirmed_requires_answer',
+            ))
+        if at is None:
+            self.add_error('health_check_confirmed_at', forms.ValidationError(
+                'Подтверждённый ответ обязан нести дату подтверждения.',
+                code='health_check_confirmed_requires_at',
+            ))
+        if not (cleaned.get('health_check_source_ref') or '').strip():
+            self.add_error('health_check_source_ref', forms.ValidationError(
+                'Укажите основание: кто в салоне ответил, документ, решение или тикет.',
+                code='health_check_confirmed_requires_source_ref',
+            ))
+        if who is None and not rule:
+            self.add_error('health_check_confirmed_by', forms.ValidationError(
+                'Укажите, КТО подтвердил ответ, либо имя правила владельца. '
+                'Значение без автора ответом человека не считается.',
+                code='health_check_confirmed_requires_who_or_rule',
+            ))
+        elif who is not None and rule:
+            self.add_error('health_check_confirmed_rule', forms.ValidationError(
+                'Заполнено и «кто», и «правило». Подтверждает либо человек, либо правило.',
+                code='health_check_confirmed_who_xor_rule',
+            ))
+        if rule and not version:
+            self.add_error('health_check_rule_version', forms.ValidationError(
+                'Правило без версии — «подтверждено какой-то из версий».',
+                code='health_check_rule_requires_version',
+            ))
+
+        if self.instance.pk and answer is not None:
+            probe = SalonService(pk=self.instance.pk)
+            probe._state.adding = False
+            probe.health_check_origin = origin
+            probe.requires_health_check = answer
+            probe.health_check_confirmed_by = who
+            probe.health_check_confirmed_rule = rule
+            probe.health_check_rule_version = version
+            probe.health_check_confirmed_at = at
+            if at is not None and probe.health_check_answer_changed_under_a_standing_confirmation():
+                self.add_error('requires_health_check', forms.ValidationError(
+                    'Ответ изменён, а подтверждение осталось прежним — оно было выдано '
+                    'для другого ответа. Подтвердите заново (новая дата и автор) либо '
+                    'отметьте ответ как неподтверждённый.',
+                    code='health_check_answer_changed_needs_reconfirmation',
+                ))
+
     def clean(self):
         cleaned = super().clean()
+        self._clean_health_check_answer(cleaned)
         if cleaned.get('mapping_status') not in self.DECIDED_STATUSES:
             # Инвариант касается только решённых связей. Требовать
             # происхождение у каждой строки значило бы запретить заводить

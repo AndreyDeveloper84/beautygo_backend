@@ -1325,6 +1325,45 @@ class SalonService(models.Model):
     # вердикта: **отсутствие обязано быть отличимо от значения.** Здесь, у
     # источника признака, он оставался непроведённым дольше всех.
     requires_health_check = models.BooleanField(null=True, blank=True, default=None)
+
+    class HealthCheckAnswerOrigin(models.TextChoices):
+        #: Ответ никто не подтверждал: умолчание, копия флага канона из
+        #: сидера, значение, выставленное без автора. Так стоят все строки,
+        #: заведённые до этого поля.
+        UNSET = "unset", "Не подтверждён"
+        #: Ответ подтверждён человеком или названным правилом владельца.
+        CONFIRMED = "confirmed", "Подтверждён"
+
+    #: Происхождение ОТВЕТА САЛОНА на вопрос «нужна ли проверка перед
+    #: услугой» — конкретного поля ``requires_health_check``, а не строки
+    #: услуги (решение владельца 07.10, пакет S2). Способ создания строки
+    #: (``source``) об этом ничего не говорит: значение, скопированное из
+    #: канона сидером, и значение, выставленное без автора, выглядят в
+    #: базе ответом салона и им не являются. Неподтверждённое «не нужна» —
+    #: это «неизвестно»; неподтверждённое «нужна» — «требование ещё не
+    #: подтверждено».
+    #:
+    #: Здесь только РАЗЛИЧЕНИЕ, как у флага канона (DRF-2614): вердикт гейта
+    #: записи это поле не меняет, пока владелец не посмотрит список
+    #: затронутых услуг (``manage.py health_check_census``).
+    health_check_origin = models.CharField(
+        max_length=16,
+        choices=HealthCheckAnswerOrigin.choices,
+        default=HealthCheckAnswerOrigin.UNSET,
+    )
+    #: Кто подтвердил ответ. Взаимоисключающе с правилом — «кто ИЛИ какое
+    #: правило», та же форма, что у флага канона и у связи с каноном.
+    health_check_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True, blank=True,
+        related_name="+",
+    )
+    health_check_confirmed_rule = models.CharField(max_length=100, blank=True, default="")
+    health_check_rule_version = models.CharField(max_length=32, blank=True, default="")
+    health_check_confirmed_at = models.DateTimeField(null=True, blank=True)
+    health_check_source_ref = models.CharField(max_length=200, blank=True, default="")
+
     is_active = models.BooleanField(default=True)
     source = models.CharField(
         max_length=10, choices=Source.choices, default=Source.MANUAL,
@@ -1530,6 +1569,53 @@ class SalonService(models.Model):
                 ),
                 name="salonservice_verified_requires_template",
             ),
+            # Происхождение ответа о проверке здоровья (решение владельца
+            # 07.10, S2). Словарь закрыт.
+            models.CheckConstraint(
+                condition=models.Q(health_check_origin__in=["unset", "confirmed"]),
+                name="salonservice_health_check_origin_known",
+            ),
+            # Подтверждают ОТВЕТ: подтверждённого молчания не бывает. И у
+            # подтверждения есть автор — человек ИЛИ правило с версией (не
+            # оба и не ни одного), дата и основание.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(health_check_origin="confirmed")
+                    | (
+                        models.Q(requires_health_check__isnull=False)
+                        & models.Q(health_check_confirmed_at__isnull=False)
+                        & ~models.Q(health_check_source_ref="")
+                        & (
+                            (
+                                models.Q(health_check_confirmed_by__isnull=False)
+                                & models.Q(health_check_confirmed_rule="")
+                                & models.Q(health_check_rule_version="")
+                            )
+                            | (
+                                models.Q(health_check_confirmed_by__isnull=True)
+                                & ~models.Q(health_check_confirmed_rule="")
+                                & ~models.Q(health_check_rule_version="")
+                            )
+                        )
+                    )
+                ),
+                name="salonservice_health_check_confirmed_requires_provenance",
+            ),
+            # Неподтверждённый ответ не несёт ни автора, ни даты: строка
+            # «не подтверждён, но подтвердил такой-то» читалась бы как
+            # наполовину подтверждённая.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(health_check_origin="unset")
+                    | (
+                        models.Q(health_check_confirmed_by__isnull=True)
+                        & models.Q(health_check_confirmed_rule="")
+                        & models.Q(health_check_rule_version="")
+                        & models.Q(health_check_confirmed_at__isnull=True)
+                    )
+                ),
+                name="salonservice_health_check_unset_carries_no_confirmation",
+            ),
         ]
         indexes = [
             models.Index(
@@ -1553,6 +1639,65 @@ class SalonService(models.Model):
             raise ValidationError(
                 {"category": "category is required for off-taxonomy custom services."}
             )
+
+    #: Поля подтверждения ответа о проверке здоровья.
+    _HEALTH_CHECK_CONFIRMATION_FIELDS = (
+        "health_check_confirmed_by_id", "health_check_confirmed_rule",
+        "health_check_rule_version", "health_check_confirmed_at",
+    )
+
+    @property
+    def health_check_answer_confirmed(self) -> bool:
+        """Ответ салона подтверждён человеком или названным правилом."""
+        return self.health_check_origin == self.HealthCheckAnswerOrigin.CONFIRMED
+
+    def health_check_answer_changed_under_a_standing_confirmation(self) -> bool:
+        """Ответ сменили, а подтверждение осталось прежним.
+
+        Подтверждают конкретный ответ. Сменить «не нужна» на «нужна» (или
+        наоборот) и оставить автора и дату — значит выдать новое значение за
+        подтверждённое. Тот же род, что смена канона под прежним
+        подтверждением связи (DRF-2883).
+
+        ``False``, если в этом же сохранении пришло новое подтверждение.
+        """
+        if self._state.adding or not self.health_check_answer_confirmed:
+            return False
+        stored = (
+            type(self).objects.filter(pk=self.pk)
+            .values("requires_health_check", "health_check_origin", *self._HEALTH_CHECK_CONFIRMATION_FIELDS)
+            .first()
+        )
+        if stored is None or stored["health_check_origin"] != self.HealthCheckAnswerOrigin.CONFIRMED:
+            return False
+        if stored["requires_health_check"] == self.requires_health_check:
+            return False
+        return all(
+            self._same_confirmation_value(stored[name], getattr(self, name))
+            for name in self._HEALTH_CHECK_CONFIRMATION_FIELDS
+        )
+
+    def _drop_a_confirmation_given_for_another_answer(self, save_kwargs: dict) -> None:
+        """Подтверждение, выданное для прежнего ответа, не переносится на новый.
+
+        Основание (``health_check_source_ref``) снимается вместе с остальным:
+        оно описывало, почему верен прежний ответ.
+        """
+        if not self.health_check_answer_changed_under_a_standing_confirmation():
+            return
+        self.health_check_origin = self.HealthCheckAnswerOrigin.UNSET
+        self.health_check_confirmed_by = None
+        self.health_check_confirmed_rule = ""
+        self.health_check_rule_version = ""
+        self.health_check_confirmed_at = None
+        self.health_check_source_ref = ""
+        update_fields = save_kwargs.get("update_fields")
+        if update_fields is not None:
+            save_kwargs["update_fields"] = [
+                *update_fields,
+                "health_check_origin", "health_check_confirmed_by", "health_check_confirmed_rule",
+                "health_check_rule_version", "health_check_confirmed_at", "health_check_source_ref",
+            ]
 
     #: Поля подтверждения связи: что именно снимается, когда подтверждение
     #: перестаёт относиться к канону услуги (DRF-2883).
@@ -1628,6 +1773,7 @@ class SalonService(models.Model):
     def save(self, *args: Any, **kwargs: Any) -> None:
         self.clean()
         self._drop_a_confirmation_given_for_another_canon(kwargs)
+        self._drop_a_confirmation_given_for_another_answer(kwargs)
         super().save(*args, **kwargs)
 
     def resolved_duration(self) -> int | None:
