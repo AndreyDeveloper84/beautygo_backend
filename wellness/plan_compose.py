@@ -60,6 +60,26 @@ RULE_KINDS: frozenset[str] = frozenset(
         "COMPATIBILITY", "INCOMPATIBILITY", "RECOVERY_WINDOW", "SAFETY_CONSTRAINT",
     }
 )
+RULE_SUBJECT_KINDS: frozenset[str] = frozenset({"capability", "canonical_service", "tenant_offer", "category"})
+
+#: DRF-2879 — реестр 1.x (контракт ограничений v1.1, решение владельца
+#: AYLA-DEC-0093): четырнадцатый вид и его субъект. ``PLAN_CADENCE`` —
+#: регулярность действий ШАБЛОНА Plan Lite; к шагу Plan Engine он не
+#: применяется никогда: регулярность, курс и сроки шагу запрещены (§1.1, §4.8).
+PLAN_CADENCE_KIND = "PLAN_CADENCE"
+PLAN_TEMPLATE_SUBJECT = "plan_template"
+
+#: Что каталог умеет читать, по major-версии реестра. Смена перечня видов —
+#: major реестра; неизвестный major отвергается ДО разбора правил — то же
+#: правило, что у загрузчика бота («разбирать неизвестное запрещено», §9).
+RULE_KINDS_BY_MAJOR: dict[int, frozenset[str]] = {
+    0: RULE_KINDS,
+    1: RULE_KINDS | {PLAN_CADENCE_KIND},
+}
+SUBJECT_KINDS_BY_MAJOR: dict[int, frozenset[str]] = {
+    0: RULE_SUBJECT_KINDS,
+    1: RULE_SUBJECT_KINDS | {PLAN_TEMPLATE_SUBJECT},
+}
 RULE_STATUSES: frozenset[str] = frozenset({"KNOWN", "UNKNOWN", "INTENTIONALLY_UNSUPPORTED"})
 UNKNOWN_REASONS: frozenset[str] = frozenset(
     {
@@ -103,7 +123,15 @@ def _text(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-def _validated_rule(rule: Any) -> dict:
+def _registry_major(version: Any) -> int:
+    """Major-версия реестра из ``"<major>.<minor>"``; неизвестная — отказ."""
+    major, dot, minor = version.strip().partition(".") if isinstance(version, str) else ("", "", "")
+    if not (dot and major.isdigit() and minor.isdigit()) or int(major) not in RULE_KINDS_BY_MAJOR:
+        raise ContractViolation("registry_version_unsupported", str(version))
+    return int(major)
+
+
+def _validated_rule(rule: Any, major: int = 0) -> dict:
     """Одно правило реестра в форме контракта ограничений §4–§5. Правило без
     полного провенанса утверждением стать не может (PE-5) — отказ целиком."""
     if not isinstance(rule, dict):
@@ -111,7 +139,7 @@ def _validated_rule(rule: Any) -> dict:
     rule_id = rule.get("rule_id")
     if not _text(rule_id):
         raise ContractViolation("rule_id_missing")
-    if rule.get("kind") not in RULE_KINDS:
+    if rule.get("kind") not in RULE_KINDS_BY_MAJOR[major]:
         raise ContractViolation("rule_kind_unknown", str(rule_id))
     status = rule.get("status")
     if status not in RULE_STATUSES:
@@ -127,6 +155,13 @@ def _validated_rule(rule: Any) -> dict:
         or not isinstance(applicability.get("subject_ids", []), list)
     ):
         raise ContractViolation("rule_applicability_missing", rule_id)
+    subject_kind = applicability["subject_kind"]
+    if subject_kind not in SUBJECT_KINDS_BY_MAJOR[major]:
+        raise ContractViolation("rule_subject_kind_unknown", rule_id)
+    # AYLA-DEC-0093: регулярность привычки в плане и правила услуг не
+    # смешиваются ни в одну сторону.
+    if (rule["kind"] == PLAN_CADENCE_KIND) != (subject_kind == PLAN_TEMPLATE_SUBJECT):
+        raise ContractViolation("plan_cadence_subject_mismatch", rule_id)
     value = rule.get("value")
     if status == "UNKNOWN":
         if (
@@ -158,7 +193,8 @@ def parse_compose_request(raw: Any) -> ComposeRequest:
     rules = registry.get("rules")
     if not isinstance(rules, list):
         raise ContractViolation("rules_registry_missing")
-    validated = tuple(_validated_rule(r) for r in rules)
+    major = _registry_major(registry["registry_version"])
+    validated = tuple(_validated_rule(r, major) for r in rules)
     ids = [r["rule_id"] for r in validated]
     if len(set(ids)) != len(ids):
         raise ContractViolation("rule_id_duplicate")
