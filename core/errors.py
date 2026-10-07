@@ -248,6 +248,23 @@ class ErrorCode(str, Enum):
     # DRF-2101 — у человека уже есть активный план (0..1 ACTIVE, OD-GOAL-4):
     # сменить план можно только закрыв прежний (DELETE), не поверх.
     PLAN_LITE_ALREADY_ACTIVE = "PLAN_LITE_ALREADY_ACTIVE"
+    # DRF-2857 — включён Plan Engine: новый план сохраняется как durable Plan,
+    # писатель Lite отказывает (один механизм на человека, без двойной записи).
+    PLAN_LITE_SUPERSEDED_BY_ENGINE = "PLAN_LITE_SUPERSEDED_BY_ENGINE"
+    # DRF-2857 — Plan Engine выключен флагом PLAN_ENGINE_ENABLED: 404 по
+    # замыслу, не 5xx (та же причина, что у PLAN_LITE_DISABLED).
+    PLAN_ENGINE_DISABLED = "PLAN_ENGINE_DISABLED"
+    # DRF-2857 — команда сохранения плана не конформна контракту Plan Engine
+    # (§4.2, §4.8, §4.9): отвергнута целиком, ничего не записано; правило —
+    # в details.reason машинным именем.
+    PLAN_CONTRACT_VIOLATION = "PLAN_CONTRACT_VIOLATION"
+    # DRF-2857 — то же подтверждение человека пришло с другим содержимым плана.
+    PLAN_IDEMPOTENCY_CONFLICT = "PLAN_IDEMPOTENCY_CONFLICT"
+    # DRF-2857 — переход статуса плана не разрешён (§4.5): superseded и
+    # archived терминальны.
+    PLAN_TRANSITION_REFUSED = "PLAN_TRANSITION_REFUSED"
+    # DRF-2857 — возобновить план нельзя: у цели уже действует другой (§4.7).
+    PLAN_ACTIVE_EXISTS = "PLAN_ACTIVE_EXISTS"
     # DRF-1699 D2 (§7 свода) — у человека живая заявка на удаление:
     # персонализация и новая обработка данных прекращены. Один код на все
     # три класса читателей (память, рекомендации, проактив), чтобы бот ловил
