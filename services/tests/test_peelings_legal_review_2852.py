@@ -12,8 +12,9 @@
 * провенанс полный: класс, кто, когда, основание;
 * чужой канон — и пилинг с другим pk тоже — не тронут;
 * класс, поставленный человеком, шаг не переписывает;
-* без названного автора, без автора в базе и с не-пилингом под pk шаг
+* без учётки владельца, с выключенной учёткой и с не-пилингом под pk шаг
   падает и ничего не пишет;
+* миграция берёт автором именную учётку владельца, найденную по ключу;
 * обратный ход снимает только своё;
 * на базе без этих канонов шаг ничего не делает.
 """
@@ -32,6 +33,7 @@ from services.body_care_license import CLASS_UNCONFIRMED, NOT_REQUIRED, license_
 from services.migrations import _drf2852_peelings_legal_review as peelings
 from services.models import SalonService, ServiceCategory, ServiceTemplate
 from tenants.models import Tenant
+from users.migrations import _owner_provenance_account as owner_account
 from users.models import User
 
 pytestmark = pytest.mark.django_db
@@ -174,7 +176,7 @@ def test_a_database_without_these_canons_is_left_alone(category) -> None:
 
 
 def test_no_named_author_refuses_and_writes_nothing(canons) -> None:
-    with pytest.raises(peelings.CannotAttribute, match="не назван"):
+    with pytest.raises(peelings.CannotAttribute, match="учётки владельца нет"):
         peelings.close(ServiceTemplate, User, confirmed_by_id=None, now=timezone.now())
 
     assert not ServiceTemplate.objects.filter(legal_service_class__isnull=False).exists()
@@ -235,12 +237,12 @@ def test_the_reverse_leaves_a_later_human_decision(canons, owner) -> None:
 # ─── миграция и её литералы ──────────────────────────────────────────────────
 
 
-def test_the_migration_runs_the_step_and_its_reverse(canons, owner, monkeypatch) -> None:
-    monkeypatch.setattr(peelings, "CONFIRMED_BY_ID", str(owner.pk))
+def test_the_migration_names_the_owner_account_as_the_author(canons) -> None:
+    author = User.objects.get(username=owner_account.USERNAME)
 
     MIGRATION.close_peelings(live_apps, None)
     assert ServiceTemplate.objects.filter(
-        legal_service_class=LC.LEGAL_REVIEW_REQUIRED, legal_class_confirmed_by=owner
+        legal_service_class=LC.LEGAL_REVIEW_REQUIRED, legal_class_confirmed_by=author
     ).count() == 4
 
     MIGRATION.reopen_peelings(live_apps, None)
@@ -257,7 +259,10 @@ def test_the_migration_literals_match_the_model() -> None:
         assert str(uuid.UUID(pk)) == pk
 
 
-def test_the_author_is_named() -> None:
-    """Красный до подтверждения атрибуции владельцем: без автора не сливать."""
-    assert peelings.CONFIRMED_BY_ID, "CONFIRMED_BY_ID не назван — атрибуцию подтверждает владелец"
-    assert str(uuid.UUID(peelings.CONFIRMED_BY_ID)) == peelings.CONFIRMED_BY_ID
+def test_the_migration_refuses_when_the_owner_account_is_gone(canons) -> None:
+    User.objects.filter(username=owner_account.USERNAME).update(is_active=False)
+
+    with pytest.raises(peelings.CannotAttribute, match="учётки владельца нет"):
+        MIGRATION.close_peelings(live_apps, None)
+
+    assert not ServiceTemplate.objects.filter(legal_service_class__isnull=False).exists()

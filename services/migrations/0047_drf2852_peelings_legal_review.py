@@ -7,19 +7,20 @@
 
 from __future__ import annotations
 
-from django.conf import settings
 from django.db import migrations
 from django.utils import timezone
+
+from users.migrations import _owner_provenance_account as owner_account
 
 from . import _drf2852_peelings_legal_review as peelings
 
 
 def close_peelings(apps, schema_editor):
-    app_label, model_name = settings.AUTH_USER_MODEL.split(".")
+    user_model = apps.get_model("users", "User")
     counts = peelings.close(
         apps.get_model("services", "ServiceTemplate"),
-        apps.get_model(app_label, model_name),
-        confirmed_by_id=peelings.CONFIRMED_BY_ID,
+        user_model,
+        confirmed_by_id=owner_account.account_id(user_model),
         now=timezone.now(),
     )
     print(
@@ -37,7 +38,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ("services", "0046_body_care_7a0_legal_class"),
-        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
+        ("users", "0031_owner_provenance_account"),
     ]
 
     operations = [
