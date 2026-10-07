@@ -141,9 +141,12 @@ def _approved(curator: User) -> dict:
 
 def _capability(template, key: str, curator, goal_option, *, cap=None, link=None, with_link: bool = True):
     """Подтверждённая способность с подтверждённой связью на цель; ``cap`` и
-    ``link`` перекрывают поля основания у способности и у связи порознь."""
+    ``link`` перекрывают поля основания у способности и у связи порознь.
+    ``template`` — одна процедура или список: способность — запись общего
+    словаря (DRF-2743), привязанная к нескольким процедурам."""
+    templates = list(template) if isinstance(template, (list, tuple)) else [template]
     capability = ProcedureCapability.objects.create(
-        template=template, key=key, text_client=f"Помогает: {key}", **{**_approved(curator), **(cap or {})},
+        templates=templates, key=key, text_client=f"Помогает: {key}", **{**_approved(curator), **(cap or {})},
     )
     if with_link:
         CapabilityGoalLink.objects.create(
@@ -276,8 +279,8 @@ class TestComposes:
         assert not {s["step_id"] for s in first["steps"]} & {s["step_id"] for s in second["steps"]}
 
     def test_one_capability_on_two_procedures_is_one_step(self, goal, back, body_massage, curator, relax) -> None:
-        _capability(back, "temporary-relaxation", curator, relax)
-        _capability(body_massage, "temporary-relaxation", curator, relax)
+        # Одна запись словаря у двух процедур — один шаг: свойство схемы (DRF-2743).
+        _capability([back, body_massage], "temporary-relaxation", curator, relax)
         _capability(back, "muscle-tension-relief", curator, relax)
         refs = [s["capability_ref"] for s in _compose()["decision"]["steps"]]
         assert refs == ["muscle-tension-relief", "temporary-relaxation"]
