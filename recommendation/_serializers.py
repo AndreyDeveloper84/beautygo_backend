@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+import logging
+
 from rest_framework import serializers
 
 from ._evidence import EvidenceItem, RatingValue
@@ -26,7 +28,12 @@ from ._types import (
     Constraint,
     ConstraintKind,
     NeedOrigin,
+    MAX_PREFERENCES,
     NeedSpec,
+    Preference,
+    PreferenceKind,
+    PreferenceOrigin,
+    PreferenceStrength,
     RecommendationDecision,
     SafetyState,
     Scope,
@@ -39,6 +46,8 @@ from ._types import (
 
 #: Поля, которых в ответе границы быть не может. Проверяется тестом W1:
 #: имя, добавленное завтра, сломает сегодняшний прогон.
+logger = logging.getLogger(__name__)
+
 FORBIDDEN_RESPONSE_FIELDS = frozenset({"reasoning_text", "reason_text", "why_text", "score", "match_score"})
 
 
@@ -78,6 +87,41 @@ class _NeedSerializer(serializers.Serializer):
     raw_text = serializers.CharField(required=False, allow_null=True, default=None)
 
 
+class PreferenceSerializer(serializers.Serializer):
+    """Предпочтение клиента — O-1 (DRF-2816).
+
+    ``origin`` — строкой, а не закрытым выбором: незнакомое происхождение (в т. ч.
+    вывод агента) не роняет запрос, а отбрасывается в :func:`build_preferences`
+    с записью в лог. Неподтверждённое не участвует — и не ломает полку.
+    """
+
+    kind = serializers.ChoiceField(choices=[k.value for k in PreferenceKind])
+    ref = serializers.UUIDField()
+    strength = serializers.ChoiceField(
+        choices=[s.value for s in PreferenceStrength], required=False, default=PreferenceStrength.SOFT.value,
+    )
+    origin = serializers.CharField(max_length=64)
+
+
+def build_preferences(items) -> tuple[Preference, ...]:
+    """Провалидированные элементы → предпочтения. Незнакомое происхождение — мимо."""
+    allowed = {o.value for o in PreferenceOrigin}
+    out: list[Preference] = []
+    for item in items or ():
+        if item["origin"] not in allowed:
+            logger.warning(
+                "recommendation.preference.dropped origin=%r kind=%s — не сказано сейчас и "
+                "не подтверждено в памяти: не участвует (O-1)",
+                item["origin"], item["kind"],
+            )
+            continue
+        out.append(Preference(
+            kind=PreferenceKind(item["kind"]), ref=item["ref"],
+            strength=PreferenceStrength(item["strength"]), origin=PreferenceOrigin(item["origin"]),
+        ))
+    return tuple(out)
+
+
 class ResolveRequestSerializer(serializers.Serializer):
     """Вход `POST /api/v1/internal/recommendation/resolve/`.
 
@@ -106,6 +150,12 @@ class ResolveRequestSerializer(serializers.Serializer):
     safety_state = serializers.ChoiceField(choices=[s.value for s in SafetyState])
     tie_break_seed = serializers.CharField(required=False, allow_null=True, default=None)
     k = serializers.IntegerField(required=False, min_value=1, max_value=50, default=3)
+    preferences = PreferenceSerializer(
+        many=True, required=False, allow_null=True, max_length=MAX_PREFERENCES,
+    )
+
+    def build_preferences(self) -> tuple[Preference, ...]:
+        return build_preferences(self.validated_data.get("preferences"))
 
     def build_scope(self) -> Scope:
         raw = self.validated_data["scope"]

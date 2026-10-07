@@ -254,6 +254,10 @@ class CatalogService:
     category_slug: str | None
     sort_order: int
     image_url: str | None
+    #: Родитель категории услуги (услуги висят на листьях дерева, клиент
+    #: называет корень: «массаж», а не «массаж спины»). Колонка той же
+    #: строки категории — лишнего запроса нет. O-1 (DRF-2816).
+    category_parent_id: uuid.UUID | None = None
 
 
 def _legacy_rows(specialist) -> list[CatalogService]:
@@ -275,6 +279,7 @@ def _legacy_rows(specialist) -> list[CatalogService]:
             category_slug=category.slug if category else None,
             sort_order=service.sort_order,
             image_url=service.image.url if service.image else None,
+            category_parent_id=category.parent_id if category else None,
         ))
     out.sort(key=lambda row: (row.sort_order, row.name))
     return out
@@ -302,6 +307,7 @@ def _canonical_rows(specialist) -> list[CatalogService]:
             # Порядка в каноническом слое нет по схеме — сортируем по имени.
             sort_order=0,
             image_url=None,
+            category_parent_id=category.parent_id if category else None,
         ))
     out.sort(key=lambda row: row.name)
     return out
