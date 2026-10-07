@@ -105,15 +105,19 @@ FIELDS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
     # DRF-2868 — что произошло с шагом после сохранения: чем он разрешён и
     # какие записи от него сделаны. Сама запись — в разделе бронирований.
     "wellness.PlanStepResolution": (
-        {**_same("step_id", "level", "created_at"),
+        {**_same("step_id", "level", "safety_state", "created_at"),
          "canonical_service": "canonical_service_name", "tenant_offer": "has_tenant_offer"},
         {"id": _KEY, "plan_revision": _NEST,
+         "safety_policy_version": "версия политики безопасности, не данные о человеке",
+         "safety_evaluated_at_revision": "служебная ревизия состояния разговора",
          "resolver_decision_id": "служебная ссылка на решение подбора, не данные о человеке",
          "recommendation_id": "служебная ссылка на запись рекомендации (сейчас всегда пусто)"},
     ),
     "wellness.PlanStepBooking": (
-        {**_same("step_id", "created_at"), "appointment": "appointment_start"},
+        {**_same("step_id", "safety_state", "created_at"), "appointment": "appointment_start"},
         {"id": _KEY, "plan": _NEST, "plan_revision": _NEST,
+         "safety_policy_version": "версия политики безопасности, не данные о человеке",
+         "safety_evaluated_at_revision": "служебная ревизия состояния разговора",
          "resolver_decision_id": "служебная ссылка на решение подбора, не данные о человеке",
          "recommendation_id": "служебная ссылка на запись рекомендации (сейчас всегда пусто)"},
     ),
