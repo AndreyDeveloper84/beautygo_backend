@@ -5,7 +5,9 @@
 ПОДТВЕРЖДЁННОГО знания каталога. Что держат узлы:
 
 * подпись есть только у подтверждённой, поддержанной, не истёкшей возможности;
-* один ключ у двух процедур с разными текстами — подписи нет (``ambiguous``):
+* ключ в общем словаре уникален (DRF-2743): у ключа одна запись и одна
+  формулировка, сколько бы процедур к ней ни было привязано;
+* (до словаря) один ключ у двух процедур с разными текстами — подписи нет (``ambiguous``):
   выбирать формулировку за владельца код не вправе; одинаковые тексты — одна;
 * «подписи нет» всегда с именем причины, а не пустой строкой;
 * ручка под тем же флагом, что и остальной Plan Engine.
@@ -15,6 +17,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -59,6 +62,7 @@ def templates(db):
 
 
 def _capability(template, key: str, text: str, curator, **over) -> ProcedureCapability:
+    """Запись словаря, привязанная к одной процедуре или к нескольким (список)."""
     fields = dict(
         status=ClaimEvidence.Status.APPROVED,
         claim_type=ClaimEvidence.ClaimType.PRODUCT,
@@ -69,7 +73,8 @@ def _capability(template, key: str, text: str, curator, **over) -> ProcedureCapa
         source_ref="owner-review-labels",
     )
     fields.update(over)
-    return ProcedureCapability.objects.create(template=template, key=key, text_client=text, **fields)
+    templates = list(template) if isinstance(template, (list, tuple)) else [template]
+    return ProcedureCapability.objects.create(templates=templates, key=key, text_client=text, **fields)
 
 
 def _api() -> APIClient:
@@ -85,17 +90,20 @@ class TestReader:
         label = capability_labels(["tension-relief"])["tension-relief"]
         assert (label.state, label.label) == (LabelState.LABELLED, "Снимает мышечное напряжение")
 
-    def test_the_same_text_on_two_procedures_is_one_label(self, templates, curator) -> None:
-        for template in templates:
-            _capability(template, "relaxation", "Помогает расслабиться", curator)
+    def test_one_capability_bound_to_two_procedures_is_one_label(self, templates, curator) -> None:
+        """Общий словарь (DRF-2743): одна запись у двух процедур — одна подпись."""
+        _capability(list(templates), "relaxation", "Помогает расслабиться", curator)
         label = capability_labels(["relaxation"])["relaxation"]
         assert (label.state, label.label) == (LabelState.LABELLED, "Помогает расслабиться")
 
-    def test_two_different_texts_for_one_key_are_no_label(self, templates, curator) -> None:
+    def test_a_key_cannot_carry_a_second_text(self, templates, curator) -> None:
+        """Ключ уникален: вторую запись с тем же ключом база не даёт завести, поэтому двух
+        разных формулировок у ключа не бывает и ``ambiguous`` при словаре недостижимо."""
         _capability(templates[0], "relaxation", "Помогает расслабиться", curator)
-        _capability(templates[1], "relaxation", "Снимает стресс", curator)
+        with pytest.raises(IntegrityError), transaction.atomic():
+            _capability(templates[1], "relaxation", "Снимает стресс", curator)
         label = capability_labels(["relaxation"])["relaxation"]
-        assert (label.state, label.label) == (LabelState.AMBIGUOUS, None)
+        assert (label.state, label.label) == (LabelState.LABELLED, "Помогает расслабиться")
 
     @pytest.mark.parametrize(
         "override",
@@ -111,15 +119,6 @@ class TestReader:
         label = capability_labels(["draft"])["draft"]
         assert (label.state, label.label) == (LabelState.UNKNOWN, None)
 
-    def test_an_unconfirmed_second_text_does_not_make_the_key_ambiguous(self, templates, curator) -> None:
-        _capability(templates[0], "relaxation", "Помогает расслабиться", curator)
-        _capability(
-            templates[1], "relaxation", "Вывод системы", curator,
-            status=ClaimEvidence.Status.SYSTEM_INFERENCE, confirmed_by=None, confirmed_at=None,
-        )
-        label = capability_labels(["relaxation"])["relaxation"]
-        assert (label.state, label.label) == (LabelState.LABELLED, "Помогает расслабиться")
-
     def test_a_confirmed_capability_without_text_says_so(self, templates, curator) -> None:
         _capability(templates[0], "silent", "", curator)
         assert capability_labels(["silent"])["silent"].state is LabelState.NO_TEXT
@@ -134,14 +133,15 @@ class TestReader:
 class TestEndpoint:
     def test_labels_come_back_by_key_with_a_named_state(self, owner, templates, curator) -> None:
         _capability(templates[0], "tension-relief", "Снимает мышечное напряжение", curator)
-        _capability(templates[0], "relaxation", "Помогает расслабиться", curator)
-        _capability(templates[1], "relaxation", "Снимает стресс", curator)
-        resp = _api().post(URL, {"keys": ["tension-relief", "relaxation", "nope"]}, format="json")
+        _capability(list(templates), "relaxation", "Помогает расслабиться", curator)
+        _capability(templates[1], "silent", "", curator)
+        resp = _api().post(URL, {"keys": ["tension-relief", "relaxation", "silent", "nope"]}, format="json")
         assert resp.status_code == 200, resp.content
         assert resp.json()["data"] == {
             "labels": {
                 "tension-relief": {"state": "labelled", "label": "Снимает мышечное напряжение"},
-                "relaxation": {"state": "ambiguous", "label": None},
+                "relaxation": {"state": "labelled", "label": "Помогает расслабиться"},
+                "silent": {"state": "no_text", "label": None},
                 "nope": {"state": "unknown", "label": None},
             }
         }
