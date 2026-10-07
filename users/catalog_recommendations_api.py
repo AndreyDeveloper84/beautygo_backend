@@ -117,6 +117,7 @@ from rest_framework.views import APIView
 
 from goals.wiring import goal_category_ids_for, saved_goal_key_for
 from recommendation.api import (
+    MAX_PREFERENCES,
     NeedOrigin,
     NeedSpec,
     RecommendationDecision,
@@ -124,7 +125,11 @@ from recommendation.api import (
     SafetyState,
     Scope,
     ScopeMode,
+    PreferenceSerializer,
+    PreferenceStrength,
+    ReasonCode,
     Surface,
+    build_preferences,
     resolve,
 )
 from services.catalog_reads import category_service_counts, specialist_service_text_q
@@ -158,6 +163,13 @@ class RecommendationsRequestSerializer(serializers.Serializer):
     goal = serializers.CharField(
         required=False, max_length=64, allow_blank=True,
         help_text="Что человек ищет сейчас. Уходит в NeedSpec.raw_text.",
+    )
+    # O-1 (DRF-2816) — предпочтения клиента, та же схема, что у ручки
+    # резолвера. Применяются к ОБЕИМ полкам: в полке 1 «твои места» «мой
+    # мастер Анна» из уже посещённого салона поднимается наверх; смысл
+    # полок не меняется (полка 2 по-прежнему без салонов из истории).
+    preferences = PreferenceSerializer(
+        many=True, required=False, allow_null=True, max_length=MAX_PREFERENCES,
     )
     # Поля безопасности здесь НЕТ намеренно — см. модульный докстринг.
     # Принять его значило бы завести ровно ту конструкцию, которую владелец
@@ -226,6 +238,7 @@ def _resolve_layer(
     seed: str | None,
     k: int,
     viewer,
+    preferences: tuple = (),
 ) -> RecommendationDecision:
     """Один вызов границы. Порядок — его, границы — наши."""
     return resolve(
@@ -238,6 +251,7 @@ def _resolve_layer(
             safety_state=safety_state,
             tie_break_seed=seed,
             k=k,
+            preferences=preferences,
         ),
         # DRF-2420 — источник знает СПРАШИВАЮЩЕГО: от него зависит, попадёт
         # ли в пул демонстрационный салон. Полка этого не решает и порядка не
@@ -495,6 +509,11 @@ class CatalogRecommendationsView(APIView):
         serializer = RecommendationsRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         goal = (serializer.validated_data.get("goal") or "").strip()
+        # Решение владельца 06.10: «только Анна» — жёсткое условие подбора и
+        # на полке. Полка 1 сужается до Анны; полка 2 (без салонов из истории)
+        # пустеет — другими мастерами «Новых мест» на «только Анна» не
+        # отвечаем. Объяснить пустоту и спросить про альтернативы — дело бота.
+        preferences = build_preferences(serializer.validated_data.get("preferences"))
 
         # Константа поверхности, не производная от запроса (§72).
         # Ни `get`, ни `or`, ни умолчания сериализатора: значение известно
@@ -542,6 +561,7 @@ class CatalogRecommendationsView(APIView):
             seed=seed,
             k=LAYER_1_LIMIT,
             viewer=request.user,
+            preferences=preferences,
         ) if history_tenant_ids else None
 
         layer_2_decision = _resolve_layer(
@@ -556,10 +576,21 @@ class CatalogRecommendationsView(APIView):
             seed=seed,
             k=LAYER_2_LIMIT,
             viewer=request.user,
+            # Полка 2 межсалонная — предпочтений она НЕ получает. Любимый
+            # мастер — отношение с одним салоном (NEVER_CROSSES, 24.08):
+            # тот же человек в чужом салоне не поднимается фаворитом из
+            # «твоих мест». То же — категория из памяти.
         )
 
         layer_1 = _shelf(layer_1_decision, limit=LAYER_1_LIMIT)
-        layer_2 = _shelf(layer_2_decision, limit=LAYER_2_LIMIT)
+        # «Только Анна» (владелец 06.10): «Новыми местами» на него не
+        # отвечаем — полка 2 пуста и объясняет себя кодом. Жёсткое в неё не
+        # передаётся: Анна в чужом салоне — тоже межсалонный фаворит.
+        layer_2 = (
+            {"items": [], "reason_codes": [ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD.value]}
+            if any(p.strength is PreferenceStrength.HARD for p in preferences)
+            else _shelf(layer_2_decision, limit=LAYER_2_LIMIT)
+        )
         layer_3 = _build_layer_3(list(
             _catalog_pool(
                 goal=goal, goal_category_ids=goal_category_ids,
