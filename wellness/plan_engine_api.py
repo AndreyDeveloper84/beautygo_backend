@@ -50,6 +50,7 @@ from .plan_engine import (
     plan_payload,
     set_plan_status,
 )
+from .plan_compose import compose_plan, parse_compose_request
 from .plan_engine_steps import (
     AppointmentNotFound,
     BookingLinkConflict,
@@ -311,3 +312,36 @@ class PlanStepBookingView(APIView):
             {"plan": plan_document(link.plan), "created": created},
             status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+class PlanDecisionView(APIView):
+    """POST /api/v1/internal/me/plan/decision/
+
+    Сборка эфемерного плана по действующей цели человека (контракт §4.1;
+    DRF-2871). Ничего не сохраняет. Тело: ``{safety_state, safety_policy_version,
+    rules_registry: {registry_version, rules: [...]}, excluded_capability_refs?}``
+    — безопасность и реестр правил приносит вызывающий, здесь они не вычисляются.
+
+    200 — ``{outcome, decision, safety_state, details}``; ``decision`` есть
+    только при ``outcome = PLAN`` и принимается командой сохранения без
+    переделки. Прочие исходы — штатные ответы, не ошибки: ``SAFETY_BLOCKED``,
+    ``NO_GOAL``, ``NO_CURATED_DECOMPOSITION``, ``PLAN_NOT_JUSTIFIED``. 400
+    ``PLAN_CONTRACT_VIOLATION`` — вход не конформен; 404 ``PLAN_ENGINE_DISABLED``.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(tags=["internal"], responses={200: OpenApiResponse(description="{outcome, decision}")})
+    def post(self, request: Request) -> Response:
+        try:
+            result = compose_plan(request.user, parse_compose_request(request.data))
+        except PlanEngineDisabled:
+            return _disabled()
+        except ContractViolation as exc:
+            return error_response(
+                "PLAN_CONTRACT_VIOLATION",
+                "Запрос на сборку плана не соответствует контракту",
+                details={"reason": exc.reason, "detail": exc.detail},
+            )
+        return success_response(result)
