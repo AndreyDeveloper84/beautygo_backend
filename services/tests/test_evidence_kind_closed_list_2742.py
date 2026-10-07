@@ -124,14 +124,14 @@ class TestTheListIsTheOwnersEight:
 class TestTheDatabaseKeepsApprovedOnKnownEvidence:
     @pytest.mark.parametrize("kind", THE_EIGHT)
     def test_each_of_the_eight_is_stored_on_an_approved_row(self, template, owner, kind) -> None:
-        ProcedureCapability.objects.create(template=template, key="known", evidence_kind=kind, **_signed(owner))
+        ProcedureCapability.objects.create(templates=[template], key="known", evidence_kind=kind, **_signed(owner))
 
         assert ProcedureCapability.objects.get().evidence_kind == kind
 
     def test_an_approved_row_without_a_kind_is_refused(self, template, owner) -> None:
         _refused_by(
             "procedurecapability_approved_evidence_kind_known",
-            lambda: ProcedureCapability.objects.create(template=template, key="no-kind", **_signed(owner)),
+            lambda: ProcedureCapability.objects.create(templates=[template], key="no-kind", **_signed(owner)),
         )
 
     @pytest.mark.parametrize("kind", NOT_EVIDENCE)
@@ -140,19 +140,19 @@ class TestTheDatabaseKeepsApprovedOnKnownEvidence:
         _refused_by(
             "procedurecapability_approved_evidence_kind_known",
             lambda: ProcedureCapability.objects.create(
-                template=template, key="outside", evidence_kind=kind, **_signed(owner),
+                templates=[template], key="outside", evidence_kind=kind, **_signed(owner),
             ),
         )
 
     def test_a_draft_is_not_judged_by_the_database(self, template) -> None:
         """Условие выкладки: черновик с произвольным видом для базы законен."""
-        ProcedureCapability.objects.create(template=template, key="draft", evidence_kind="маркетинг салона")
-        ProcedureCapability.objects.create(template=template, key="empty-draft")
+        ProcedureCapability.objects.create(templates=[template], key="draft", evidence_kind="маркетинг салона")
+        ProcedureCapability.objects.create(templates=[template], key="empty-draft")
 
         assert ProcedureCapability.objects.count() == 2
 
     def test_the_goal_link_carries_the_same_rule(self, template, goal, owner) -> None:
-        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[template], key="for-link")
 
         _refused_by(
             "capabilitygoallink_approved_evidence_kind_known",
@@ -191,7 +191,7 @@ class TestTheSharedRule:
 
 def _form(template: ServiceTemplate, **overrides) -> dict:
     data = {
-        "template": str(template.pk),
+        "procedures": [str(template.pk)],
         "key": "example_effect",
         "text_client": "Синтетическая формулировка",
         "text_professional": "",
@@ -249,7 +249,7 @@ class TestTheAdminFormOffersTheListOnly:
         assert ProcedureCapability.objects.count() == 0
 
     def test_the_link_form_asks_the_same(self, template, goal) -> None:
-        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[template], key="for-link")
         data = {
             "capability": str(capability.pk), "goal": str(goal.pk),
             "course_pattern": "", "result_horizon": "", "variability_note": "",

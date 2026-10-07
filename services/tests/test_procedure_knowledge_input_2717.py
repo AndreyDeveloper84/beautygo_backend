@@ -96,7 +96,7 @@ def admin_client(owner):
 
 def _capability_form(template: ServiceTemplate, **overrides) -> dict:
     data = {
-        "template": str(template.pk),
+        "procedures": [str(template.pk)],
         "key": "example_effect",
         "text_client": "Синтетическая формулировка",
         "text_professional": "",
@@ -162,7 +162,7 @@ class TestTheAdminHasTheTwoModels:
         assert not ProcedureCapabilityAdmin.prepopulated_fields
 
     def test_the_curator_reads_names_not_uuids(self, world) -> None:
-        capability = ProcedureCapability.objects.create(template=world["relaxing"], key="readable")
+        capability = ProcedureCapability.objects.create(templates=[world["relaxing"]], key="readable")
         link = CapabilityGoalLink.objects.create(capability=capability, goal=world["goal"])
 
         assert str(capability) == "Процедура 2717-А · readable"
@@ -256,7 +256,7 @@ class TestApprovingNeedsASource:
         assert (row.status, row.confirmed_by_id, row.confirmed_at) == ("system_inference", None, None)
 
     def test_an_approved_goal_link_is_signed_too(self, admin_client, owner, world) -> None:
-        capability = ProcedureCapability.objects.create(template=world["relaxing"], key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[world["relaxing"]], key="for-link")
 
         response = admin_client.post(reverse(ADD_LINK), {
             "capability": str(capability.pk), "goal": str(world["goal"].pk),
@@ -279,7 +279,7 @@ class TestSavingWithoutAnEditKeepsTheSignature:
     @pytest.fixture
     def approved_by_rule(self, world) -> ProcedureCapability:
         return ProcedureCapability.objects.create(
-            template=world["relaxing"], key="example_effect",
+            templates=[world["relaxing"]], key="example_effect",
             text_client="Синтетическая формулировка",
             status="approved", claim_type="product", evidence_kind="professional_consensus",
             claim_scope="supported", source_ref="DOC-2717",
@@ -324,7 +324,7 @@ class TestSavingWithoutAnEditKeepsTheSignature:
 
 class TestTheCourseIsWordsWithAGround:
     def _form(self, world, **overrides) -> CapabilityGoalLinkAdminForm:
-        capability = ProcedureCapability.objects.create(template=world["relaxing"], key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[world["relaxing"]], key="for-link")
         data = {
             "capability": str(capability.pk),
             "goal": str(world["goal"].pk),
@@ -425,7 +425,7 @@ class TestSeedingFromTheCuratorsFile:
     def test_a_padded_template_code_is_still_found(self, world, tmp_path) -> None:
         _seed(_write(tmp_path, [{"template_code": " 1.1.3 ", "key": "padded"}]))
 
-        assert ProcedureCapability.objects.get().template_id == world["relaxing"].pk
+        assert list(ProcedureCapability.objects.get().templates.all()) == [world["relaxing"]]
 
 
 class TestAnImportIsNotAnApproval:
