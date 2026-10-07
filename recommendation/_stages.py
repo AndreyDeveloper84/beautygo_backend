@@ -55,6 +55,7 @@ from ._types import (
     ConstraintKind,
     ExcludedCandidate,
     MappingCensus,
+    ConfigGate,
     LegalGate,
     MappingStatus,
     MatchLevel,
@@ -229,13 +230,27 @@ def apply_scope(candidates: Sequence[CandidateFacts], scope: Scope) -> Admission
 # S1 — жёсткая допустимость. Компенсации баллом нет (R2)
 # ---------------------------------------------------------------------------
 
-#: Значение гейта → код исключения. Всё, чего здесь нет (не подтверждено
-#: или не определено), закрывается общим кодом — умолчание в ``.get`` ниже.
+#: Значения, с которыми строка проходит гейт. Всё остальное исключает.
+_CONFIG_OPEN = frozenset({ConfigGate.NOT_SUBJECT, ConfigGate.READY})
+
+#: Значение гейта → код исключения: у каждой причины свой (владелец 07.10).
+#: Значение, которого здесь нет, закрывается как «не определено» — умолчание
+#: в ``.get`` ниже: новое значение перечисления не может открыть по недосмотру.
+_CONFIG_EXCLUSION = {
+    ConfigGate.UNCLASSIFIED: ReasonCode.ELIG_EXCLUDED_CATALOG_UNCLASSIFIED,
+    ConfigGate.NOT_READY: ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY,
+    ConfigGate.UNDETERMINED: ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED,
+}
+
 _LEGAL_EXCLUSION = {
+    LegalGate.CLASS_UNCONFIRMED: ReasonCode.ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED,
     LegalGate.LICENSE_NOT_VERIFIED: ReasonCode.ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED,
     LegalGate.LICENSE_SCOPE_MISMATCH: ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
+    LegalGate.LOCATION_UNKNOWN: ReasonCode.ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN,
     LegalGate.ADDRESS_MISMATCH: ReasonCode.ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH,
+    LegalGate.QUALIFICATION_REQUIREMENT_UNCONFIRMED: ReasonCode.ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED,
     LegalGate.QUALIFICATION_NOT_VERIFIED: ReasonCode.ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED,
+    LegalGate.UNDETERMINED: ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED,
 }
 
 
@@ -366,11 +381,14 @@ def apply_eligibility(
         # процедуру можно рекомендовать — её конфигурация должна быть готова
         # к скринингу (CAT-6 READY). Гейт на ЧТЕНИИ: состояние может упасть
         # после верификации связи, и это ловится здесь без пересмотра связи.
-        # ``None`` — услуга вне Body Care: гейт к ней не относится.
-        if facts.config_ready is False:
-            excluded.append(
-                ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY)
-            )
+        # Перед готовностью — область (П2): канон, про который не сказано,
+        # подлежит ли он Body Care, закрыт своей причиной, а не пропущен.
+        # ``None`` — у строки нет канонической связи: гейт к ней не относится.
+        if facts.config_gate is not None and facts.config_gate not in _CONFIG_OPEN:
+            excluded.append(ExcludedCandidate(
+                facts.ref, StageId.S1,
+                _CONFIG_EXCLUSION.get(facts.config_gate, ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED),
+            ))
             continue
         # CAT-10-ext: юридические условия §7A — лицензия салона, адрес и
         # квалификация мастера. По подтверждённому классу канона, а не по
@@ -378,7 +396,7 @@ def apply_eligibility(
         if facts.legal_gate is not None and facts.legal_gate is not LegalGate.CLEARED:
             excluded.append(ExcludedCandidate(
                 facts.ref, StageId.S1,
-                _LEGAL_EXCLUSION.get(facts.legal_gate, ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED),
+                _LEGAL_EXCLUSION.get(facts.legal_gate, ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED),
             ))
             continue
         # O-1: «только X» — жёсткое условие, и только из ТЕКУЩЕГО запроса.

@@ -81,6 +81,7 @@ from recommendation.api import (
     CandidateFacts,
     CandidateKind,
     CandidateRef,
+    ConfigGate,
     LegalGate,
     MappingStatus,
     MatchLevel,
@@ -118,24 +119,31 @@ def build_candidate_source(*, viewer=None) -> "SpecialistCandidateSource":
     return SpecialistCandidateSource(viewer=viewer)
 
 
-def config_readiness(salon_service_ids) -> dict[UUID, bool | None]:
-    """Готовность конфигурации строк пула — CAT-10 (DRF-2820), шов с CAT-6.
+#: Маркер CAT-6 «область канона неизвестна» (проверка П2). Литерал согласован
+#: с каталогом 07.10 и узнаётся здесь РАНЬШЕ, чем его начнут отдавать: иначе
+#: первый же ответ с ним закрыл бы выдачу как «не определено» и залил лог.
+UNCLASSIFIED = "unclassified"
+
+
+def config_readiness(salon_service_ids) -> dict[UUID, ConfigGate]:
+    """Область и готовность конфигурации строк пула — шов с CAT-6 (проверки П2, П3).
 
     Одно пакетное чтение :func:`services.body_care_validation.validation_states`
     на весь пул; лестницу состояний здесь никто не повторяет — читается итог.
 
-    ===========================================  ==========================
-    ответ CAT-6                                  ``config_ready``
-    ===========================================  ==========================
-    ``not_subject`` (вне Body Care)              ``None`` — гейт выключен
-    ``ready_for_screening``                      ``True``
-    остальные состояния §7                       ``False``
-    ключа нет, незнакомое значение, сбой чтения  ``False`` + ERROR в лог
-    ===========================================  ==========================
+    ===========================================  ============================
+    ответ CAT-6                                  значение гейта
+    ===========================================  ============================
+    ``not_subject`` (канон вне Body Care)        ``NOT_SUBJECT`` — открыто
+    ``ready_for_screening``                      ``READY`` — открыто
+    остальные состояния §7                       ``NOT_READY``
+    ``unclassified`` (область неизвестна)        ``UNCLASSIFIED``
+    ключа нет, незнакомое значение, сбой чтения  ``UNDETERMINED`` + ERROR в лог
+    ===========================================  ============================
 
-    ``None`` рождается ТОЛЬКО из ``not_subject``: ``None`` значит «гейт
-    выключен», и у body-care строки это был бы fail-open. Неопределённость
-    закрывает строку и пишет в лог, а полку не роняет.
+    Открывают ровно два ответа. «Не классифицировано» и «не смогли
+    прочитать» — разные значения: первое — состояние данных, второе —
+    дефект чтения, и в логе ERROR пишется только про второе.
     """
     ids = set(salon_service_ids)
     if not ids:
@@ -144,20 +152,23 @@ def config_readiness(salon_service_ids) -> dict[UUID, bool | None]:
         states = validation_states(ids)
     except Exception:  # noqa: BLE001 — сбой чтения закрывает строки, а не роняет полку
         logger.exception("recommendation.source config_readiness_failed rows=%d", len(ids))
-        return dict.fromkeys(ids, False)
+        return dict.fromkeys(ids, ConfigGate.UNDETERMINED)
 
-    out: dict[UUID, bool | None] = {}
+    out: dict[UUID, ConfigGate] = {}
     undetermined: list[str] = []
     for pk in ids:
         state = states.get(pk)
         if state == NOT_SUBJECT:
-            out[pk] = None
+            out[pk] = ConfigGate.NOT_SUBJECT
         elif state == READY_FOR_SCREENING:
-            out[pk] = True
+            out[pk] = ConfigGate.READY
+        elif state == UNCLASSIFIED:
+            out[pk] = ConfigGate.UNCLASSIFIED
+        elif state in VALIDATION_STATES:
+            out[pk] = ConfigGate.NOT_READY
         else:
-            out[pk] = False
-            if state not in VALIDATION_STATES:
-                undetermined.append(f"{pk}={state!r}")
+            out[pk] = ConfigGate.UNDETERMINED
+            undetermined.append(f"{pk}={state!r}")
     if undetermined:
         logger.error(
             "recommendation.source config_readiness_undetermined rows=%d closed=%s",
@@ -165,6 +176,9 @@ def config_readiness(salon_service_ids) -> dict[UUID, bool | None]:
         )
     return out
 
+
+#: Значения гейта конфигурации, с которыми строка открыта (для выбора строки).
+_CONFIG_OPEN = frozenset({ConfigGate.NOT_SUBJECT, ConfigGate.READY})
 
 #: Ответ §7A-2 (лицензия салона, по предложению) → значение гейта.
 _LICENSE_GATE = {
@@ -206,7 +220,9 @@ def legal_gates(rows) -> dict[tuple[UUID, UUID], LegalGate]:
 
     Все три функции судят по подтверждённому классу канона, а не по
     семейству, поэтому гейт закрывает и медицинский класс вне Body Care.
-    У строки без канона требования к квалификации нет — её не спрашивают.
+    У строки без канона нет и класса: квалификацию спрашивать нечем, и
+    вместо неё ответ — ``CLASS_UNCONFIRMED``. Отсутствие канона проверку не
+    обходит (владелец 07.10).
 
     Ключа нет, незнакомое значение, сбой чтения — ``UNDETERMINED`` и ERROR
     в лог: строка закрыта, полка не падает.
@@ -232,7 +248,9 @@ def legal_gates(rows) -> dict[tuple[UUID, UUID], LegalGate]:
             _LICENSE_GATE.get(licenses.get(salon_id), LegalGate.UNDETERMINED),
             _ADDRESS_GATE.get(addresses.get((specialist_id, salon_id)), LegalGate.UNDETERMINED),
         ]
-        if template_id is not None:
+        if template_id is None:
+            answers.append(LegalGate.CLASS_UNCONFIRMED)
+        else:
             qualification = qualifications.get((specialist_id, template_id))
             answers.append(
                 _QUALIFICATION_GATE.get(getattr(qualification, "state", None), LegalGate.UNDETERMINED)
@@ -373,7 +391,7 @@ class SpecialistCandidateSource:
             # без второго чтения и без догадки, какая услуга совпала.
             facts.status_by_service[salon.id] = salon.mapping_status
             # Строка, про которую шов не ответил, закрыта, а не «вне гейта».
-            facts.config_ready_by_service[salon.id] = readiness.get(salon.id, False)
+            facts.config_by_service[salon.id] = readiness.get(salon.id, ConfigGate.UNDETERMINED)
             facts.legal_by_service[salon.id] = legal.get((link.specialist_id, salon.id), LegalGate.UNDETERMINED)
             if salon.template_id is not None:
                 facts.template_by_service[salon.id] = salon.template_id
@@ -470,7 +488,7 @@ class SpecialistCandidateSource:
                 has_offer=has_offer, matched_service_ref=matched_service_id,
             ),
             # CAT-10: готовность ТОЙ строки, чей статус связи стоит выше.
-            config_ready=mapping.config_ready(
+            config_gate=mapping.config_gate(
                 has_offer=has_offer, matched_service_ref=matched_service_id,
             ),
             # CAT-10-ext: юридические условия той же строки для этого мастера.
@@ -655,7 +673,7 @@ class _MappingFacts:
         #: `SalonService.id` → готовность конфигурации (CAT-10), как её
         #: отдал :func:`config_readiness`. Легаси-строки здесь нет: канона у
         #: неё не бывает, значит и Body Care она не подлежит.
-        self.config_ready_by_service: dict[UUID, bool | None] = {}
+        self.config_by_service: dict[UUID, ConfigGate] = {}
         #: `SalonService.id` → юридические условия §7A этой строки для ЭТОГО
         #: мастера (CAT-10-ext), как их отдал :func:`legal_gates`. Легаси-строки
         #: здесь нет: канона у неё не бывает.
@@ -705,7 +723,7 @@ class _MappingFacts:
             key=lambda status: self._RANK[status],
         )
 
-    def config_ready(
+    def config_gate(
         self,
         *,
         has_offer: bool | None = None,
@@ -722,7 +740,7 @@ class _MappingFacts:
         читаются у неё обе, а не у двух разных строк.
         """
         row = self._answering_row(has_offer=has_offer, matched_service_ref=matched_service_ref)
-        return None if row is None else self.config_ready_by_service.get(row)
+        return None if row is None else self.config_by_service.get(row)
 
     def legal_gate(
         self,
@@ -730,7 +748,7 @@ class _MappingFacts:
         has_offer: bool | None = None,
         matched_service_ref: UUID | None = None,
     ) -> LegalGate | None:
-        """Юридические условия §7A той же строки, что отвечает в :meth:`config_ready`."""
+        """Юридические условия §7A той же строки, что отвечает в :meth:`config_gate`."""
         row = self._answering_row(has_offer=has_offer, matched_service_ref=matched_service_ref)
         return None if row is None else self.legal_by_service.get(row)
 
@@ -764,7 +782,7 @@ class _MappingFacts:
     def _gates_rank(self, pk: UUID) -> tuple[int, int]:
         """(конфигурация не закрыта, юридические условия не закрыты)."""
         return (
-            0 if self.config_ready_by_service.get(pk) is False else 1,
+            1 if self.config_by_service.get(pk, ConfigGate.NOT_SUBJECT) in _CONFIG_OPEN else 0,
             0 if self.legal_by_service.get(pk, LegalGate.CLEARED) is not LegalGate.CLEARED else 1,
         )
 

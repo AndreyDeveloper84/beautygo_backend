@@ -47,7 +47,7 @@ from typing import Iterable, Sequence
 from uuid import UUID
 
 from ._evidence import EvidenceItem
-from ._reason_codes import LEGAL_EXCLUSION_CODES, REGISTRY_VERSION, ReasonCode, validate_candidate_codes
+from ._reason_codes import GATE_EXCLUSION_CODES, REGISTRY_VERSION, ReasonCode, validate_candidate_codes
 from ._rotation import rotate_within_tier
 from ._stages import (
     StageOutput,
@@ -407,14 +407,10 @@ def _decision_codes(
         codes.add(ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE)
     if not ordered and any(e.reason_code is ReasonCode.ELIG_EXCLUDED_SAFETY for e in excluded):
         codes.add(ReasonCode.ELIG_EXCLUDED_SAFETY)
-    if not ordered and any(e.reason_code is ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY for e in excluded):
-        # CAT-10: пустая полка объясняет себя — не «связь не проверена»,
-        # а «процедура не готова к скринингу».
-        codes.add(ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY)
     if not ordered:
-        # CAT-10-ext: то же для юридических условий §7A — каким именно
-        # условием закрыта пустая полка.
-        codes.update(e.reason_code for e in excluded if e.reason_code in LEGAL_EXCLUSION_CODES)
+        # Пустая полка объясняет себя: не «связь не проверена», а какой именно
+        # гейт допуска каталога её закрыл — область, конфигурация, юр. условия.
+        codes.update(e.reason_code for e in excluded if e.reason_code in GATE_EXCLUSION_CODES)
     if not ordered and any(e.reason_code is ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD for e in excluded):
         # O-1: «только X», а X среди допустимых нет — сигнал уточнить, а не
         # молча подставить другого.

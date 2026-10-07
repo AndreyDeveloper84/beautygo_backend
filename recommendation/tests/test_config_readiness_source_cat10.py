@@ -30,6 +30,7 @@ from django.utils import timezone
 from recommendation._pipeline import resolve
 from recommendation._reason_codes import ReasonCode
 from recommendation._types import (
+    ConfigGate,
     NeedOrigin,
     NeedSpec,
     RecommendationRequest,
@@ -225,7 +226,7 @@ class TestTheGateReadsTheRealState:
 
         [facts] = _fetch()
 
-        assert facts.config_ready is True
+        assert facts.config_gate is ConfigGate.READY
         assert _shown(_resolve()) == {str(master.user_id)}
 
     def test_an_offer_outside_body_care_passes_whatever_its_neighbours_are(self, tenant, category, curator):
@@ -234,9 +235,11 @@ class TestTheGateReadsTheRealState:
         _offer(tenant, hairdresser, category, curator, name="Стрижка")
         _offer(tenant, wrapper, category, curator, name="Обёртывание", state=INCOMPLETE)
 
-        facts = {str(f.ref.id): f.config_ready for f in _fetch()}
+        facts = {str(f.ref.id): f.config_gate for f in _fetch()}
 
-        assert facts == {str(hairdresser.user_id): None, str(wrapper.user_id): False}
+        assert facts == {
+            str(hairdresser.user_id): ConfigGate.NOT_SUBJECT, str(wrapper.user_id): ConfigGate.NOT_READY,
+        }
         assert _shown(_resolve()) == {str(hairdresser.user_id)}
 
     def test_a_state_that_falls_after_the_mapping_was_verified_closes_the_offer(self, tenant, category, curator):
@@ -261,7 +264,7 @@ class TestTheSubjectIsNotSubstituted:
         [facts] = _fetch(_named("обёртывание водорослями"))
 
         assert facts.matched_service_ref == unready.pk
-        assert facts.config_ready is False
+        assert facts.config_gate is ConfigGate.NOT_READY
         assert _excluded(_resolve(_named("обёртывание водорослями"))) == {
             str(master.user_id): ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY,
         }
@@ -274,7 +277,7 @@ class TestTheSubjectIsNotSubstituted:
         [facts] = _fetch(_named("обёртывание"))
 
         assert facts.matched_service_ref == ready.pk
-        assert facts.config_ready is True
+        assert facts.config_gate is ConfigGate.READY
 
 
 class TestTheNeedIsNotStated:
@@ -285,7 +288,7 @@ class TestTheNeedIsNotStated:
 
         [facts] = _fetch()
 
-        assert facts.config_ready is None
+        assert facts.config_gate is ConfigGate.NOT_SUBJECT
         assert _shown(_resolve()) == {str(master.user_id)}
 
     def test_only_unready_offers_close_the_master(self, tenant, category, curator):
@@ -295,7 +298,7 @@ class TestTheNeedIsNotStated:
 
         [facts] = _fetch()
 
-        assert facts.config_ready is False
+        assert facts.config_gate is ConfigGate.NOT_READY
 
     def test_an_unverified_offer_outside_body_care_does_not_open_the_gate(self, tenant, category, curator):
         """«Рекомендуемая строка» — VERIFIED и готовая. Непроверенная стрижка не
@@ -307,7 +310,7 @@ class TestTheNeedIsNotStated:
 
         [facts] = _fetch()
 
-        assert facts.config_ready is False
+        assert facts.config_gate is ConfigGate.NOT_READY
 
 
 class TestTheReadyRowIsChosenBeforeTheDeeperOne:
@@ -324,12 +327,12 @@ class TestTheReadyRowIsChosenBeforeTheDeeperOne:
         [facts] = _fetch(NeedSpec(origin=NeedOrigin.GOAL, goal_key=goal.key))
 
         assert facts.matched_service_ref == ready.pk
-        assert facts.config_ready is True
+        assert facts.config_gate is ConfigGate.READY
         assert facts.goal_fit_depth == 1
 
 
 class TestTheSeam:
-    """``config_readiness`` — единственное место, где ответ CAT-6 становится ``config_ready``."""
+    """``config_readiness`` — единственное место, где ответ CAT-6 становится ``config_gate``."""
 
     def test_only_not_subject_becomes_none(self):
         """Инвариант: ни одно состояние body-care не даёт ``None`` — по всем ответам функции."""
@@ -340,11 +343,11 @@ class TestTheSeam:
             patch.setattr(recommendation_source, "validation_states", lambda ids: answers)
             readiness = config_readiness(pks.values())
 
-        assert readiness[pks[NOT_SUBJECT]] is None
-        assert readiness[pks[READY_FOR_SCREENING]] is True
+        assert readiness[pks[NOT_SUBJECT]] is ConfigGate.NOT_SUBJECT
+        assert readiness[pks[READY_FOR_SCREENING]] is ConfigGate.READY
         closing = set(VALIDATION_STATES) - {READY_FOR_SCREENING}
         assert closing == {INCOMPLETE, REVIEW_REQUIRED, BLOCKED, RETIRED}
-        assert {readiness[pks[state]] for state in closing} == {False}
+        assert {readiness[pks[state]] for state in closing} == {ConfigGate.NOT_READY}
 
     @pytest.mark.parametrize(
         "answer",
@@ -360,7 +363,7 @@ class TestTheSeam:
 
         readiness = config_readiness([pk])
 
-        assert readiness == {pk: False}
+        assert readiness == {pk: ConfigGate.UNDETERMINED}
         [message] = _errors(source_log)
         assert "config_readiness_undetermined" in message
         assert str(pk) in message
@@ -372,7 +375,7 @@ class TestTheSeam:
 
         readiness = config_readiness([pk])
 
-        assert readiness == {pk: False}
+        assert readiness == {pk: ConfigGate.NOT_READY}
         assert _errors(source_log) == []
 
     def test_a_failing_read_closes_the_rows_instead_of_dropping_the_shelf(self, monkeypatch, source_log):
@@ -384,19 +387,20 @@ class TestTheSeam:
 
         readiness = config_readiness([pk])
 
-        assert readiness == {pk: False}
+        assert readiness == {pk: ConfigGate.UNDETERMINED}
         [message] = _errors(source_log)
         assert "config_readiness_failed" in message
 
     def test_a_body_care_row_the_function_dropped_is_excluded_not_waved_through(
         self, tenant, category, curator, monkeypatch,
     ):
-        """Сквозной: нарушенный контракт функции у настоящей body-care строки — закрытая строка."""
+        """Сквозной: нарушенный контракт функции у настоящей body-care строки — закрытая строка,
+        и причина названа дефектом чтения, а не «конфигурация не готова»."""
         master = _master(tenant, "12")
         _offer(tenant, master, category, curator, name="Обёртывание", state=READY_FOR_SCREENING)
         monkeypatch.setattr(recommendation_source, "validation_states", lambda ids: {})
 
-        assert _excluded(_resolve()) == {str(master.user_id): ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY}
+        assert _excluded(_resolve()) == {str(master.user_id): ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED}
 
     def test_the_source_uses_the_cat6_function_itself(self):
         """Один источник состояния: шов читает функцию CAT-6, а не свою копию лестницы."""
