@@ -26,11 +26,16 @@ def own_salon_ids(user) -> tuple[UUID, ...]:
     )
 
 
+def _fold_name(text: str) -> str:
+    """Без регистра и без различия «ё»/«е»: «Алёна» в памяти и «Алена» в каталоге — одно имя."""
+    return text.strip().casefold().replace("ё", "е")
+
+
 def masters_matching_name(stems, tenant_ids, *, viewer=None) -> tuple[UUID, ...]:
     """Мастера салонов ``tenant_ids``, чьё имя отвечает ВСЕМ основам — DRF-2855.
 
     Основа отвечает, когда входит в слово ``display_name`` (без учёта
-    регистра): так же ищет мастера по имени бот, и клиент, спросивший «к
+    регистра и «ё»/«е»): так же ищет мастера по имени бот, и клиент, спросивший «к
     Анне», получает тех же людей. Морфологии здесь нет — основы приходят
     готовыми.
 
@@ -43,7 +48,7 @@ def masters_matching_name(stems, tenant_ids, *, viewer=None) -> tuple[UUID, ...]
     from users.models import SpecialistProfile
     from users.sellable import demo_visibility_q, sellable_q
 
-    wanted = [stem for stem in stems if stem]
+    wanted = [folded for folded in map(_fold_name, stems) if folded]
     if not wanted or not tenant_ids:
         return ()
     rows = (
@@ -54,5 +59,5 @@ def masters_matching_name(stems, tenant_ids, *, viewer=None) -> tuple[UUID, ...]
     )
     return tuple(
         user_id for user_id, display_name in rows
-        if all(any(stem in word for word in (display_name or "").casefold().split()) for stem in wanted)
+        if all(any(stem in word for word in _fold_name(display_name or "").split()) for stem in wanted)
     )

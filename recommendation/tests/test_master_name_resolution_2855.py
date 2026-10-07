@@ -172,6 +172,16 @@ class TestExactlyOne:
         assert data["preference_resolution"] == [{"kind": "master", "status": "resolved", "matches": 1}]
         assert _is_raised(data, petrova)
 
+    @pytest.mark.parametrize(("stored", "stem"), [("Алёна", "ален"), ("Алена", "алён"), ("АЛЁНА", "Алён")])
+    def test_yo_and_ye_are_one_letter_on_both_sides(self, salons, stored, stem):
+        alena = _master(salons["a"], stored)
+        _master(salons["a"], "Мария")
+
+        data = _data(preferences=[_by_name("Алёне", stem)])
+
+        assert data["preference_resolution"][0]["status"] == "resolved"
+        assert _is_raised(data, alena)
+
     def test_the_case_of_the_stored_name_does_not_matter(self, salons):
         anna = _master(salons["a"], "АННА")
         _master(salons["a"], "Мария")
@@ -255,6 +265,7 @@ class TestWhereTheMemoryWasWritten:
 
     @pytest.mark.parametrize("source", ["null", "garbage", "foreign"])
     def test_memory_of_unknown_or_foreign_origin_is_not_even_looked_up(self, salons, source):
+        """Одна Анна в своих салонах есть — и всё равно не resolved: имя не искали."""
         _master(salons["a"], "Анна")
         _master(salons["a"], "Мария")
         _master(salons["c"], "Анна")
@@ -262,7 +273,7 @@ class TestWhereTheMemoryWasWritten:
 
         data = _data(preferences=[_by_name("Анна", "анн", source_tenant_id=value)])
 
-        assert data["preference_resolution"] == []
+        assert data["preference_resolution"] == [{"kind": "master", "status": "not_applicable", "matches": 0}]
         assert _nobody_is_raised(data)
 
 
@@ -273,7 +284,7 @@ class TestOnlyInOwnSalons:
 
         data = _data(scope={"mode": "MARKETPLACE"}, preferences=[_by_name("Анна-Редкоеимя", "анн")])
 
-        assert data["preference_resolution"] == []
+        assert data["preference_resolution"] == [{"kind": "master", "status": "not_applicable", "matches": 0}]
         assert _nobody_is_raised(data)
         warnings = [r.getMessage() for r in resolve_log.records if r.levelno == logging.WARNING]
         assert any("name_dropped" in message for message in warnings)
@@ -371,12 +382,21 @@ class TestTheContract:
         _master(salons["b"], "Мария Петрова")
 
         data = _data(preferences=[
-            _by_name("Ольга", "ольг"), _by_name("Мария", "мари"), _by_name("Анна", "анн"),
+            _by_name("Ольга", "ольг"), _by_name("Мария", "мари"),
+            _by_name("Анна", "анн", source_tenant_id=None), _by_name("Анна", "анн"),
         ])
 
         assert [(e["status"], e["matches"]) for e in data["preference_resolution"]] == [
-            ("not_found", 0), ("ambiguous", 2), ("resolved", 1),
+            ("not_found", 0), ("ambiguous", 2), ("not_applicable", 0), ("resolved", 1),
         ]
+
+    def test_an_explicit_strength_travels_with_a_name(self, salons):
+        anna = _master(salons["a"], "Анна")
+        _master(salons["a"], "Мария")
+
+        data = _data(preferences=[_by_name("Анна", "анн", strength="soft", source_tenant_id=str(salons["a"].id))])
+
+        assert _is_raised(data, anna)
 
     def test_the_field_is_part_of_the_response_schema_and_the_version_moved(self):
         payload = decision_to_payload(resolve(make_request(), source=StaticSource([make_facts()])))

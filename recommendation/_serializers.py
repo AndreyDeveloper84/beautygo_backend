@@ -171,6 +171,8 @@ class NamedMaster:
     stems: tuple[str, ...]
     #: Салон, где память записана; ``None`` — во всех своих салонах.
     tenant_ref: UUID | None = None
+    #: ``False`` — происхождение памяти неизвестно: имя не ищется вовсе.
+    origin_known: bool = True
 
 
 #: Виды, у которых память — отношение клиента с одним салоном.
@@ -226,21 +228,17 @@ def build_preferences(items) -> tuple[Preference, ...]:
 
 
 def named_masters(items) -> tuple[NamedMaster, ...]:
-    """Мастера, названные по имени, — в порядке запроса. Память без известного салона не едет."""
+    """Мастера, названные по имени, — ВСЕ и в порядке запроса: на каждое имя будет ответ."""
     out: list[NamedMaster] = []
     for item in items or ():
         if "name" not in item:
             continue
         tenant_ref = _memory_tenant_ref(item)
+        stems = tuple(s.strip() for s in item["name_stems"])
         if tenant_ref is _UNSCOPED:
-            logger.warning(
-                "recommendation.preference.dropped kind=master — память по имени без известного "
-                "салона происхождения не участвует (O-1b)"
-            )
-            continue
-        out.append(NamedMaster(
-            stems=tuple(s.strip().casefold() for s in item["name_stems"]), tenant_ref=tenant_ref,
-        ))
+            out.append(NamedMaster(stems=stems, origin_known=False))
+        else:
+            out.append(NamedMaster(stems=stems, tenant_ref=tenant_ref))
     return tuple(out)
 
 
@@ -363,7 +361,7 @@ class _PreferenceResolutionSerializer(serializers.Serializer):
     """Чем кончилось разрешение имени. Ни имени, ни id — только исход и число."""
 
     kind = serializers.ChoiceField(choices=[PreferenceKind.MASTER.value])
-    status = serializers.ChoiceField(choices=["resolved", "not_found", "ambiguous"])
+    status = serializers.ChoiceField(choices=["resolved", "not_found", "ambiguous", "not_applicable"])
     matches = serializers.IntegerField(min_value=0)
 
 
@@ -388,7 +386,7 @@ class ResolveResponseSerializer(serializers.Serializer):
     candidate_count = serializers.IntegerField(min_value=0)
     # O2 (§9): до калибровки по тени — всегда null.
     separation_score = serializers.FloatField(allow_null=True, min_value=0.0, max_value=1.0)
-    # DRF-2855 (1.2.0): по одному элементу на мастера, названного по имени, в порядке запроса.
+    # DRF-2855 (1.2.0): по одному элементу на КАЖДОЕ присланное имя, в порядке запроса.
     preference_resolution = _PreferenceResolutionSerializer(many=True)
 
 

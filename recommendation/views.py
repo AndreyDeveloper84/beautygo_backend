@@ -127,13 +127,20 @@ def _within_own_salons(preferences: tuple, own_salons: tuple) -> tuple:
     return kept
 
 
+#: Имя не искали: режим не «свои салоны» либо происхождение памяти не позволяет.
+_NAME_NOT_APPLICABLE = {"kind": PreferenceKind.MASTER.value, "status": "not_applicable", "matches": 0}
+
+
 def _resolve_named_masters(named: tuple, own_salons: tuple, viewer) -> tuple[tuple, list[dict]]:
     """Имя мастера из памяти → предпочтение, только среди своих салонов — DRF-2855.
 
     Ровно одно совпадение — обычное мягкое предпочтение из памяти по этому
     мастеру. Ноль или несколько — не применяется: произвольного мастера не
-    выбираем, а ответ несёт признак, чтобы бот уточнил у клиента. Ни имя,
-    ни id в журнал и в ответ не попадают — только исход и число.
+    выбираем, а ответ несёт признак, чтобы бот уточнил у клиента. Имя, чья
+    память записана неизвестно где или в салоне, который клиенту не свой,
+    не ищется вовсе (``not_applicable``). На каждое имя — один элемент
+    ответа, в порядке запроса. Ни имя, ни id в журнал и в ответ не
+    попадают — только исход и число.
     """
     from users.own_salons import masters_matching_name
 
@@ -141,11 +148,12 @@ def _resolve_named_masters(named: tuple, own_salons: tuple, viewer) -> tuple[tup
     preferences: list[Preference] = []
     resolution: list[dict] = []
     for item in named:
-        if item.tenant_ref is not None and item.tenant_ref not in own:
+        if not item.origin_known or (item.tenant_ref is not None and item.tenant_ref not in own):
             logger.warning(
-                "recommendation.preference.foreign_salon_dropped count=1 — салон происхождения "
-                "памяти по имени не входит в свои салоны клиента"
+                "recommendation.preference.name_not_applicable — память по имени записана неизвестно "
+                "где или в салоне, который клиенту не свой"
             )
+            resolution.append(dict(_NAME_NOT_APPLICABLE))
             continue
         salons = own_salons if item.tenant_ref is None else (item.tenant_ref,)
         matches = masters_matching_name(item.stems, salons, viewer=viewer)
@@ -225,6 +233,7 @@ class RecommendationResolveView(APIView):
                     "только в режиме «свои салоны»",
                     len(named),
                 )
+                preference_resolution = [dict(_NAME_NOT_APPLICABLE) for _ in named]
 
         decision = resolve(
             RecommendationRequest(
