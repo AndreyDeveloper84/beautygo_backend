@@ -747,7 +747,7 @@ class _MappingFacts:
         И прошедшая юридические условия; одной достаточно. Условия
         проверяются у одной строки: готовая без лицензии и лицензированная
         неготовая вместе мастера не открывают. Если рекомендуемой нет,
-        отвечает первая из лучших по ``_row_rank`` — и называет причину.
+        отвечает лучшая по ``_gates_rank`` — и называет причину.
         """
         if not self.status_by_service:
             return None
@@ -756,7 +756,7 @@ class _MappingFacts:
             pk for pk, value in self.status_by_service.items()
             if self._RANK[self._as_status(value)] == best
         ]
-        return max(deciding, key=lambda pk: (self._is_recommendable(pk), *self._gates_rank(pk)))
+        return max(deciding, key=self._gates_rank)
 
     def _gates_rank(self, pk: UUID) -> tuple[int, int]:
         """(конфигурация не закрыта, юридические условия не закрыты)."""
@@ -764,9 +764,6 @@ class _MappingFacts:
             0 if self.config_ready_by_service.get(pk) is False else 1,
             0 if self.legal_by_service.get(pk, LegalGate.CLEARED) is not LegalGate.CLEARED else 1,
         )
-
-    def _is_recommendable(self, pk: UUID) -> bool:
-        return self._gates_rank(pk) == (1, 1)
 
     def _row_rank(self, service) -> tuple[int, int, int]:
         """(статус связи, готовность конфигурации, юридические условия) — ключ выбора строки.

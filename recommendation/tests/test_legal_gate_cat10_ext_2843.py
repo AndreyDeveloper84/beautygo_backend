@@ -370,6 +370,17 @@ class TestOneRowAnswersForBothGates:
 
         assert admitted is False
 
+    def test_both_answers_come_from_the_same_row(self):
+        """Какая бы строка ни отвечала, готовность и юридические условия — её собственные."""
+        ready_unlicensed, licensed_unready = uuid.uuid4(), uuid.uuid4()
+        rows = {
+            ready_unlicensed: (True, LegalGate.LICENSE_NOT_VERIFIED),
+            licensed_unready: (False, LegalGate.CLEARED),
+        }
+        mapping = self._facts(rows)
+
+        assert (mapping.config_ready(), mapping.legal_gate()) in set(rows.values())
+
     def test_positive_control_one_fully_open_row_among_closed_ones_opens(self):
         open_row = uuid.uuid4()
         mapping = self._facts({
@@ -473,6 +484,58 @@ class TestTheSeam:
         [message] = _errors(source_log)
         assert "legal_gates_undetermined" in message
         assert f"{master}:{offer}" in message
+
+    @pytest.mark.parametrize(
+        ("silent", "expected"),
+        [
+            pytest.param("licenses", LegalGate.UNDETERMINED, id="only-the-licence-is-missing"),
+            pytest.param("addresses", LegalGate.UNDETERMINED, id="only-the-address-is-missing"),
+            pytest.param("qualifications", LegalGate.UNDETERMINED, id="only-the-qualification-is-missing"),
+            pytest.param(None, LegalGate.CLEARED, id="control-nothing-is-missing"),
+        ],
+    )
+    def test_each_read_closes_the_row_on_its_own(self, monkeypatch, silent, expected):
+        """Два чтения ответили «открыто», третье промолчало: молчание одного закрывает."""
+        master, offer, canon = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        answers = {
+            "licenses": {offer: "verified"},
+            "addresses": {(master, offer): "verified"},
+            "qualifications": {(master, canon): QualificationState("verified")},
+        }
+        answers.pop(silent, None)
+        self._patch(monkeypatch, **answers)
+
+        assert legal_gates([(master, offer, canon)]) == {(master, offer): expected}
+
+    @pytest.mark.parametrize(
+        ("read", "answer", "expected"),
+        [
+            ("licenses", "class_unconfirmed", LegalGate.CLASS_UNCONFIRMED),
+            ("licenses", "not_verified", LegalGate.LICENSE_NOT_VERIFIED),
+            ("licenses", "scope_mismatch", LegalGate.LICENSE_SCOPE_MISMATCH),
+            ("licenses", "approved", LegalGate.UNDETERMINED),
+            ("addresses", "class_unconfirmed", LegalGate.CLASS_UNCONFIRMED),
+            ("addresses", "location_unknown", LegalGate.LOCATION_UNKNOWN),
+            ("addresses", "address_mismatch", LegalGate.ADDRESS_MISMATCH),
+            ("addresses", "no_covering_license", LegalGate.UNDETERMINED),
+            ("qualifications", "requirement_unconfirmed", LegalGate.QUALIFICATION_REQUIREMENT_UNCONFIRMED),
+            ("qualifications", "not_verified", LegalGate.QUALIFICATION_NOT_VERIFIED),
+            ("qualifications", "approved", LegalGate.UNDETERMINED),
+        ],
+    )
+    def test_each_refusal_of_one_read_closes_while_the_other_two_are_open(self, monkeypatch, read, answer, expected):
+        """Каждый отказ каждой функции — отдельно: два других чтения при этом открыты."""
+        master, offer, canon = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        answers = {
+            "licenses": {offer: "verified"},
+            "addresses": {(master, offer): "verified"},
+            "qualifications": {(master, canon): QualificationState("verified")},
+        }
+        key = next(iter(answers[read]))
+        answers[read] = {key: QualificationState(answer) if read == "qualifications" else answer}
+        self._patch(monkeypatch, **answers)
+
+        assert legal_gates([(master, offer, canon)]) == {(master, offer): expected}
 
     def test_a_known_refusal_is_not_an_error(self, monkeypatch, source_log):
         master, offer, canon = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
