@@ -755,6 +755,63 @@ class ServiceTemplate(models.Model):
     SCOPE_BY_FAMILY_RULE = "family_implies_body_care"
     SCOPE_BY_FAMILY_RULE_VERSION = "1"
 
+    #: Поля подтверждения флага проверки здоровья у канона.
+    _HEALTH_FLAG_CONFIRMATION_FIELDS = (
+        "health_check_confirmed_by_id", "health_check_confirmed_rule",
+        "health_check_rule_version", "health_check_confirmed_at",
+    )
+
+    def health_flag_changed_under_a_standing_confirmation(self) -> bool:
+        """Флаг проверки здоровья сменили, а подтверждение осталось прежним.
+
+        Просматривают конкретное значение флага. Сменить «нужна» на «не
+        нужна» и оставить происхождение ``confirmed`` — значит выдать новое
+        значение за просмотренное; а подтверждённое «не нужна» канона —
+        основание, на котором правило владельца (S2) откроет запись. Тот же
+        род, что смена канона под прежним подтверждением связи (DRF-2883) и
+        смена ответа салона под прежним подтверждением.
+
+        ``False``, если в этом же сохранении пришло новое подтверждение.
+        """
+        if self._state.adding or self.health_check_origin != self.HealthCheckOrigin.CONFIRMED:
+            return False
+        stored = (
+            type(self).objects.filter(pk=self.pk)
+            .values("requires_health_check", "health_check_origin", *self._HEALTH_FLAG_CONFIRMATION_FIELDS)
+            .first()
+        )
+        if stored is None or stored["health_check_origin"] != self.HealthCheckOrigin.CONFIRMED:
+            return False
+        if stored["requires_health_check"] == self.requires_health_check:
+            return False
+        return all(
+            SalonService._same_confirmation_value(stored[name], getattr(self, name))
+            for name in self._HEALTH_FLAG_CONFIRMATION_FIELDS
+        )
+
+    def _drop_a_health_flag_confirmation_given_for_another_value(self, save_kwargs: dict) -> None:
+        """Просмотр прежнего значения флага на новое не переносится.
+
+        Флаг возвращается в черновые (``inferred``); автор, правило, дата и
+        основание снимаются. ``QuerySet.update()`` сюда не заходит —
+        известный предел правил уровня модели.
+        """
+        if not self.health_flag_changed_under_a_standing_confirmation():
+            return
+        self.health_check_origin = self.HealthCheckOrigin.INFERRED
+        self.health_check_confirmed_by = None
+        self.health_check_confirmed_rule = ""
+        self.health_check_rule_version = ""
+        self.health_check_confirmed_at = None
+        self.health_check_source_ref = ""
+        update_fields = save_kwargs.get("update_fields")
+        if update_fields is not None:
+            save_kwargs["update_fields"] = [
+                *update_fields,
+                "health_check_origin", "health_check_confirmed_by", "health_check_confirmed_rule",
+                "health_check_rule_version", "health_check_confirmed_at", "health_check_source_ref",
+            ]
+
     def _scope_follows_family(self, save_kwargs: dict) -> None:
         """Назначенное семейство утверждает область — записать её правилом.
 
@@ -808,6 +865,7 @@ class ServiceTemplate(models.Model):
         if self.canonical_code == "":
             self.canonical_code = None
         self._scope_follows_family(kwargs)
+        self._drop_a_health_flag_confirmation_given_for_another_value(kwargs)
         changes = self._significant_changes()
         adding = self._state.adding
         # DRF-2741: откуда процедура уходит. Противопоказание, названное

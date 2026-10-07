@@ -18,6 +18,8 @@
 * вердикт гейта записи и его основание не меняются; единый вызов у ребра
   добавляет к ним один признак — подтверждено ли основание;
 * сидер, копирующий флаг канона, ответом салона не становится;
+* то же у флага канона: просмотр относится к значению флага, и переворот
+  флага под прежним просмотром возвращает его в черновые;
 * перепись читает новое поле без правки; указатель на подтвердившего решён
   переписью удаления.
 """
@@ -443,6 +445,70 @@ def test_one_call_says_whether_the_basis_of_the_verdict_is_confirmed(salon, cate
         "канон выведен не нужна, салон подтверждённо не нужна": (False, "salon", True),
         "канон просмотрен не нужна, салон без подтверждения нужна": (True, "salon", False),
     }
+
+
+# ─── то же у флага канона ────────────────────────────────────────────────────
+
+
+def _canon_row(canon) -> dict:
+    return ServiceTemplate.objects.filter(pk=canon.pk).values(
+        "requires_health_check", "health_check_origin", "health_check_confirmed_by_id",
+        "health_check_confirmed_at", "health_check_source_ref",
+    ).get()
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_a_canon_flag_flipped_under_its_review_goes_back_to_draft(category, curator, flag) -> None:
+    """Просмотренное «нужна», перевёрнутое в «не нужна», открыло бы запись чужим просмотром."""
+    canon = ServiceTemplate.objects.get(pk=_canon(category, curator, "Канон", flag=flag, confirmed=True).pk)
+
+    canon.requires_health_check = not flag
+    canon.save()
+
+    assert _canon_row(canon) == {
+        "requires_health_check": not flag,
+        "health_check_origin": ServiceTemplate.HealthCheckOrigin.INFERRED,
+        "health_check_confirmed_by_id": None,
+        "health_check_confirmed_at": None,
+        "health_check_source_ref": "",
+    }
+
+
+def test_a_canon_flag_flipped_with_a_fresh_review_stays_confirmed(category, curator) -> None:
+    canon = ServiceTemplate.objects.get(pk=_canon(category, curator, "Канон", flag=True, confirmed=True).pk)
+
+    canon.requires_health_check = False
+    canon.health_check_confirmed_at = timezone.now() + timedelta(days=1)
+    canon.health_check_source_ref = "повторный разбор владельца"
+    canon.save()
+
+    row = _canon_row(canon)
+    assert (row["requires_health_check"], row["health_check_origin"]) == (
+        False, ServiceTemplate.HealthCheckOrigin.CONFIRMED,
+    )
+
+
+def test_other_edits_of_a_canon_leave_its_review_alone(category, curator) -> None:
+    canon = ServiceTemplate.objects.get(pk=_canon(category, curator, "Канон", flag=True, confirmed=True).pk)
+    before = _canon_row(canon)
+
+    canon.name_short = "Канон, короче"
+    canon.sort_order = 7
+    canon.save()
+
+    assert _canon_row(canon) == before
+
+
+def test_a_draft_canon_flag_may_be_flipped_freely(category, curator) -> None:
+    canon = _canon(category, curator, "Черновой", flag=True, confirmed=False)
+
+    canon.requires_health_check = False
+    canon.save()
+
+    row = _canon_row(canon)
+    assert (row["requires_health_check"], row["health_check_origin"]) == (
+        False, ServiceTemplate.HealthCheckOrigin.INFERRED,
+    )
 
 
 # ─── сидер, перепись, удаление ───────────────────────────────────────────────
