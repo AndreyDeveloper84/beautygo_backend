@@ -23,7 +23,7 @@ from enum import StrEnum
 #: Версия реестра. Любое добавление, удаление или изменение смысла кода —
 #: новая версия; она уезжает в `policy_versions` ответа, иначе решение
 #: невоспроизводимо задним числом (контракт §6.3).
-REGISTRY_VERSION = "1.4.0"
+REGISTRY_VERSION = "1.5.0"
 
 
 class ReasonCode(StrEnum):
@@ -55,14 +55,28 @@ class ReasonCode(StrEnum):
     # процедуры; смешение спрятало бы C1 в «маппинг не проверен».
     ELIG_EXCLUDED_CONFIG_NOT_READY = "ELIG_EXCLUDED_CONFIG_NOT_READY"
     # CAT-10-ext (1.4.0) — юридические условия §7A не сошлись. Четыре кода
-    # повторяют имена отказов §21 контракта Body Care; пятый — всё, что не
-    # подтверждено (класс, место мастера, требование к квалификации) или на
-    # что источник не ответил: закрыто, но не «нарушение».
+    # повторяют имена отказов §21 контракта Body Care.
     ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED = "ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED"
     ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH = "ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH"
     ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH = "ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH"
     ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED = "ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED"
+    # УСТАРЕЛ в 1.5.0 и больше НЕ выдаётся: называл одним именем четыре
+    # разные причины. Оставлен в реестре ради непрерывности аудита — решения,
+    # записанные под 1.4.0, могли его нести, и они должны читаться.
     ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED = "ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED"
+    # 1.5.0 — причины не сливаются (решение владельца 07.10): у каждой
+    # несошедшейся проверки свой код.
+    #   область классификации канона неизвестна (или канона нет) — П2;
+    ELIG_EXCLUDED_CATALOG_UNCLASSIFIED = "ELIG_EXCLUDED_CATALOG_UNCLASSIFIED"
+    #   юридический класс канона не подтверждён человеком — П4;
+    ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED = "ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED"
+    #   место работы мастера неизвестно или не подтверждено — П6;
+    ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN = "ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN"
+    #   требование к квалификации клиникой не подтверждено — П7;
+    ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED = "ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED"
+    #   источник не смог ответить (сбой чтения, нет ключа, незнакомое
+    #   значение): дефект чтения, а не незаполненные данные.
+    ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED = "ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED"
     # O-1 (1.2.0) — «только X» в текущем запросе: кандидат не X.
     ELIG_EXCLUDED_PREFERENCE_HARD = "ELIG_EXCLUDED_PREFERENCE_HARD"
 
@@ -130,17 +144,28 @@ EXCLUSION_CODES = frozenset({
     ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
     ReasonCode.ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH,
     ReasonCode.ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED,
-    ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED,
+    ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED,  # устарел, не выдаётся — см. выше
+    ReasonCode.ELIG_EXCLUDED_CATALOG_UNCLASSIFIED,
+    ReasonCode.ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED,
+    ReasonCode.ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN,
+    ReasonCode.ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED,
+    ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED,
     ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD,
 })
 
-#: Исключения по юридическим условиям §7A (CAT-10-ext).
-LEGAL_EXCLUSION_CODES = frozenset({
+#: Исключения гейтов допуска каталога — область, конфигурация, юридические
+#: условия (проверки П2–П7). Пустая полка называет их в сводке решения.
+GATE_EXCLUSION_CODES = frozenset({
+    ReasonCode.ELIG_EXCLUDED_CATALOG_UNCLASSIFIED,
+    ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY,
+    ReasonCode.ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED,
     ReasonCode.ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED,
     ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
+    ReasonCode.ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN,
     ReasonCode.ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH,
+    ReasonCode.ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED,
     ReasonCode.ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED,
-    ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED,
+    ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED,
 })
 
 #: Семейство `MATCH_`, кроме `MATCH_UNDETERMINED`: «нужда чем-то закрыта».
