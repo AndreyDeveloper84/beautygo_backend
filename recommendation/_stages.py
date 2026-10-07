@@ -377,6 +377,15 @@ def apply_eligibility(
                 ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE)
             )
             continue
+        # DRF-2793: вторая половина той же проверки «канон + связь». Связь
+        # проверена, но канон выведен из оборота — вывод канона статус связи
+        # не трогает, поэтому читается здесь, на каждом решении. Раньше области
+        # и готовности: что именно не готово у выведенного канона, уже неважно.
+        if facts.canon_retired is True:
+            excluded.append(
+                ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_CANON_RETIRED)
+            )
+            continue
         # CAT-10 (чинит C1): связь VERIFIED ещё не значит, что body-care
         # процедуру можно рекомендовать — её конфигурация должна быть готова
         # к скринингу (CAT-6 READY). Гейт на ЧТЕНИИ: состояние может упасть

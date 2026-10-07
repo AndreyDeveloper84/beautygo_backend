@@ -99,7 +99,7 @@ from services.body_care_validation import NOT_SUBJECT, READY_FOR_SCREENING, VALI
 from services.capabilities import template_ids_helping_goal
 from services.catalog_reads import catalog_services_for, catalog_services_prefetch
 from services.offer_sellable import sellable_offer_q
-from services.models import DraftSalonService, SpecialistService
+from services.models import DraftSalonService, ServiceTemplate, SpecialistService
 from users.models import SpecialistProfile
 
 logger = logging.getLogger(__name__)
@@ -176,6 +176,8 @@ def config_readiness(salon_service_ids) -> dict[UUID, ConfigGate]:
         )
     return out
 
+
+_RETIRED = ServiceTemplate.Lifecycle.RETIRED
 
 #: Значения гейта конфигурации, с которыми строка открыта (для выбора строки).
 _CONFIG_OPEN = frozenset({ConfigGate.NOT_SUBJECT, ConfigGate.READY})
@@ -390,6 +392,11 @@ class SpecialistCandidateSource:
             # нужде вернёт этот же ключ, и статус найдётся по нему —
             # без второго чтения и без догадки, какая услуга совпала.
             facts.status_by_service[salon.id] = salon.mapping_status
+            # DRF-2793: статус самого канона — из уже загруженной строки, без
+            # запроса и не через CAT-6: это факт канона, а не конфигурации, и
+            # у канона вне Body Care его больше никто не читает.
+            if salon.template_id is not None and salon.template.lifecycle == _RETIRED:
+                facts.retired_services.add(salon.id)
             # Строка, про которую шов не ответил, закрыта, а не «вне гейта».
             facts.config_by_service[salon.id] = readiness.get(salon.id, ConfigGate.UNDETERMINED)
             facts.legal_by_service[salon.id] = legal.get((link.specialist_id, salon.id), LegalGate.UNDETERMINED)
@@ -488,6 +495,10 @@ class SpecialistCandidateSource:
                 has_offer=has_offer, matched_service_ref=matched_service_id,
             ),
             # CAT-10: готовность ТОЙ строки, чей статус связи стоит выше.
+            # DRF-2793: выведен ли канон той же строки.
+            canon_retired=mapping.canon_retired(
+                has_offer=has_offer, matched_service_ref=matched_service_id,
+            ),
             config_gate=mapping.config_gate(
                 has_offer=has_offer, matched_service_ref=matched_service_id,
             ),
@@ -674,6 +685,8 @@ class _MappingFacts:
         #: отдал :func:`config_readiness`. Легаси-строки здесь нет: канона у
         #: неё не бывает, значит и Body Care она не подлежит.
         self.config_by_service: dict[UUID, ConfigGate] = {}
+        #: `SalonService.id` строк, чей канон выведен из оборота (DRF-2793).
+        self.retired_services: set[UUID] = set()
         #: `SalonService.id` → юридические условия §7A этой строки для ЭТОГО
         #: мастера (CAT-10-ext), как их отдал :func:`legal_gates`. Легаси-строки
         #: здесь нет: канона у неё не бывает.
@@ -742,6 +755,22 @@ class _MappingFacts:
         row = self._answering_row(has_offer=has_offer, matched_service_ref=matched_service_ref)
         return None if row is None else self.config_by_service.get(row)
 
+    def canon_retired(
+        self,
+        *,
+        has_offer: bool | None = None,
+        matched_service_ref: UUID | None = None,
+    ) -> bool | None:
+        """Выведен ли канон той же строки, что отвечает в :meth:`config_gate` (DRF-2793).
+
+        ``None`` — отвечающей строки нет или у неё нет канонической связи
+        (легаси): статуса канона у такой строки не бывает.
+        """
+        row = self._answering_row(has_offer=has_offer, matched_service_ref=matched_service_ref)
+        if row is None or row not in self.status_by_service:
+            return None
+        return row in self.retired_services
+
     def legal_gate(
         self,
         *,
@@ -765,9 +794,9 @@ class _MappingFacts:
 
         Смотрятся только строки с лучшим статусом связи (те, что и решают
         допуск). Среди них берётся рекомендуемая — готовая по конфигурации
-        И прошедшая юридические условия; одной достаточно. Условия
-        проверяются у одной строки: готовая без лицензии и лицензированная
-        неготовая вместе мастера не открывают. Если рекомендуемой нет,
+        И прошедшая юридические условия, на живом каноне; одной достаточно.
+        Условия проверяются у одной строки: готовая без лицензии и
+        лицензированная неготовая вместе мастера не открывают. Если рекомендуемой нет,
         отвечает лучшая по ``_gates_rank`` — и называет причину.
         """
         if not self.status_by_service:
@@ -779,15 +808,16 @@ class _MappingFacts:
         ]
         return max(deciding, key=self._gates_rank)
 
-    def _gates_rank(self, pk: UUID) -> tuple[int, int]:
-        """(конфигурация не закрыта, юридические условия не закрыты)."""
+    def _gates_rank(self, pk: UUID) -> tuple[int, int, int]:
+        """(канон не выведен, конфигурация не закрыта, юридические условия не закрыты)."""
         return (
+            0 if pk in self.retired_services else 1,
             1 if self.config_by_service.get(pk, ConfigGate.NOT_SUBJECT) in _CONFIG_OPEN else 0,
             0 if self.legal_by_service.get(pk, LegalGate.CLEARED) is not LegalGate.CLEARED else 1,
         )
 
-    def _row_rank(self, service) -> tuple[int, int, int]:
-        """(статус связи, готовность конфигурации, юридические условия) — ключ выбора строки.
+    def _row_rank(self, service) -> tuple[int, int, int, int]:
+        """(статус связи, канон жив, готовность конфигурации, юридические условия) — ключ выбора строки.
 
         Оба гейта стоят сразу за статусом: закрытая строка выбила бы
         мастера на S1, когда у него есть открытая с тем же совпадением.
