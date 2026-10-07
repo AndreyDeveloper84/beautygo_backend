@@ -23,7 +23,7 @@ from enum import StrEnum
 #: Версия реестра. Любое добавление, удаление или изменение смысла кода —
 #: новая версия; она уезжает в `policy_versions` ответа, иначе решение
 #: невоспроизводимо задним числом (контракт §6.3).
-REGISTRY_VERSION = "1.3.0"
+REGISTRY_VERSION = "1.4.0"
 
 
 class ReasonCode(StrEnum):
@@ -54,6 +54,15 @@ class ReasonCode(StrEnum):
     # NOT_RECOMMENDABLE: тот — про связь с каноном, этот — про готовность
     # процедуры; смешение спрятало бы C1 в «маппинг не проверен».
     ELIG_EXCLUDED_CONFIG_NOT_READY = "ELIG_EXCLUDED_CONFIG_NOT_READY"
+    # CAT-10-ext (1.4.0) — юридические условия §7A не сошлись. Четыре кода
+    # повторяют имена отказов §21 контракта Body Care; пятый — всё, что не
+    # подтверждено (класс, место мастера, требование к квалификации) или на
+    # что источник не ответил: закрыто, но не «нарушение».
+    ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED = "ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED"
+    ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH = "ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH"
+    ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH = "ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH"
+    ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED = "ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED"
+    ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED = "ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED"
     # O-1 (1.2.0) — «только X» в текущем запросе: кандидат не X.
     ELIG_EXCLUDED_PREFERENCE_HARD = "ELIG_EXCLUDED_PREFERENCE_HARD"
 
@@ -117,7 +126,21 @@ EXCLUSION_CODES = frozenset({
     ReasonCode.ELIG_EXCLUDED_BUDGET,
     ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE,
     ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY,
+    ReasonCode.ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED,
+    ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
+    ReasonCode.ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH,
+    ReasonCode.ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED,
+    ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED,
     ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD,
+})
+
+#: Исключения по юридическим условиям §7A (CAT-10-ext).
+LEGAL_EXCLUSION_CODES = frozenset({
+    ReasonCode.ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED,
+    ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
+    ReasonCode.ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH,
+    ReasonCode.ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED,
+    ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED,
 })
 
 #: Семейство `MATCH_`, кроме `MATCH_UNDETERMINED`: «нужда чем-то закрыта».

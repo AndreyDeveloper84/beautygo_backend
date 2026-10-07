@@ -99,6 +99,29 @@ class ConstraintKind(StrEnum):
     FLEXIBLE = "FLEXIBLE"
 
 
+class LegalGate(StrEnum):
+    """Юридические условия §7A для ТОЙ строки и ТОГО мастера — CAT-10-ext (DRF-2843).
+
+    Читается по подтверждённому классу канона, а не по семейству: медицинский
+    класс вне Body Care (пилинги лица) состояние CAT-6 не видит
+    (``not_subject``), и закрывает его этот гейт. Порядок проверки — лицензия
+    салона, адрес мастера, квалификация мастера; значение называет первое
+    несошедшееся условие. Открывает только ``CLEARED``.
+    """
+
+    CLEARED = "CLEARED"
+    CLASS_UNCONFIRMED = "CLASS_UNCONFIRMED"
+    LICENSE_NOT_VERIFIED = "LICENSE_NOT_VERIFIED"
+    LICENSE_SCOPE_MISMATCH = "LICENSE_SCOPE_MISMATCH"
+    LOCATION_UNKNOWN = "LOCATION_UNKNOWN"
+    ADDRESS_MISMATCH = "ADDRESS_MISMATCH"
+    QUALIFICATION_REQUIREMENT_UNCONFIRMED = "QUALIFICATION_REQUIREMENT_UNCONFIRMED"
+    QUALIFICATION_NOT_VERIFIED = "QUALIFICATION_NOT_VERIFIED"
+    #: Источник не смог ответить (ключа нет, незнакомое значение, сбой
+    #: чтения). Закрывает: неопределённость не толкуется в пользу допуска.
+    UNDETERMINED = "UNDETERMINED"
+
+
 class MappingStatus(StrEnum):
     """Статус канонического маппинга. `recommendation_eligible = (VERIFIED)` (§10.1).
 
@@ -470,6 +493,11 @@ class CandidateFacts:
     #: Body Care (``not_subject``): гейт не применяется. Body-care строка
     #: ``None`` не получает никогда.
     config_ready: bool | None = None
+    #: CAT-10-ext — юридические условия §7A той же строки для этого мастера.
+    #: ``None`` — у строки нет канонической связи (легаси) или источник
+    #: условий не знает: гейт не применяется. Любое значение, кроме
+    #: ``CLEARED``, исключает.
+    legal_gate: LegalGate | None = None
     #: O-1 — категории предложений мастера (своя, иначе шаблона): на них
     #: проверяется предпочтение категории.
     category_refs: frozenset[UUID] = frozenset()

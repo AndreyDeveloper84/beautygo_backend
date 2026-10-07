@@ -81,6 +81,7 @@ from recommendation.api import (
     CandidateFacts,
     CandidateKind,
     CandidateRef,
+    LegalGate,
     MappingStatus,
     MatchLevel,
     NeedSpec,
@@ -88,6 +89,10 @@ from recommendation.api import (
     ScheduleState,
     Scope,
 )
+from services import body_care_address, body_care_license, body_care_qualification
+from services.body_care_address import address_states
+from services.body_care_license import license_states
+from services.body_care_qualification import qualification_states
 from services.body_care_validation import NOT_SUBJECT, READY_FOR_SCREENING, VALIDATION_STATES, validation_states
 from services.capabilities import template_ids_helping_goal
 from services.catalog_reads import catalog_services_for, catalog_services_prefetch
@@ -155,6 +160,89 @@ def config_readiness(salon_service_ids) -> dict[UUID, bool | None]:
     if undetermined:
         logger.error(
             "recommendation.source config_readiness_undetermined rows=%d closed=%s",
+            len(undetermined), ",".join(sorted(undetermined)),
+        )
+    return out
+
+
+#: Ответ §7A-2 (лицензия салона, по предложению) → значение гейта.
+_LICENSE_GATE = {
+    body_care_license.NOT_REQUIRED: LegalGate.CLEARED,
+    body_care_license.VERIFIED: LegalGate.CLEARED,
+    body_care_license.CLASS_UNCONFIRMED: LegalGate.CLASS_UNCONFIRMED,
+    body_care_license.NOT_VERIFIED: LegalGate.LICENSE_NOT_VERIFIED,
+    body_care_license.SCOPE_MISMATCH: LegalGate.LICENSE_SCOPE_MISMATCH,
+}
+
+#: Ответ §7A-3 (адрес, по паре мастер × предложение) → значение гейта.
+#: ``no_covering_license`` сюда доходит, только если гейт лицензии выше
+#: ответил «открыто» — два чтения разошлись, и это не толкуется.
+_ADDRESS_GATE = {
+    body_care_address.NOT_REQUIRED: LegalGate.CLEARED,
+    body_care_address.VERIFIED: LegalGate.CLEARED,
+    body_care_address.CLASS_UNCONFIRMED: LegalGate.CLASS_UNCONFIRMED,
+    body_care_address.LOCATION_UNKNOWN: LegalGate.LOCATION_UNKNOWN,
+    body_care_address.ADDRESS_MISMATCH: LegalGate.ADDRESS_MISMATCH,
+}
+
+#: Ответ §7A-4 (квалификация, по паре мастер × канон) → значение гейта.
+_QUALIFICATION_GATE = {
+    body_care_qualification.NOT_REQUIRED: LegalGate.CLEARED,
+    body_care_qualification.VERIFIED: LegalGate.CLEARED,
+    body_care_qualification.REQUIREMENT_UNCONFIRMED: LegalGate.QUALIFICATION_REQUIREMENT_UNCONFIRMED,
+    body_care_qualification.NOT_VERIFIED: LegalGate.QUALIFICATION_NOT_VERIFIED,
+}
+
+
+def legal_gates(rows) -> dict[tuple[UUID, UUID], LegalGate]:
+    """Юридические условия §7A строк пула — CAT-10-ext (DRF-2843).
+
+    ``rows`` — тройки ``(specialist_id, salon_service_id, template_id)``;
+    ответ — по паре ``(specialist_id, salon_service_id)``. Три пакетных
+    чтения на весь пул, правила §7A здесь не повторяются — читается итог:
+    лицензия салона (§7A-2), адрес мастера (§7A-3), квалификация мастера
+    (§7A-4). Значение называет ПЕРВОЕ несошедшееся условие в этом порядке.
+
+    Все три функции судят по подтверждённому классу канона, а не по
+    семейству, поэтому гейт закрывает и медицинский класс вне Body Care.
+    У строки без канона требования к квалификации нет — её не спрашивают.
+
+    Ключа нет, незнакомое значение, сбой чтения — ``UNDETERMINED`` и ERROR
+    в лог: строка закрыта, полка не падает.
+    """
+    rows = list(rows)
+    if not rows:
+        return {}
+    pairs = {(specialist_id, salon_id) for specialist_id, salon_id, _ in rows}
+    try:
+        licenses = license_states({salon_id for _, salon_id in pairs})
+        addresses = address_states(pairs)
+        qualifications = qualification_states(
+            {(specialist_id, template_id) for specialist_id, _, template_id in rows if template_id is not None}
+        )
+    except Exception:  # noqa: BLE001 — сбой чтения закрывает строки, а не роняет полку
+        logger.exception("recommendation.source legal_gates_failed rows=%d", len(pairs))
+        return dict.fromkeys(pairs, LegalGate.UNDETERMINED)
+
+    out: dict[tuple[UUID, UUID], LegalGate] = {}
+    undetermined: list[str] = []
+    for specialist_id, salon_id, template_id in rows:
+        answers = [
+            _LICENSE_GATE.get(licenses.get(salon_id), LegalGate.UNDETERMINED),
+            _ADDRESS_GATE.get(addresses.get((specialist_id, salon_id)), LegalGate.UNDETERMINED),
+        ]
+        if template_id is not None:
+            qualification = qualifications.get((specialist_id, template_id))
+            answers.append(
+                _QUALIFICATION_GATE.get(getattr(qualification, "state", None), LegalGate.UNDETERMINED)
+            )
+        gate = next((a for a in answers if a is not LegalGate.CLEARED), LegalGate.CLEARED)
+        out[(specialist_id, salon_id)] = gate
+        if gate is LegalGate.UNDETERMINED:
+            undetermined.append(f"{specialist_id}:{salon_id}")
+    if undetermined:
+        logger.error(
+            "recommendation.source legal_gates_undetermined rows=%d closed=%s",
             len(undetermined), ",".join(sorted(undetermined)),
         )
     return out
@@ -266,6 +354,10 @@ class SpecialistCandidateSource:
         )
         # CAT-10: готовность конфигурации ВСЕХ строк пула одним чтением.
         readiness = config_readiness(link.salon_service_id for link in links)
+        # CAT-10-ext: юридические условия §7A всех пар мастер × строка — так же.
+        legal = legal_gates(
+            (link.specialist_id, link.salon_service_id, link.salon_service.template_id) for link in links
+        )
 
         out: dict[UUID, _MappingFacts] = {}
         for link in links:
@@ -279,6 +371,7 @@ class SpecialistCandidateSource:
             facts.status_by_service[salon.id] = salon.mapping_status
             # Строка, про которую шов не ответил, закрыта, а не «вне гейта».
             facts.config_ready_by_service[salon.id] = readiness.get(salon.id, False)
+            facts.legal_by_service[salon.id] = legal.get((link.specialist_id, salon.id), LegalGate.UNDETERMINED)
             if salon.template_id is not None:
                 facts.template_by_service[salon.id] = salon.template_id
             if salon.template_id is not None:
@@ -377,6 +470,10 @@ class SpecialistCandidateSource:
             config_ready=mapping.config_ready(
                 has_offer=has_offer, matched_service_ref=matched_service_id,
             ),
+            # CAT-10-ext: юридические условия той же строки для этого мастера.
+            legal_gate=mapping.legal_gate(
+                has_offer=has_offer, matched_service_ref=matched_service_id,
+            ),
             safety_blocked=False,
             # Признак медицинской проверки доезжает до резолвера: он
             # отменяет заявление NOT_APPLICABLE (§4.1). Витрина, в которой
@@ -463,7 +560,8 @@ class SpecialistCandidateSource:
             in_goal = [s for s in services if s.category_id in allowed]
             if in_goal:
                 # DRF-2789: из услуг мастера в цели — лучшая по статусу связи,
-                # затем по готовности конфигурации (CAT-10), затем по глубине.
+                # затем по готовности конфигурации и юридическим условиям
+                # (CAT-10, CAT-10-ext), затем по глубине.
                 # Это выбор строки, которой мастер отвечает
                 # на цель, а не порядок мастеров: порядок — дело резолвера.
                 def depth(s) -> int:
@@ -555,6 +653,10 @@ class _MappingFacts:
         #: отдал :func:`config_readiness`. Легаси-строки здесь нет: канона у
         #: неё не бывает, значит и Body Care она не подлежит.
         self.config_ready_by_service: dict[UUID, bool | None] = {}
+        #: `SalonService.id` → юридические условия §7A этой строки для ЭТОГО
+        #: мастера (CAT-10-ext), как их отдал :func:`legal_gates`. Легаси-строки
+        #: здесь нет: канона у неё не бывает.
+        self.legal_by_service: dict[UUID, LegalGate] = {}
 
     def status(
         self,
@@ -612,37 +714,69 @@ class _MappingFacts:
         готовая услуга Б не допускает мастера, совпавшего неготовой А
         (§14.4, как у статуса связи).
 
-        Нужда не названа — предмет сам мастер. Смотрятся только строки с
-        лучшим статусом связи (те, что и решают допуск): одной готовой или
-        не подлежащей гейту достаточно; закрыт мастер, у которого все такие
-        строки не готовы. ``None`` — ни одна из них гейту не подлежит.
+        Нужда не названа — предмет сам мастер, и отвечает за него ОДНА
+        строка (:meth:`_deciding_row`): готовность и юридические условия
+        читаются у неё обе, а не у двух разных строк.
         """
+        row = self._answering_row(has_offer=has_offer, matched_service_ref=matched_service_ref)
+        return None if row is None else self.config_ready_by_service.get(row)
+
+    def legal_gate(
+        self,
+        *,
+        has_offer: bool | None = None,
+        matched_service_ref: UUID | None = None,
+    ) -> LegalGate | None:
+        """Юридические условия §7A той же строки, что отвечает в :meth:`config_ready`."""
+        row = self._answering_row(has_offer=has_offer, matched_service_ref=matched_service_ref)
+        return None if row is None else self.legal_by_service.get(row)
+
+    def _answering_row(self, *, has_offer: bool | None, matched_service_ref: UUID | None) -> UUID | None:
         offered = self.has_service if has_offer is None else has_offer
         if not offered:
             return None
         if matched_service_ref is not None:
-            return self.config_ready_by_service.get(matched_service_ref)
+            return matched_service_ref
+        return self._deciding_row()
+
+    def _deciding_row(self) -> UUID | None:
+        """Строка, которая отвечает за мастера, когда нужда не названа.
+
+        Смотрятся только строки с лучшим статусом связи (те, что и решают
+        допуск). Среди них берётся рекомендуемая — готовая по конфигурации
+        И прошедшая юридические условия; одной достаточно. Условия
+        проверяются у одной строки: готовая без лицензии и лицензированная
+        неготовая вместе мастера не открывают. Если рекомендуемой нет,
+        отвечает первая из лучших по ``_row_rank`` — и называет причину.
+        """
         if not self.status_by_service:
             return None
         best = max(self._RANK[self._as_status(v)] for v in self.status_by_service.values())
         deciding = [
-            self.config_ready_by_service.get(pk)
-            for pk, value in self.status_by_service.items()
+            pk for pk, value in self.status_by_service.items()
             if self._RANK[self._as_status(value)] == best
         ]
-        if all(ready is False for ready in deciding):
-            return False
-        return True if any(ready is True for ready in deciding) else None
+        return max(deciding, key=lambda pk: (self._is_recommendable(pk), *self._gates_rank(pk)))
 
-    def _row_rank(self, service) -> tuple[int, int]:
-        """(статус связи, готовность конфигурации) — ключ выбора строки.
+    def _gates_rank(self, pk: UUID) -> tuple[int, int]:
+        """(конфигурация не закрыта, юридические условия не закрыты)."""
+        return (
+            0 if self.config_ready_by_service.get(pk) is False else 1,
+            0 if self.legal_by_service.get(pk, LegalGate.CLEARED) is not LegalGate.CLEARED else 1,
+        )
 
-        Готовность стоит сразу за статусом: неготовая строка выбила бы
-        мастера на S1, когда у него есть готовая с тем же совпадением.
+    def _is_recommendable(self, pk: UUID) -> bool:
+        return self._gates_rank(pk) == (1, 1)
+
+    def _row_rank(self, service) -> tuple[int, int, int]:
+        """(статус связи, готовность конфигурации, юридические условия) — ключ выбора строки.
+
+        Оба гейта стоят сразу за статусом: закрытая строка выбила бы
+        мастера на S1, когда у него есть открытая с тем же совпадением.
         """
         return (
             self._RANK[self._as_status(self.status_by_service.get(service.id))],
-            0 if self.config_ready_by_service.get(service.id) is False else 1,
+            *self._gates_rank(service.id),
         )
 
     def best_of(self, services) -> UUID | None:

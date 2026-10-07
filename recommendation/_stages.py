@@ -55,6 +55,7 @@ from ._types import (
     ConstraintKind,
     ExcludedCandidate,
     MappingCensus,
+    LegalGate,
     MappingStatus,
     MatchLevel,
     NeedSpec,
@@ -222,6 +223,16 @@ def apply_scope(candidates: Sequence[CandidateFacts], scope: Scope) -> Admission
 # S1 — жёсткая допустимость. Компенсации баллом нет (R2)
 # ---------------------------------------------------------------------------
 
+#: Значение гейта → код исключения. Всё, чего здесь нет (не подтверждено
+#: или не определено), закрывается общим кодом — умолчание в ``.get`` ниже.
+_LEGAL_EXCLUSION = {
+    LegalGate.LICENSE_NOT_VERIFIED: ReasonCode.ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED,
+    LegalGate.LICENSE_SCOPE_MISMATCH: ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
+    LegalGate.ADDRESS_MISMATCH: ReasonCode.ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH,
+    LegalGate.QUALIFICATION_NOT_VERIFIED: ReasonCode.ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED,
+}
+
+
 def apply_eligibility(
     candidates: Sequence[CandidateFacts],
     request: RecommendationRequest,
@@ -354,6 +365,15 @@ def apply_eligibility(
             excluded.append(
                 ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY)
             )
+            continue
+        # CAT-10-ext: юридические условия §7A — лицензия салона, адрес и
+        # квалификация мастера. По подтверждённому классу канона, а не по
+        # семейству: медицинский класс вне Body Care готовность выше не видит.
+        if facts.legal_gate is not None and facts.legal_gate is not LegalGate.CLEARED:
+            excluded.append(ExcludedCandidate(
+                facts.ref, StageId.S1,
+                _LEGAL_EXCLUSION.get(facts.legal_gate, ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED),
+            ))
             continue
         # O-1: «только X» — жёсткое условие, и только из ТЕКУЩЕГО запроса.
         # Стоит ПОСЛЕ проверок процедуры и связи: предпочтение работает на
