@@ -75,6 +75,11 @@ class GoalNotFound(PlanLiteError):
     «не найдено», не «чужое», чтобы по коду нельзя было перебирать."""
 
 
+class SupersededByEngine(PlanLiteError):
+    """Включён Plan Engine (DRF-2857): новый план сохраняется как durable
+    ``wellness.Plan``, Lite новых не пишет — иначе у человека два механизма."""
+
+
 class PlanAlreadyActive(PlanLiteError):
     """0..1 ACTIVE на человека (OD-GOAL-4): сменить — только закрыв прежний."""
 
@@ -169,6 +174,10 @@ def create_plan(
     источник, не приказ: бот мог дать человеку убрать одно из трёх."""
     if not plan_lite_enabled():
         raise PlanLiteDisabled()
+    # DRF-2857 — флаг читается из настроек, а не из ``plan_engine``: Lite о
+    # durable-плане не знает ничего, кроме того, что писать ему больше нельзя.
+    if getattr(settings, "PLAN_ENGINE_ENABLED", False):
+        raise SupersededByEngine()
     goals = ClientGoal.objects.filter(client=user, state=ClientGoal.State.ACTIVE)
     goal = (goals.filter(pk=goal_id) if goal_id is not None else goals).first()
     if goal is None:
