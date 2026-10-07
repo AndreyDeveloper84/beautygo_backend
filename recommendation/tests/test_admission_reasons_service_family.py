@@ -9,7 +9,7 @@
   кода; дефект чтения не выглядит незаполненными данными;
 - у каждого значения обоих гейтов свой код, общего «не допущен» нет;
 - неклассифицированная строка при выборе строки стоит как закрытая;
-- пока CAT-6 маркер не отдаёт, выдача не меняется.
+- маркер каталога — не состояние §7: шов не примет его за «не готово».
 """
 from __future__ import annotations
 
@@ -105,8 +105,9 @@ class TestTheSeamKnowsTheMarkerBeforeItIsProduced:
             body_care_validation.NOT_SUBJECT, body_care_validation.READY_FOR_SCREENING,
         }
 
-    def test_today_the_catalog_does_not_produce_the_marker(self):
-        """Ветка мёртвая до PR каталога: выдача этим PR не меняется."""
+    def test_the_marker_is_not_a_state_of_the_ladder(self):
+        """Маркер, как и ``not_subject``, — не состояние §7: шов разбирает его
+        раньше набора состояний и не примет за «не готово»."""
         assert UNCLASSIFIED not in (body_care_validation.NOT_SUBJECT, *body_care_validation.VALIDATION_STATES)
 
 
