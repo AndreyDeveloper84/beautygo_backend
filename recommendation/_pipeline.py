@@ -407,6 +407,10 @@ def _decision_codes(
         codes.add(ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE)
     if not ordered and any(e.reason_code is ReasonCode.ELIG_EXCLUDED_SAFETY for e in excluded):
         codes.add(ReasonCode.ELIG_EXCLUDED_SAFETY)
+    if not ordered and any(e.reason_code is ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY for e in excluded):
+        # CAT-10: пустая полка объясняет себя — не «связь не проверена»,
+        # а «процедура не готова к скринингу».
+        codes.add(ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY)
     if not ordered and any(e.reason_code is ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD for e in excluded):
         # O-1: «только X», а X среди допустимых нет — сигнал уточнить, а не
         # молча подставить другого.

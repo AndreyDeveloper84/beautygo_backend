@@ -23,7 +23,7 @@ from enum import StrEnum
 #: Версия реестра. Любое добавление, удаление или изменение смысла кода —
 #: новая версия; она уезжает в `policy_versions` ответа, иначе решение
 #: невоспроизводимо задним числом (контракт §6.3).
-REGISTRY_VERSION = "1.2.0"
+REGISTRY_VERSION = "1.3.0"
 
 
 class ReasonCode(StrEnum):
@@ -49,6 +49,11 @@ class ReasonCode(StrEnum):
     ELIG_EXCLUDED_SAFETY = "ELIG_EXCLUDED_SAFETY"
     ELIG_EXCLUDED_BUDGET = "ELIG_EXCLUDED_BUDGET"
     ELIG_EXCLUDED_NOT_RECOMMENDABLE = "ELIG_EXCLUDED_NOT_RECOMMENDABLE"
+    # CAT-10 (1.3.0) — связь VERIFIED, но конфигурация body-care-услуги не
+    # готова к скринингу (состояние валидации CAT-6 не READY). Отдельно от
+    # NOT_RECOMMENDABLE: тот — про связь с каноном, этот — про готовность
+    # процедуры; смешение спрятало бы C1 в «маппинг не проверен».
+    ELIG_EXCLUDED_CONFIG_NOT_READY = "ELIG_EXCLUDED_CONFIG_NOT_READY"
     # O-1 (1.2.0) — «только X» в текущем запросе: кандидат не X.
     ELIG_EXCLUDED_PREFERENCE_HARD = "ELIG_EXCLUDED_PREFERENCE_HARD"
 
@@ -111,6 +116,7 @@ EXCLUSION_CODES = frozenset({
     ReasonCode.ELIG_EXCLUDED_SAFETY,
     ReasonCode.ELIG_EXCLUDED_BUDGET,
     ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE,
+    ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY,
     ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD,
 })
 
