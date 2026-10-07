@@ -93,7 +93,7 @@ _PRICE_FIELDS = frozenset({"price_range_min", "price_range_max"})
 
 def _price(field: str, value: object) -> Decimal:
     """Цена из тела запроса — число, не отрицательное; иначе отказ с именем поля."""
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)) or value == "":
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         raise serializers.ValidationError(
             {field: "Ожидается число. Чтобы очистить поле, пришлите null."}
         )
