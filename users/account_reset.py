@@ -81,6 +81,7 @@ _QUESTIONNAIRE = frozenset(
         "goals.GoalAnketaRun.client",
         "wellness.DesiredOutcome.user",
         "wellness.PersonalPlan.user",
+        "wellness.Plan.subject_user",
         "wellness.ProgressObservation.user",
     }
 )
