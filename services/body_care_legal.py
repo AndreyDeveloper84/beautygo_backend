@@ -38,6 +38,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from services.body_care_scope import (
+    NOT_SUBJECT as SCOPE_NOT_SUBJECT,
+    UNCLASSIFIED as SCOPE_UNCLASSIFIED,
+    scope_of,
+)
 from services.models import OfferingConfigFact, ServiceTemplate
 
 Family = ServiceTemplate.ServiceFamily
@@ -51,6 +56,7 @@ RULE = "bc-7a2-default"
 RULE_VERSION = "0.1"
 
 NOT_SUBJECT = "not_subject"
+UNCLASSIFIED = "unclassified"
 
 BASE_CAVEAT = "BASE каноном не различается: проверьте, нет ли тепла или компрессии"
 
@@ -92,6 +98,9 @@ _BY_FAMILY: dict[str, Candidate] = {
 _NOT_SUBJECT = Candidate(
     None, reason=f"{NOT_SUBJECT}: у канона нет семейства body-care", subject=False
 )
+#: Классификация неизвестна: §7A.2 может относиться к канону, а может и нет —
+#: ``subject`` остаётся ``True``, кандидата нет.
+_UNCLASSIFIED = Candidate(None, reason=f"{UNCLASSIFIED}: классификация канона неизвестна")
 
 
 def _candidate(family: str | None) -> Candidate:
@@ -104,10 +113,19 @@ def _candidate(family: str | None) -> Candidate:
 
 def legal_class_candidates(template_ids: Iterable[object]) -> dict[object, Candidate]:
     """``{pk канона: кандидат}`` — один запрос. Неизвестный pk в ответ не попадает."""
-    families = ServiceTemplate.objects.filter(pk__in=list(template_ids)).values_list(
-        "pk", "service_family"
+    rows = ServiceTemplate.objects.filter(pk__in=list(template_ids)).values_list(
+        "pk", "body_care_scope", "service_family"
     )
-    return {pk: _candidate(family) for pk, family in families}
+    return {pk: _candidate_for(scope, family) for pk, scope, family in rows}
+
+
+def _candidate_for(scope: str | None, family: str | None) -> Candidate:
+    answer = scope_of(has_canon=True, scope=scope, family=family)
+    if answer == SCOPE_UNCLASSIFIED:
+        return _UNCLASSIFIED
+    if answer == SCOPE_NOT_SUBJECT:
+        return _NOT_SUBJECT
+    return _candidate(family)
 
 
 def legal_class_candidate(template: ServiceTemplate) -> Candidate:
