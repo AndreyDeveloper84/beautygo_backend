@@ -34,6 +34,7 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from services.body_care_admission import (
+    CANON_RETIRED,
     CLASS_UNCONFIRMED,
     LINK_NOT_VERIFIED,
     NO_CANON,
@@ -214,6 +215,22 @@ def test_the_unknown_scope_is_counted_by_offers_and_grouped_by_section(pool, sal
     assert sorted((r.section, r.name) for r in census.unclassified) == [
         ("1.4", "Лимфодренаж"), (NO_CODE, "Авторский уход"), (NO_CANON, "Услуга без канона"),
     ]
+
+
+def test_a_retired_canon_is_closed_today_and_named_before_the_scope(salon, category, staff) -> None:
+    """DRF-2793: выведенный канон не рекомендуется при любом положении флага."""
+    offer = _offer(
+        salon, category, staff, _master(salon, "dryrun-retired-master"), "Снятая услуга", code="1.1.5",
+    )
+    ServiceTemplate.objects.filter(pk=offer.template_id).update(
+        lifecycle=ServiceTemplate.Lifecycle.RETIRED, retired_rule="test_fixture",
+        retirement_rule_version="1", retired_at=timezone.now(), retirement_source_ref="узел dry-run",
+    )
+
+    row = _by_name(admission_census([salon.slug]))["Снятая услуга"]
+
+    assert row.today.reasons == (CANON_RETIRED,)
+    assert row.after.reasons[:2] == (CANON_RETIRED, REASON_UNCLASSIFIED)
 
 
 @pytest.mark.parametrize(

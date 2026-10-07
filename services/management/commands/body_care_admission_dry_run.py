@@ -54,6 +54,7 @@ from services.body_care_admission import FLAG, REASONS, admission_census
 
 TITLES = {
     "link_not_verified": "связь с каноном не подтверждена",
+    "canon_retired": "канон выведен из оборота",
     "no_sellable_master": "нет продаваемого мастера",
     "unclassified": "область неизвестна / нет канона",
     "config_not_ready": "конфигурация Body Care не готова",

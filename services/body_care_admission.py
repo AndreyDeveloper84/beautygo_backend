@@ -20,6 +20,8 @@ dry-run по активным предложениям». Здесь он счи
 
 ``link_not_verified``      связь с каноном не подтверждена — рекомендации
                            не подлежит при любом положении флага;
+``canon_retired``          канон выведен из оборота (DRF-2793) — рекомендации
+                           не подлежит при любом положении флага;
 ``no_sellable_master``     ни одного продаваемого ребра мастер × услуга;
 ``unclassified``           область канона неизвестна или канона нет;
 ``config_not_ready``       подлежит Body Care, конфигурация не готова;
@@ -48,13 +50,14 @@ from django.test.utils import override_settings
 
 from services import body_care_address, body_care_license, body_care_qualification
 from services.body_care_validation import NOT_SUBJECT, READY_FOR_SCREENING, UNCLASSIFIED, validation_states
-from services.models import SalonService, SpecialistService
+from services.models import SalonService, ServiceTemplate, SpecialistService
 from services.offer_sellable import sellable_offer_q
 from users.sellable import sellable_q
 
 FLAG = "BODY_CARE_UNCLASSIFIED_FAIL_CLOSED"
 
 LINK_NOT_VERIFIED = "link_not_verified"
+CANON_RETIRED = "canon_retired"
 NO_SELLABLE_MASTER = "no_sellable_master"
 REASON_UNCLASSIFIED = "unclassified"
 CONFIG_NOT_READY = "config_not_ready"
@@ -63,10 +66,12 @@ LICENSE_NOT_VERIFIED = "license_not_verified"
 LICENSE_SCOPE_MISMATCH = "license_scope_mismatch"
 NO_MASTER_CLEARED = "no_master_cleared"
 
-#: Порядок — как у резолвера в S1: связь → конфигурация → юридические условия.
-#: Первая причина предложения в этом порядке — та, что ушла бы на провод.
+#: Порядок — как у резолвера в S1: связь → канон жив → конфигурация →
+#: юридические условия. Первая причина предложения в этом порядке — та, что
+#: ушла бы на провод.
 REASONS = (
     LINK_NOT_VERIFIED,
+    CANON_RETIRED,
     NO_SELLABLE_MASTER,
     REASON_UNCLASSIFIED,
     CONFIG_NOT_READY,
@@ -176,6 +181,8 @@ def _verdicts(rows: list[dict], edges: dict[object, list[tuple[object, object]]]
         reasons: list[str] = []
         if row["mapping_status"] != SalonService.MappingStatus.VERIFIED:
             reasons.append(LINK_NOT_VERIFIED)
+        if row["template__lifecycle"] == ServiceTemplate.Lifecycle.RETIRED:
+            reasons.append(CANON_RETIRED)
         masters = edges.get(pk, [])
         if not masters:
             reasons.append(NO_SELLABLE_MASTER)
@@ -213,6 +220,7 @@ def admission_census(tenant_slugs: Iterable[str] | None = None) -> Census:
     rows = list(
         offers.order_by("tenant__slug", "name", "pk").values(
             "pk", "name", "mapping_status", "template_id", "tenant__slug", "template__canonical_code",
+            "template__lifecycle",
         )
     )
     edges: dict[object, list[tuple[object, object]]] = {}
