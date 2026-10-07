@@ -108,7 +108,7 @@ def approver() -> User:
 
 def _form(template: ServiceTemplate, **overrides) -> dict:
     data = {
-        "template": str(template.pk),
+        "procedures": [str(template.pk)],
         "key": "example_effect",
         "text_client": "Синтетическая формулировка",
         "text_professional": "",
@@ -131,7 +131,7 @@ def _form(template: ServiceTemplate, **overrides) -> dict:
 @pytest.fixture
 def approved_row(template, approver) -> ProcedureCapability:
     return ProcedureCapability.objects.create(
-        template=template, key="example_effect", text_client="Синтетическая формулировка",
+        templates=[template], key="example_effect", text_client="Синтетическая формулировка",
         status="approved", claim_type="product", claim_scope="supported",
         evidence_kind="professional_consensus", source_ref="DOC-2726",
         confirmed_by=approver, confirmed_at=timezone.now(),
@@ -184,7 +184,7 @@ class TestAnEditorKeepsDraftsOnly:
 
     def test_approving_an_existing_draft_is_refused(self, editor, template) -> None:
         draft = ProcedureCapability.objects.create(
-            template=template, key="example_effect", text_client="Синтетическая формулировка",
+            templates=[template], key="example_effect", text_client="Синтетическая формулировка",
             source_ref="DOC-2726", claim_scope="supported",
         )
 
@@ -239,7 +239,7 @@ class TestAnEditorKeepsDraftsOnly:
 
     def test_deleting_approved_rows_from_the_list_is_refused(self, editor, template, approved_row) -> None:
         client = _client(editor)
-        draft = ProcedureCapability.objects.create(template=template, key="draft")
+        draft = ProcedureCapability.objects.create(templates=[template], key="draft")
 
         def delete_from_list(pk):
             return client.post(
@@ -260,7 +260,7 @@ class TestAnEditorKeepsDraftsOnly:
     ) -> None:
         """Связь удаляется каскадом вместе с возможностью — подтверждённую связь
         нельзя снести, удалив её черновую возможность."""
-        draft = ProcedureCapability.objects.create(template=template, key="draft-with-link")
+        draft = ProcedureCapability.objects.create(templates=[template], key="draft-with-link")
         link = CapabilityGoalLink.objects.create(
             capability=draft, goal=goal, status="approved", claim_type="product", claim_scope="supported",
             evidence_kind="professional_consensus",
@@ -274,7 +274,7 @@ class TestAnEditorKeepsDraftsOnly:
 
     def test_a_draft_can_still_be_deleted(self, editor, template) -> None:
         """Контроль: отказ выше вызван подтверждением, а не правом удаления."""
-        draft = ProcedureCapability.objects.create(template=template, key="draft")
+        draft = ProcedureCapability.objects.create(templates=[template], key="draft")
 
         response = _client(editor).post(reverse(DELETE, args=[draft.pk]), {"post": "yes"})
 
@@ -282,7 +282,7 @@ class TestAnEditorKeepsDraftsOnly:
         assert not ProcedureCapability.objects.filter(pk=draft.pk).exists()
 
     def test_the_goal_link_is_guarded_by_its_own_right(self, editor, template, goal) -> None:
-        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[template], key="for-link")
 
         response = _client(editor).post(reverse(ADD_LINK), _link_form(capability, goal, status="approved"))
 
@@ -292,7 +292,7 @@ class TestAnEditorKeepsDraftsOnly:
     def test_an_approved_goal_link_is_neither_edited_nor_deleted(
         self, editor, approver, template, goal
     ) -> None:
-        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[template], key="for-link")
         link = CapabilityGoalLink.objects.create(
             capability=capability, goal=goal, status="approved", claim_type="product", claim_scope="supported",
             evidence_kind="professional_consensus",
@@ -320,7 +320,7 @@ class TestAnEditorKeepsDraftsOnly:
     )
     def test_the_right_for_one_table_does_not_open_the_other(self, template, goal, held, url, kind) -> None:
         half = _staff(f"half-{kind}-2726", EVERYDAY + BOUNDARY + [held])
-        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[template], key="for-link")
         data = (
             _link_form(capability, goal, status="approved")
             if kind == "link"

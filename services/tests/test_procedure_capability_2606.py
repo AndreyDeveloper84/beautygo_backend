@@ -54,7 +54,7 @@ def goal() -> GoalOption:
 
 def _capability(template, *, key="even-tone", **kw) -> ProcedureCapability:
     return ProcedureCapability.objects.create(
-        template=template, key=key, text_client="Выравнивает тон кожи", **kw
+        templates=[template], key=key, text_client="Выравнивает тон кожи", **kw
     )
 
 

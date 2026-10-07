@@ -426,7 +426,7 @@ class TestAClaimOutlivesItsReviewersErasure:
         goal = GoalOption.objects.create(key="skin-d3-2606", label="Уход за кожей")
         when = timezone.now() - timedelta(days=3)
         said = ProcedureCapability.objects.create(
-            template=template, key="even-tone", text_client="Выравнивает тон кожи",
+            templates=[template], key="even-tone", text_client="Выравнивает тон кожи",
             status=ClaimEvidence.Status.APPROVED,
             claim_type=ClaimEvidence.ClaimType.PRODUCT,
             evidence_kind=ClaimEvidence.EvidenceKind.PROFESSIONAL_CONSENSUS,
@@ -442,7 +442,7 @@ class TestAClaimOutlivesItsReviewersErasure:
             confirmed_by=person, confirmed_at=when, source_ref="owner-review-2606",
         )
         unsaid = ProcedureCapability.objects.create(
-            template=template, key="calm-skin", text_client="Успокаивает кожу",
+            templates=[template], key="calm-skin", text_client="Успокаивает кожу",
         )
 
         req = ensure_deletion_request(person, initiator="bot").request

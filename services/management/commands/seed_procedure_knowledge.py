@@ -7,9 +7,10 @@
 
 Что команда делает
 ------------------
-* Заводит только НОВОЕ: возможность ищется по паре (шаблон, ``key``), связь —
-  по паре (возможность, цель). Существующую строку команда не трогает ни в
-  одном поле — так же, как засев канона и целей после DRF-2663: всё, что
+* Заводит только НОВОЕ: возможность — запись общего словаря (DRF-2743) —
+  ищется по ``key``, связь — по паре (возможность, цель). Существующую строку
+  команда не трогает ни в одном поле и не добавляет ей процедур — так же,
+  как засев канона и целей после DRF-2663: всё, что
   лежит в базе, дальше живёт под рукой куратора в админке, и повторный прогон
   файла не должен возвращать подтверждённое к черновику файла. Сколько строк
   оставлено как есть — печатается.
@@ -60,8 +61,11 @@
 базу стенда не попадает: это не файл по умолчанию)::
 
     {"capabilities": [{
-        "template_code": "1.1.3",          # ServiceTemplate.canonical_code
-        "key": "temporary_relaxation",     # машинный ключ смысла, не из текста
+        "template_codes": ["1.1.3", "1.1.2"],  # ServiceTemplate.canonical_code — к каким
+                                           # процедурам относится запись словаря; старый
+                                           # ключ "template_code": "1.1.3" читается как
+                                           # список из одного
+        "key": "temporary_relaxation",     # машинный ключ смысла, не из текста; уникален
         "text_client": "...", "text_professional": "...",
         "expected_effect": "...",
         "result_timeframe": "...",         # словами, не числом; только вместе с
@@ -150,7 +154,9 @@ _CLAIM_TEXT = (
 _CLAIM_KEYS = frozenset(
     {"status", "claim_scope", "claim_type", "confirmed_at", "valid_until", *_CLAIM_TEXT}
 )
-_CAPABILITY_KEYS = _CLAIM_KEYS | {"template_code", "key", "goal_links", *_CAPABILITY_TEXT}
+_CAPABILITY_KEYS = _CLAIM_KEYS | {
+    "template_code", "template_codes", "key", "goal_links", *_CAPABILITY_TEXT,
+}
 _LINK_KEYS = _CLAIM_KEYS | {"goal", *_LINK_TEXT}
 
 #: Эти поля проверены здесь словами для человека; модель их повторно не судит.
@@ -342,8 +348,10 @@ class Command(BaseCommand):
         with transaction.atomic():
             for item in plan:
                 capability, created = ProcedureCapability.objects.get_or_create(
-                    template=item["template"], key=item["key"], defaults=item["fields"],
+                    key=item["key"], defaults=item["fields"],
                 )
+                if created:
+                    capability.templates.set(item["templates"])
                 created_caps += created
                 kept_caps += not created
                 for link in item["links"]:
@@ -445,40 +453,55 @@ class Command(BaseCommand):
     def _plan(self, rows: list[Any]) -> tuple[list[dict[str, Any]], _Problems]:
         problems = _Problems()
         codes = {
-            row["template_code"].strip() for row in rows
-            if isinstance(row, dict) and isinstance(row.get("template_code"), str)
+            code.strip()
+            for row in rows if isinstance(row, dict)
+            for code in (
+                [row["template_code"]] if isinstance(row.get("template_code"), str)
+                else row["template_codes"] if isinstance(row.get("template_codes"), list)
+                else []
+            )
+            if isinstance(code, str)
         }
         templates = {
             t.canonical_code: t for t in ServiceTemplate.objects.filter(canonical_code__in=codes)
         }
         goals = {g.key: g for g in GoalOption.objects.all()}
+        # DRF-2743: запись словаря ищется по ``key`` — существующая могла быть
+        # привязана к другим процедурам. Связи из файла к ней тогда не
+        # добавляются: связь, написанная про одни процедуры, легла бы на другие.
+        existing = {
+            capability.key: {t.pk for t in capability.templates.all()}
+            for capability in ProcedureCapability.objects.filter(
+                # Ключ — как его читает разбор строки: без пробелов по краям.
+                key__in=[
+                    row["key"].strip() for row in rows
+                    if isinstance(row, dict) and isinstance(row.get("key"), str)
+                ]
+            ).prefetch_related("templates")
+        }
 
         plan: list[dict[str, Any]] = []
-        seen: set[tuple[str, str]] = set()
+        seen: set[str] = set()
         for index, row in enumerate(rows, start=1):
             where = f"capabilities[{index}]"
             if not isinstance(row, dict):
                 problems.add(where, "ожидался объект")
                 continue
-            code = _text(row, "template_code", where, problems)
             key = _text(row, "key", where, problems)
-            where = f"capabilities[{index}] {code or '?'}:{key or '?'}"
+            where = f"capabilities[{index}] {key or '?'}"
             _unknown_keys(row, _CAPABILITY_KEYS, where, problems)
-            template = templates.get(code)
-            if not code:
-                problems.add(where, "template_code — не указан код шаблона процедуры")
-            elif template is None:
-                problems.add(
-                    where,
-                    f"template_code «{code}» не найден среди шаблонов "
-                    "(код — ServiceTemplate.canonical_code; его нет у шаблонов, заведённых "
-                    "после начального присвоения кодов, и у черновых канонов)",
-                )
+            bound = self._capability_templates(row, templates, where, problems)
             if not key:
                 problems.add(where, "key — не указан ключ смысла")
-            elif (code, key) in seen:
-                problems.add(where, "такая пара (template_code, key) в файле уже есть")
-            seen.add((code, key))
+            elif key in seen:
+                problems.add(where, "такой key в файле уже есть: запись словаря одна на все процедуры")
+            elif key in existing and bound and existing[key] != {t.pk for t in bound}:
+                problems.add(
+                    where,
+                    "запись с таким key уже есть в словаре и привязана к другим процедурам; "
+                    "файл существующую запись не меняет — привязки правятся в админке",
+                )
+            seen.add(key)
 
             fields = _claim_fields(row, where, problems, has_client_text=True)
             fields.update({name: _text(row, name, where, problems) for name in _CAPABILITY_TEXT})
@@ -491,7 +514,7 @@ class Command(BaseCommand):
             ).items():
                 problems.add(where, f"{field} — {message}")
             if key:
-                _model_problems(ProcedureCapability(key=key, **fields), {"template"}, where, problems)
+                _model_problems(ProcedureCapability(key=key, **fields), set(), where, problems)
 
             links: list[dict[str, Any]] = []
             raw_links = row.get("goal_links") or []
@@ -540,5 +563,41 @@ class Command(BaseCommand):
                 )
                 links.append({"goal": goal, "fields": link_fields})
 
-            plan.append({"template": template, "key": key, "fields": fields, "links": links})
+            plan.append({"templates": bound, "key": key, "fields": fields, "links": links})
         return plan, problems
+
+    @staticmethod
+    def _capability_templates(
+        row: dict[str, Any], templates: dict[str, Any], where: str, problems: _Problems,
+    ) -> list[Any]:
+        """Процедуры записи словаря: ``template_codes`` — список; старый ``template_code`` — список из одного."""
+        if "template_code" in row and "template_codes" in row:
+            problems.add(where, "укажите либо template_codes (список), либо template_code, не оба")
+            return []
+        if "template_code" in row:
+            raw = row["template_code"]
+            if not isinstance(raw, str):
+                problems.add(where, f"template_code — ожидалась строка, получено {type(raw).__name__}")
+                return []
+            raw = [raw]
+        else:
+            raw = row.get("template_codes", [])
+            if not isinstance(raw, list) or not all(isinstance(code, str) for code in raw):
+                problems.add(where, "template_codes — ожидался список кодов процедур")
+                return []
+        codes = [code.strip() for code in raw if code.strip()]
+        if not codes:
+            problems.add(where, "template_codes — не указан ни один код процедуры")
+        bound = []
+        for code in dict.fromkeys(codes):
+            template = templates.get(code)
+            if template is None:
+                problems.add(
+                    where,
+                    f"код процедуры «{code}» не найден среди шаблонов "
+                    "(код — ServiceTemplate.canonical_code; его нет у шаблонов, заведённых "
+                    "после начального присвоения кодов, и у черновых канонов)",
+                )
+            else:
+                bound.append(template)
+        return bound

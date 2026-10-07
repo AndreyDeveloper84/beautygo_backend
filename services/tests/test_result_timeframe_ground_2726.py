@@ -110,7 +110,7 @@ class TestTheDatabaseGuardsAnApprovedTimeframe:
     def test_approved_with_a_grounded_timeframe_is_stored(self, template, owner) -> None:
         """Контроль: подтверждённая строка со сроком вообще сохраняется."""
         ProcedureCapability.objects.create(
-            template=template, key="grounded", result_timeframe="обычно в первые недели",
+            templates=[template], key="grounded", result_timeframe="обычно в первые недели",
             **GROUND, **_approved(owner),
         )
 
@@ -123,7 +123,7 @@ class TestTheDatabaseGuardsAnApprovedTimeframe:
         _refused_by(
             "procedurecapability_approved_timeframe_grounded",
             lambda: ProcedureCapability.objects.create(
-                template=template, key="bare", result_timeframe="обычно в первые недели",
+                templates=[template], key="bare", result_timeframe="обычно в первые недели",
                 **ground, **_approved(owner),
             ),
         )
@@ -133,7 +133,7 @@ class TestTheDatabaseGuardsAnApprovedTimeframe:
         _refused_by(
             "procedurecapability_approved_timeframe_in_words",
             lambda: ProcedureCapability.objects.create(
-                template=template, key="number", result_timeframe=number,
+                templates=[template], key="number", result_timeframe=number,
                 **GROUND, **_approved(owner),
             ),
         )
@@ -146,13 +146,13 @@ class TestTheDatabaseGuardsAnApprovedTimeframe:
         строк, лежавших до неё, — держит
         ``TestTheMigrationOnRowsThatWereThereBefore``.
         """
-        ProcedureCapability.objects.create(template=template, key="draft", result_timeframe="3")
+        ProcedureCapability.objects.create(templates=[template], key="draft", result_timeframe="3")
 
         assert ProcedureCapability.objects.get().status == "system_inference"
 
     def test_approved_without_a_timeframe_needs_no_note(self, template, owner) -> None:
         ProcedureCapability.objects.create(
-            template=template, key="no-timeframe", source_ref="DOC-2726", **_approved(owner),
+            templates=[template], key="no-timeframe", source_ref="DOC-2726", **_approved(owner),
         )
 
         assert ProcedureCapability.objects.count() == 1
@@ -161,7 +161,7 @@ class TestTheDatabaseGuardsAnApprovedTimeframe:
 class TestTheDatabaseGuardsAnApprovedHorizon:
     @pytest.fixture
     def capability(self, template) -> ProcedureCapability:
-        return ProcedureCapability.objects.create(template=template, key="for-link")
+        return ProcedureCapability.objects.create(templates=[template], key="for-link")
 
     def test_approved_with_a_grounded_horizon_is_stored(self, capability, goal, owner) -> None:
         CapabilityGoalLink.objects.create(
@@ -240,7 +240,7 @@ class TestTheSharedRule:
 
 def _capability_form(template: ServiceTemplate, **overrides) -> dict:
     data = {
-        "template": str(template.pk),
+        "procedures": [str(template.pk)],
         "key": "example_effect",
         "text_client": "Синтетическая формулировка",
         "text_professional": "",
@@ -304,7 +304,7 @@ class TestTheAdminFormAsksForTheGround:
         черновиком или подтверждением — упирается в правило: по полям и
         словами, без ошибки ограничения базы (``__all__``)."""
         draft = ProcedureCapability.objects.create(
-            template=template, key="example_effect", result_timeframe="3",
+            templates=[template], key="example_effect", result_timeframe="3",
         )
 
         response = admin_client.post(
@@ -337,7 +337,7 @@ class TestTheAdminFormAsksForTheGround:
         assert ProcedureCapability.objects.count() == 0
 
     def test_the_link_form_asks_the_same_of_the_horizon(self, template, goal) -> None:
-        capability = ProcedureCapability.objects.create(template=template, key="for-link")
+        capability = ProcedureCapability.objects.create(templates=[template], key="for-link")
         data = {
             "capability": str(capability.pk), "goal": str(goal.pk),
             "course_pattern": "", "result_horizon": "3", "variability_note": "",
