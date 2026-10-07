@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from services.body_care_scope import class_unknown, fail_closed
+from services.body_care_scope import qualification_requirement_unknown
 from services.models import ServiceTemplate
 from users.models import PractitionerQualification
 
@@ -78,7 +78,7 @@ def _state(template: dict, specialist_id, verified: set) -> QualificationState:
         )
     # Неизвестный класс — не «квалификация не нужна»: нужна ли она, решает
     # класс, а его ещё нет (под флагом, как у лицензии и адреса).
-    if fail_closed() and class_unknown(template["legal_service_class"]):
+    if qualification_requirement_unknown(template["legal_service_class"]):
         return QualificationState(
             REQUIREMENT_UNCONFIRMED, "класс не подтверждён, требование к квалификации неизвестно"
         )
