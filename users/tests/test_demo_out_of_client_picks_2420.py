@@ -26,7 +26,11 @@
 * p2 — полка 3, счётчики категорий (`users/catalog_recommendations_api.py`);
 * p3 — движок главной Mini App (`ai/.../recommendation_engine.py`);
 * p4 — глобальный поиск, все три выборки (`search/views.py`);
-* p5 — публичный список и карточка мастера (`users/specialists_api.py`).
+* p5 — публичный список и карточка мастера (`users/specialists_api.py`);
+* p6 — полка «популярное» главного экрана (`users/home_api.py`,
+  `services.catalog_reads.category_specialist_counts`): счётчик мастеров по
+  категориям, кэшируемый на час. Найдена 04.10 при сверке листа с dev: она
+  считала демо-мастеров всем и держала ОДИН ключ кэша на всех.
 
 До этого тикета к таблице тенантов НЕ присоединялись p4 и p5 — там демо
 удерживал единственный замок сида (`status`), и он открыт. Значит для них
@@ -305,6 +309,51 @@ class TestP2TheCategoryCounters:
         assert {both_salons["real"].id, both_salons["demo"].id} <= ids
 
 
+class TestP2bTheServiceCounterWithoutAPool:
+    """`services.catalog_reads.category_service_counts` без пула мастеров.
+
+    Живой вызывающий передаёт пул (полка 3, P2). Без пула счётчик берёт всех —
+    и тогда обязан держать правило клиента сам: умолчание fail-closed.
+    """
+
+    def _massage(self, both_salons):
+        return both_salons["real"].specialist_services.get().salon_service.template.category_id
+
+    def test_without_a_pool_demo_is_not_counted_by_default(self, both_salons):
+        from services.catalog_reads import category_service_counts
+
+        assert category_service_counts()[self._massage(both_salons)] == 1  # боевая услуга на месте
+
+    def test_without_a_pool_demo_is_counted_when_asked(self, both_salons):
+        from services.catalog_reads import category_service_counts
+
+        assert category_service_counts(sees_demo=True)[self._massage(both_salons)] == 2
+
+    def test_the_legacy_layer_follows_the_same_default(self, both_salons):
+        from decimal import Decimal
+
+        from services.catalog_reads import category_service_counts
+        from services.models import Service
+
+        category = ServiceCategory.objects.create(slug="demo2420-legacy", name="Демо-легаси")
+        Service.objects.create(
+            specialist=both_salons["demo"], name="Стрижка", price=Decimal("1000"),
+            duration_minutes=30, is_active=True, category=category,
+        )
+
+        assert category_service_counts()[self._massage(both_salons)] == 1  # боевая услуга на месте
+        assert category_service_counts().get(category.id, 0) == 0
+        assert category_service_counts(sees_demo=True)[category.id] == 1
+
+    def test_a_given_pool_is_trusted_as_it_is(self, both_salons):
+        """Пул тестовой личности несёт демо-мастера — счётчик его не вырезает."""
+        from services.catalog_reads import category_service_counts
+
+        both = [both_salons["real"].id, both_salons["demo"].id]
+
+        assert category_service_counts(specialist_ids=both)[self._massage(both_salons)] == 2
+
+
 class TestP3TheHomeEngine:
     """Движок главной Mini App: `ai/.../recommendation_engine.py`."""
 
@@ -554,3 +603,114 @@ class TestL5TheConcierge:
         names = self._names(test_person)
 
         assert {REAL_NAME, DEMO_NAME} <= names
+
+
+# ---------------------------------------------------------------------------
+# p6 — полка «популярное» главного экрана
+# ---------------------------------------------------------------------------
+
+
+class TestP6TheHomePopularCategories:
+    """Счётчик мастеров по категориям на главной — и его кэш.
+
+    У демо-мастера есть услуга в категории, где боевого салона нет вовсе
+    («Демо-маникюр»): ровно картина стенда, где маникюр, ресницы и стрижки
+    держат только вымышленные салоны.
+    """
+
+    HOME_URL = "/api/v1/home/"
+
+    @pytest.fixture(autouse=True)
+    def _clean_cache(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        yield
+        cache.clear()
+
+    @pytest.fixture
+    def demo_only(self, both_salons) -> ServiceCategory:
+        category = ServiceCategory.objects.create(slug="demo2420-nails", name="Демо-маникюр")
+        template = ServiceTemplate.objects.create(name="Демо-маникюр 2420", category=category)
+        demo = both_salons["demo"]
+        salon_service = SalonService.objects.create(
+            tenant=demo.tenant, template=template, name="Маникюр",
+            base_price=1000, duration_minutes=60, is_active=True,
+        )
+        SpecialistService.objects.create(
+            specialist=demo, salon_service=salon_service, tenant=demo.tenant,
+            price=1000, duration_minutes=60, is_active=True,
+        )
+        return category
+
+    def _counts(self, viewer) -> dict[str, int]:
+        from rest_framework.test import APIClient
+
+        api = APIClient()
+        api.defaults["HTTP_X_APP_TYPE"] = "client"
+        api.force_authenticate(user=viewer)
+        response = api.get(self.HOME_URL)
+        assert response.status_code == 200, response.content
+        rows = response.json()["data"]["popular_categories"]
+        return {row["name"]: row["specialists_count"] for row in rows}
+
+    def test_a_client_counts_only_the_real_salon(self, both_salons, demo_only, client_person):
+        counts = self._counts(client_person)
+
+        assert counts["Массаж"] == 1  # боевой мастер на месте — выдача не пуста
+        assert counts.get("Демо-маникюр", 0) == 0
+
+    def test_a_test_persona_counts_both(self, both_salons, demo_only, test_person):
+        counts = self._counts(test_person)
+
+        assert (counts["Массаж"], counts["Демо-маникюр"]) == (2, 1)
+
+    def test_the_counter_hides_demo_unless_asked(self, both_salons, demo_only):
+        """Умолчание — правило клиента: вызывающий, забывший спросить, демо не получит."""
+        from services.catalog_reads import category_specialist_counts
+
+        default, persona = category_specialist_counts(), category_specialist_counts(sees_demo=True)
+        massage = both_salons["real"].specialist_services.get().salon_service.template.category_id
+
+        assert (default[massage], default.get(demo_only.id, 0)) == (1, 0)
+        assert (persona[massage], persona[demo_only.id]) == (2, 1)
+
+    def test_the_legacy_catalog_layer_is_counted_by_the_same_rule(
+        self, both_salons, client_person, test_person
+    ):
+        """Счётчик складывает два слоя каталога; у легаси-услуги мастера демо-салона — то же правило."""
+        from decimal import Decimal
+
+        from services.models import Service
+
+        category = ServiceCategory.objects.create(slug="demo2420-cuts", name="Демо-стрижки")
+        Service.objects.create(
+            specialist=both_salons["demo"], name="Стрижка", price=Decimal("1000"),
+            duration_minutes=30, is_active=True, category=category,
+        )
+
+        client = self._counts(client_person)
+        persona = self._counts(test_person)
+
+        assert (client["Массаж"], client.get("Демо-стрижки", 0)) == (1, 0)
+        assert persona["Демо-стрижки"] == 1
+
+    def test_a_cached_persona_answer_is_not_served_to_a_client(
+        self, both_salons, demo_only, test_person, client_person
+    ):
+        """Тестовая личность заходит первой и наполняет кэш; клиент после неё
+        видит свои числа, а не её. С одним ключом на всех — увидел бы демо."""
+        persona = self._counts(test_person)
+        client = self._counts(client_person)
+
+        assert persona["Демо-маникюр"] == 1
+        assert (client["Массаж"], client.get("Демо-маникюр", 0)) == (1, 0)
+
+    def test_a_cached_client_answer_is_not_served_to_a_test_persona(
+        self, both_salons, demo_only, test_person, client_person
+    ):
+        client = self._counts(client_person)
+        persona = self._counts(test_person)
+
+        assert client.get("Демо-маникюр", 0) == 0
+        assert (persona["Массаж"], persona["Демо-маникюр"]) == (2, 1)

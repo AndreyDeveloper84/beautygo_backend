@@ -88,6 +88,20 @@ FIELDS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
         _same("action_type", "cadence", "target_count", "created_at"),
         {"id": _KEY, "plan": _NEST},
     ),
+    # DRF-2857 — сохранённый план (Plan Engine) и его ревизии.
+    "wellness.Plan": (
+        {**_same("status", "created_via", "created_at", "status_changed_at"), "goal": "goal_key"},
+        {"id": _KEY, "subject_user": _OWNER, "idempotency_key": _REPEAT,
+         "current_revision": "указатель на последнюю ревизию — ревизии выгружены внутри плана"},
+    ),
+    "wellness.PlanRevision": (
+        {**_same("revision_no", "validation", "staleness", "created_at"),
+         "steps_snapshot": "steps", "assertions_snapshot": "assertions"},
+        {"id": _KEY, "plan": _NEST,
+         "policy_versions": "версии правил, по которым собран план, — не данные о человеке",
+         "created_from": "служебная ссылка на решение, из которого сохранена ревизия",
+         "content_hash": "служебный отпечаток содержимого для сверки повтора"},
+    ),
     "wellness.PlanOutcomeLink": (
         {**_same("target_date", "status", "created_at", "closed_at"), "outcome": "outcome_target"},
         {"id": _KEY, "plan": _NEST},
@@ -118,9 +132,11 @@ FIELDS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
          "targets_method_versions": "версии методик расчёта ориентиров, не данные о человеке"},
     ),
     "nutrition.FoodLog": (
-        {**_same("dish_name", "portion_multiplier", "calories", "protein_g", "fat_g", "carbs_g",
-                 *_NUTRIENTS, "micronutrients_source", "meal_type", "entry_origin", "logged_at",
-                 "created_at"),
+        # DRF-2761 — ``ai_calories`` (оценка калорий ИИ) — запись дневника
+        # человека, как и ``calories``: выгружается.
+        {**_same("dish_name", "portion_multiplier", "calories", "ai_calories", "protein_g",
+                 "fat_g", "carbs_g", *_NUTRIENTS, "micronutrients_source", "meal_type",
+                 "entry_origin", "logged_at", "created_at"),
          "scan": "from_scan"},
         {"id": _KEY, "user": _OWNER, "idempotency_key": _REPEAT},
     ),
@@ -226,6 +242,7 @@ def _plain(value):
 _CONVERT = {
     ("goals.GoalAnketaRun", "goal"): lambda o: o.goal.goal_key if o.goal_id else None,
     ("wellness.PlanOutcomeLink", "outcome"): lambda o: o.outcome.target,
+    ("wellness.Plan", "goal"): lambda o: o.goal.goal_key if o.goal_id else None,
     ("wellness.ProgressObservation", "superseded_by"): lambda o: o.superseded_by_id is not None,
     ("nutrition.FoodLog", "scan"): lambda o: o.scan_id is not None,
     ("nutrition.FoodScan", "image"): lambda o: o.image.url if o.image else None,
@@ -272,7 +289,15 @@ def export_goals(user) -> dict:
 
 
 def export_wellness_plan(user) -> dict:
-    from wellness.models import DesiredOutcome, PersonalPlan, ProgressObservation
+    from wellness.models import DesiredOutcome, PersonalPlan, Plan, ProgressObservation
+
+    saved_plans = []
+    for saved in (
+        Plan.objects.filter(subject_user=user).select_related("goal").order_by("created_at", "id")
+    ):
+        item = _row(saved)
+        item["revisions"] = [_row(r) for r in saved.revisions.order_by("revision_no")]
+        saved_plans.append(item)
 
     plans = []
     for plan in PersonalPlan.objects.filter(user=user).order_by("created_at", "id"):
@@ -287,6 +312,7 @@ def export_wellness_plan(user) -> dict:
             _row(o) for o in DesiredOutcome.objects.filter(user=user).order_by("created_at", "id")
         ],
         "plans": plans,
+        "saved_plans": saved_plans,
         "progress_observations": [
             _row(o) for o in ProgressObservation.objects.filter(user=user).order_by("observed_at", "id")
         ],

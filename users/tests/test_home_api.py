@@ -223,7 +223,7 @@ class TestPopularCategories:
 
     def test_caches_popular_categories(self, auth_client):
         from django.core.cache import cache
-        from users.home_api import CACHE_KEY_POPULAR_CATEGORIES
+        from users.home_api import popular_categories_cache_key
 
         cat = ServiceCategory.objects.create(name="X")
         spec = make_specialist()
@@ -234,7 +234,7 @@ class TestPopularCategories:
 
         # First call — populates cache
         auth_client.get(HOME_URL)
-        cached = cache.get(CACHE_KEY_POPULAR_CATEGORIES)
+        cached = cache.get(popular_categories_cache_key(False))
         assert cached is not None
 
         # Add new category — should NOT appear in next call (cached)
@@ -354,6 +354,10 @@ class TestNearbyIsCatalogNotRecommendation:
     RECOMMENDATION_ARTEFACTS = {
         "match_reasons", "score", "top_reasons", "why", "reasons",
         "recommendation_reasons", "explanation",
+        # Идентификаторы решения канонического резолвера: их несёт только
+        # Recommendation (В-12, «все показанные Recommendation несут
+        # decision_id»). Каталог с ними выдавал бы себя за решение (DRF-2771).
+        "decision_id", "recommendation_id", "recommendation_status",
     }
 
     def test_section_carries_no_personal_fit_explanation(self, auth_client):

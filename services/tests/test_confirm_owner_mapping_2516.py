@@ -1,7 +1,8 @@
-"""DRF-2516 — поставить 36 связей по списку, подтверждённому владельцем 25.09.
+"""DRF-2516 — поставить 31 связь по списку, подтверждённому владельцем 25.09
+(пересмотр 05.10: 36 → 31, пять строк убраны владельцем).
 
 Список закрыт и подтверждён дословно — «да по списку». Лист не про то, чтобы
-написать 36 строк: это пять минут. Он про то, что **связь без указания, кто её
+написать 31 строку: это пять минут. Он про то, что **связь без указания, кто её
 подтвердил, через месяц неотличима от машинной догадки** (DRF-2408).
 
 Узлы держат ровно то, что названо сторожами листа:
@@ -9,10 +10,10 @@
 * **адресность — свойство, а не слово:** строка, которой нет в списке, командой
   не затрагивается. Проверяется соседством: рядом с перечисленной стоит
   непepечисленная, у которой всё остальное совпадает;
-* **обе стороны:** 36 перечисленных получают связь **и** неподтверждённые
+* **обе стороны:** 31 перечисленная получает связь **и** неподтверждённые
   остаются `unmapped`. Второе важнее: без него мы измерили бы «что-то
   записалось», а не «записалось верное»;
-* **число до изменения:** кандидатов ровно 36, иначе останов. Не «применим
+* **число до изменения:** кандидатов ровно 31, иначе останов. Не «применим
   сколько нашлось»: несовпадение значит, что данные уехали с 25.09, и тогда
   список надо пересматривать, а не додавливать;
 * **провенанс читается ИЗ ПОЛЯ**, а не из докстроки, и правило — **своё**:
@@ -24,6 +25,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import uuid
 from io import StringIO
@@ -51,7 +54,7 @@ _SLUG_CELL = re.compile(r"^\*{0,2}`(?P<slug>[a-z0-9-]+)`\*{0,2}$")
 _CODE_CELL = re.compile(r"^`(?P<code>\d+(?:\.\d+)+)`$")
 
 
-def read_document() -> list[tuple[str, str, str]]:
+def read_document(path=DOCUMENT) -> list[tuple[str, str, str]]:
     """Тройки прямо из документа основания.
 
     Фикстуры строятся ОТСЮДА, а не рядом. Первая редакция создавала все 36
@@ -64,7 +67,7 @@ def read_document() -> list[tuple[str, str, str]]:
     «Салон» только в раздел массажей, и то не всем строкам. Где слага нет —
     он `formula-tela`, как прямо говорит поправка.
     """
-    text = DOCUMENT.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
     start = text.index("## Подтверждено")
     end = text.index("## НЕ подтверждено")
     section = text[start:end]
@@ -202,16 +205,16 @@ class TestTheListIsTheDocument:
             "список в коде разошёлся с документом основания"
         )
 
-    def test_the_list_holds_exactly_thirty_six(self) -> None:
+    def test_the_list_holds_exactly_thirty_one(self) -> None:
         # Положительная пара к утверждениям об отсутствии ниже: если список
         # однажды опустеет, все проверки «не тронуто» станут вакуумными.
-        assert len(CONFIRMED) == 36
-        assert len({(s, n) for s, n, _ in CONFIRMED}) == 36, (
+        assert len(CONFIRMED) == 31
+        assert len({(s, n) for s, n, _ in CONFIRMED}) == 31, (
             "пары «салон + услуга» обязаны быть различны"
         )
 
     def test_the_distribution_by_salon_matches_the_correction(self) -> None:
-        """35 + 1, а не 36 у одного салона.
+        """30 + 1 (после пересмотра 05.10; было 35 + 1), а не всё у одного салона.
 
         Ровно эта посылка и была неверна в первой редакции: `--apply` упал бы
         на 35 из 36, а ворота напечатали бы ложную причину.
@@ -219,6 +222,61 @@ class TestTheListIsTheDocument:
         from collections import Counter
 
         assert dict(Counter(s for s, _, _ in CONFIRMED)) == EXPECTED_BY_SALON
+
+
+#: Документ 25.09 — закрытая запись; пересмотр 05.10 — другой документ рядом.
+DOCUMENT_2509 = DOCUMENT.parent / "MAPPING_SERVICES_OWNER_CONFIRMED_2026-09-25.md"
+
+#: Пять строк, убранных владельцем 05.10, — дословно как в его решении и в
+#: списке 25.09. Здесь, а не в модуле списка: команде они не нужны, они нужны
+#: проверке, что пересмотр убрал ровно их.
+REMOVED_0510 = frozenset({
+    "Всё тело (руки полностью, ноги полностью, тотальное бикини, подмышки)",
+    "Must Have (подмышки + глубокое бикини)",
+    "Спина без боли — комплекс массажа",
+    "Комплекс «Гладкая кожа»: антицеллюлитный массаж (45 мин) + VelaShape (60 минут)",
+    "Комплекс «Лёгкие ноги»: лимфодренажный массаж + вибромассаж (60 минут)",
+})
+
+
+#: Отпечаток SHA-256 разобранных троек записи 25.09 — не секрет, а закрепление
+#: закрытой записи (детектор секретов видит в нём высокую энтропию).
+RECORD_2509_DIGEST = "aed7dc2b0a15e26e31cdf73e8a06d3981939e65981d61da16216be6cac48291b"  # pragma: allowlist secret
+
+
+class TestTheRevisionOfOctoberFifth:
+    """Пересмотр 05.10 убрал ровно пять названных строк и не тронул остальные.
+
+    Без этого узла «31» было бы любым 31: пересмотр, заодно «поправивший»
+    код у оставшейся строки, прошёл бы сверку с новым документом — оба
+    поменялись бы вместе. Сверка с закрытой записью 25.09 держит, что каждая
+    оставшаяся пара — именно та, что владелец подтвердил дословно.
+    """
+
+    def test_the_revision_removes_exactly_the_five_and_keeps_the_rest_verbatim(self) -> None:
+        before = read_document(DOCUMENT_2509)
+        # Положительный контроль: все пять в записи 25.09 были, иначе «их нет
+        # в новом списке» доказывало бы опечатку в этом узле, а не пересмотр.
+        assert len(before) == 36
+        assert REMOVED_0510 <= {name for _, name, _ in before}
+        assert [tuple(x) for x in CONFIRMED] == [r for r in before if r[1] not in REMOVED_0510]
+
+    def test_the_closed_record_of_september_25th_is_not_edited(self) -> None:
+        """Запись 25.09 закреплена отпечатком своих троек.
+
+        Узел выше сверяет пересмотр С ЭТОЙ записью — значит, он держит только
+        пока запись неизменна. «Поправка» кода у оставшейся пары сразу в
+        списке, в документе 05.10 и в записи 25.09 прошла бы все сверки.
+        Отпечаток — от разобранных троек, а не от байтов файла: байты
+        меняет перевод строк при выгрузке (autocrlf), тройки — нет.
+        """
+        triples = [list(t) for t in read_document(DOCUMENT_2509)]
+        payload = json.dumps(triples, ensure_ascii=False).encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()
+        assert digest == RECORD_2509_DIGEST, "закрытая запись 25.09 изменена"
+        text = DOCUMENT_2509.read_text(encoding="utf-8")
+        assert "## Подтверждено: 36 строк" in text
+        assert OWNER_LIST_SOURCE_REF != "docs/" + DOCUMENT_2509.name
 
 
 class TestTheRuleNamesItsOrigin:
@@ -241,13 +299,13 @@ class TestTheRuleNamesItsOrigin:
         Ссылка на файл соседнего репозитория (без удалённых адресов, да ещё и
         неотслеживаемый) — это провенанс по имени, а не по сути.
         """
-        assert OWNER_LIST_SOURCE_REF == "docs/MAPPING_SERVICES_OWNER_CONFIRMED_2026-09-25.md"
+        assert OWNER_LIST_SOURCE_REF == "docs/MAPPING_SERVICES_OWNER_CONFIRMED_2026-10-05.md"
         assert len(OWNER_LIST_SOURCE_REF) <= 200, "поле основания не длиннее 200"
         assert DOCUMENT.exists()
 
 
 class TestBothSides:
-    def test_the_listed_thirty_six_get_the_link(self) -> None:
+    def test_the_listed_thirty_one_get_the_link(self) -> None:
         rows = _whole_list()
 
         _run(apply=True)
@@ -361,15 +419,15 @@ class TestAddressingIsAProperty:
 
 
 class TestTheCountIsShownBeforeTheChange:
-    def test_dry_run_prints_exactly_thirty_six(self) -> None:
+    def test_dry_run_prints_exactly_thirty_one(self) -> None:
         _whole_list()
 
         out = _run()
 
-        assert "36" in out
+        assert "31" in out
         assert "сухой прогон" in out.lower()
 
-    def test_a_count_other_than_thirty_six_halts(self) -> None:
+    def test_a_count_other_than_thirty_one_halts(self) -> None:
         """Останов, а не «применим сколько нашлось».
 
         Несовпадение значит, что данные на стенде уехали с 25.09 — и тогда
@@ -380,7 +438,8 @@ class TestTheCountIsShownBeforeTheChange:
 
         with pytest.raises(CommandError) as err:
             _run(apply=True)
-        assert "36" in str(err.value)
+        # Именно ворота числа: «31» печатается и в других отказах команды.
+        assert "кандидатов 30, а владелец подтверждал 31" in str(err.value)
 
     def test_the_halt_happens_before_anything_is_written(self) -> None:
         """Останов обязан быть ДО записи, иначе он половинчатый.
@@ -398,7 +457,9 @@ class TestTheCountIsShownBeforeTheChange:
 
         with pytest.raises(CommandError) as err:
             _run(apply=True)
-        assert "36" in str(err.value), f"отказ не про число кандидатов: {err.value}"
+        assert "кандидатов 30, а владелец подтверждал 31" in str(err.value), (
+            f"отказ не про число кандидатов: {err.value}"
+        )
 
         assert _snapshot(rest) == before
 

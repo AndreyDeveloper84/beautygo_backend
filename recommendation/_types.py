@@ -56,6 +56,15 @@ class Surface(StrEnum):
 class ScopeMode(StrEnum):
     SALON = "SALON"
     MARKETPLACE = "MARKETPLACE"
+    #: O-1b (DRF-2831) — «свои салоны» клиента. Салоны называет СЕРВЕР по
+    #: отношениям клиента, а не вызывающий: только в этом режиме память о
+    #: мастере и салоне участвует в выборе (NEVER_CROSSES, 24.08).
+    OWN_SALONS = "OWN_SALONS"
+
+
+#: Значение ``source_tenant_id`` у предпочтения из памяти, записанного в
+#: общем боте, а не в боте одного салона: действует во всех своих салонах.
+MEMORY_SOURCE_GLOBAL_BOT = "global_bot"
 
 
 class SafetyState(StrEnum):
@@ -97,6 +106,50 @@ class ConstraintKind(StrEnum):
     KNOWN = "KNOWN"
     UNKNOWN = "UNKNOWN"
     FLEXIBLE = "FLEXIBLE"
+
+
+class ConfigGate(StrEnum):
+    """Область классификации и готовность конфигурации ТОЙ строки — проверки П2 и П3.
+
+    Заменяет ``config_ready: bool | None``: трёх значений не хватало, чтобы
+    отличить «не готово» от «не классифицировано» и от «не смогли прочитать»
+    (решение владельца 07.10: причины не сливаются). Открывают ровно два
+    значения — ``NOT_SUBJECT`` и ``READY``.
+    """
+
+    #: Канон явно вне Body Care: проверка конфигурации к нему не относится.
+    NOT_SUBJECT = "NOT_SUBJECT"
+    READY = "READY"
+    #: Body Care, конфигурация не готова к скринингу (любое другое состояние CAT-6).
+    NOT_READY = "NOT_READY"
+    #: Область канона неизвестна (или канона нет): подлежит ли строка Body
+    #: Care, никто не сказал. Не «вне Body Care» — неизвестность закрывает.
+    UNCLASSIFIED = "UNCLASSIFIED"
+    #: Источник не смог ответить (ключа нет, незнакомое значение, сбой чтения).
+    UNDETERMINED = "UNDETERMINED"
+
+
+class LegalGate(StrEnum):
+    """Юридические условия §7A для ТОЙ строки и ТОГО мастера — CAT-10-ext (DRF-2843).
+
+    Читается по подтверждённому классу канона, а не по семейству: медицинский
+    класс вне Body Care (пилинги лица) состояние CAT-6 не видит
+    (``not_subject``), и закрывает его этот гейт. Порядок проверки — лицензия
+    салона, адрес мастера, квалификация мастера; значение называет первое
+    несошедшееся условие. Открывает только ``CLEARED``.
+    """
+
+    CLEARED = "CLEARED"
+    CLASS_UNCONFIRMED = "CLASS_UNCONFIRMED"
+    LICENSE_NOT_VERIFIED = "LICENSE_NOT_VERIFIED"
+    LICENSE_SCOPE_MISMATCH = "LICENSE_SCOPE_MISMATCH"
+    LOCATION_UNKNOWN = "LOCATION_UNKNOWN"
+    ADDRESS_MISMATCH = "ADDRESS_MISMATCH"
+    QUALIFICATION_REQUIREMENT_UNCONFIRMED = "QUALIFICATION_REQUIREMENT_UNCONFIRMED"
+    QUALIFICATION_NOT_VERIFIED = "QUALIFICATION_NOT_VERIFIED"
+    #: Источник не смог ответить (ключа нет, незнакомое значение, сбой
+    #: чтения). Закрывает: неопределённость не толкуется в пользу допуска.
+    UNDETERMINED = "UNDETERMINED"
 
 
 class MappingStatus(StrEnum):
@@ -285,6 +338,11 @@ class Scope:
     §14.6). `MARKETPLACE` допускает ноль (весь маркетплейс) или список как
     явное сужение, плюс `exclude_tenant_refs` для обратного сужения
     («всё, кроме тех, где человек уже был»).
+
+    `OWN_SALONS` (O-1b) — `tenant_refs` заполняет сервер салонами клиента.
+    Пустой список здесь значит «своих салонов нет» и даёт ПУСТУЮ выдачу, а
+    не весь маркетплейс: в отличие от `MARKETPLACE`, отсутствие салонов —
+    не отсутствие ограничения.
     """
 
     mode: ScopeMode
@@ -298,6 +356,8 @@ class Scope:
             raise ValueError("SALON требует ровно одного tenant_ref (§4.1)")
         if self.mode is ScopeMode.SALON and self.exclude_tenant_refs:
             raise ValueError("exclude_tenant_refs бессмысленно внутри одного салона")
+        if self.mode is ScopeMode.OWN_SALONS and self.exclude_tenant_refs:
+            raise ValueError("OWN_SALONS: салоны называет сервер, исключать из них нечем")
         if self.radius_km is not None and self.radius_km <= 0:
             raise ValueError("radius_km задан — значит положителен; отсутствие радиуса выражается None (UNSET)")
         overlap = set(self.tenant_refs) & set(self.exclude_tenant_refs)
@@ -323,6 +383,56 @@ class NeedSpec:
         `INACTIVE`, а не подменяется нулевым баллом для всех.
         """
         return bool(self.capability_refs or self.canonical_service_refs or self.goal_key or self.raw_text)
+
+
+#: Предпочтений в одном запросе — не больше (провод и вызов в процессе).
+MAX_PREFERENCES = 20
+
+
+class PreferenceKind(StrEnum):
+    """На ЧТО направлено предпочтение клиента (O-1, решение владельца 06.10)."""
+
+    MASTER = "master"      #: мастер — id пользователя мастера, как у кандидата
+    SALON = "salon"        #: салон — id тенанта
+    CATEGORY = "category"  #: категория услуг — id ServiceCategory
+
+
+class PreferenceStrength(StrEnum):
+    """«Предпочитаю Анну» — мягкое; «только Анна» — жёсткое (O-1)."""
+
+    SOFT = "soft"
+    HARD = "hard"
+
+
+class PreferenceOrigin(StrEnum):
+    """Откуда предпочтение. Вывода агента здесь НЕТ и не будет (O-1).
+
+    «Неподтверждённые выводы агента не участвуют в выборе как установленные
+    предпочтения» — поэтому у перечисления только сказанное сейчас и
+    подтверждённое самим человеком в памяти.
+    """
+
+    CURRENT_REQUEST = "current_request"
+    CONFIRMED_MEMORY = "confirmed_memory"
+
+
+@dataclass(frozen=True)
+class Preference:
+    """Предпочтение клиента в запросе — O-1.
+
+    Прямое слово клиента — сигнал без SafetyResult для этого предпочтения;
+    обязательные проверки процедуры при этом сохраняются: предпочтение
+    работает только на допустимых кандидатах (S1 выше него).
+    """
+
+    kind: PreferenceKind
+    ref: UUID
+    strength: PreferenceStrength = PreferenceStrength.SOFT
+    origin: PreferenceOrigin = PreferenceOrigin.CURRENT_REQUEST
+    #: O-1b — салон, в котором предпочтение записано. Задан — предпочтение
+    #: действует только на кандидатов этого салона; ``None`` — на всех в
+    #: области запроса.
+    tenant_ref: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -355,10 +465,18 @@ class RecommendationRequest:
     tie_break_seed: str | None = None
     k: int = 3
     policy_pins: PolicyPins | None = None
+    #: O-1 (DRF-2816) — предпочтения клиента: сказанное сейчас и
+    #: подтверждённое в памяти. Пусто — поведение как до O-1.
+    preferences: tuple["Preference", ...] = ()
 
     def __post_init__(self) -> None:
         if self.k < 1:
             raise ValueError("k — сколько будет показано; ноль показанных это не запрос, а его отсутствие")
+        if len(self.preferences) > MAX_PREFERENCES:
+            raise ValueError(
+                f"предпочтений {len(self.preferences)} > {MAX_PREFERENCES}: предел держит и провод, "
+                "и вызов в процессе (O-1)"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -375,10 +493,13 @@ class CandidateFacts:
     ни одной стадии.
 
     Все поля, которых может не быть, трёхзначны: `None` означает `UNKNOWN`
-    и **нигде не превращается в 0 или False**. Сегодня в коде живут два
-    обратных примера — `_score_distance` возвращает `0.5` при неизвестной
-    географии, `_score_availability` считает незаполненное расписание
-    отсутствием слотов; оба схлопывают UNKNOWN в число.
+    и **нигде не превращается в 0 или False**. Когда это писалось, в коде жили
+    два обратных примера — `_score_distance` возвращал `0.5` при неизвестной
+    географии, `_score_availability` считал незаполненное расписание
+    отсутствием слотов. Оба сняты: неизвестное расстояние теперь `None` и
+    выбывает из суммы (`RecommendationEngine._score_distance`,
+    `ScoreBreakdown.composite`), а компонента доступности больше нет
+    (`ai/tests/test_availability_fiction_removed.py`).
     """
 
     ref: CandidateRef
@@ -401,6 +522,30 @@ class CandidateFacts:
     match_level: MatchLevel = MatchLevel.UNDETERMINED
     matched_service_ref: UUID | None = None
     matched_goal_category_ref: UUID | None = None
+    #: DRF-2789 — глубина совпадения с целью, только у уровня GOAL_CATEGORY:
+    #: 4 подтверждённая связь процедуры с целью, 3 основная категория прямо,
+    #: 2 лист под основным корнем, 1 побочная прямо, 0 лист под побочным корнем.
+    #: ``None`` — не совпадение по цели.
+    goal_fit_depth: int | None = None
+    #: CAT-10 (чинит C1) — область и готовность конфигурации ТОЙ услуги,
+    #: которой мастер совпал. ``None`` — у строки нет канонической связи
+    #: (легаси) или источник этого не знает: гейт не применяется. Открывают
+    #: ``NOT_SUBJECT`` и ``READY``; остальное исключает своим кодом.
+    config_gate: ConfigGate | None = None
+    #: CAT-10-ext — юридические условия §7A той же строки для этого мастера.
+    #: ``None`` — у строки нет канонической связи (легаси) или источник
+    #: условий не знает: гейт не применяется. Любое значение, кроме
+    #: ``CLEARED``, исключает.
+    legal_gate: LegalGate | None = None
+    #: O-1 — категории предложений мастера (своя, иначе шаблона): на них
+    #: проверяется предпочтение категории.
+    category_refs: frozenset[UUID] = frozenset()
+    #: O-1: категории (лист и родитель) той услуги, которой мастер ответил
+    #: на НАЗВАННУЮ нужду. Когда нужда названа, предпочтение категории
+    #: сверяется с ней, а не с любым предложением мастера: «массаж» у
+    #: мастера, совпавшего по маникюру, — не ответ на «маникюр, лучше там,
+    #: где массаж». Пусто — не знаем.
+    matched_category_refs: frozenset[UUID] = frozenset()
 
     # -- S3: транзакционная пригодность -------------------------------------
     is_bookable: bool | None = None

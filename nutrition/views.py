@@ -61,6 +61,12 @@ from nutrition.serializers import (
     WaterTodayResponseSerializer,
     WaterTodayResponseSerializerV3,
 )
+from nutrition.services.food_diary_consent import (
+    FOOD_DIARY_PROCESSING,
+    FoodDiaryConsentRequired,
+    require_attested_basis,
+    require_not_withdrawn,
+)
 from nutrition.services.personal_calculation_consent import (
     PERSONAL_CALCULATION,
     PersonalCalculationConsentRequired,
@@ -96,6 +102,7 @@ from nutrition.services.food_scanner_router import (
     FoodScannerRouter,
 )
 from nutrition.services.deficit_hints import build_deficit_hint
+from nutrition.services.ai_calorie_estimate import AI_SOURCE, ai_calories_for
 from nutrition.services.nutrition_lookup_factory import build_nutrition_lookup
 from nutrition.services.nutrition_summary_service import NutritionSummaryService
 from nutrition.services.water_entry_service import (
@@ -516,6 +523,21 @@ class InternalFoodScanView(APIView):
         )
 
 
+def _food_diary_consent_refusal(user, exc: FoodDiaryConsentRequired) -> Response:
+    """DRF-2777 — отказ записи в дневник без основания ``food_diary_processing``.
+
+    422 и свой код, как у параметров тела: «нет основания» чинится согласием
+    человека, а не телом запроса.
+    """
+    logger.info("nutrition.food_diary.consent_refused user=%s reason=%s", user.pk, exc.reason)
+    return error_response(
+        exc.code,
+        str(exc),
+        details={"consent_type": FOOD_DIARY_PROCESSING, "reason": exc.reason},
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+    )
+
+
 def _create_food_log_for(user, serializer_data: dict, request: Request) -> Response:
     """Shared body for FoodLogCreateView + InternalFoodLogView (DRF-247).
 
@@ -581,6 +603,12 @@ class FoodLogCreateView(APIView):
         },
     )
     def post(self, request: Request) -> Response:
+        # DRF-2777 — внешнее клиентское приложение (бот эту ручку не зовёт)
+        # обязано утвердить основание; известный отзыв побеждает утверждение.
+        try:
+            require_attested_basis(request.user.id, request.data)
+        except FoodDiaryConsentRequired as exc:
+            return _food_diary_consent_refusal(request.user, exc)
         serializer = FoodLogCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(
@@ -642,6 +670,25 @@ class InternalFoodEstimateView(APIView):
         facts = build_nutrition_lookup().lookup(
             dish_name, portion_g=portion_g, portion_named=named_portion is not None
         )
+        # DRF-2761 — справочник промахнулся: можно оценить калории ИИ (решение
+        # владельца 02.10, пересмотр вопроса 40). Только после промаха —
+        # проверенное бьёт оценку. Кому оценку показывать, решает
+        # ``may_estimate_for``; субъект читается БЕЗ создания: ручка оценки
+        # по-прежнему ничего о человеке не пишет. Заголовка нет или он не
+        # знаком — оценки нет.
+        kcal_ai_estimate = None
+        if facts is None:
+            from users.services import resolve_external_user_readonly
+
+            subject = resolve_external_user_readonly(
+                request.META.get("HTTP_X_EXTERNAL_USER_ID", "")
+            )
+            kcal_ai_estimate = ai_calories_for(
+                dish_name,
+                portion_g=portion_g,
+                user_id=subject.id if subject is not None else None,
+                may_call_model=True,
+            )
         # DRF-2371 — отказа здесь больше нет. Раньше «блюда нет в
         # справочнике» и «вес неизвестен» отвечали 400, и §109 шаг 6
         # («запись только по подтверждению показанной оценки») делал запись
@@ -653,7 +700,11 @@ class InternalFoodEstimateView(APIView):
         return success_response(
             {
                 "matched_dish": facts.matched_dish if facts is not None else dish_name,
-                "source": facts.source if facts is not None else None,
+                "source": (
+                    facts.source
+                    if facts is not None
+                    else (AI_SOURCE if kcal_ai_estimate is not None else None)
+                ),
                 "portion_g": portion_g,
                 "portion_estimated": named_portion is None,
                 # DRF-2371 + DRF-2402 — признак происхождения порции обязан
@@ -666,6 +717,12 @@ class InternalFoodEstimateView(APIView):
                 "fat_g": facts.fat_g if facts is not None else None,
                 "carbs_g": facts.carbs_g if facts is not None else None,
                 "kcal_per_100g": facts.kcal_per_100g if facts is not None else None,
+                # DRF-2761 — оценка ИИ едет СВОИМ ключом, а ``kcal`` при ней
+                # остаётся null: читатель, не знающий про оценку, покажет
+                # карточку без калорий, как раньше, а не примет оценку за
+                # проверенное число. Показывать — только с пометкой
+                # «Оценка ИИ».
+                "kcal_ai_estimate": kcal_ai_estimate,
             },
             status_code=status.HTTP_200_OK,
         )
@@ -703,6 +760,12 @@ class InternalFoodLogView(APIView):
                 f"X-External-User-ID невалиден: {exc}",
             )
 
+        # DRF-2777 — согласие проверяет бот до вызова; здесь только рассинхрон:
+        # известный отзыв — отказ, неизвестное состояние — не отзыв.
+        try:
+            require_not_withdrawn(user.id)
+        except FoodDiaryConsentRequired as exc:
+            return _food_diary_consent_refusal(user, exc)
         serializer = FoodLogCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(
@@ -984,6 +1047,12 @@ class InternalFoodLogRestoreView(APIView):
         user, refusal = _food_log_actor(request)
         if refusal is not None:
             return refusal
+        # DRF-2777 — восстановление возвращает запись в дневник: то же правило,
+        # что у новой записи бот-пути.
+        try:
+            require_not_withdrawn(user.id)
+        except FoodDiaryConsentRequired as exc:
+            return _food_diary_consent_refusal(user, exc)
         try:
             log = restore_food_log(user_id=user.id, log_id=pk)
         except FoodLogEditError as exc:
@@ -1672,6 +1741,12 @@ class InternalWaterCreateView(APIView):
                 f"X-External-User-ID невалиден: {exc}",
             )
 
+        # DRF-2777 — запись воды пишет зеркало в дневник (FoodLog). Бот держит
+        # её под тем же согласием; здесь только рассинхрон — известный отзыв.
+        try:
+            require_not_withdrawn(user.id)
+        except FoodDiaryConsentRequired as exc:
+            return _food_diary_consent_refusal(user, exc)
         serializer = WaterEntryCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return error_response(
@@ -1796,6 +1871,11 @@ class InternalWaterRestoreView(APIView):
                 f"X-External-User-ID невалиден: {exc}",
             )
 
+        # DRF-2777 — восстановление воды возвращает и зеркало в дневник.
+        try:
+            require_not_withdrawn(user.id)
+        except FoodDiaryConsentRequired as exc:
+            return _food_diary_consent_refusal(user, exc)
         try:
             entry = WaterEntryService().restore(user.id, pk)
         except EntryNotFoundError:
@@ -2452,6 +2532,9 @@ class InternalDiaryDaysView(APIView):
                             "meals_count": drf_serializers.IntegerField(),
                             "kcal": drf_serializers.FloatField(allow_null=True),
                             "has_entries": drf_serializers.BooleanField(),
+                            "uncounted_meals": drf_serializers.IntegerField(),
+                            # DRF-2766 — записей, вошедших в kcal оценкой ИИ.
+                            "kcal_ai_included": drf_serializers.IntegerField(),
                         },
                         many=True,
                     ),

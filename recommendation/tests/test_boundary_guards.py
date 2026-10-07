@@ -20,6 +20,7 @@ import re
 from pathlib import Path
 
 from recommendation._authority import (
+    CATALOG_ORDER_CONSUMERS,
     NON_RANKING_CONSUMERS,
     RANKED_OUTPUT_CONSUMERS,
     RANKING_COMPONENTS,
@@ -461,7 +462,7 @@ def test_every_consumer_of_a_ranking_component_is_declared():
     потребитель попадает сюда автоматически и остаётся красным, пока его
     не разберут словами.
     """
-    declared = set(RANKED_OUTPUT_CONSUMERS) | set(NON_RANKING_CONSUMERS)
+    declared = set(RANKED_OUTPUT_CONSUMERS) | set(NON_RANKING_CONSUMERS) | set(CATALOG_ORDER_CONSUMERS)
     undeclared = [
         f"{rel}:{lines[0][0]}"
         for rel, lines in _importers_of(set(RANKING_COMPONENTS)).items()
@@ -471,10 +472,42 @@ def test_every_consumer_of_a_ranking_component_is_declared():
         "потребитель ранжирующего компонента не объявлен (DRF-1628):\n  "
         + "\n  ".join(undeclared)
         + "\n\nВнесите его в RANKED_OUTPUT_CONSUMERS, если он берёт ПОРЯДОК "
-        "(тогда назовите задачу, которая это снимет), или в "
+        "(тогда назовите задачу, которая это снимет), в "
+        "CATALOG_ORDER_CONSUMERS, если показывает порядок как каталог "
+        "(решение владельца и поведенческий сторож), или в "
         "NON_RANKING_CONSUMERS, если берёт предикат либо счёт — "
         "и напишите, что именно."
     )
+
+
+def test_the_three_kinds_of_consumer_do_not_overlap():
+    """Один файл — одна категория. Иначе запись в мягкой прикрывала бы долг в строгой."""
+    kinds = [set(RANKED_OUTPUT_CONSUMERS), set(NON_RANKING_CONSUMERS), set(CATALOG_ORDER_CONSUMERS)]
+    overlap = (kinds[0] & kinds[1]) | (kinds[0] & kinds[2]) | (kinds[1] & kinds[2])
+    assert not overlap, f"файл объявлен в двух категориях: {sorted(overlap)}"
+
+
+def test_every_catalog_order_consumer_names_the_ruling_and_a_living_guard():
+    """Каталог со своим порядком допустим только с решением владельца и сторожем.
+
+    Решение — потому что граница «каталог ≠ рекомендация» владельческая
+    (В-12), а не инженерная. Сторож — потому что «не выдаёт себя за
+    решение» без поведенческой проверки остаётся декларацией: ссылка на
+    тест проверяется здесь на существование, а не только на форму.
+    """
+    import re
+
+    for path, reason in CATALOG_ORDER_CONSUMERS.items():
+        assert re.search(r"§\d+|В-\d+", reason), (
+            f"{path}: нет ссылки на решение владельца, разрешающее каталог: {reason!r}"
+        )
+        guard = re.search(r"([\w/]+\.py)::(\w+)", reason)
+        assert guard, f"{path}: не назван поведенческий сторож (файл::класс): {reason!r}"
+        guard_file = REPO_ROOT / guard.group(1)
+        assert guard_file.exists(), f"{path}: сторож {guard.group(1)} не существует"
+        assert re.search(rf"^class {guard.group(2)}\b", guard_file.read_text(encoding="utf-8"), re.M), (
+            f"{path}: в {guard.group(1)} нет класса {guard.group(2)}"
+        )
 
 
 def test_every_ranked_output_consumer_names_the_task_that_removes_it():
@@ -499,7 +532,9 @@ def test_declared_consumers_still_import_the_component():
     """
     importers = set(_importers_of(set(RANKING_COMPONENTS)))
     stale = [
-        rel for rel in (set(RANKED_OUTPUT_CONSUMERS) | set(NON_RANKING_CONSUMERS))
+        rel for rel in (
+            set(RANKED_OUTPUT_CONSUMERS) | set(NON_RANKING_CONSUMERS) | set(CATALOG_ORDER_CONSUMERS)
+        )
         if rel not in importers
     ]
     assert not stale, (

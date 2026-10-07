@@ -733,6 +733,14 @@ class CreateBookingService:
                 # Omitting it crashed the booking.created handler with
                 # KeyError before delivery could ever succeed.
                 "status": str(appointment.status),
+                # DRF-2785 — the optimistic-concurrency counter, so the bot's
+                # mirror knows it from birth. The master's «✅ Подтверждаю» on
+                # «У вас новая запись» sends expected_version; before this, the
+                # mirror learned a version only from appointment.rescheduled, so a
+                # booking never moved had none to send. New OPTIONAL field
+                # (event-contract §4.1): non-breaking, stays at v1. Read off the
+                # row, not assumed to be 1.
+                "version": appointment.version,
                 # Coarse origin channel (§3.1 `source`) — the `origin`
                 # that Ayla MVP Appointment Contract §10 names as the
                 # thing that distinguishes a manual salon booking from a

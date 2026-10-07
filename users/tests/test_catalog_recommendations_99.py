@@ -17,9 +17,11 @@ rating» здесь больше нет: этих механизмов не су
 """
 from __future__ import annotations
 
+import contextlib
 import uuid
 
 from decimal import Decimal
+from unittest import mock
 
 import pytest
 from rest_framework.test import APIClient
@@ -890,3 +892,244 @@ class TestSalonStateGatesThePool:
         picks = {i["candidate"]["id"] for i in r.json()["data"]["layer_2_ayla_picks"]["items"]}
         assert _key(healthy) in picks
         assert _key(orphan) not in picks
+
+
+@pytest.mark.django_db
+class TestShelfLogCarriesSeparation:
+    """DRF-2805 — строка лога полки несёт разделение лучшего яруса полки 2.
+
+    Стендовая проверка ранжирования (R0, DRF-2789) — чтение этой строки: какая
+    стадия разделила лучший ярус и сколько в нём кандидатов. Только наблюдаемость.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
+    @staticmethod
+    def _post_and_read_the_line(body) -> str:
+        """Строка, которую ручка отдала логгеру, — отрендеренная из его аргументов.
+
+        Через обёртку логгера модуля, а не caplog: настройка логирования проекта
+        может не пускать записи к корню, и пустой caplog выглядел бы как «строки нет».
+        """
+        from unittest import mock
+
+        import users.catalog_recommendations_api as api_module
+
+        with mock.patch.object(api_module.logger, "info", wraps=api_module.logger.info) as info:
+            response = _api().post(URL, body, format="json")
+        assert response.status_code == 200, response.content
+        lines = [
+            call.args[0] % call.args[1:] for call in info.call_args_list
+            if call.args and str(call.args[0]).startswith("catalog.recommendations ")
+        ]
+        assert len(lines) == 1, lines
+        return lines[0]
+
+    def test_a_split_names_the_stage_and_the_best_group(self, customer, tenant_new, manicure_category):
+        exact = _make_specialist(tenant_new, suffix="2805", name="Exact")
+        partial = _make_specialist(tenant_new, suffix="2806", name="Partial")
+        _make_service(exact, manicure_category, name="Маникюр")
+        _make_service(partial, manicure_category, name="Покрытие гель-лаком")
+
+        line = self._post_and_read_the_line(_body(goal="маникюр"))
+
+        assert "l2_separation[stage=S2 state=SPLIT best_group=1]" in line
+
+    def test_no_split_is_said_as_such(self, customer, tenant_new, manicure_category):
+        """Нужда не названа — S2 молчит, ярус один: ``stage=-``, а не выдуманная стадия."""
+        for i in range(2):
+            _make_service(_make_specialist(tenant_new, suffix=f"281{i}", name=f"Tie {i}"), manicure_category)
+
+        line = self._post_and_read_the_line(_body())
+
+        assert "l2_separation[stage=- state=NOT_SPLIT best_group=2]" in line
+
+
+@pytest.mark.django_db
+class TestPreferencesOnTheShelf:
+    """O-1 (DRF-2816), вариант (а): предпочтение работает и в полке 1 «твои места».
+
+    «Мой мастер Анна» из уже посещённого салона в полку 2 не попадает (там
+    салоны из истории исключены — смысл полок не меняется). Поэтому
+    предпочтение применяется в полке 1: Анна наверху среди твоих мест.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _token(self, settings):
+        settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+
+    def test_a_preferred_master_tops_your_places(
+        self, customer, customer_known_tur, tenant_known, manicure_category,
+    ):
+        anna = _make_specialist(tenant_known, suffix="2816", name="Анна")
+        other = _make_specialist(tenant_known, suffix="2817", name="Другая")
+        _make_service(anna, manicure_category, name="Маникюр")
+        _make_service(other, manicure_category, name="Маникюр")
+        body = _body(preferences=[{"kind": "master", "ref": _key(anna), "origin": "current_request"}])
+
+        items = _api().post(URL, body, format="json").json()["data"]["layer_1_your_places"]["items"]
+
+        assert [item["candidate"]["id"] for item in items][0] == _key(anna)
+        tiers = {item["candidate"]["id"]: item["tier"] for item in items}
+        assert tiers[_key(anna)] < tiers[_key(other)]
+        assert "CONTEXT_PREFERENCE_CURRENT_REQUEST" in items[0]["reason_codes"]
+
+    def test_without_preferences_your_places_stay_a_tie(
+        self, customer, customer_known_tur, tenant_known, manicure_category,
+    ):
+        """Положительный контроль: без предпочтения оба в одном ярусе — порядок дала не случайность."""
+        anna = _make_specialist(tenant_known, suffix="2818", name="Анна")
+        other = _make_specialist(tenant_known, suffix="2819", name="Другая")
+        _make_service(anna, manicure_category, name="Маникюр")
+        _make_service(other, manicure_category, name="Маникюр")
+
+        items = _api().post(URL, _body(), format="json").json()["data"]["layer_1_your_places"]["items"]
+
+        assert len({item["tier"] for item in items}) == 1
+
+    def test_a_root_category_preference_reaches_services_on_its_leaves(
+        self, customer, customer_known_tur, tenant_known, manicure_category, massage_category,
+    ):
+        """Услуги висят на листьях, клиент называет корень: «ногти», а не «маникюр»."""
+        root = ServiceCategory.objects.create(name="Ногти", slug="nails-2816")
+        manicure_category.parent = root
+        manicure_category.save(update_fields=["parent"])
+        anna = _make_specialist(tenant_known, suffix="2820", name="Анна")
+        other = _make_specialist(tenant_known, suffix="2821", name="Другая")
+        _make_service(anna, manicure_category, name="Маникюр")
+        _make_service(other, massage_category, name="Массаж")
+        body = _body(preferences=[{"kind": "category", "ref": str(root.id), "origin": "current_request"}])
+
+        items = _api().post(URL, body, format="json").json()["data"]["layer_1_your_places"]["items"]
+
+        tiers = {item["candidate"]["id"]: item["tier"] for item in items}
+        assert tiers[_key(anna)] < tiers[_key(other)]
+
+    def test_only_anna_is_never_answered_with_another_master(
+        self, customer, customer_known_tur, tenant_known, tenant_new, manicure_category,
+    ):
+        """Приёмка владельца 06.10, узел 2: «только Анна» — жёсткий scope и на полке.
+
+        Полка 1 сужается до Анны; полка 2 пустеет, а не отвечает мастером из
+        «Новых мест». Объяснить и спросить про альтернативы — дело бота.
+        """
+        anna = _make_specialist(tenant_known, suffix="2822", name="Анна")
+        other = _make_specialist(tenant_known, suffix="2823", name="Другая")
+        fresh = _make_specialist(tenant_new, suffix="2825", name="Новая")
+        for master in (anna, other, fresh):
+            _make_service(master, manicure_category, name="Маникюр")
+        body = _body(preferences=[
+            {"kind": "master", "ref": _key(anna), "strength": "hard", "origin": "current_request"},
+        ])
+
+        data = _api().post(URL, body, format="json").json()["data"]
+
+        assert [i["candidate"]["id"] for i in data["layer_1_your_places"]["items"]] == [_key(anna)]
+        assert data["layer_2_ayla_picks"]["items"] == []
+        assert data["layer_2_ayla_picks"]["reason_codes"] == ["ELIG_EXCLUDED_PREFERENCE_HARD"], (
+            "пустота объясняет себя — бот спрашивает про альтернативы"
+        )
+
+    def test_a_familiar_anna_rises_on_shelf_1_and_stays_off_shelf_2(
+        self, customer, customer_known_tur, tenant_known, tenant_new, manicure_category,
+    ):
+        """Приёмка владельца 06.10, узел 1: мягкое «моя Анна» — наверх полки 1, в полку 2 не попадает."""
+        anna = _make_specialist(tenant_known, suffix="2826", name="Анна")
+        other = _make_specialist(tenant_known, suffix="2827", name="Другая")
+        fresh = _make_specialist(tenant_new, suffix="2828", name="Новая")
+        for master in (anna, other, fresh):
+            _make_service(master, manicure_category, name="Маникюр")
+        body = _body(preferences=[{"kind": "master", "ref": _key(anna), "origin": "current_request"}])
+
+        data = _api().post(URL, body, format="json").json()["data"]
+
+        l1 = {i["candidate"]["id"]: i["tier"] for i in data["layer_1_your_places"]["items"]}
+        l2 = {i["candidate"]["id"] for i in data["layer_2_ayla_picks"]["items"]}
+        assert l1[_key(anna)] < l1[_key(other)]
+        assert _key(anna) not in l2
+        assert l2 == {_key(fresh)}, "полка 2 — новые места, как и без предпочтения"
+
+    def test_preferences_may_be_null(self, customer, customer_known_tur, tenant_known, manicure_category):
+        anna = _make_specialist(tenant_known, suffix="2824", name="Анна")
+        _make_service(anna, manicure_category, name="Маникюр")
+
+        response = _api().post(URL, _body(preferences=None), format="json")
+
+        assert response.status_code == 200, response.content
+
+    def test_a_favourite_never_ranks_the_cross_salon_shelf(
+        self, customer, customer_known_tur, tenant_known, tenant_new, manicure_category,
+    ):
+        """NEVER_CROSSES (24.08): любимый мастер — отношение с ОДНИМ салоном.
+
+        Анна была мастером салона из истории клиента и перешла в салон B вне
+        истории (профиль у человека один — OneToOne, — салон меняется). В
+        межсалонной полке 2 фаворит не действует: салон B о нём не узнаёт и
+        Анну не продвигает.
+        """
+        anna_moved = _make_specialist(tenant_new, suffix="2830", name="Анна")
+        other_in_b = _make_specialist(tenant_new, suffix="2832", name="Другая-B")
+        for master in (anna_moved, other_in_b):
+            _make_service(master, manicure_category, name="Маникюр")
+        favourite = [{"kind": "master", "ref": _key(anna_moved), "origin": "confirmed_memory"}]
+
+        with_pref = _api().post(URL, _body(preferences=favourite), format="json").json()["data"]
+        without = _api().post(URL, _body(), format="json").json()["data"]
+
+        l2_with = {i["candidate"]["id"]: i["tier"] for i in with_pref["layer_2_ayla_picks"]["items"]}
+        l2_without = {i["candidate"]["id"]: i["tier"] for i in without["layer_2_ayla_picks"]["items"]}
+        assert set(l2_without) == {_key(anna_moved), _key(other_in_b)}, "контроль: оба в полке 2"
+        assert len(set(l2_without.values())) == 1, "контроль: без предпочтения — одна ступень"
+        assert l2_with == l2_without, "предпочтение не ранжирует межсалонную полку"
+        assert all(
+            "CONTEXT_PREFERENCE_CONFIRMED_MEMORY" not in i["reason_codes"]
+            for i in with_pref["layer_2_ayla_picks"]["items"]
+        )
+        assert with_pref["layer_2_ayla_picks"]["reason_codes"] == without["layer_2_ayla_picks"]["reason_codes"]
+
+    def test_two_own_salons_each_get_only_their_own_context(
+        self, customer, customer_known_tur, tenant_known, tenant_explore, manicure_category,
+    ):
+        """Приёмка владельца 06.10: полка 1 из двух салонов клиента; чужой контекст не передаётся.
+
+        Фаворит Анна — из салона A. В полке 1 она поднимается. Строка мастера
+        салона C не несёт ни кода предпочтения, ни ссылки на Анну или салон A.
+        Журнал запроса не называет ни Анну, ни салон A: доступные салону логи
+        не узнают ни о предпочтении, ни об отношениях клиента с другим салоном.
+        """
+        TenantUserRelationship.objects.create(
+            user=customer, tenant=tenant_explore, role=TenantUserRelationship.Role.CUSTOMER,
+        )
+        anna = _make_specialist(tenant_known, suffix="2833", name="Анна")
+        master_c = _make_specialist(tenant_explore, suffix="2834", name="Мастер-C")
+        for master in (anna, master_c):
+            _make_service(master, manicure_category, name="Маникюр")
+        favourite = [{"kind": "master", "ref": _key(anna), "origin": "confirmed_memory"}]
+        lines: list[str] = []
+
+        def record(msg, *args, **kwargs):
+            lines.append(str(msg) % args if args else str(msg))
+
+        import recommendation._serializers as serializers_mod
+        import recommendation._stages as stages_mod
+        import users.catalog_recommendations_api as api_mod
+        import users.recommendation_source as source_mod
+
+        with contextlib.ExitStack() as stack:
+            for module in (api_mod, source_mod, stages_mod, serializers_mod):
+                for level in ("info", "warning", "error", "debug"):
+                    stack.enter_context(mock.patch.object(module.logger, level, side_effect=record))
+            data = _api().post(URL, _body(preferences=favourite), format="json").json()["data"]
+
+        l1 = {i["candidate"]["id"]: i for i in data["layer_1_your_places"]["items"]}
+        assert set(l1) == {_key(anna), _key(master_c)}, "контроль: оба салона в полке 1"
+        assert l1[_key(anna)]["tier"] < l1[_key(master_c)]["tier"]
+        row_c = str(l1[_key(master_c)])
+        assert not any(c.startswith("CONTEXT_PREFERENCE") for c in l1[_key(master_c)]["reason_codes"])
+        assert _key(anna) not in row_c and str(tenant_known.id) not in row_c
+        assert lines, "контроль: журнал запроса перехвачен"
+        for line in lines:
+            assert _key(anna) not in line, line
+            assert str(tenant_known.id) not in line, line

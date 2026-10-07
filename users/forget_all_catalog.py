@@ -114,6 +114,11 @@ KEPT_BY_FORGET_ALL: dict[str, str] = {
         "решение владельца §72: избранные мастера остаются — выбор человека в каталоге, "
         "а не запомненное о нём"
     ),
+    "users.ConsentState": (
+        "DRF-2776: состояние согласия — основание обработки, а не запомненное о человеке. "
+        "Стерев его, «забудь всё» вернуло бы рассылку тому, кто отозвал согласие на дневник; "
+        "реестр согласий в боте после «забудь всё» тоже остаётся"
+    ),
 }
 
 #: Ключ счёта :func:`erase_remembered_catalog` → слово журнала AMD-010 и ответа.
@@ -125,6 +130,8 @@ REMEMBERED_SCOPE: dict[str, str] = {
     "wellness.PlanOutcomeLink": "wellness_plan",
     "wellness.PlanAction": "wellness_plan",
     "wellness.PersonalPlan": "wellness_plan",
+    # DRF-2857 — durable-план; ревизии уходят каскадом и входят в тот же счёт.
+    "wellness.Plan": "wellness_plan",
     "wellness.DesiredOutcome": "wellness_plan",
     "wellness.ProgressObservation": "wellness_plan",
     "nutrition.NutritionProfile": "nutrition_profile",
@@ -270,6 +277,7 @@ def _remembered_querysets(user) -> dict:
     from wellness.models import (
         DesiredOutcome,
         PersonalPlan,
+        Plan,
         PlanAction,
         PlanOutcomeLink,
         ProgressObservation,
@@ -283,6 +291,7 @@ def _remembered_querysets(user) -> dict:
         ),
         "wellness.PlanAction": PlanAction.objects.filter(plan__user=user),
         "wellness.PersonalPlan": PersonalPlan.objects.filter(user=user),
+        "wellness.Plan": Plan.objects.filter(subject_user=user),
         "wellness.DesiredOutcome": DesiredOutcome.objects.filter(user=user),
         "wellness.ProgressObservation": ProgressObservation.objects.filter(user=user),
         "nutrition.NutritionProfile": NutritionProfile.objects.filter(user=user),
@@ -344,6 +353,7 @@ def erase_remembered_catalog(
     from wellness.models import (
         DesiredOutcome,
         PersonalPlan,
+        Plan,
         PlanAction,
         PlanOutcomeLink,
         ProgressObservation,
@@ -364,6 +374,8 @@ def erase_remembered_catalog(
     _delete("wellness.PlanOutcomeLink", PlanOutcomeLink.objects.filter(outcome__user=user))
     _delete("wellness.PlanAction", PlanAction.objects.filter(plan__user=user))
     _delete("wellness.PersonalPlan", PersonalPlan.objects.filter(user=user))
+    # DRF-2857 — durable-план с ревизиями (каскад); до ClientGoal, как в D3.
+    _delete("wellness.Plan", Plan.objects.filter(subject_user=user))
     _delete("wellness.DesiredOutcome", DesiredOutcome.objects.filter(user=user))
     ProgressObservation.objects.filter(user=user).update(superseded_by=None)
     _delete("wellness.ProgressObservation", ProgressObservation.objects.filter(user=user))

@@ -138,6 +138,11 @@ REST_FRAMEWORK = {
         # Scoped: service-to-service /nutrition/internal/* — looser than
         # client-app rate; bot fans out across many BotUsers.
         'food_scan_internal': '60/min',
+        # DRF-2776 — смены согласия от бота. Бот доставляет с одного адреса и
+        # разбирает накопившееся пачкой (сегодня в его ящике 65 событий);
+        # отказ здесь — задержка отзыва, а не защита от перебора: ручка
+        # закрыта токеном. 300 — соседи `food_photo_internal`.
+        'consent_events_internal': '300/min',
         # DRF-2607 — MAX signature → salon administrator's token. Not the
         # client-login bucket `auth` (10/min guards ONE person's login against
         # guessing): this exchange is service-to-service — the bot spreads it
@@ -363,6 +368,25 @@ MULTI_TENANT_DEFAULT_SLUG = os.environ.get("MULTI_TENANT_DEFAULT_SLUG", "formula
 MULTI_TENANT_STRICT = os.environ.get("MULTI_TENANT_STRICT", "false").lower() in (
     "1", "true", "yes", "on",
 )
+
+# Неизвестная классификация канона закрывает услугу (решение владельца 07.10).
+#
+# Выключено: читатели Body Care ведут себя по-старому — канон без семейства
+# «не подлежит», класс не спрашивается. Это и есть обход: на пилоте
+# семейства нет ни у одного канона, и гейты слепы.
+#
+# Включено: неизвестная область (``ServiceTemplate.body_care_scope``) и
+# неподтверждённый юридический класс закрывают рекомендацию — каждое своей
+# причиной (``services.body_care_scope``).
+#
+# Включать ТОЛЬКО после классификации данных: при пустой области выдача
+# обнуляется целиком. Условие — ноль активных предложений с неизвестной
+# областью (включая предложения без канона) либо список, принятый
+# владельцем. Пока флаг выключен, обход открыт, что бы ни было записано в
+# базе.
+BODY_CARE_UNCLASSIFIED_FAIL_CLOSED = os.environ.get(
+    "BODY_CARE_UNCLASSIFIED_FAIL_CLOSED", "false"
+).lower() in ("1", "true", "yes", "on")
 
 ROOT_URLCONF = 'djangoProject.urls'
 
@@ -610,6 +634,13 @@ SMS_ENABLED = os.environ.get("SMS_ENABLED", "false").lower() == "true"
 # (штатный отказ, не 5xx — общий breaker бота считает постоянный 5xx
 # аварией), чтение отдаёт plan_lite: null.
 PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() == "true"
+
+# DRF-2857 — durable Plan (Plan Engine, WP1). Default CLOSED. Включён →
+# писатель Plan Lite отказывает (409 PLAN_LITE_SUPERSEDED_BY_ENGINE), чтение и
+# закрытие Lite работают; новый план человека сохраняется как wellness.Plan.
+# Выключен → писатели Plan отвечают 404 PLAN_ENGINE_DISABLED, чтение отдаёт
+# plan: null; уже сохранённые Plan/PlanRevision остаются в базе.
+PLAN_ENGINE_ENABLED = os.environ.get("PLAN_ENGINE_ENABLED", "false").lower() == "true"
 SMS_RU_SENDER = os.environ.get("SMS_RU_SENDER", "")  # Empty = default sender
 SMS_RU_TIMEOUT = 10  # HTTP timeout in seconds
 
@@ -867,6 +898,13 @@ FOOD_SCAN_PRICE_OUTPUT_USD_PER_1M = os.environ.get("FOOD_SCAN_PRICE_OUTPUT_USD_P
 # простоем чужого справочника нельзя. Сборка — только через
 # nutrition/services/nutrition_lookup_factory.py.
 USDA_LOOKUP_ENABLED = os.environ.get("USDA_LOOKUP_ENABLED", "false").lower() == "true"
+# DRF-2761 — оценка калорий ИИ при промахе справочника (решение владельца
+# 02.10.2026, пересмотр вопроса 40). Выключено по умолчанию, как официальный
+# источник выше: включение на стенде — отдельное решение. Число показывается
+# только с пометкой «Оценка ИИ» и не входит ни в суммы, ни в сравнение с целью.
+AI_CALORIE_ESTIMATE_ENABLED = (
+    os.environ.get("AI_CALORIE_ESTIMATE_ENABLED", "false").lower() == "true"
+)
 USDA_API_KEY = os.environ.get("USDA_API_KEY", "")
 
 # Service-to-service token for /api/v1/nutrition/internal/* endpoints (DRF-246).

@@ -55,13 +55,20 @@ from ._types import (
     ConstraintKind,
     ExcludedCandidate,
     MappingCensus,
+    ConfigGate,
+    LegalGate,
     MappingStatus,
     MatchLevel,
     NeedSpec,
+    Preference,
+    PreferenceKind,
+    PreferenceOrigin,
+    PreferenceStrength,
     RecommendationRequest,
     SafetyState,
     ScheduleState,
     Scope,
+    ScopeMode,
     StageId,
 )
 
@@ -138,6 +145,14 @@ class StageOutput:
     evidence: Mapping[UUID, tuple[EvidenceItem, ...]] = field(default_factory=dict)
     #: Кандидаты, которым запрещён первый ярус (K5).
     tier_one_forbidden: frozenset[UUID] = frozenset()
+    #: Стадия из нескольких измерений (S4, O-1): ключ — кортеж, сравнение
+    #: по измерениям по очереди. Если задан, группа делится по нему, а не по
+    #: ``keys``.
+    lex_keys: Mapping[UUID, tuple[int, ...]] = field(default_factory=dict)
+    #: С какого измерения значение кандидата неизвестно (§29.4 по измерению):
+    #: подгруппа, где он стоит, дальше этого измерения не делится. Старшие
+    #: измерения работают; неизвестное молчит вместе со всеми младшими.
+    unknown_from: Mapping[UUID, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -170,19 +185,24 @@ def apply_scope(candidates: Sequence[CandidateFacts], scope: Scope) -> Admission
 
     include = set(scope.tenant_refs)
     exclude = set(scope.exclude_tenant_refs)
+    # O-1b: в режиме «свои салоны» список — ограничение, даже когда он пуст.
+    # Пустое `include` в MARKETPLACE значит «весь маркетплейс»; здесь оно
+    # значит «своих салонов нет», и молча расширить область было бы утечкой.
+    own_salons_only = scope.mode is ScopeMode.OWN_SALONS
 
     for facts in candidates:
         cid = facts.ref.id
         granted: set[ReasonCode] = set()
 
-        if include or exclude:
-            if facts.tenant_ref is None or (include and facts.tenant_ref not in include) \
+        if include or exclude or own_salons_only:
+            if facts.tenant_ref is None \
+                    or ((include or own_salons_only) and facts.tenant_ref not in include) \
                     or facts.tenant_ref in exclude:
                 excluded.append(ExcludedCandidate(facts.ref, StageId.S0, ReasonCode.SCOPE_EXCLUDED_OUT_OF_TENANT))
                 continue
             if include:
                 granted.add(ReasonCode.SCOPE_WITHIN_TENANT)
-        if not include and not exclude:
+        if not include and not exclude and not own_salons_only:
             granted.add(ReasonCode.SCOPE_CROSS_TENANT_ALLOWED)
 
         if scope.city is not None:
@@ -209,6 +229,30 @@ def apply_scope(candidates: Sequence[CandidateFacts], scope: Scope) -> Admission
 # ---------------------------------------------------------------------------
 # S1 — жёсткая допустимость. Компенсации баллом нет (R2)
 # ---------------------------------------------------------------------------
+
+#: Значения, с которыми строка проходит гейт. Всё остальное исключает.
+_CONFIG_OPEN = frozenset({ConfigGate.NOT_SUBJECT, ConfigGate.READY})
+
+#: Значение гейта → код исключения: у каждой причины свой (владелец 07.10).
+#: Значение, которого здесь нет, закрывается как «не определено» — умолчание
+#: в ``.get`` ниже: новое значение перечисления не может открыть по недосмотру.
+_CONFIG_EXCLUSION = {
+    ConfigGate.UNCLASSIFIED: ReasonCode.ELIG_EXCLUDED_CATALOG_UNCLASSIFIED,
+    ConfigGate.NOT_READY: ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY,
+    ConfigGate.UNDETERMINED: ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED,
+}
+
+_LEGAL_EXCLUSION = {
+    LegalGate.CLASS_UNCONFIRMED: ReasonCode.ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED,
+    LegalGate.LICENSE_NOT_VERIFIED: ReasonCode.ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED,
+    LegalGate.LICENSE_SCOPE_MISMATCH: ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
+    LegalGate.LOCATION_UNKNOWN: ReasonCode.ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN,
+    LegalGate.ADDRESS_MISMATCH: ReasonCode.ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH,
+    LegalGate.QUALIFICATION_REQUIREMENT_UNCONFIRMED: ReasonCode.ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED,
+    LegalGate.QUALIFICATION_NOT_VERIFIED: ReasonCode.ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED,
+    LegalGate.UNDETERMINED: ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED,
+}
+
 
 def apply_eligibility(
     candidates: Sequence[CandidateFacts],
@@ -260,6 +304,8 @@ def apply_eligibility(
         safety_blocks_all = True
     budget = request.constraints.price_max
     need_is_stated = request.need.is_stated
+    hard_preferences, _, _ = effective_preferences(request.preferences)
+    hard_by_kind = _by_kind(hard_preferences)
 
     for facts in candidates:
         cid = facts.ref.id
@@ -329,6 +375,43 @@ def apply_eligibility(
         if not eligible:
             excluded.append(
                 ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE)
+            )
+            continue
+        # CAT-10 (чинит C1): связь VERIFIED ещё не значит, что body-care
+        # процедуру можно рекомендовать — её конфигурация должна быть готова
+        # к скринингу (CAT-6 READY). Гейт на ЧТЕНИИ: состояние может упасть
+        # после верификации связи, и это ловится здесь без пересмотра связи.
+        # Перед готовностью — область (П2): канон, про который не сказано,
+        # подлежит ли он Body Care, закрыт своей причиной, а не пропущен.
+        # ``None`` — у строки нет канонической связи: гейт к ней не относится.
+        if facts.config_gate is not None and facts.config_gate not in _CONFIG_OPEN:
+            excluded.append(ExcludedCandidate(
+                facts.ref, StageId.S1,
+                _CONFIG_EXCLUSION.get(facts.config_gate, ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED),
+            ))
+            continue
+        # CAT-10-ext: юридические условия §7A — лицензия салона, адрес и
+        # квалификация мастера. По подтверждённому классу канона, а не по
+        # семейству: медицинский класс вне Body Care готовность выше не видит.
+        if facts.legal_gate is not None and facts.legal_gate is not LegalGate.CLEARED:
+            excluded.append(ExcludedCandidate(
+                facts.ref, StageId.S1,
+                _LEGAL_EXCLUSION.get(facts.legal_gate, ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED),
+            ))
+            continue
+        # O-1: «только X» — жёсткое условие, и только из ТЕКУЩЕГО запроса.
+        # Стоит ПОСЛЕ проверок процедуры и связи: предпочтение работает на
+        # допустимых кандидатах и ничего из них не отменяет.
+        # Внутри вида — ИЛИ («Анна или Мария»), между видами — И («Анна, и
+        # только в этом салоне»). «Только массаж» при неизвестных категориях
+        # кандидата исключает: жёсткое условие подтверждается, а не
+        # предполагается (как известный бюджет при неизвестной цене ниже).
+        if not all(
+            any(satisfies_preference(facts, p, need_is_stated=need_is_stated) for p in same_kind)
+            for same_kind in hard_by_kind.values()
+        ):
+            excluded.append(
+                ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD)
             )
             continue
         granted.add(ReasonCode.ELIG_CAPABILITY_VERIFIED)
@@ -449,8 +532,17 @@ def stage_semantic_fit(candidates: Sequence[CandidateFacts], need: NeedSpec) -> 
 
     for facts in candidates:
         level = _effective_match_level(facts)
-        keys[facts.ref.id] = float(MATCH_RANK[level])
-        codes[facts.ref.id] = frozenset({MATCH_CODE[level]})
+        depth = facts.goal_fit_depth if level is MatchLevel.GOAL_CATEGORY else None
+        # DRF-2789 (R0): глубина цели — дробная часть ключа уровня. Она
+        # различает только внутри «категории цели» и не может поднять его
+        # выше совпадения по названию: максимум 1.4 < 2.
+        keys[facts.ref.id] = float(MATCH_RANK[level]) + (
+            _GOAL_DEPTH_STEP * depth if depth is not None else 0.0
+        )
+        level_codes = {MATCH_CODE[level]}
+        if depth is not None:
+            level_codes |= GOAL_DEPTH_CODES[depth]
+        codes[facts.ref.id] = frozenset(level_codes)
         if level is not MatchLevel.UNDETERMINED:
             evidence[facts.ref.id] = (
                 EvidenceItem(
@@ -467,6 +559,21 @@ def stage_semantic_fit(candidates: Sequence[CandidateFacts], need: NeedSpec) -> 
             )
 
     return StageOutput(StageId.S2, active=True, keys=keys, codes=codes, evidence=evidence)
+
+
+#: Шаг глубины цели внутри уровня: 0.1. Пять значений глубины (0–4) дают
+#: не больше 0.4 — меньше расстояния между соседними уровнями (1.0).
+_GOAL_DEPTH_STEP = 0.1
+
+#: Коды объяснения глубины (DRF-2789): класс категории и, если она досталась
+#: раскрытием корня, отметка об этом.
+GOAL_DEPTH_CODES: dict[int, frozenset[ReasonCode]] = {
+    4: frozenset({ReasonCode.MATCH_GOAL_CONFIRMED_CAPABILITY}),
+    3: frozenset({ReasonCode.MATCH_GOAL_PRIMARY_CATEGORY}),
+    2: frozenset({ReasonCode.MATCH_GOAL_PRIMARY_CATEGORY, ReasonCode.MATCH_GOAL_EXPANDED_CATEGORY}),
+    1: frozenset({ReasonCode.MATCH_GOAL_SECONDARY_CATEGORY}),
+    0: frozenset({ReasonCode.MATCH_GOAL_SECONDARY_CATEGORY, ReasonCode.MATCH_GOAL_EXPANDED_CATEGORY}),
+}
 
 
 def _effective_match_level(facts: CandidateFacts) -> MatchLevel:
@@ -549,7 +656,90 @@ def stage_transaction_fit(
 # S4 — контекстная персонализация
 # ---------------------------------------------------------------------------
 
-def stage_contextual(candidates: Sequence[CandidateFacts]) -> StageOutput:
+def effective_preferences(
+    preferences: Sequence[Preference],
+) -> tuple[tuple[Preference, ...], tuple[Preference, ...], tuple[Preference, ...]]:
+    """(жёсткие текущего запроса, мягкие текущего запроса, мягкие из памяти) — O-1.
+
+    * **Текущий запрос важнее истории — по виду.** Если в запросе назван
+      мастер, предпочтение мастера из памяти не учитывается вовсе; память о
+      категории при этом работает.
+    * **Жёстко отсекает только сказанное сейчас.** «Только Анна» из памяти
+      читается как мягкое: устаревшее условие не прячет всех кандидатов.
+    * Повторы схлопываются: одно и то же предпочтение дважды не считается.
+    * Салон, которым предпочтение сужено (O-1b), — часть его тождества:
+      «Анна в салоне A» и «Анна везде» — разные предпочтения.
+    """
+    current = [p for p in preferences if p.origin is PreferenceOrigin.CURRENT_REQUEST]
+    named_now = {p.kind for p in current}
+    hard = tuple(dict.fromkeys(p for p in current if p.strength is PreferenceStrength.HARD))
+    soft_current = tuple(dict.fromkeys(
+        (p.kind, p.ref, p.tenant_ref) for p in current if p.strength is PreferenceStrength.SOFT
+    ))
+    soft_memory = tuple(dict.fromkeys(
+        (p.kind, p.ref, p.tenant_ref) for p in preferences
+        if p.origin is PreferenceOrigin.CONFIRMED_MEMORY and p.kind not in named_now
+    ))
+    as_pref = lambda triples, origin: tuple(  # noqa: E731 — локальная форма
+        Preference(kind=k, ref=r, strength=PreferenceStrength.SOFT, origin=origin, tenant_ref=t)
+        for k, r, t in triples
+    )
+    return (
+        hard,
+        as_pref(soft_current, PreferenceOrigin.CURRENT_REQUEST),
+        as_pref(soft_memory, PreferenceOrigin.CONFIRMED_MEMORY),
+    )
+
+
+def _by_kind(preferences: Sequence[Preference]) -> dict[PreferenceKind, tuple[Preference, ...]]:
+    out: dict[PreferenceKind, list[Preference]] = {}
+    for p in preferences:
+        out.setdefault(p.kind, []).append(p)
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def _candidate_categories(facts: CandidateFacts, *, need_is_stated: bool) -> frozenset[UUID]:
+    """Категории, с которыми сверяется предпочтение категории.
+
+    Нужда названа — категории той услуги, которой мастер на неё ответил;
+    не названа — категории всех его предложений. Лист и родитель — оба:
+    услуги висят на листьях, а клиент называет корень.
+    """
+    refs = facts.matched_category_refs if need_is_stated else facts.category_refs
+    if facts.matched_goal_category_ref is not None:
+        refs = refs | {facts.matched_goal_category_ref}
+    return refs
+
+
+def satisfies_preference(
+    facts: CandidateFacts, preference: Preference, *, need_is_stated: bool = False,
+) -> bool:
+    """Отвечает ли кандидат предпочтению — по виду предпочтения.
+
+    Предпочтение, суженное до салона (O-1b), вне этого салона не действует:
+    тот же мастер в другом салоне — не тот, кого клиент там выбрал.
+    """
+    if preference.tenant_ref is not None and facts.tenant_ref != preference.tenant_ref:
+        return False
+    if preference.kind is PreferenceKind.MASTER:
+        return facts.ref.id == preference.ref
+    if preference.kind is PreferenceKind.SALON:
+        return facts.tenant_ref == preference.ref
+    if preference.kind is PreferenceKind.CATEGORY:
+        return preference.ref in _candidate_categories(facts, need_is_stated=need_is_stated)
+    return False  # pragma: no cover — закрытое перечисление
+
+
+#: Порядок измерений внутри одного происхождения: мастер, салон, категория.
+_PREFERENCE_DIMENSIONS = (PreferenceKind.MASTER, PreferenceKind.SALON, PreferenceKind.CATEGORY)
+
+
+def stage_contextual(
+    candidates: Sequence[CandidateFacts],
+    preferences: Sequence[Preference] = (),
+    *,
+    need_is_stated: bool = False,
+) -> StageOutput:
     """Прошлый успешный опыт. Только `COMPLETED` — и это не сокращение.
 
     Канон §10.3: `shown ≠ engaged ≠ booked ≠ completed ≠ liked`. Показ,
@@ -558,22 +748,69 @@ def stage_contextual(candidates: Sequence[CandidateFacts]) -> StageOutput:
     `_load_history_specialist_ids` читает именно `COMPLETED` — это
     правильное чтение, и оно переиспользуется без изменений.
     """
+    _, soft_current, soft_memory = effective_preferences(preferences)
     has_history = any(f.prior_completed_visit or f.prior_completed_same_category for f in candidates)
-    if not has_history:
+    if not has_history and not soft_current and not soft_memory:
         return StageOutput(
             StageId.S4, active=False,
-            inactive_reason="завершённых визитов нет — персонализировать нечем",
+            inactive_reason="ни предпочтений клиента, ни завершённых визитов — персонализировать нечем",
         )
 
     keys: dict[UUID, float] = {}
+    lex_keys: dict[UUID, tuple[int, ...]] = {}
+    unknown_from: dict[UUID, int] = {}
     codes: dict[UUID, frozenset[ReasonCode]] = {}
     evidence: dict[UUID, tuple[EvidenceItem, ...]] = {}
+    now_by_kind, memory_by_kind = _by_kind(soft_current), _by_kind(soft_memory)
+    # Первое измерение категории, которое участвует: текущего запроса (2),
+    # иначе памяти (3 + 2). Неизвестные категории замораживают с него.
+    category_position = (
+        _PREFERENCE_DIMENSIONS.index(PreferenceKind.CATEGORY) if PreferenceKind.CATEGORY in now_by_kind
+        else len(_PREFERENCE_DIMENSIONS) + _PREFERENCE_DIMENSIONS.index(PreferenceKind.CATEGORY)
+        if PreferenceKind.CATEGORY in memory_by_kind
+        else None
+    )
+
+    def hits(facts: CandidateFacts, by_kind) -> tuple[bool, ...]:
+        return tuple(
+            any(satisfies_preference(facts, p, need_is_stated=need_is_stated) for p in by_kind.get(kind, ()))
+            for kind in _PREFERENCE_DIMENSIONS
+        )
 
     for facts in candidates:
         cid = facts.ref.id
+        # §29.4 по измерению: категорий кандидата не знаем — молчит только
+        # сравнение по категории и всё младшее. «Мой мастер Анна» (старше)
+        # работает, даже если у соседа услуги без категорий.
+        if category_position is not None and not _candidate_categories(facts, need_is_stated=need_is_stated):
+            unknown_from[cid] = category_position
+        # O-1 (DRF-2816): лексикографически ВНУТРИ стадии, без весов и сумм —
+        # да/нет по измерениям в закреплённом порядке: текущий запрос
+        # (мастер, салон, категория), затем подтверждённая память (то же),
+        # затем история визитов. Любой старший признак перевешивает все
+        # младшие вместе: два совпадения не «стоят» одного более важного.
+        now, remembered = hits(facts, now_by_kind), hits(facts, memory_by_kind)
+        pref_codes: set[ReasonCode] = set()
+        if any(now):
+            pref_codes.add(ReasonCode.CONTEXT_PREFERENCE_CURRENT_REQUEST)
+        if any(remembered):
+            pref_codes.add(ReasonCode.CONTEXT_PREFERENCE_CONFIRMED_MEMORY)
+        history = 2 if (has_history and facts.prior_completed_visit) else (
+            1 if (has_history and facts.prior_completed_same_category) else 0
+        )
+        lex_keys[cid] = tuple(int(bit) for bit in now + remembered) + (history,)
+        # То же число одной величиной — для журнала; делит группу ``lex_keys``.
+        pref_key = 0
+        for bit in now + remembered:
+            pref_key = pref_key * 2 + int(bit)
+        pref_key *= 3
+        if not has_history:
+            keys[cid] = float(pref_key)
+            codes[cid] = frozenset(pref_codes or {ReasonCode.CONTEXT_NOT_APPLICABLE})
+            continue
         if facts.prior_completed_visit:
-            keys[cid] = 2.0
-            codes[cid] = frozenset({ReasonCode.CONTEXT_PRIOR_COMPLETED_VISIT})
+            keys[cid] = float(pref_key) + 2.0
+            codes[cid] = frozenset({ReasonCode.CONTEXT_PRIOR_COMPLETED_VISIT} | pref_codes)
             evidence[cid] = (
                 EvidenceItem(
                     kind=EvidenceKind.PRIOR_VISIT,
@@ -584,13 +821,16 @@ def stage_contextual(candidates: Sequence[CandidateFacts]) -> StageOutput:
                 ),
             )
         elif facts.prior_completed_same_category:
-            keys[cid] = 1.0
-            codes[cid] = frozenset({ReasonCode.CONTEXT_PRIOR_SAME_CATEGORY})
+            keys[cid] = float(pref_key) + 1.0
+            codes[cid] = frozenset({ReasonCode.CONTEXT_PRIOR_SAME_CATEGORY} | pref_codes)
         else:
-            keys[cid] = 0.0
-            codes[cid] = frozenset({ReasonCode.CONTEXT_NOT_APPLICABLE})
+            keys[cid] = float(pref_key)
+            codes[cid] = frozenset(pref_codes or {ReasonCode.CONTEXT_NOT_APPLICABLE})
 
-    return StageOutput(StageId.S4, active=True, keys=keys, codes=codes, evidence=evidence)
+    return StageOutput(
+        StageId.S4, active=True, keys=keys, codes=codes, evidence=evidence,
+        lex_keys=lex_keys, unknown_from=unknown_from,
+    )
 
 
 # ---------------------------------------------------------------------------

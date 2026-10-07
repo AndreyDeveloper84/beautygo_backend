@@ -106,6 +106,8 @@ class TestTheWeekIsSevenRows:
         assert rows["2026-09-16"] == {
             "date": "2026-09-16", "meals_count": 2, "kcal": 500.0,
             "has_entries": True, "uncounted_meals": 0,
+            # DRF-2766 (фаза 2) — оценкой ИИ в этот день не вошло ничего.
+            "kcal_ai_included": 0,
         }
         assert sum(1 for r in rows.values() if r["has_entries"]) == 1
 

@@ -223,3 +223,77 @@ class TestHandlerRegistry:
             lambda e: calls.append("notifications"),
         )(object())
         assert calls == ["billing", "notifications"]
+
+
+@pytest.mark.django_db
+class TestExhaustedRowsDoNotHoldBackIndependentEvents:
+    """DRF-2773: «неподдерживаемое событие не должно бесконечно задерживать
+    независимые события» (решение владельца 05.10 по DRF-2434).
+
+    Исчерпанная строка навсегда остаётся с ``processed_at IS NULL``. Пока она
+    выбиралась в батч и только пропускалась, сто таких строк занимали весь
+    батч каждый тик. Узлы — тот же замер, которым дефект найден: полный батч
+    исчерпанных, на одну меньше (положительный контроль) и неизвестный топик.
+    """
+
+    #: Обработчик только пишет в лог и полезной нагрузки не требует.
+    HEALTHY = OutboxEvent.Topic.SYSTEM_MODULE_HEALTH_DEGRADED
+
+    def _exhausted(self, count: int) -> None:
+        from appointments.tasks import MAX_HANDLER_ATTEMPTS
+
+        ids = [
+            OutboxEvent.objects.create(
+                topic="probe.unknown", payload={}, error_count=MAX_HANDLER_ATTEMPTS,
+            ).id
+            for _ in range(count)
+        ]
+        # Старше здоровой — иначе по порядку ``created_at`` они бы и так шли после неё.
+        OutboxEvent.objects.filter(id__in=ids).update(created_at=timezone.now() - timedelta(hours=1))
+
+    def test_a_full_batch_of_exhausted_rows_does_not_hold_back_a_healthy_event(self):
+        from appointments.tasks import BATCH_SIZE
+
+        self._exhausted(BATCH_SIZE)
+        healthy = OutboxEvent.objects.create(topic=self.HEALTHY, payload={"module": "probe"})
+
+        result = dispatch_outbox_events()
+
+        healthy.refresh_from_db()
+        assert healthy.processed_at is not None
+        assert result == {"processed": 1, "failed": 0, "skipped": BATCH_SIZE}
+
+    def test_one_slot_short_the_healthy_event_was_already_processed(self):
+        """Положительный контроль: и до правки здоровая проходила, если в батче было место."""
+        from appointments.tasks import BATCH_SIZE
+
+        self._exhausted(BATCH_SIZE - 1)
+        healthy = OutboxEvent.objects.create(topic=self.HEALTHY, payload={"module": "probe"})
+
+        result = dispatch_outbox_events()
+
+        healthy.refresh_from_db()
+        assert healthy.processed_at is not None
+        assert result["processed"] == 1
+
+    def test_exhausted_rows_are_still_never_retried(self):
+        from appointments.tasks import BATCH_SIZE, MAX_HANDLER_ATTEMPTS
+
+        self._exhausted(BATCH_SIZE)
+        dispatch_outbox_events()
+
+        assert not OutboxEvent.objects.filter(topic="probe.unknown", processed_at__isnull=False).exists()
+        assert set(
+            OutboxEvent.objects.filter(topic="probe.unknown").values_list("error_count", flat=True)
+        ) == {MAX_HANDLER_ATTEMPTS}
+
+    def test_an_unknown_topic_becomes_exhausted_and_then_leaves_the_batch(self):
+        from appointments.tasks import MAX_HANDLER_ATTEMPTS
+
+        unknown = OutboxEvent.objects.create(topic="probe.unknown", payload={})
+        results = [dispatch_outbox_events() for _ in range(MAX_HANDLER_ATTEMPTS + 1)]
+
+        unknown.refresh_from_db()
+        assert [r["failed"] for r in results] == [1] * MAX_HANDLER_ATTEMPTS + [0]
+        assert results[-1]["skipped"] == 1
+        assert (unknown.processed_at, unknown.error_count) == (None, MAX_HANDLER_ATTEMPTS)

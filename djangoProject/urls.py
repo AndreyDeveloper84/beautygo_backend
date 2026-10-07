@@ -16,6 +16,7 @@ from services.internal_offer_api import (
     InternalSpecialistServiceSelectionView,
 )
 from services.knowledge_api import InternalProcedureKnowledgeView
+from users.consent_events_api import ConsentEventView
 from users.internal_address_suggest_api import InternalAddressSuggestView
 from users.internal_canon_gap_api import (  # noqa: E402
     InternalCanonGapRequestDetailView,
@@ -40,6 +41,13 @@ from users.internal_specialist_media_read_api import (
 from users.internal_service_locations_api import (
     InternalSpecialistServiceLocationView,
     InternalSpecialistServiceLocationsView,
+)
+from appointments.internal_specialist_api import (
+    InternalSpecialistBookingAcknowledgeView,
+    InternalSpecialistBookingCancelView,
+    InternalSpecialistBookingCompleteView,
+    InternalSpecialistBookingNoShowView,
+    InternalSpecialistBookingRescheduleView,
 )
 from users.internal_reviews_api import InternalSpecialistReviewsView
 from users.internal_specialist_identity_api import InternalSpecialistIdentityLinkView
@@ -102,6 +110,13 @@ urlpatterns = [
         'api/v1/internal/me/goals/state/',
         include('goals.state_urls'),
     ),
+    # DRF-2776 — смена согласия от бота: каталог применяет её у себя
+    # (стирание данных при отзыве, стоп рассылки). Контракт — в модуле ручки.
+    path(
+        'api/v1/internal/me/consent-events/',
+        ConsentEventView.as_view(),
+        name='internal-consent-events',
+    ),
     # DRF-1344 — wellness-context read для решающего слоя бота: только
     # коды состояний (никогда значения наблюдений), fail-closed через
     # гейты wellness/services.py. Аддитивная поверхность.
@@ -110,6 +125,12 @@ urlpatterns = [
     path(
         'api/v1/internal/me/plan-lite/',
         include('wellness.plan_lite_urls'),
+    ),
+    # DRF-2857 — durable Plan (контракт Plan Engine §4.4–§4.9): команда
+    # сохранения, чтение, пауза/архив. Под флагом PLAN_ENGINE_ENABLED.
+    path(
+        'api/v1/internal/me/plan/',
+        include('wellness.plan_engine_urls'),
     ),
     path(
         'api/v1/internal/me/wellness-context/',
@@ -280,6 +301,35 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/reviews/',
         InternalSpecialistReviewsView.as_view(),
         name='internal-specialist-reviews',
+    ),
+    # DRF-2785 (вариант «в» владельца 05.10) — мастер над СВОЕЙ клиентской
+    # записью из бота: «Подтверждаю» (статус не меняется), «Не смогу»
+    # (отмена без вины клиента), закрыть визит, неявка, перенос. Под
+    # субъектом; чужая запись — 404. Explicit routes BEFORE the include.
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/appointments/<uuid:appointment_id>/acknowledge/',
+        InternalSpecialistBookingAcknowledgeView.as_view(),
+        name='internal-specialist-booking-acknowledge',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/appointments/<uuid:appointment_id>/cancel/',
+        InternalSpecialistBookingCancelView.as_view(),
+        name='internal-specialist-booking-cancel',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/appointments/<uuid:appointment_id>/complete/',
+        InternalSpecialistBookingCompleteView.as_view(),
+        name='internal-specialist-booking-complete',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/appointments/<uuid:appointment_id>/no-show/',
+        InternalSpecialistBookingNoShowView.as_view(),
+        name='internal-specialist-booking-no-show',
+    ),
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/appointments/<uuid:appointment_id>/reschedule/',
+        InternalSpecialistBookingRescheduleView.as_view(),
+        name='internal-specialist-booking-reschedule',
     ),
     # DRF-1796 (M4) — готовность к публикации, «Опубликовать» (DRAFT → PENDING,
     # идемпотентно по ключу команды), «Проверить статус». ACTIVE — только

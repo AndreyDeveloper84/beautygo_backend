@@ -58,7 +58,12 @@ from django.conf import settings
 from services.models import GoalOption
 
 from .models import ClientGoal
-from .resolution import _categories_for_option, resolve_goal_category_ids
+from .resolution import (
+    GoalCategoryPosition,
+    _categories_for_option,
+    category_positions_for_option,
+    resolve_goal_category_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +97,30 @@ def goal_category_ids_for(client) -> tuple[UUID, ...] | None:
     return tuple(resolved)
 
 
+def saved_goal_key_for(client) -> str | None:
+    """Ключ активной цели человека, если фильтр по цели включён (OD-1).
+
+    Прежде жил приватным помощником в ``users/catalog_recommendations_api``,
+    и потому ручка резолвера для бота (``recommendation/views.py``) его не
+    видела: домашняя полка мини-приложения приходит с ``need.origin=GOAL``
+    без ключа, и резолвер подбирал так, будто цели нет. Две поверхности
+    одного человека расходились в том, знают ли они его цель. Теперь у обеих
+    один читатель — здесь, рядом с единственным чтением флага.
+
+    ``None`` — при выключенном флаге, без активной цели или когда цель не
+    разрешается в категории: те же три случая, что у
+    :func:`goal_category_ids_for`, и та же политика «не угадывать».
+    """
+    if goal_category_ids_for(client) is None:
+        return None
+    goal = (
+        ClientGoal.objects.filter(client=client, state=ClientGoal.State.ACTIVE)
+        .order_by("-selected_at")
+        .first()
+    )
+    return goal.goal_key if goal and goal.goal_key else None
+
+
 def goal_category_ids_for_key(goal_key: str | None) -> tuple[UUID, ...] | None:
     """Категории цели по её ключу, без обращения к клиенту.
 
@@ -119,6 +148,21 @@ def goal_category_ids_for_key(goal_key: str | None) -> tuple[UUID, ...] | None:
     if option is None:
         return None
     return tuple(_categories_for_option(option)) or None
+
+
+def goal_category_positions_for_key(goal_key: str | None) -> dict[UUID, GoalCategoryPosition]:
+    """Категории цели по ключу вместе с их положением (DRF-2789). Пусто — цели нет.
+
+    Тот же разрез, что у :func:`goal_category_ids_for_key`, и то же раскрытие:
+    ключи результата в том же порядке. Флаг ``GOAL_RESOLUTION_ENABLED`` не
+    читается по той же причине.
+    """
+    if not goal_key:
+        return {}
+    option = GoalOption.objects.filter(key=goal_key).first()
+    if option is None:
+        return {}
+    return category_positions_for_option(option)
 
 
 def _log_unresolved(client) -> None:

@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 
 from drf_spectacular.utils import OpenApiResponse, extend_schema
@@ -37,9 +38,91 @@ from users.deletion_requests import deletion_block_for, deletion_refusal
 
 from ._serializers import ResolveRequestSerializer, ResolveResponseSerializer, decision_to_payload
 from ._source_binding import CandidateSourceNotConfigured, get_candidate_source
-from .api import RecommendationRequest, SafetyState, Surface, resolve
+from .api import (
+    NeedOrigin,
+    NeedSpec,
+    PreferenceKind,
+    PreferenceOrigin,
+    RecommendationRequest,
+    SafetyState,
+    ScopeMode,
+    Surface,
+    resolve,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _with_saved_goal(need: NeedSpec, subject) -> NeedSpec:
+    """Нужда «по цели» без ключа — ключ сохранённой цели того, кого спрашивают.
+
+    Домашняя полка мини-приложения шлёт ``need.origin=GOAL`` без
+    ``goal_key``: бот цели человека не знает, и знать её не должен — она
+    живёт здесь. Без подстановки резолвер подбирал так, будто цели нет
+    (источник без фильтра цели, S2 «нужда не названа»), хотя путь
+    приложения каталога (``users/catalog_recommendations_api``) тому же
+    человеку подставлял его цель. Правило то же и читатель тот же —
+    :func:`goals.wiring.saved_goal_key_for`, под тем же флагом.
+
+    Названный в теле ключ не перекрывается: сказанное в запросе старше
+    сохранённого (OD-1). Другие происхождения нужды не трогаются — у
+    «памяти» и «явных слов» своя семантика.
+    """
+    from goals.wiring import saved_goal_key_for
+
+    if need.origin is not NeedOrigin.GOAL or need.goal_key:
+        return need
+    saved = saved_goal_key_for(subject)
+    if not saved:
+        return need
+    return dataclasses.replace(need, goal_key=saved)
+
+
+def _cross_salon_safe(preferences: tuple) -> tuple:
+    """Память о мастере или салоне эта ручка не применяет НИКОГДА.
+
+    Любимый мастер — отношение клиента с ОДНИМ салоном (NEVER_CROSSES,
+    24.08; узкое дополнение владельца 06.10 — только личная полка «Твои
+    места»). Область здесь присылает бот, а ``tenant_refs`` от бота — не
+    «свои салоны» клиента: истории салонов он не знает (DRF-1626), а
+    ``tenant_refs=[салон B]`` с фаворитом из A и было бы утечкой. Поэтому
+    ``confirmed_memory`` вида master/salon отбрасывается при любой
+    области, которую назвал бот. Законный путь памяти — режим «свои
+    салоны», где салоны выводит сервер (:func:`_within_own_salons`).
+    Сказанное в текущем запросе и категория из памяти остаются.
+    """
+    kept = tuple(
+        p for p in preferences
+        if not (p.origin is PreferenceOrigin.CONFIRMED_MEMORY
+                and p.kind in (PreferenceKind.MASTER, PreferenceKind.SALON))
+    )
+    if len(kept) != len(preferences):
+        logger.warning(
+            "recommendation.preference.cross_salon_dropped count=%d — память о мастере/салоне "
+            "не ранжирует межсалонную выдачу (NEVER_CROSSES)",
+            len(preferences) - len(kept),
+        )
+    return kept
+
+
+def _within_own_salons(preferences: tuple, own_salons: tuple) -> tuple:
+    """Память о мастере/салоне в режиме «свои салоны» — O-1b (DRF-2831).
+
+    Здесь она законна: область вывел сервер, и в ней только салоны, с
+    которыми у клиента есть отношения. Предпочтение, суженное до салона,
+    который своим не является (отношения отозваны, id чужой), отбрасывается:
+    сузить до него нечего, а расширять до «всех своих» — значит применить
+    память там, где её не записывали.
+    """
+    own = set(own_salons)
+    kept = tuple(p for p in preferences if p.tenant_ref is None or p.tenant_ref in own)
+    if len(kept) != len(preferences):
+        logger.warning(
+            "recommendation.preference.foreign_salon_dropped count=%d — салон происхождения "
+            "памяти не входит в свои салоны клиента",
+            len(preferences) - len(kept),
+        )
+    return kept
 
 
 class RecommendationResolveView(APIView):
@@ -84,18 +167,31 @@ class RecommendationResolveView(APIView):
                 status_code=503,
             )
 
+        scope = serializer.build_scope()
+        preferences = serializer.build_preferences()
+        if scope.mode is ScopeMode.OWN_SALONS:
+            # Салоны клиента называет сервер — по тому же правилу, что полка
+            # «Твои места». Бот их не присылает и прислать не может (схема).
+            from users.own_salons import own_salon_ids
+
+            scope = dataclasses.replace(scope, tenant_refs=own_salon_ids(request.user))
+            preferences = _within_own_salons(preferences, scope.tenant_refs)
+        else:
+            preferences = _cross_salon_safe(preferences)
+
         decision = resolve(
             RecommendationRequest(
                 request_id=serializer.validated_data["request_id"],
                 # Кого спрашивают — говорит аутентификация, а не тело запроса.
                 subject_ref=str(request.user.id),
                 surface=Surface(serializer.validated_data["surface"]),
-                scope=serializer.build_scope(),
-                need=serializer.build_need(),
+                scope=scope,
+                need=_with_saved_goal(serializer.build_need(), request.user),
                 constraints=serializer.build_constraints(),
                 safety_state=SafetyState(serializer.validated_data["safety_state"]),
                 tie_break_seed=serializer.validated_data.get("tie_break_seed"),
                 k=serializer.validated_data["k"],
+                preferences=preferences,
             ),
             source=source,
         )
@@ -108,9 +204,10 @@ class RecommendationResolveView(APIView):
         outgoing.is_valid(raise_exception=True)
 
         logger.info(
-            "recommendation.resolve request_id=%s surface=%s ordered=%d excluded=%d tiers=%d",
+            "recommendation.resolve request_id=%s surface=%s scope=%s ordered=%d excluded=%d tiers=%d",
             decision.request_id,
             serializer.validated_data["surface"],
+            scope.mode.value,
             len(decision.ordered),
             len(decision.excluded),
             len({c.tier for c in decision.ordered}),

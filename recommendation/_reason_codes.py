@@ -23,7 +23,7 @@ from enum import StrEnum
 #: Версия реестра. Любое добавление, удаление или изменение смысла кода —
 #: новая версия; она уезжает в `policy_versions` ответа, иначе решение
 #: невоспроизводимо задним числом (контракт §6.3).
-REGISTRY_VERSION = "1.0.0"
+REGISTRY_VERSION = "1.5.0"
 
 
 class ReasonCode(StrEnum):
@@ -49,12 +49,52 @@ class ReasonCode(StrEnum):
     ELIG_EXCLUDED_SAFETY = "ELIG_EXCLUDED_SAFETY"
     ELIG_EXCLUDED_BUDGET = "ELIG_EXCLUDED_BUDGET"
     ELIG_EXCLUDED_NOT_RECOMMENDABLE = "ELIG_EXCLUDED_NOT_RECOMMENDABLE"
+    # CAT-10 (1.3.0) — связь VERIFIED, но конфигурация body-care-услуги не
+    # готова к скринингу (состояние валидации CAT-6 не READY). Отдельно от
+    # NOT_RECOMMENDABLE: тот — про связь с каноном, этот — про готовность
+    # процедуры; смешение спрятало бы C1 в «маппинг не проверен».
+    ELIG_EXCLUDED_CONFIG_NOT_READY = "ELIG_EXCLUDED_CONFIG_NOT_READY"
+    # CAT-10-ext (1.4.0) — юридические условия §7A не сошлись. Четыре кода
+    # повторяют имена отказов §21 контракта Body Care.
+    ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED = "ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED"
+    ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH = "ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH"
+    ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH = "ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH"
+    ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED = "ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED"
+    # УСТАРЕЛ в 1.5.0 и больше НЕ выдаётся: называл одним именем четыре
+    # разные причины. Оставлен в реестре ради непрерывности аудита — решения,
+    # записанные под 1.4.0, могли его нести, и они должны читаться.
+    ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED = "ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED"
+    # 1.5.0 — причины не сливаются (решение владельца 07.10): у каждой
+    # несошедшейся проверки свой код.
+    #   область классификации канона неизвестна (или канона нет) — П2;
+    ELIG_EXCLUDED_CATALOG_UNCLASSIFIED = "ELIG_EXCLUDED_CATALOG_UNCLASSIFIED"
+    #   юридический класс канона не подтверждён человеком — П4;
+    ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED = "ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED"
+    #   место работы мастера неизвестно или не подтверждено — П6;
+    ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN = "ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN"
+    #   требование к квалификации клиникой не подтверждено — П7;
+    ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED = "ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED"
+    #   источник не смог ответить (сбой чтения, нет ключа, незнакомое
+    #   значение): дефект чтения, а не незаполненные данные.
+    ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED = "ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED"
+    # O-1 (1.2.0) — «только X» в текущем запросе: кандидат не X.
+    ELIG_EXCLUDED_PREFERENCE_HARD = "ELIG_EXCLUDED_PREFERENCE_HARD"
 
     # -- S2: соответствие нужде --------------------------------------------
     MATCH_SERVICE_EXACT = "MATCH_SERVICE_EXACT"
     MATCH_SERVICE_PARTIAL = "MATCH_SERVICE_PARTIAL"
     MATCH_CAPABILITY_ONLY = "MATCH_CAPABILITY_ONLY"
     MATCH_GOAL_CATEGORY = "MATCH_GOAL_CATEGORY"
+    # DRF-2789 (1.1.0) — глубина совпадения с целью, всегда рядом с
+    # MATCH_GOAL_CATEGORY: чем именно совпадение по цели держится.
+    # PRIMARY / SECONDARY / EXPANDED говорят о ПОЛОЖЕНИИ категории в
+    # курируемой цели и только о нём — не о том, что процедура доказанно
+    # помогает (канон §17 claim-модели). Об эффективности — только
+    # CONFIRMED_CAPABILITY, и только из подтверждённой CapabilityGoalLink.
+    MATCH_GOAL_CONFIRMED_CAPABILITY = "MATCH_GOAL_CONFIRMED_CAPABILITY"
+    MATCH_GOAL_PRIMARY_CATEGORY = "MATCH_GOAL_PRIMARY_CATEGORY"
+    MATCH_GOAL_SECONDARY_CATEGORY = "MATCH_GOAL_SECONDARY_CATEGORY"
+    MATCH_GOAL_EXPANDED_CATEGORY = "MATCH_GOAL_EXPANDED_CATEGORY"
     MATCH_UNDETERMINED = "MATCH_UNDETERMINED"
 
     # -- S3: транзакционная пригодность ------------------------------------
@@ -68,6 +108,10 @@ class ReasonCode(StrEnum):
     CONTEXT_PRIOR_COMPLETED_VISIT = "CONTEXT_PRIOR_COMPLETED_VISIT"
     CONTEXT_PRIOR_SAME_CATEGORY = "CONTEXT_PRIOR_SAME_CATEGORY"
     CONTEXT_NOT_APPLICABLE = "CONTEXT_NOT_APPLICABLE"
+    # O-1 (1.2.0) — кандидат совпал с мягким предпочтением клиента:
+    # сказанным в текущем запросе / подтверждённым им в памяти.
+    CONTEXT_PREFERENCE_CURRENT_REQUEST = "CONTEXT_PREFERENCE_CURRENT_REQUEST"
+    CONTEXT_PREFERENCE_CONFIRMED_MEMORY = "CONTEXT_PREFERENCE_CONFIRMED_MEMORY"
 
     # -- S5: качество -------------------------------------------------------
     QUALITY_RATING_SUBSTANTIATED = "QUALITY_RATING_SUBSTANTIATED"
@@ -95,6 +139,33 @@ EXCLUSION_CODES = frozenset({
     ReasonCode.ELIG_EXCLUDED_SAFETY,
     ReasonCode.ELIG_EXCLUDED_BUDGET,
     ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE,
+    ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY,
+    ReasonCode.ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED,
+    ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
+    ReasonCode.ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH,
+    ReasonCode.ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED,
+    ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED,  # устарел, не выдаётся — см. выше
+    ReasonCode.ELIG_EXCLUDED_CATALOG_UNCLASSIFIED,
+    ReasonCode.ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED,
+    ReasonCode.ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN,
+    ReasonCode.ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED,
+    ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED,
+    ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD,
+})
+
+#: Исключения гейтов допуска каталога — область, конфигурация, юридические
+#: условия (проверки П2–П7). Пустая полка называет их в сводке решения.
+GATE_EXCLUSION_CODES = frozenset({
+    ReasonCode.ELIG_EXCLUDED_CATALOG_UNCLASSIFIED,
+    ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY,
+    ReasonCode.ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED,
+    ReasonCode.ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED,
+    ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
+    ReasonCode.ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN,
+    ReasonCode.ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH,
+    ReasonCode.ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED,
+    ReasonCode.ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED,
+    ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED,
 })
 
 #: Семейство `MATCH_`, кроме `MATCH_UNDETERMINED`: «нужда чем-то закрыта».

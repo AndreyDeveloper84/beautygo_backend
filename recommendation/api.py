@@ -43,6 +43,7 @@ from ._evidence import (
 from ._pipeline import RESOLVER_SPEC_VERSION, TIE_BREAK_POLICY_VERSION, resolve
 from ._reason_codes import REGISTRY_VERSION as REASON_CODE_REGISTRY_VERSION
 from ._reason_codes import ReasonCode, ReasonCodeInvariantError
+from ._serializers import MAX_PREFERENCES, PreferenceSerializer, build_preferences
 from ._stages import StagePolicy
 from ._types import (
     FLEXIBLE,
@@ -57,12 +58,19 @@ from ._types import (
     ConstraintKind,
     ExcludedCandidate,
     MappingCensus,
+    ConfigGate,
+    LegalGate,
     MappingStatus,
     MatchLevel,
     NeedOrigin,
     NeedSpec,
     PolicyPins,
     PolicyVersions,
+    MEMORY_SOURCE_GLOBAL_BOT,
+    Preference,
+    PreferenceKind,
+    PreferenceOrigin,
+    PreferenceStrength,
     RankedCandidate,
     RecommendationDecision,
     RecommendationRequest,
@@ -88,6 +96,14 @@ __all__ = [
     "REASON_CODE_REGISTRY_VERSION",
     # запрос
     "RecommendationRequest",
+    "PreferenceSerializer",
+    "build_preferences",
+    "MAX_PREFERENCES",
+    "MEMORY_SOURCE_GLOBAL_BOT",
+    "Preference",
+    "PreferenceKind",
+    "PreferenceOrigin",
+    "PreferenceStrength",
     "Scope",
     "ScopeMode",
     "NeedSpec",
@@ -106,6 +122,8 @@ __all__ = [
     "CandidateRef",
     "CandidateKind",
     "MappingCensus",
+    "ConfigGate",
+    "LegalGate",
     "MappingStatus",
     "MatchLevel",
     "MATCH_RANK",

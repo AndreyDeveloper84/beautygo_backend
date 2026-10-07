@@ -372,6 +372,9 @@ class FoodLogEntrySerializer(serializers.ModelSerializer):
             "has_photo",
             "dish_name",
             "calories",
+            # DRF-2761 — оценка калорий ИИ. Отдельным полем: ``calories`` при
+            # ней null. Показывать только с пометкой «Оценка ИИ».
+            "ai_calories",
             "protein_g",
             "fat_g",
             "carbs_g",
@@ -465,6 +468,11 @@ class NutritionSummaryResponseSerializer(OmitAbsentTargetsMixin, serializers.Ser
     fat_g = serializers.FloatField(source="totals.fat_g", allow_null=True)
     carbs_g = serializers.FloatField(source="totals.carbs_g", allow_null=True)
     unscored_entries = serializers.IntegerField(source="totals.unscored_entries")
+    # DRF-2766 (фаза 2) — оценки ИИ входят в ``calories_total``: сколько
+    # записей вошло оценкой (итог «≈ …, включая оценки ИИ») и сколько без
+    # какого-либо значения калорий (итог неполный, не ноль).
+    calories_ai_included = serializers.IntegerField(source="totals.calories_ai_included")
+    calories_unscored = serializers.IntegerField(source="totals.calories_unscored")
     water_ml = serializers.IntegerField()
     water_goal_ml = serializers.IntegerField(allow_null=True, required=False)
     entries = FoodLogEntrySerializer(many=True)
