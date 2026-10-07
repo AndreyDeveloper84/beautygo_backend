@@ -142,7 +142,7 @@ def _helps(template, goal, curator, *, approved=True, capability_approved=None, 
     """
     cap_ok = approved if capability_approved is None else capability_approved
     capability = ProcedureCapability.objects.create(
-        template=template, key=f"calm-{uuid.uuid4().hex[:6]}", text_client="Синтетическая формулировка",
+        templates=[template], key=f"calm-{uuid.uuid4().hex[:6]}", text_client="Синтетическая формулировка",
         **_signed(curator, cap_ok),
     )
     CapabilityGoalLink.objects.create(

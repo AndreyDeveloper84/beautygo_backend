@@ -16,7 +16,7 @@
   ],
   "capabilities": [
     {
-      "template_code": "1.1.3",
+      "template_codes": ["1.1.3", "1.1.2"],
       "key": "example_supported_effect",
       "text_client": "[пример формата] Формулировка для клиента — как это прозвучит человеку.",
       "text_professional": "[пример формата] Формулировка для специалиста — точнее и строже.",
@@ -42,7 +42,7 @@
       ]
     },
     {
-      "template_code": "1.1.3",
+      "template_codes": ["1.1.3"],
       "key": "example_prohibited_promise",
       "text_client": "",
       "claim_scope": "prohibited_claim",
@@ -51,7 +51,7 @@
       "source_ref": "EXAMPLE-SOURCE-3"
     },
     {
-      "template_code": "1.1.2",
+      "template_codes": ["1.1.2"],
       "key": "example_not_supported",
       "text_client": "[пример формата] утверждение, которое не подтверждено",
       "claim_scope": "not_supported",

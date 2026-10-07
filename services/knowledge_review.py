@@ -55,8 +55,6 @@
 
 from __future__ import annotations
 
-from django.db.models import Q
-
 from services.models import ClaimEvidence, ClaimReviewer, ServiceTemplate
 
 UNCLASSIFIED = ClaimEvidence.ClaimType.UNCLASSIFIED.value
@@ -82,18 +80,10 @@ def may_review(user, *, claim_type: str, template: ServiceTemplate | None) -> bo
     (любая) либо категория процедуры или её родительская категория. Нет
     пользователя, учётка не действует, тип не требует рецензента — нет.
     """
-    if user is None or not getattr(user, "is_active", False) or not getattr(user, "pk", None):
-        return False
-    if not requires_review(claim_type):
-        return False
-    appointments = ClaimReviewer.objects.filter(user=user, claim_type=claim_type, is_active=True)
-    scope = Q(category__isnull=True)
-    if template is not None and template.category_id is not None:
-        categories = [template.category_id]
-        if template.category.parent_id is not None:
-            categories.append(template.category.parent_id)
-        scope |= Q(category_id__in=categories)
-    return appointments.filter(scope).exists()
+    # DRF-2743: одна процедура — частный случай области из нескольких; правило одно.
+    return may_review_scope(
+        user, claim_type=claim_type, templates=[template] if template is not None else [], categories=[],
+    )
 
 
 def may_review_scope(user, *, claim_type: str, templates, categories) -> bool:

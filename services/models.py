@@ -2673,8 +2673,8 @@ def reset_claims_of_procedure(template: Any, *, reason: str, changes: list[dict[
     ``QuerySet.update()`` его обходит — как любое правило уровня модели.
     """
     return reset_claims(
-        capabilities=ProcedureCapability.objects.filter(template=template),
-        goal_links=CapabilityGoalLink.objects.filter(capability__template=template),
+        capabilities=ProcedureCapability.objects.filter(templates=template),
+        goal_links=CapabilityGoalLink.objects.filter(capability__templates=template),
         contraindications=contraindications_in_scope(template=template, category_ids=[template.category_id]),
         reason=reason, changes=changes,
     )
@@ -2954,16 +2954,41 @@ class ClaimEvidence(models.Model):
         )
 
 
+class ProcedureCapabilityManager(models.Manager):
+    def create(self, *, templates: Any = (), **fields: Any) -> Any:
+        """Завести запись словаря сразу с процедурами.
+
+        Связь «многие ко многим» нельзя передать конструктору модели, а запись
+        без процедуры — знание ни о чём. Запись и привязка — одной транзакцией.
+        """
+        with transaction.atomic():
+            capability = super().create(**fields)
+            if templates:
+                capability.templates.set(templates)
+        return capability
+
+
 class ProcedureCapability(ClaimEvidence):
-    """Что процедура канона умеет — одна возможность одной процедуры.
+    """Что процедура канона умеет — запись общего словаря возможностей.
 
     ``key`` — **стабильный машинный идентификатор смысла, а не производная от
     текста** (приёмка владельца 29.09, §4): ``key ≠ slugify(text_client)``.
     Правка ``text_client`` / ``text_professional`` не меняет ``key``, и никакой
     код не выводит его из формулировки — ключ задаёт тот, кто заводит
-    возможность (пример владельца: ``temporary_relaxation``). Одна возможность
-    встречается у многих процедур; устойчивый ключ позволит потом свести их в
-    общий словарь, не перечитывая текст. Уникален в паре (шаблон, ключ).
+    возможность (пример владельца: ``temporary_relaxation``).
+
+    **Общий словарь** (DRF-2743, решение владельца №5 от 02.10): одно знание
+    не копируется вручную в десятки строк. Запись существует один раз —
+    ``key`` уникален сам по себе — и привязана к нескольким процедурам канона
+    (``templates``). Текст, эффект, срок, основание, тип и обе подписи живут в
+    записи; связи с целями — тоже на записи: «возможность помогает цели»
+    утверждается о возможности, а не о паре возможность + процедура.
+
+    **Привязка — часть содержания.** Добавить или убрать процедуру у
+    подтверждённой записи — правка, как правка текста: подтверждение и
+    отметка рецензента снимаются (правило DRF-2726). Рецензент должен быть
+    вправе проверять по КАЖДОЙ привязанной процедуре; значимая правка любой из
+    них возвращает запись в черновик (:func:`reset_claims_of_procedure`).
 
     **Срок результата — не самостоятельное число** (решение владельца 02.10,
     блок B; DRF-2726). ``result_timeframe`` у ПОДТВЕРЖДЁННОЙ строки не может
@@ -2977,11 +3002,12 @@ class ProcedureCapability(ClaimEvidence):
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    #: PROTECT: знание о процедуре не должно исчезать вместе с правкой канона.
-    template = models.ForeignKey(
-        ServiceTemplate, on_delete=models.PROTECT, related_name="capabilities",
+    #: К каким процедурам канона относится запись. Через :class:`CapabilityTemplate`:
+    #: процедуру с привязанным знанием удалить нельзя, как и до словаря.
+    templates = models.ManyToManyField(
+        ServiceTemplate, through="CapabilityTemplate", related_name="capabilities",
     )
-    key = models.SlugField(max_length=64)
+    key = models.SlugField(max_length=64, unique=True)
     #: Формулировка для человека — то, что может прозвучать клиенту.
     text_client = models.TextField(blank=True, default="")
     #: Профессиональная формулировка — для мастера и разбора.
@@ -2996,9 +3022,6 @@ class ProcedureCapability(ClaimEvidence):
     class Meta(ClaimEvidence.Meta):
         constraints = [
             *ClaimEvidence.Meta.constraints,
-            models.UniqueConstraint(
-                fields=["template", "key"], name="procedurecapability_template_key_uniq",
-            ),
             # Подтверждённый срок — только с оговоркой о разбросе и основанием.
             models.CheckConstraint(
                 condition=(
@@ -3024,7 +3047,7 @@ class ProcedureCapability(ClaimEvidence):
                 name="procedurecapability_approved_timeframe_in_words",
             ),
         ]
-        ordering = ["template", "key"]
+        ordering = ["key"]
         # Право подтверждать — отдельное от права изменять (DRF-2726, решение
         # владельца 02.10, блок A). Кому его дать, решает владелец; здесь —
         # только носитель. Исполняет его форма админки (services/admin.py).
@@ -3041,10 +3064,38 @@ class ProcedureCapability(ClaimEvidence):
             ),
         ]
 
+    objects = ProcedureCapabilityManager()
+
     def __str__(self) -> str:
-        # Имя процедуры, а не её UUID: эту строку читает куратор — в списке,
-        # в выборе возможности у связи с целью, в журнале админки.
-        return f"{self.template.name} · {self.key}"
+        # Имена процедур, а не UUID: эту строку читает куратор — в списке, в
+        # выборе возможности у связи с целью, в журнале админки. У ещё не
+        # записанной строки привязок нет.
+        if self._state.adding:
+            return self.key
+        names = ", ".join(sorted(template.name for template in self.templates.all()))
+        return f"{names or '—'} · {self.key}"
+
+
+class CapabilityTemplate(models.Model):
+    """Привязка записи словаря возможностей к процедуре канона (DRF-2743)."""
+
+    capability = models.ForeignKey(
+        ProcedureCapability, on_delete=models.CASCADE, related_name="template_bindings",
+    )
+    #: PROTECT: знание о процедуре не должно исчезать вместе с правкой канона.
+    template = models.ForeignKey(
+        ServiceTemplate, on_delete=models.PROTECT, related_name="capability_bindings",
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["capability", "template"], name="capabilitytemplate_capability_template_uniq",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.capability.key} → {self.template.name}"
 
 
 class CapabilityGoalLink(ClaimEvidence):
