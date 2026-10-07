@@ -1,9 +1,17 @@
 """DRF-2857 — durable Plan routes (mounted at /api/v1/internal/me/plan/)."""
 from django.urls import path
 
-from .plan_engine_api import PlanEngineStateView, PlanEngineView
+from .plan_engine_api import (
+    PlanEngineStateView,
+    PlanEngineView,
+    PlanStepBookingView,
+    PlanStepResolutionView,
+)
 
 urlpatterns = [
     path("", PlanEngineView.as_view(), name="me-plan"),
     path("state/", PlanEngineStateView.as_view(), name="me-plan-state"),
+    # DRF-2868 — шаг: чем разрешён и какая запись от него сделана.
+    path("steps/resolution/", PlanStepResolutionView.as_view(), name="me-plan-step-resolution"),
+    path("steps/booking/", PlanStepBookingView.as_view(), name="me-plan-step-booking"),
 ]
