@@ -24,9 +24,10 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from recommendation._pipeline import resolve
-from recommendation._reason_codes import EXCLUSION_CODES, LEGAL_EXCLUSION_CODES, ReasonCode
+from recommendation._reason_codes import EXCLUSION_CODES, GATE_EXCLUSION_CODES, ReasonCode
 from recommendation._stages import StagePolicy, apply_eligibility
 from recommendation._types import (
+    ConfigGate,
     LegalGate,
     NeedOrigin,
     NeedSpec,
@@ -197,7 +198,7 @@ class TestTheLadderOfConditions:
 
         [facts] = _fetch()
 
-        assert facts.config_ready is None, "контроль: CAT-6 считает строку вне Body Care и пропускает"
+        assert facts.config_gate is ConfigGate.NOT_SUBJECT, "контроль: CAT-6 считает строку вне Body Care и пропускает"
         assert facts.legal_gate is LegalGate.LICENSE_NOT_VERIFIED
         decision = _resolve()
         assert _excluded(decision) == {str(master.user_id): ReasonCode.ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED}
@@ -222,7 +223,7 @@ class TestTheLadderOfConditions:
         [facts] = _fetch()
 
         assert facts.legal_gate is LegalGate.LOCATION_UNKNOWN
-        assert _excluded(_resolve()) == {str(master.user_id): ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED}
+        assert _excluded(_resolve()) == {str(master.user_id): ReasonCode.ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN}
 
     def test_a_master_who_works_at_an_address_outside_the_licence(self, tenant, category, curator):
         licensed = _place(tenant, curator)
@@ -244,7 +245,9 @@ class TestTheLadderOfConditions:
         [facts] = _fetch()
 
         assert facts.legal_gate is LegalGate.QUALIFICATION_REQUIREMENT_UNCONFIRMED
-        assert _excluded(_resolve()) == {str(master.user_id): ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED}
+        assert _excluded(_resolve()) == {
+            str(master.user_id): ReasonCode.ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED,
+        }
 
     def test_a_master_without_the_required_qualification(self, tenant, category, curator):
         place = _place(tenant, curator)
@@ -297,7 +300,7 @@ class TestTheRestOfTheCatalog:
         master = _master(tenant, "11")
         _does(master, _offer(tenant, category, curator, name="Спорная", legal_class=LC.LEGAL_REVIEW_REQUIRED))
 
-        assert _excluded(_resolve()) == {str(master.user_id): ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED}
+        assert _excluded(_resolve()) == {str(master.user_id): ReasonCode.ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED}
 
 
 class TestTheConditionsOfTheMasterAreTheMasters:
@@ -355,18 +358,18 @@ class TestOneRowAnswersForBothGates:
         mapping.has_service = True
         for pk, (config, legal) in rows.items():
             mapping.status_by_service[pk] = "verified"
-            mapping.config_ready_by_service[pk] = config
+            mapping.config_by_service[pk] = config
             mapping.legal_by_service[pk] = legal
         return mapping
 
     def test_two_half_open_rows_do_not_make_an_open_master(self):
         ready_unlicensed, licensed_unready = uuid.uuid4(), uuid.uuid4()
         mapping = self._facts({
-            ready_unlicensed: (True, LegalGate.LICENSE_NOT_VERIFIED),
-            licensed_unready: (False, LegalGate.CLEARED),
+            ready_unlicensed: (ConfigGate.READY, LegalGate.LICENSE_NOT_VERIFIED),
+            licensed_unready: (ConfigGate.NOT_READY, LegalGate.CLEARED),
         })
 
-        admitted = mapping.config_ready() is not False and mapping.legal_gate() is LegalGate.CLEARED
+        admitted = mapping.config_gate() is not ConfigGate.NOT_READY and mapping.legal_gate() is LegalGate.CLEARED
 
         assert admitted is False
 
@@ -374,22 +377,22 @@ class TestOneRowAnswersForBothGates:
         """Какая бы строка ни отвечала, готовность и юридические условия — её собственные."""
         ready_unlicensed, licensed_unready = uuid.uuid4(), uuid.uuid4()
         rows = {
-            ready_unlicensed: (True, LegalGate.LICENSE_NOT_VERIFIED),
-            licensed_unready: (False, LegalGate.CLEARED),
+            ready_unlicensed: (ConfigGate.READY, LegalGate.LICENSE_NOT_VERIFIED),
+            licensed_unready: (ConfigGate.NOT_READY, LegalGate.CLEARED),
         }
         mapping = self._facts(rows)
 
-        assert (mapping.config_ready(), mapping.legal_gate()) in set(rows.values())
+        assert (mapping.config_gate(), mapping.legal_gate()) in set(rows.values())
 
     def test_positive_control_one_fully_open_row_among_closed_ones_opens(self):
         open_row = uuid.uuid4()
         mapping = self._facts({
-            uuid.uuid4(): (True, LegalGate.LICENSE_NOT_VERIFIED),
-            open_row: (None, LegalGate.CLEARED),
-            uuid.uuid4(): (False, LegalGate.CLEARED),
+            uuid.uuid4(): (ConfigGate.READY, LegalGate.LICENSE_NOT_VERIFIED),
+            open_row: (ConfigGate.NOT_SUBJECT, LegalGate.CLEARED),
+            uuid.uuid4(): (ConfigGate.NOT_READY, LegalGate.CLEARED),
         })
 
-        assert mapping.config_ready() is None
+        assert mapping.config_gate() is ConfigGate.NOT_SUBJECT
         assert mapping.legal_gate() is LegalGate.CLEARED
 
     def test_a_legacy_row_has_no_gate(self):
@@ -415,7 +418,7 @@ class TestTheResolverHalf:
 
         assert result.admitted == ()
         [exclusion] = result.excluded
-        assert exclusion.reason_code in LEGAL_EXCLUSION_CODES
+        assert exclusion.reason_code in GATE_EXCLUSION_CODES
 
     def test_the_named_violations_keep_their_own_codes(self):
         codes = {
@@ -428,20 +431,20 @@ class TestTheResolverHalf:
             LegalGate.LICENSE_SCOPE_MISMATCH: ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
             LegalGate.ADDRESS_MISMATCH: ReasonCode.ELIG_EXCLUDED_LICENSE_ADDRESS_MISMATCH,
             LegalGate.QUALIFICATION_NOT_VERIFIED: ReasonCode.ELIG_EXCLUDED_PRACTITIONER_QUALIFICATION_NOT_VERIFIED,
-            LegalGate.CLASS_UNCONFIRMED: ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED,
-            LegalGate.LOCATION_UNKNOWN: ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED,
-            LegalGate.QUALIFICATION_REQUIREMENT_UNCONFIRMED: ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED,
-            LegalGate.UNDETERMINED: ReasonCode.ELIG_EXCLUDED_LEGAL_NOT_CONFIRMED,
+            LegalGate.CLASS_UNCONFIRMED: ReasonCode.ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED,
+            LegalGate.LOCATION_UNKNOWN: ReasonCode.ELIG_EXCLUDED_MASTER_LOCATION_UNKNOWN,
+            LegalGate.QUALIFICATION_REQUIREMENT_UNCONFIRMED:
+                ReasonCode.ELIG_EXCLUDED_QUALIFICATION_REQUIREMENT_UNCONFIRMED,
+            LegalGate.UNDETERMINED: ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED,
         }
 
     def test_readiness_is_checked_first_and_codes_do_not_mix(self):
-        result = self._admit(make_facts(config_ready=False, legal_gate=LegalGate.LICENSE_NOT_VERIFIED))
+        result = self._admit(make_facts(config_gate=ConfigGate.NOT_READY, legal_gate=LegalGate.LICENSE_NOT_VERIFIED))
 
         assert [e.reason_code for e in result.excluded] == [ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY]
 
     def test_the_legal_codes_are_exclusion_codes(self):
-        assert LEGAL_EXCLUSION_CODES <= EXCLUSION_CODES
-        assert len(LEGAL_EXCLUSION_CODES) == 5
+        assert GATE_EXCLUSION_CODES <= EXCLUSION_CODES
 
 
 class TestTheSeam:
@@ -544,12 +547,13 @@ class TestTheSeam:
         assert legal_gates([(master, offer, canon)]) == {(master, offer): LegalGate.LICENSE_NOT_VERIFIED}
         assert _errors(source_log) == []
 
-    def test_a_row_without_a_canon_is_not_asked_about_qualification(self, monkeypatch, source_log):
+    def test_a_row_without_a_canon_does_not_pass_for_lack_of_one(self, monkeypatch, source_log):
+        """Канона нет — класса нет: квалификацию спросить нечем, и это не «условие снято»."""
         master, offer = uuid.uuid4(), uuid.uuid4()
         self._patch(monkeypatch, licenses={offer: "not_required"}, addresses={(master, offer): "not_required"})
 
-        assert legal_gates([(master, offer, None)]) == {(master, offer): LegalGate.CLEARED}
-        assert _errors(source_log) == []
+        assert legal_gates([(master, offer, None)]) == {(master, offer): LegalGate.CLASS_UNCONFIRMED}
+        assert _errors(source_log) == [], "состояние данных, не дефект чтения"
 
     def test_a_failing_read_closes_the_rows_instead_of_dropping_the_shelf(self, monkeypatch, source_log):
         def broken(ids):
