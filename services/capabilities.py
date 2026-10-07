@@ -122,9 +122,97 @@ def template_ids_helping_goal(goal_key: str, *, now: datetime | None = None) -> 
     )
 
 
+def capability_keys_helping_goal(goal_key: str, *, now: datetime | None = None) -> tuple[str, ...]:
+    """Ключи возможностей, о которых подтверждено «X помогает этой цели».
+
+    DRF-2871 (сборка плана): курируемая декомпозиция «цель → способность».
+    Правило то же, что у :func:`template_ids_helping_goal`: оба утверждения
+    подтверждены, поддержаны и не истекли, цель активна. Возвращаются КЛЮЧИ,
+    а не строки: одна возможность встречается у нескольких процедур, и для
+    плана это одна способность. По алфавиту — чтобы ответ был воспроизводим;
+    это не порядок важности.
+
+    Курс и горизонт со связи (``course_pattern``, ``result_horizon``) отсюда
+    не выдаются: плану они запрещены контрактом Plan Engine (§1.1, §4.8).
+    """
+    now = now or timezone.now()
+    return tuple(
+        sorted(
+            set(
+                CapabilityGoalLink.objects.filter(
+                    _client_facing_q(now),
+                    _client_facing_q(now, prefix="capability__"),
+                    goal__key=goal_key,
+                    goal__is_active=True,
+                ).values_list("capability__key", flat=True)
+            )
+        )
+    )
+
+
+class LabelState(str, Enum):
+    #: У ключа ровно одна подтверждённая формулировка для человека.
+    LABELLED = "labelled"
+    #: Подтверждённой, поддержанной, не истёкшей возможности с таким ключом нет.
+    UNKNOWN = "unknown"
+    #: Возможность подтверждена, но формулировки для человека у неё нет.
+    NO_TEXT = "no_text"
+    #: Ключ встречается у нескольких процедур с РАЗНЫМИ формулировками —
+    #: какая из них «подпись способности», решает владелец, не код.
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True)
+class CapabilityLabel:
+    state: LabelState
+    label: str | None = None
+
+
+def capability_labels(keys, *, now: datetime | None = None) -> dict[str, CapabilityLabel]:
+    """Формулировка для человека по ключу возможности — или явная причина, почему её нет.
+
+    DRF-2871 (экран плана): у шага плана текста нет по контракту Plan Engine
+    (PE-2), он несёт только ключ; подпись берётся здесь. Правило то же, что у
+    остального чтения: только подтверждённое, поддержанное, не истёкшее.
+
+    Возможность сегодня — строка ОДНОЙ процедуры, и один ключ у двух процедур
+    может нести два разных текста. Тогда подписи нет (``AMBIGUOUS``): выбрать
+    одну из двух формулировок значило бы решить за владельца, что именно
+    прозвучит человеку. Совпадающие тексты — одна подпись.
+
+    Версии у источника нет (время подтверждения — не версия), поэтому и не
+    возвращается.
+    """
+    now = now or timezone.now()
+    wanted = list(dict.fromkeys(keys))
+    texts: dict[str, set[str]] = {key: set() for key in wanted}
+    seen: set[str] = set()
+    for key, text in ProcedureCapability.objects.filter(_client_facing_q(now), key__in=wanted).values_list(
+        "key", "text_client"
+    ):
+        seen.add(key)
+        if text.strip():
+            texts[key].add(text.strip())
+    out: dict[str, CapabilityLabel] = {}
+    for key in wanted:
+        if key not in seen:
+            out[key] = CapabilityLabel(LabelState.UNKNOWN)
+        elif not texts[key]:
+            out[key] = CapabilityLabel(LabelState.NO_TEXT)
+        elif len(texts[key]) > 1:
+            out[key] = CapabilityLabel(LabelState.AMBIGUOUS)
+        else:
+            out[key] = CapabilityLabel(LabelState.LABELLED, next(iter(texts[key])))
+    return out
+
+
 __all__ = [
+    "CapabilityLabel",
     "CapabilityReadout",
     "KnowledgeState",
+    "LabelState",
+    "capability_keys_helping_goal",
+    "capability_labels",
     "client_facing_capabilities",
     "client_facing_goal_links",
     "template_ids_helping_goal",

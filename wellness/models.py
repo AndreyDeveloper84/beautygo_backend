@@ -742,3 +742,166 @@ class PlanRevision(models.Model):
 
     def __str__(self) -> str:
         return f"PlanRevision<plan={self.plan_id}> #{self.revision_no}"
+
+
+# ─── Plan Engine: шаг ↔ услуга ↔ запись (DRF-2868, WP2) ──────────────────────
+#
+# Контракт §4.3, §8.2, §8.3. Обе таблицы — ВНЕ снимка ревизии: ревизия
+# иммутабельна, а переход уровня шага — «отдельное событие» (PE-6), которое не
+# входит в основания новой ревизии (§9.2); новая ревизия к тому же сменила бы
+# ``step_id`` (§9.1) и оборвала ссылки на шаг.
+
+
+class _AppendOnlyQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ImmutablePlanRecordError(f"{self.model.__name__}: update() запрещён — строка только дописывается")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise ImmutablePlanRecordError(f"{self.model.__name__}: bulk_update() запрещён — строка только дописывается")
+
+    def delete(self):
+        raise ImmutablePlanRecordError(
+            f"{self.model.__name__}: delete() запрещён — строки уходят только вместе с планом (каскад)"
+        )
+
+
+class _AppendOnlyModel(models.Model):
+    objects = _AppendOnlyQuerySet.as_manager()
+
+    class Meta:
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ImmutablePlanRecordError(f"{type(self).__name__} {self.pk}: строка только дописывается")
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutablePlanRecordError(
+            f"{type(self).__name__} {self.pk}: delete() запрещён — строка уходит только вместе с планом"
+        )
+
+
+class PlanStepResolution(_AppendOnlyModel):
+    """Переход шага вниз: ``CAPABILITY → SERVICE → OFFER`` (контракт §4.3).
+
+    Действующий уровень шага — последняя строка здесь, иначе уровень снимка.
+    Только вниз: «исполненный уровень не откатывается» — писатель отвергает
+    строку, которая не ниже действующей.
+
+    ``resolver_decision_id`` — ``decision_id`` ответа резолвера трека C: шаг не
+    получает услугу в обход резолвера (§8.2). ``recommendation_id`` пуст, пока
+    сохранённой живой ``Recommendation`` не существует (решение 07.10, В-2(а):
+    запись Recommendation сервер ставит только ``SHADOW`` до порогов C1); его
+    не заполняют ничем другим — «присутствует только при реальной цепочке»
+    (§8.3).
+    """
+
+    class Level(models.TextChoices):
+        SERVICE = "SERVICE", "SERVICE"
+        OFFER = "OFFER", "OFFER"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan_revision = models.ForeignKey(
+        PlanRevision,
+        on_delete=models.CASCADE,
+        related_name="step_resolutions",
+    )
+    step_id = models.CharField(max_length=128, help_text="step_id шага в снимке этой ревизии")
+    level = models.CharField(max_length=16, choices=Level.choices)
+    canonical_service = models.ForeignKey(
+        "services.ServiceTemplate",
+        on_delete=models.PROTECT,
+        related_name="+",
+    )
+    tenant_offer = models.ForeignKey(
+        "services.SalonService",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="Предложение салона; NULL на уровне SERVICE",
+    )
+    resolver_decision_id = models.CharField(
+        max_length=64, help_text="decision_id ответа резолвера, которым разрешён шаг",
+    )
+    recommendation_id = models.UUIDField(
+        null=True, blank=True,
+        help_text="Только при реальной сохранённой Recommendation; до открытия C1 — NULL",
+    )
+    # DRF-2877 — безопасность хода, при которой человек действовал: вердикт
+    # движка бота, версия его политики и ревизия состояния разговора, для
+    # которой он посчитан. При STOP / UNKNOWN строка не появляется вовсе.
+    safety_state = models.CharField(max_length=16)
+    safety_policy_version = models.CharField(max_length=64)
+    safety_evaluated_at_revision = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["plan_revision", "step_id", "created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["plan_revision", "step_id", "level"],
+                name="planstepresolution_one_per_level",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(level="SERVICE", tenant_offer__isnull=True)
+                    | models.Q(level="OFFER", tenant_offer__isnull=False)
+                ),
+                name="planstepresolution_offer_matches_level",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"PlanStepResolution<rev={self.plan_revision_id} step={self.step_id}> {self.level}"
+
+
+class PlanStepBooking(_AppendOnlyModel):
+    """Запись, сделанная от шага плана, — ФАКТ, не состояние (контракт §8.3).
+
+    Ни флага «выполнено», ни счётчика (PE-4, §4.8). Статус записи сюда не
+    копируется — читается с ``Appointment`` в момент чтения, поэтому отмена и
+    перенос видны на шаге сами и ничего не меняют ни в плане, ни в цели.
+
+    Одна запись — один шаг. Строка уходит каскадом от плана: при удалении
+    аккаунта запись остаётся (обезличенной), а ссылка на стёртый план — нет.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan = models.ForeignKey(
+        Plan,
+        on_delete=models.CASCADE,
+        related_name="step_bookings",
+    )
+    plan_revision = models.ForeignKey(
+        PlanRevision,
+        on_delete=models.CASCADE,
+        related_name="step_bookings",
+    )
+    step_id = models.CharField(max_length=128)
+    appointment = models.OneToOneField(
+        "appointments.Appointment",
+        on_delete=models.CASCADE,
+        related_name="plan_step_booking",
+    )
+    # Копии с действующего разрешения шага на момент записи: по какой
+    # цепочке человек пришёл к записи.
+    resolver_decision_id = models.CharField(max_length=64, blank=True, default="")
+    recommendation_id = models.UUIDField(null=True, blank=True)
+    # DRF-2877 — безопасность хода, при которой человек действовал: вердикт
+    # движка бота, версия его политики и ревизия состояния разговора, для
+    # которой он посчитан. При STOP / UNKNOWN строка не появляется вовсе.
+    safety_state = models.CharField(max_length=16)
+    safety_policy_version = models.CharField(max_length=64)
+    safety_evaluated_at_revision = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["plan", "step_id", "created_at"]
+        indexes = [
+            models.Index(fields=["plan", "step_id"], name="planstepbooking_plan_step_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"PlanStepBooking<plan={self.plan_id} step={self.step_id}> appt={self.appointment_id}"
