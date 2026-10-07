@@ -119,6 +119,11 @@ class TestReader:
         label = capability_labels(["draft"])["draft"]
         assert (label.state, label.label) == (LabelState.UNKNOWN, None)
 
+    def test_ambiguous_stays_declared_on_the_wire_though_nothing_produces_it(self) -> None:
+        """Объявлено, но при общем словаре недостижимо: экран строится на четырёх состояниях,
+        и значение не должно исчезнуть из провода молча."""
+        assert {state.value for state in LabelState} == {"labelled", "unknown", "no_text", "ambiguous"}
+
     def test_a_confirmed_capability_without_text_says_so(self, templates, curator) -> None:
         _capability(templates[0], "silent", "", curator)
         assert capability_labels(["silent"])["silent"].state is LabelState.NO_TEXT
