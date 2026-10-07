@@ -50,18 +50,19 @@ def test_rating_without_reviews_is_unsubstantiated():
     assert rating_strength(RatingValue(Decimal("4.9"), 0)) is EvidenceStrength.UNSUBSTANTIATED
 
 
-def test_confirmed_is_never_issued_while_threshold_unnamed():
-    """Порог `N_substantiated` владельцем не назван — `CONFIRMED` не выдаётся.
+def test_confirmed_is_issued_from_the_threshold_the_owner_named():
+    """Порог назван владельцем 07.10.2026 (DRF-2884): 5 отзывов.
 
-    Максимум `WEAK`, и это не осторожность: `CONFIRMED` означает «оценке
-    можно верить», и выдать его, не имея порога, значило бы назначить порог
-    молча — тем же способом, которым в контур попал литерал рейтинга.
+    До этого здесь стоял узел «порог не назван — CONFIRMED не выдаётся»: он
+    не давал назначить порог молча. Порог назначен решением, узел теперь
+    держит само число: без переданного порога действует общий.
     """
-    assert rating_strength(RatingValue(Decimal("4.9"), 100)) is EvidenceStrength.WEAK
+    assert rating_strength(RatingValue(Decimal("4.9"), 4)) is EvidenceStrength.WEAK
+    assert rating_strength(RatingValue(Decimal("4.9"), 5)) is EvidenceStrength.CONFIRMED
 
 
 def test_threshold_separates_weak_from_confirmed_once_named():
-    """Когда владелец назовёт число, функция начинает различать — без правок."""
+    """Политика может назвать свой порог — тогда действует он, а не общий."""
     assert rating_strength(RatingValue(Decimal("4.9"), 9), n_substantiated=10) is EvidenceStrength.WEAK
     assert rating_strength(RatingValue(Decimal("4.9"), 10), n_substantiated=10) is EvidenceStrength.CONFIRMED
 
