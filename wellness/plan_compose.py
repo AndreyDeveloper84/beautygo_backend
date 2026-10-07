@@ -45,6 +45,7 @@ from recommendation.api import REASON_CODE_REGISTRY_VERSION, RESOLVER_SPEC_VERSI
 from services.capabilities import capability_keys_helping_goal
 
 from .plan_engine import ContractViolation, PlanEngineDisabled, plan_engine_enabled
+from .plan_safety import SAFETY_BLOCKING, SAFETY_STATES
 
 PLAN_SPEC_VERSION = "1.0"
 #: У сопоставления каталога нет схемы версий (контракт ограничений §5.3:
@@ -71,10 +72,8 @@ UNKNOWN_REASONS: frozenset[str] = frozenset(
 #: утверждать, а молчание читалось бы как «ограничений нет».
 CAPABILITY_LEVEL_KINDS: tuple[str, ...] = ("CAPABILITY_SEMANTICS", "SERVICE_CAPABILITY_MAPPING")
 
-#: ``PlanDecision.safety_state`` (§4.1). ``NOT_APPLICABLE`` бота сюда не входит.
-SAFETY_STATES: frozenset[str] = frozenset({"NORMAL", "CLARIFY", "CAUTION", "STOP", "UNKNOWN"})
-#: §12: при этих состояниях план не строится и частичный не выдаётся.
-SAFETY_BLOCKING: frozenset[str] = frozenset({"STOP", "UNKNOWN"})
+#: Состояния безопасности и те из них, при которых план не строится (§12), —
+#: общие со всеми действиями плана: ``wellness.plan_safety``.
 
 
 class Outcome:
