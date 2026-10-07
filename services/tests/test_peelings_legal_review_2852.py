@@ -27,6 +27,7 @@ from decimal import Decimal
 
 import pytest
 from django.apps import apps as live_apps
+from django.contrib.auth.hashers import make_password
 from django.utils import timezone
 
 from services.body_care_license import CLASS_UNCONFIRMED, NOT_REQUIRED, license_states
@@ -234,11 +235,28 @@ def test_the_reverse_leaves_a_later_human_decision(canons, owner) -> None:
     assert _snapshot([decided, reviewed]) == before
 
 
+def test_the_migration_refuses_when_there_is_no_owner_account(canons) -> None:
+    User.objects.filter(username=owner_account.USERNAME).delete()
+
+    with pytest.raises(peelings.CannotAttribute, match="учётки владельца нет"):
+        MIGRATION.close_peelings(live_apps, None)
+
+    assert not ServiceTemplate.objects.filter(legal_service_class__isnull=False).exists()
+
+
 # ─── миграция и её литералы ──────────────────────────────────────────────────
 
 
-def test_the_migration_names_the_owner_account_as_the_author(canons) -> None:
-    author = User.objects.get(username=owner_account.USERNAME)
+@pytest.fixture
+def owner_row(db):
+    """Именная учётка владельца. Заводится здесь, а не берётся от накатки:
+    транзакционный узел, отработавший раньше, смывает таблицы."""
+    pk, _ = owner_account.ensure(User, unusable_password=make_password(None))
+    return User.objects.get(pk=pk)
+
+
+def test_the_migration_names_the_owner_account_as_the_author(canons, owner_row) -> None:
+    author = owner_row
 
     MIGRATION.close_peelings(live_apps, None)
     assert ServiceTemplate.objects.filter(
@@ -259,8 +277,8 @@ def test_the_migration_literals_match_the_model() -> None:
         assert str(uuid.UUID(pk)) == pk
 
 
-def test_the_migration_refuses_when_the_owner_account_is_gone(canons) -> None:
-    User.objects.filter(username=owner_account.USERNAME).update(is_active=False)
+def test_the_migration_refuses_when_the_owner_account_is_switched_off(canons, owner_row) -> None:
+    User.objects.filter(pk=owner_row.pk).update(is_active=False)
 
     with pytest.raises(peelings.CannotAttribute, match="учётки владельца нет"):
         MIGRATION.close_peelings(live_apps, None)
