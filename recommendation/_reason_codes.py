@@ -23,7 +23,7 @@ from enum import StrEnum
 #: Версия реестра. Любое добавление, удаление или изменение смысла кода —
 #: новая версия; она уезжает в `policy_versions` ответа, иначе решение
 #: невоспроизводимо задним числом (контракт §6.3).
-REGISTRY_VERSION = "1.5.0"
+REGISTRY_VERSION = "1.6.0"
 
 
 class ReasonCode(StrEnum):
@@ -49,6 +49,11 @@ class ReasonCode(StrEnum):
     ELIG_EXCLUDED_SAFETY = "ELIG_EXCLUDED_SAFETY"
     ELIG_EXCLUDED_BUDGET = "ELIG_EXCLUDED_BUDGET"
     ELIG_EXCLUDED_NOT_RECOMMENDABLE = "ELIG_EXCLUDED_NOT_RECOMMENDABLE"
+    # DRF-2793 (1.6.0) — связь VERIFIED, но сам канон выведен из оборота.
+    # Отдельно от NOT_RECOMMENDABLE: там оператору проверять связь, здесь —
+    # перепривязать предложение к живому канону; в переписи связей «выведен
+    # канон» не должен прятаться в «связь не проверена».
+    ELIG_EXCLUDED_CANON_RETIRED = "ELIG_EXCLUDED_CANON_RETIRED"
     # CAT-10 (1.3.0) — связь VERIFIED, но конфигурация body-care-услуги не
     # готова к скринингу (состояние валидации CAT-6 не READY). Отдельно от
     # NOT_RECOMMENDABLE: тот — про связь с каноном, этот — про готовность
@@ -139,6 +144,7 @@ EXCLUSION_CODES = frozenset({
     ReasonCode.ELIG_EXCLUDED_SAFETY,
     ReasonCode.ELIG_EXCLUDED_BUDGET,
     ReasonCode.ELIG_EXCLUDED_NOT_RECOMMENDABLE,
+    ReasonCode.ELIG_EXCLUDED_CANON_RETIRED,
     ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY,
     ReasonCode.ELIG_EXCLUDED_MEDICAL_LICENSE_NOT_VERIFIED,
     ReasonCode.ELIG_EXCLUDED_LICENSE_SCOPE_MISMATCH,
@@ -153,9 +159,10 @@ EXCLUSION_CODES = frozenset({
     ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD,
 })
 
-#: Исключения гейтов допуска каталога — область, конфигурация, юридические
-#: условия (проверки П2–П7). Пустая полка называет их в сводке решения.
+#: Исключения гейтов допуска каталога — статус канона, область,
+#: конфигурация, юридические условия. Пустая полка называет их в сводке решения.
 GATE_EXCLUSION_CODES = frozenset({
+    ReasonCode.ELIG_EXCLUDED_CANON_RETIRED,
     ReasonCode.ELIG_EXCLUDED_CATALOG_UNCLASSIFIED,
     ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY,
     ReasonCode.ELIG_EXCLUDED_LEGAL_CLASS_UNCONFIRMED,

@@ -207,7 +207,7 @@ def _excluded(decision) -> dict[str, ReasonCode]:
 
 
 class TestTheGateReadsTheRealState:
-    @pytest.mark.parametrize("state", [INCOMPLETE, REVIEW_REQUIRED, BLOCKED, RETIRED])
+    @pytest.mark.parametrize("state", [INCOMPLETE, REVIEW_REQUIRED, BLOCKED])
     def test_an_unready_body_care_offer_is_excluded_despite_a_verified_mapping(
         self, tenant, category, curator, state,
     ):
@@ -219,6 +219,20 @@ class TestTheGateReadsTheRealState:
         assert decision.ordered == ()
         assert _excluded(decision) == {str(master.user_id): ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY}
         assert ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY in decision.reason_codes
+
+    def test_a_retired_body_care_canon_is_named_as_retired_not_as_unready(self, tenant, category, curator):
+        """DRF-2793: CAT-6 такой канон тоже закрывает (``retired`` → NOT_READY), но причина на
+        проводе — статус канона: он проверяется раньше готовности, и оператору это другое действие."""
+        master = _master(tenant, "01")
+        _offer(tenant, master, category, curator, name="Обёртывание", state=RETIRED)
+
+        [facts] = _fetch()
+        decision = _resolve()
+
+        assert facts.config_gate is ConfigGate.NOT_READY, "контроль: CAT-6 по-прежнему отвечает retired"
+        assert facts.canon_retired is True
+        assert decision.ordered == ()
+        assert _excluded(decision) == {str(master.user_id): ReasonCode.ELIG_EXCLUDED_CANON_RETIRED}
 
     def test_a_ready_body_care_offer_is_admitted(self, tenant, category, curator):
         master = _master(tenant, "02")
