@@ -486,7 +486,7 @@ class TestTheSeam:
         assert gates == {(master, offer): LegalGate.UNDETERMINED}
         [message] = _errors(source_log)
         assert "legal_gates_undetermined" in message
-        assert f"{master}:{offer}" in message
+        assert f"{master.hex}:{offer.hex}" in message, "адрес строки — без дефисов: так его не режет маска карт"
 
     @pytest.mark.parametrize(
         ("silent", "expected"),
