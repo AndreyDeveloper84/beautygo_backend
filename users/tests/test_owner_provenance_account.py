@@ -1,8 +1,9 @@
 """Именная учётка владельца для провенанса (решение владельца 07.10).
 
 Миграция ``0031`` схему не меняет — это данные; узлы зовут шаг напрямую на
-живой модели. ``--create-db`` уже накатил ``0031``, поэтому учётка в базе
-узла есть с самого начала: узлы, которым нужна чистая база, её удаляют.
+живой модели. На строку, оставленную накаткой, узлы не опираются: она есть
+в свежей базе, но транзакционный узел, отработавший раньше в том же
+прогоне, смывает таблицы. Каждый узел начинает с чистого ключа.
 
 Узлы держат:
 
@@ -42,10 +43,12 @@ def _ensure():
     return owner_account.ensure(User, unusable_password=make_password(None))
 
 
-def test_the_migration_has_already_made_the_account() -> None:
-    account = User.objects.get(username=owner_account.USERNAME)
+def test_the_migration_step_makes_the_account(clean) -> None:
+    MIGRATION.ensure_account(live_apps, None)
 
+    account = User.objects.get(username=owner_account.USERNAME)
     assert str(account.pk) == owner_account.FIXED_ID
+    assert not account.has_usable_password()
 
 
 def test_the_account_is_made_with_the_fixed_pk_and_the_owner_name(clean) -> None:
