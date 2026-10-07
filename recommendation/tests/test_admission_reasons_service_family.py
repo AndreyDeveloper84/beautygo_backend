@@ -162,7 +162,7 @@ class TestEveryReasonHasItsOwnCode:
 
     def test_the_gate_codes_are_registered_exclusions(self):
         assert GATE_EXCLUSION_CODES <= EXCLUSION_CODES
-        assert len(GATE_EXCLUSION_CODES) == 10
+        assert len(GATE_EXCLUSION_CODES) == 11
         assert tuple(int(p) for p in REGISTRY_VERSION.split(".")[:2]) >= (1, 5)
 
 
