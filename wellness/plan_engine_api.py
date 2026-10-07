@@ -31,6 +31,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from services.capabilities import capability_labels
 from users.permissions import IsBotServiceWithVerifiedClient
 from users.response import error_response, success_response
 
@@ -47,6 +48,7 @@ from .plan_engine import (
     create_plan_from_command,
     parse_command,
     plan_document,
+    plan_engine_enabled,
     plan_payload,
     set_plan_status,
 )
@@ -345,3 +347,41 @@ class PlanDecisionView(APIView):
                 details={"reason": exc.reason, "detail": exc.detail},
             )
         return success_response(result)
+
+
+#: Сколько ключей за один запрос: у плана единицы шагов, сотня — уже перебор словаря.
+MAX_LABEL_KEYS = 50
+
+
+class PlanCapabilityLabelsView(APIView):
+    """POST /api/v1/internal/me/plan/capability-labels/
+
+    ``{keys: [...]}`` → ``{labels: {key: {state, label}}}``. У шага плана
+    текста нет (контракт PE-2) — подпись способности берётся здесь, из
+    подтверждённого знания каталога. ``state``: ``labelled`` (подпись есть) |
+    ``unknown`` (подтверждённой способности с таким ключом нет) | ``no_text``
+    | ``ambiguous`` (у ключа несколько разных формулировок — подписи нет).
+    Ничего о человеке не читает и не пишет.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(tags=["internal"], responses={200: OpenApiResponse(description="{labels}")})
+    def post(self, request: Request) -> Response:
+        if not plan_engine_enabled():
+            return _disabled()
+        keys = request.data.get("keys") if isinstance(request.data, dict) else None
+        if (
+            not isinstance(keys, list)
+            or not keys
+            or len(keys) > MAX_LABEL_KEYS
+            or not all(isinstance(k, str) and k.strip() for k in keys)
+        ):
+            return error_response(
+                "VALIDATION_ERROR", f"keys must be a list of 1..{MAX_LABEL_KEYS} non-empty strings",
+            )
+        labels = capability_labels(keys)
+        return success_response(
+            {"labels": {key: {"state": item.state.value, "label": item.label} for key, item in labels.items()}}
+        )
