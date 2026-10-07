@@ -65,6 +65,12 @@ C_HEADER_ONLY = {
     "wellness/api.py::WellnessContextView",
     "wellness/plan_lite_api.py::PlanLiteView",
     "wellness/plan_lite_api.py::PlanLiteProposalView",
+    # DRF-2857 — durable Plan: как у Plan Lite, человек берётся только из
+    # заголовка; `goal_ref` и `plan_id` из тела — не user id, а строки,
+    # которые писатель ищет строго среди принадлежащих `request.user`
+    # (чужое → 404).
+    "wellness/plan_engine_api.py::PlanEngineView",
+    "wellness/plan_engine_api.py::PlanEngineStateView",
 }
 
 
@@ -210,7 +216,8 @@ def test_group_c_has_no_hidden_cross_check() -> None:
 
 def test_the_census_numbers_of_05_10() -> None:
     """Literally the numbers the docstring and DRF-2421 cite. A change here is a decision."""
-    assert (len(A_CROSS_CHECKED), len(B_TENANT_ADMIN), len(C_HEADER_ONLY)) == (6, 6, 15)
+    # DRF-2857: C 15 -> 17, the two durable-plan views (same standing as Plan Lite).
+    assert (len(A_CROSS_CHECKED), len(B_TENANT_ADMIN), len(C_HEADER_ONLY)) == (6, 6, 17)
 
 
 def test_the_docstring_states_the_census_not_the_old_promise() -> None:
