@@ -100,6 +100,12 @@ class PersonalPlan(models.Model):
     class Status(models.TextChoices):
         ACTIVE = "active", "Активен"
         CLOSED_BY_USER = "closed_by_user", "Закрыт пользователем"
+        # DRF-2857 — закрыт тем, что человек сохранил durable-план
+        # (``wellness.Plan``). Это НЕ ``closed_by_user``: человек не говорил,
+        # что этот план вести не хочет, — он подтвердил новый. Разведено по
+        # образцу ``ClientGoal.State.SUPERSEDED``; писатель один —
+        # ``wellness.plan_engine.create_plan_from_command``.
+        SUPERSEDED = "superseded", "Замещён сохранённым планом"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
@@ -533,3 +539,206 @@ class PlanTemplate(models.Model):
 
     def __str__(self) -> str:
         return f"PlanTemplate<{self.goal_key} v{self.version}{'' if self.is_active else ' inactive'}>"
+
+
+# ─── Plan Engine: durable Plan / PlanRevision (DRF-2857, WP1) ────────────────
+#
+# Контракт: PLAN_ENGINE_CONTRACT v1.0 §4.4–§4.9 (тело без изменений в v1.1).
+# Хранение — здесь; композиция и семантическая валидация — ayla-ai-core
+# (§10.1); Lite (``PersonalPlan``/``PlanAction``) живёт рядом под своим флагом
+# и сюда не переезжает.
+
+#: Закрытый список запрещённых полей контракта §4.8. Сверяется с текстом
+#: контракта узлом (``wellness/tests/test_plan_engine_2857.py``), чтобы список
+#: в коде не мог разойтись с контрактом молча.
+PLAN_FORBIDDEN_FIELDS: frozenset[str] = frozenset(
+    {
+        "sub_steps", "children", "parts", "parent_step_id", "progress", "percent",
+        "completed_count", "done", "score", "confidence", "next_visit_date", "course",
+        "sessions_total", "sessions_done", "compatible_with", "incompatible_with",
+        "repeat_every", "recovery_days",
+    }
+)
+
+#: Шесть версий политик на ревизии (§4.1, §7) — ровно этот набор ключей.
+PLAN_POLICY_VERSION_KEYS: frozenset[str] = frozenset(
+    {
+        "plan_spec_version", "constraint_policy_version", "resolver_spec_version",
+        "catalog_mapping_version", "safety_policy_version", "reason_code_registry_version",
+    }
+)
+
+
+class ImmutablePlanRecordError(RuntimeError):
+    """Попытка изменить или удалить ревизию плана (§4.4: никогда не правится)."""
+
+
+class _PlanRevisionQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ImmutablePlanRecordError(
+            "PlanRevision: update() запрещён — ревизия иммутабельна (контракт §4.4); "
+            "изменение плана = новая ревизия"
+        )
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise ImmutablePlanRecordError("PlanRevision: bulk_update() запрещён — ревизия иммутабельна")
+
+    def delete(self):
+        raise ImmutablePlanRecordError(
+            "PlanRevision: delete() запрещён — ревизии уходят только вместе с планом "
+            "при стирании данных человека (каскад от Plan)"
+        )
+
+
+class Plan(models.Model):
+    """Сохранённый план — durable, авторитетный (контракт §4.4).
+
+    Создаётся только командой сохранения по явному подтверждению человека
+    (§4.9, ``wellness.plan_engine.create_plan_from_command``); содержимое
+    живёт в ревизиях. Не более одного ``active`` на цель (§4.7).
+
+    ``goal`` nullable ТОЛЬКО ради ``SET_NULL``: план переживает снятие цели
+    как история. Создать план без цели писатель не даёт — это открытый вопрос
+    владельца Q-PE-2 (§16.2), и схема его не решает.
+
+    Ни одного поля из закрытого списка §4.8 (``PLAN_FORBIDDEN_FIELDS``): ни
+    прогресса, ни счётчиков, ни курса.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Действует"
+        PAUSED = "paused", "Приостановлен"
+        SUPERSEDED = "superseded", "Замещён другим планом той же цели"
+        ARCHIVED = "archived", "В архиве"
+
+    class CreatedVia(models.TextChoices):
+        CONFIRMATION = "confirmation", "Подтверждение человека"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    subject_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="engine_plans",
+    )
+    # ``related_name`` не ``plans``: то имя занято ``PersonalPlan.goal`` (Lite).
+    goal = models.ForeignKey(
+        "goals.ClientGoal",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="engine_plans",
+        help_text="Цель плана; NULL — только после снятия цели (история), не при создании",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    created_via = models.CharField(
+        max_length=16,
+        choices=CreatedVia.choices,
+        default=CreatedVia.CONFIRMATION,
+    )
+    idempotency_key = models.CharField(
+        max_length=64,
+        unique=True,
+        help_text="sha256(subject, decision_id, подтверждение) — §4.9; считает сервер",
+    )
+    # RESTRICT, не PROTECT: при стирании человека план удаляется вместе со
+    # своими ревизиями (каскад ниже), и указатель на удаляемую ревизию этому
+    # не мешает; удалить ревизию отдельно от плана по-прежнему нельзя.
+    current_revision = models.ForeignKey(
+        "wellness.PlanRevision",
+        on_delete=models.RESTRICT,
+        null=True,
+        blank=True,
+        related_name="+",
+        help_text="Текущая ревизия; NULL только внутри транзакции создания",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    status_changed_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["goal"],
+                condition=models.Q(status="active"),
+                name="plan_one_active_per_goal",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["subject_user", "status"], name="plan_subject_status_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"Plan<{self.subject_user_id}> goal={self.goal_id} (status={self.status})"
+
+
+class PlanRevision(models.Model):
+    """Ревизия плана — ИММУТАБЕЛЬНА (контракт §4.4, §9.1).
+
+    Снимки, а не ссылки: шаги и утверждения хранятся целиком, чтобы ревизию
+    можно было воспроизвести без текущего состояния каталога. Изменение плана
+    — новая ревизия, эта строка не правится никогда. Удаляется только каскадом
+    от ``Plan`` при стирании данных человека.
+
+    ПДн-дисциплина §4.4: ссылки (``decision_id``, ``capability_ref``,
+    ``assertion_id``) вместо текстов; свободного текста у шага нет (PE-2) —
+    форму держит писатель.
+    """
+
+    class Staleness(models.TextChoices):
+        NONE = "none", "Актуальна"
+        STALE_RULES = "stale_rules", "Правила обновились"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan = models.ForeignKey(
+        Plan,
+        on_delete=models.CASCADE,
+        related_name="revisions",
+    )
+    revision_no = models.PositiveIntegerField(help_text="Монотонный в рамках плана, с 1")
+    steps_snapshot = models.JSONField(help_text="PlanStep целиком (§4.2) — снимок, не ссылки")
+    assertions_snapshot = models.JSONField(
+        default=list, help_text="PlanningAssertion целиком — воспроизводимость (§4.4)",
+    )
+    validation = models.JSONField(help_text="PlanValidation на момент сборки (§6)")
+    staleness = models.CharField(
+        max_length=16,
+        choices=Staleness.choices,
+        default=Staleness.NONE,
+    )
+    policy_versions = models.JSONField(help_text="Шесть версий политик (§4.1)")
+    created_from = models.JSONField(help_text="{decision_id} | {recompute_event}")
+    content_hash = models.CharField(
+        max_length=64,
+        help_text="sha256 канонического JSON снимков — сверка повтора команды",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    objects = _PlanRevisionQuerySet.as_manager()
+
+    class Meta:
+        ordering = ["plan", "revision_no"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["plan", "revision_no"],
+                name="planrevision_plan_revision_no_unique",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ImmutablePlanRecordError(
+                f"PlanRevision {self.pk}: ревизия иммутабельна — изменение плана = новая ревизия"
+            )
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ImmutablePlanRecordError(
+            f"PlanRevision {self.pk}: delete() запрещён — ревизия уходит только вместе с планом"
+        )
+
+    def __str__(self) -> str:
+        return f"PlanRevision<plan={self.plan_id}> #{self.revision_no}"

@@ -126,6 +126,12 @@ urlpatterns = [
         'api/v1/internal/me/plan-lite/',
         include('wellness.plan_lite_urls'),
     ),
+    # DRF-2857 — durable Plan (контракт Plan Engine §4.4–§4.9): команда
+    # сохранения, чтение, пауза/архив. Под флагом PLAN_ENGINE_ENABLED.
+    path(
+        'api/v1/internal/me/plan/',
+        include('wellness.plan_engine_urls'),
+    ),
     path(
         'api/v1/internal/me/wellness-context/',
         include('wellness.urls'),
