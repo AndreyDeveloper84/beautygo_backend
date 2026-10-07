@@ -66,7 +66,7 @@ def _backward(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("services", "0039_drf2741_contraindication_rules"),
+        ("services", "0049_drf2866_phase1_classification"),
     ]
 
     operations = [

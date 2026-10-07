@@ -107,6 +107,9 @@ def template_ids_helping_goal(goal_key: str, *, now: datetime | None = None) -> 
     утверждения подтверждены, поддержаны и не истекли, цель активна; вывод
     системы (``inference``) не считается. Здесь, а не у читателя: этот
     модуль — единственная санкционированная точка чтения знания.
+
+    Возможность — запись словаря, привязанная к нескольким процедурам
+    (DRF-2743): в ответ попадает каждая из них.
     """
     now = now or timezone.now()
     return frozenset(
@@ -115,7 +118,7 @@ def template_ids_helping_goal(goal_key: str, *, now: datetime | None = None) -> 
             _client_facing_q(now, prefix="capability__"),
             goal__key=goal_key,
             goal__is_active=True,
-        ).values_list("capability__template_id", flat=True)
+        ).values_list("capability__templates", flat=True)
     )
 
 

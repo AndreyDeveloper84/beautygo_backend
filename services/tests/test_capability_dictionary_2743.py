@@ -426,7 +426,7 @@ class TestAFileBindsAnEntryToItsProcedures:
 # ── Миграция 0040 на строках, лежавших до неё ─────────────────────────────
 
 BEFORE = "0039_drf2741_contraindication_rules"
-THE_MIGRATION = "0040_drf2743_capability_dictionary"
+THE_MIGRATION = "0050_drf2743_capability_dictionary"
 
 
 @pytest.mark.django_db(transaction=True)
