@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import itertools
 import uuid
 from datetime import timedelta
 from decimal import Decimal
@@ -48,6 +49,9 @@ _rows = m8a._rows
 _select = m8a._select
 _selection_url = m8a._url
 
+#: Телефон уникален на всю таблицу; случайный из десяти тысяч сталкивается сам с собой.
+_PHONES = itertools.count(1)
+
 
 def _offer_url(profile, row) -> str:
     return f"/api/v1/internal/specialists/{profile.pk}/services/{row.pk}/offer/"
@@ -72,7 +76,7 @@ def _booking(profile, row, *, start, status):
         username=f"client_m8b_{uuid.uuid4().hex[:8]}",
         password="x",  # pragma: allowlist secret
         role="client",
-        phone=f"+7999518{uuid.uuid4().int % 10000:04d}",
+        phone=f"+7999518{next(_PHONES):04d}",
     )
     return Appointment.objects.create(
         client=client,
