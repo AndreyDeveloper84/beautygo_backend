@@ -265,6 +265,15 @@ class ErrorCode(str, Enum):
     PLAN_TRANSITION_REFUSED = "PLAN_TRANSITION_REFUSED"
     # DRF-2857 — возобновить план нельзя: у цели уже действует другой (§4.7).
     PLAN_ACTIVE_EXISTS = "PLAN_ACTIVE_EXISTS"
+    # DRF-2868 — шаг плана не допущен к действию (план или цель не действуют,
+    # правила устарели, шаг BLOCKED, уровень не OFFER, услуга не та): причина —
+    # в details.reason машинным именем; ничего не записано.
+    PLAN_STEP_NOT_EXECUTABLE = "PLAN_STEP_NOT_EXECUTABLE"
+    # DRF-2868 — переход уровня шага не принят (не вниз, канон сменился,
+    # предложение не этого канона, нет decision_id резолвера).
+    PLAN_STEP_RESOLUTION_REFUSED = "PLAN_STEP_RESOLUTION_REFUSED"
+    # DRF-2868 — запись уже связана с другим шагом: одна запись — один шаг.
+    PLAN_STEP_BOOKING_CONFLICT = "PLAN_STEP_BOOKING_CONFLICT"
     # DRF-1699 D2 (§7 свода) — у человека живая заявка на удаление:
     # персонализация и новая обработка данных прекращены. Один код на все
     # три класса читателей (память, рекомендации, проактив), чтобы бот ловил

@@ -102,6 +102,21 @@ FIELDS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
          "created_from": "служебная ссылка на решение, из которого сохранена ревизия",
          "content_hash": "служебный отпечаток содержимого для сверки повтора"},
     ),
+    # DRF-2868 — что произошло с шагом после сохранения: чем он разрешён и
+    # какие записи от него сделаны. Сама запись — в разделе бронирований.
+    "wellness.PlanStepResolution": (
+        {**_same("step_id", "level", "created_at"),
+         "canonical_service": "canonical_service_name", "tenant_offer": "has_tenant_offer"},
+        {"id": _KEY, "plan_revision": _NEST,
+         "resolver_decision_id": "служебная ссылка на решение подбора, не данные о человеке",
+         "recommendation_id": "служебная ссылка на запись рекомендации (сейчас всегда пусто)"},
+    ),
+    "wellness.PlanStepBooking": (
+        {**_same("step_id", "created_at"), "appointment": "appointment_start"},
+        {"id": _KEY, "plan": _NEST, "plan_revision": _NEST,
+         "resolver_decision_id": "служебная ссылка на решение подбора, не данные о человеке",
+         "recommendation_id": "служебная ссылка на запись рекомендации (сейчас всегда пусто)"},
+    ),
     "wellness.PlanOutcomeLink": (
         {**_same("target_date", "status", "created_at", "closed_at"), "outcome": "outcome_target"},
         {"id": _KEY, "plan": _NEST},
@@ -243,6 +258,9 @@ _CONVERT = {
     ("goals.GoalAnketaRun", "goal"): lambda o: o.goal.goal_key if o.goal_id else None,
     ("wellness.PlanOutcomeLink", "outcome"): lambda o: o.outcome.target,
     ("wellness.Plan", "goal"): lambda o: o.goal.goal_key if o.goal_id else None,
+    ("wellness.PlanStepResolution", "canonical_service"): lambda o: o.canonical_service.name,
+    ("wellness.PlanStepResolution", "tenant_offer"): lambda o: o.tenant_offer_id is not None,
+    ("wellness.PlanStepBooking", "appointment"): lambda o: o.appointment.start_datetime.isoformat(),
     ("wellness.ProgressObservation", "superseded_by"): lambda o: o.superseded_by_id is not None,
     ("nutrition.FoodLog", "scan"): lambda o: o.scan_id is not None,
     ("nutrition.FoodScan", "image"): lambda o: o.image.url if o.image else None,
@@ -289,7 +307,13 @@ def export_goals(user) -> dict:
 
 
 def export_wellness_plan(user) -> dict:
-    from wellness.models import DesiredOutcome, PersonalPlan, Plan, ProgressObservation
+    from wellness.models import (
+        DesiredOutcome,
+        PersonalPlan,
+        Plan,
+        PlanStepResolution,
+        ProgressObservation,
+    )
 
     saved_plans = []
     for saved in (
@@ -297,6 +321,15 @@ def export_wellness_plan(user) -> dict:
     ):
         item = _row(saved)
         item["revisions"] = [_row(r) for r in saved.revisions.order_by("revision_no")]
+        item["step_resolutions"] = [
+            _row(r)
+            for r in PlanStepResolution.objects.filter(plan_revision__plan=saved)
+            .select_related("canonical_service")
+            .order_by("created_at", "id")
+        ]
+        item["step_bookings"] = [
+            _row(b) for b in saved.step_bookings.select_related("appointment").order_by("created_at", "id")
+        ]
         saved_plans.append(item)
 
     plans = []

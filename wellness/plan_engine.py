@@ -260,6 +260,16 @@ def parse_command(raw: Any) -> PlanCommand:
     if nested:
         raise ContractViolation("forbidden_field", nested)
     steps = _validate_steps(decision.get("steps"), {a["assertion_id"] for a in assertions})
+    # DRF-2868 — валидация по КАЖДОМУ шагу (§6.1) обязательна: по ней сервер
+    # перед записью узнаёт, что шаг BLOCKED. Шаг без вердикта не «допущен по
+    # умолчанию» — команда не конформна.
+    step_validations = validation.get("step_validations")
+    if (
+        not isinstance(step_validations, dict)
+        or set(step_validations) != {s["step_id"] for s in steps}
+        or not all(v in VALIDATION_STATUSES for v in step_validations.values())
+    ):
+        raise ContractViolation("step_validations_malformed")
 
     return PlanCommand(
         decision_id=decision_id,
@@ -450,7 +460,17 @@ def plan_document(plan: Plan) -> dict[str, Any]:
             "created_from": revision.created_from,
             "created_at": revision.created_at.isoformat(),
         },
+        # DRF-2868 — что произошло с шагами ПОСЛЕ сохранения ревизии: до какой
+        # услуги разрешён шаг и какие записи от него сделаны. Снимок выше при
+        # этом не меняется.
+        "step_state": _step_state(plan, revision),
     }
+
+
+def _step_state(plan: Plan, revision: PlanRevision) -> dict[str, Any]:
+    from .plan_engine_steps import step_state  # импорт здесь: тот модуль импортирует этот
+
+    return step_state(plan, revision)
 
 
 def plan_payload(user) -> dict[str, Any] | None:
