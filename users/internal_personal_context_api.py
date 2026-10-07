@@ -22,10 +22,17 @@ persist (принимаем в PATCH, source пишем в data_sources; confide
 
 DRF-1367 — DELETE это глагол стирания «забудь всё». До него у контракта не
 было ни одного способа сказать «сотри профиль»: только PATCH по именам
-полей, и цену через него нельзя очистить в принципе (``null`` → 400,
-пустая строка падает на Decimal-колонке). Мост называл три поля из
-двенадцати, и список расходился с моделью при каждом новом поле. Глагол
-не перечисляет полей — он спрашивает модель (см. ``personal_context_erasure``).
+полей. Мост называл три поля из двенадцати, и список расходился с моделью
+при каждом новом поле. Глагол не перечисляет полей — он спрашивает модель
+(см. ``personal_context_erasure``).
+
+DRF-2886 — очистка ОДНОГО поля: ``value: null`` в ``updates``. До него цену
+через PATCH нельзя было очистить в принципе (``null`` → 400, пустая строка
+падала на Decimal-колонке при сохранении), и после «забудь про бюджет»
+значение оставалось в анкете и продолжало уходить модели. ``null`` —
+родное для JSON «значения нет»; поле возвращается к умолчанию модели той же
+таблицей, что у поштучного сброса клиентского приложения. Раньше ``null``
+давал 400, так что ни один действующий вызов поведения не меняет.
 
 Владелец, ``Ayla/docs/OD_MEMORY.md`` §1: источник истины — бэкенд. Значит
 операция «стереть то, чем владеешь» обязана быть здесь, а не на мосте.
@@ -38,6 +45,7 @@ DRF-1367 — DELETE это глагол стирания «забудь всё»
 from __future__ import annotations
 
 import uuid as uuid_mod
+from decimal import Decimal, InvalidOperation
 
 from rest_framework import serializers
 from rest_framework.request import Request
@@ -55,7 +63,7 @@ from privacy_audit.mixins import AuditedPersonalDataAccess
 from privacy_audit.models import PersonalDataAccessLog
 from users.permissions import IsInternalBearerForSubject
 from users.forget_all_subject import erase_remembered_for_subject
-from users.personal_context_views import _GREEN_ZONE_FIELDS
+from users.personal_context_views import _GREEN_ZONE_FIELDS, UserPersonalContextFieldDeleteView
 from users.response import error_response, success_response
 
 # Поля, о которых concierge может задать вопрос (subset green), + prompt-hint.
@@ -73,6 +81,31 @@ _ASK_CANDIDATES: tuple[tuple[str, str], ...] = (
 
 _SOURCE_CHOICES = ("explicit", "behavioral", "conversational", "transactional")
 _MAX_BATCH = 10
+
+#: Умолчание каждого поля — одна таблица с поштучным сбросом клиентского
+#: приложения: «очищено» у бота и у приложения значит одно и то же.
+_FIELD_DEFAULTS = UserPersonalContextFieldDeleteView._FIELD_DEFAULTS
+
+#: Поля-цены: Decimal-колонки. Значение проверяется здесь, а не базой:
+#: пустая строка иначе падала при сохранении, а не отвечала отказом.
+_PRICE_FIELDS = frozenset({"price_range_min", "price_range_max"})
+
+
+def _price(field: str, value: object) -> Decimal:
+    """Цена из тела запроса — число, не отрицательное; иначе отказ с именем поля."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)) or value == "":
+        raise serializers.ValidationError(
+            {field: "Ожидается число. Чтобы очистить поле, пришлите null."}
+        )
+    try:
+        price = Decimal(str(value))
+    except InvalidOperation:
+        raise serializers.ValidationError(
+            {field: "Ожидается число. Чтобы очистить поле, пришлите null."}
+        ) from None
+    if not price.is_finite() or price < 0:
+        raise serializers.ValidationError({field: "Цена не может быть отрицательной."})
+    return price
 
 
 def _resolve_user(ayla_user_id: str) -> User | None:
@@ -118,7 +151,8 @@ def _green_data_sources(ctx: UserPersonalContext) -> dict:
 
 class _UpdateItemSerializer(serializers.Serializer):
     field = serializers.ChoiceField(choices=_GREEN_ZONE_FIELDS)
-    value = serializers.JSONField()
+    #: ``null`` — «очистить поле» (DRF-2886), а не «значение не прислали».
+    value = serializers.JSONField(allow_null=True)
     source = serializers.ChoiceField(choices=_SOURCE_CHOICES, default="explicit")
     confidence = serializers.FloatField(
         min_value=0.0, max_value=1.0, default=1.0, required=False
@@ -184,10 +218,22 @@ class InternalPersonalContextView(AuditedPersonalDataAccess, APIView):
         ser = _UpdateItemSerializer(data=updates, many=True)
         ser.is_valid(raise_exception=True)
 
+        # Значения проверяются до первой записи: пачка либо ложится целиком,
+        # либо не ложится вовсе.
+        values = {}
+        for item in ser.validated_data:
+            field, value = item["field"], item["value"]
+            if value is None:
+                values[field] = _FIELD_DEFAULTS[field]()
+            elif field in _PRICE_FIELDS:
+                values[field] = _price(field, value)
+            else:
+                values[field] = value
+
         ctx, _ = UserPersonalContext.objects.get_or_create(user=user)
         data_sources = dict(ctx.data_sources or {})
         for item in ser.validated_data:
-            setattr(ctx, item["field"], item["value"])
+            setattr(ctx, item["field"], values[item["field"]])
             # A1a: пишем provenance (source). Per-field confidence — с A1b (MemoryFact).
             data_sources[item["field"]] = item["source"]
         ctx.data_sources = data_sources
