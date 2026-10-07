@@ -314,12 +314,9 @@ class SalonServiceAdminForm(forms.ModelForm):
 
     def clean_health_check_origin(self):
         """Не прислали — остаётся прежнее; у новой услуги — «не подтверждён»."""
-        value = self.cleaned_data.get('health_check_origin')
-        if value:
-            return value
-        if self.instance.pk:
-            return self.instance.health_check_origin
-        return SalonService.HealthCheckAnswerOrigin.UNSET
+        # У новой услуги экземпляр уже несёт умолчание колонки — отдельной
+        # ветки для неё не нужно (pk у модели выдаётся до сохранения).
+        return self.cleaned_data.get('health_check_origin') or self.instance.health_check_origin
 
     def _clean_health_check_answer(self, cleaned) -> None:
         """Происхождение ответа «нужна ли проверка перед услугой» (S2).
