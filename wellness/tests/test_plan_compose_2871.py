@@ -476,6 +476,17 @@ class TestJustifiedOnlyWhenNoSingleProcedureCoversIt:
         _capability([back, body_massage], "muscle-tension-relief", curator, relax)
         self._not_justified("one_procedure_covers_all")
 
+    @pytest.mark.parametrize("sole", ["back", "body_massage"])
+    def test_every_procedure_of_a_shared_capability_counts_as_its_carrier(
+        self, goal, back, body_massage, curator, relax, sole,
+    ) -> None:
+        """Способность словаря привязана к двум процедурам; вторую способность
+        несёт то одна из них, то другая. Обе раскладки — один визит: читатель
+        обязан отдать ВСЕ процедуры способности, а не первую попавшуюся."""
+        _capability([back, body_massage], "muscle-tension-relief", curator, relax)
+        _capability({"back": back, "body_massage": body_massage}[sole], "general-relaxation", curator, relax)
+        self._not_justified("one_procedure_covers_all")
+
     def test_two_capabilities_no_procedure_carries_both_are_a_plan(self, goal, knowledge) -> None:
         data = _compose()
         assert data["outcome"] == "PLAN"
