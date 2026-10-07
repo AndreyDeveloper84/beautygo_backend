@@ -36,6 +36,7 @@ from services.models import SalonService, ServiceTemplate
 
 from .models import Plan, PlanRevision, PlanStepBooking, PlanStepResolution
 from .plan_engine import PlanEngineDisabled, PlanEngineError, PlanNotFound, plan_engine_enabled
+from .plan_safety import SafetyInput
 
 _LEVEL_ORDER = {"CAPABILITY": 0, "SERVICE": 1, "OFFER": 2}
 
@@ -134,6 +135,14 @@ def step_admission(plan: Plan, revision: PlanRevision, step_id: str, *, salon_se
     return state
 
 
+def _safety_gate(safety: SafetyInput) -> None:
+    """§6.1, §9.3: действие с шагом при STOP / UNKNOWN не выполняется. До
+    транзакции и до любого чтения плана — отказ не зависит от того, чей план и
+    есть ли он. Статус плана при этом не меняется: гейт отказывает действию."""
+    if safety.blocks:
+        raise StepNotExecutable("safety_blocked")
+
+
 def _locked_plan(user, plan_id: UUID) -> Plan:
     plan = (
         Plan.objects.select_for_update(of=("self",))
@@ -158,6 +167,7 @@ def resolve_step(
     canonical_service_ref: UUID,
     tenant_offer_ref: UUID | None,
     resolver_decision_id: str,
+    safety: SafetyInput,
 ) -> tuple[PlanStepResolution, bool]:
     """Записать, чем резолвер разрешил шаг. Возвращает ``(строка, created)``;
     повтор того же перехода с тем же содержимым — та же строка."""
@@ -170,6 +180,7 @@ def resolve_step(
     if not isinstance(resolver_decision_id, str) or not resolver_decision_id.strip():
         # §8.2: шаг не получает услугу в обход резолвера.
         raise ResolutionRefused("resolver_decision_missing")
+    _safety_gate(safety)
 
     with transaction.atomic():
         plan = _locked_plan(user, plan_id)
@@ -212,6 +223,9 @@ def resolve_step(
             canonical_service_id=canonical_service_ref,
             tenant_offer_id=tenant_offer_ref,
             resolver_decision_id=resolver_decision_id.strip(),
+            safety_state=safety.state,
+            safety_policy_version=safety.policy_version,
+            safety_evaluated_at_revision=safety.evaluated_at_revision,
         )
     return resolution, True
 
@@ -219,10 +233,11 @@ def resolve_step(
 # ─── запись как факт на шаге ─────────────────────────────────────────────────
 
 
-def attach_booking(plan: Plan, step_id: str, appointment: Appointment) -> PlanStepBooking:
+def attach_booking(plan: Plan, step_id: str, appointment: Appointment, safety: SafetyInput) -> PlanStepBooking:
     """Связать запись с шагом. Вызывается ВНУТРИ открытой транзакции с уже
     запертым планом — и отсюда, и (если владелец разрешит В-1) из транзакции
     создания записи. Проверяет допуск шага; ни плана, ни цели не трогает."""
+    _safety_gate(safety)
     revision = plan.current_revision
     state = step_admission(plan, revision, step_id, salon_service_id=appointment.salon_service_id)
     return PlanStepBooking.objects.create(
@@ -231,14 +246,20 @@ def attach_booking(plan: Plan, step_id: str, appointment: Appointment) -> PlanSt
         step_id=step_id,
         appointment=appointment,
         resolver_decision_id=state["resolver_decision_id"] or "",
+        safety_state=safety.state,
+        safety_policy_version=safety.policy_version,
+        safety_evaluated_at_revision=safety.evaluated_at_revision,
     )
 
 
-def link_booking(user, plan_id: UUID, step_id: str, appointment_id: UUID) -> tuple[PlanStepBooking, bool]:
+def link_booking(
+    user, plan_id: UUID, step_id: str, appointment_id: UUID, *, safety: SafetyInput,
+) -> tuple[PlanStepBooking, bool]:
     """Связь после факта: запись уже создана обычным путём. Возвращает
     ``(строка, created)``; повтор — та же строка."""
     if not plan_engine_enabled():
         raise PlanEngineDisabled()
+    _safety_gate(safety)
     try:
         with transaction.atomic():
             plan = _locked_plan(user, plan_id)
@@ -254,7 +275,7 @@ def link_booking(user, plan_id: UUID, step_id: str, appointment_id: UUID) -> tup
             # его шага — задним числом её к шагу не приписывают.
             if appointment.created_at < plan.created_at:
                 raise StepNotExecutable("booking_predates_plan")
-            link = attach_booking(plan, step_id, appointment)
+            link = attach_booking(plan, step_id, appointment, safety)
     except IntegrityError as exc:  # гонка двух связей одной записи — OneToOne
         raise BookingLinkConflict() from exc
     return link, True

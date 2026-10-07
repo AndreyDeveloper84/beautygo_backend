@@ -53,6 +53,7 @@ from .plan_engine import (
     set_plan_status,
 )
 from .plan_compose import compose_plan, parse_compose_request
+from .plan_safety import SafetyInputError, parse_safety_input
 from .plan_engine_steps import (
     AppointmentNotFound,
     BookingLinkConflict,
@@ -224,7 +225,8 @@ class PlanStepResolutionView(APIView):
     """POST /api/v1/internal/me/plan/steps/resolution/
 
     ``{plan_id, step_id, level: SERVICE | OFFER, canonical_service_ref,
-    tenant_offer_ref?, resolver_decision_id}`` — чем резолвер разрешил шаг
+    tenant_offer_ref?, resolver_decision_id, safety_state,
+    safety_policy_version, evaluated_at_revision}`` — чем резолвер разрешил шаг
     (контракт §4.3, §8.2). 201 — записано; 200 — повтор того же перехода; 409
     ``PLAN_STEP_RESOLUTION_REFUSED`` / ``PLAN_STEP_NOT_EXECUTABLE`` с
     ``details.reason``. ``recommendation_id`` не принимается (§8.3).
@@ -246,6 +248,14 @@ class PlanStepResolutionView(APIView):
         if not isinstance(step_id, str) or not step_id.strip():
             return error_response("VALIDATION_ERROR", "step_id is required")
         try:
+            safety = parse_safety_input(data)
+        except SafetyInputError as exc:
+            return error_response(
+                "PLAN_CONTRACT_VIOLATION",
+                "Действие с шагом плана требует состояния безопасности хода",
+                details={"reason": exc.reason, "detail": exc.detail},
+            )
+        try:
             resolution, created = resolve_step(
                 request.user,
                 plan_id,
@@ -254,6 +264,7 @@ class PlanStepResolutionView(APIView):
                 canonical_service_ref=canonical,
                 tenant_offer_ref=offer,
                 resolver_decision_id=data.get("resolver_decision_id"),
+                safety=safety,
             )
         except ResolutionRefused as exc:
             return error_response(
@@ -274,7 +285,8 @@ class PlanStepResolutionView(APIView):
 class PlanStepBookingView(APIView):
     """POST /api/v1/internal/me/plan/steps/booking/
 
-    ``{plan_id, step_id, appointment_id}`` — запись, сделанная от шага, как
+    ``{plan_id, step_id, appointment_id, safety_state, safety_policy_version,
+    evaluated_at_revision}`` — запись, сделанная от шага, как
     факт на шаге (контракт §8.3). Ни план, ни цель не меняются. 201 — связано;
     200 — повтор; 404 — план, шаг или запись не у этого человека; 409
     ``PLAN_STEP_NOT_EXECUTABLE`` (шаг не допущен, ``details.reason``) или
@@ -296,7 +308,15 @@ class PlanStepBookingView(APIView):
         if not isinstance(step_id, str) or not step_id.strip():
             return error_response("VALIDATION_ERROR", "step_id is required")
         try:
-            link, created = link_booking(request.user, plan_id, step_id, appointment_id)
+            safety = parse_safety_input(data)
+        except SafetyInputError as exc:
+            return error_response(
+                "PLAN_CONTRACT_VIOLATION",
+                "Действие с шагом плана требует состояния безопасности хода",
+                details={"reason": exc.reason, "detail": exc.detail},
+            )
+        try:
+            link, created = link_booking(request.user, plan_id, step_id, appointment_id, safety=safety)
         except AppointmentNotFound:
             return error_response(
                 "NOT_FOUND", "Запись не найдена",

@@ -829,6 +829,12 @@ class PlanStepResolution(_AppendOnlyModel):
         null=True, blank=True,
         help_text="Только при реальной сохранённой Recommendation; до открытия C1 — NULL",
     )
+    # DRF-2877 — безопасность хода, при которой человек действовал: вердикт
+    # движка бота, версия его политики и ревизия состояния разговора, для
+    # которой он посчитан. При STOP / UNKNOWN строка не появляется вовсе.
+    safety_state = models.CharField(max_length=16)
+    safety_policy_version = models.CharField(max_length=64)
+    safety_evaluated_at_revision = models.PositiveIntegerField()
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -883,6 +889,12 @@ class PlanStepBooking(_AppendOnlyModel):
     # цепочке человек пришёл к записи.
     resolver_decision_id = models.CharField(max_length=64, blank=True, default="")
     recommendation_id = models.UUIDField(null=True, blank=True)
+    # DRF-2877 — безопасность хода, при которой человек действовал: вердикт
+    # движка бота, версия его политики и ревизия состояния разговора, для
+    # которой он посчитан. При STOP / UNKNOWN строка не появляется вовсе.
+    safety_state = models.CharField(max_length=16)
+    safety_policy_version = models.CharField(max_length=64)
+    safety_evaluated_at_revision = models.PositiveIntegerField()
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

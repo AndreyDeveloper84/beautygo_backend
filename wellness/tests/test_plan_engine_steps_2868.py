@@ -60,6 +60,8 @@ POLICY_VERSIONS = {
     "reason_code_registry_version": "3",
 }
 DECISION = "resolver-decision-1"
+#: DRF-2877 — каждое действие с шагом несёт безопасность хода.
+SAFETY = {"safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4}
 
 
 @pytest.fixture(autouse=True)
@@ -188,7 +190,7 @@ def _save(goal: ClientGoal, steps: list[dict] | None = None, verdicts=None) -> P
 def _resolve(plan: Plan, step_id: str = "s1", who: str = OWNER, **body):
     return _api(who).post(
         RESOLUTION_URL,
-        {"plan_id": str(plan.id), "step_id": step_id, "resolver_decision_id": DECISION, **body},
+        {"plan_id": str(plan.id), "step_id": step_id, "resolver_decision_id": DECISION, **SAFETY, **body},
         format="json",
     )
 
@@ -220,10 +222,10 @@ def _book(who: User, specialist: SpecialistProfile, offer: SalonService, *, hour
     return appt
 
 
-def _link(plan: Plan, appt: Appointment, step_id: str = "s1", who: str = OWNER):
+def _link(plan: Plan, appt: Appointment, step_id: str = "s1", who: str = OWNER, **body):
     return _api(who).post(
         BOOKING_URL,
-        {"plan_id": str(plan.id), "step_id": step_id, "appointment_id": str(appt.id)},
+        {"plan_id": str(plan.id), "step_id": step_id, "appointment_id": str(appt.id), **SAFETY, **body},
         format="json",
     )
 
@@ -382,6 +384,7 @@ class TestResolveStep:
             PlanStepResolution.objects.create(
                 plan_revision=plan.current_revision, step_id="s1", level="OFFER",
                 canonical_service=canon, resolver_decision_id=DECISION,
+                safety_state="NORMAL", safety_policy_version="v", safety_evaluated_at_revision=0,
             )
 
     def test_unknown_step_and_strangers_plan_are_not_found(self, goal, canon, stranger) -> None:
@@ -667,7 +670,7 @@ class TestErasureAndExport:
         _, appt = linked
         saved = export_wellness_plan(owner)["saved_plans"][0]
         assert saved["step_resolutions"] == [{
-            "step_id": "s1", "level": "OFFER",
+            "step_id": "s1", "level": "OFFER", "safety_state": "NORMAL",
             "created_at": saved["step_resolutions"][0]["created_at"],
             "canonical_service_name": canon.name, "has_tenant_offer": True,
         }]
