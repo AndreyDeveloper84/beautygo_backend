@@ -31,6 +31,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from services.capabilities import capability_labels
 from users.permissions import IsBotServiceWithVerifiedClient
 from users.response import error_response, success_response
 
@@ -47,8 +48,20 @@ from .plan_engine import (
     create_plan_from_command,
     parse_command,
     plan_document,
+    plan_engine_enabled,
     plan_payload,
     set_plan_status,
+)
+from .plan_compose import compose_plan, parse_compose_request
+from .plan_safety import SafetyInputError, parse_safety_input
+from .plan_engine_steps import (
+    AppointmentNotFound,
+    BookingLinkConflict,
+    ResolutionRefused,
+    StepNotExecutable,
+    StepNotFound,
+    link_booking,
+    resolve_step,
 )
 
 
@@ -170,3 +183,225 @@ class PlanEngineStateView(APIView):
             )
         plan.refresh_from_db()
         return success_response({"plan": plan_document(plan)})
+
+
+def _uuid_field(data: dict, name: str, *, required: bool = True):
+    raw = data.get(name)
+    if raw in (None, ""):
+        if required:
+            raise ValueError(name)
+        return None
+    try:
+        return UUID(str(raw))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(name) from exc
+
+
+def _step_refusal(exc: Exception) -> Response:
+    """Общие отказы двух ручек шага — одним местом, чтобы коды не разошлись."""
+    if isinstance(exc, PlanEngineDisabled):
+        return _disabled()
+    if isinstance(exc, PlanNotFound):
+        return error_response(
+            "NOT_FOUND", "План не найден",
+            details={"reason": "plan_not_found"}, status_code=status.HTTP_404_NOT_FOUND,
+        )
+    if isinstance(exc, StepNotFound):
+        return error_response(
+            "NOT_FOUND", "Шаг не найден в текущей ревизии плана",
+            details={"reason": "step_not_found"}, status_code=status.HTTP_404_NOT_FOUND,
+        )
+    if isinstance(exc, StepNotExecutable):
+        return error_response(
+            "PLAN_STEP_NOT_EXECUTABLE",
+            "Шаг плана сейчас не допущен к действию",
+            details={"reason": exc.reason},
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    raise exc
+
+
+class PlanStepResolutionView(APIView):
+    """POST /api/v1/internal/me/plan/steps/resolution/
+
+    ``{plan_id, step_id, level: SERVICE | OFFER, canonical_service_ref,
+    tenant_offer_ref?, resolver_decision_id, safety_state,
+    safety_policy_version, evaluated_at_revision}`` — чем резолвер разрешил шаг
+    (контракт §4.3, §8.2). 201 — записано; 200 — повтор того же перехода; 409
+    ``PLAN_STEP_RESOLUTION_REFUSED`` / ``PLAN_STEP_NOT_EXECUTABLE`` с
+    ``details.reason``. ``recommendation_id`` не принимается (§8.3).
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(tags=["internal"], responses={201: OpenApiResponse(description="{plan, created}")})
+    def post(self, request: Request) -> Response:
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            plan_id = _uuid_field(data, "plan_id")
+            canonical = _uuid_field(data, "canonical_service_ref")
+            offer = _uuid_field(data, "tenant_offer_ref", required=False)
+        except ValueError as exc:
+            return error_response("VALIDATION_ERROR", f"{exc} must be a UUID")
+        step_id = data.get("step_id")
+        if not isinstance(step_id, str) or not step_id.strip():
+            return error_response("VALIDATION_ERROR", "step_id is required")
+        try:
+            safety = parse_safety_input(data)
+        except SafetyInputError as exc:
+            return error_response(
+                "PLAN_CONTRACT_VIOLATION",
+                "Действие с шагом плана требует состояния безопасности хода",
+                details={"reason": exc.reason, "detail": exc.detail},
+            )
+        try:
+            resolution, created = resolve_step(
+                request.user,
+                plan_id,
+                step_id,
+                level=data.get("level"),
+                canonical_service_ref=canonical,
+                tenant_offer_ref=offer,
+                resolver_decision_id=data.get("resolver_decision_id"),
+                safety=safety,
+            )
+        except ResolutionRefused as exc:
+            return error_response(
+                "PLAN_STEP_RESOLUTION_REFUSED",
+                "Переход шага не принят",
+                details={"reason": exc.reason},
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        except (PlanEngineDisabled, PlanNotFound, StepNotFound, StepNotExecutable) as exc:
+            return _step_refusal(exc)
+        plan = resolution.plan_revision.plan
+        return success_response(
+            {"plan": plan_document(plan), "created": created},
+            status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class PlanStepBookingView(APIView):
+    """POST /api/v1/internal/me/plan/steps/booking/
+
+    ``{plan_id, step_id, appointment_id, safety_state, safety_policy_version,
+    evaluated_at_revision}`` — запись, сделанная от шага, как
+    факт на шаге (контракт §8.3). Ни план, ни цель не меняются. 201 — связано;
+    200 — повтор; 404 — план, шаг или запись не у этого человека; 409
+    ``PLAN_STEP_NOT_EXECUTABLE`` (шаг не допущен, ``details.reason``) или
+    ``PLAN_STEP_BOOKING_CONFLICT`` (запись уже у другого шага).
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(tags=["internal"], responses={201: OpenApiResponse(description="{plan, created}")})
+    def post(self, request: Request) -> Response:
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            plan_id = _uuid_field(data, "plan_id")
+            appointment_id = _uuid_field(data, "appointment_id")
+        except ValueError as exc:
+            return error_response("VALIDATION_ERROR", f"{exc} must be a UUID")
+        step_id = data.get("step_id")
+        if not isinstance(step_id, str) or not step_id.strip():
+            return error_response("VALIDATION_ERROR", "step_id is required")
+        try:
+            safety = parse_safety_input(data)
+        except SafetyInputError as exc:
+            return error_response(
+                "PLAN_CONTRACT_VIOLATION",
+                "Действие с шагом плана требует состояния безопасности хода",
+                details={"reason": exc.reason, "detail": exc.detail},
+            )
+        try:
+            link, created = link_booking(request.user, plan_id, step_id, appointment_id, safety=safety)
+        except AppointmentNotFound:
+            return error_response(
+                "NOT_FOUND", "Запись не найдена",
+                details={"reason": "appointment_not_found"}, status_code=status.HTTP_404_NOT_FOUND,
+            )
+        except BookingLinkConflict:
+            return error_response(
+                "PLAN_STEP_BOOKING_CONFLICT",
+                "Эта запись уже связана с другим шагом",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        except (PlanEngineDisabled, PlanNotFound, StepNotFound, StepNotExecutable) as exc:
+            return _step_refusal(exc)
+        return success_response(
+            {"plan": plan_document(link.plan), "created": created},
+            status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class PlanDecisionView(APIView):
+    """POST /api/v1/internal/me/plan/decision/
+
+    Сборка эфемерного плана по действующей цели человека (контракт §4.1;
+    DRF-2871). Ничего не сохраняет. Тело: ``{safety_state, safety_policy_version,
+    rules_registry: {registry_version, rules: [...]}, excluded_capability_refs?}``
+    — безопасность и реестр правил приносит вызывающий, здесь они не вычисляются.
+
+    200 — ``{outcome, decision, safety_state, details}``; ``decision`` есть
+    только при ``outcome = PLAN`` и принимается командой сохранения без
+    переделки. Прочие исходы — штатные ответы, не ошибки: ``SAFETY_BLOCKED``,
+    ``NO_GOAL``, ``NO_CURATED_DECOMPOSITION``, ``PLAN_NOT_JUSTIFIED``. 400
+    ``PLAN_CONTRACT_VIOLATION`` — вход не конформен; 404 ``PLAN_ENGINE_DISABLED``.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(tags=["internal"], responses={200: OpenApiResponse(description="{outcome, decision}")})
+    def post(self, request: Request) -> Response:
+        try:
+            result = compose_plan(request.user, parse_compose_request(request.data))
+        except PlanEngineDisabled:
+            return _disabled()
+        except ContractViolation as exc:
+            return error_response(
+                "PLAN_CONTRACT_VIOLATION",
+                "Запрос на сборку плана не соответствует контракту",
+                details={"reason": exc.reason, "detail": exc.detail},
+            )
+        return success_response(result)
+
+
+#: Сколько ключей за один запрос: у плана единицы шагов, сотня — уже перебор словаря.
+MAX_LABEL_KEYS = 50
+
+
+class PlanCapabilityLabelsView(APIView):
+    """POST /api/v1/internal/me/plan/capability-labels/
+
+    ``{keys: [...]}`` → ``{labels: {key: {state, label}}}``. У шага плана
+    текста нет (контракт PE-2) — подпись способности берётся здесь, из
+    подтверждённого знания каталога. ``state``: ``labelled`` (подпись есть) |
+    ``unknown`` (подтверждённой способности с таким ключом нет) | ``no_text``
+    | ``ambiguous`` (у ключа несколько разных формулировок — подписи нет).
+    Ничего о человеке не читает и не пишет.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(tags=["internal"], responses={200: OpenApiResponse(description="{labels}")})
+    def post(self, request: Request) -> Response:
+        if not plan_engine_enabled():
+            return _disabled()
+        keys = request.data.get("keys") if isinstance(request.data, dict) else None
+        if (
+            not isinstance(keys, list)
+            or not keys
+            or len(keys) > MAX_LABEL_KEYS
+            or not all(isinstance(k, str) and k.strip() for k in keys)
+        ):
+            return error_response(
+                "VALIDATION_ERROR", f"keys must be a list of 1..{MAX_LABEL_KEYS} non-empty strings",
+            )
+        labels = capability_labels(keys)
+        return success_response(
+            {"labels": {key: {"state": item.state.value, "label": item.label} for key, item in labels.items()}}
+        )

@@ -71,6 +71,15 @@ C_HEADER_ONLY = {
     # (чужое → 404).
     "wellness/plan_engine_api.py::PlanEngineView",
     "wellness/plan_engine_api.py::PlanEngineStateView",
+    # DRF-2868 — шаг плана: `plan_id` и `appointment_id` из тела — не user id;
+    # и план, и запись ищутся строго среди строк `request.user` (чужое → 404).
+    "wellness/plan_engine_api.py::PlanStepResolutionView",
+    "wellness/plan_engine_api.py::PlanStepBookingView",
+    # DRF-2871 — сборка плана: в теле нет ни одного идентификатора человека
+    # или его строк — цель берётся у `request.user`.
+    "wellness/plan_engine_api.py::PlanDecisionView",
+    # DRF-2871 — подписи способностей: справочное чтение, о человеке ничего.
+    "wellness/plan_engine_api.py::PlanCapabilityLabelsView",
 }
 
 
@@ -217,7 +226,10 @@ def test_group_c_has_no_hidden_cross_check() -> None:
 def test_the_census_numbers_of_05_10() -> None:
     """Literally the numbers the docstring and DRF-2421 cite. A change here is a decision."""
     # DRF-2857: C 15 -> 17, the two durable-plan views (same standing as Plan Lite).
-    assert (len(A_CROSS_CHECKED), len(B_TENANT_ADMIN), len(C_HEADER_ONLY)) == (6, 6, 17)
+    # DRF-2868: C 17 -> 19, the two plan-step views.
+    # DRF-2871: C 19 -> 20, the plan-composition view.
+    # DRF-2871: C 20 -> 21, the capability-labels view.
+    assert (len(A_CROSS_CHECKED), len(B_TENANT_ADMIN), len(C_HEADER_ONLY)) == (6, 6, 21)
 
 
 def test_the_docstring_states_the_census_not_the_old_promise() -> None:

@@ -88,7 +88,17 @@ def _step(step_id: str = "s1", **over) -> dict:
     return step
 
 
+def _verdicts(steps: list) -> dict:
+    """DRF-2868: вердикт валидации обязателен по каждому шагу."""
+    return {
+        s["step_id"]: "INCOMPLETE"
+        for s in steps
+        if isinstance(s, dict) and isinstance(s.get("step_id"), str)
+    }
+
+
 def _command(goal: ClientGoal | None, *, steps: list[dict] | None = None, **over) -> dict:
+    steps = steps if steps is not None else [_step("s1"), _step("s2", role="OPTIONAL")]
     body = {
         "decision_id": str(uuid.uuid4()),
         "goal_ref": str(goal.id) if goal is not None else None,
@@ -96,12 +106,12 @@ def _command(goal: ClientGoal | None, *, steps: list[dict] | None = None, **over
         "confirmation": {"question_id": "plan.save", "option_id": "yes", "state_revision": 7},
         "provenance": {"policy_versions": dict(POLICY_VERSIONS)},
         "decision": {
-            "steps": steps if steps is not None else [_step("s1"), _step("s2", role="OPTIONAL")],
+            "steps": steps,
             "assertions": [
                 {"assertion_id": "a1", "kind": "SERVICE_CAPABILITY_MAPPING",
                  "value": {"state": "Unknown", "reason": "NO_RULE"}},
             ],
-            "validation": {"status": "INCOMPLETE", "step_validations": {"s1": "INCOMPLETE"}},
+            "validation": {"status": "INCOMPLETE", "step_validations": _verdicts(steps)},
         },
     }
     body.update(over)
@@ -187,6 +197,7 @@ class TestCreateCommand:
         assert _api().post(PLAN_URL, body, format="json").status_code == 201
         other = copy.deepcopy(body)
         other["decision"]["steps"] = [_step("s9")]
+        other["decision"]["validation"]["step_validations"] = {"s9": "INCOMPLETE"}
         resp = _api().post(PLAN_URL, other, format="json")
         assert resp.status_code == 409
         assert resp.json()["error"]["code"] == "PLAN_IDEMPOTENCY_CONFLICT"
@@ -380,9 +391,10 @@ class TestContractShape:
         """INCOMPLETE — первоклассный результат (§6.3); BLOCKED сохраняется как
         замысел — допуск к исполнению решается не здесь."""
         body = _command(goal)
-        body["decision"]["validation"] = {"status": status}
+        validation = {"status": status, "step_validations": {"s1": status, "s2": "VALID"}}
+        body["decision"]["validation"] = validation
         assert _api().post(PLAN_URL, body, format="json").status_code == 201
-        assert PlanRevision.objects.get().validation == {"status": status}
+        assert PlanRevision.objects.get().validation == validation
 
 
 # ─── 3. ревизия иммутабельна (§4.4, §9.1) ────────────────────────────────────
