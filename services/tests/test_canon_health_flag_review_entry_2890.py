@@ -153,6 +153,10 @@ def test_the_queue_of_unreviewed_flags_can_be_filtered(category, curator) -> Non
 
     assert names(Origin.INFERRED) == ["Канон черновой"]
     assert names(Origin.CONFIRMED) == ["Канон просмотренный"]
+    # Отбор по параметру Django разрешает и без фильтра в боковой панели;
+    # очередь — это когда фильтр куратору ПРЕДЛОЖЕН.
+    offered = {spec.field.name for spec in client.get(url).context["cl"].filter_specs if hasattr(spec, "field")}
+    assert {"health_check_origin", "requires_health_check"} <= offered
 
 
 # ─── проверка формы ──────────────────────────────────────────────────────────
