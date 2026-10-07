@@ -87,6 +87,7 @@ from recommendation.api import (
     RatingValue,
     ScheduleState,
     Scope,
+    ScopeMode,
 )
 from services.capabilities import template_ids_helping_goal
 from services.catalog_reads import catalog_services_for, catalog_services_prefetch
@@ -181,7 +182,9 @@ class SpecialistCandidateSource:
             .select_related("tenant")
             .prefetch_related(*catalog_services_prefetch())
         )
-        if scope.tenant_refs:
+        # O-1b: «свои салоны» — ограничение и при пустом списке (нет своих
+        # салонов → пустой пул, а не весь маркетплейс).
+        if scope.tenant_refs or scope.mode is ScopeMode.OWN_SALONS:
             qs = qs.filter(tenant_id__in=scope.tenant_refs)
         if scope.exclude_tenant_refs:
             qs = qs.exclude(tenant_id__in=scope.exclude_tenant_refs)
