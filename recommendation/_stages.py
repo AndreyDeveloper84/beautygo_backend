@@ -849,8 +849,19 @@ def stage_contextual(
 # S5 — качество
 # ---------------------------------------------------------------------------
 
-def stage_quality(candidates: Sequence[CandidateFacts], policy: StagePolicy) -> StageOutput:
+def stage_quality(
+    candidates: Sequence[CandidateFacts], policy: StagePolicy, *, need_is_stated: bool = True,
+) -> StageOutput:
     """Вторичное свидетельство качества — и только подтверждённое (§8).
+
+    **Только после соответствия нужде.** Рейтинг не бывает причиной
+    рекомендации сам по себе (канон §9.1; владелец 07.10: «учитываем после
+    соответствия запросу»). Когда нужда не названа, соответствия нет ни у
+    кого — стадия молчит о всех, как бы ни были подтверждены оценки. Это не
+    осторожность, а условие инварианта кодов: «рейтинг подтверждён» без
+    кода совпадения выдать нельзя. До назначения порога стадия молчала
+    всегда, и этот случай был недостижим; полка «Твои места» идёт именно
+    без нужды.
 
     Кандидат с `UNSUBSTANTIATED` / `WEAK` / `UNKNOWN` для этой стадии
     `INACTIVE`: он **не понижается** (§29.4), а стадия про его группу
@@ -875,9 +886,17 @@ def stage_quality(candidates: Sequence[CandidateFacts], policy: StagePolicy) -> 
             source_ref=facts.source_ref,
             n_substantiated=policy.n_substantiated,
         )
-        if strength is EvidenceStrength.CONFIRMED and facts.rating is not None:
+        if strength is EvidenceStrength.CONFIRMED and facts.rating is not None and need_is_stated:
             keys[cid] = float(facts.rating.rating)
             codes[cid] = frozenset({ReasonCode.QUALITY_RATING_SUBSTANTIATED})
+            evidence[cid] = (item,)
+            continue
+        if strength is EvidenceStrength.CONFIRMED:
+            # Оценка подтверждена, но приложить её не к чему. Число едет
+            # справочно, с кодом, который говорит ровно это.
+            inactive_for.add(cid)
+            keys[cid] = 0.0
+            codes[cid] = frozenset({ReasonCode.QUALITY_RATING_NOT_APPLIED_NEED_NOT_STATED})
             evidence[cid] = (item,)
             continue
 
@@ -893,7 +912,10 @@ def stage_quality(candidates: Sequence[CandidateFacts], policy: StagePolicy) -> 
     return StageOutput(
         StageId.S5,
         active=active,
-        inactive_reason=None if active else "подтверждённого свидетельства качества нет ни у одного кандидата",
+        inactive_reason=None if active else (
+            "подтверждённого свидетельства качества нет ни у одного кандидата" if need_is_stated
+            else "нужда не названа — рейтинг учитывается только после соответствия запросу"
+        ),
         keys=keys,
         inactive_for=frozenset(inactive_for),
         codes=codes,

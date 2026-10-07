@@ -8,7 +8,10 @@
 - сравнивается обычная средняя оценка, без коэффициента числа отзывов;
 - при одинаковой оценке порядок задают остальные правила;
 - импортированные оценки в ранжирование не идут — сегодня потому, что у них
-  ноль отзывов Ayla (поля происхождения оценки нет).
+  ноль отзывов Ayla (поля происхождения оценки нет);
+- рейтинг учитывается ПОСЛЕ соответствия запросу: когда нужда не названа
+  (полка «Твои места»), подтверждённые оценки едут справочно и порядок не
+  задают — иначе полка падала бы на инварианте кодов.
 
 Всё здесь идёт через ПОЛИТИКУ ПО УМОЛЧАНИЮ — ту, что получает ручка
 `resolve`: порог не передаётся узлом, он должен быть назначен в коде.
@@ -24,14 +27,15 @@ from recommendation._evidence import EvidenceStrength, RatingValue, rating_stren
 from recommendation._pipeline import resolve
 from recommendation._reason_codes import ReasonCode
 from recommendation._stages import StagePolicy
-from recommendation._types import SeparationState, StageId
+from recommendation._types import NeedOrigin, NeedSpec, SeparationState, StageId
 from recommendation.tests.conftest import StaticSource, make_facts, make_request
 
 
-def _decision(*ratings):
+def _decision(*ratings, need=None):
     """Решение на политике по умолчанию; кандидаты в том же порядке, что оценки."""
     facts = [make_facts(rating=rating) for rating in ratings]
-    decision = resolve(make_request(k=10), source=StaticSource(facts))
+    request = make_request(k=10) if need is None else make_request(k=10, need=need)
+    decision = resolve(request, source=StaticSource(facts))
     tiers = {c.candidate_ref.id: c.tier for c in decision.ordered}
     codes = {c.candidate_ref.id: set(c.reason_codes) for c in decision.ordered}
     return decision, [tiers[f.ref.id] for f in facts], [codes[f.ref.id] for f in facts]
@@ -122,3 +126,42 @@ class TestAnImportedRatingDoesNotRank:
         _, tiers, _ = _decision(("5.0", 0), ("4.0", 20))
 
         assert tiers == [1, 1]
+
+
+class TestRatingComesAfterTheNeed:
+    """Нужда не названа — так ходит полка «Твои места»: её якорь — отношения с салоном."""
+
+    UNSTATED = NeedSpec(origin=NeedOrigin.MEMORY)
+
+    def test_positive_control_the_default_request_states_a_need(self):
+        assert make_request().need.is_stated is True
+        assert self.UNSTATED.is_stated is False
+
+    def test_confirmed_ratings_do_not_order_a_shelf_without_a_need(self):
+        decision, tiers, codes = _decision(("4.9", 50), ("3.0", 50), need=self.UNSTATED)
+
+        assert tiers == [1, 1]
+        assert decision.separation_state is SeparationState.NOT_SPLIT
+        assert all(ReasonCode.QUALITY_RATING_NOT_APPLIED_NEED_NOT_STATED in c for c in codes)
+
+    def test_a_confirmed_rating_without_a_need_never_claims_to_be_a_reason(self):
+        """Инвариант кодов: «рейтинг подтверждён» без кода совпадения выдать нельзя. До порога
+        этот случай был недостижим; с порогом 5 полка без нужды падала бы ошибкой."""
+        _, _, codes = _decision(("4.9", 50), ("4.2", 7), need=self.UNSTATED)
+
+        assert not any(ReasonCode.QUALITY_RATING_SUBSTANTIATED in c for c in codes)
+
+    def test_the_number_still_travels_for_reference(self):
+        decision, _, _ = _decision(("4.9", 50), need=self.UNSTATED)
+
+        [candidate] = decision.ordered
+        ratings = [
+            item for item in candidate.evidence
+            if item.value is not None and hasattr(item.value, "review_count")
+        ]
+        assert [(str(item.value.rating), item.value.review_count) for item in ratings] == [("4.9", 50)]
+
+    def test_short_of_reviews_keeps_its_own_code_without_a_need(self):
+        _, _, codes = _decision(("4.9", 4), ("4.9", 0), need=self.UNSTATED)
+
+        assert all(ReasonCode.QUALITY_RATING_UNSUBSTANTIATED_IGNORED in c for c in codes)
