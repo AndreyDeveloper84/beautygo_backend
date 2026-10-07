@@ -225,9 +225,12 @@ class LegalAnswers:
     """
 
     license: LegalGate
-    address: LegalGate
-    #: ``None`` — у строки нет канона: квалификацию спрашивать нечем.
+    #: ``None`` — вопрос про само предложение, мастера нет: адрес не спрашивается.
+    address: LegalGate | None
+    #: ``None`` — у строки нет канона или нет мастера: квалификацию спрашивать нечем.
     qualification: LegalGate | None
+    #: Есть ли у строки канон: без него класса нет, и это отказ, а не обход.
+    has_canon: bool = True
     #: Сырые литералы каталога — различают «проверено» и «не требуется».
     license_raw: str | None = None
     address_raw: str | None = None
@@ -240,8 +243,9 @@ class LegalAnswers:
         У строки без канона класса нет — на месте квалификации стоит
         ``CLASS_UNCONFIRMED``: отсутствие канона проверку не обходит.
         """
-        last = LegalGate.CLASS_UNCONFIRMED if self.qualification is None else self.qualification
-        return next((g for g in (self.license, self.address, last) if g is not LegalGate.CLEARED), LegalGate.CLEARED)
+        last = self.qualification if self.has_canon else LegalGate.CLASS_UNCONFIRMED
+        asked = (g for g in (self.license, self.address, last) if g is not None)
+        return next((g for g in asked if g is not LegalGate.CLEARED), LegalGate.CLEARED)
 
 
 _ALL_UNDETERMINED = LegalAnswers(LegalGate.UNDETERMINED, LegalGate.UNDETERMINED, LegalGate.UNDETERMINED)
@@ -258,29 +262,35 @@ def legal_answers(rows) -> dict[tuple[UUID, UUID], LegalAnswers]:
     if not rows:
         return {}
     pairs = {(specialist_id, salon_id) for specialist_id, salon_id, _ in rows}
+    # Мастер ``None`` — вопрос про само предложение (перепись, шаг плана):
+    # лицензия спрашивается, адрес и квалификация — нет.
+    with_master = {pair for pair in pairs if pair[0] is not None}
     try:
         licenses = license_states({salon_id for _, salon_id in pairs})
-        addresses = address_states(pairs)
-        qualifications = qualification_states(
-            {(specialist_id, template_id) for specialist_id, _, template_id in rows if template_id is not None}
-        )
+        addresses = address_states(with_master)
+        qualifications = qualification_states({
+            (specialist_id, template_id) for specialist_id, _, template_id in rows
+            if template_id is not None and specialist_id is not None
+        })
     except Exception:  # noqa: BLE001 — сбой чтения закрывает строки, а не роняет полку
         logger.exception("recommendation.source legal_gates_failed rows=%d", len(pairs))
         return dict.fromkeys(pairs, _ALL_UNDETERMINED)
 
     out: dict[tuple[UUID, UUID], LegalAnswers] = {}
     for specialist_id, salon_id, template_id in rows:
+        has_master, has_canon = specialist_id is not None, template_id is not None
         license_raw = licenses.get(salon_id)
-        address_raw = addresses.get((specialist_id, salon_id))
-        qualification = None if template_id is None else qualifications.get((specialist_id, template_id))
+        address_raw = addresses.get((specialist_id, salon_id)) if has_master else None
+        qualification = qualifications.get((specialist_id, template_id)) if has_master and has_canon else None
         qualification_raw = getattr(qualification, "state", None)
         out[(specialist_id, salon_id)] = LegalAnswers(
             license=_LICENSE_GATE.get(license_raw, LegalGate.UNDETERMINED),
-            address=_ADDRESS_GATE.get(address_raw, LegalGate.UNDETERMINED),
+            address=_ADDRESS_GATE.get(address_raw, LegalGate.UNDETERMINED) if has_master else None,
             qualification=(
-                None if template_id is None
-                else _QUALIFICATION_GATE.get(qualification_raw, LegalGate.UNDETERMINED)
+                _QUALIFICATION_GATE.get(qualification_raw, LegalGate.UNDETERMINED)
+                if has_master and has_canon else None
             ),
+            has_canon=has_canon,
             license_raw=license_raw, address_raw=address_raw, qualification_raw=qualification_raw,
         )
     return out
