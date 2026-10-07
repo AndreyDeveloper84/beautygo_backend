@@ -31,8 +31,9 @@
 --------------------------------------------
 ``non_medical_cosmetic`` ставится шести канонам, которые владелец назвал
 бесспорными. Отбор по коду справочника: код — логическая идентичность
-канона, одна на всех базах. Автор — именная учётка владельца
-(``users/0031``), найденная по ключу; исполнитель назван в основании. Тем же
+канона, одна на всех базах. Автор — именная учётка владельца, найденная по
+ключу (``users.migrations._owner_provenance_account``); если её ещё нет, шаг
+заводит её в той же транзакции. Исполнитель назван в основании. Тем же
 шестерым область ставится не правилом, а тем же автором.
 
 Остальным класс не ставится: его нет, и юридическая проверка их закрывает.
@@ -46,9 +47,13 @@
 
 Когда шаг падает
 ----------------
-Канон из шестёрки на месте и ждёт класса, а учётки владельца в базе нет или
-она выключена. Молча пропустить нельзя: миграция отметилась бы применённой.
-Накатка идёт в транзакции, половины не остаётся.
+Канон из шестёрки на месте и ждёт решения владельца, а автора записать
+нечем: учётка владельца выключена или её ключ занят чужой личностью. Молча
+пропустить нельзя: миграция отметилась бы применённой. Накатка идёт в
+транзакции, половины не остаётся.
+
+На базе, где шестёрки нет или решение ей уже записано, автор не нужен — и
+учётка владельца не заводится.
 
 Сколько строк затронуто, шаг печатает числом — без содержимого.
 """
@@ -101,29 +106,36 @@ def section_is_outside_body_care(code: str | None) -> bool:
     return section in NOT_BODY_CARE_SECTIONS or f"{section}.{subsection}" in NOT_BODY_CARE_SUBSECTIONS
 
 
-def classify(template_model, *, owner_id, now) -> dict[str, int]:
-    """Поставить класс шести и область по разделам; вернуть числа."""
-    six = template_model.objects.filter(canonical_code__in=NON_MEDICAL_CODES)
-    waiting = six.filter(legal_service_class__isnull=True)
-    if waiting.exists() and not owner_id:
-        raise CannotAttribute("DRF-2866: именной учётки владельца нет — автора решения нет")
+def classify(template_model, *, owner, now) -> dict[str, int]:
+    """Поставить класс шести и область по разделам; вернуть числа.
 
-    # Шестерым область ставит тот же автор, что и класс, — до правила
-    # раздела, которое иначе заняло бы её.
-    scoped_by_owner = six.filter(body_care_scope__isnull=True, service_family__isnull=True).update(
-        body_care_scope=NOT_BODY_CARE,
-        scope_confirmed_by_id=owner_id,
-        scope_confirmed_rule="",
-        scope_rule_version="",
-        scope_confirmed_at=now,
-        scope_source_ref=OWNER_SOURCE_REF,
-    ) if owner_id else 0
-    classed = waiting.update(
-        legal_service_class=NON_MEDICAL_COSMETIC,
-        legal_class_confirmed_by_id=owner_id,
-        legal_class_confirmed_at=now,
-        legal_class_source_ref=OWNER_SOURCE_REF,
-    )
+    ``owner`` — вызов без аргументов, возвращающий pk автора. Зовётся только
+    когда шестёрке есть что записать — класс или область.
+    """
+    six = template_model.objects.filter(canonical_code__in=NON_MEDICAL_CODES)
+    waiting_class = six.filter(legal_service_class__isnull=True)
+    waiting_scope = six.filter(body_care_scope__isnull=True, service_family__isnull=True)
+    classed = scoped_by_owner = 0
+    if waiting_class.exists() or waiting_scope.exists():
+        owner_id = owner()
+        if not owner_id:
+            raise CannotAttribute("DRF-2866: именной учётки владельца нет — автора решения нет")
+        # Шестерым область ставит тот же автор, что и класс, — до правила
+        # раздела, которое иначе заняло бы её.
+        scoped_by_owner = waiting_scope.update(
+            body_care_scope=NOT_BODY_CARE,
+            scope_confirmed_by_id=owner_id,
+            scope_confirmed_rule="",
+            scope_rule_version="",
+            scope_confirmed_at=now,
+            scope_source_ref=OWNER_SOURCE_REF,
+        )
+        classed = waiting_class.update(
+            legal_service_class=NON_MEDICAL_COSMETIC,
+            legal_class_confirmed_by_id=owner_id,
+            legal_class_confirmed_at=now,
+            legal_class_source_ref=OWNER_SOURCE_REF,
+        )
 
     by_rule = [
         pk

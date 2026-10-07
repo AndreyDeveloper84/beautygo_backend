@@ -15,8 +15,8 @@
 * под включённым флагом открыты только шесть; остальные закрыты каждая
   своей причиной — «класс не подтверждён» или «область неизвестна»;
 * уже стоящие область и класс шаг не переписывает;
-* без учётки владельца шаг падает и ничего не пишет; базу без шестёрки
-  оставляет в покое;
+* без автора шаг падает и ничего не пишет; учётку владельца миграция
+  заводит сама и только когда шестёрке есть что записать;
 * обратный ход снимает только своё.
 """
 
@@ -89,7 +89,13 @@ def canons(category):
 
 
 def _classify(owner):
-    return phase1.classify(ServiceTemplate, owner_id=owner.pk if owner else None, now=timezone.now())
+    return phase1.classify(
+        ServiceTemplate, owner=lambda: owner.pk if owner else None, now=timezone.now()
+    )
+
+
+def _account():
+    return User.objects.filter(username=owner_account.USERNAME).first()
 
 
 def _row(canon, fields):
@@ -276,6 +282,35 @@ def test_a_database_without_the_six_needs_no_owner(category) -> None:
     assert _row(laser, SCOPE_FIELDS)["body_care_scope"] == Scope.NOT_BODY_CARE
 
 
+def test_the_migration_makes_no_owner_account_where_the_six_are_absent(category) -> None:
+    """Учётка не заводится там, где решению владельца не о чем говорить."""
+    _canon(category, "7.1.1")
+
+    MIGRATION.classify(live_apps, None)
+
+    assert _account() is None
+
+
+def test_the_migration_makes_the_owner_account_when_the_six_wait(category) -> None:
+    massage = _canon(category, "1.1.1")
+    assert _account() is None
+
+    MIGRATION.classify(live_apps, None)
+
+    account = _account()
+    assert str(account.pk) == owner_account.FIXED_ID
+    assert _row(massage, CLASS_FIELDS)["legal_class_confirmed_by_id"] == account.pk
+
+
+def test_a_six_already_decided_needs_no_owner_account(canons, owner) -> None:
+    _classify(owner)
+    User.objects.filter(pk=owner.pk).update(username="кто-то-другой")
+
+    MIGRATION.classify(live_apps, None)
+
+    assert _account() is None
+
+
 # ─── обратный ход ────────────────────────────────────────────────────────────
 
 
@@ -291,14 +326,18 @@ def test_the_reverse_restores_the_state_before(canons, owner) -> None:
 
 def test_the_reverse_leaves_later_human_decisions(canons, owner) -> None:
     _classify(owner)
-    reclassed, rescoped = canons["1.1.4"], canons["7.1.20"]
+    reclassed, reviewed, rescoped = canons["1.1.4"], canons["1.1.5"], canons["7.1.20"]
+    # Класс и основание меняются порознь: отбор обратного хода держит оба.
     ServiceTemplate.objects.filter(pk=reclassed.pk).update(legal_service_class=LC.MEDICAL_OTHER)
+    ServiceTemplate.objects.filter(pk=reviewed.pk).update(legal_class_source_ref="юрист: подтверждаю")
     ServiceTemplate.objects.filter(pk=rescoped.pk).update(scope_source_ref="куратор: подтверждаю")
-    kept = (_row(reclassed, CLASS_FIELDS), _row(rescoped, SCOPE_FIELDS))
+    kept = (_row(reclassed, CLASS_FIELDS), _row(reviewed, CLASS_FIELDS), _row(rescoped, SCOPE_FIELDS))
 
     phase1.declassify(ServiceTemplate)
 
-    assert (_row(reclassed, CLASS_FIELDS), _row(rescoped, SCOPE_FIELDS)) == kept
+    assert (
+        _row(reclassed, CLASS_FIELDS), _row(reviewed, CLASS_FIELDS), _row(rescoped, SCOPE_FIELDS)
+    ) == kept
 
 
 # ─── миграция и её литералы ──────────────────────────────────────────────────
@@ -318,8 +357,10 @@ def test_the_migration_names_the_owner_account_and_reverses(canons, owner) -> No
 def test_the_migration_refuses_when_the_owner_account_is_switched_off(canons, owner) -> None:
     User.objects.filter(pk=owner.pk).update(is_active=False)
 
-    with pytest.raises(phase1.CannotAttribute):
+    with pytest.raises(owner_account.NotAProvenanceAccount):
         MIGRATION.classify(live_apps, None)
+
+    assert not ServiceTemplate.objects.filter(legal_service_class__isnull=False).exists()
 
 
 def test_the_literals_match_the_model() -> None:
