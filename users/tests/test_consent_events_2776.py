@@ -407,12 +407,12 @@ class TestTheErasureOfAPersonKnowsTheNewPointers:
 
 class TestEveryFoodLogWriteRequiresTheFoodDiaryConsent:
     """Инвариант, на котором держится решение (б): запись в дневник идёт только
-    под ``food_diary_processing``. Сегодня каталог это согласие не проверяет ни
-    на одном пути — бот-путь защищён ботом, а клиентская ручка нет. Узел
-    стоит честно красным (xfail, strict) до DRF-2777: когда проверку введут, он
-    станет зелёным и xfail придётся снять."""
+    под ``food_diary_processing``. Бот-путь защищён ботом; клиентская ручка с
+    DRF-2777 требует утверждения основания (до него узел стоял strict-xfail).
+    Остальные двери — ``nutrition/tests/test_food_diary_consent_2777.py``."""
 
     WRITE = {"dish_name": "борщ", "portion_multiplier": 1.0, "meal_type": "lunch"}
+    ATTESTED = {"consent": {"type": "food_diary_processing", "document_version": "food-diary-v1"}}
 
     def _client(self, person) -> APIClient:
         api = APIClient()
@@ -420,15 +420,16 @@ class TestEveryFoodLogWriteRequiresTheFoodDiaryConsent:
         api.defaults["HTTP_X_APP_TYPE"] = "client"
         return api
 
-    def test_control_the_same_request_writes_a_food_log_today(self, person):
-        """Контроль, что xfail ниже красный ПО НУЖНОЙ причине: запрос валиден и
-        сегодня действительно пишет дневник — без всякого основания согласия."""
-        response = self._client(person).post("/api/v1/nutrition/food-log/", self.WRITE, format="json")
+    def test_control_the_same_request_with_the_basis_writes_a_food_log(self, person):
+        """Контроль, что отказ ниже — по основанию, а не по форме запроса: тот же
+        запрос с утверждённым основанием пишет дневник."""
+        response = self._client(person).post(
+            "/api/v1/nutrition/food-log/", {**self.WRITE, **self.ATTESTED}, format="json",
+        )
 
         assert response.status_code == 201, response.content
         assert FoodLog.objects.filter(user=person).count() == 1
 
-    @pytest.mark.xfail(strict=True, reason="DRF-2777: /nutrition/food-log/ пишет без основания food_diary_processing")
     def test_the_client_app_food_log_endpoint_refuses_a_write_without_the_consent(self, person):
         response = self._client(person).post("/api/v1/nutrition/food-log/", self.WRITE, format="json")
 

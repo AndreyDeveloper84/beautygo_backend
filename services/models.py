@@ -159,10 +159,40 @@ class ServiceTemplate(models.Model):
         заведённый кодом, миграцией или чужой рукой, никем не проверен
         по определению. Умолчание `APPROVED` означало бы, что каждая
         новая строка сама себя одобрила.
+
+        ### Body Care CAT-2: ещё два состояния, та же ось
+
+        Контракт Body Care v0.1 §2.1 требует у канона статус
+        DRAFT / CANDIDATE / ACTIVE / RETIRED. Решение (главное окно, 06.10):
+        расширить эту ось, а не заводить вторую. Сопоставление::
+
+            контракт   здесь
+            DRAFT      provisional   — существующее значение, не переименовано
+            CANDIDATE  candidate     — предложен к активации, ждёт проверки
+            ACTIVE     approved      — существующее значение, не переименовано
+            RETIRED    retired       — выведен из оборота
+
+        Существующие значения не переименованы: это миграция данных по
+        всем строкам ради слова. Все читатели оси спрашивают ``== approved``
+        и поэтому читают оба новых состояния как «не одобрено» — новое
+        значение безопасно по умолчанию.
+
+        ``retired`` — решение, и провенанс у него тот же, что у одобрения:
+        дата, основание и «кто ИЛИ правило» (CheckConstraint'ы ниже).
+        ``candidate`` провенанса не требует: это предложение, а не решение.
+
+        **Чего вывод из оборота НЕ делает сам.** Рекомендуемость сегодня —
+        ``SalonService.mapping_status == VERIFIED``, и статус канона она не
+        видит: связь салона с выведенным каноном остаётся в подборе.
+        Закрыть это — связать допустимость со статусом (CAT-10); до тех
+        пор такие связи считает ``check_canon_invariants``
+        (``verified_on_retired``), чтобы дыра не молчала.
         """
 
         PROVISIONAL = "provisional", "Черновой"
+        CANDIDATE = "candidate", "Кандидат"
         APPROVED = "approved", "Одобрен"
+        RETIRED = "retired", "Выведен"
 
     class ServiceFamily(models.TextChoices):
         """Семейство body-care услуги — контракт Body Care v0.1 §2.1 (CAT-1).
@@ -182,6 +212,34 @@ class ServiceTemplate(models.Model):
         SPA_BODY = "spa_body", "SPA-уход за телом"
         MECHANICAL_SCRUB = "mechanical_scrub", "Механический скраб"
         ACID_CARE = "acid_care", "Кислотный уход"
+
+    class LegalServiceClass(models.TextChoices):
+        """Юридический класс услуги в РФ — контракт v0.2 §7A.1 (§7A-0).
+
+        Ровно четыре значения контракта. ``NULL`` — класс не установлен; и
+        ``NULL``, и ``LEGAL_REVIEW_REQUIRED`` читатель понимает как «не
+        разрешено» (fail-closed). Какой процедуре какой класс — решение
+        юриста (D-1); здесь значения никому не присваиваются.
+        """
+
+        NON_MEDICAL_COSMETIC = "non_medical_cosmetic", "Немедицинская косметическая"
+        MEDICAL_COSMETOLOGY = "medical_cosmetology", "Медицинская косметология"
+        MEDICAL_OTHER = "medical_other", "Иная медицинская"
+        LEGAL_REVIEW_REQUIRED = "legal_review_required", "Нужна юридическая проверка"
+
+    class PractitionerClass(models.TextChoices):
+        """Требуемая квалификация исполнителя — контракт v0.2 §7A.4 (§7A-0).
+
+        Пять значений «минимума» контракта. ``NULL`` — требование не
+        установлено (не «любой мастер»). Какая квалификация нужна какой
+        процедуре — решение клиники (D-2).
+        """
+
+        COSMETIC_ESTHETICIAN = "cosmetic_esthetician", "Косметик-эстетист"
+        NURSE_COSMETOLOGY = "nurse_cosmetology", "Медсестра по косметологии"
+        PHYSICIAN_COSMETOLOGIST = "physician_cosmetologist", "Врач-косметолог"
+        MEDICAL_SPECIALIST = "medical_specialist", "Врач-специалист"
+        PROTOCOL_SPECIFIC = "protocol_specific", "По протоколу"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     category = models.ForeignKey(
@@ -297,6 +355,18 @@ class ServiceTemplate(models.Model):
     approved_at = models.DateTimeField(null=True, blank=True)
     #: Основание одобрения — разбор, реестр владельца, тикет.
     approval_source_ref = models.CharField(max_length=200, blank=True, default="")
+    #: Body Care CAT-2: кто вывел канон из оборота. Та же форма, что у
+    #: одобрения: «кто ИЛИ правило», правило с версией, дата и основание.
+    retired_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True, blank=True,
+        related_name="+",
+    )
+    retired_rule = models.CharField(max_length=100, blank=True, default="")
+    retirement_rule_version = models.CharField(max_length=32, blank=True, default="")
+    retired_at = models.DateTimeField(null=True, blank=True)
+    retirement_source_ref = models.CharField(max_length=200, blank=True, default="")
 
     # -- Body Care: семейство и версии (контракт v0.1 §2.1, CAT-1) ----------
     # Решение владельца D-3 (06.10): расширять ServiceTemplate, а не заводить
@@ -326,6 +396,50 @@ class ServiceTemplate(models.Model):
     #: «не определён», и читатель обязан понимать это как «не разрешено»
     #: (fail-closed), а не как «разрешено, потому что не запрещено».
     legal_status = models.CharField(max_length=32, null=True, blank=True)
+
+    # -- Body Care §7A-0: юридический класс и требуемая квалификация --------
+    # Контракт v0.2 §2.1 / §7A.1 / §7A.4. Только поля: значения процедурам
+    # ставят юрист (класс, D-1) и клиника (квалификация, D-2). ``NULL`` и
+    # ``LEGAL_REVIEW_REQUIRED`` — «не разрешено»: гейт читает это в §7A-6.
+    legal_service_class = models.CharField(
+        max_length=24,
+        choices=LegalServiceClass.choices,
+        null=True,
+        blank=True,
+        help_text="Юридический класс (§7A.1); пусто — не установлен, читается как «не разрешено»",
+    )
+    required_practitioner_class = models.CharField(
+        max_length=24,
+        choices=PractitionerClass.choices,
+        null=True,
+        blank=True,
+        help_text="Требуемая квалификация исполнителя (§7A.4); пусто — не установлена",
+    )
+    # Оба значения — ПОДТВЕРЖДЁННЫЕ, и пишет их только человек (главное
+    # окно, 06.10, по запрету владельца «класс без автора нельзя»):
+    # заданное значение требует кто + когда + основание (CheckConstraint).
+    # Варианта «правило» нет: системный вывод класса (§7A-1, «кандидат»)
+    # живёт в отдельной паре и гейт не открывает. Класс (юрист, D-1) и
+    # квалификация (клиника, D-2) — разные решения, у каждого свой
+    # провенанс. Кто вправе подтверждать — слой прав, не база.
+    legal_class_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    legal_class_confirmed_at = models.DateTimeField(null=True, blank=True)
+    legal_class_source_ref = models.CharField(max_length=200, blank=True, default="")
+    practitioner_class_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    practitioner_class_confirmed_at = models.DateTimeField(null=True, blank=True)
+    practitioner_class_source_ref = models.CharField(max_length=200, blank=True, default="")
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -409,6 +523,42 @@ class ServiceTemplate(models.Model):
                 ),
                 name="servicetemplate_health_check_rule_carries_version",
             ),
+            # Body Care CAT-2: вывод из оборота — решение того же веса, что
+            # одобрение, и провенанс у него тот же.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(lifecycle="retired")
+                    | (
+                        models.Q(retired_at__isnull=False)
+                        & ~models.Q(retirement_source_ref="")
+                        & (
+                            models.Q(retired_by__isnull=False)
+                            | ~models.Q(retired_rule="")
+                        )
+                    )
+                ),
+                name="servicetemplate_retired_requires_provenance",
+            ),
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(retired_by__isnull=False)
+                    & ~models.Q(retired_rule="")
+                ),
+                name="servicetemplate_retirement_is_who_xor_rule",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(retired_rule="")
+                    | ~models.Q(retirement_rule_version="")
+                ),
+                name="servicetemplate_retirement_rule_carries_version",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    lifecycle__in=["provisional", "candidate", "approved", "retired"]
+                ),
+                name="servicetemplate_lifecycle_known",
+            ),
             # Body Care CAT-1: назначенное семейство без версии канона —
             # решение, которое нельзя воспроизвести. Услуга вне body-care
             # (семейство NULL) версии не требует.
@@ -429,6 +579,57 @@ class ServiceTemplate(models.Model):
                     )
                 ),
                 name="servicetemplate_service_family_known",
+            ),
+            # Body Care §7A-0: мимо ORM в базу не попадает класс или
+            # квалификация вне словаря контракта.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(legal_service_class__isnull=True)
+                    | models.Q(
+                        legal_service_class__in=[
+                            "non_medical_cosmetic", "medical_cosmetology",
+                            "medical_other", "legal_review_required",
+                        ]
+                    )
+                ),
+                name="servicetemplate_legal_service_class_known",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(required_practitioner_class__isnull=True)
+                    | models.Q(
+                        required_practitioner_class__in=[
+                            "cosmetic_esthetician", "nurse_cosmetology",
+                            "physician_cosmetologist", "medical_specialist",
+                            "protocol_specific",
+                        ]
+                    )
+                ),
+                name="servicetemplate_practitioner_class_known",
+            ),
+            # §7A-0: класс и квалификация без автора, даты и основания в базу
+            # не попадают — ни через ORM, ни через ``update()``.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(legal_service_class__isnull=True)
+                    | (
+                        models.Q(legal_class_confirmed_by__isnull=False)
+                        & models.Q(legal_class_confirmed_at__isnull=False)
+                        & ~models.Q(legal_class_source_ref="")
+                    )
+                ),
+                name="servicetemplate_legal_class_requires_confirmation",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(required_practitioner_class__isnull=True)
+                    | (
+                        models.Q(practitioner_class_confirmed_by__isnull=False)
+                        & models.Q(practitioner_class_confirmed_at__isnull=False)
+                        & ~models.Q(practitioner_class_source_ref="")
+                    )
+                ),
+                name="servicetemplate_practitioner_class_requires_confirmation",
             ),
         ]
 
@@ -1038,11 +1239,76 @@ class SalonService(models.Model):
     #: одного типа значило бы запретить те, которых мы ещё не видели.
     mapping_source_ref = models.CharField(max_length=200, blank=True, default="")
 
+    #: Body Care CAT-3 (контракт v0.1 §3): версия конфигурации, к которой
+    #: относятся факты :class:`OfferingConfigFact` этого предложения. Пусто —
+    #: конфигурация не описана; ни один факт ещё не утверждён.
+    configuration_version = models.CharField(max_length=32, blank=True, default="")
+
+    # -- Ревью конфигурации (Body Care CAT-6, контракт §7) -------------------
+    # §7: REVIEW_REQUIRED — «факты есть, но требуется policy/legal/protocol
+    # review». Если бы полнота фактов сама давала READY_FOR_SCREENING, этого
+    # ревью не было бы вовсе. Поэтому READY — только при ЯВНОМ ревью, и оно
+    # привязано к версии конфигурации и к отпечатку её фактов: изменили
+    # конфигурацию — ревью устарело, предложение снова REVIEW_REQUIRED. Хранится решение, а не
+    # состояние: состояние вычисляет ``services.body_care_validation``.
+    # Форма провенанса — «кто ИЛИ правило», как у ``approved_*``.
+    config_reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    config_review_rule = models.CharField(max_length=100, blank=True, default="")
+    config_review_rule_version = models.CharField(max_length=32, blank=True, default="")
+    config_reviewed_at = models.DateTimeField(null=True, blank=True)
+    config_review_source_ref = models.CharField(max_length=200, blank=True, default="")
+    #: Какую версию конфигурации проверили. Ревью действует, только пока
+    #: она равна ``configuration_version``.
+    config_reviewed_version = models.CharField(max_length=32, blank=True, default="")
+    #: Отпечаток фактов конфигурации, которые видел ревьюер (SHA-256, см.
+    #: ``body_care_validation.config_fingerprint``). Ревью действует, только
+    #: пока отпечаток текущих фактов с ним совпадает: любая правка факта —
+    #: значение, состояние, источник, удаление строки — делает ревью
+    #: неактуальным без ручного подъёма версии (решение главного окна, 06.10).
+    config_reviewed_fingerprint = models.CharField(max_length=64, blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
+            # Body Care CAT-6: ревью конфигурации — решение, и провенанс у него
+            # тот же, что у подтверждения связи: дата, основание, кто ИЛИ правило.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(config_reviewed_version="")
+                    | (
+                        models.Q(config_reviewed_at__isnull=False)
+                        & ~models.Q(config_review_source_ref="")
+                        & ~models.Q(config_reviewed_fingerprint="")
+                        & (
+                            models.Q(config_reviewed_by__isnull=False)
+                            | ~models.Q(config_review_rule="")
+                        )
+                    )
+                ),
+                name="salonservice_config_review_requires_provenance",
+            ),
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(config_reviewed_by__isnull=False)
+                    & ~models.Q(config_review_rule="")
+                ),
+                name="salonservice_config_review_is_who_xor_rule",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(config_review_rule="")
+                    | ~models.Q(config_review_rule_version="")
+                ),
+                name="salonservice_config_review_rule_carries_version",
+            ),
             models.UniqueConstraint(
                 fields=["tenant", "template", "name"],
                 name="salonservice_tenant_template_name_uniq",
@@ -1181,8 +1447,227 @@ class SalonService(models.Model):
             return template.duration_default
         return None
 
+    def config_fact(self, field: str) -> tuple[str, object]:
+        """Состояние и значение факта конфигурации — ``(state, value)``.
+
+        Body Care CAT-3, контракт §4: «UNKNOWN не преобразуется в
+        разрешение». Поэтому **отсутствие строки читается как
+        ``UNKNOWN``**, а не как «ограничений нет»: салон, ничего не
+        сказавший про время экспозиции, не сказал «любое».
+        Неизвестное имя поля — ошибка вызывающего, а не ``UNKNOWN``:
+        опечатка в имени иначе молча читалась бы как неизвестный факт.
+        """
+        if field not in OfferingConfigFact.Field.values:
+            raise ValueError(f"unknown configuration field: {field!r}")
+        fact = self.config_facts.filter(field=field).first()
+        if fact is None:
+            return OfferingConfigFact.State.UNKNOWN, None
+        return fact.state, fact.value
+
     def __str__(self) -> str:
         return f"{self.name} @ {self.tenant.slug}"
+
+
+class OfferingConfigFact(models.Model):
+    """Факт конфигурации предложения салона — Body Care CAT-3 (контракт §3.1, §4).
+
+    Решение владельца D-3 (06.10): ``SalonService`` и есть ``SalonOffering``
+    контракта; факты конфигурации — отдельная таблица на него, по строке на
+    поле. Почему не столбцы: полей девятнадцать, у каждого пять состояний и
+    свой источник, и ``NULL`` в столбце не различил бы «неизвестно» от «не
+    применимо» — контракт §4 прямо запрещает ``null`` как единственный смысл.
+
+    ### Пять состояний (§4)
+
+    ``KNOWN``           значение есть и у него есть источник (``source_ref``)
+    ``UNKNOWN``         не знаем; значения нет — и это НЕ разрешение
+    ``NOT_APPLICABLE``  для этой услуги поле не имеет смысла
+    ``NOT_PROVIDED``    салон спросили — салон не ответил
+    ``CONFLICT``        источники расходятся; расходящиеся варианты могут
+                        лежать в ``value``
+
+    Нет строки — то же, что ``UNKNOWN`` (:meth:`SalonService.config_fact`).
+
+    Полный провенанс факта (``source_type``, ``source_version``,
+    ``captured_at/by``, ``confidence`` — контракт §5) — это CAT-4; здесь
+    только ``source_ref``, без которого ``KNOWN`` не принимается вовсе.
+    """
+
+    class Field(models.TextChoices):
+        """Поля конфигурации — ровно список контракта §3.1, закрытый."""
+
+        PRODUCT_NAME = "product_name", "Продукт"
+        PRODUCT_ARTICLE = "product_article", "Артикул"
+        MANUFACTURER = "manufacturer", "Производитель"
+        INSTRUCTION_VERSION = "instruction_version", "Версия инструкции"
+        INSTRUCTION_REGION = "instruction_region", "Регион инструкции"
+        APPLICATION_AREA = "application_area", "Зона нанесения"
+        APPLICATION_AREA_SIZE = "application_area_size", "Размер зоны"
+        MODE = "mode", "Режим"
+        EXPOSURE_SECONDS = "exposure_seconds", "Время экспозиции, с"
+        APPLICATION_COUNT = "application_count", "Число нанесений"
+        COVERING_TYPE = "covering_type", "Тип укрытия"
+        REMOVAL_METHOD = "removal_method", "Способ снятия"
+        AFTERCARE = "aftercare", "Уход после"
+        ADDITIONAL_MODALITY = "additional_modality", "Дополнительная модальность"
+        HEAT_MODE = "heat_mode", "Тепловой режим"
+        COLD_MODE = "cold_mode", "Холодовой режим"
+        COMPRESSION_MODE = "compression_mode", "Компрессия"
+        DEVICE_REFERENCE = "device_reference", "Аппарат"
+        PROTOCOL_SOURCE = "protocol_source", "Источник протокола"
+
+    class State(models.TextChoices):
+        KNOWN = "known", "Известно"
+        UNKNOWN = "unknown", "Неизвестно"
+        NOT_APPLICABLE = "not_applicable", "Не применимо"
+        NOT_PROVIDED = "not_provided", "Не предоставлено"
+        CONFLICT = "conflict", "Противоречие"
+
+    class SourceType(models.TextChoices):
+        """Откуда взят факт — контракт §5, ровно семь значений (CAT-4).
+
+        ``SYSTEM_DERIVED`` в словаре есть, но §5 запрещает его для
+        клинического факта, которого нет в политике. Какие из 19 полей
+        «клинические», контракт не перечисляет (вопрос владельцу Q2) —
+        поэтому запрет здесь не реализован, а не угадан.
+        """
+
+        MANUFACTURER_INSTRUCTION = "manufacturer_instruction", "Инструкция производителя"
+        PROTOCOL_DOCUMENT = "protocol_document", "Документ протокола"
+        OWNER_INPUT = "owner_input", "Ввод владельца"
+        SALON_INPUT = "salon_input", "Ввод салона"
+        PHYSICIAN_POLICY = "physician_policy", "Политика врача"
+        CANONICAL_POLICY = "canonical_policy", "Каноническая политика"
+        SYSTEM_DERIVED = "system_derived", "Выведено системой"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    salon_service = models.ForeignKey(
+        SalonService,
+        on_delete=models.CASCADE,
+        related_name="config_facts",
+    )
+    field = models.CharField(max_length=32, choices=Field.choices)
+    state = models.CharField(max_length=16, choices=State.choices)
+    #: Значение факта. Тип у полей разный (секунды, строки, ссылки), поэтому
+    #: JSON. Пусто у UNKNOWN / NOT_APPLICABLE / NOT_PROVIDED — CheckConstraint.
+    value = models.JSONField(null=True, blank=True)
+    #: Откуда известно значение. Обязательно у KNOWN: известный факт без
+    #: источника через месяц неотличим от догадки (контракт §5).
+    source_ref = models.CharField(max_length=200, blank=True, default="")
+    # -- Провенанс факта (контракт §5, Body Care CAT-4) ---------------------
+    #: Вид источника. NULL законен у факта, который ещё не известен
+    #: (UNKNOWN / NOT_PROVIDED / NOT_APPLICABLE): провенанса у отсутствия нет,
+    #: и пустой вид источника там не читается как «проверено». У KNOWN —
+    #: обязателен (CheckConstraint ниже).
+    source_type = models.CharField(
+        max_length=32,
+        choices=SourceType.choices,
+        null=True,
+        blank=True,
+    )
+    #: Версия источника — например, редакция инструкции производителя.
+    source_version = models.CharField(max_length=64, blank=True, default="")
+    #: Когда факт зафиксирован (не путать с датой самого источника).
+    captured_at = models.DateTimeField(null=True, blank=True)
+    #: Кто зафиксировал факт — «кто ИЛИ правило», та же форма, что у
+    #: ``approved_by``/``approved_rule`` и ``retired_by``/``retired_rule``:
+    #: ручной ввод салона или владельца — человек, загрузка из инструкции
+    #: или производное — правило с версией. PROTECT: провенанс не должен
+    #: молча исчезать при удалении учётки (в переписи удаления — RETAIN).
+    captured_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    captured_rule = models.CharField(max_length=100, blank=True, default="")
+    capture_rule_version = models.CharField(max_length=32, blank=True, default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            # Один факт на поле у предложения: два «известных» значения одного
+            # поля — это CONFLICT, и он выражается состоянием, а не дублем.
+            models.UniqueConstraint(
+                fields=["salon_service", "field"],
+                name="offeringconfigfact_one_fact_per_field",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    field__in=[
+                        "product_name", "product_article", "manufacturer",
+                        "instruction_version", "instruction_region",
+                        "application_area", "application_area_size", "mode",
+                        "exposure_seconds", "application_count", "covering_type",
+                        "removal_method", "aftercare", "additional_modality",
+                        "heat_mode", "cold_mode", "compression_mode",
+                        "device_reference", "protocol_source",
+                    ]
+                ),
+                name="offeringconfigfact_field_known",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    state__in=[
+                        "known", "unknown", "not_applicable", "not_provided", "conflict",
+                    ]
+                ),
+                name="offeringconfigfact_state_known",
+            ),
+            # §4: KNOWN — это значение с источником.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(state="known")
+                    | (models.Q(value__isnull=False) & ~models.Q(source_ref=""))
+                ),
+                name="offeringconfigfact_known_requires_value_and_source",
+            ),
+            # CAT-4, §5: известный факт несёт и ВИД источника, а не только
+            # ссылку на него — иначе «инструкция производителя» и «так сказал
+            # салон» неразличимы для того, кто решает о безопасности.
+            models.CheckConstraint(
+                condition=~models.Q(state="known") | models.Q(source_type__isnull=False),
+                name="offeringconfigfact_known_requires_source_type",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(source_type__isnull=True)
+                    | models.Q(
+                        source_type__in=[
+                            "manufacturer_instruction", "protocol_document", "owner_input",
+                            "salon_input", "physician_policy", "canonical_policy",
+                            "system_derived",
+                        ]
+                    )
+                ),
+                name="offeringconfigfact_source_type_known",
+            ),
+            models.CheckConstraint(
+                condition=~(
+                    models.Q(captured_by__isnull=False) & ~models.Q(captured_rule="")
+                ),
+                name="offeringconfigfact_capture_is_who_xor_rule",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(captured_rule="") | ~models.Q(capture_rule_version=""),
+                name="offeringconfigfact_capture_rule_carries_version",
+            ),
+            # §4: «не знаем», «не применимо», «не ответили» значения не несут —
+            # иначе значение при UNKNOWN однажды прочтут как известное.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(state__in=["unknown", "not_applicable", "not_provided"])
+                    | models.Q(value__isnull=True)
+                ),
+                name="offeringconfigfact_absent_states_carry_no_value",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.field}={self.state} @ {self.salon_service_id}"
 
 
 class SpecialistService(models.Model):

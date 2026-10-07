@@ -173,7 +173,7 @@ def _run_ranking_stages(
     return {
         StageId.S2: stage_semantic_fit(survivors, request.need),
         StageId.S3: stage_transaction_fit(survivors, request, policy),
-        StageId.S4: stage_contextual(survivors),
+        StageId.S4: stage_contextual(survivors, request.preferences, need_is_stated=request.need.is_stated),
         StageId.S5: stage_quality(survivors, policy),
     }
 
@@ -222,6 +222,9 @@ def _split_group(
             )
         return [group]
 
+    if output.lex_keys:
+        return _split_group_lexicographically(group, output, verdicts)
+
     keyed: dict[float, list[UUID]] = {}
     for cid in group:
         keyed.setdefault(output.keys.get(cid, 0.0), []).append(cid)
@@ -232,6 +235,48 @@ def _split_group(
             StageVerdict.DISTINGUISHED if distinguished else StageVerdict.TIED
         )
     return [keyed[key] for key in sorted(keyed, reverse=True)]
+
+
+def _split_group_lexicographically(
+    group: list[UUID],
+    output: StageOutput,
+    verdicts: dict[UUID, dict[StageId, StageVerdict]],
+) -> list[list[UUID]]:
+    """Стадия из нескольких измерений: делить по ним по очереди.
+
+    То же правило §29.4, что у :func:`_split_group`, но по измерению:
+    подгруппа, в которой есть кандидат с неизвестным значением измерения,
+    дальше не делится — ни по нему, ни по младшим. Старшие измерения при
+    этом уже разделили её. Отсутствие данных не понижает и не глушит
+    то, что известно и важнее.
+    """
+    width = max(len(k) for k in output.lex_keys.values())
+    frozen: set[UUID] = set()
+
+    def split(sub: list[UUID], j: int) -> list[list[UUID]]:
+        if len(sub) <= 1 or j >= width:
+            return [sub]
+        blocked = [cid for cid in sub if output.unknown_from.get(cid, width) <= j]
+        if blocked:
+            frozen.update(blocked)
+            return [sub]
+        parts: dict[int, list[UUID]] = {}
+        for cid in sub:
+            parts.setdefault(output.lex_keys.get(cid, (0,) * width)[j], []).append(cid)
+        out: list[list[UUID]] = []
+        for value in sorted(parts, reverse=True):
+            out.extend(split(parts[value], j + 1))
+        return out
+
+    result = split(group, 0)
+    distinguished = len(result) > 1
+    for cid in group:
+        verdicts[cid][output.stage] = (
+            StageVerdict.DISTINGUISHED if distinguished
+            else StageVerdict.INACTIVE if cid in frozen
+            else StageVerdict.TIED
+        )
+    return result
 
 
 def _apply_tier_one_ban(
@@ -366,4 +411,8 @@ def _decision_codes(
         # CAT-10: пустая полка объясняет себя — не «связь не проверена»,
         # а «процедура не готова к скринингу».
         codes.add(ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY)
+    if not ordered and any(e.reason_code is ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD for e in excluded):
+        # O-1: «только X», а X среди допустимых нет — сигнал уточнить, а не
+        # молча подставить другого.
+        codes.add(ReasonCode.ELIG_EXCLUDED_PREFERENCE_HARD)
     return tuple(sorted(codes))

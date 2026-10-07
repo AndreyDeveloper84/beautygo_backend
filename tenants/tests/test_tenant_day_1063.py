@@ -618,7 +618,8 @@ class TestARefusalHasAName:
         assert resp.status_code == 403
         lines = self._forbidden(caplog)
         assert len(lines) == 1, lines
-        assert "permission=IsTenantAdmin" in lines[0]
+        # DRF-2826: the day is the booking desk's — the refusal names that check.
+        assert "permission=IsTenantBookingDesk" in lines[0]
         assert f"tenant={other_salon.slug}" in lines[0]
         assert f"actor={admin_user.pk}" in lines[0]
 

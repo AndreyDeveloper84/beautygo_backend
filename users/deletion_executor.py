@@ -258,10 +258,54 @@ RETAIN: dict[str, str] = {
     "services.ServiceTemplate.health_check_confirmed_by": (
         "провенанс подтверждения флага гейта здоровья (§95), актор — сотрудник"
     ),
+    # Body Care CAT-2 (DRF-2792). Кто вывел канон из оборота. НЕ обнуляется по
+    # той же причине, что ``approved_by``: CHECK
+    # ``servicetemplate_retired_requires_provenance`` требует у ``retired``
+    # автора или правила — NULL нарушил бы схему, а снятие вывода вернуло бы
+    # канон в оборот приватным действием сотрудника.
+    "services.ServiceTemplate.retired_by": (
+        "провенанс вывода канона из оборота (Body Care CAT-2), актор — сотрудник"
+    ),
+    # Body Care §7A-0. Кто подтвердил юридический класс и требуемую
+    # квалификацию канона. Решения юриста и клиники о допуске услуги;
+    # обнуление нарушило бы CHECK «значение требует подтверждения» и
+    # оставило бы класс без автора — ровно то, что запретил владелец.
+    "services.ServiceTemplate.legal_class_confirmed_by": (
+        "провенанс подтверждения юридического класса канона (Body Care §7A-0), актор — сотрудник"
+    ),
+    "services.ServiceTemplate.practitioner_class_confirmed_by": (
+        "провенанс подтверждения требуемой квалификации канона (Body Care §7A-0), актор — сотрудник"
+    ),
+    # Body Care CAT-4. Кто зафиксировал факт конфигурации предложения. Это
+    # провенанс факта о салоне, а не данные человека-клиента; актор —
+    # сотрудник салона или куратор. Обнуление стёрло бы, кто отвечает за
+    # факт о безопасности услуги.
+    # Body Care CAT-6. Кто проверил конфигурацию предложения. Провенанс
+    # решения о готовности услуги к скринингу; актор — сотрудник или
+    # куратор. Обнуление нарушило бы CHECK провенанса ревью.
+    "services.SalonService.config_reviewed_by": (
+        "провенанс ревью конфигурации предложения (Body Care CAT-6), актор — сотрудник"
+    ),
+    "services.OfferingConfigFact.captured_by": (
+        "провенанс факта конфигурации предложения (Body Care CAT-4), актор — сотрудник"
+    ),
     "services.ServiceTemplateSynonym.confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "services.SalonService.mapping_confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "services.DraftSalonService.confirmed_by": "провенанс решения по каталогу (§93), актор — сотрудник",
     "tenants.ServiceLocation.confirmed_by": "провенанс подтверждения адреса, актор — сотрудник",
+    # Body Care §7A-2. Кто проверил медицинскую лицензию салона — решение о
+    # допуске медицинских услуг; обнуление нарушило бы CHECK «проверка: все
+    # три поля или ни одного» и оставило бы допуск без автора.
+    "tenants.MedicalLicense.verified_by": (
+        "провенанс проверки медицинской лицензии салона (Body Care §7A-2), актор — сотрудник"
+    ),
+    # Body Care §7A-4. Кто проверил квалификацию мастера — сотрудник-ревьюер,
+    # это его запись. Сами строки квалификации стёртого мастера удаляются
+    # (``_erase_qualifications``); у живых строк обнуление ревьюера нарушило
+    # бы CHECK «проверка: все три поля или ни одного».
+    "users.PractitionerQualification.verified_by": (
+        "провенанс проверки квалификации мастера (Body Care §7A-4), актор — сотрудник"
+    ),
     "services.CanonGapRequest.decided_by": (
         "провенанс решения владельца по заявке о разрыве канона (§143), актор — сотрудник"
     ),
@@ -827,6 +871,8 @@ def _erase_catalog(user) -> dict:
         _erase_solo_tenant(sp, anonymised, kept)
         # DRF-1803 — зона выезда: город работы мастера; на строку ничто не ссылается.
         _erase_service_areas(sp, anonymised)
+        # Body Care §7A-4 — квалификация: профессиональные данные мастера.
+        _erase_qualifications(sp, anonymised)
 
     # 7. Аккаунт. Контекст — ДО обезличивания событий аналитики: erase
     # пишет своё аудит-событие с actor=user, и оно тоже обязано потерять актора.
@@ -968,6 +1014,20 @@ def _erase_own_place(sp, anonymised: dict, kept: dict) -> None:
     place.status = LocationStatus.INACTIVE
     place.save(update_fields=[*OWN_PLACE_ERASED_TEXT_FIELDS, "latitude", "longitude", "status", "updated_at"])
     anonymised["tenants.ServiceLocation.own"] = anonymised.get("tenants.ServiceLocation.own", 0) + 1
+
+
+def _erase_qualifications(sp, anonymised: dict) -> None:
+    """Квалификации мастера (Body Care §7A-4): класс, протокол и основание
+    проверки — данные о человеке; строки удаляются (решение главного окна,
+    06.10, 152-ФЗ). Допуск проверяется в момент подбора и записи; история
+    прошлых записей живёт в appointments, а не здесь."""
+    from users.models import PractitionerQualification
+
+    deleted, _ = PractitionerQualification.objects.filter(specialist=sp).delete()
+    if deleted:
+        anonymised["users.PractitionerQualification.deleted"] = (
+            anonymised.get("users.PractitionerQualification.deleted", 0) + deleted
+        )
 
 
 def _erase_service_areas(sp, anonymised: dict) -> None:
@@ -1161,6 +1221,11 @@ def _own_place_residue(sp) -> dict[str, int]:
             or tenant.latitude is not None
         ):
             found["tenants.Tenant.solo"] = 1
+    from users.models import PractitionerQualification
+
+    qualifications = PractitionerQualification.objects.filter(specialist=sp).count()
+    if qualifications:
+        found["users.PractitionerQualification"] = qualifications
     areas = ServiceArea.objects.filter(specialist=sp).count()
     if areas:
         found["tenants.ServiceArea"] = areas

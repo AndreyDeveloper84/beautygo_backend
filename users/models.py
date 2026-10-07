@@ -813,6 +813,13 @@ class TenantUserRelationship(models.Model):
     - ``staff`` — specialist working in a salon. Full employer data
       access. Multi-tenant for mobility (Q2: master moves salon).
     - ``admin`` — tenant owner / manager. Same as staff + admin perms.
+    - ``receptionist`` — the front desk of ONE salon (DRF-2826, owner
+      decision 06.10): sees the schedule, runs the booking cycle (create,
+      reschedule, cancel, complete, no-show), finds the customer it books.
+      Not the owner's powers: no roles, no availability edits, no salon
+      settings, no exports, no diaries, no health details. Server-side:
+      :class:`users.permissions.IsTenantBookingDesk` /
+      :class:`users.permissions.IsTenantAdminOrBookingDeskRead`.
 
     Staff-specific side-fields (hire_date, commission_rate, etc.)
     live on a separate ``StaffEmployment`` model when needed — keeps
@@ -823,6 +830,7 @@ class TenantUserRelationship(models.Model):
         CUSTOMER = "customer", "Customer"
         STAFF = "staff", "Staff"
         ADMIN = "admin", "Admin"
+        RECEPTIONIST = "receptionist", "Receptionist"
 
     class GrantedBy(models.TextChoices):
         SELF = "self", "Self (user-initiated)"
@@ -847,7 +855,8 @@ class TenantUserRelationship(models.Model):
         help_text=(
             "customer: granted on booking via Variant E. "
             "staff: specialist working in the salon. "
-            "admin: tenant owner / manager."
+            "admin: tenant owner / manager. "
+            "receptionist: front desk of one salon — bookings, not settings (DRF-2826)."
         ),
     )
     is_active = models.BooleanField(default=True, db_index=True)
@@ -1181,3 +1190,101 @@ class ConsentEventReceipt(models.Model):
 
     def __str__(self) -> str:
         return f"{self.event_id} {self.consent_type} {self.outcome}"
+
+
+class PractitionerQualification(models.Model):
+    """Квалификация мастера — Body Care §7A-4 (контракт v0.2 §7A.4, DRF-2840).
+
+    Факт мастера, а не салона и не предложения: одну услугу салона делают
+    разные мастера. Состояние квалификации пары «мастер × канон» выводится
+    (``services.body_care_qualification``), а не вводится.
+
+    Проверку ставит только человек — провенанс «кто, когда, основание», все
+    три или ни одного (CHECK); отдельного статуса нет. Словарь классов — тот
+    же, что ``ServiceTemplate.PractitionerClass`` (§7A-0); равенство держит
+    узел, а не импорт: ``services.models`` из ``users.models`` не тянем.
+
+    ``protocol_ref`` обязателен у ``protocol_specific`` и пуст у остальных
+    классов. Что такое протокол и как он связан с каноном — решение клиники
+    (D-2); у канона ссылки на протокол пока нет.
+
+    При стирании аккаунта строки удаляются (решение главного окна, 06.10,
+    152-ФЗ): класс и основание проверки — профессиональные данные самого
+    мастера. ``verified_by`` (сотрудник-ревьюер) — RETAIN.
+    """
+
+    class PractitionerClass(models.TextChoices):
+        COSMETIC_ESTHETICIAN = "cosmetic_esthetician", "Косметик-эстетист"
+        NURSE_COSMETOLOGY = "nurse_cosmetology", "Медсестра по косметологии"
+        PHYSICIAN_COSMETOLOGIST = "physician_cosmetologist", "Врач-косметолог"
+        MEDICAL_SPECIALIST = "medical_specialist", "Врач-специалист"
+        PROTOCOL_SPECIFIC = "protocol_specific", "По протоколу"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    # PROTECT: профиль мастера при стирании обезличивается, а не удаляется;
+    # строки квалификации стирание удаляет само, до них ничто не доходит молча.
+    specialist = models.ForeignKey(
+        SpecialistProfile, on_delete=models.PROTECT, related_name="qualifications",
+    )
+    practitioner_class = models.CharField(max_length=24, choices=PractitionerClass.choices)
+    protocol_ref = models.CharField(
+        max_length=200, blank=True, default="",
+        help_text="Ссылка на протокол — только для «По протоколу».",
+    )
+
+    verified_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="+", help_text="Кто проверил квалификацию. Пусто — не проверена.",
+    )
+    verified_at = models.DateTimeField(null=True, blank=True)
+    verification_source_ref = models.CharField(
+        max_length=200, blank=True, default="",
+        help_text="Основание проверки: какой документ сверен.",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Квалификация мастера"
+        verbose_name_plural = "Квалификации мастеров"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["specialist", "practitioner_class", "protocol_ref"],
+                name="practitionerqualification_unique",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(
+                    practitioner_class__in=[
+                        "cosmetic_esthetician", "nurse_cosmetology", "physician_cosmetologist",
+                        "medical_specialist", "protocol_specific",
+                    ]
+                ),
+                name="practitionerqualification_class_known",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(practitioner_class="protocol_specific") & ~models.Q(protocol_ref=""))
+                    | (~models.Q(practitioner_class="protocol_specific") & models.Q(protocol_ref=""))
+                ),
+                name="practitionerqualification_protocol_ref_iff_protocol_specific",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    (
+                        models.Q(verified_by__isnull=True)
+                        & models.Q(verified_at__isnull=True)
+                        & models.Q(verification_source_ref="")
+                    )
+                    | (
+                        models.Q(verified_by__isnull=False)
+                        & models.Q(verified_at__isnull=False)
+                        & ~models.Q(verification_source_ref="")
+                    )
+                ),
+                name="practitionerqualification_verification_all_or_nothing",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.specialist_id} {self.practitioner_class}"
