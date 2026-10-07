@@ -117,9 +117,38 @@ def template_ids_helping_goal(goal_key: str, *, now: datetime | None = None) -> 
     )
 
 
+def capability_keys_helping_goal(goal_key: str, *, now: datetime | None = None) -> tuple[str, ...]:
+    """Ключи возможностей, о которых подтверждено «X помогает этой цели».
+
+    DRF-2871 (сборка плана): курируемая декомпозиция «цель → способность».
+    Правило то же, что у :func:`template_ids_helping_goal`: оба утверждения
+    подтверждены, поддержаны и не истекли, цель активна. Возвращаются КЛЮЧИ,
+    а не строки: одна возможность встречается у нескольких процедур, и для
+    плана это одна способность. По алфавиту — чтобы ответ был воспроизводим;
+    это не порядок важности.
+
+    Курс и горизонт со связи (``course_pattern``, ``result_horizon``) отсюда
+    не выдаются: плану они запрещены контрактом Plan Engine (§1.1, §4.8).
+    """
+    now = now or timezone.now()
+    return tuple(
+        sorted(
+            set(
+                CapabilityGoalLink.objects.filter(
+                    _client_facing_q(now),
+                    _client_facing_q(now, prefix="capability__"),
+                    goal__key=goal_key,
+                    goal__is_active=True,
+                ).values_list("capability__key", flat=True)
+            )
+        )
+    )
+
+
 __all__ = [
     "CapabilityReadout",
     "KnowledgeState",
+    "capability_keys_helping_goal",
     "client_facing_capabilities",
     "client_facing_goal_links",
     "template_ids_helping_goal",

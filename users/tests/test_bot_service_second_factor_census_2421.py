@@ -75,6 +75,9 @@ C_HEADER_ONLY = {
     # и план, и запись ищутся строго среди строк `request.user` (чужое → 404).
     "wellness/plan_engine_api.py::PlanStepResolutionView",
     "wellness/plan_engine_api.py::PlanStepBookingView",
+    # DRF-2871 — сборка плана: в теле нет ни одного идентификатора человека
+    # или его строк — цель берётся у `request.user`.
+    "wellness/plan_engine_api.py::PlanDecisionView",
 }
 
 
@@ -222,7 +225,8 @@ def test_the_census_numbers_of_05_10() -> None:
     """Literally the numbers the docstring and DRF-2421 cite. A change here is a decision."""
     # DRF-2857: C 15 -> 17, the two durable-plan views (same standing as Plan Lite).
     # DRF-2868: C 17 -> 19, the two plan-step views.
-    assert (len(A_CROSS_CHECKED), len(B_TENANT_ADMIN), len(C_HEADER_ONLY)) == (6, 6, 19)
+    # DRF-2871: C 19 -> 20, the plan-composition view.
+    assert (len(A_CROSS_CHECKED), len(B_TENANT_ADMIN), len(C_HEADER_ONLY)) == (6, 6, 20)
 
 
 def test_the_docstring_states_the_census_not_the_old_promise() -> None:
