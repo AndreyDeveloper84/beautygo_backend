@@ -349,7 +349,7 @@ def apply_eligibility(
         # процедуру можно рекомендовать — её конфигурация должна быть готова
         # к скринингу (CAT-6 READY). Гейт на ЧТЕНИИ: состояние может упасть
         # после верификации связи, и это ловится здесь без пересмотра связи.
-        # ``None`` — источник не сообщает (вне Body Care или до CAT-6).
+        # ``None`` — услуга вне Body Care: гейт к ней не относится.
         if facts.config_ready is False:
             excluded.append(
                 ExcludedCandidate(facts.ref, StageId.S1, ReasonCode.ELIG_EXCLUDED_CONFIG_NOT_READY)

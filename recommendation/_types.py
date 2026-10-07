@@ -464,11 +464,11 @@ class CandidateFacts:
     #: ``None`` — не совпадение по цели.
     goal_fit_depth: int | None = None
     #: CAT-10 (чинит C1) — готовность конфигурации ТОЙ услуги, которой мастер
-    #: совпал. ``True`` — услуга вне Body Care (``not_subject``) или body-care
-    #: в состоянии ``ready_for_screening``; ``False`` — body-care в одном из
-    #: ``incomplete`` / ``review_required`` / ``blocked`` / ``retired``.
-    #: ``None`` — источник готовность не сообщает: гейт не применяется (так
-    #: ведут себя все источники до подключения CAT-6).
+    #: совпал. ``True`` — body-care в состоянии ``ready_for_screening``;
+    #: ``False`` — body-care в любом другом состоянии CAT-6, а также всё, про
+    #: что источник не смог ответить (fail-closed). ``None`` — услуга вне
+    #: Body Care (``not_subject``): гейт не применяется. Body-care строка
+    #: ``None`` не получает никогда.
     config_ready: bool | None = None
     #: O-1 — категории предложений мастера (своя, иначе шаблона): на них
     #: проверяется предпочтение категории.

@@ -88,6 +88,7 @@ from recommendation.api import (
     ScheduleState,
     Scope,
 )
+from services.body_care_validation import NOT_SUBJECT, READY_FOR_SCREENING, VALIDATION_STATES, validation_states
 from services.capabilities import template_ids_helping_goal
 from services.catalog_reads import catalog_services_for, catalog_services_prefetch
 from services.offer_sellable import sellable_offer_q
@@ -109,6 +110,54 @@ def build_candidate_source(*, viewer=None) -> "SpecialistCandidateSource":
     его означает правило обычного клиента — демо скрыто.
     """
     return SpecialistCandidateSource(viewer=viewer)
+
+
+def config_readiness(salon_service_ids) -> dict[UUID, bool | None]:
+    """Готовность конфигурации строк пула — CAT-10 (DRF-2820), шов с CAT-6.
+
+    Одно пакетное чтение :func:`services.body_care_validation.validation_states`
+    на весь пул; лестницу состояний здесь никто не повторяет — читается итог.
+
+    ===========================================  ==========================
+    ответ CAT-6                                  ``config_ready``
+    ===========================================  ==========================
+    ``not_subject`` (вне Body Care)              ``None`` — гейт выключен
+    ``ready_for_screening``                      ``True``
+    остальные состояния §7                       ``False``
+    ключа нет, незнакомое значение, сбой чтения  ``False`` + ERROR в лог
+    ===========================================  ==========================
+
+    ``None`` рождается ТОЛЬКО из ``not_subject``: ``None`` значит «гейт
+    выключен», и у body-care строки это был бы fail-open. Неопределённость
+    закрывает строку и пишет в лог, а полку не роняет.
+    """
+    ids = set(salon_service_ids)
+    if not ids:
+        return {}
+    try:
+        states = validation_states(ids)
+    except Exception:  # noqa: BLE001 — сбой чтения закрывает строки, а не роняет полку
+        logger.exception("recommendation.source config_readiness_failed rows=%d", len(ids))
+        return dict.fromkeys(ids, False)
+
+    out: dict[UUID, bool | None] = {}
+    undetermined: list[str] = []
+    for pk in ids:
+        state = states.get(pk)
+        if state == NOT_SUBJECT:
+            out[pk] = None
+        elif state == READY_FOR_SCREENING:
+            out[pk] = True
+        else:
+            out[pk] = False
+            if state not in VALIDATION_STATES:
+                undetermined.append(f"{pk}={state!r}")
+    if undetermined:
+        logger.error(
+            "recommendation.source config_readiness_undetermined rows=%d closed=%s",
+            len(undetermined), ",".join(sorted(undetermined)),
+        )
+    return out
 
 
 def _category_refs(services) -> frozenset[UUID]:
@@ -192,11 +241,11 @@ class SpecialistCandidateSource:
     # -- маппинг и медицинская проверка -----------------------------------
 
     def _mapping_by_specialist(self, specialist_ids: list[UUID]) -> dict[UUID, "_MappingFacts"]:
-        """Статус маппинга и признак health-check — одним проходом.
+        """Статус маппинга, готовность конфигурации и health-check — одним проходом.
 
-        Два запроса на весь пул, а не по одному на мастера: пул на пилоте
-        мал, но форма запроса не должна зависеть от того, мал он сегодня
-        или нет.
+        Постоянное число запросов на весь пул, а не по одному на мастера:
+        пул на пилоте мал, но форма запроса не должна зависеть от того, мал
+        он сегодня или нет.
         """
         links = list(
             SpecialistService.objects
@@ -215,6 +264,8 @@ class SpecialistCandidateSource:
             .exclude(suggested_template__isnull=True)
             .values_list("confirmed_salon_service_id", flat=True)
         )
+        # CAT-10: готовность конфигурации ВСЕХ строк пула одним чтением.
+        readiness = config_readiness(link.salon_service_id for link in links)
 
         out: dict[UUID, _MappingFacts] = {}
         for link in links:
@@ -226,6 +277,8 @@ class SpecialistCandidateSource:
             # нужде вернёт этот же ключ, и статус найдётся по нему —
             # без второго чтения и без догадки, какая услуга совпала.
             facts.status_by_service[salon.id] = salon.mapping_status
+            # Строка, про которую шов не ответил, закрыта, а не «вне гейта».
+            facts.config_ready_by_service[salon.id] = readiness.get(salon.id, False)
             if salon.template_id is not None:
                 facts.template_by_service[salon.id] = salon.template_id
             if salon.template_id is not None:
@@ -320,6 +373,10 @@ class SpecialistCandidateSource:
             mapping_status=mapping.status(
                 has_offer=has_offer, matched_service_ref=matched_service_id,
             ),
+            # CAT-10: готовность ТОЙ строки, чей статус связи стоит выше.
+            config_ready=mapping.config_ready(
+                has_offer=has_offer, matched_service_ref=matched_service_id,
+            ),
             safety_blocked=False,
             # Признак медицинской проверки доезжает до резолвера: он
             # отменяет заявление NOT_APPLICABLE (§4.1). Витрина, в которой
@@ -406,7 +463,8 @@ class SpecialistCandidateSource:
             in_goal = [s for s in services if s.category_id in allowed]
             if in_goal:
                 # DRF-2789: из услуг мастера в цели — лучшая по статусу связи,
-                # затем по глубине. Это выбор строки, которой мастер отвечает
+                # затем по готовности конфигурации (CAT-10), затем по глубине.
+                # Это выбор строки, которой мастер отвечает
                 # на цель, а не порядок мастеров: порядок — дело резолвера.
                 def depth(s) -> int:
                     return goal_fit_depth(
@@ -493,6 +551,10 @@ class _MappingFacts:
         self.human_confirmed_ref: str | None = None
         #: `SalonService.id` → статус связи, как он записан в домене.
         self.status_by_service: dict[UUID, str] = {}
+        #: `SalonService.id` → готовность конфигурации (CAT-10), как её
+        #: отдал :func:`config_readiness`. Легаси-строки здесь нет: канона у
+        #: неё не бывает, значит и Body Care она не подлежит.
+        self.config_ready_by_service: dict[UUID, bool | None] = {}
 
     def status(
         self,
@@ -538,8 +600,54 @@ class _MappingFacts:
             key=lambda status: self._RANK[status],
         )
 
+    def config_ready(
+        self,
+        *,
+        has_offer: bool | None = None,
+        matched_service_ref: UUID | None = None,
+    ) -> bool | None:
+        """Готовность конфигурации той же строки, что отвечает в :meth:`status`.
+
+        Нужда названа и услуга совпала — готовность **именно этой** услуги:
+        готовая услуга Б не допускает мастера, совпавшего неготовой А
+        (§14.4, как у статуса связи).
+
+        Нужда не названа — предмет сам мастер. Смотрятся только строки с
+        лучшим статусом связи (те, что и решают допуск): одной готовой или
+        не подлежащей гейту достаточно; закрыт мастер, у которого все такие
+        строки не готовы. ``None`` — ни одна из них гейту не подлежит.
+        """
+        offered = self.has_service if has_offer is None else has_offer
+        if not offered:
+            return None
+        if matched_service_ref is not None:
+            return self.config_ready_by_service.get(matched_service_ref)
+        if not self.status_by_service:
+            return None
+        best = max(self._RANK[self._as_status(v)] for v in self.status_by_service.values())
+        deciding = [
+            self.config_ready_by_service.get(pk)
+            for pk, value in self.status_by_service.items()
+            if self._RANK[self._as_status(value)] == best
+        ]
+        if all(ready is False for ready in deciding):
+            return False
+        return True if any(ready is True for ready in deciding) else None
+
+    def _row_rank(self, service) -> tuple[int, int]:
+        """(статус связи, готовность конфигурации) — ключ выбора строки.
+
+        Готовность стоит сразу за статусом: неготовая строка выбила бы
+        мастера на S1, когда у него есть готовая с тем же совпадением.
+        """
+        return (
+            self._RANK[self._as_status(self.status_by_service.get(service.id))],
+            0 if self.config_ready_by_service.get(service.id) is False else 1,
+        )
+
     def best_of(self, services) -> UUID | None:
-        """Из одинаково совпавших услуг — та, чья связь доказана лучше.
+        """Из одинаково совпавших услуг — та, чья связь доказана лучше;
+        при равной связи — та, чья конфигурация готова (CAT-10).
 
         Выбор идёт **только среди совпавших**, поэтому подменой предмета
         не является: человек спросил про эту услугу, и мы отвечаем той
@@ -551,25 +659,20 @@ class _MappingFacts:
         """
         if not services:
             return None
-        return max(
-            services,
-            key=lambda s: self._RANK[self._as_status(self.status_by_service.get(s.id))],
-        ).id
+        return max(services, key=self._row_rank).id
 
     def best_of_with(self, services, *, secondary):
-        """Как :meth:`best_of`, но при равном статусе связи — по ``secondary``.
+        """Как :meth:`best_of`, но при равных связи и готовности — по ``secondary``.
 
         Сначала статус: допуск к рекомендации требует VERIFIED у той самой
         услуги, которой мастер совпал, и строка с лучшей глубиной, но без
-        проверенной связи, выбила бы мастера из выдачи. При равенстве обоих —
-        первая, как у ``best_of``. Возвращает строку, не id.
+        проверенной связи, выбила бы мастера из выдачи. Готовность — до
+        глубины по той же причине (CAT-10). При полном равенстве — первая,
+        как у ``best_of``. Возвращает строку, не id.
         """
         return max(
             services,
-            key=lambda s: (
-                self._RANK[self._as_status(self.status_by_service.get(s.id))],
-                secondary(s),
-            ),
+            key=lambda s: (*self._row_rank(s), secondary(s)),
         )
 
     @classmethod
