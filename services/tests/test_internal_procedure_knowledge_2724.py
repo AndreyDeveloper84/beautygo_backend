@@ -98,7 +98,7 @@ def _capability(template, *, key="even-tone", **kw) -> ProcedureCapability:
         "evidence_kind": "professional_consensus",
         **kw,
     }
-    return ProcedureCapability.objects.create(template=template, key=key, **fields)
+    return ProcedureCapability.objects.create(templates=[template], key=key, **fields)
 
 
 def _approve(row, curator, **extra) -> None:
