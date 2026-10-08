@@ -662,6 +662,14 @@ class Plan(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     status_changed_at = models.DateTimeField(default=timezone.now)
+    # DRF-2871 — план собран на помеченных тестовых данных (решение владельца
+    # 08.10: сквозная проверка на подготовленных данных). Ставится при
+    # сохранении и не меняется никогда — триггер миграции 0012 ловит и
+    # ``update()``: синтетический план не может стать настоящим, и наоборот.
+    synthetic = models.BooleanField(
+        default=False,
+        help_text="План на помеченных синтетических данных; ставится при создании, не меняется",
+    )
 
     class Meta:
         ordering = ["-created_at"]

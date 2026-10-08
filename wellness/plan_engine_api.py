@@ -39,6 +39,7 @@ from .plan_gate import archiving_own_plan, gated
 from .plan_engine import (
     REQUESTABLE_STATUSES,
     ActivePlanExists,
+    CapabilityNotConfirmed,
     ContractViolation,
     GoalNotFound,
     GoalRequired,
@@ -144,6 +145,13 @@ class PlanEngineView(APIView):
             return error_response(
                 "PLAN_SAVE_SAFETY_BLOCKED",
                 "План сейчас не сохраняется",
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        except CapabilityNotConfirmed as exc:
+            return error_response(
+                "PLAN_CAPABILITY_NOT_CONFIRMED",
+                "План опирается на знание, которое не подтверждено, — сохранить его нельзя",
+                details={"capability_ref": exc.capability_ref},
                 status_code=status.HTTP_409_CONFLICT,
             )
         except IdempotencyConflict:
