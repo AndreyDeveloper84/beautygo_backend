@@ -399,7 +399,7 @@ class TestNoPlanOutcomes:
         собранного при незакрытом вопросе, не существует."""
         data = _compose(_body(safety_state="CLARIFY"))
         assert (data["outcome"], data["decision"], data["safety_state"]) == ("CLARIFY_PENDING", None, "CLARIFY")
-        assert data["details"] == {"cause": "SAFETY_CLARIFY"}
+        assert data["details"] == {}
 
     @pytest.mark.parametrize("state", ["NORMAL", "CAUTION"])
     def test_non_blocking_safety_is_carried_on_the_decision(self, goal, knowledge, state) -> None:

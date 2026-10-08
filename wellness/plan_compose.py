@@ -45,7 +45,6 @@ from recommendation.api import REASON_CODE_REGISTRY_VERSION, RESOLVER_SPEC_VERSI
 from services.capabilities import capability_keys_helping_goal
 
 from .plan_engine import ContractViolation, PlanEngineDisabled, plan_engine_enabled
-from .plan_restrictions import CAUSE_SAFETY_CLARIFY
 from .plan_safety import SAFETY_BLOCKING, SAFETY_STATES
 
 PLAN_SPEC_VERSION = "1.0"
@@ -255,7 +254,7 @@ def compose_plan(user, request: ComposeRequest) -> dict[str, Any]:
     if request.safety_state == "CLARIFY":
         # Решения, собранного при незакрытом вопросе, не существует — иначе его
         # можно было бы сохранить ходом с другим вердиктом, минуя вопрос.
-        return _nothing(Outcome.CLARIFY_PENDING, request, cause=CAUSE_SAFETY_CLARIFY)
+        return _nothing(Outcome.CLARIFY_PENDING, request)
 
     goal = ClientGoal.objects.filter(client=user, state=ClientGoal.State.ACTIVE).first()
     if goal is None or not goal.goal_key:

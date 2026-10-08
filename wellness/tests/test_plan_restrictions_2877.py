@@ -53,10 +53,18 @@ RESTRICTIONS_URL = "/api/v1/internal/me/plan/restrictions/"
 LIFT_URL = "/api/v1/internal/me/plan/restrictions/lift/"
 STATE_URL = "/api/v1/internal/me/plan/state/"
 QUESTION = "plan.safety_clarify"
-CLARIFY = {"scope": "PLAN", "cause": "SAFETY_CLARIFY", "question_id": QUESTION}
+#: Причина области «весь план» — только для узлов: таблица причин каталога
+#: пуста до решения владельца, а механизм проверить нужно.
+PLAN_CAUSE = "TEST_PLAN_QUESTION"
+CLARIFY = {"scope": "PLAN", "cause": PLAN_CAUSE, "question_id": QUESTION}
 #: Причина области «шаг» — только для узлов: в таблице причин её сегодня нет
 #: (ждёт решения владельца), а механизм области «шаг» проверить нужно.
 STEP_CAUSE = "TEST_STEP_QUESTION"
+
+
+@pytest.fixture(autouse=True)
+def plan_cause(monkeypatch):
+    monkeypatch.setitem(CAUSES, PLAN_CAUSE, Cause(scopes=frozenset({"PLAN"}), lift_kinds=frozenset({"answered"})))
 
 
 @pytest.fixture
@@ -86,6 +94,26 @@ def _document() -> dict:
     return _api().get(PLAN_URL).json()["data"]["plan"]
 
 
+class TestTheTableOfCausesIsEmptyUntilTheOwnerDecides:
+    """Владелец 08.10: «Универсальный вопрос CLARIFY без причины придумывать
+    не будем». В каталоге нет ни одной причины, и вердикт «уточнить» сам её
+    не создаёт."""
+
+    def test_the_catalog_ships_no_cause_of_its_own(self) -> None:
+        import wellness.plan_restrictions as module
+
+        assert set(CAUSES) == {PLAN_CAUSE}  # только подставленная этим файлом
+        assert "SAFETY_CLARIFY" not in CAUSES
+        assert not hasattr(module, "CAUSE_SAFETY_CLARIFY")
+
+    @pytest.mark.parametrize("cause", ["SAFETY_CLARIFY", "CLARIFY", "HEALTH_QUESTION"])
+    def test_a_cause_nobody_decided_cannot_be_opened(self, goal, cause) -> None:
+        resp = _open(_save(goal), cause=cause)
+        assert resp.status_code == 400
+        assert resp.json()["error"]["details"]["reason"] == "restriction_cause_unknown"
+        assert not PlanRestriction.objects.exists()
+
+
 class TestSavingWithTheTurnVerdict:
     def test_silence_about_safety_is_not_normal(self, goal) -> None:
         body = _command(goal, [_step("s1")])
@@ -109,11 +137,13 @@ class TestSavingWithTheTurnVerdict:
         assert _api().post(PLAN_URL, body, format="json").json()["error"]["code"] == "PLAN_SAVE_SAFETY_BLOCKED"
         assert not Plan.objects.exists()
 
-    def test_clarify_without_a_named_question_is_refused(self, goal) -> None:
+    def test_clarify_alone_neither_blocks_the_save_nor_invents_a_question(self, goal) -> None:
+        """«Уточнить» сохранение не блокирует; ограничение из самого вердикта
+        не возникает — его открывает конкретная причина."""
         resp = _api().post(PLAN_URL, {**_command(goal, [_step("s1")]), "safety_state": "CLARIFY"}, format="json")
-        assert resp.status_code == 400
-        assert resp.json()["error"]["details"]["reason"] == "clarify_without_restriction"
-        assert not Plan.objects.exists()
+        assert resp.status_code == 201, resp.content
+        assert resp.json()["data"]["plan"]["restrictions"] == []
+        assert not PlanRestriction.objects.exists()
 
     def test_clarify_saves_the_draft_together_with_its_restriction(self, goal) -> None:
         body = {**_command(goal, [_step("s1"), _step("s2")]), "safety_state": "CLARIFY", "restrictions": [CLARIFY]}
@@ -122,7 +152,7 @@ class TestSavingWithTheTurnVerdict:
         plan = resp.json()["data"]["plan"]
         assert plan["status"] == "active"  # отдельного статуса «черновик» нет
         assert [(r["scope"], r["step_id"], r["cause"], r["question_id"], r["lifted"]) for r in plan["restrictions"]] == [
-            ("PLAN", None, "SAFETY_CLARIFY", QUESTION, None),
+            ("PLAN", None, PLAN_CAUSE, QUESTION, None),
         ]
         assert {s: v["restricted"] for s, v in plan["step_state"].items()} == {"s1": True, "s2": True}
         row = PlanRestriction.objects.get()
@@ -153,13 +183,13 @@ class TestSavingWithTheTurnVerdict:
         "restrictions, reason",
         [
             ("nope", "restrictions_malformed"),
-            ([{"scope": "ALL", "cause": "SAFETY_CLARIFY", "question_id": QUESTION}], "restriction_scope_invalid"),
+            ([{"scope": "ALL", "cause": PLAN_CAUSE, "question_id": QUESTION}], "restriction_scope_invalid"),
             ([{"scope": "PLAN", "cause": "INVENTED", "question_id": QUESTION}], "restriction_cause_unknown"),
-            ([{"scope": "STEP", "step_id": "s1", "cause": "SAFETY_CLARIFY", "question_id": QUESTION}],
+            ([{"scope": "STEP", "step_id": "s1", "cause": PLAN_CAUSE, "question_id": QUESTION}],
              "restriction_scope_not_for_cause"),
-            ([{"scope": "PLAN", "step_id": "s1", "cause": "SAFETY_CLARIFY", "question_id": QUESTION}],
+            ([{"scope": "PLAN", "step_id": "s1", "cause": PLAN_CAUSE, "question_id": QUESTION}],
              "restriction_step_id_on_plan_scope"),
-            ([{"scope": "PLAN", "cause": "SAFETY_CLARIFY", "question_id": " "}], "restriction_question_id_missing"),
+            ([{"scope": "PLAN", "cause": PLAN_CAUSE, "question_id": " "}], "restriction_question_id_missing"),
             ([CLARIFY, CLARIFY], "restriction_duplicate"),
         ],
     )

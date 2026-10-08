@@ -303,17 +303,12 @@ def _safety_and_restrictions(raw: dict, step_ids: set[str]):
     """Вердикт хода подтверждения и ограничения, с которыми план сохраняется.
 
     Молчание о безопасности не читается как «норма»: тройка обязательна.
-    «Уточнить» без ограничения на весь план — отказ: вопрос, который не назван,
-    не может ни держаться, ни быть снят.
+    Вердикт «уточнить» сам ограничения не требует: вопрос возникает из
+    конкретной причины, а не из вердикта (владелец 08.10: универсальный вопрос
+    без причины не придумываем).
     """
     # Импорт здесь: ``plan_restrictions`` импортирует этот модуль.
-    from .plan_restrictions import (
-        CAUSE_SAFETY_CLARIFY,
-        SCOPE_PLAN,
-        SCOPE_STEP,
-        RestrictionMalformed,
-        parse_restrictions,
-    )
+    from .plan_restrictions import SCOPE_STEP, RestrictionMalformed, parse_restrictions
     from .plan_safety import SafetyInputError, parse_safety_input
 
     try:
@@ -326,10 +321,6 @@ def _safety_and_restrictions(raw: dict, step_ids: set[str]):
     for spec in restrictions:
         if spec.scope == SCOPE_STEP and spec.step_id not in step_ids:
             raise ContractViolation("restriction_step_not_in_plan", spec.step_id)
-    if safety.state == "CLARIFY" and not any(
-        r.scope == SCOPE_PLAN and r.cause == CAUSE_SAFETY_CLARIFY for r in restrictions
-    ):
-        raise ContractViolation("clarify_without_restriction")
     return safety, restrictions
 
 
@@ -394,8 +385,8 @@ def create_plan_from_command(user, command: PlanCommand) -> tuple[Plan, bool]:
     if existing is not None:
         return existing, False
     # После повтора: уже сохранённая команда не судится заново. «Стоп» — не
-    # вопрос с ответом, сохранение не выполняется; «уточнить» сохраняется
-    # вместе с ограничением (оно обязательно — см. разбор команды).
+    # вопрос с ответом, сохранение не выполняется; «уточнить» сохранению не
+    # мешает.
     if command.safety is None or command.safety.blocks:
         raise SaveSafetyBlocked()
 
