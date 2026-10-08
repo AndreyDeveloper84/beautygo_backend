@@ -388,6 +388,21 @@ BODY_CARE_UNCLASSIFIED_FAIL_CLOSED = os.environ.get(
     "BODY_CARE_UNCLASSIFIED_FAIL_CLOSED", "false"
 ).lower() in ("1", "true", "yes", "on")
 
+# Синтетические тестовые данные (решение владельца 08.10.2026, сквозная
+# проверка Плана). ПЕРВЫЙ из двух факторов: без него строки с пометкой
+# ``synthetic`` не читает никто. Право чтения выдаёт сервер по личности
+# (``services.synthetic.grant_for``): флаг ниже, пользователь каталога из
+# списка ниже и признак тестовой персоны у пользователя. В запросе этого права нет нигде.
+# Только тестовый стенд; на боевом контуре не включать.
+SYNTHETIC_TEST_DATA_ENABLED = os.environ.get(
+    "SYNTHETIC_TEST_DATA_ENABLED", "false"
+).lower() in ("1", "true", "yes", "on")
+# Тестовые субъекты: UUID пользователей каталога через запятую. Пусто — права
+# нет ни у кого, даже при включённом флаге.
+SYNTHETIC_TEST_SUBJECT_IDS = tuple(
+    item.strip() for item in os.environ.get("SYNTHETIC_TEST_SUBJECT_IDS", "").split(",") if item.strip()
+)
+
 ROOT_URLCONF = 'djangoProject.urls'
 
 TEMPLATES = [
