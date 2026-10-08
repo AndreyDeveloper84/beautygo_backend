@@ -197,6 +197,19 @@ class TestReplacingNeedsAConfirmationOfThatVeryPlan:
         resp = _replace(proposal, active, who=STRANGER)
         assert (resp.status_code, resp.json()["error"]["details"]["reason"]) == (404, "plan_not_found")
 
+    def test_another_persons_plan_cannot_be_named_as_the_one_replaced(self, pair, stranger) -> None:
+        """Заменяемый план ищется строго среди планов этого человека: чужой
+        действующий план — «не найдено», а не «подтверждение о другом плане»."""
+        from goals.models import ClientGoal
+        from wellness.tests.test_plan_engine_2857 import _save
+
+        theirs = _save(ClientGoal.objects.create(client=stranger, goal_key="relax", source_channel="bot"), stranger)
+        _, proposal = pair
+        resp = _replace(proposal, str(theirs.id))
+        assert (resp.status_code, resp.json()["error"]["details"]["reason"]) == (404, "plan_not_found")
+        assert Plan.objects.get(pk=theirs.pk).status == "active"
+        assert Plan.objects.get(pk=proposal).status == "proposed"
+
     @pytest.mark.parametrize(
         "over, reason",
         [
