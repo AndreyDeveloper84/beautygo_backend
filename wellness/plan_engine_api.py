@@ -75,6 +75,7 @@ from .plan_engine_steps import (
     ResolutionRefused,
     StepNotExecutable,
     StepNotFound,
+    candidates_for_step,
     link_booking,
     resolve_step,
 )
@@ -401,6 +402,53 @@ class PlanStepResolutionView(APIView):
             {"plan": plan_document(plan), "created": created},
             status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+class PlanStepCandidatesView(APIView):
+    """POST /api/v1/internal/me/plan/steps/candidates/ — кандидаты услуги для
+    шага (DRF-2868, контракт §8.2). Ничего не пишет.
+
+    Тело: ``{plan_id, step_id, safety_state, safety_policy_version,
+    evaluated_at_revision}``. Каталог сам ищет предложения по способности шага
+    в видимости этого человека, проверяет допуск и происхождение ответа о
+    проверке здоровья. Порядок кандидатов — не ранжирование.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(
+                description="{step_id, capability_ref, candidates[], search_id, nothing_because, rejected}",
+            ),
+            400: OpenApiResponse(description="PLAN_CONTRACT_VIOLATION, details.reason"),
+            404: OpenApiResponse(description="Plan / step not found for the caller, or PLAN_ENGINE_DISABLED"),
+            409: OpenApiResponse(description="PLAN_STEP_NOT_EXECUTABLE, details.reason"),
+        },
+    )
+    def post(self, request: Request) -> Response:
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            plan_id = _uuid_field(data, "plan_id")
+            safety = parse_safety_input(data)
+        except SafetyInputError as exc:  # раньше ValueError: SafetyInputError — его род
+            return error_response("PLAN_CONTRACT_VIOLATION", "Запрос не конформен", details={"reason": exc.reason})
+        except ValueError as exc:
+            return error_response(
+                "PLAN_CONTRACT_VIOLATION", "Запрос не конформен", details={"reason": f"{exc}_malformed"},
+            )
+        step_id = data.get("step_id")
+        if not isinstance(step_id, str) or not step_id.strip():
+            return error_response(
+                "PLAN_CONTRACT_VIOLATION", "Запрос не конформен", details={"reason": "step_id_missing"},
+            )
+        try:
+            found = candidates_for_step(request.user, plan_id, step_id.strip(), safety)
+        except (PlanEngineDisabled, PlanNotFound, StepNotFound, StepNotExecutable) as exc:
+            return _step_refusal(exc)
+        return success_response(found)
 
 
 class PlanStepBookingView(APIView):

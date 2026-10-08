@@ -78,6 +78,10 @@ C_HEADER_ONLY = {
     # и план, и запись ищутся строго среди строк `request.user` (чужое → 404).
     "wellness/plan_engine_api.py::PlanStepResolutionView",
     "wellness/plan_engine_api.py::PlanStepBookingView",
+    # DRF-2868 — кандидаты услуги для шага: `plan_id` из тела — не user id; план
+    # ищется строго среди планов `request.user` (чужое → 404), подбор идёт в
+    # видимости `request.user`.
+    "wellness/plan_engine_api.py::PlanStepCandidatesView",
     # DRF-2877 — ограничения плана: `plan_id` и `restriction_id` из тела — не
     # user id; план ищется строго среди планов `request.user` (чужое → 404),
     # ограничение — строго среди ограничений этого плана.

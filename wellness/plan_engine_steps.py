@@ -38,6 +38,7 @@ from services.models import SalonService, ServiceTemplate
 from .models import Plan, PlanRevision, PlanStepBooking, PlanStepResolution
 from .plan_engine import PlanEngineDisabled, PlanEngineError, PlanNotFound, plan_engine_enabled
 from .plan_restrictions import blocking_question_ids
+from .plan_step_candidates import offer_is_candidate, step_candidates
 from .plan_safety import SafetyInput, SafetyInputError, parse_safety_input
 
 _LEVEL_ORDER = {"CAPABILITY": 0, "SERVICE": 1, "OFFER": 2}
@@ -226,6 +227,11 @@ def resolve_step(
                 raise ResolutionRefused("tenant_offer_unknown")
             if offer_template != canonical_service_ref:
                 raise ResolutionRefused("offer_not_of_canonical_service")
+            # §8.2: шаг не получает услугу в обход подбора. Предложение обязано
+            # быть допущенным кандидатом этого шага для этого человека ПРЯМО
+            # СЕЙЧАС — перепроверяется при выборе, а не берётся с показа.
+            if not offer_is_candidate(user, plan, step_id, tenant_offer_ref):
+                raise ResolutionRefused("offer_not_a_candidate")
 
         resolution = PlanStepResolution.objects.create(
             plan_revision=revision,
@@ -239,6 +245,22 @@ def resolve_step(
             safety_evaluated_at_revision=safety.evaluated_at_revision,
         )
     return resolution, True
+
+
+def candidates_for_step(user, plan_id: UUID, step_id: str, safety: SafetyInput) -> dict[str, Any]:
+    """Кандидаты услуги для шага (§8.2). Ничего не пишет; допуск шага — тот
+    же, что у перехода: план действует, вердикт хода, ограничения."""
+    if not plan_engine_enabled():
+        raise PlanEngineDisabled()
+    _safety_gate(safety)
+    with transaction.atomic():
+        plan = _locked_plan(user, plan_id)
+        revision = plan.current_revision
+        _plan_gate(plan, revision, step_id)
+        if effective_step(revision, step_id)["level"] == PlanStepResolution.Level.OFFER:
+            # Исполненный уровень не откатывается (§4.3): искать нечего.
+            raise StepNotExecutable("step_already_resolved")
+        return step_candidates(user, plan, step_id)
 
 
 # ─── запись как факт на шаге ─────────────────────────────────────────────────
