@@ -24,6 +24,7 @@ from uuid import UUID
 
 from services.capabilities import template_ids_with_capability
 from services.models import SalonService
+from services.synthetic import real_offer_q
 from users.sellable import demo_visibility_q
 
 
@@ -56,7 +57,11 @@ def offers_by_capability(key: str, *, viewer=None) -> CapabilityOffers:
     templates = template_ids_with_capability(key)
     if not templates:
         return CapabilityOffers((), NoOffers.NO_CAPABILITY)
-    existing = SalonService.objects.filter(template_id__in=templates, is_active=True, tenant__is_active=True)
+    # Синтетическая услуга на настоящем каноне невозможна по замку базы
+    # (DRF-2916); условие здесь — второй рубеж, а не единственный.
+    existing = SalonService.objects.filter(
+        real_offer_q(), template_id__in=templates, is_active=True, tenant__is_active=True,
+    )
     visible = tuple(existing.filter(demo_visibility_q(viewer)).order_by("pk").values_list("pk", flat=True))
     if visible:
         return CapabilityOffers(visible)

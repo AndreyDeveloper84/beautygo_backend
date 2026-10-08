@@ -13,6 +13,10 @@
 
 Только чтение. Положение флага каталога — то, что действует в момент вызова.
 
+Помеченная синтетика (DRF-2916) для этих функций не существует: синтетическое
+предложение отвечает как id, которого нет в базе, — при любой личности и в
+операторском режиме.
+
 Что эти функции НЕ отвечают: безопасность хода и здоровье, совпадение с
 нуждой, бюджет, область запроса, согласия. Допуск каталога — необходимое
 условие рекомендации и перехода шага плана к услуге, но не достаточное.
@@ -29,6 +33,7 @@ from recommendation.api import ALL_CHECKS, AdmissionCheck, CheckAnswer, ConfigGa
 from services import body_care_address, body_care_license, body_care_qualification
 from services.models import SalonService, ServiceTemplate, SpecialistService
 from services.offer_sellable import sellable_offer_q
+from services.synthetic import real_offer_q
 from users.models import SpecialistProfile
 from users.recommendation_source import _MappingFacts, config_readiness, legal_answers, unenforced
 from users.sellable import demo_scope_q, demo_visibility_q, sellable_q
@@ -55,7 +60,9 @@ def admission_answers(rows: Iterable[Row]) -> dict[Key, tuple[CheckAnswer, ...]]
         return {}
     offers = {
         offer["pk"]: offer
-        for offer in SalonService.objects.filter(pk__in={salon_id for _, salon_id, _ in rows}).values(
+        for offer in SalonService.objects.filter(
+            real_offer_q(), pk__in={salon_id for _, salon_id, _ in rows},
+        ).values(
             "pk", "mapping_status", "template_id", "template__lifecycle",
             "template__body_care_scope", "template__service_family",
             "template__legal_service_class", "template__required_practitioner_class",
@@ -137,7 +144,10 @@ def sellable_edges(salon_service_ids, *, viewer=None, all_salons: bool = False) 
     edges: dict[UUID, list[UUID]] = defaultdict(list)
     for salon_id, specialist_id in (
         SpecialistService.objects
-        .filter(sellable_offer_q(), salon_service_id__in=list(salon_service_ids), specialist__in=masters)
+        .filter(
+            sellable_offer_q(), real_offer_q("salon_service__"),
+            salon_service_id__in=list(salon_service_ids), specialist__in=masters,
+        )
         .order_by("salon_service_id", "specialist_id")
         .values_list("salon_service_id", "specialist_id")
     ):
@@ -165,7 +175,7 @@ def offer_admission(
     ids = list(dict.fromkeys(salon_service_ids))
     if not ids:
         return {}
-    templates = dict(SalonService.objects.filter(pk__in=ids).values_list("pk", "template_id"))
+    templates = dict(SalonService.objects.filter(real_offer_q(), pk__in=ids).values_list("pk", "template_id"))
     edges = sellable_edges(templates, viewer=viewer, all_salons=all_salons)
     rows: list[Row] = []
     for salon_id, template_id in templates.items():
