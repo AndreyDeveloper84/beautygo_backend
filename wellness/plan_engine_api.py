@@ -57,6 +57,7 @@ from .plan_safety import SafetyInputError, parse_safety_input
 from .plan_engine_steps import (
     AppointmentNotFound,
     BookingLinkConflict,
+    ProvenanceMalformed,
     ResolutionRefused,
     StepNotExecutable,
     StepNotFound,
@@ -219,6 +220,24 @@ def _step_refusal(exc: Exception) -> Response:
             status_code=status.HTTP_409_CONFLICT,
         )
     raise exc
+
+
+def plan_step_refusal_response(exc: Exception) -> Response:
+    """Отказы допуска шага для создания записи с блоком происхождения
+    (``appointments.internal_api``): те же коды, что у ручек шага."""
+    if isinstance(exc, ProvenanceMalformed):
+        return error_response(
+            "PLAN_CONTRACT_VIOLATION",
+            "Блок происхождения записи не соответствует контракту",
+            details={"reason": exc.reason, "detail": ""},
+        )
+    if isinstance(exc, BookingLinkConflict):
+        return error_response(
+            "PLAN_STEP_BOOKING_CONFLICT",
+            "Эта запись уже связана с другим шагом",
+            status_code=status.HTTP_409_CONFLICT,
+        )
+    return _step_refusal(exc)
 
 
 class PlanStepResolutionView(APIView):
