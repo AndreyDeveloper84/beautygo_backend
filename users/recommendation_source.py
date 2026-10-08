@@ -77,7 +77,13 @@ from typing import Sequence
 from uuid import UUID
 
 from goals.wiring import goal_category_positions_for_key
+from dataclasses import dataclass
+
 from recommendation.api import (
+    UNENFORCED_LITERALS,
+    AdmissionCheck,
+    CheckAnswer,
+    build_answers,
     CandidateFacts,
     CandidateKind,
     CandidateRef,
@@ -91,7 +97,7 @@ from recommendation.api import (
     Scope,
     ScopeMode,
 )
-from services import body_care_address, body_care_license, body_care_qualification
+from services import body_care_address, body_care_license, body_care_qualification, body_care_scope
 from services.body_care_address import address_states
 from services.body_care_license import license_states
 from services.body_care_qualification import qualification_states
@@ -123,6 +129,39 @@ def build_candidate_source(*, viewer=None) -> "SpecialistCandidateSource":
 #: с каталогом 07.10 и узнаётся здесь РАНЬШЕ, чем его начнут отдавать: иначе
 #: первый же ответ с ним закрыл бы выдачу как «не определено» и залил лог.
 UNCLASSIFIED = "unclassified"
+
+
+def unenforced(
+    *,
+    has_canon: bool,
+    scope: str | None,
+    family: str | None,
+    legal_class: str | None,
+    required_practitioner_class: str | None,
+) -> frozenset[AdmissionCheck]:
+    """Какие проверки допуска у этой строки сейчас НЕ ДЕЙСТВУЮТ (DRF-2888).
+
+    Правило целиком у каталога — :func:`services.body_care_scope.unenforced_checks`:
+    проверка «не действует», когда её ответ при включённом
+    ``BODY_CARE_UNCLASSIFIED_FAIL_CLOSED`` был бы другим. Здесь только перевод
+    его литералов в проверки резолвера; своей копии правила нет. Флаг
+    читается каталогом в момент вызова.
+
+    Литерал, которого резолвер не знает, пропускается с ERROR: исход
+    «не действует» на допуск не влияет, а уронить из-за него полку нельзя.
+    Расхождение наборов запирает узел.
+    """
+    out: set[AdmissionCheck] = set()
+    for literal in body_care_scope.unenforced_checks(
+        has_canon=has_canon, scope=scope, family=family, legal_class=legal_class,
+        required_practitioner_class=required_practitioner_class,
+    ):
+        check = UNENFORCED_LITERALS.get(literal)
+        if check is None:
+            logger.error("recommendation.source unenforced_check_unknown literal=%r", literal)
+            continue
+        out.add(check)
+    return frozenset(out)
 
 
 def _log_id(pk) -> str:
@@ -224,6 +263,87 @@ _QUALIFICATION_GATE = {
 }
 
 
+@dataclass(frozen=True)
+class LegalAnswers:
+    """Ответы трёх чтений §7A про одну пару мастер × строка — каждое отдельно.
+
+    До DRF-2888 наружу уходило только первое несошедшееся
+    (:func:`legal_gates`); остальные ответы выбрасывались, и «что закрывает
+    каждая проверка отдельно» спросить было нечем.
+    """
+
+    license: LegalGate
+    #: ``None`` — вопрос про само предложение, мастера нет: адрес не спрашивается.
+    address: LegalGate | None
+    #: ``None`` — у строки нет канона или нет мастера: квалификацию спрашивать нечем.
+    qualification: LegalGate | None
+    #: Есть ли у строки канон: без него класса нет, и это отказ, а не обход.
+    has_canon: bool = True
+    #: Сырые литералы каталога — различают «проверено» и «не требуется».
+    license_raw: str | None = None
+    address_raw: str | None = None
+    qualification_raw: str | None = None
+
+    @property
+    def first_unmet(self) -> LegalGate:
+        """Первое несошедшееся в порядке лицензия → адрес → квалификация.
+
+        У строки без канона класса нет — на месте квалификации стоит
+        ``CLASS_UNCONFIRMED``: отсутствие канона проверку не обходит.
+        """
+        last = self.qualification if self.has_canon else LegalGate.CLASS_UNCONFIRMED
+        asked = (g for g in (self.license, self.address, last) if g is not None)
+        return next((g for g in asked if g is not LegalGate.CLEARED), LegalGate.CLEARED)
+
+
+_ALL_UNDETERMINED = LegalAnswers(LegalGate.UNDETERMINED, LegalGate.UNDETERMINED, LegalGate.UNDETERMINED)
+
+
+def legal_answers(rows) -> dict[tuple[UUID, UUID], LegalAnswers]:
+    """Ответ КАЖДОГО из трёх чтений §7A по парам мастер × строка (DRF-2888).
+
+    Те же три пакетных чтения, что у :func:`legal_gates`, и те же правила
+    перевода — но без свёртки в первое несошедшееся. Сбой чтения даёт
+    ``UNDETERMINED`` по всем трём и ERROR в лог.
+    """
+    rows = list(rows)
+    if not rows:
+        return {}
+    pairs = {(specialist_id, salon_id) for specialist_id, salon_id, _ in rows}
+    # Мастер ``None`` — вопрос про само предложение (перепись, шаг плана):
+    # лицензия спрашивается, адрес и квалификация — нет.
+    with_master = {pair for pair in pairs if pair[0] is not None}
+    try:
+        licenses = license_states({salon_id for _, salon_id in pairs})
+        addresses = address_states(with_master)
+        qualifications = qualification_states({
+            (specialist_id, template_id) for specialist_id, _, template_id in rows
+            if template_id is not None and specialist_id is not None
+        })
+    except Exception:  # noqa: BLE001 — сбой чтения закрывает строки, а не роняет полку
+        logger.exception("recommendation.source legal_gates_failed rows=%d", len(pairs))
+        return dict.fromkeys(pairs, _ALL_UNDETERMINED)
+
+    out: dict[tuple[UUID, UUID], LegalAnswers] = {}
+    for specialist_id, salon_id, template_id in rows:
+        has_master, has_canon = specialist_id is not None, template_id is not None
+        license_raw = licenses.get(salon_id)
+        address_raw = addresses.get((specialist_id, salon_id)) if has_master else None
+        qualification = qualifications.get((specialist_id, template_id)) if has_master and has_canon else None
+        qualification_raw = getattr(qualification, "state", None)
+        out[(specialist_id, salon_id)] = LegalAnswers(
+            license=_LICENSE_GATE.get(license_raw, LegalGate.UNDETERMINED),
+            address=_ADDRESS_GATE.get(address_raw, LegalGate.UNDETERMINED) if has_master else None,
+            qualification=(
+                _QUALIFICATION_GATE.get(qualification_raw, LegalGate.UNDETERMINED)
+                if has_master and has_canon else None
+            ),
+            has_canon=has_canon,
+            license_raw=license_raw, address_raw=address_raw, qualification_raw=qualification_raw,
+        )
+    return out
+
+
 def legal_gates(rows) -> dict[tuple[UUID, UUID], LegalGate]:
     """Юридические условия §7A строк пула — CAT-10-ext (DRF-2843).
 
@@ -242,42 +362,22 @@ def legal_gates(rows) -> dict[tuple[UUID, UUID], LegalGate]:
     Ключа нет, незнакомое значение, сбой чтения — ``UNDETERMINED`` и ERROR
     в лог: строка закрыта, полка не падает.
     """
-    rows = list(rows)
-    if not rows:
-        return {}
-    pairs = {(specialist_id, salon_id) for specialist_id, salon_id, _ in rows}
-    try:
-        licenses = license_states({salon_id for _, salon_id in pairs})
-        addresses = address_states(pairs)
-        qualifications = qualification_states(
-            {(specialist_id, template_id) for specialist_id, _, template_id in rows if template_id is not None}
-        )
-    except Exception:  # noqa: BLE001 — сбой чтения закрывает строки, а не роняет полку
-        logger.exception("recommendation.source legal_gates_failed rows=%d", len(pairs))
-        return dict.fromkeys(pairs, LegalGate.UNDETERMINED)
+    return _first_unmet_legal(legal_answers(rows))
 
-    out: dict[tuple[UUID, UUID], LegalGate] = {}
-    undetermined: list[str] = []
-    for specialist_id, salon_id, template_id in rows:
-        answers = [
-            _LICENSE_GATE.get(licenses.get(salon_id), LegalGate.UNDETERMINED),
-            _ADDRESS_GATE.get(addresses.get((specialist_id, salon_id)), LegalGate.UNDETERMINED),
-        ]
-        if template_id is None:
-            answers.append(LegalGate.CLASS_UNCONFIRMED)
-        else:
-            qualification = qualifications.get((specialist_id, template_id))
-            answers.append(
-                _QUALIFICATION_GATE.get(getattr(qualification, "state", None), LegalGate.UNDETERMINED)
-            )
-        gate = next((a for a in answers if a is not LegalGate.CLEARED), LegalGate.CLEARED)
-        out[(specialist_id, salon_id)] = gate
-        if gate is LegalGate.UNDETERMINED:
-            undetermined.append(f"{_log_id(specialist_id)}:{_log_id(salon_id)}")
-    if undetermined:
+
+def _first_unmet_legal(answers: dict[tuple[UUID, UUID], LegalAnswers]) -> dict[tuple[UUID, UUID], LegalGate]:
+    """Свёртка ответов §7A в первое несошедшееся — с ERROR про неопределённое."""
+    out = {pair: answer.first_unmet for pair, answer in answers.items()}
+    undetermined = sorted(
+        f"{_log_id(specialist_id)}:{_log_id(salon_id)}"
+        for (specialist_id, salon_id), gate in out.items() if gate is LegalGate.UNDETERMINED
+    )
+    # Сбой чтения уже записан исключением в `legal_answers`; здесь — ответы,
+    # которые пришли, но не читаются.
+    if undetermined and any(a is not _ALL_UNDETERMINED for a in answers.values()):
         logger.error(
             "recommendation.source legal_gates_undetermined rows=%d closed=%s",
-            len(undetermined), ",".join(sorted(undetermined)),
+            len(undetermined), ",".join(undetermined),
         )
     return out
 
@@ -391,9 +491,12 @@ class SpecialistCandidateSource:
         # CAT-10: готовность конфигурации ВСЕХ строк пула одним чтением.
         readiness = config_readiness(link.salon_service_id for link in links)
         # CAT-10-ext: юридические условия §7A всех пар мастер × строка — так же.
-        legal = legal_gates(
+        # Ответ каждого чтения §7A отдельно (DRF-2888); свёрнутое значение
+        # гейта выводится из него же — второго чтения нет.
+        legal_all = legal_answers(
             (link.specialist_id, link.salon_service_id, link.salon_service.template_id) for link in links
         )
+        legal = _first_unmet_legal(legal_all)
 
         out: dict[UUID, _MappingFacts] = {}
         for link in links:
@@ -413,6 +516,15 @@ class SpecialistCandidateSource:
             # Строка, про которую шов не ответил, закрыта, а не «вне гейта».
             facts.config_by_service[salon.id] = readiness.get(salon.id, ConfigGate.UNDETERMINED)
             facts.legal_by_service[salon.id] = legal.get((link.specialist_id, salon.id), LegalGate.UNDETERMINED)
+            facts.legal_answers_by_service[salon.id] = legal_all.get((link.specialist_id, salon.id), _ALL_UNDETERMINED)
+            canon = salon.template if salon.template_id is not None else None
+            facts.unenforced_by_service[salon.id] = unenforced(
+                has_canon=canon is not None,
+                scope=getattr(canon, "body_care_scope", None),
+                family=getattr(canon, "service_family", None),
+                legal_class=getattr(canon, "legal_service_class", None),
+                required_practitioner_class=getattr(canon, "required_practitioner_class", None),
+            )
             if salon.template_id is not None:
                 facts.template_by_service[salon.id] = salon.template_id
             if salon.template_id is not None:
@@ -508,6 +620,10 @@ class SpecialistCandidateSource:
                 has_offer=has_offer, matched_service_ref=matched_service_id,
             ),
             # CAT-10: готовность ТОЙ строки, чей статус связи стоит выше.
+            # DRF-2888: ответ каждой проверки допуска про ту же строку.
+            admission=mapping.admission(
+                has_offer=has_offer, matched_service_ref=matched_service_id,
+            ),
             # DRF-2793: выведен ли канон той же строки.
             canon_retired=mapping.canon_retired(
                 has_offer=has_offer, matched_service_ref=matched_service_id,
@@ -700,6 +816,10 @@ class _MappingFacts:
         self.config_by_service: dict[UUID, ConfigGate] = {}
         #: `SalonService.id` строк, чей канон выведен из оборота (DRF-2793).
         self.retired_services: set[UUID] = set()
+        #: `SalonService.id` → ответы трёх чтений §7A порознь (DRF-2888).
+        self.legal_answers_by_service: dict[UUID, LegalAnswers] = {}
+        #: `SalonService.id` → проверки, которые у строки сейчас не действуют.
+        self.unenforced_by_service: dict[UUID, frozenset[AdmissionCheck]] = {}
         #: `SalonService.id` → юридические условия §7A этой строки для ЭТОГО
         #: мастера (CAT-10-ext), как их отдал :func:`legal_gates`. Легаси-строки
         #: здесь нет: канона у неё не бывает.
@@ -783,6 +903,38 @@ class _MappingFacts:
         if row is None or row not in self.status_by_service:
             return None
         return row in self.retired_services
+
+    def admission(
+        self,
+        *,
+        has_offer: bool | None = None,
+        matched_service_ref: UUID | None = None,
+    ) -> tuple[CheckAnswer, ...] | None:
+        """Ответ каждой проверки допуска про ту же строку, что отвечает в :meth:`config_gate`.
+
+        Собирается из тех же значений, что и свёрнутые гейты рядом, — второго
+        чтения и второго правила нет. ``None`` — отвечающей строки нет или у
+        неё нет канонической связи (легаси): тогда S1 судит по статусу связи.
+        """
+        row = self._answering_row(has_offer=has_offer, matched_service_ref=matched_service_ref)
+        if row is None or row not in self.status_by_service:
+            return None
+        legal = self.legal_answers_by_service.get(row, _ALL_UNDETERMINED)
+        has_canon = row in self.template_by_service
+        return build_answers(
+            mapping_status=self._as_status(self.status_by_service.get(row)),
+            canon_retired=(row in self.retired_services) if has_canon else None,
+            config_gate=self.config_by_service.get(row, ConfigGate.UNDETERMINED),
+            license_gate=legal.license,
+            address_gate=legal.address,
+            qualification_gate=legal.qualification,
+            has_canon=has_canon,
+            license_verified=legal.license_raw == body_care_license.VERIFIED,
+            address_verified=legal.address_raw == body_care_address.VERIFIED,
+            qualification_verified=legal.qualification_raw == body_care_qualification.VERIFIED,
+            address_waits_for_license=legal.address_raw == body_care_address.NO_COVERING_LICENSE,
+            unenforced=self.unenforced_by_service.get(row, ()),
+        )
 
     def legal_gate(
         self,
