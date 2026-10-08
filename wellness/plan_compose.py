@@ -15,7 +15,9 @@
 Что собирается:
 
 * шаг на каждую способность, о которой ПОДТВЕРЖДЕНО, что она помогает цели
-  человека (``services.capabilities.capability_keys_helping_goal``);
+  человека (``services.capabilities.procedures_by_capability_helping_goal``);
+* план — только когда способности нельзя получить одной процедурой: иначе
+  потребность сводится к одной услуге (§6.4), и ответ — ``PLAN_NOT_JUSTIFIED``;
 * роль — всегда ``OPTIONAL``: связь говорит «помогает», а не «без неё цель
   недостижима»; знания об обязательности нет, а ложный ``CORE`` навязывает
   (§5.1–§5.2). ``CORE`` не присваивается никому;
@@ -42,7 +44,7 @@ from django.utils import timezone
 
 from goals.models import ClientGoal
 from recommendation.api import REASON_CODE_REGISTRY_VERSION, RESOLVER_SPEC_VERSION
-from services.capabilities import capability_keys_helping_goal
+from services.capabilities import procedures_by_capability_helping_goal
 
 from .plan_engine import ContractViolation, PlanEngineDisabled, plan_engine_enabled
 from .plan_safety import SAFETY_BLOCKING, SAFETY_STATES
@@ -86,8 +88,14 @@ class Outcome:
     NO_GOAL = "NO_GOAL"
     #: Подтверждённых способностей под цель нет — честное «плана нет» (§6.2).
     NO_CURATED_DECOMPOSITION = "NO_CURATED_DECOMPOSITION"
-    #: §1.2, §6.4: одной способности план не нужен — это обычная рекомендация.
+    #: §1.2, §6.4: потребность сводится к одной услуге — плана не нужно, это
+    #: обычная рекомендация. ``details.reason`` называет, почему именно.
     PLAN_NOT_JUSTIFIED = "PLAN_NOT_JUSTIFIED"
+
+
+#: Причины ``PLAN_NOT_JUSTIFIED``.
+NOT_JUSTIFIED_SINGLE_CAPABILITY = "single_capability"
+NOT_JUSTIFIED_ONE_PROCEDURE_COVERS_ALL = "one_procedure_covers_all"
 
 
 @dataclass(frozen=True)
@@ -240,6 +248,26 @@ def _nothing(outcome: str, request: ComposeRequest | None = None, **details: Any
     }
 
 
+def _not_justified_reason(capability_refs: list[str], procedures: dict[str, frozenset]) -> str | None:
+    """Почему из этих способностей плана не выходит; ``None`` — выходит.
+
+    Контракт §6.4 судит не о числе способностей, а о том, **сводится ли
+    потребность к одной услуге**. Две способности, которые несёт одна и та же
+    процедура, закрываются одним визитом: два массажа под цель — это два
+    варианта одного шага, а не два шага. План оправдан, только когда ни одна
+    процедура не несёт все его способности сразу.
+
+    Считать разные ключи вместо этого — заменить правило удобным числом: под
+    такое условие начинают подбирать «вторую способность», и план строится
+    ради формы (решение владельца 07.10).
+    """
+    if len(capability_refs) < 2:
+        return NOT_JUSTIFIED_SINGLE_CAPABILITY
+    if frozenset.intersection(*(procedures[ref] for ref in capability_refs)):
+        return NOT_JUSTIFIED_ONE_PROCEDURE_COVERS_ALL
+    return None
+
+
 def compose_plan(user, request: ComposeRequest) -> dict[str, Any]:
     """Собрать эфемерный ``PlanDecision`` по действующей цели человека."""
     if not plan_engine_enabled():
@@ -251,14 +279,16 @@ def compose_plan(user, request: ComposeRequest) -> dict[str, Any]:
     if goal is None or not goal.goal_key:
         return _nothing(Outcome.NO_GOAL, request, reason="no_active_goal" if goal is None else "goal_has_no_key")
 
-    curated = capability_keys_helping_goal(goal.goal_key)
-    if not curated:
+    procedures = procedures_by_capability_helping_goal(goal.goal_key)
+    if not procedures:
         return _nothing(Outcome.NO_CURATED_DECOMPOSITION, request, goal_key=goal.goal_key)
-    capability_refs = [c for c in curated if c not in request.excluded_capability_refs]
-    if len(capability_refs) < 2:
-        # Одна способность (или человек убрал остальные) — координировать
-        # нечего: «задача не моя», а не ошибка (§6.4).
-        return _nothing(Outcome.PLAN_NOT_JUSTIFIED, request, goal_key=goal.goal_key)
+    # По алфавиту ключа — ради воспроизводимости; это не порядок исполнения.
+    capability_refs = [c for c in sorted(procedures) if c not in request.excluded_capability_refs]
+    not_justified = _not_justified_reason(capability_refs, procedures)
+    if not_justified is not None:
+        # «Задача не моя», а не ошибка (§6.4): потребность уходит обычной
+        # рекомендации.
+        return _nothing(Outcome.PLAN_NOT_JUSTIFIED, request, goal_key=goal.goal_key, reason=not_justified)
 
     policy_versions = {
         "plan_spec_version": PLAN_SPEC_VERSION,

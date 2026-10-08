@@ -150,6 +150,32 @@ def capability_keys_helping_goal(goal_key: str, *, now: datetime | None = None) 
     )
 
 
+def procedures_by_capability_helping_goal(goal_key: str, *, now: datetime | None = None) -> dict[str, frozenset]:
+    """Ключ возможности → процедуры (шаблоны), которые её несут, — под эту цель.
+
+    DRF-2871: сборке плана нужно знать не только КАКИЕ способности помогают
+    цели, но и можно ли получить их все ОДНОЙ процедурой: тогда потребность
+    сводится к одной услуге, и плана не нужно (контракт Plan Engine §6.4).
+    Правило чтения то же, что у :func:`capability_keys_helping_goal`: оба
+    утверждения подтверждены, поддержаны и не истекли, цель активна.
+    """
+    now = now or timezone.now()
+    out: dict[str, set] = {}
+    for key, template_id in CapabilityGoalLink.objects.filter(
+        _client_facing_q(now),
+        _client_facing_q(now, prefix="capability__"),
+        goal__key=goal_key,
+        goal__is_active=True,
+    ).values_list("capability__key", "capability__templates"):
+        # Запись общего словаря привязана к нескольким процедурам (DRF-2743):
+        # строка выборки — пара «ключ, процедура». Привязка своего статуса не
+        # имеет — она часть содержания подтверждённой записи.
+        carriers = out.setdefault(key, set())
+        if template_id is not None:
+            carriers.add(template_id)
+    return {key: frozenset(templates) for key, templates in out.items()}
+
+
 class LabelState(str, Enum):
     #: У ключа ровно одна подтверждённая формулировка для человека.
     LABELLED = "labelled"
@@ -218,5 +244,6 @@ __all__ = [
     "capability_labels",
     "client_facing_capabilities",
     "client_facing_goal_links",
+    "procedures_by_capability_helping_goal",
     "template_ids_helping_goal",
 ]
