@@ -212,28 +212,41 @@ class TestForgetAllPayload:
         context = resp.data["data"]["context"]
         assert not any(context.values()), f"still in the prompt source: {context}"
 
-    def test_price_cannot_be_cleared_through_the_contract_at_all(self, user, ctx):
-        """Still true after DRF-1367, and still the reason the verb exists.
+    def test_one_field_can_be_cleared_through_the_contract(self, user, ctx):
+        """INVERTED by DRF-2886. Until it, a price had no honest clear value on
+        the PATCH contract: ``null`` was rejected by the serializer's JSONField
+        and ``""`` blew up the Decimal column — so after «забудь про бюджет»
+        the price stayed in the profile and kept reaching the model.
 
-        ``null`` is rejected by the serializer's JSONField and ``""`` blows up
-        the Decimal column. There is no honest clear value for a price field on
-        the PATCH contract — which is why erasure is not a PATCH. The bridge
-        must call DELETE (see ``test_the_erase_verb_clears_the_price_...``),
-        not learn a better encoding.
+        ``null`` now means «clear this field»: it goes back to the column's own
+        default, by the same table the client app's per-field reset uses.
+        ``""`` is still not a price — but it is refused by name, not by a crash.
+
+        What did NOT change: «забудь всё» is still the DELETE verb below. One
+        field cleared by ``null`` is not an erasure of the profile, and the
+        bridge must not rebuild «forget all» out of twelve nulls — the verb
+        asks the model for its fields, a list of nulls would drift from it.
         """
         null_resp = _internal().patch(
             _url(user.id),
             {"updates": [{"field": "price_range_max", "value": None, "source": "explicit"}]},
             format="json",
         )
-        assert null_resp.status_code == 400
+        assert null_resp.status_code == 200
+        assert null_resp.data["data"]["context"]["price_range_max"] is None
+        ctx.refresh_from_db()
+        assert ctx.price_range_max is None
+        # Положительная пара: соседнее поле не тронуто — это не «забудь всё».
+        assert ctx.price_range_min is not None
 
-        with pytest.raises(Exception):  # noqa: B017,PT011 — the column itself refuses
-            _internal().patch(
-                _url(user.id),
-                {"updates": [{"field": "price_range_max", "value": "", "source": "explicit"}]},
-                format="json",
-            )
+        empty_resp = _internal().patch(
+            _url(user.id),
+            {"updates": [{"field": "price_range_min", "value": "", "source": "explicit"}]},
+            format="json",
+        )
+        assert empty_resp.status_code == 400
+        ctx.refresh_from_db()
+        assert ctx.price_range_min is not None
 
     def test_the_internal_contract_has_an_erase_verb(self, user, ctx):
         """INVERTED by DRF-1367. The bot used to have no way to say «wipe the
@@ -250,9 +263,9 @@ class TestForgetAllPayload:
     def test_the_erase_verb_clears_the_price_the_contract_cannot(self, user, ctx):
         """The sharpest edge of P0-2, closed.
 
-        ``price_range_max`` has no honest clear value on the PATCH contract
-        (see the test above: ``null`` → 400, ``""`` → Decimal blows up). The
-        verb never encodes a value at all — it asks the column for its own
+        Before DRF-2886 ``price_range_max`` had no honest clear value on the
+        PATCH contract at all (``null`` → 400, ``""`` → Decimal blew up). The
+        verb never encodes a value — it asks the column for its own
         default — so the field the bridge could not touch is gone.
         """
         _internal().delete(_url(user.id))
