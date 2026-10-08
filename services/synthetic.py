@@ -9,7 +9,7 @@
 ``CapabilityGoalLink``), у канона (``ServiceTemplate``) и у услуги салона
 (``SalonService``). Предложение мастера своего поля не имеет: читается с
 услуги салона. У салона и мастера своей пометки нет — тестовым салоном
-служит существующий демо-салон (``Tenant.is_demo``), он уже скрыт от
+служит существующий демо-салон (признак демо у ``Tenant``), он уже скрыт от
 обычного клиента во всех пулах.
 
 **Почему синтетика не станет настоящей — замки базы (миграция 0052).**
@@ -43,9 +43,11 @@
 
 1. настройка ``SYNTHETIC_TEST_DATA_ENABLED`` — флаг стенда;
 2. пользователь каталога входит в ``SYNTHETIC_TEST_SUBJECT_IDS``;
-3. у пользователя стоит ``is_test_persona`` — без него демо-салон ему не
-   показывает видимость (``users.sellable``), и синтетика «не работала бы»
-   молча; так отказ стоит в одном месте.
+3. пользователь — тестовая персона. Без этого демо-салон ему не показывает
+   видимость, и синтетика «не работала бы» молча; так отказ стоит в одном
+   месте. Признак читается через его владельца — функцию
+   ``is_test_persona()`` из ``users.sellable``, — а не напрямую: копий
+   правила видимости демо быть не должно (сторож DRF-2420).
 
 Читатели принимают только этот объект. Голое ``True`` — ``TypeError``:
 значение, приехавшее из тела запроса, разрешением стать не может по
@@ -129,7 +131,9 @@ def grant_for(user) -> SyntheticGrant | None:
     """
     if user is None or not getattr(user, "is_authenticated", False):
         return None
-    if not synthetic_data_enabled() or not getattr(user, "is_test_persona", False):
+    from users.sellable import is_test_persona
+
+    if not synthetic_data_enabled() or not is_test_persona(user):
         return None
     subject_id = str(user.pk)
     if not _subject_is_listed(subject_id):
