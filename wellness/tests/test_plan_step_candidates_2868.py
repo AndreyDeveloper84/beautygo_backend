@@ -419,3 +419,73 @@ class TestTheSameGatesAsTheStepItself:
         resp = _candidates(_save(goal), **over)
         assert resp.status_code == 400, resp.content
         assert resp.json()["error"]["details"]["reason"] == reason
+
+
+class TestThePersonIsTheViewer:
+    def test_a_test_persona_gets_the_offers_of_a_demo_salon(self, goal, owner, category, curator) -> None:
+        """Подбор идёт в видимости ЭТОГО человека: демо-салон обычному клиенту
+        не виден (узел выше), тестовой личности — виден."""
+        demo = Tenant.objects.create(slug="demo-2868-persona", name="Демо-салон", is_active=True, is_demo=True)
+        _, offering = _ready_offer(demo, category, curator, name="Массаж в демо", suffix="71")
+        _can([offering.template], curator)
+        User.objects.filter(pk=owner.pk).update(is_test_persona=True)
+        data = _found(_save(goal))
+        assert [c["tenant_offer_ref"] for c in data["candidates"]] == [str(offering.pk)]
+        assert data["nothing_because"] is None
+
+
+class TestTheDurableRestrictionOfThePerson:
+    """Длительное ограничение S1 живёт у бота и переживает разговор. Пока оно
+    стоит, действия, ведущие к услуге и записи, закрыты — зарегистрированная
+    политика ограничения, которую план раньше не читал вовсе. Сборку,
+    сохранение и просмотр оно не закрывает: область — по причине."""
+
+    @pytest.mark.parametrize("state, reason", [("open", "s1_restriction_open"), ("stop", "s1_restriction_stop")])
+    def test_candidates_are_closed_under_their_own_names(self, goal, massage, state, reason) -> None:
+        resp = _candidates(_save(goal), s1_restriction=state)
+        assert resp.status_code == 409, resp.content
+        assert resp.json()["error"]["code"] == "PLAN_STEP_NOT_EXECUTABLE"
+        assert resp.json()["error"]["details"] == {"reason": reason}
+
+    @pytest.mark.parametrize("state, reason", [("open", "s1_restriction_open"), ("stop", "s1_restriction_stop")])
+    def test_choosing_an_offer_is_closed_and_nothing_is_written(self, goal, massage, state, reason) -> None:
+        _, offering = massage
+        plan = _save(goal)
+        search = _found(plan)["search_id"]
+        resp = _choose(plan, offering, search, s1_restriction=state)
+        assert resp.status_code == 409, resp.content
+        assert resp.json()["error"]["details"] == {"reason": reason}
+        assert not PlanStepResolution.objects.exists()
+
+    @pytest.mark.parametrize("value", [None, "", "NONE", "cleared", True])
+    def test_silence_about_the_restriction_is_not_its_absence(self, goal, massage, value) -> None:
+        body = {"plan_id": str(_save(goal).id), "step_id": "s1", **SAFETY}
+        if value is None:
+            body.pop("s1_restriction")
+        else:
+            body["s1_restriction"] = value
+        resp = _api().post(CANDIDATES_URL, body, format="json")
+        assert resp.status_code == 400, resp.content
+        assert resp.json()["error"]["details"]["reason"] == "s1_restriction_invalid"
+
+    def test_a_blocking_turn_verdict_is_named_first(self, goal, massage) -> None:
+        resp = _candidates(_save(goal), safety_state="STOP", s1_restriction="stop")
+        assert resp.json()["error"]["details"] == {"reason": "safety_blocked"}
+
+    @pytest.mark.parametrize("state", ["open", "stop"])
+    def test_saving_and_reading_the_plan_are_not_closed_by_it(self, goal, state) -> None:
+        """«Не зависимые действия»: человек с ограничением план сохранит и
+        увидит — но ни один шаг до услуги не доведёт."""
+        from wellness.tests.test_plan_engine_steps_2868 import _command, _step
+
+        saved = _api().post(PLAN_URL, {**_command(goal, [_step("s1")]), "s1_restriction": state}, format="json")
+        assert saved.status_code == 201, saved.content
+        assert _api().get(PLAN_URL).json()["data"]["plan"]["plan_id"] == saved.json()["data"]["plan"]["plan_id"]
+
+    def test_once_the_bot_says_none_the_step_goes_on(self, goal, massage) -> None:
+        """Каталог ограничение не хранит и не снимает — читает присланное."""
+        _, offering = massage
+        plan = _save(goal)
+        assert _candidates(plan, s1_restriction="open").status_code == 409
+        search = _found(plan)["search_id"]
+        assert _choose(plan, offering, search).status_code == 201

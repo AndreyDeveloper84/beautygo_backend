@@ -61,7 +61,11 @@ POLICY_VERSIONS = {
 }
 DECISION = "resolver-decision-1"
 #: DRF-2877 — каждое действие с шагом несёт безопасность хода.
-SAFETY = {"safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4}
+SAFETY = {
+    "safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4,
+    # DRF-2868 — длительное ограничение S1: действия, ведущие к услуге и записи, обязаны его назвать.
+    "s1_restriction": "none",
+}
 
 
 @pytest.fixture(autouse=True)

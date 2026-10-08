@@ -55,7 +55,10 @@ PASSING = ["NORMAL", "CLARIFY", "CAUTION"]
 
 
 def _safety(state: str) -> dict:
-    return {"safety_state": state, "safety_policy_version": "pre_check-abc", "evaluated_at_revision": 9}
+    return {
+        "safety_state": state, "safety_policy_version": "pre_check-abc", "evaluated_at_revision": 9,
+        "s1_restriction": "none",
+    }
 
 
 def _offer_body(canon, offer) -> dict:

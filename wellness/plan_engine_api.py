@@ -67,7 +67,7 @@ from .plan_restrictions import (
     open_restriction,
     parse_restriction,
 )
-from .plan_safety import SafetyInputError, parse_safety_input
+from .plan_safety import SafetyInputError, parse_safety_input, parse_step_safety_input
 from .plan_engine_steps import (
     AppointmentNotFound,
     BookingLinkConflict,
@@ -370,7 +370,7 @@ class PlanStepResolutionView(APIView):
         if not isinstance(step_id, str) or not step_id.strip():
             return error_response("VALIDATION_ERROR", "step_id is required")
         try:
-            safety = parse_safety_input(data)
+            safety = parse_step_safety_input(data)
         except SafetyInputError as exc:
             return error_response(
                 "PLAN_CONTRACT_VIOLATION",
@@ -432,7 +432,7 @@ class PlanStepCandidatesView(APIView):
         data = request.data if isinstance(request.data, dict) else {}
         try:
             plan_id = _uuid_field(data, "plan_id")
-            safety = parse_safety_input(data)
+            safety = parse_step_safety_input(data)
         except SafetyInputError as exc:  # раньше ValueError: SafetyInputError — его род
             return error_response("PLAN_CONTRACT_VIOLATION", "Запрос не конформен", details={"reason": exc.reason})
         except ValueError as exc:
@@ -478,7 +478,7 @@ class PlanStepBookingView(APIView):
         if not isinstance(step_id, str) or not step_id.strip():
             return error_response("VALIDATION_ERROR", "step_id is required")
         try:
-            safety = parse_safety_input(data)
+            safety = parse_step_safety_input(data)
         except SafetyInputError as exc:
             return error_response(
                 "PLAN_CONTRACT_VIOLATION",
