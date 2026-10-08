@@ -80,11 +80,6 @@ class Outcome:
     """Исход сборки. ``decision`` есть только у ``PLAN``."""
 
     PLAN = "PLAN"
-    #: DRF-2877 — вердикт хода «уточнить»: причина о человеке, область — весь
-    #: план (решение владельца 08.10: ограничение затрагивает всю сборку, если
-    #: относится ко всему плану). Не отказ, а «сначала вопрос»: отдельный исход,
-    #: чтобы вызывающий задал вопрос, а не показал запрет.
-    CLARIFY_PENDING = "CLARIFY_PENDING"
     #: §12: вход безопасности STOP / UNKNOWN.
     SAFETY_BLOCKED = "SAFETY_BLOCKED"
     #: Нет действующей цели с курируемым ключом — декомпозировать нечего.
@@ -251,10 +246,6 @@ def compose_plan(user, request: ComposeRequest) -> dict[str, Any]:
         raise PlanEngineDisabled()
     if request.safety_state in SAFETY_BLOCKING:
         return _nothing(Outcome.SAFETY_BLOCKED, request)
-    if request.safety_state == "CLARIFY":
-        # Решения, собранного при незакрытом вопросе, не существует — иначе его
-        # можно было бы сохранить ходом с другим вердиктом, минуя вопрос.
-        return _nothing(Outcome.CLARIFY_PENDING, request)
 
     goal = ClientGoal.objects.filter(client=user, state=ClientGoal.State.ACTIVE).first()
     if goal is None or not goal.goal_key:

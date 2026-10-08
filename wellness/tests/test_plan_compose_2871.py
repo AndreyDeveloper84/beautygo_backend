@@ -394,14 +394,7 @@ class TestNoPlanOutcomes:
         data = _compose(_body(safety_state=state))
         assert (data["outcome"], data["decision"], data["safety_state"]) == ("SAFETY_BLOCKED", None, state)
 
-    def test_clarify_builds_nothing_and_says_a_question_is_pending(self, goal, knowledge) -> None:
-        """DRF-2877: причина о человеке — область «весь план». Решения,
-        собранного при незакрытом вопросе, не существует."""
-        data = _compose(_body(safety_state="CLARIFY"))
-        assert (data["outcome"], data["decision"], data["safety_state"]) == ("CLARIFY_PENDING", None, "CLARIFY")
-        assert data["details"] == {}
-
-    @pytest.mark.parametrize("state", ["NORMAL", "CAUTION"])
+    @pytest.mark.parametrize("state", ["NORMAL", "CLARIFY", "CAUTION"])
     def test_non_blocking_safety_is_carried_on_the_decision(self, goal, knowledge, state) -> None:
         data = _compose(_body(safety_state=state))
         assert data["outcome"] == "PLAN" and data["decision"]["safety_state"] == state

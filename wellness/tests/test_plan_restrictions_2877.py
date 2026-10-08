@@ -254,9 +254,6 @@ class TestAnOpenRestrictionBlocksStepActionsAndNothingElse:
         сообщения. Действие с НОРМАЛЬНЫМ вердиктом хода по-прежнему отказано."""
         plan = _save(goal)
         _open(plan, safety_state="CLARIFY")
-        waiting = _resolve(plan, "s1", level="OFFER", canonical_service_ref=str(canon.id),
-                           tenant_offer_ref=str(offer.id), safety_state="CLARIFY")
-        assert waiting.json()["error"]["details"] == {"reason": "clarify_pending"}
         for _ in range(2):
             resp = _resolve(plan, "s1", level="OFFER", canonical_service_ref=str(canon.id),
                             tenant_offer_ref=str(offer.id))  # SAFETY несёт NORMAL

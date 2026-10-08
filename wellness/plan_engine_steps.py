@@ -152,12 +152,6 @@ def _safety_gate(safety: SafetyInput) -> None:
     есть ли он. Статус плана при этом не меняется: гейт отказывает действию."""
     if safety.blocks:
         raise StepNotExecutable("safety_blocked")
-    # DRF-2877 — «уточнить» значит «сначала вопрос»: причина о человеке, область
-    # — весь план. Отдельное имя, чтобы вызывающий задал вопрос, а не показал
-    # запрет. Сам вопрос держится ограничением плана; это пол на случай, когда
-    # вызывающий его не открыл.
-    if safety.state == "CLARIFY":
-        raise StepNotExecutable("clarify_pending")
 
 
 def _locked_plan(user, plan_id: UUID) -> Plan:
