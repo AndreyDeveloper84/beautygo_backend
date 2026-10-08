@@ -52,6 +52,23 @@ from .models import (
 )
 
 
+class SyntheticMarkIsNotEditable:
+    """Пометку «синтетика» в админке видно, но не поставить и не снять.
+
+    Ставит её только код сида при создании строки (``services.synthetic``).
+    Через ``disabled``, а не ``readonly_fields``: у части админок свой
+    ``get_readonly_fields``, и добавка в общий список терялась бы молча.
+    Отключённое поле формы игнорирует присланное значение.
+    """
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        field = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if field is not None and db_field.name == 'synthetic':
+            field.disabled = True
+            field.help_text = 'Синтетические тестовые данные. Ставится только при создании кодом сида.'
+        return field
+
+
 class ServiceInline(admin.TabularInline):
     model = Service
     extra = 0
@@ -209,7 +226,7 @@ class ServiceTemplateAdminForm(forms.ModelForm):
 
 
 @admin.register(ServiceTemplate)
-class ServiceTemplateAdmin(admin.ModelAdmin):
+class ServiceTemplateAdmin(SyntheticMarkIsNotEditable, admin.ModelAdmin):
     form = ServiceTemplateAdminForm
     list_display = (
         'name', 'canonical_code', 'lifecycle', 'category', 'duration_default',
@@ -599,7 +616,7 @@ class SalonServiceAdminForm(forms.ModelForm):
 
 
 @admin.register(SalonService)
-class SalonServiceAdmin(admin.ModelAdmin):
+class SalonServiceAdmin(SyntheticMarkIsNotEditable, admin.ModelAdmin):
     form = SalonServiceAdminForm
     # `mapping_status` стоит сразу за именем, а не в хвосте: разбор услуг
     # по §93 — это чтение статуса построчно, и он здесь главный столбец,
@@ -1381,7 +1398,7 @@ class _NeedsReconfirmationFilter(admin.SimpleListFilter):
         return queryset
 
 
-class _ClaimAdmin(admin.ModelAdmin):
+class _ClaimAdmin(SyntheticMarkIsNotEditable, admin.ModelAdmin):
     """Общее у двух таблиц знания: кто сохранил «подтверждено», тот и подтвердил."""
 
     readonly_fields = _CLAIM_READONLY

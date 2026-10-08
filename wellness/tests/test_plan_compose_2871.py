@@ -278,10 +278,15 @@ class TestComposes:
         # step_id не переиспользуется между решениями (§9.1).
         assert not {s["step_id"] for s in first["steps"]} & {s["step_id"] for s in second["steps"]}
 
-    def test_one_capability_on_two_procedures_is_one_step(self, goal, back, body_massage, curator, relax) -> None:
+    def test_one_capability_on_two_procedures_is_one_step(
+        self, goal, back, body_massage, category, curator, relax,
+    ) -> None:
         # Одна запись словаря у двух процедур — один шаг: свойство схемы (DRF-2743).
+        # Вторая способность — у ТРЕТЬЕЙ процедуры: иначе обе нёс бы один массаж,
+        # и плана не было бы вовсе (§6.4).
+        wrap = ServiceTemplate.objects.create(category=category, name="Обёртывание 2871")
         _capability([back, body_massage], "temporary-relaxation", curator, relax)
-        _capability(back, "muscle-tension-relief", curator, relax)
+        _capability(wrap, "muscle-tension-relief", curator, relax)
         refs = [s["capability_ref"] for s in _compose()["decision"]["steps"]]
         assert refs == ["muscle-tension-relief", "temporary-relaxation"]
 
@@ -334,14 +339,15 @@ class TestTheDecisionSavesAsIs:
     def test_partial_acceptance_is_a_recomposition_without_the_removed_capability(
         self, goal, back, body_massage, curator, relax,
     ) -> None:
-        for key in ("a-first", "b-second", "c-third"):
-            _capability(back, key, curator, relax)
+        for template, key in ((back, "a-first"), (back, "b-second"), (body_massage, "c-third")):
+            _capability(template, key, curator, relax)
         data = _compose(_body(excluded_capability_refs=["b-second"]))
         assert [s["capability_ref"] for s in data["decision"]["steps"]] == ["a-first", "c-third"]
 
     def test_removing_down_to_one_capability_is_no_longer_a_plan(self, goal, knowledge) -> None:
         data = _compose(_body(excluded_capability_refs=["temporary-relaxation"]))
         assert (data["outcome"], data["decision"]) == ("PLAN_NOT_JUSTIFIED", None)
+        assert data["details"]["reason"] == "single_capability"
 
 
 # ─── 3. что шагом не становится ──────────────────────────────────────────────
@@ -354,6 +360,9 @@ class TestOnlyConfirmedKnowledge:
     def _only_one_step_source(self) -> None:
         data = _compose()
         assert (data["outcome"], data["decision"]) == ("PLAN_NOT_JUSTIFIED", None)
+        # Именно «одна способность»: негодная стоит на ДРУГОЙ процедуре, и стань
+        # она шагом — вышел бы план, а не «одна процедура покрывает всё».
+        assert data["details"]["reason"] == "single_capability"
 
     @pytest.mark.parametrize(
         "override",
@@ -364,21 +373,23 @@ class TestOnlyConfirmedKnowledge:
         ],
     )
     @pytest.mark.parametrize("where", ["cap", "link"])
-    def test_an_unconfirmed_unsupported_or_expired_claim(self, goal, back, curator, relax, override, where) -> None:
+    def test_an_unconfirmed_unsupported_or_expired_claim(
+        self, goal, back, body_massage, curator, relax, override, where,
+    ) -> None:
         override = {k: (timezone.now() - timedelta(days=1) if v == "PAST" else v) for k, v in override.items()}
         _capability(back, "good", curator, relax)
-        _capability(back, "bad", curator, relax, **{where: override})
+        _capability(body_massage, "bad", curator, relax, **{where: override})
         self._only_one_step_source()
 
-    def test_a_capability_with_no_link_to_the_goal(self, goal, back, curator, relax) -> None:
+    def test_a_capability_with_no_link_to_the_goal(self, goal, back, body_massage, curator, relax) -> None:
         _capability(back, "good", curator, relax)
-        _capability(back, "unlinked", curator, relax, with_link=False)
+        _capability(body_massage, "unlinked", curator, relax, with_link=False)
         self._only_one_step_source()
 
-    def test_a_capability_linked_to_another_goal(self, goal, back, curator, relax) -> None:
+    def test_a_capability_linked_to_another_goal(self, goal, back, body_massage, curator, relax) -> None:
         other = GoalOption.objects.create(key="tone-2871", label="Тонус")
         _capability(back, "good", curator, relax)
-        _capability(back, "for-another-goal", curator, other)
+        _capability(body_massage, "for-another-goal", curator, other)
         self._only_one_step_source()
 
     def test_the_control_two_confirmed_capabilities_are_a_plan(self, goal, knowledge) -> None:
@@ -427,6 +438,7 @@ class TestNoPlanOutcomes:
         _capability(back, "only-one", curator, relax)
         data = _compose()
         assert (data["outcome"], data["decision"]) == ("PLAN_NOT_JUSTIFIED", None)
+        assert data["details"] == {"goal_key": goal.goal_key, "reason": "single_capability"}
 
     def test_a_strangers_goal_is_not_mine(self, goal, knowledge) -> None:
         _user(STRANGER, "+79995028712", is_proxy=True)
@@ -437,6 +449,70 @@ class TestNoPlanOutcomes:
         resp = _api().post(DECISION_URL, _body(), format="json")
         assert resp.status_code == 404
         assert resp.json()["error"]["code"] == "PLAN_ENGINE_DISABLED"
+
+
+# ─── 4a. оправданность: потребность не сводится к одной услуге (§6.4) ───────
+
+
+class TestJustifiedOnlyWhenNoSingleProcedureCoversIt:
+    """Контракт судит о том, сводится ли потребность к ОДНОЙ УСЛУГЕ, а не о
+    числе способностей (решение владельца 07.10: «один массаж может отвечать
+    обеим задачам»)."""
+
+    def _not_justified(self, reason: str) -> None:
+        data = _compose()
+        assert (data["outcome"], data["decision"]) == ("PLAN_NOT_JUSTIFIED", None)
+        assert data["details"]["reason"] == reason
+
+    def test_two_capabilities_of_one_procedure_are_one_visit_not_a_plan(self, goal, back, curator, relax) -> None:
+        _capability(back, "general-relaxation", curator, relax)
+        _capability(back, "muscle-tension-relief", curator, relax)
+        self._not_justified("one_procedure_covers_all")
+
+    def test_the_owners_case_one_massage_answers_both(self, goal, back, body_massage, curator, relax) -> None:
+        """Таблица, которую владелец не утвердил: «общее расслабление» у массажа
+        тела, «снятие напряжения» у массажа спины И у массажа тела. Два ключа,
+        две процедуры — но массаж тела несёт обе способности."""
+        _capability(body_massage, "general-relaxation", curator, relax)
+        _capability([back, body_massage], "muscle-tension-relief", curator, relax)
+        self._not_justified("one_procedure_covers_all")
+
+    @pytest.mark.parametrize("sole", ["back", "body_massage"])
+    def test_every_procedure_of_a_shared_capability_counts_as_its_carrier(
+        self, goal, back, body_massage, curator, relax, sole,
+    ) -> None:
+        """Способность словаря привязана к двум процедурам; вторую способность
+        несёт то одна из них, то другая. Обе раскладки — один визит: читатель
+        обязан отдать ВСЕ процедуры способности, а не первую попавшуюся."""
+        _capability([back, body_massage], "muscle-tension-relief", curator, relax)
+        _capability({"back": back, "body_massage": body_massage}[sole], "general-relaxation", curator, relax)
+        self._not_justified("one_procedure_covers_all")
+
+    def test_two_capabilities_no_procedure_carries_both_are_a_plan(self, goal, knowledge) -> None:
+        data = _compose()
+        assert data["outcome"] == "PLAN"
+        assert len(data["decision"]["steps"]) == 2
+
+    def test_three_capabilities_where_one_procedure_carries_two_but_not_all(
+        self, goal, back, body_massage, curator, relax,
+    ) -> None:
+        _capability(back, "a-first", curator, relax)
+        _capability(back, "b-second", curator, relax)
+        _capability(body_massage, "c-third", curator, relax)
+        data = _compose()
+        assert data["outcome"] == "PLAN"
+        assert [s["capability_ref"] for s in data["decision"]["steps"]] == ["a-first", "b-second", "c-third"]
+
+    def test_removing_a_capability_can_collapse_the_plan_into_one_visit(
+        self, goal, back, body_massage, curator, relax,
+    ) -> None:
+        """Частичное принятие: человек убрал способность, без которой остальное
+        получает одна процедура, — плана больше нет."""
+        _capability(back, "a-first", curator, relax)
+        _capability(back, "b-second", curator, relax)
+        _capability(body_massage, "c-third", curator, relax)
+        data = _compose(_body(excluded_capability_refs=["c-third"]))
+        assert (data["outcome"], data["details"]["reason"]) == ("PLAN_NOT_JUSTIFIED", "one_procedure_covers_all")
 
 
 # ─── 5. вход: форма контракта ────────────────────────────────────────────────

@@ -31,7 +31,8 @@ from enum import Enum
 from django.db.models import Q
 from django.utils import timezone
 
-from services.models import CapabilityGoalLink, ClaimEvidence, ProcedureCapability, ServiceTemplate
+from services.models import CapabilityGoalLink, ProcedureCapability, ServiceTemplate
+from services.synthetic import SyntheticGrant, knowledge_q
 
 
 class KnowledgeState(str, Enum):
@@ -47,31 +48,32 @@ class CapabilityReadout:
     capabilities: tuple[ProcedureCapability, ...] = field(default_factory=tuple)
 
 
-def _client_facing_q(now: datetime, prefix: str = "") -> Q:
+def _client_facing_q(now: datetime, prefix: str = "", *, include_synthetic: SyntheticGrant | None = None) -> Q:
     """Подтверждено, поддержано, не истекло — в базе, а не только в памяти.
 
     ``prefix`` — путь до строки с основанием (``"capability__"`` у связи):
     связь проверяет возможность ПО БАЗЕ, а не по объекту в руках вызывающего,
     который мог устареть.
+
+    ``include_synthetic`` — разрешение читать синтетику, выданное сервером
+    (:func:`services.synthetic.grant_for`), или ``None``; само правило —
+    :func:`services.synthetic.knowledge_q`. У каждой возвращённой строки
+    пометка лежит в ``.synthetic``.
     """
-    return (
-        Q(**{f"{prefix}status": ClaimEvidence.Status.APPROVED})
-        & Q(**{f"{prefix}claim_scope": ClaimEvidence.ClaimScope.SUPPORTED})
-        & (Q(**{f"{prefix}valid_until__isnull": True}) | Q(**{f"{prefix}valid_until__gt": now}))
-    )
+    return knowledge_q(now, prefix, include_synthetic=include_synthetic)
 
 
 def client_facing_capabilities(
-    template: ServiceTemplate, *, now: datetime | None = None
+    template: ServiceTemplate, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
 ) -> CapabilityReadout:
     """Возможности процедуры, которые можно сказать человеку, и явное состояние."""
     now = now or timezone.now()
     rows = list(
         # DRF-2743: запись словаря привязана к нескольким процедурам — та же
         # запись приходит для каждой из них с тем же ``claim_id``.
-        ProcedureCapability.objects.filter(_client_facing_q(now), templates=template).order_by(
-            "key"
-        )
+        ProcedureCapability.objects.filter(
+            _client_facing_q(now, include_synthetic=include_synthetic), templates=template,
+        ).order_by("key")
     )
     if not rows:
         return CapabilityReadout(state=KnowledgeState.UNKNOWN)
@@ -79,7 +81,7 @@ def client_facing_capabilities(
 
 
 def client_facing_goal_links(
-    capability: ProcedureCapability, *, now: datetime | None = None
+    capability: ProcedureCapability, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
 ) -> tuple[CapabilityGoalLink, ...]:
     """Цели, которым возможность помогает, — только если подтверждены ОБА утверждения.
 
@@ -89,8 +91,8 @@ def client_facing_goal_links(
     now = now or timezone.now()
     return tuple(
         CapabilityGoalLink.objects.filter(
-            _client_facing_q(now),
-            _client_facing_q(now, prefix="capability__"),
+            _client_facing_q(now, include_synthetic=include_synthetic),
+            _client_facing_q(now, prefix="capability__", include_synthetic=include_synthetic),
             capability_id=capability.pk,
             goal__is_active=True,
         )
@@ -99,7 +101,9 @@ def client_facing_goal_links(
     )
 
 
-def template_ids_helping_goal(goal_key: str, *, now: datetime | None = None) -> frozenset:
+def template_ids_helping_goal(
+    goal_key: str, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
+) -> frozenset:
     """Шаблоны, у которых подтверждено «процедура умеет X» И «X помогает этой цели».
 
     DRF-2789 (R0 умного ранжирования): сильнейший сигнал глубины совпадения
@@ -114,15 +118,44 @@ def template_ids_helping_goal(goal_key: str, *, now: datetime | None = None) -> 
     now = now or timezone.now()
     return frozenset(
         CapabilityGoalLink.objects.filter(
-            _client_facing_q(now),
-            _client_facing_q(now, prefix="capability__"),
+            _client_facing_q(now, include_synthetic=include_synthetic),
+            _client_facing_q(now, prefix="capability__", include_synthetic=include_synthetic),
             goal__key=goal_key,
             goal__is_active=True,
         ).values_list("capability__templates", flat=True)
     )
 
 
-def capability_keys_helping_goal(goal_key: str, *, now: datetime | None = None) -> tuple[str, ...]:
+def template_ids_with_capability(key: str, *, now: datetime | None = None) -> frozenset:
+    """Каноны, о которых подтверждено «процедура умеет это» (DRF-2915).
+
+    Вход — КЛЮЧ способности: им её называет план (см.
+    :func:`capability_keys_helping_goal`), он уникален и не меняется от правки
+    текста. Правило то же, что у :func:`client_facing_capabilities`:
+    подтверждено человеком, поддержано, не истекло; вывод системы и запрет не
+    считаются. Пустой ответ — «подтверждённого нет», а не «никто не умеет».
+
+    Отдельной функцией, потому что это точка, в которой чтение «способность
+    подтверждена» расширится на помеченные синтетические данные тестового
+    сценария (DRF-2916): расширение должно случиться здесь, а не у читателей.
+
+    Запись словаря привязана к нескольким процедурам (DRF-2743): в ответ
+    попадает каждая. Состояние самого канона (выведен из оборота) здесь не
+    судится — это вопрос допуска.
+    """
+    now = now or timezone.now()
+    return frozenset(
+        template_id
+        for template_id in ProcedureCapability.objects.filter(_client_facing_q(now), key=key).values_list(
+            "templates", flat=True
+        )
+        if template_id is not None
+    )
+
+
+def capability_keys_helping_goal(
+    goal_key: str, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
+) -> tuple[str, ...]:
     """Ключи возможностей, о которых подтверждено «X помогает этой цели».
 
     DRF-2871 (сборка плана): курируемая декомпозиция «цель → способность».
@@ -140,14 +173,40 @@ def capability_keys_helping_goal(goal_key: str, *, now: datetime | None = None) 
         sorted(
             set(
                 CapabilityGoalLink.objects.filter(
-                    _client_facing_q(now),
-                    _client_facing_q(now, prefix="capability__"),
+                    _client_facing_q(now, include_synthetic=include_synthetic),
+                    _client_facing_q(now, prefix="capability__", include_synthetic=include_synthetic),
                     goal__key=goal_key,
                     goal__is_active=True,
                 ).values_list("capability__key", flat=True)
             )
         )
     )
+
+
+def procedures_by_capability_helping_goal(goal_key: str, *, now: datetime | None = None) -> dict[str, frozenset]:
+    """Ключ возможности → процедуры (шаблоны), которые её несут, — под эту цель.
+
+    DRF-2871: сборке плана нужно знать не только КАКИЕ способности помогают
+    цели, но и можно ли получить их все ОДНОЙ процедурой: тогда потребность
+    сводится к одной услуге, и плана не нужно (контракт Plan Engine §6.4).
+    Правило чтения то же, что у :func:`capability_keys_helping_goal`: оба
+    утверждения подтверждены, поддержаны и не истекли, цель активна.
+    """
+    now = now or timezone.now()
+    out: dict[str, set] = {}
+    for key, template_id in CapabilityGoalLink.objects.filter(
+        _client_facing_q(now),
+        _client_facing_q(now, prefix="capability__"),
+        goal__key=goal_key,
+        goal__is_active=True,
+    ).values_list("capability__key", "capability__templates"):
+        # Запись общего словаря привязана к нескольким процедурам (DRF-2743):
+        # строка выборки — пара «ключ, процедура». Привязка своего статуса не
+        # имеет — она часть содержания подтверждённой записи.
+        carriers = out.setdefault(key, set())
+        if template_id is not None:
+            carriers.add(template_id)
+    return {key: frozenset(templates) for key, templates in out.items()}
 
 
 class LabelState(str, Enum):
@@ -168,9 +227,13 @@ class LabelState(str, Enum):
 class CapabilityLabel:
     state: LabelState
     label: str | None = None
+    #: Формулировка взята у синтетической возможности (services.synthetic).
+    synthetic: bool = False
 
 
-def capability_labels(keys, *, now: datetime | None = None) -> dict[str, CapabilityLabel]:
+def capability_labels(
+    keys, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
+) -> dict[str, CapabilityLabel]:
     """Формулировка для человека по ключу возможности — или явная причина, почему её нет.
 
     DRF-2871 (экран плана): у шага плана текста нет по контракту Plan Engine
@@ -190,22 +253,26 @@ def capability_labels(keys, *, now: datetime | None = None) -> dict[str, Capabil
     wanted = list(dict.fromkeys(keys))
     texts: dict[str, set[str]] = {key: set() for key in wanted}
     seen: set[str] = set()
-    for key, text in ProcedureCapability.objects.filter(_client_facing_q(now), key__in=wanted).values_list(
-        "key", "text_client"
-    ):
+    marked: set[str] = set()
+    for key, text, synthetic in ProcedureCapability.objects.filter(
+        _client_facing_q(now, include_synthetic=include_synthetic), key__in=wanted,
+    ).values_list("key", "text_client", "synthetic"):
         seen.add(key)
+        if synthetic:
+            marked.add(key)
         if text.strip():
             texts[key].add(text.strip())
     out: dict[str, CapabilityLabel] = {}
     for key in wanted:
+        synthetic = key in marked
         if key not in seen:
             out[key] = CapabilityLabel(LabelState.UNKNOWN)
         elif not texts[key]:
-            out[key] = CapabilityLabel(LabelState.NO_TEXT)
+            out[key] = CapabilityLabel(LabelState.NO_TEXT, synthetic=synthetic)
         elif len(texts[key]) > 1:
-            out[key] = CapabilityLabel(LabelState.AMBIGUOUS)
+            out[key] = CapabilityLabel(LabelState.AMBIGUOUS, synthetic=synthetic)
         else:
-            out[key] = CapabilityLabel(LabelState.LABELLED, next(iter(texts[key])))
+            out[key] = CapabilityLabel(LabelState.LABELLED, next(iter(texts[key])), synthetic=synthetic)
     return out
 
 
@@ -218,5 +285,6 @@ __all__ = [
     "capability_labels",
     "client_facing_capabilities",
     "client_facing_goal_links",
+    "procedures_by_capability_helping_goal",
     "template_ids_helping_goal",
 ]
