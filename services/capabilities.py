@@ -32,7 +32,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from services.models import CapabilityGoalLink, ProcedureCapability, ServiceTemplate
-from services.synthetic import knowledge_q
+from services.synthetic import SyntheticGrant, knowledge_q
 
 
 class KnowledgeState(str, Enum):
@@ -48,14 +48,15 @@ class CapabilityReadout:
     capabilities: tuple[ProcedureCapability, ...] = field(default_factory=tuple)
 
 
-def _client_facing_q(now: datetime, prefix: str = "", *, include_synthetic: bool = False) -> Q:
+def _client_facing_q(now: datetime, prefix: str = "", *, include_synthetic: SyntheticGrant | None = None) -> Q:
     """Подтверждено, поддержано, не истекло — в базе, а не только в памяти.
 
     ``prefix`` — путь до строки с основанием (``"capability__"`` у связи):
     связь проверяет возможность ПО БАЗЕ, а не по объекту в руках вызывающего,
     который мог устареть.
 
-    ``include_synthetic`` — второй фактор чтения синтетики; само правило —
+    ``include_synthetic`` — разрешение читать синтетику, выданное сервером
+    (:func:`services.synthetic.grant_for`), или ``None``; само правило —
     :func:`services.synthetic.knowledge_q`. У каждой возвращённой строки
     пометка лежит в ``.synthetic``.
     """
@@ -63,7 +64,7 @@ def _client_facing_q(now: datetime, prefix: str = "", *, include_synthetic: bool
 
 
 def client_facing_capabilities(
-    template: ServiceTemplate, *, now: datetime | None = None, include_synthetic: bool = False,
+    template: ServiceTemplate, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
 ) -> CapabilityReadout:
     """Возможности процедуры, которые можно сказать человеку, и явное состояние."""
     now = now or timezone.now()
@@ -80,7 +81,7 @@ def client_facing_capabilities(
 
 
 def client_facing_goal_links(
-    capability: ProcedureCapability, *, now: datetime | None = None, include_synthetic: bool = False,
+    capability: ProcedureCapability, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
 ) -> tuple[CapabilityGoalLink, ...]:
     """Цели, которым возможность помогает, — только если подтверждены ОБА утверждения.
 
@@ -101,7 +102,7 @@ def client_facing_goal_links(
 
 
 def template_ids_helping_goal(
-    goal_key: str, *, now: datetime | None = None, include_synthetic: bool = False,
+    goal_key: str, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
 ) -> frozenset:
     """Шаблоны, у которых подтверждено «процедура умеет X» И «X помогает этой цели».
 
@@ -126,7 +127,7 @@ def template_ids_helping_goal(
 
 
 def capability_keys_helping_goal(
-    goal_key: str, *, now: datetime | None = None, include_synthetic: bool = False,
+    goal_key: str, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
 ) -> tuple[str, ...]:
     """Ключи возможностей, о которых подтверждено «X помогает этой цели».
 
@@ -178,7 +179,7 @@ class CapabilityLabel:
 
 
 def capability_labels(
-    keys, *, now: datetime | None = None, include_synthetic: bool = False,
+    keys, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
 ) -> dict[str, CapabilityLabel]:
     """Формулировка для человека по ключу возможности — или явная причина, почему её нет.
 

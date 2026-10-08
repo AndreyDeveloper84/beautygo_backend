@@ -13,8 +13,13 @@ CHECK умеет только одну строку. Два свойства о�
   approved / не verified». Триггер ловит и ``QuerySet.update()``;
 * **согласованность между таблицами** — способность и её канон, услуга
   салона и её канон, связь с целью и её способность несут одну пометку.
-  Иначе синтетическая способность на настоящем каноне под флагом сделала бы
-  кандидатами настоящие предложения всех салонов.
+  Иначе синтетическая способность на настоящем каноне под разрешением
+  сделала бы кандидатами настоящие предложения всех салонов;
+* **вся цепочка тестовая** — синтетическая услуга живёт только в
+  демо-салоне (``Tenant.is_demo``), признак демо с такого салона не снять,
+  а предложение по ней открывает только мастер этого же салона. Правило
+  «мастер и услуга одного салона» у настоящих строк живёт в коде модели;
+  для синтетики оно поднято в базу.
 
 Имена триггеров выбраны с расчётом: при одном событии Postgres исполняет их
 по алфавиту, и ``…_synthetic_mark_is_immutable`` идёт раньше
@@ -75,6 +80,11 @@ BEGIN
         RAISE EXCEPTION 'synthetic_binds_only_to_synthetic: salon service % and template % carry different marks',
             NEW.id, NEW.template_id USING ERRCODE = '23514';
     END IF;
+    IF NEW.synthetic
+       AND NOT COALESCE((SELECT is_demo FROM tenants_tenant WHERE id = NEW.tenant_id), false) THEN
+        RAISE EXCEPTION 'synthetic_lives_only_in_a_demo_salon: salon service % in tenant %',
+            NEW.id, NEW.tenant_id USING ERRCODE = '23514';
+    END IF;
     RETURN NEW;
 END $$ LANGUAGE plpgsql;
 
@@ -95,9 +105,47 @@ END $$ LANGUAGE plpgsql;
 CREATE TRIGGER capabilitygoallink_synthetic_stays_apart
     BEFORE INSERT OR UPDATE ON services_capabilitygoallink
     FOR EACH ROW EXECUTE FUNCTION services_goal_link_keeps_synthetic_apart();
+
+CREATE FUNCTION services_demo_salon_keeps_its_mark_while_synthetic() RETURNS trigger AS $$
+BEGIN
+    IF OLD.is_demo AND NOT NEW.is_demo
+       AND EXISTS (SELECT 1 FROM services_salonservice WHERE tenant_id = NEW.id AND synthetic) THEN
+        RAISE EXCEPTION 'demo_salon_holds_synthetic_services: tenant % cannot stop being a demo salon',
+            NEW.id USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER tenant_keeps_demo_while_it_holds_synthetic
+    BEFORE UPDATE ON tenants_tenant
+    FOR EACH ROW EXECUTE FUNCTION services_demo_salon_keeps_its_mark_while_synthetic();
+
+CREATE FUNCTION services_synthetic_offer_only_by_a_master_of_its_salon() RETURNS trigger AS $$
+DECLARE
+    offer_tenant uuid;
+    offer_synthetic boolean;
+BEGIN
+    SELECT tenant_id, synthetic INTO offer_tenant, offer_synthetic
+        FROM services_salonservice WHERE id = NEW.salon_service_id;
+    IF offer_synthetic
+       AND (SELECT tenant_id FROM users_specialistprofile WHERE id = NEW.specialist_id)
+           IS DISTINCT FROM offer_tenant THEN
+        RAISE EXCEPTION 'synthetic_offer_only_by_a_master_of_its_salon: specialist % and salon service %',
+            NEW.specialist_id, NEW.salon_service_id USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END $$ LANGUAGE plpgsql;
+
+CREATE TRIGGER specialistservice_synthetic_only_by_a_master_of_its_salon
+    BEFORE INSERT OR UPDATE ON services_specialistservice
+    FOR EACH ROW EXECUTE FUNCTION services_synthetic_offer_only_by_a_master_of_its_salon();
 """
 
 DROP_TRIGGERS = r"""
+DROP TRIGGER specialistservice_synthetic_only_by_a_master_of_its_salon ON services_specialistservice;
+DROP TRIGGER tenant_keeps_demo_while_it_holds_synthetic ON tenants_tenant;
+DROP FUNCTION services_synthetic_offer_only_by_a_master_of_its_salon();
+DROP FUNCTION services_demo_salon_keeps_its_mark_while_synthetic();
 DROP TRIGGER capabilitygoallink_synthetic_stays_apart ON services_capabilitygoallink;
 DROP TRIGGER salonservice_synthetic_stays_apart ON services_salonservice;
 DROP TRIGGER capabilitytemplate_synthetic_stays_apart ON services_capabilitytemplate;
@@ -234,6 +282,13 @@ class Migration(migrations.Migration):
                     _connector="OR",
                 ),
                 name="servicetemplate_synthetic_rule_only_on_synthetic",
+            ),
+        ),
+        migrations.AddConstraint(
+            model_name="salonservice",
+            constraint=models.CheckConstraint(
+                condition=models.Q(("synthetic", False), ("template__isnull", False), _connector="OR"),
+                name="salonservice_synthetic_has_a_canon",
             ),
         ),
         migrations.RunSQL(sql=TRIGGERS, reverse_sql=DROP_TRIGGERS),

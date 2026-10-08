@@ -1709,6 +1709,12 @@ class SalonService(models.Model):
                 condition=models.Q(synthetic=False) | ~models.Q(mapping_status="verified"),
                 name="salonservice_synthetic_is_never_verified",
             ),
+            # …и не бывает без канона: исключение в допуске — только для
+            # ПОДТВЕРЖДЕНИЯ связи, сама ссылка на канон обязана существовать.
+            models.CheckConstraint(
+                condition=models.Q(synthetic=False) | models.Q(template__isnull=False),
+                name="salonservice_synthetic_has_a_canon",
+            ),
             # Синтетика (services.synthetic): ответ о проверке здоровья у
             # синтетической строки подтверждает только названное синтетическое
             # правило, человека нет; настоящей строке это правило запрещено.
@@ -2215,7 +2221,7 @@ class SpecialistService(models.Model):
         return self.resolved_health_check()[0]
 
     def resolved_health_check_with_origin(
-        self, *, include_synthetic: bool = False,
+        self, *, include_synthetic=None,
     ) -> tuple[bool | None, str, bool]:
         """Вердикт гейта, его основание и ПОДТВЕРЖДЕНО ЛИ это основание (DRF-2877).
 
@@ -2239,10 +2245,10 @@ class SpecialistService(models.Model):
         включает владелец.
 
         **Синтетика.** У синтетической услуги основание подтверждено
-        синтетическим правилом, и «подтверждено» отдаётся только под двумя
-        факторами (:func:`services.synthetic.reads_synthetic`); без них —
-        ``False``, как у любого неподтверждённого. Настоящих услуг параметр
-        не касается.
+        синтетическим правилом, и «подтверждено» отдаётся только под
+        действующим разрешением (``include_synthetic`` —
+        :class:`services.synthetic.SyntheticGrant`); без него — ``False``,
+        как у любого неподтверждённого. Настоящих услуг параметр не касается.
         """
         from .synthetic import reads_synthetic
 
