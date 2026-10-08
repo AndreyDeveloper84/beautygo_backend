@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import itertools
 import uuid
 from io import StringIO
 
@@ -45,12 +46,18 @@ def _cat(name: str) -> ServiceCategory:
     return ServiceCategory.objects.get_or_create(name=name)[0]
 
 
+#: Код канона уникален на всю таблицу. Случайный из девятисот значений
+#: сталкивался сам с собой в узле с несколькими канонами — шард краснел раз
+#: в несколько прогонов (DRF-2883, #684). Счётчик не сталкивается.
+_CODES = itertools.count(10)
+
+
 def _tpl(cat_name: str = "Базовый ручной массаж") -> ServiceTemplate:
     return ServiceTemplate.objects.create(
         category=_cat(cat_name),
         name=f"Массаж {uuid.uuid4().hex[:6]}",
         name_short="Массаж",
-        canonical_code=f"1.1.{uuid.uuid4().int % 900 + 10}",
+        canonical_code=f"1.1.{next(_CODES)}",
         lifecycle="approved",
         requires_health_check=False,
         approved_rule="test",
