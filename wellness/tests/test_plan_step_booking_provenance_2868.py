@@ -177,6 +177,13 @@ class TestIdentifiersDoNotBypassAdmission:
         resp = _create(owner, specialist, offer, provenance=_provenance(plan, safety_state=state))
         self._refused(resp, 409, "safety_blocked")
 
+    @pytest.mark.parametrize("state, reason", [("open", "s1_restriction_open"), ("stop", "s1_restriction_stop")])
+    def test_the_durable_restriction_of_the_person(self, plan, owner, specialist, offer, state, reason) -> None:
+        """Запись от шага — действие, ведущее к услуге: длительное ограничение
+        S1 её закрывает, и записи не появляется."""
+        resp = _create(owner, specialist, offer, provenance=_provenance(plan, s1_restriction=state))
+        self._refused(resp, 409, reason)
+
     @pytest.mark.parametrize("status", ["paused", "archived", "superseded"])
     def test_a_plan_that_is_not_active(self, plan, owner, specialist, offer, status) -> None:
         Plan.objects.filter(pk=plan.pk).update(status=status)
@@ -208,6 +215,9 @@ class TestIdentifiersDoNotBypassAdmission:
             ({"safety_state": None}, "safety_state_invalid"),
             ({"safety_policy_version": ""}, "safety_policy_version_missing"),
             ({"evaluated_at_revision": None}, "safety_revision_malformed"),
+            # Молчание об ограничении — не его отсутствие.
+            ({"s1_restriction": None}, "s1_restriction_invalid"),
+            ({"s1_restriction": "cleared"}, "s1_restriction_invalid"),
         ],
     )
     def test_a_malformed_block_is_refused_and_nothing_is_booked(self, plan, owner, specialist, offer, patch, reason) -> None:
