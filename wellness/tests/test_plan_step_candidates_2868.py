@@ -32,6 +32,7 @@ from services.models import ProcedureCapability, SalonService, ServiceTemplate, 
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
 from wellness.models import Plan, PlanStepResolution
+from wellness.plan_restrictions import CAUSES, Cause
 from wellness.tests.test_plan_engine_steps_2868 import (  # noqa: F401 — фикстуры того же сценария
     OWNER,
     PLAN_URL,
@@ -368,11 +369,13 @@ class TestTheSameGatesAsTheStepItself:
     def test_the_turn_verdict(self, goal, massage, state, reason) -> None:
         self._refused(_candidates(_save(goal), safety_state=state), reason)
 
-    def test_an_open_restriction_names_its_question(self, goal, massage) -> None:
+    def test_an_open_restriction_names_its_question(self, goal, massage, monkeypatch) -> None:
+        # Таблица причин каталога пуста до решения владельца — причина подставлена узлом.
+        monkeypatch.setitem(CAUSES, "TEST_PLAN_QUESTION", Cause(scopes=frozenset({"PLAN"}), lift_kinds=frozenset()))
         plan = _save(goal)
         opened = _api().post(
             RESTRICTIONS_URL,
-            {"plan_id": str(plan.id), "scope": "PLAN", "cause": "SAFETY_CLARIFY",
+            {"plan_id": str(plan.id), "scope": "PLAN", "cause": "TEST_PLAN_QUESTION",
              "question_id": "plan.safety_clarify", **SAFETY},
             format="json",
         )
