@@ -50,7 +50,9 @@ from wellness.tests.test_plan_engine_steps_2868 import (  # noqa: F401 — фи�
 pytestmark = pytest.mark.django_db
 
 BLOCKING = ["STOP", "UNKNOWN"]
-PASSING = ["NORMAL", "CLARIFY", "CAUTION"]
+PASSING = ["NORMAL", "CAUTION"]
+#: DRF-2877 — «уточнить»: не запрет, а «сначала вопрос»; действие с шагом ждёт.
+PENDING = ["CLARIFY"]
 
 
 def _safety(state: str) -> dict:
@@ -69,7 +71,7 @@ class TestTheVocabulary:
     def test_the_two_sets_are_the_contracts(self) -> None:
         assert SAFETY_STATES == {"NORMAL", "CLARIFY", "CAUTION", "STOP", "UNKNOWN"}
         assert SAFETY_BLOCKING == set(BLOCKING)
-        assert set(PASSING) | set(BLOCKING) == SAFETY_STATES
+        assert set(PASSING) | set(PENDING) | set(BLOCKING) == SAFETY_STATES
 
     @pytest.mark.parametrize(
         ("body", "reason"),
@@ -104,6 +106,13 @@ class TestResolution:
         assert not PlanStepResolution.objects.exists()
         # Гейт отказывает действию, план и цель не трогает (§4.5).
         assert _snapshot() == before
+
+    def test_clarify_waits_for_the_question_under_its_own_name(self, goal, canon, offer) -> None:
+        plan = _save(goal)
+        resp = _resolve(plan, **_offer_body(canon, offer), **_safety("CLARIFY"))
+        assert resp.status_code == 409
+        assert resp.json()["error"]["details"] == {"reason": "clarify_pending"}
+        assert not PlanStepResolution.objects.exists()
 
     @pytest.mark.parametrize("state", PASSING)
     def test_non_blocking_safety_passes_and_is_recorded(self, goal, canon, offer, state) -> None:

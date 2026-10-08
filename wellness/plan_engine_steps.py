@@ -37,6 +37,7 @@ from services.models import SalonService, ServiceTemplate
 
 from .models import Plan, PlanRevision, PlanStepBooking, PlanStepResolution
 from .plan_engine import PlanEngineDisabled, PlanEngineError, PlanNotFound, plan_engine_enabled
+from .plan_restrictions import blocking_question_ids
 from .plan_safety import SafetyInput, SafetyInputError, parse_safety_input
 
 _LEVEL_ORDER = {"CAPABILITY": 0, "SERVICE": 1, "OFFER": 2}
@@ -47,11 +48,14 @@ class StepNotFound(PlanEngineError):
 
 
 class StepNotExecutable(PlanEngineError):
-    """Шаг не допущен к действию. ``reason`` — машинное имя условия."""
+    """Шаг не допущен к действию. ``reason`` — машинное имя условия;
+    ``details`` — что вызывающему нужно показать человеку (идентификаторы
+    открытых вопросов), без текста."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, **details: Any) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.details = details
 
 
 class ResolutionRefused(PlanEngineError):
@@ -119,6 +123,12 @@ def _plan_gate(plan: Plan, revision: PlanRevision, step_id: str) -> None:
         raise StepNotExecutable("step_blocked")
     if verdict not in ("VALID", "INCOMPLETE"):
         raise StepNotExecutable("step_validation_unknown")
+    # DRF-2877 — стойкий незакрытый вопрос: открытое ограничение на всём плане
+    # или на этом шаге. Последним: отказ называет вопрос только там, где шаг
+    # иначе был бы исполним.
+    questions = blocking_question_ids(plan, step_id)
+    if questions:
+        raise StepNotExecutable("restriction_open", question_ids=questions)
 
 
 def step_admission(plan: Plan, revision: PlanRevision, step_id: str, *, salon_service_id: UUID | None) -> dict:
@@ -142,6 +152,12 @@ def _safety_gate(safety: SafetyInput) -> None:
     есть ли он. Статус плана при этом не меняется: гейт отказывает действию."""
     if safety.blocks:
         raise StepNotExecutable("safety_blocked")
+    # DRF-2877 — «уточнить» значит «сначала вопрос»: причина о человеке, область
+    # — весь план. Отдельное имя, чтобы вызывающий задал вопрос, а не показал
+    # запрет. Сам вопрос держится ограничением плана; это пол на случай, когда
+    # вызывающий его не открыл.
+    if safety.state == "CLARIFY":
+        raise StepNotExecutable("clarify_pending")
 
 
 def _locked_plan(user, plan_id: UUID) -> Plan:
@@ -367,5 +383,10 @@ def step_state(plan: Plan, revision: PlanRevision) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for step in revision.steps_snapshot:
         step_id = step["step_id"]
-        out[step_id] = {**effective_step(revision, step_id), "bookings": bookings.get(step_id, [])}
+        out[step_id] = {
+            **effective_step(revision, step_id),
+            "bookings": bookings.get(step_id, []),
+            # DRF-2877 — на шаге или на всём плане есть незакрытый вопрос.
+            "restricted": bool(blocking_question_ids(plan, step_id)),
+        }
     return out

@@ -93,6 +93,12 @@ class GoalNotFound(PlanEngineError):
     «не найдено», не «чужое»."""
 
 
+class SaveSafetyBlocked(PlanEngineError):
+    """Вердикт хода подтверждения — «стоп» или «не оценивался»: план не
+    сохраняется (решение владельца 08.10: «стоп» блокирует сохранение,
+    «уточнить» — нет)."""
+
+
 class IdempotencyConflict(PlanEngineError):
     """Тот же ключ команды, другое содержимое — клиент переиспользовал
     подтверждение; ничего не записано."""
@@ -129,6 +135,10 @@ class PlanCommand:
     assertions: list[dict]
     validation: dict
     policy_versions: dict
+    #: Вердикт хода, в котором человек подтвердил сохранение (DRF-2877).
+    safety: Any = None
+    #: Ограничения, с которыми план сохраняется (``plan_restrictions``).
+    restrictions: tuple = ()
 
 
 def _forbidden_key(node: Any) -> str | None:
@@ -272,6 +282,8 @@ def parse_command(raw: Any) -> PlanCommand:
     ):
         raise ContractViolation("step_validations_malformed")
 
+    safety, restrictions = _safety_and_restrictions(raw, {s["step_id"] for s in steps})
+
     return PlanCommand(
         decision_id=decision_id,
         goal_ref=goal_ref,
@@ -282,7 +294,43 @@ def parse_command(raw: Any) -> PlanCommand:
         assertions=assertions,
         validation=validation,
         policy_versions=policy_versions,
+        safety=safety,
+        restrictions=restrictions,
     )
+
+
+def _safety_and_restrictions(raw: dict, step_ids: set[str]):
+    """Вердикт хода подтверждения и ограничения, с которыми план сохраняется.
+
+    Молчание о безопасности не читается как «норма»: тройка обязательна.
+    «Уточнить» без ограничения на весь план — отказ: вопрос, который не назван,
+    не может ни держаться, ни быть снят.
+    """
+    # Импорт здесь: ``plan_restrictions`` импортирует этот модуль.
+    from .plan_restrictions import (
+        CAUSE_SAFETY_CLARIFY,
+        SCOPE_PLAN,
+        SCOPE_STEP,
+        RestrictionMalformed,
+        parse_restrictions,
+    )
+    from .plan_safety import SafetyInputError, parse_safety_input
+
+    try:
+        safety = parse_safety_input(raw)
+        restrictions = parse_restrictions(raw.get("restrictions"))
+    except SafetyInputError as exc:
+        raise ContractViolation(exc.reason, exc.detail) from exc
+    except RestrictionMalformed as exc:
+        raise ContractViolation(exc.reason, exc.detail) from exc
+    for spec in restrictions:
+        if spec.scope == SCOPE_STEP and spec.step_id not in step_ids:
+            raise ContractViolation("restriction_step_not_in_plan", spec.step_id)
+    if safety.state == "CLARIFY" and not any(
+        r.scope == SCOPE_PLAN and r.cause == CAUSE_SAFETY_CLARIFY for r in restrictions
+    ):
+        raise ContractViolation("clarify_without_restriction")
+    return safety, restrictions
 
 
 def idempotency_key(user_id: Any, command: PlanCommand) -> str:
@@ -345,6 +393,11 @@ def create_plan_from_command(user, command: PlanCommand) -> tuple[Plan, bool]:
     existing = _replay(key, digest)
     if existing is not None:
         return existing, False
+    # После повтора: уже сохранённая команда не судится заново. «Стоп» — не
+    # вопрос с ответом, сохранение не выполняется; «уточнить» сохраняется
+    # вместе с ограничением (оно обязательно — см. разбор команды).
+    if command.safety is None or command.safety.blocks:
+        raise SaveSafetyBlocked()
 
     try:
         with transaction.atomic():
@@ -388,6 +441,9 @@ def create_plan_from_command(user, command: PlanCommand) -> tuple[Plan, bool]:
             )
             plan.current_revision = revision
             plan.save(update_fields=["current_revision"])
+            # Черновик с ограничениями: вопросы сохраняются вместе с планом, в
+            # той же транзакции — плана без его ограничений не бывает.
+            _save_restrictions(plan, command)
     except IntegrityError:
         # Гонка той же команды мимо замка (цель сменилась между чтениями):
         # победитель уже записал план под этим ключом.
@@ -468,7 +524,23 @@ def plan_document(plan: Plan) -> dict[str, Any]:
         # услуги разрешён шаг и какие записи от него сделаны. Снимок выше при
         # этом не меняется.
         "step_state": _step_state(plan, revision),
+        # DRF-2877 — стойкие вопросы: все ограничения плана, открытые и
+        # снятые. Просмотр ими не блокируется никогда.
+        "restrictions": _restrictions(plan),
     }
+
+
+def _save_restrictions(plan: Plan, command: PlanCommand) -> None:
+    from .plan_restrictions import create_restriction  # тот модуль импортирует этот
+
+    for spec in command.restrictions:
+        create_restriction(plan, spec, command.safety)
+
+
+def _restrictions(plan: Plan) -> list[dict[str, Any]]:
+    from .plan_restrictions import restrictions_document  # тот модуль импортирует этот
+
+    return restrictions_document(plan)
 
 
 def _step_state(plan: Plan, revision: PlanRevision) -> dict[str, Any]:
