@@ -40,6 +40,15 @@ from ._evidence import (
     rating_evidence,
     rating_strength,
 )
+from ._admission import (
+    ALL_CHECKS,
+    UNENFORCED_LITERALS,
+    AdmissionCheck,
+    CheckAnswer,
+    CheckOutcome,
+    build_answers,
+    first_unmet,
+)
 from ._pipeline import RESOLVER_SPEC_VERSION, TIE_BREAK_POLICY_VERSION, resolve
 from ._reason_codes import REGISTRY_VERSION as REASON_CODE_REGISTRY_VERSION
 from ._reason_codes import ReasonCode, ReasonCodeInvariantError
@@ -87,6 +96,13 @@ from ._types import (
 )
 
 __all__ = [
+    "ALL_CHECKS",
+    "UNENFORCED_LITERALS",
+    "AdmissionCheck",
+    "CheckAnswer",
+    "CheckOutcome",
+    "build_answers",
+    "first_unmet",
     # точка входа
     "resolve",
     "StagePolicy",

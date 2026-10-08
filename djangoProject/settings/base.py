@@ -655,6 +655,9 @@ PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() == "tru
 # закрытие Lite работают; новый план человека сохраняется как wellness.Plan.
 # Выключен → писатели Plan отвечают 404 PLAN_ENGINE_DISABLED, чтение отдаёт
 # plan: null; уже сохранённые Plan/PlanRevision остаются в базе.
+# Вытеснение Lite (отказ писателя и закрытие Lite-плана сохранением) подавлено,
+# пока включён SYNTHETIC_TEST_DATA_ENABLED: на время проверки на тестовых
+# данных оба механизма сосуществуют (решение владельца 08.10).
 PLAN_ENGINE_ENABLED = os.environ.get("PLAN_ENGINE_ENABLED", "false").lower() == "true"
 SMS_RU_SENDER = os.environ.get("SMS_RU_SENDER", "")  # Empty = default sender
 SMS_RU_TIMEOUT = 10  # HTTP timeout in seconds
