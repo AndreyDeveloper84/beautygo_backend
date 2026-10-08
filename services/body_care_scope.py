@@ -60,7 +60,12 @@ def scope_of(*, has_canon: bool, scope: str | None, family: str | None) -> str:
     ``has_canon=False`` — у предложения нет канона: классифицировать нечего,
     и это тоже «неизвестно», а не «не подлежит».
     """
-    if not fail_closed():
+    return _scope_of(has_canon=has_canon, scope=scope, family=family, closed=fail_closed())
+
+
+def _scope_of(*, has_canon: bool, scope: str | None, family: str | None, closed: bool) -> str:
+    """Правило области при названном положении флага — без чтения настроек."""
+    if not closed:
         return SUBJECT if family else NOT_SUBJECT
     if not has_canon or scope is None:
         return UNCLASSIFIED
@@ -87,11 +92,77 @@ def legal_checks_waived(*, legal_class: str | None, family: str | None) -> bool:
     При выключенном флаге действует прежнее правило: канон без семейства и
     без класса тоже считается не требующим проверок.
     """
+    return _legal_checks_waived(legal_class=legal_class, family=family, closed=fail_closed())
+
+
+def _legal_checks_waived(*, legal_class: str | None, family: str | None, closed: bool) -> bool:
     if legal_class == LC.NON_MEDICAL_COSMETIC:
         return True
-    if fail_closed():
+    if closed:
         return False
     return not family and legal_class is None
+
+
+def qualification_requirement_unknown(legal_class: str | None) -> bool:
+    """Неизвестный класс оставляет требование к квалификации неизвестным.
+
+    Нужна ли квалификация, решает класс; пока его нет, «не требуется»
+    сказать нельзя. Действует под флагом, как у лицензии и адреса.
+    """
+    return _qualification_requirement_unknown(legal_class, closed=fail_closed())
+
+
+def _qualification_requirement_unknown(legal_class: str | None, *, closed: bool) -> bool:
+    return closed and class_unknown(legal_class)
+
+
+#: Проверки, которые правило «неизвестное не допускается» может оставить
+#: недействующими. Закрытый набор: потребитель (``users.admission``) сверяет
+#: его со своим отображением и обязан покраснеть, если здесь появится шестая.
+UNENFORCEABLE_CHECKS = ("scope", "legal_class", "license", "address", "qualification")
+
+
+def unenforced_checks(
+    *,
+    has_canon: bool,
+    scope: str | None,
+    family: str | None,
+    legal_class: str | None,
+    required_practitioner_class: str | None = None,
+) -> frozenset[str]:
+    """Какие проверки у этой строки сейчас НЕ ДЕЙСТВУЮТ из-за выключенного флага.
+
+    Не «пройдены», а «не проверены»: строка проходит их только потому, что
+    ``BODY_CARE_UNCLASSIFIED_FAIL_CLOSED`` выключен. При включённом флаге
+    ответ всегда пуст.
+
+    Считается одним приёмом, без второго списка условий: проверка не
+    действует, если ответ правила при включённом флаге отличается от ответа
+    при выключенном. Новая ветка правила попадает сюда сама.
+
+    Следствие приёма: у строки, которую включение флага не затронет
+    (подтверждённое ``not_body_care``, подтверждённый класс), проверка в
+    ответ не входит — её исход от флага не зависит.
+
+    Лицензия и адрес идут вместе с классом: прежнее правило снимало их
+    разом, одним условием «семейства нет и класса нет».
+    """
+    if fail_closed():
+        return frozenset()
+    unenforced: set[str] = set()
+    row = {"has_canon": has_canon, "scope": scope, "family": family}
+    if _scope_of(**row, closed=True) != _scope_of(**row, closed=False):
+        unenforced.add("scope")
+    if _legal_checks_waived(legal_class=legal_class, family=family, closed=True) != _legal_checks_waived(
+        legal_class=legal_class, family=family, closed=False
+    ):
+        unenforced.update({"legal_class", "license", "address"})
+    # Заданное требование к квалификации проверяется при любом флаге.
+    if not required_practitioner_class and _qualification_requirement_unknown(
+        legal_class, closed=True
+    ) != _qualification_requirement_unknown(legal_class, closed=False):
+        unenforced.add("qualification")
+    return frozenset(unenforced)
 
 
 def classification_stamp(*, scope: str | None, family: str | None, canonical_version: str) -> list:
