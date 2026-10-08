@@ -238,11 +238,13 @@ def test_saving_the_salon_with_its_existing_masters_grants_nothing(operator, sal
     url = reverse("admin:tenants_tenant_change", args=[salon.pk])
     page = client.get(url)
 
-    response = client.post(url, {**_page_data(page), "name": "Салон 2913, переименован"})
+    # Строка мастера ИЗМЕНЕНА: неизменённую строку блок не сохраняет вовсе,
+    # и узел доказывал бы пустоту.
+    response = client.post(url, {**_page_data(page), "specialist_profiles-0-display_name": "Переименован в блоке"})
 
     assert response.status_code == 302, _errors(response)
-    salon.refresh_from_db()
-    assert salon.name == "Салон 2913, переименован"  # положительная пара
+    legacy.refresh_from_db()
+    assert legacy.display_name == "Переименован в блоке"  # положительная пара: строка сохранена
     assert _rows(legacy, salon) == []
 
 
