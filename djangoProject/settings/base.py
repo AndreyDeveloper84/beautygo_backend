@@ -392,7 +392,7 @@ BODY_CARE_UNCLASSIFIED_FAIL_CLOSED = os.environ.get(
 # проверка Плана). ПЕРВЫЙ из двух факторов: без него строки с пометкой
 # ``synthetic`` не читает никто. Право чтения выдаёт сервер по личности
 # (``services.synthetic.grant_for``): флаг ниже, пользователь каталога из
-# списка ниже и ``User.is_test_persona``. В запросе этого права нет нигде.
+# списка ниже и признак тестовой персоны у пользователя. В запросе этого права нет нигде.
 # Только тестовый стенд; на боевом контуре не включать.
 SYNTHETIC_TEST_DATA_ENABLED = os.environ.get(
     "SYNTHETIC_TEST_DATA_ENABLED", "false"
