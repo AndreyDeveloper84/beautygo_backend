@@ -143,7 +143,10 @@ def test_the_seeded_canons_pass_the_real_scope_readers(settings, spec, fail_clos
     seed(spec)
 
     for canon in ServiceTemplate.objects.filter(synthetic=True):
-        facts = {"scope": canon.body_care_scope, "family": canon.service_family, "legal_class": canon.legal_service_class}
+        facts = {
+            "scope": canon.body_care_scope, "family": canon.service_family,
+            "legal_class": canon.legal_service_class,
+        }
         assert body_care_scope.unenforced_checks(has_canon=True, **facts) == frozenset(), canon.name
         assert body_care_scope.scope_of(has_canon=True, scope=facts["scope"], family=facts["family"]) == (
             body_care_scope.NOT_SUBJECT
