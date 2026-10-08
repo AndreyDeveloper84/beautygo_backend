@@ -114,6 +114,11 @@ USE_REGISTRY: dict[str, tuple[int, str]] = {
     "tenants/service_location.py": (2, "ServiceLocation.address (self)"),
     "users/home_api.py": (1, "s.address — кандидат движка (DTO)"),
     "users/internal_catalog_api.py": (1, "getattr(obj.tenant, 'address') — адрес салона"),
+    # --- НЕ адрес вовсе: ответ проверки допуска «адрес оказания» (DRF-2888) ---
+    "users/recommendation_source.py": (
+        3, "LegalAnswers.address — LegalGate проверки адреса §7A (сошлось / нет), не строка адреса и не колонка"
+    ),
+    "users/admission.py": (1, "answers.address — тот же LegalGate из LegalAnswers, не адрес"),
 }
 
 #: Нижняя граница переписи: на 7374b07d рабочих .py-файлов 427. Меньше —
