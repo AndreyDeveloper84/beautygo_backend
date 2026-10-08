@@ -122,6 +122,33 @@ def template_ids_helping_goal(goal_key: str, *, now: datetime | None = None) -> 
     )
 
 
+def template_ids_with_capability(key: str, *, now: datetime | None = None) -> frozenset:
+    """Каноны, о которых подтверждено «процедура умеет это» (DRF-2915).
+
+    Вход — КЛЮЧ способности: им её называет план (см.
+    :func:`capability_keys_helping_goal`), он уникален и не меняется от правки
+    текста. Правило то же, что у :func:`client_facing_capabilities`:
+    подтверждено человеком, поддержано, не истекло; вывод системы и запрет не
+    считаются. Пустой ответ — «подтверждённого нет», а не «никто не умеет».
+
+    Отдельной функцией, потому что это точка, в которой чтение «способность
+    подтверждена» расширится на помеченные синтетические данные тестового
+    сценария (DRF-2916): расширение должно случиться здесь, а не у читателей.
+
+    Запись словаря привязана к нескольким процедурам (DRF-2743): в ответ
+    попадает каждая. Состояние самого канона (выведен из оборота) здесь не
+    судится — это вопрос допуска.
+    """
+    now = now or timezone.now()
+    return frozenset(
+        template_id
+        for template_id in ProcedureCapability.objects.filter(_client_facing_q(now), key=key).values_list(
+            "templates", flat=True
+        )
+        if template_id is not None
+    )
+
+
 def capability_keys_helping_goal(goal_key: str, *, now: datetime | None = None) -> tuple[str, ...]:
     """Ключи возможностей, о которых подтверждено «X помогает этой цели».
 
@@ -148,6 +175,32 @@ def capability_keys_helping_goal(goal_key: str, *, now: datetime | None = None) 
             )
         )
     )
+
+
+def procedures_by_capability_helping_goal(goal_key: str, *, now: datetime | None = None) -> dict[str, frozenset]:
+    """Ключ возможности → процедуры (шаблоны), которые её несут, — под эту цель.
+
+    DRF-2871: сборке плана нужно знать не только КАКИЕ способности помогают
+    цели, но и можно ли получить их все ОДНОЙ процедурой: тогда потребность
+    сводится к одной услуге, и плана не нужно (контракт Plan Engine §6.4).
+    Правило чтения то же, что у :func:`capability_keys_helping_goal`: оба
+    утверждения подтверждены, поддержаны и не истекли, цель активна.
+    """
+    now = now or timezone.now()
+    out: dict[str, set] = {}
+    for key, template_id in CapabilityGoalLink.objects.filter(
+        _client_facing_q(now),
+        _client_facing_q(now, prefix="capability__"),
+        goal__key=goal_key,
+        goal__is_active=True,
+    ).values_list("capability__key", "capability__templates"):
+        # Запись общего словаря привязана к нескольким процедурам (DRF-2743):
+        # строка выборки — пара «ключ, процедура». Привязка своего статуса не
+        # имеет — она часть содержания подтверждённой записи.
+        carriers = out.setdefault(key, set())
+        if template_id is not None:
+            carriers.add(template_id)
+    return {key: frozenset(templates) for key, templates in out.items()}
 
 
 class LabelState(str, Enum):
@@ -218,5 +271,6 @@ __all__ = [
     "capability_labels",
     "client_facing_capabilities",
     "client_facing_goal_links",
+    "procedures_by_capability_helping_goal",
     "template_ids_helping_goal",
 ]
