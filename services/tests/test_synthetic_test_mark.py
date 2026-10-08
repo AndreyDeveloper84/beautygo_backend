@@ -475,6 +475,47 @@ def test_the_synthetic_rule_is_refused_on_real_rows(salon, category) -> None:
         pk=canon.pk).update(**{k: v for k, v in answer.items() if k != "requires_health_check"}))
 
 
+# ─── админка ─────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("model", [ServiceTemplate, SalonService, ProcedureCapability, CapabilityGoalLink])
+def test_the_admin_shows_the_mark_and_does_not_let_it_be_set(model, curator) -> None:
+    from django.contrib import admin as django_admin
+    from django.test import RequestFactory
+
+    curator.is_superuser = True
+    curator.save()
+    request = RequestFactory().get("/")
+    request.user = curator
+    field = django_admin.site._registry[model].get_form(request).base_fields.get("synthetic")
+
+    # У знания набор полей формы задан явно, и пометки в нём нет — поставить
+    # её нечем. У канона и услуги салона поле на форме есть и отключено.
+    if model in (ServiceTemplate, SalonService):
+        assert field is not None, "пометку должно быть видно на форме"
+    assert field is None or field.disabled is True
+
+
+def test_a_canon_created_through_the_admin_form_is_never_synthetic(category, curator) -> None:
+    from django.contrib import admin as django_admin
+    from django.test import RequestFactory
+
+    curator.is_superuser = True
+    curator.save()
+    request = RequestFactory().get("/")
+    request.user = curator
+    form_class = django_admin.site._registry[ServiceTemplate].get_form(request)
+    initial = {name: field.initial for name, field in form_class.base_fields.items() if field.initial is not None}
+
+    form = form_class(data={
+        **initial, "category": str(category.pk), "name": "Заведён формой", "name_short": "Формой",
+        "synthetic": "on",
+    })
+
+    assert form.is_valid(), form.errors
+    assert form.save().synthetic is False
+
+
 # ─── миграция ────────────────────────────────────────────────────────────────
 
 
