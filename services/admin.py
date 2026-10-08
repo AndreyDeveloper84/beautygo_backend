@@ -118,16 +118,114 @@ class ServiceTemplateSynonymInline(admin.TabularInline):
     ordering = ('text',)
 
 
+class ServiceTemplateAdminForm(forms.ModelForm):
+    """Просмотр флага «нужна ли проверка перед услугой» у канона (DRF-2890).
+
+    Флаг и его происхождение (DRF-2614) на форме были всегда; не было
+    проверки по полю. Неполное подтверждение доходило до базы и возвращалось
+    именем ограничения, а не подсказкой.
+
+    Что форма требует у подтверждённого флага: основание — всегда, его
+    вводит человек; автор — человек ИЛИ правило, не оба; правило — с версией.
+    Автора и дату форма НЕ требует: если куратор их не указал, форма ставит
+    их сама — тем, кто сохраняет (``reviewer``, его передаёт
+    ``ServiceTemplateAdmin.get_form``), и моментом проверки. Ставит именно
+    форма, а не ``save_model``: ограничение базы «подтверждён — значит с
+    датой» Django сверяет ещё на проверке формы, до сохранения. Так просмотр
+    канона — одно поле основания, а не четыре.
+
+    Массового подтверждения нет и не будет: владелец запретил подставлять
+    подтверждения (S2). Канон просматривают по одному.
+    """
+
+    #: Кто сохраняет форму. ``None`` — форма собрана не админкой.
+    reviewer = None
+
+    class Meta:
+        model = ServiceTemplate
+        fields = '__all__'
+
+    def clean(self):
+        cleaned = super().clean()
+        Origin = ServiceTemplate.HealthCheckOrigin
+        if cleaned.get('health_check_origin') != Origin.CONFIRMED:
+            return cleaned
+
+        who = cleaned.get('health_check_confirmed_by')
+        rule = (cleaned.get('health_check_confirmed_rule') or '').strip()
+        version = (cleaned.get('health_check_rule_version') or '').strip()
+
+        if not (cleaned.get('health_check_source_ref') or '').strip():
+            self.add_error('health_check_source_ref', forms.ValidationError(
+                'Укажите основание просмотра: разбор, документ, решение или тикет. '
+                'Просмотр без основания через месяц неотличим от умолчания.',
+                code='health_flag_review_requires_source_ref',
+            ))
+        if who is not None and rule:
+            self.add_error('health_check_confirmed_rule', forms.ValidationError(
+                'Заполнено и «кто», и «правило». Просматривает либо человек, либо правило.',
+                code='health_flag_review_who_xor_rule',
+            ))
+        if rule and not version:
+            self.add_error('health_check_rule_version', forms.ValidationError(
+                'Правило без версии — «подтверждено какой-то из версий».',
+                code='health_flag_rule_requires_version',
+            ))
+
+        flag = cleaned.get('requires_health_check')
+        at = cleaned.get('health_check_confirmed_at')
+        if not self.instance._state.adding and flag is not None and at is not None:
+            # Правило модели вернуло бы такой флаг в черновые молча; здесь
+            # куратору говорится, что произошло и что сделать.
+            probe = ServiceTemplate(pk=self.instance.pk)
+            probe._state.adding = False
+            probe.health_check_origin = Origin.CONFIRMED
+            probe.requires_health_check = flag
+            probe.health_check_confirmed_by = who
+            probe.health_check_confirmed_rule = rule
+            probe.health_check_rule_version = version
+            probe.health_check_confirmed_at = at
+            if probe.health_flag_changed_under_a_standing_confirmation():
+                self.add_error('requires_health_check', forms.ValidationError(
+                    'Флаг изменён, а просмотр остался прежним — он был выдан для другого '
+                    'значения. Очистите автора и дату просмотра (подставятся ваши) и '
+                    'назовите основание заново, либо отметьте флаг как черновой.',
+                    code='health_flag_changed_needs_new_review',
+                ))
+
+        # Подпись по умолчанию — ПОСЛЕ сверки выше: та судит по тому, что
+        # прислал куратор, а не по подставленному.
+        if who is None and not rule:
+            if self.reviewer is None:
+                self.add_error('health_check_confirmed_by', forms.ValidationError(
+                    'Укажите, кто просмотрел флаг, либо правило.',
+                    code='health_flag_review_requires_who_or_rule',
+                ))
+            else:
+                cleaned['health_check_confirmed_by'] = self.reviewer
+        if at is None:
+            cleaned['health_check_confirmed_at'] = timezone.now()
+        return cleaned
+
+
 @admin.register(ServiceTemplate)
 class ServiceTemplateAdmin(admin.ModelAdmin):
+    form = ServiceTemplateAdminForm
     list_display = (
         'name', 'canonical_code', 'lifecycle', 'category', 'duration_default',
+        'requires_health_check', 'health_check_origin',
         'is_popular', 'sort_order',
     )
     # `lifecycle` первым фильтром: очередь одобрения канонов — рабочий
     # список куратора справочника, ровно как очередь проверки связей у
     # оператора салонов (§93).
-    list_filter = ('lifecycle', 'category', 'is_popular')
+    #
+    # `health_check_origin` — очередь просмотра флага проверки здоровья
+    # (DRF-2890): «inferred» — флаг выведен правилом и человеком не смотрен.
+    # Перепись на пилоте 08.10: непросмотренный флаг стоит у каждого канона,
+    # и после правила владельца (S2) запись не проходит ни по одному
+    # предложению. Без фильтра куратор открывал бы каноны вслепую.
+    list_filter = ('lifecycle', 'health_check_origin', 'requires_health_check', 'category', 'is_popular')
     # `synonyms__text` — то, ради чего синонимы и заведены (§93). Салон
     # называет услугу «Подмышки» в категории «Лазерная эпиляция», канон
     # называется «Лазерная эпиляция подмышек», и поиском по имени эта
@@ -139,6 +237,12 @@ class ServiceTemplateAdmin(admin.ModelAdmin):
     list_editable = ('is_popular', 'sort_order')
     ordering = ('category', '-is_popular', 'sort_order', 'name')
     inlines = [RegionalPricingInline, ServiceTemplateSynonymInline]
+
+    def get_form(self, request, obj=None, change=False, **kwargs):
+        # DRF-2890: просмотр флага проверки здоровья без названного автора
+        # подписывает тот, кто сохраняет. Форме его больше взять неоткуда.
+        form = super().get_form(request, obj, change=change, **kwargs)
+        return type(form.__name__, (form,), {'reviewer': request.user})
 
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
