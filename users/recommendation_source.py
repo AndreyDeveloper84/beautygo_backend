@@ -105,6 +105,7 @@ from services.body_care_validation import NOT_SUBJECT, READY_FOR_SCREENING, VALI
 from services.capabilities import template_ids_helping_goal
 from services.catalog_reads import catalog_services_for, catalog_services_prefetch
 from services.offer_sellable import sellable_offer_q
+from services.synthetic import real_offer_q
 from services.models import DraftSalonService, ServiceTemplate, SpecialistService
 from users.models import SpecialistProfile
 
@@ -475,6 +476,9 @@ class SpecialistCandidateSource:
             SpecialistService.objects
             .filter(
                 sellable_offer_q(),
+                # DRF-2916: помеченная синтетика для подбора не существует —
+                # ни у обычного клиента, ни у тестовой личности.
+                real_offer_q("salon_service__"),
                 specialist_id__in=specialist_ids,
             )
             .select_related("salon_service", "salon_service__template")
