@@ -677,3 +677,50 @@ class TestErasureAndExport:
         assert saved["step_bookings"][0]["step_id"] == "s1"
         assert saved["step_bookings"][0]["appointment_start"] == appt.start_datetime.isoformat()
         assert DECISION not in repr(saved)
+
+
+# ─── слои раздельны: нет услуги под шаг ≠ нельзя сохранить план ──────────────
+#
+# Решение владельца 08.10: непроверенная (или отсутствующая) услуга не идёт в
+# рекомендацию, но её отсутствие само по себе не запрещает сохранить допустимую
+# общую часть плана. Что мешает подобрать услугу и что мешает сохранить — разные
+# слои, и первый не протекает во второй.
+
+
+class TestNoServiceForAStepIsNotNoPlan:
+    def test_a_plan_is_saved_and_read_with_no_service_in_the_catalog_at_all(self, goal) -> None:
+        assert not SalonService.objects.exists()
+        saved = _api().post(PLAN_URL, _command(goal, [_step("s1"), _step("s2", role="OPTIONAL")]), format="json")
+        assert saved.status_code == 201, saved.content
+        plan = _api().get(PLAN_URL).json()["data"]["plan"]
+        steps = plan["revision"]["steps"]
+        assert [(s["step_id"], s["level"], s["tenant_offer_ref"]) for s in steps] == [
+            ("s1", "CAPABILITY", None), ("s2", "CAPABILITY", None),
+        ]
+        assert plan["status"] == "active"
+
+    def test_a_refused_way_to_a_service_leaves_the_saved_plan_whole(
+        self, goal, canon, tenant, category, specialist, owner, offer,
+    ) -> None:
+        plan = _save(goal)
+        before = _api().get(PLAN_URL).json()["data"]["plan"]
+
+        refused = _resolve(
+            plan, level="OFFER", canonical_service_ref=str(canon.id), tenant_offer_ref=str(uuid.uuid4()),
+        )
+        assert refused.status_code == 409
+        assert refused.json()["error"]["code"] == "PLAN_STEP_RESOLUTION_REFUSED"
+        # И запись от шага, не дошедшего до услуги, отказана своим слоем.
+        link = _link(plan, _book(owner, specialist, offer))
+        assert link.json()["error"]["details"]["reason"] == "step_not_offer_level"
+
+        assert _api().get(PLAN_URL).json()["data"]["plan"] == before
+        plan.refresh_from_db()
+        assert plan.status == Plan.Status.ACTIVE
+        assert not PlanStepResolution.objects.exists() and not PlanStepBooking.objects.exists()
+
+    def test_the_other_step_still_goes_to_a_service(self, goal, canon, offer) -> None:
+        """Отказ одному шагу — не ограничение соседнему и не ограничение плану."""
+        plan = _save(goal)
+        _resolve(plan, "s1", level="OFFER", canonical_service_ref=str(canon.id), tenant_offer_ref=str(uuid.uuid4()))
+        assert _to_offer(plan, canon, offer, step_id="s2").status_code in (200, 201)

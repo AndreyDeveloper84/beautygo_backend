@@ -44,6 +44,7 @@ from .models import (
     Plan,
     PlanRevision,
 )
+from .plan_coexistence import engine_displaces_lite
 
 #: Ключи шага — закрытый набор §4.2. Незнакомый ключ — отказ: у шага нет
 #: места для произвольного текста (PE-2), и появиться ему негде.
@@ -366,9 +367,12 @@ def create_plan_from_command(user, command: PlanCommand) -> tuple[Plan, bool]:
             )
             # Один механизм на человека: действующий Lite-план закрывается
             # этим же сохранением. Строка и её обязательства остаются историей.
-            PersonalPlan.objects.filter(user=user, status=PersonalPlan.Status.ACTIVE).update(
-                status=PersonalPlan.Status.SUPERSEDED, closed_at=now,
-            )
+            # Пока идёт проверка на тестовых данных, Lite-план не трогается —
+            # см. ``plan_coexistence``.
+            if engine_displaces_lite():
+                PersonalPlan.objects.filter(user=user, status=PersonalPlan.Status.ACTIVE).update(
+                    status=PersonalPlan.Status.SUPERSEDED, closed_at=now,
+                )
             plan = Plan.objects.create(
                 subject_user=user, goal=goal, idempotency_key=key, status_changed_at=now,
             )
