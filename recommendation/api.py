@@ -42,6 +42,7 @@ from ._evidence import (
 )
 from ._admission import (
     ALL_CHECKS,
+    SYNTHETIC_OUTCOME_LABEL,
     UNENFORCED_LITERALS,
     AdmissionCheck,
     CheckAnswer,
@@ -97,6 +98,7 @@ from ._types import (
 
 __all__ = [
     "ALL_CHECKS",
+    "SYNTHETIC_OUTCOME_LABEL",
     "UNENFORCED_LITERALS",
     "AdmissionCheck",
     "CheckAnswer",
