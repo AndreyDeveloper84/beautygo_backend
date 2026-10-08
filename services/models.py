@@ -593,6 +593,37 @@ class ServiceTemplate(models.Model):
                 ),
                 name="servicetemplate_synthetic_rule_only_on_synthetic",
             ),
+            # Синтетическому канону нужны настоящие область и класс: проверки
+            # допуска для синтетики не ослабляются. Но основание у них
+            # названо синтетическим — и только им: область подтверждает
+            # правило ``synthetic-test-data`` (человека нет), а у класса,
+            # который правилом подтверждаться не умеет, синтетическим назван
+            # источник. Настоящему канону оба значения запрещены.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(synthetic=False)
+                    | (
+                        models.Q(scope_confirmed_by__isnull=True)
+                        & models.Q(scope_confirmed_rule__in=["", "synthetic-test-data"])
+                    )
+                ),
+                name="servicetemplate_synthetic_scope_only_by_synthetic_rule",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(scope_confirmed_rule="synthetic-test-data") | models.Q(synthetic=True),
+                name="servicetemplate_synthetic_scope_rule_only_on_synthetic",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(synthetic=False)
+                    | models.Q(legal_class_source_ref__in=["", "synthetic-test-data"])
+                ),
+                name="servicetemplate_synthetic_class_source_is_synthetic",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(legal_class_source_ref="synthetic-test-data") | models.Q(synthetic=True),
+                name="servicetemplate_synthetic_class_source_only_on_synthetic",
+            ),
             # Body Care CAT-2: вывод из оборота — решение того же веса, что
             # одобрение, и провенанс у него тот же.
             models.CheckConstraint(

@@ -291,5 +291,52 @@ class Migration(migrations.Migration):
                 name="salonservice_synthetic_has_a_canon",
             ),
         ),
+        migrations.AddConstraint(
+            model_name="servicetemplate",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    ("synthetic", False),
+                    models.Q(
+                        ("scope_confirmed_by__isnull", True),
+                        ("scope_confirmed_rule__in", ["", "synthetic-test-data"]),
+                    ),
+                    _connector="OR",
+                ),
+                name="servicetemplate_synthetic_scope_only_by_synthetic_rule",
+            ),
+        ),
+        migrations.AddConstraint(
+            model_name="servicetemplate",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    models.Q(("scope_confirmed_rule", "synthetic-test-data"), _negated=True),
+                    ("synthetic", True),
+                    _connector="OR",
+                ),
+                name="servicetemplate_synthetic_scope_rule_only_on_synthetic",
+            ),
+        ),
+        migrations.AddConstraint(
+            model_name="servicetemplate",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    ("synthetic", False),
+                    ("legal_class_source_ref__in", ["", "synthetic-test-data"]),
+                    _connector="OR",
+                ),
+                name="servicetemplate_synthetic_class_source_is_synthetic",
+            ),
+        ),
+        migrations.AddConstraint(
+            model_name="servicetemplate",
+            constraint=models.CheckConstraint(
+                condition=models.Q(
+                    models.Q(("legal_class_source_ref", "synthetic-test-data"), _negated=True),
+                    ("synthetic", True),
+                    _connector="OR",
+                ),
+                name="servicetemplate_synthetic_class_source_only_on_synthetic",
+            ),
+        ),
         migrations.RunSQL(sql=TRIGGERS, reverse_sql=DROP_TRIGGERS),
     ]

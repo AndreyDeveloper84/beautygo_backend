@@ -649,6 +649,69 @@ def test_the_synthetic_rule_is_refused_on_real_rows(demo_salon, category) -> Non
         pk=canon.pk).update(**{k: v for k, v in answer.items() if k != "requires_health_check"}))
 
 
+# ─── область и класс синтетического канона ───────────────────────────────────
+
+
+def _classified(category, curator, name, *, synthetic) -> ServiceTemplate:
+    """Канон с семейством, областью и немедицинским классом — так, как его обязан завести сид."""
+    scope = (
+        {"scope_confirmed_rule": SYNTHETIC_RULE, "scope_rule_version": "1"} if synthetic
+        else {"scope_confirmed_by": curator}
+    )
+    return _canon(
+        category, name, synthetic=synthetic,
+        service_family=ServiceTemplate.ServiceFamily.BODY_WRAP, canonical_version="synthetic-1",
+        body_care_scope=ServiceTemplate.BodyCareScope.BODY_CARE,
+        scope_confirmed_at=timezone.now(), scope_source_ref="тестовый набор", **scope,
+        legal_service_class=ServiceTemplate.LegalServiceClass.NON_MEDICAL_COSMETIC,
+        legal_class_confirmed_by=curator, legal_class_confirmed_at=timezone.now(),
+        legal_class_source_ref=SYNTHETIC_RULE if synthetic else "заключение юриста",
+    )
+
+
+@pytest.mark.parametrize("fail_closed", [False, True])
+def test_a_classified_synthetic_canon_passes_the_real_scope_readers(settings, category, curator, fail_closed) -> None:
+    """Читатели области судят по значениям, а не по основанию: синтетическое правило их не смущает."""
+    from services import body_care_scope
+
+    settings.BODY_CARE_UNCLASSIFIED_FAIL_CLOSED = fail_closed
+    canon = ServiceTemplate.objects.get(pk=_classified(category, curator, "Синтетический канон", synthetic=True).pk)
+    facts = {"scope": canon.body_care_scope, "family": canon.service_family, "legal_class": canon.legal_service_class}
+
+    assert body_care_scope.scope_of(has_canon=True, scope=facts["scope"], family=facts["family"]) == (
+        body_care_scope.SUBJECT
+    )
+    assert body_care_scope.unenforced_checks(has_canon=True, **facts) == frozenset()
+    # Немедицинский класс снимает лицензию и адрес («не применимы») — поэтому сиду нужен именно он.
+    assert body_care_scope.legal_checks_waived(legal_class=facts["legal_class"], family=facts["family"]) is True
+    assert body_care_scope.class_unknown(facts["legal_class"]) is False
+
+
+def test_the_scope_of_a_synthetic_canon_is_confirmed_only_by_the_synthetic_rule(category, curator) -> None:
+    canon = _classified(category, curator, "Синтетический канон", synthetic=True)
+
+    _refused("servicetemplate_synthetic_scope_only_by_synthetic_rule", lambda: ServiceTemplate.objects.filter(
+        pk=canon.pk).update(scope_confirmed_by=curator, scope_confirmed_rule="", scope_rule_version=""))
+    _refused("servicetemplate_synthetic_scope_only_by_synthetic_rule", lambda: ServiceTemplate.objects.filter(
+        pk=canon.pk).update(scope_confirmed_rule="owner_rule"))
+
+
+def test_the_class_of_a_synthetic_canon_names_a_synthetic_source(category, curator) -> None:
+    canon = _classified(category, curator, "Синтетический канон", synthetic=True)
+
+    _refused("servicetemplate_synthetic_class_source_is_synthetic", lambda: ServiceTemplate.objects.filter(
+        pk=canon.pk).update(legal_class_source_ref="заключение юриста"))
+
+
+def test_real_canons_cannot_borrow_the_synthetic_grounds(category, curator) -> None:
+    canon = _classified(category, curator, "Настоящий канон", synthetic=False)
+
+    _refused("servicetemplate_synthetic_scope_rule_only_on_synthetic", lambda: ServiceTemplate.objects.filter(
+        pk=canon.pk).update(scope_confirmed_by=None, scope_confirmed_rule=SYNTHETIC_RULE, scope_rule_version="1"))
+    _refused("servicetemplate_synthetic_class_source_only_on_synthetic", lambda: ServiceTemplate.objects.filter(
+        pk=canon.pk).update(legal_class_source_ref=SYNTHETIC_RULE))
+
+
 # ─── админка ─────────────────────────────────────────────────────────────────
 
 
