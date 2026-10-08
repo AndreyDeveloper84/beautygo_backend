@@ -71,6 +71,12 @@ class CreateBookingDTO:
     # создания; расхождение — ``QuoteChangedError``, записи нет.
     quoted_price: Optional[Decimal] = None
     quoted_duration_minutes: Optional[int] = None
+    # DRF-2868 (решение владельца 07.10) — запись сделана от шага плана.
+    # Необязательно: без поля запись создаётся как прежде и плана не касается.
+    # С полем сервис в ТОЙ ЖЕ транзакции проверяет допуск шага и связывает
+    # запись с шагом; отказ допуска — записи нет. Значение непрозрачно для
+    # домена записи: это ``wellness.plan_engine_steps.PlanStepProvenance``.
+    plan_step: Optional[object] = None
 
 
 @dataclass(frozen=True)

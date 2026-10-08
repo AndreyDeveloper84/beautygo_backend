@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -36,7 +37,7 @@ from services.models import SalonService, ServiceTemplate
 
 from .models import Plan, PlanRevision, PlanStepBooking, PlanStepResolution
 from .plan_engine import PlanEngineDisabled, PlanEngineError, PlanNotFound, plan_engine_enabled
-from .plan_safety import SafetyInput
+from .plan_safety import SafetyInput, SafetyInputError, parse_safety_input
 
 _LEVEL_ORDER = {"CAPABILITY": 0, "SERVICE": 1, "OFFER": 2}
 
@@ -279,6 +280,68 @@ def link_booking(
     except IntegrityError as exc:  # гонка двух связей одной записи — OneToOne
         raise BookingLinkConflict() from exc
     return link, True
+
+
+# ─── запись от шага: происхождение в создании записи (решение владельца 07.10) ──
+
+ENTRY_POINT_PLAN_STEP = "PLAN_STEP"
+
+
+class ProvenanceMalformed(PlanEngineError):
+    """Блок происхождения не конформен. ``reason`` — машинное имя."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class PlanStepProvenance:
+    """Откуда запись: шаг какого плана и при какой безопасности хода (канон
+    §16.4: ``entry_point = PLAN_STEP`` + ссылки на план и шаг)."""
+
+    plan_id: UUID
+    step_id: str
+    safety: SafetyInput
+
+
+def parse_booking_provenance(raw: Any) -> PlanStepProvenance | None:
+    """Необязательный блок ``provenance`` тела создания записи. ``None`` —
+    блока нет: обычная запись, плана она не касается."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ProvenanceMalformed("provenance_not_object")
+    if raw.get("entry_point") != ENTRY_POINT_PLAN_STEP:
+        raise ProvenanceMalformed("entry_point_unsupported")
+    try:
+        plan_id = UUID(str(raw.get("plan_id")))
+    except (TypeError, ValueError) as exc:
+        raise ProvenanceMalformed("plan_id_malformed") from exc
+    step_id = raw.get("step_id")
+    if not isinstance(step_id, str) or not step_id.strip():
+        raise ProvenanceMalformed("step_id_missing")
+    try:
+        safety = parse_safety_input(raw)
+    except SafetyInputError as exc:
+        raise ProvenanceMalformed(exc.reason) from exc
+    return PlanStepProvenance(plan_id=plan_id, step_id=step_id, safety=safety)
+
+
+def admit_step_for_booking(client_id: UUID, provenance: PlanStepProvenance, *, salon_service_id: UUID | None) -> Plan:
+    """Допуск шага ДО создания записи, внутри её транзакции.
+
+    Идентификаторы из тела допуска не обходят: план ищется строго среди планов
+    этого человека, шаг — в его текущей ревизии, услуга — та, которой разрешён
+    шаг. Возвращает запертый план для ``attach_booking``. Отказ — исключение;
+    транзакция записи откатывается, записи нет.
+    """
+    if not plan_engine_enabled():
+        raise PlanEngineDisabled()
+    _safety_gate(provenance.safety)
+    plan = _locked_plan(client_id, provenance.plan_id)
+    step_admission(plan, plan.current_revision, provenance.step_id, salon_service_id=salon_service_id)
+    return plan
 
 
 # ─── чтение ──────────────────────────────────────────────────────────────────

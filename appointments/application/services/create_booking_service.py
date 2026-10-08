@@ -368,6 +368,18 @@ class CreateBookingService:
             )
             return existing, existing.payments.filter(status="pending").first()
 
+        # DRF-2868 — запись от шага плана: допуск шага проверяется здесь, в
+        # транзакции записи и ДО её создания. После возврата по идемпотентности
+        # — повтор уже созданной записи не судится заново. Отказ — исключение
+        # ``wellness.plan_engine.PlanEngineError``: транзакция откатывается.
+        plan_for_step = None
+        if dto.plan_step is not None:
+            from wellness.plan_engine_steps import admit_step_for_booking
+
+            plan_for_step = admit_step_for_booking(
+                dto.client_id, dto.plan_step, salon_service_id=salon_service_id,
+            )
+
         # C1 — billing eligibility (W2): a past_due subscription blocks
         # only NEW bookings. Placed AFTER the idempotency early-return
         # so a retried create of an existing booking is never refused
@@ -670,6 +682,13 @@ class CreateBookingService:
             snapshot_platform_fee=snapshot.platform_fee,
             snapshot_timezone=snapshot.specialist_timezone,
         )
+
+        # DRF-2868 — связь записи с шагом: та же транзакция, что и запись.
+        # Запись на шаге — факт; ни план, ни цель от неё не меняются.
+        if plan_for_step is not None:
+            from wellness.plan_engine_steps import attach_booking
+
+            attach_booking(plan_for_step, dto.plan_step.step_id, appointment, dto.plan_step.safety)
 
         # Create payment record (online-payment path only). Walk-ins are
         # settled off-platform — no Payment row.
