@@ -137,6 +137,12 @@ class InternalBookingCreateSerializer(serializers.Serializer):
         required=False, max_digits=10, decimal_places=2, min_value=Decimal("0"),
     )
     quoted_duration_minutes = serializers.IntegerField(required=False, min_value=1)
+    # DRF-2868 (решение владельца 07.10) — запись от шага плана. Необязательно:
+    # без блока запись создаётся как прежде. Форма:
+    # ``{entry_point: "PLAN_STEP", plan_id, step_id, safety_state,
+    # safety_policy_version, evaluated_at_revision}``. Форму и допуск судит
+    # ``wellness.plan_engine_steps`` — здесь блок только принимается.
+    provenance = serializers.DictField(required=False)
 
 
 class _InternalAuthMixin:
@@ -187,6 +193,15 @@ class InternalBookingCreateView(_InternalAuthMixin, APIView):
                 status_code=403,
             )
 
+        from wellness.plan_engine import PlanEngineError
+        from wellness.plan_engine_api import plan_step_refusal_response
+        from wellness.plan_engine_steps import parse_booking_provenance
+
+        try:
+            plan_step = parse_booking_provenance(serializer.validated_data.get('provenance'))
+        except PlanEngineError as exc:
+            return plan_step_refusal_response(exc)
+
         dto = CreateBookingDTO(
             client_id=request.user.id,
             specialist_id=serializer.validated_data['specialist_id'],
@@ -206,6 +221,7 @@ class InternalBookingCreateView(_InternalAuthMixin, APIView):
             quoted_duration_minutes=serializer.validated_data.get(
                 'quoted_duration_minutes'
             ),
+            plan_step=plan_step,
         )
 
         # Booking domain errors (slot taken, inactive specialist/service)
@@ -223,6 +239,10 @@ class InternalBookingCreateView(_InternalAuthMixin, APIView):
                 'blocked for this specialist.',
                 status_code=409,
             )
+        except PlanEngineError as exc:
+            # Допуск шага плана отказал — транзакция записи откатилась,
+            # записи нет. Обычной записи (без блока) это не касается.
+            return plan_step_refusal_response(exc)
 
         appointment = (
             Appointment.objects
