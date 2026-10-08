@@ -51,6 +51,7 @@ from nutrition.services.plan_facts import count_days_within_calorie_target
 
 from .fact_providers import count_fact_days, count_facts
 from .models import PersonalPlan, PlanAction
+from .plan_coexistence import engine_displaces_lite
 from .plan_lite_templates import active_template_for, template_version_exists
 
 MIN_ACTIONS = 1
@@ -174,9 +175,10 @@ def create_plan(
     источник, не приказ: бот мог дать человеку убрать одно из трёх."""
     if not plan_lite_enabled():
         raise PlanLiteDisabled()
-    # DRF-2857 — флаг читается из настроек, а не из ``plan_engine``: Lite о
-    # durable-плане не знает ничего, кроме того, что писать ему больше нельзя.
-    if getattr(settings, "PLAN_ENGINE_ENABLED", False):
+    # DRF-2857 — Lite о durable-плане не знает ничего, кроме того, что писать
+    # ему больше нельзя. Пока идёт проверка на тестовых данных, вытеснение
+    # подавлено — см. ``plan_coexistence``.
+    if engine_displaces_lite():
         raise SupersededByEngine()
     goals = ClientGoal.objects.filter(client=user, state=ClientGoal.State.ACTIVE)
     goal = (goals.filter(pk=goal_id) if goal_id is not None else goals).first()
