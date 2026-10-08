@@ -559,6 +559,51 @@ class TestFlagsAndLite:
         assert resp.json()["error"]["code"] == "PLAN_LITE_SUPERSEDED_BY_ENGINE"
         assert PersonalPlan.objects.count() == 1
 
+    def test_under_test_data_the_lite_writer_is_not_displaced(self, goal, settings) -> None:
+        """Решение владельца 08.10: пока идёт проверка на тестовых данных,
+        включённый движок создание через Lite не ломает."""
+        settings.PLAN_ENGINE_ENABLED = True
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        assert _api().post(LITE_URL, LITE_BODY, format="json").status_code == 201
+        assert _api().delete(LITE_URL).status_code == 200
+        assert _api().post(LITE_URL, LITE_BODY, format="json").status_code == 201
+        assert PersonalPlan.objects.count() == 2
+
+    def test_under_test_data_saving_a_plan_leaves_the_lite_plan_alone(self, goal, settings) -> None:
+        settings.PLAN_ENGINE_ENABLED = True
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        assert _api().post(LITE_URL, LITE_BODY, format="json").status_code == 201
+        lite = PersonalPlan.objects.get()
+
+        _save(goal)
+
+        lite.refresh_from_db()
+        assert (lite.status, lite.closed_at) == ("active", None)
+        assert Plan.objects.filter(status="active").count() == 1  # оба механизма живы
+
+    def test_test_data_off_again_the_displacement_is_back(self, goal, settings) -> None:
+        """Вытеснение подавлено, а не снято: выключили тестовые данные —
+        действует как решено в WP1, в обоих местах."""
+        settings.PLAN_ENGINE_ENABLED = True
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        assert _api().post(LITE_URL, LITE_BODY, format="json").status_code == 201
+        lite = PersonalPlan.objects.get()
+        settings.SYNTHETIC_TEST_DATA_ENABLED = False
+
+        _save(goal)
+        lite.refresh_from_db()
+        assert lite.status == "superseded"
+        resp = _api().post(LITE_URL, LITE_BODY, format="json")
+        assert resp.json()["error"]["code"] == "PLAN_LITE_SUPERSEDED_BY_ENGINE"
+
+    def test_test_data_alone_displaces_nothing_and_enables_nothing(self, goal, settings) -> None:
+        """Флаг тестовых данных движок не включает: без PLAN_ENGINE_ENABLED
+        Lite пишет, а писатель Plan отвечает 404."""
+        settings.PLAN_ENGINE_ENABLED = False
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        assert _api().post(LITE_URL, LITE_BODY, format="json").status_code == 201
+        assert _api().post(PLAN_URL, _command(goal), format="json").status_code == 404
+
     def test_engine_off_again_lite_writes_and_engine_rows_stay(self, goal, settings) -> None:
         _save(goal)
         settings.PLAN_ENGINE_ENABLED = False
