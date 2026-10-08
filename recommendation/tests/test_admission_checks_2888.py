@@ -344,6 +344,26 @@ class TestASubsetOfChecksIsADiagnosticPolicy:
 
         assert ReasonCode.ELIG_CAPABILITY_VERIFIED in result.codes[candidate.ref.id]
 
+    def test_a_verified_candidate_is_not_called_verified_when_the_mapping_was_not_checked(self):
+        """Связь у кандидата подтверждена, но прогон её не проверял — свидетельства в отчёте нет."""
+        candidate = make_facts()
+
+        result = self._admit(candidate, [A.CONFIG])
+
+        assert [f.ref.id for f in result.admitted] == [candidate.ref.id]
+        assert ReasonCode.ELIG_CAPABILITY_VERIFIED not in result.codes[candidate.ref.id]
+
+    def test_a_source_that_collapsed_its_answers_cannot_vouch_for_the_checks_after_the_failure(self):
+        """Источник отдал только «лицензия не сошлась». Что с квалификацией — он не сказал, и
+        диагностический прогон «только квалификация» не вправе считать её пройденной."""
+        candidate = make_facts(legal_gate=LegalGate.LICENSE_NOT_VERIFIED)
+
+        alone = self._admit(candidate, [A.QUALIFICATION])
+        before = self._admit(candidate, [A.LEGAL_CLASS])
+
+        assert [e.reason_code for e in alone.excluded] == [ReasonCode.ELIG_EXCLUDED_ELIGIBILITY_UNDETERMINED]
+        assert before.excluded == (), "а про проверку ДО несошедшейся он сказал: она прошла"
+
     def test_one_check_alone_excludes_only_by_itself(self):
         candidate = make_facts(
             mapping_status=MappingStatus.UNMAPPED, canon_retired=True, config_gate=ConfigGate.NOT_READY,
