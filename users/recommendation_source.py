@@ -80,6 +80,8 @@ from goals.wiring import goal_category_positions_for_key
 from dataclasses import dataclass
 
 from recommendation.api import (
+    UNENFORCED_LITERALS,
+    AdmissionCheck,
     CheckAnswer,
     build_answers,
     CandidateFacts,
@@ -95,7 +97,7 @@ from recommendation.api import (
     Scope,
     ScopeMode,
 )
-from services import body_care_address, body_care_license, body_care_qualification
+from services import body_care_address, body_care_license, body_care_qualification, body_care_scope
 from services.body_care_address import address_states
 from services.body_care_license import license_states
 from services.body_care_qualification import qualification_states
@@ -127,6 +129,39 @@ def build_candidate_source(*, viewer=None) -> "SpecialistCandidateSource":
 #: с каталогом 07.10 и узнаётся здесь РАНЬШЕ, чем его начнут отдавать: иначе
 #: первый же ответ с ним закрыл бы выдачу как «не определено» и залил лог.
 UNCLASSIFIED = "unclassified"
+
+
+def unenforced(
+    *,
+    has_canon: bool,
+    scope: str | None,
+    family: str | None,
+    legal_class: str | None,
+    required_practitioner_class: str | None,
+) -> frozenset[AdmissionCheck]:
+    """Какие проверки допуска у этой строки сейчас НЕ ДЕЙСТВУЮТ (DRF-2888).
+
+    Правило целиком у каталога — :func:`services.body_care_scope.unenforced_checks`:
+    проверка «не действует», когда её ответ при включённом
+    ``BODY_CARE_UNCLASSIFIED_FAIL_CLOSED`` был бы другим. Здесь только перевод
+    его литералов в проверки резолвера; своей копии правила нет. Флаг
+    читается каталогом в момент вызова.
+
+    Литерал, которого резолвер не знает, пропускается с ERROR: исход
+    «не действует» на допуск не влияет, а уронить из-за него полку нельзя.
+    Расхождение наборов запирает узел.
+    """
+    out: set[AdmissionCheck] = set()
+    for literal in body_care_scope.unenforced_checks(
+        has_canon=has_canon, scope=scope, family=family, legal_class=legal_class,
+        required_practitioner_class=required_practitioner_class,
+    ):
+        check = UNENFORCED_LITERALS.get(literal)
+        if check is None:
+            logger.error("recommendation.source unenforced_check_unknown literal=%r", literal)
+            continue
+        out.add(check)
+    return frozenset(out)
 
 
 def _log_id(pk) -> str:
@@ -482,6 +517,14 @@ class SpecialistCandidateSource:
             facts.config_by_service[salon.id] = readiness.get(salon.id, ConfigGate.UNDETERMINED)
             facts.legal_by_service[salon.id] = legal.get((link.specialist_id, salon.id), LegalGate.UNDETERMINED)
             facts.legal_answers_by_service[salon.id] = legal_all.get((link.specialist_id, salon.id), _ALL_UNDETERMINED)
+            canon = salon.template if salon.template_id is not None else None
+            facts.unenforced_by_service[salon.id] = unenforced(
+                has_canon=canon is not None,
+                scope=getattr(canon, "body_care_scope", None),
+                family=getattr(canon, "service_family", None),
+                legal_class=getattr(canon, "legal_service_class", None),
+                required_practitioner_class=getattr(canon, "required_practitioner_class", None),
+            )
             if salon.template_id is not None:
                 facts.template_by_service[salon.id] = salon.template_id
             if salon.template_id is not None:
@@ -775,6 +818,8 @@ class _MappingFacts:
         self.retired_services: set[UUID] = set()
         #: `SalonService.id` → ответы трёх чтений §7A порознь (DRF-2888).
         self.legal_answers_by_service: dict[UUID, LegalAnswers] = {}
+        #: `SalonService.id` → проверки, которые у строки сейчас не действуют.
+        self.unenforced_by_service: dict[UUID, frozenset[AdmissionCheck]] = {}
         #: `SalonService.id` → юридические условия §7A этой строки для ЭТОГО
         #: мастера (CAT-10-ext), как их отдал :func:`legal_gates`. Легаси-строки
         #: здесь нет: канона у неё не бывает.
@@ -888,6 +933,7 @@ class _MappingFacts:
             address_verified=legal.address_raw == body_care_address.VERIFIED,
             qualification_verified=legal.qualification_raw == body_care_qualification.VERIFIED,
             address_waits_for_license=legal.address_raw == body_care_address.NO_COVERING_LICENSE,
+            unenforced=self.unenforced_by_service.get(row, ()),
         )
 
     def legal_gate(

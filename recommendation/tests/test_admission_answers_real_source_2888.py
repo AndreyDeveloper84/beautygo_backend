@@ -150,4 +150,6 @@ def test_the_config_gate_of_a_plain_offer_is_what_the_answers_say(tenant, catego
     [facts] = _fetch()
 
     assert facts.config_gate is ConfigGate.NOT_SUBJECT
-    assert _outcomes(facts)[A.SCOPE] is O.PASSED
+    # Свёрнутый гейт говорит «вне Body Care», а набор ответов честнее: область этой строки
+    # никто не называл, и проходит она только потому, что флаг каталога выключен.
+    assert _outcomes(facts)[A.SCOPE] is O.NOT_ENFORCED

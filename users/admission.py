@@ -30,7 +30,7 @@ from services import body_care_address, body_care_license, body_care_qualificati
 from services.models import SalonService, ServiceTemplate, SpecialistService
 from services.offer_sellable import sellable_offer_q
 from users.models import SpecialistProfile
-from users.recommendation_source import _MappingFacts, config_readiness, legal_answers
+from users.recommendation_source import _MappingFacts, config_readiness, legal_answers, unenforced
 from users.sellable import demo_scope_q, demo_visibility_q, sellable_q
 
 _RETIRED = ServiceTemplate.Lifecycle.RETIRED
@@ -57,6 +57,8 @@ def admission_answers(rows: Iterable[Row]) -> dict[Key, tuple[CheckAnswer, ...]]
         offer["pk"]: offer
         for offer in SalonService.objects.filter(pk__in={salon_id for _, salon_id, _ in rows}).values(
             "pk", "mapping_status", "template_id", "template__lifecycle",
+            "template__body_care_scope", "template__service_family",
+            "template__legal_service_class", "template__required_practitioner_class",
         )
     }
     known = [row for row in rows if row[1] in offers]
@@ -81,6 +83,13 @@ def admission_answers(rows: Iterable[Row]) -> dict[Key, tuple[CheckAnswer, ...]]
             address_verified=answers.address_raw == body_care_address.VERIFIED,
             qualification_verified=answers.qualification_raw == body_care_qualification.VERIFIED,
             address_waits_for_license=answers.address_raw == body_care_address.NO_COVERING_LICENSE,
+            unenforced=unenforced(
+                has_canon=has_canon,
+                scope=offer["template__body_care_scope"],
+                family=offer["template__service_family"],
+                legal_class=offer["template__legal_service_class"],
+                required_practitioner_class=offer["template__required_practitioner_class"],
+            ),
         )
     return out
 
