@@ -291,6 +291,11 @@ def _canonical_rows(specialist) -> list[CatalogService]:
         salon = link.salon_service
         if edge_refusal(link) is not None:
             continue
+        # DRF-2916: помеченная синтетика в список услуг мастера не входит ни
+        # в одном пуле каталога (подбор, поиск, публичный каталог, движок
+        # чата) — тестовая личность видит демо-салон, но не тестовые данные.
+        if salon.synthetic:
+            continue
         category = resolved_category(salon)
         out.append(CatalogService(
             id=salon.id,
