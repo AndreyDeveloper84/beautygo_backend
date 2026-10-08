@@ -129,6 +129,19 @@ def build_candidate_source(*, viewer=None) -> "SpecialistCandidateSource":
 UNCLASSIFIED = "unclassified"
 
 
+def _log_id(pk) -> str:
+    """Идентификатор строки для лога — без дефисов (DRF-2889).
+
+    Маскировщик ПДн (``core.pii_log_filter``) изредка принимает группы цифр
+    UUID с дефисами за номер карты и заменяет хвост на ``[CARD]`` — по его
+    же замеру 0,014% идентификаторов; у записи без дефисов — ноль из
+    200 000. Строка «закрыта такая-то» без адреса строки бесполезна ровно
+    тогда, когда она нужна, поэтому адрес пишется в виде, который маска
+    не трогает. Идентификатор строки каталога — не ПДн, а адрес записи.
+    """
+    return getattr(pk, "hex", None) or str(pk)
+
+
 def config_readiness(salon_service_ids) -> dict[UUID, ConfigGate]:
     """Область и готовность конфигурации строк пула — шов с CAT-6 (проверки П2, П3).
 
@@ -172,7 +185,7 @@ def config_readiness(salon_service_ids) -> dict[UUID, ConfigGate]:
             out[pk] = ConfigGate.NOT_READY
         else:
             out[pk] = ConfigGate.UNDETERMINED
-            undetermined.append(f"{pk}={state!r}")
+            undetermined.append(f"{_log_id(pk)}={state!r}")
     if undetermined:
         logger.error(
             "recommendation.source config_readiness_undetermined rows=%d closed=%s",
@@ -321,7 +334,7 @@ def _first_unmet_legal(answers: dict[tuple[UUID, UUID], LegalAnswers]) -> dict[t
     """Свёртка ответов §7A в первое несошедшееся — с ERROR про неопределённое."""
     out = {pair: answer.first_unmet for pair, answer in answers.items()}
     undetermined = sorted(
-        f"{specialist_id}:{salon_id}"
+        f"{_log_id(specialist_id)}:{_log_id(salon_id)}"
         for (specialist_id, salon_id), gate in out.items() if gate is LegalGate.UNDETERMINED
     )
     # Сбой чтения уже записан исключением в `legal_answers`; здесь — ответы,

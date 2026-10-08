@@ -127,9 +127,17 @@ jobs:
     name: test shard ${{ matrix.shard.id }}
     needs: lint
     runs-on: ubuntu-latest
-    # ~7.5 min estimated; 25 is >3x that. If any shard is cancelled at this
-    # ceiling within the next 20 runs, this number is wrong — refit it.
-    timeout-minutes: 25
+    # ~7.5 min estimated when the split was fitted (12.09, 4174 tests). The
+    # suite has grown since and the estimate no longer holds: on 07.10 shard 4
+    # ran 4639 tests in 23:51 and the job was CANCELLED at the old ceiling of
+    # 25 (25m13s) with every test green; the same shard took 19 min on
+    # another PR. A cancelled shard reads as a red PR, and under the serial
+    # merge queue it blocks everyone behind it.
+    #
+    # 35 is headroom, not a fix: the real answer is to refit the split by
+    # measured time (shard 4 is the catch-all and takes every new app). If a
+    # shard is cancelled at THIS ceiling, do not raise it again — rebalance.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:

@@ -361,9 +361,33 @@ class SalonServiceAdminForm(forms.ModelForm):
                 code='rule_requires_version',
             ))
 
+        # Канон читается до проверок: ``add_error`` убирает поле из
+        # ``cleaned_data``, и следующая проверка приняла бы изменённый канон
+        # за отсутствующий.
+        canon = cleaned.get('template')
+        if cleaned.get('mapping_status') == SalonService.MappingStatus.VERIFIED and self.instance.pk:
+            # DRF-2883. Подтверждение выдают для конкретного канона. Модель
+            # такую связь молча вернёт в очередь проверки; здесь оператору
+            # говорится, что произошло и что сделать, — до сохранения.
+            probe = SalonService(pk=self.instance.pk)
+            probe._state.adding = False
+            probe.mapping_status = cleaned.get('mapping_status')
+            probe.template = canon
+            probe.mapping_confirmed_by = who
+            probe.mapping_confirmed_rule = rule
+            probe.mapping_rule_version = version
+            probe.mapping_confirmed_at = cleaned.get('mapping_confirmed_at')
+            if probe.template is not None and probe.canon_changed_under_a_standing_confirmation():
+                self.add_error('template', forms.ValidationError(
+                    'Канон изменён, а подтверждение связи осталось прежним — оно было '
+                    'выдано для другого канона. Подтвердите связь заново (новая дата и '
+                    'автор) либо поставьте статус «требует проверки».',
+                    code='canon_changed_needs_reconfirmation',
+                ))
+
         if (
             cleaned.get('mapping_status') == SalonService.MappingStatus.VERIFIED
-            and cleaned.get('template') is None
+            and canon is None
         ):
             # База: `salonservice_verified_requires_template` (DRF-1668).
             # Здесь — по полю: «проверено» отвечает на вопрос «с чем

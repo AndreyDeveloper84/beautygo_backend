@@ -380,7 +380,7 @@ class TestTheSeam:
         assert readiness == {pk: ConfigGate.UNDETERMINED}
         [message] = _errors(source_log)
         assert "config_readiness_undetermined" in message
-        assert str(pk) in message
+        assert pk.hex in message, "адрес строки в логе — без дефисов: так его не режет маска карт"
 
     def test_a_known_closing_state_is_not_an_error(self, monkeypatch, source_log):
         """Положительный контроль: штатное «не готово» в ERROR не пишется."""
