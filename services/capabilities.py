@@ -32,7 +32,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from services.models import CapabilityGoalLink, ProcedureCapability, ServiceTemplate
-from services.synthetic import SyntheticGrant, knowledge_q
+from services.synthetic import SyntheticGrant, knowledge_q, reads_synthetic
 
 
 class KnowledgeState(str, Enum):
@@ -209,6 +209,137 @@ def procedures_by_capability_helping_goal(goal_key: str, *, now: datetime | None
     return {key: frozenset(templates) for key, templates in out.items()}
 
 
+@dataclass(frozen=True)
+class CapabilityVersion:
+    """Версии двух утверждений, на которых стоит шаг плана (DRF-2879).
+
+    «Процедура умеет X» и «X помогает цели» — два утверждения; у каждого свой
+    идентификатор и свой отпечаток. Отпечаток — непрозрачная строка: его
+    сравнивают целиком и не разбирают.
+    """
+
+    capability_id: object
+    capability_fingerprint: str
+    link_id: object
+    link_fingerprint: str
+    synthetic: bool
+
+
+class UnreadableReason(str, Enum):
+    """Почему утверждение сейчас не читается — причины различимы для человека."""
+
+    #: Строки нет (удалена) или она не из тех, что спрошены.
+    MISSING = "missing"
+    #: Подтверждение снято или его не было; синтетика без разрешения — сюда же.
+    NOT_APPROVED = "not_approved"
+    #: Подтверждено, но не «поддержано»: запрет или «не поддерживается».
+    NOT_SUPPORTED = "not_supported"
+    #: Срок годности подтверждения истёк.
+    EXPIRED = "expired"
+
+
+@dataclass(frozen=True)
+class ClaimVersion:
+    """Текущее состояние одного утверждения — для сверки сохранённого шага.
+
+    ``readable`` — отдаёт ли его сейчас чтение знания тем же правилом, что и
+    сборка. Два исхода для шага различимы: строка читается, но ``fingerprint``
+    другой — «знание изменилось» (его правили и подтвердили заново); строка
+    не читается — «знание больше не действует», причина в ``unreadable_reason``.
+    """
+
+    fingerprint: str | None
+    readable: bool
+    unreadable_reason: UnreadableReason | None
+    synthetic: bool
+
+
+def claim_fingerprint(row) -> str:
+    """Отпечаток содержания и основания утверждения — как его записала база.
+
+    Читается из базы, а не с объекта: отпечаток ставит триггер, и значение в
+    памяти после ``save()`` устаревает.
+    """
+    return type(row).objects.filter(pk=row.pk).values_list("content_fingerprint", flat=True).get()
+
+
+def knowledge_versions_helping_goal(
+    goal_key: str, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
+) -> dict[str, CapabilityVersion]:
+    """По ключу способности, помогающей цели, — версии обоих её утверждений.
+
+    Правило чтения и разрешение на синтетику — те же, что у
+    :func:`capability_keys_helping_goal`; ключи ответа совпадают с её ответом
+    при тех же аргументах.
+    """
+    now = now or timezone.now()
+    rows = CapabilityGoalLink.objects.filter(
+        _client_facing_q(now, include_synthetic=include_synthetic),
+        _client_facing_q(now, prefix="capability__", include_synthetic=include_synthetic),
+        goal__key=goal_key,
+        goal__is_active=True,
+    ).values_list(
+        "capability__key", "capability_id", "capability__content_fingerprint", "id", "content_fingerprint",
+        "synthetic",
+    )
+    return {
+        key: CapabilityVersion(capability_id, capability_fingerprint, link_id, link_fingerprint, synthetic)
+        for key, capability_id, capability_fingerprint, link_id, link_fingerprint, synthetic in rows
+    }
+
+
+def _claim_versions(model, ids, *, now, include_synthetic, extra_q=None) -> dict:
+    ids = list(ids)
+    readable = set(
+        model.objects.filter(
+            _client_facing_q(now, include_synthetic=include_synthetic), *(extra_q or ()), pk__in=ids,
+        ).values_list("pk", flat=True)
+    )
+    grant_reads = reads_synthetic(include_synthetic)
+    out: dict = {pk: ClaimVersion(None, False, UnreadableReason.MISSING, False) for pk in ids}
+    for pk, fingerprint, status, scope, valid_until, synthetic in model.objects.filter(pk__in=ids).values_list(
+        "pk", "content_fingerprint", "status", "claim_scope", "valid_until", "synthetic",
+    ):
+        if pk in readable:
+            reason = None
+        elif not (status == "approved" or (synthetic and grant_reads)):
+            reason = UnreadableReason.NOT_APPROVED
+        elif scope != "supported":
+            reason = UnreadableReason.NOT_SUPPORTED
+        elif valid_until is not None and valid_until <= now:
+            reason = UnreadableReason.EXPIRED
+        else:
+            # Само утверждение в порядке, не читается то, от чего оно зависит
+            # (у связи — её возможность или цель).
+            reason = UnreadableReason.NOT_APPROVED
+        out[pk] = ClaimVersion(fingerprint, reason is None, reason, synthetic)
+    return out
+
+
+def knowledge_versions(
+    capability_ids=(), link_ids=(), *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
+) -> dict[str, dict]:
+    """Текущие версии утверждений по идентификаторам — без знания цели.
+
+    Возвращает ``{"capabilities": {id: ClaimVersion}, "links": {id: ClaimVersion}}``.
+    Связь читается, только если читается и её возможность, а цель активна —
+    как у :func:`client_facing_goal_links`.
+    """
+    now = now or timezone.now()
+    return {
+        "capabilities": _claim_versions(
+            ProcedureCapability, capability_ids, now=now, include_synthetic=include_synthetic,
+        ),
+        "links": _claim_versions(
+            CapabilityGoalLink, link_ids, now=now, include_synthetic=include_synthetic,
+            extra_q=(
+                _client_facing_q(now, prefix="capability__", include_synthetic=include_synthetic),
+                Q(goal__is_active=True),
+            ),
+        ),
+    }
+
+
 class LabelState(str, Enum):
     #: У ключа ровно одна подтверждённая формулировка для человека.
     LABELLED = "labelled"
@@ -279,6 +410,12 @@ def capability_labels(
 __all__ = [
     "CapabilityLabel",
     "CapabilityReadout",
+    "CapabilityVersion",
+    "ClaimVersion",
+    "UnreadableReason",
+    "claim_fingerprint",
+    "knowledge_versions",
+    "knowledge_versions_helping_goal",
     "KnowledgeState",
     "LabelState",
     "capability_keys_helping_goal",
