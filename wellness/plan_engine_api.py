@@ -32,6 +32,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from services.capabilities import capability_labels
+from services.synthetic import grant_for
 from users.permissions import IsBotServiceWithVerifiedClient
 from users.response import error_response, success_response
 
@@ -710,11 +711,18 @@ class PlanCapabilityLabelsView(APIView):
             return error_response(
                 "VALIDATION_ERROR", f"keys must be a list of 1..{MAX_LABEL_KEYS} non-empty strings",
             )
-        labels = capability_labels(keys)
+        # DRF-2871 — подпись синтетической способности читается по тому же
+        # серверному разрешению субъекта, что и сама способность при сборке;
+        # иначе у шага синтетического плана не было бы текста. ``synthetic``
+        # рядом с подписью — чтобы экран пометил такой шаг.
+        labels = capability_labels(keys, include_synthetic=grant_for(request.user))
         return success_response(
             {
                 "labels": {
-                    key: {"state": item.state.value, "label": item.label, "expected_effect": item.expected_effect}
+                    key: {
+                        "state": item.state.value, "label": item.label,
+                        "expected_effect": item.expected_effect, "synthetic": item.synthetic,
+                    }
                     for key, item in labels.items()
                 }
             }

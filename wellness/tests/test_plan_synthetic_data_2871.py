@@ -194,6 +194,34 @@ class TestTheServerDecidesWhoReadsSynthetic:
             synthetic_capability_keys_helping_goal(relax.key, include_synthetic=not_a_grant)
 
 
+class TestLabelsOfSyntheticSteps:
+    """У шага текста нет — подпись берётся отдельной ручкой. Синтетическая
+    подпись читается по тому же разрешению и приходит с пометкой."""
+
+    LABELS_URL = f"{PLAN_URL}capability-labels/"
+
+    def _labels(self, *keys: str) -> dict:
+        resp = _api().post(self.LABELS_URL, {"keys": list(keys)}, format="json")
+        assert resp.status_code == 200, resp.content
+        return resp.json()["data"]["labels"]
+
+    def test_under_the_permission_a_synthetic_label_is_given_and_marked(self, goal, synthetic, test_data_on) -> None:
+        assert self._labels("synthetic-a")["synthetic-a"] == {
+            "state": "labelled", "label": "Помогает: synthetic-a", "synthetic": True,
+        }
+
+    @pytest.mark.parametrize("missing", MISSING_ONE)
+    def test_without_the_permission_there_is_no_such_label(self, goal, synthetic, settings, owner, missing) -> None:
+        _allow(settings, owner, **missing)
+        label = self._labels("synthetic-a")["synthetic-a"]
+        assert (label["label"], label["synthetic"]) == (None, False)
+        assert label["state"] != "labelled"
+
+    def test_a_confirmed_label_is_never_marked(self, goal, knowledge, test_data_on) -> None:
+        label = self._labels("muscle-tension-relief")["muscle-tension-relief"]
+        assert (label["state"], label["synthetic"]) == ("labelled", False)
+
+
 class TestNothingElseIsRelaxed:
     @pytest.fixture(autouse=True)
     def _on(self, test_data_on):
