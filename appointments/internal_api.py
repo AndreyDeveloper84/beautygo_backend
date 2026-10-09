@@ -201,6 +201,16 @@ class InternalBookingCreateView(_InternalAuthMixin, APIView):
             plan_step = parse_booking_provenance(serializer.validated_data.get('provenance'))
         except PlanEngineError as exc:
             return plan_step_refusal_response(exc)
+        if plan_step is not None:
+            # Запись ОТ ШАГА ПЛАНА — под гейтом плана (решение владельца
+            # 09.10: при заявке на удаление или отзыве согласия «нельзя
+            # переходить к записи или создавать запись»). Обычная запись без
+            # шага сюда не относится.
+            from wellness.plan_gate import refusal_for
+
+            refusal = refusal_for(request.user, request.data)
+            if refusal is not None:
+                return refusal
 
         dto = CreateBookingDTO(
             client_id=request.user.id,
