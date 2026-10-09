@@ -207,7 +207,7 @@ class TestLabelsOfSyntheticSteps:
 
     def test_under_the_permission_a_synthetic_label_is_given_and_marked(self, goal, synthetic, test_data_on) -> None:
         assert self._labels("synthetic-a")["synthetic-a"] == {
-            "state": "labelled", "label": "Помогает: synthetic-a", "synthetic": True,
+            "state": "labelled", "label": "Помогает: synthetic-a", "expected_effect": None, "synthetic": True,
         }
 
     @pytest.mark.parametrize("missing", MISSING_ONE)
