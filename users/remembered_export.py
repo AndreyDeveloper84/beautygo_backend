@@ -121,6 +121,20 @@ FIELDS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
          "resolver_decision_id": "служебная ссылка на решение подбора, не данные о человеке",
          "recommendation_id": "служебная ссылка на запись рекомендации (сейчас всегда пусто)"},
     ),
+    # DRF-2877 — стойкие вопросы плана: что было открыто и чем снято. Текста
+    # вопроса и ответа здесь нет — только идентификаторы.
+    "wellness.PlanRestriction": (
+        _same("scope", "step_id", "cause", "question_id", "safety_state", "created_at"),
+        {"id": _KEY, "plan": _NEST,
+         "safety_policy_version": "версия политики безопасности, не данные о человеке",
+         "safety_evaluated_at_revision": "служебная ревизия состояния разговора"},
+    ),
+    "wellness.PlanRestrictionLift": (
+        _same("lift_kind", "answer_option_id", "safety_state", "created_at"),
+        {"id": _KEY, "restriction": _NEST,
+         "safety_policy_version": "версия политики безопасности, не данные о человеке",
+         "safety_evaluated_at_revision": "служебная ревизия состояния разговора"},
+    ),
     "wellness.PlanOutcomeLink": (
         {**_same("target_date", "status", "created_at", "closed_at"), "outcome": "outcome_target"},
         {"id": _KEY, "plan": _NEST},
