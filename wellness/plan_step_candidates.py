@@ -34,6 +34,7 @@ from uuid import UUID
 
 from recommendation.api import first_unmet
 from services.models import SalonService, SpecialistService
+from services.synthetic import SyntheticGrant, grant_for
 from users.admission import OfferVerdict, offer_admission
 from users.capability_offers import offers_by_capability
 
@@ -63,11 +64,17 @@ def _capability_of(revision: PlanRevision, step_id: str) -> str:
     return step["capability_ref"]
 
 
-def _masters_with_defined_health(offer_id: UUID, master_ids: list[UUID]) -> list[tuple[SpecialistService, bool]]:
+def _masters_with_defined_health(
+    offer_id: UUID, master_ids: list[UUID], *, include_synthetic: SyntheticGrant | None,
+) -> list[tuple[SpecialistService, bool]]:
     """Мастера, у которых ответ о проверке здоровья по этой услуге ПОДТВЕРЖДЁН.
 
     Возвращает пары «ребро, нужен ли расспрос». Неподтверждённый ответ (в любую
     сторону) и отсутствие ответа — мастер не возвращается.
+
+    ``include_synthetic`` — серверное разрешение ЭТОГО человека: ответ
+    синтетической услуги подтверждён синтетическим правилом и считается
+    подтверждённым только под ним. Настоящих услуг оно не касается.
     """
     out: list[tuple[SpecialistService, bool]] = []
     edges = (
@@ -76,7 +83,7 @@ def _masters_with_defined_health(offer_id: UUID, master_ids: list[UUID]) -> list
         .order_by("specialist_id")
     )
     for edge in edges:
-        verdict, _basis, confirmed = edge.resolved_health_check_with_origin()
+        verdict, _basis, confirmed = edge.resolved_health_check_with_origin(include_synthetic=include_synthetic)
         if confirmed and verdict is not None:
             out.append((edge, bool(verdict)))
     return out
@@ -110,6 +117,7 @@ def step_candidates(user, plan: Plan, step_id: str) -> dict[str, Any]:
     candidates: list[dict[str, Any]] = []
 
     if found.offer_ids:
+        grant = grant_for(user)
         admission = offer_admission(found.offer_ids, viewer=user, not_enforced_is_unmet=NOT_ENFORCED_IS_UNMET)
         offers = {
             o.pk: o
@@ -131,7 +139,7 @@ def step_candidates(user, plan: Plan, step_id: str) -> dict[str, Any]:
                 for master_id, answers in verdict.masters.items()
                 if first_unmet(answers, not_enforced_is_unmet=NOT_ENFORCED_IS_UNMET) is None
             ]
-            masters = _masters_with_defined_health(offer_id, admitted)
+            masters = _masters_with_defined_health(offer_id, admitted, include_synthetic=grant)
             if not masters:
                 rejected[HEALTH_CONDITIONS_UNDEFINED] += 1
                 continue
@@ -141,6 +149,10 @@ def step_candidates(user, plan: Plan, step_id: str) -> dict[str, Any]:
                     "canonical_service_ref": str(offer.template_id),
                     "health_check": HEALTH_REQUIRED if any(req for _, req in masters) else HEALTH_NOT_REQUIRED,
                     "display": _display(offer, masters),
+                    # Помеченные синтетические данные, прочитанные под разрешением
+                    # этого человека (DRF-2916): вызывающий обязан показать это
+                    # словами. У настоящего предложения всегда ``False``.
+                    "synthetic": verdict.synthetic,
                 }
             )
 

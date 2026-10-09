@@ -28,7 +28,10 @@ from django.utils import timezone
 
 from recommendation.tests.test_goal_fit_depth_2789 import _signed
 from recommendation.tests.test_legal_gate_cat10_ext_2843 import _does, _master, _offer as _admitted_offer
+from recommendation.tests.test_synthetic_admission_2916 import _outside_body_care
 from services.models import ProcedureCapability, SalonService, ServiceTemplate, SpecialistService
+from services.synthetic import SYNTHETIC_RULE
+from services.tests.test_synthetic_test_mark import _capability as _synthetic_capability
 from tenants.models import Tenant
 from users.models import SpecialistProfile, User
 from wellness.models import Plan, PlanStepResolution
@@ -41,6 +44,7 @@ from wellness.tests.test_plan_engine_steps_2868 import (  # noqa: F401 — фи�
     STRANGER,
     _api,
     _save,
+    _step,
     _token_and_flag,
     category,
     goal,
@@ -55,6 +59,8 @@ CANDIDATES_URL = "/api/v1/internal/me/plan/steps/candidates/"
 RESTRICTIONS_URL = "/api/v1/internal/me/plan/restrictions/"
 #: Способность шага в помощнике ``_step`` узлов шагов.
 KEY = "cap:relaxation-massage"
+#: Способность синтетической цепочки — отдельный ключ.
+SYNTHETIC_KEY = "synthetic_event_look_2868"
 Scope = ServiceTemplate.BodyCareScope
 LC = ServiceTemplate.LegalServiceClass
 
@@ -152,6 +158,7 @@ class TestACandidate:
                         },
                     ],
                 },
+                "synthetic": False,
             },
         ]
         assert uuid.UUID(data["search_id"])
@@ -365,9 +372,14 @@ class TestTheSameGatesAsTheStepItself:
         assert resp.json()["error"]["code"] == "PLAN_STEP_NOT_EXECUTABLE"
         assert resp.json()["error"]["details"] == {"reason": reason, **details}
 
-    @pytest.mark.parametrize("state, reason", [("STOP", "safety_blocked"), ("UNKNOWN", "safety_blocked"), ("CLARIFY", "clarify_pending")])
+    @pytest.mark.parametrize("state, reason", [("STOP", "safety_blocked"), ("UNKNOWN", "safety_blocked")])
     def test_the_turn_verdict(self, goal, massage, state, reason) -> None:
         self._refused(_candidates(_save(goal), safety_state=state), reason)
+
+    @pytest.mark.parametrize("state", ["CLARIFY", "CAUTION"])
+    def test_a_verdict_that_does_not_block_lets_the_search_through(self, goal, massage, state) -> None:
+        """Владелец 08.10: универсального вопроса «уточнить» нет — закрывает причина, не вердикт."""
+        assert _candidates(_save(goal), safety_state=state).status_code == 200
 
     def test_an_open_restriction_names_its_question(self, goal, massage, monkeypatch) -> None:
         # Таблица причин каталога пуста до решения владельца — причина подставлена узлом.
@@ -432,6 +444,44 @@ class TestThePersonIsTheViewer:
         data = _found(_save(goal))
         assert [c["tenant_offer_ref"] for c in data["candidates"]] == [str(offering.pk)]
         assert data["nothing_because"] is None
+
+
+class TestASyntheticCandidateSaysSo:
+    """DRF-2916: синтетическое предложение доходит до кандидата только под
+    серверным разрешением этого человека — и несёт пометку; без разрешения
+    его не существует."""
+
+    @pytest.fixture
+    def synthetic_chain(self, owner, category, curator):
+        demo = Tenant.objects.create(slug="demo-2868-synthetic", name="Демо-салон", is_active=True, is_demo=True)
+        canon, offering = _outside_body_care(demo, category, curator, "Образ к событию (тест)", synthetic=True)
+        _does(_master(demo, "72"), offering)
+        # Ответ о проверке здоровья у синтетики подтверждает только синтетическое правило.
+        SalonService.objects.filter(pk=offering.pk).update(
+            requires_health_check=False,
+            health_check_origin=SalonService.HealthCheckAnswerOrigin.CONFIRMED,
+            health_check_confirmed_rule=SYNTHETIC_RULE, health_check_rule_version="1",
+            health_check_confirmed_at=timezone.now(), health_check_source_ref=SYNTHETIC_RULE,
+        )
+        # Свой ключ: настоящая способность шага в этих узлах остаётся настоящей.
+        _synthetic_capability(canon, SYNTHETIC_KEY, synthetic=True)
+        User.objects.filter(pk=owner.pk).update(is_test_persona=True)
+        return offering
+
+    def _plan(self, goal) -> Plan:
+        return _save(goal, [_step("s1", capability_ref=SYNTHETIC_KEY)])
+
+    def test_under_the_grant_the_candidate_is_marked(self, goal, owner, synthetic_chain, settings) -> None:
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        settings.SYNTHETIC_TEST_SUBJECT_IDS = [str(owner.pk)]
+        data = _found(self._plan(goal))
+        assert [(c["tenant_offer_ref"], c["synthetic"]) for c in data["candidates"]] == [
+            (str(synthetic_chain.pk), True),
+        ]
+
+    def test_without_the_grant_there_is_no_such_capability(self, goal, synthetic_chain) -> None:
+        data = _found(self._plan(goal))
+        assert (data["candidates"], data["nothing_because"]) == ([], "NO_CAPABILITY")
 
 
 class TestTheDurableRestrictionOfThePerson:
