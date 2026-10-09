@@ -219,3 +219,163 @@ def test_the_sweep_would_notice_a_leak(seeded) -> None:
         keys = capabilities.capability_keys_helping_goal("event", include_synthetic=grant_for(seeded["persona"]))
 
     assert any(marker in " ".join(keys) for marker in seeded["markers"])
+
+
+# ─── ручки на POST: подбор, сборка плана, подписи ────────────────────────────
+#
+# GET-обход выше нашёл три пути мимо общих читателей (оба зеркала бота и
+# выборку поиска). Довод «подбор закрыт фильтром, значит и POST закрыт» верен
+# ровно настолько, насколько POST-ручки идут через подбор, — поэтому они
+# вызываются здесь исполнением. Тела запросов — рабочие, от владельцев ручек
+# (помощники их же узлов), а не подобранные: отказ ручки не должен сойти за
+# «не отдаёт». У каждой ручки — положительный контроль на настоящей строке.
+
+RESOLVE_URL = "/api/v1/internal/recommendation/resolve/"
+DECISION_URL = "/api/v1/internal/me/plan/decision/"
+LABELS_URL = "/api/v1/internal/me/plan/capability-labels/"
+SYNTHETIC_KEYS = ["synthetic_event_hair", "synthetic_event_makeup", "synthetic_event_hands"]
+
+
+def _bot(external_user_id: str) -> APIClient:
+    client = APIClient()
+    client.defaults["HTTP_AUTHORIZATION"] = f"Bearer {TOKEN}"
+    client.defaults["HTTP_X_EXTERNAL_USER_ID"] = external_user_id
+    return client
+
+
+@pytest.fixture
+def bot_users(seeded, settings):
+    """Два внешних пользователя бота: обычный и ТЕСТОВАЯ ПЕРСОНА — она видит демо-салон и опаснее всех."""
+    from goals.models import ClientGoal
+
+    settings.PLAN_ENGINE_ENABLED = True
+    users = {
+        "бот: обычный человек": User.objects.create_user(
+            username="bot:sweep-plain", password="x", role="client", phone="+79995550001", is_proxy=True,
+        ),
+        "бот: тестовая персона": User.objects.create_user(
+            username="bot:sweep-persona", password="x", role="client", phone="+79995550002", is_proxy=True,
+            is_test_persona=True,
+        ),
+    }
+    for user in users.values():
+        ClientGoal.objects.create(client=user, goal_key="event", source_channel="bot")
+    return users
+
+
+def _resolve_body(need: dict) -> dict:
+    return {
+        "request_id": "sweep-1", "surface": "MINIAPP_HOME", "scope": {"mode": "MARKETPLACE"}, "need": need,
+        "safety_state": "NORMAL", "tie_break_seed": "s", "k": 20,
+    }
+
+
+@pytest.mark.parametrize("need", [
+    {"origin": "MEMORY"},
+    {"origin": "USER_EXPLICIT", "raw_text": "укладка"},
+    {"origin": "USER_EXPLICIT", "raw_text": "событию"},
+])
+def test_the_resolver_does_not_return_the_seeded_offer_to_anyone(seeded, bot_users, need) -> None:
+    """В ответе подбора нет названий — только идентификаторы; ищутся они, в том числе среди исключённых."""
+    from recommendation.tests.test_legal_gate_cat10_ext_2843 import _does, _master, _offer
+
+    salon = Tenant.objects.get(slug="synthetic-sweep-demo")
+    curator = User.objects.create_user(username="sweep-curator", password="x")
+    resident = _master(salon, "77")
+    _does(resident, _offer(
+        salon, ServiceCategory.objects.get(slug="макияж"), curator, name="Укладка к событию настоящая",
+    ))
+    test_master_user = str(SalonService.objects.get(synthetic=True).specialist_services.get().specialist.user_id)
+    # Идентификаторы услуги, ребра, канонов, способностей и связей. Самого тест-мастера среди
+    # запрещённого нет: он обычный мастер демо-салона, пометки у мастеров нет, и «мастер без
+    # услуг» в демо принят. Но появиться он вправе только среди исключённых и только с общей
+    # причиной «нет действующих предложений» — не с причиной, говорящей о самой услуге.
+    forbidden = {marker for marker in seeded["markers"] if len(marker) == 36}
+
+    seen_resident = set()
+    for who, user in bot_users.items():
+        response = _bot(user.username).post(RESOLVE_URL, _resolve_body(need), format="json")
+        assert response.status_code == 200, (who, response.content[:300])
+        text = response.content.decode("utf-8")
+        assert not sorted(marker for marker in forbidden if marker in text), (who, need)
+        data = response.json()["data"]
+        assert test_master_user not in {row["candidate"]["id"] for row in data["ordered"]}, (who, need)
+        about_him = [row["reason_code"] for row in data["excluded"] if row["candidate"]["id"] == test_master_user]
+        assert about_him in ([], ["ELIG_EXCLUDED_INACTIVE"]), (who, need, about_him)
+        if str(resident.user_id) in text:
+            seen_resident.add(who)
+
+    # Положительный контроль: настоящего мастера того же демо-салона тестовая
+    # персона получает — значит, подбор исполнился и демо-салон ей виден.
+    assert "бот: тестовая персона" in seen_resident
+    assert "бот: обычный человек" not in seen_resident
+
+
+def test_plan_composition_and_labels_do_not_read_the_seeded_knowledge(seeded, bot_users) -> None:
+    from wellness.tests.test_plan_compose_2871 import _body
+
+    for who, user in bot_users.items():
+        decision = _bot(user.username).post(DECISION_URL, _body(), format="json")
+        assert decision.status_code == 200, (who, decision.content[:300])
+        assert decision.json()["data"]["outcome"] == "NO_CURATED_DECOMPOSITION", who
+        assert not [m for m in seeded["markers"] if m in decision.content.decode("utf-8")], who
+
+        labels = _bot(user.username).post(LABELS_URL, {"keys": SYNTHETIC_KEYS}, format="json")
+        assert labels.status_code == 200, (who, labels.content[:300])
+        answer = labels.json()["data"]["labels"]
+        assert {key: (row["state"], row["label"]) for key, row in answer.items()} == {
+            key: ("unknown", None) for key in SYNTHETIC_KEYS
+        }, who
+
+
+def test_plan_composition_control_real_knowledge_gives_a_plan_without_synthetic_steps(seeded, bot_users) -> None:
+    """Положительный контроль сборки: с настоящим знанием план есть, и синтетических шагов в нём нет."""
+    from wellness.tests.test_plan_compose_2871 import _body, _capability
+
+    goal_option = GoalOption.objects.get(key="event")
+    curator = User.objects.create_user(username="sweep-knowledge-curator", password="x")
+    category = ServiceCategory.objects.get(slug="макияж")
+    for index, key in enumerate(["real_event_first", "real_event_second"]):
+        canon = ServiceTemplate.objects.create(category=category, name=f"Настоящий канон {index}", name_short="Наст")
+        _capability(canon, key, curator, goal_option)
+
+    for who, user in bot_users.items():
+        data = _bot(user.username).post(DECISION_URL, _body(), format="json").json()["data"]
+        assert data["outcome"] == "PLAN", who
+        refs = sorted(step["capability_ref"] for step in data["decision"]["steps"])
+        assert refs == ["real_event_first", "real_event_second"], who
+
+
+# ─── слоты: путь, который закрывать НЕЛЬЗЯ ───────────────────────────────────
+
+
+def test_slots_of_the_test_master_come_for_the_seeded_service(seeded) -> None:
+    """Слоты — время, а не знание и не предложение; у ручки нет личности, фильтр закрыл бы её наглухо.
+
+    Бот в ветке плана берёт идентификаторы мастера и услуги из ответа
+    кандидатов (он уже прошёл серверное разрешение) и идёт за временем сюда.
+    Узел держит, что путь открыт, и что в ответе нет описания услуги.
+    Сама ручка разрешения не проверяет: идентификатор синтетической услуги
+    обычному клиенту взять неоткуда — это и держит обход выше.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    offer = SalonService.objects.get(synthetic=True)
+    day = (timezone.localdate() + timedelta(days=2)).isoformat()
+    client = APIClient()
+    client.defaults["HTTP_AUTHORIZATION"] = f"Bearer {TOKEN}"
+
+    response = client.get(
+        f"/api/v1/internal/specialists/{seeded['master_id']}/slots/", {"service_id": str(offer.pk), "date": day},
+    )
+
+    assert response.status_code == 200, response.content[:400]
+    text = response.content.decode("utf-8")
+    payload = response.json()
+    slots = payload.get("slots") if isinstance(payload, dict) else None
+    if slots is None and isinstance(payload, dict):
+        slots = (payload.get("data") or {}).get("slots")
+    assert slots, f"свободных окон нет: {text[:300]}"
+    assert "(тест)" not in text and "Причёска к событию" not in text and "synthetic_event_" not in text
