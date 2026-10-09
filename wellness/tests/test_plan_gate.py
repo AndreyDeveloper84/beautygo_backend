@@ -539,3 +539,30 @@ def test_wire_the_snapshots_are_in_the_order_the_rule_relies_on() -> None:
 
     assert before < withdrawn < after
     assert all(moment.tzinfo is not None for moment in (before, withdrawn, after))
+
+
+# ─── выключенный движок отвечает «движок выключен», а не отказом гейта ───────
+
+
+@pytest.mark.parametrize("blocker", ["deletion_request", "withdrawn_consent"])
+def test_a_disabled_engine_answers_disabled_not_the_gate(settings, owner, goal, blocker) -> None:
+    """По 404 вызывающий решает «движка нет — работаю по-старому»; отказ гейта читался бы как «нет согласия»."""
+    if blocker == "deletion_request":
+        _request_deletion(owner)
+    else:
+        _consent(owner, granted=False)
+    settings.PLAN_ENGINE_ENABLED = False
+
+    for endpoint in ("decision", "save"):
+        response = _api().post(URLS[endpoint], _bodies(goal)[endpoint], format="json")
+        assert response.status_code == 404, (endpoint, response.content[:300])
+        assert response.json()["error"]["code"] == "PLAN_ENGINE_DISABLED", endpoint
+    assert Plan.objects.count() == 0
+
+
+def test_control_the_gate_answers_once_the_engine_is_on(settings, owner, goal) -> None:
+    """Положительная пара: тот же человек, движок включён — отвечает гейт."""
+    _request_deletion(owner)
+    settings.PLAN_ENGINE_ENABLED = True
+
+    assert _api().post(URLS["decision"], _body(), format="json").status_code == 423
