@@ -31,6 +31,7 @@ from recommendation.tests.test_legal_gate_cat10_ext_2843 import _does, _master, 
 from recommendation.tests.test_synthetic_admission_2916 import _outside_body_care
 from services.models import (
     CapabilityTemplate,
+    GoalOption,
     ProcedureCapability,
     SalonService,
     ServiceTemplate,
@@ -38,6 +39,7 @@ from services.models import (
 )
 from services.synthetic import SYNTHETIC_RULE
 from services.tests.test_synthetic_test_mark import _capability as _synthetic_capability
+from services.tests.test_synthetic_test_mark import _link as _synthetic_link
 from tenants.models import Tenant
 from tenants.tests.test_offer_address_l6 import _place
 from users.models import SpecialistProfile, User
@@ -182,7 +184,9 @@ class TestACandidate:
             },
         ]
         assert uuid.UUID(data["search_id"])
-        assert data["rejected"] == {"NO_SELLABLE_MASTER": 0, "NOT_ADMITTED": 0, "HEALTH_CONDITIONS_UNDEFINED": 0}
+        assert data["rejected"] == {
+            "NO_SELLABLE_MASTER": 0, "NOT_ADMITTED": 0, "HEALTH_CONDITIONS_UNDEFINED": 0, "ACROSS_THE_TEST_BOUNDARY": 0,
+        }
 
     def test_a_confirmed_need_for_a_health_check_is_shown_not_hidden(self, goal, tenant, category, curator) -> None:
         """Подтверждённое «расспрос нужен» — услуга кандидат; расспрос встретит
@@ -491,24 +495,54 @@ class TestASyntheticCandidateSaysSo:
             health_check_confirmed_at=timezone.now(), health_check_source_ref=SYNTHETIC_RULE,
         )
         # Свой ключ: настоящая способность шага в этих узлах остаётся настоящей.
-        _synthetic_capability(canon, SYNTHETIC_KEY, synthetic=True)
+        capability = _synthetic_capability(canon, SYNTHETIC_KEY, synthetic=True)
+        # Синтетическая связь с целью: без неё план на этой способности не сохранить (DRF-2871).
+        _synthetic_link(capability, GoalOption.objects.get(key="relax"), synthetic=True)
         User.objects.filter(pk=owner.pk).update(is_test_persona=True)
         return offering
 
-    def _plan(self, goal) -> Plan:
-        return _save(goal, [_step("s1", capability_ref=SYNTHETIC_KEY)])
-
-    def test_under_the_grant_the_candidate_is_marked(self, goal, owner, synthetic_chain, settings) -> None:
+    @pytest.fixture
+    def granted(self, owner, settings):
         settings.SYNTHETIC_TEST_DATA_ENABLED = True
         settings.SYNTHETIC_TEST_SUBJECT_IDS = [str(owner.pk)]
+
+    def _plan(self, goal, *more) -> Plan:
+        goal.client.refresh_from_db()  # признак тестовой личности выдан после создания цели
+        plan = _save(goal, [_step("s1", capability_ref=SYNTHETIC_KEY), *more])
+        assert plan.synthetic is True
+        return plan
+
+    def test_under_the_grant_the_candidate_is_marked(self, goal, synthetic_chain, granted) -> None:
         data = _found(self._plan(goal))
         assert [(c["tenant_offer_ref"], c["synthetic"]) for c in data["candidates"]] == [
             (str(synthetic_chain.pk), True),
         ]
 
-    def test_without_the_grant_there_is_no_such_capability(self, goal, synthetic_chain) -> None:
-        data = _found(self._plan(goal))
+    def test_once_the_grant_is_withdrawn_there_is_no_such_capability(self, goal, synthetic_chain, granted, settings) -> None:
+        plan = self._plan(goal)
+        settings.SYNTHETIC_TEST_DATA_ENABLED = False
+        data = _found(plan)
         assert (data["candidates"], data["nothing_because"]) == ([], "NO_CAPABILITY")
+
+    def test_a_real_step_of_a_marked_plan_does_not_reach_a_real_offer(self, goal, synthetic_chain, granted, massage) -> None:
+        """Вся цепочка тестовая (владелец 08.10): в помеченном плане шаг настоящей
+        способности настоящую услугу не получает — ни показом, ни выбором."""
+        _, real = massage
+        plan = self._plan(goal, _step("s2", role="OPTIONAL"))
+        data = _found(plan, "s2")
+        assert (data["candidates"], data["nothing_because"]) == ([], "ACROSS_THE_TEST_BOUNDARY")
+        assert data["rejected"]["ACROSS_THE_TEST_BOUNDARY"] == 1
+        refused = _choose(plan, real, data["search_id"], step_id="s2")
+        assert refused.status_code == 409, refused.content
+        assert refused.json()["error"]["details"]["reason"] == "offer_not_a_candidate"
+        assert not PlanStepResolution.objects.filter(plan_revision__plan=plan, step_id="s2").exists()
+
+    def test_the_same_real_offer_is_a_candidate_of_a_real_plan(self, goal, synthetic_chain, granted, massage) -> None:
+        """Контроль: границу держит пометка плана, а не разрешение человека."""
+        _, real = massage
+        plan = _save(goal)
+        assert plan.synthetic is False
+        assert [c["tenant_offer_ref"] for c in _found(plan)["candidates"]] == [str(real.pk)]
 
 
 class TestTheDurableRestrictionOfThePerson:
