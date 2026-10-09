@@ -22,9 +22,11 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
+from django.db.models import Q
+
 from services.capabilities import template_ids_with_capability
 from services.models import SalonService
-from services.synthetic import real_offer_q
+from services.synthetic import grant_for, reads_synthetic, real_offer_q
 from users.sellable import demo_visibility_q
 
 
@@ -54,13 +56,18 @@ def offers_by_capability(key: str, *, viewer=None) -> CapabilityOffers:
     если оно активно и его салон жив; продаваемость мастеров и допуск сюда
     не входят.
     """
-    templates = template_ids_with_capability(key)
+    # Разрешение на помеченную синтетику — только из личности (DRF-2916).
+    # Без него синтетическая способность — «нет такой способности»: её
+    # существование не раскрывается.
+    grant = grant_for(viewer)
+    templates = template_ids_with_capability(key, include_synthetic=grant)
     if not templates:
         return CapabilityOffers((), NoOffers.NO_CAPABILITY)
     # Синтетическая услуга на настоящем каноне невозможна по замку базы
     # (DRF-2916); условие здесь — второй рубеж, а не единственный.
+    genuine = real_offer_q() if not reads_synthetic(grant) else Q()
     existing = SalonService.objects.filter(
-        real_offer_q(), template_id__in=templates, is_active=True, tenant__is_active=True,
+        genuine, template_id__in=templates, is_active=True, tenant__is_active=True,
     )
     visible = tuple(existing.filter(demo_visibility_q(viewer)).order_by("pk").values_list("pk", flat=True))
     if visible:

@@ -76,6 +76,17 @@ class CheckOutcome(StrEnum):
     NOT_ENFORCED = "NOT_ENFORCED"
     #: Ответа нет: ключа нет, незнакомое значение, сбой чтения. Закрывает.
     UNDETERMINED = "UNDETERMINED"
+    #: Допущено для теста: строка — помеченные синтетические данные, читается
+    #: под серверным разрешением тестового субъекта (DRF-2916, решение
+    #: владельца 08.10). Бывает ТОЛЬКО у проверки связи и подменяет только её
+    #: подтверждение: связь с каноном у строки есть, подтверждённой она быть
+    #: не может по замку базы. Не ``PASSED`` и никогда им не станет.
+    SYNTHETIC = "SYNTHETIC"
+
+
+#: Исход — человеку: читающий отчёт или журнал не должен принять тестовый
+#: допуск за настоящий.
+SYNTHETIC_OUTCOME_LABEL = "Допущено для теста · синтетические данные"
 
 
 #: Исходы, с которыми проверка не пройдена при любой свёртке.
@@ -214,6 +225,7 @@ def build_answers(
     qualification_verified: bool = False,
     address_waits_for_license: bool = False,
     unenforced: Iterable[AdmissionCheck] = (),
+    synthetic: bool = False,
 ) -> tuple[CheckAnswer, ...]:
     """Восемь ответов про одну строку каталога — из значений гейтов.
 
@@ -233,6 +245,14 @@ def build_answers(
     ``address_waits_for_license`` — каталог ответил про адрес «сверять не с
     чем: нет покрывающей лицензии». Если лицензия при этом не сошлась, адрес
     «не применим»; если сошлась — два чтения разошлись, и это не толкуется.
+
+    ``synthetic`` — строка помечена синтетикой И прочитана под действующим
+    серверным разрешением (это решает вызывающий через
+    ``services.synthetic``, не эта функция). Тогда проверка связи отвечает
+    ``SYNTHETIC`` — при двух условиях сразу: канон у строки есть и связь в
+    состоянии «есть, не подтверждена». Без канона, «не связана» и «решено не
+    рекомендовать» — обычный отказ. Остальных семи проверок признак не
+    касается вовсе.
     """
     off = frozenset(unenforced)
     out: list[CheckAnswer] = []
@@ -240,6 +260,9 @@ def build_answers(
     # П1 — связь.
     if mapping_status is MappingStatus.VERIFIED:
         out.append(_answer(AdmissionCheck.MAPPING, CheckOutcome.PASSED, catalog_answer=mapping_status.value))
+    elif synthetic and has_canon and mapping_status is MappingStatus.REVIEW_REQUIRED:
+        # Единственное исключение для синтетики (DRF-2916): подтверждение связи.
+        out.append(_answer(AdmissionCheck.MAPPING, CheckOutcome.SYNTHETIC, catalog_answer=mapping_status.value))
     else:
         out.append(_answer(
             AdmissionCheck.MAPPING, CheckOutcome.FAILED,

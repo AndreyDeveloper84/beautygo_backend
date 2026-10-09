@@ -14,8 +14,14 @@
 Только чтение. Положение флага каталога — то, что действует в момент вызова.
 
 Помеченная синтетика (DRF-2916) для этих функций не существует: синтетическое
-предложение отвечает как id, которого нет в базе, — при любой личности и в
-операторском режиме.
+предложение отвечает как id, которого нет в базе, — без личности, в
+операторском режиме и для любого, у кого нет серверного разрешения.
+
+Единственное исключение — субъект с действующим разрешением
+(:func:`services.synthetic.grant_for`: флаг стенда, серверный список,
+тестовая личность). Ему синтетическое предложение отдаётся с отдельным
+исходом ``SYNTHETIC`` у проверки связи и признаком ``OfferAdmission.synthetic``.
+Попросить синтетику параметром нельзя: разрешение выводится из ``viewer``.
 
 Что эти функции НЕ отвечают: безопасность хода и здоровье, совпадение с
 нуждой, бюджет, область запроса, согласия. Допуск каталога — необходимое
@@ -29,11 +35,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from uuid import UUID
 
+from django.db.models import F, Q
+
 from recommendation.api import ALL_CHECKS, AdmissionCheck, CheckAnswer, ConfigGate, build_answers, first_unmet
 from services import body_care_address, body_care_license, body_care_qualification
 from services.models import SalonService, ServiceTemplate, SpecialistService
 from services.offer_sellable import sellable_offer_q
-from services.synthetic import real_offer_q
+from services.synthetic import grant_for, offers_reading_as_synthetic, real_offer_q
 from users.models import SpecialistProfile
 from users.recommendation_source import _MappingFacts, config_readiness, legal_answers, unenforced
 from users.sellable import demo_scope_q, demo_visibility_q, sellable_q
@@ -44,7 +52,7 @@ Row = tuple[UUID | None, UUID, UUID | None]
 Key = tuple[UUID | None, UUID]
 
 
-def admission_answers(rows: Iterable[Row]) -> dict[Key, tuple[CheckAnswer, ...]]:
+def admission_answers(rows: Iterable[Row], *, viewer=None) -> dict[Key, tuple[CheckAnswer, ...]]:
     """Ответ каждой проверки допуска — по тройкам ``(мастер | None, предложение, канон | None)``.
 
     Ключ ответа — ``(мастер | None, предложение)``; значение — восемь ответов
@@ -54,21 +62,32 @@ def admission_answers(rows: Iterable[Row]) -> dict[Key, tuple[CheckAnswer, ...]]
 
     Число запросов постоянно и от размера списка не зависит. Предложение,
     которого нет в базе, в ответ не попадает — как у читателей каталога.
+
+    ``viewer`` — пользователь каталога, для которого идёт вопрос. Нужен для
+    одного: помеченная синтетика существует только для субъекта с серверным
+    разрешением (:func:`services.synthetic.grant_for`). Для всех остальных и
+    при ``viewer=None`` синтетическое предложение в ответ не попадает. Под
+    разрешением — попадает, с исходом ``SYNTHETIC`` у проверки связи; пара с
+    мастером ДРУГОГО салона не попадает и тогда: вся цепочка тестовая.
     """
     rows = list(dict.fromkeys(rows))
     if not rows:
         return {}
+    asked = {salon_id for _, salon_id, _ in rows}
+    as_synthetic = offers_reading_as_synthetic(asked, include_synthetic=grant_for(viewer))
     offers = {
         offer["pk"]: offer
         for offer in SalonService.objects.filter(
-            real_offer_q(), pk__in={salon_id for _, salon_id, _ in rows},
+            real_offer_q() | Q(pk__in=as_synthetic), pk__in=asked,
         ).values(
-            "pk", "mapping_status", "template_id", "template__lifecycle",
+            "pk", "tenant_id", "mapping_status", "template_id", "template__lifecycle",
             "template__body_care_scope", "template__service_family",
             "template__legal_service_class", "template__required_practitioner_class",
         )
     }
     known = [row for row in rows if row[1] in offers]
+    if as_synthetic:
+        known = _only_masters_of_the_same_salon(known, offers, as_synthetic)
     readiness = config_readiness(offers)
     legal = legal_answers(known)
 
@@ -97,8 +116,26 @@ def admission_answers(rows: Iterable[Row]) -> dict[Key, tuple[CheckAnswer, ...]]
                 legal_class=offer["template__legal_service_class"],
                 required_practitioner_class=offer["template__required_practitioner_class"],
             ),
+            synthetic=salon_id in as_synthetic,
         )
     return out
+
+
+def _only_masters_of_the_same_salon(rows: list[Row], offers: dict, as_synthetic: frozenset) -> list[Row]:
+    """У синтетического предложения — только мастера его же салона.
+
+    Замок базы проверяет это при записи предложения мастера; мастера могли
+    перевести в другой салон позже. Тестовая личность видит и настоящие
+    салоны, так что без этого условия тестовая запись ушла бы в чужой слот.
+    """
+    masters = {specialist_id for specialist_id, salon_id, _ in rows if specialist_id and salon_id in as_synthetic}
+    if not masters:
+        return rows
+    salon_of = dict(SpecialistProfile.objects.filter(pk__in=masters).values_list("pk", "tenant_id"))
+    return [
+        row for row in rows
+        if row[0] is None or row[1] not in as_synthetic or salon_of.get(row[0]) == offers[row[1]]["tenant_id"]
+    ]
 
 
 class OfferVerdict(StrEnum):
@@ -125,9 +162,16 @@ class OfferAdmission:
     #: (без повторов). Ответ отдаётся целиком: у «не действует» кода причины
     #: нет, и подменять его кодом отказа нельзя.
     unmet: tuple[CheckAnswer, ...] = ()
+    #: Предложение — помеченные синтетические данные, прочитанные под
+    #: действующим разрешением спрашивающего (DRF-2916). При любом вердикте.
+    #: У настоящего предложения всегда ``False``; синтетическое без разрешения
+    #: в ответ не попадает вовсе.
+    synthetic: bool = False
 
 
-def sellable_edges(salon_service_ids, *, viewer=None, all_salons: bool = False) -> dict[UUID, list[UUID]]:
+def sellable_edges(
+    salon_service_ids, *, viewer=None, all_salons: bool = False, _as_synthetic: frozenset = frozenset(),
+) -> dict[UUID, list[UUID]]:
     """Продаваемые мастера предложений — тем же правилом, что у пула подбора.
 
     Мастер продаётся (:func:`users.sellable.sellable_q`), его салон жив, ребро
@@ -145,7 +189,11 @@ def sellable_edges(salon_service_ids, *, viewer=None, all_salons: bool = False) 
     for salon_id, specialist_id in (
         SpecialistService.objects
         .filter(
-            sellable_offer_q(), real_offer_q("salon_service__"),
+            sellable_offer_q(),
+            # Синтетическое предложение — только под разрешением и только у
+            # мастера его же салона (второй рубеж к замку базы).
+            real_offer_q("salon_service__")
+            | Q(salon_service_id__in=_as_synthetic, specialist__tenant_id=F("salon_service__tenant_id")),
             salon_service_id__in=list(salon_service_ids), specialist__in=masters,
         )
         .order_by("salon_service_id", "specialist_id")
@@ -175,13 +223,19 @@ def offer_admission(
     ids = list(dict.fromkeys(salon_service_ids))
     if not ids:
         return {}
-    templates = dict(SalonService.objects.filter(real_offer_q(), pk__in=ids).values_list("pk", "template_id"))
-    edges = sellable_edges(templates, viewer=viewer, all_salons=all_salons)
+    # Разрешение на синтетику выводится из личности и только из неё: у
+    # операторского режима и у неизвестного клиента его нет.
+    as_synthetic = offers_reading_as_synthetic(ids, include_synthetic=None if all_salons else grant_for(viewer))
+    templates = dict(
+        SalonService.objects.filter(real_offer_q() | Q(pk__in=as_synthetic), pk__in=ids)
+        .values_list("pk", "template_id")
+    )
+    edges = sellable_edges(templates, viewer=viewer, all_salons=all_salons, _as_synthetic=as_synthetic)
     rows: list[Row] = []
     for salon_id, template_id in templates.items():
         rows.append((None, salon_id, template_id))
         rows.extend((specialist_id, salon_id, template_id) for specialist_id in edges.get(salon_id, ()))
-    answers = admission_answers(rows)
+    answers = admission_answers(rows, viewer=None if all_salons else viewer)
     enabled = frozenset(enabled)
 
     def unmet(found: tuple[CheckAnswer, ...]) -> CheckAnswer | None:
@@ -191,19 +245,20 @@ def offer_admission(
     for salon_id in templates:
         offer = answers[(None, salon_id)]
         masters = {specialist_id: answers[(specialist_id, salon_id)] for specialist_id in edges.get(salon_id, ())}
+        synthetic = salon_id in as_synthetic
         offer_unmet = unmet(offer)
         if offer_unmet is not None:
-            out[salon_id] = OfferAdmission(OfferVerdict.NOT_ADMITTED, offer, masters, (offer_unmet,))
+            out[salon_id] = OfferAdmission(OfferVerdict.NOT_ADMITTED, offer, masters, (offer_unmet,), synthetic)
             continue
         if not masters:
-            out[salon_id] = OfferAdmission(OfferVerdict.NO_SELLABLE_MASTER, offer, masters)
+            out[salon_id] = OfferAdmission(OfferVerdict.NO_SELLABLE_MASTER, offer, masters, synthetic=synthetic)
             continue
         per_master = [unmet(found) for found in masters.values()]
         if any(found is None for found in per_master):
-            out[salon_id] = OfferAdmission(OfferVerdict.OPEN, offer, masters)
+            out[salon_id] = OfferAdmission(OfferVerdict.OPEN, offer, masters, synthetic=synthetic)
             continue
         out[salon_id] = OfferAdmission(
-            OfferVerdict.NOT_ADMITTED, offer, masters, tuple(dict.fromkeys(per_master)),
+            OfferVerdict.NOT_ADMITTED, offer, masters, tuple(dict.fromkeys(per_master)), synthetic,
         )
     return out
 
