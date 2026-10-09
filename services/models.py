@@ -3206,6 +3206,34 @@ class ClaimEvidence(models.Model):
     #: что из этого следует — :mod:`services.synthetic`.
     synthetic = models.BooleanField(default=False)
 
+    # DRF-2879. Версия знания — отпечаток его содержания и основания
+    # (решение владельца: «основание входит в версию знания»).
+    #
+    # Оба поля ставит БАЗА (триггер миграции 0053), не код: отпечаток
+    # пересчитывается при любой записи строки, в том числе через
+    # ``QuerySet.update()``. Состав — :data:`FINGERPRINT_FIELDS` плюс свои поля
+    # класса (:data:`OWN_FINGERPRINT_FIELDS`). Не входят: статус, кто и когда
+    # подтвердил, срок годности (свойство подтверждения, а не утверждения),
+    # состав привязанных процедур, пометка синтетики, служебные времена.
+    #
+    # ``approved_fingerprint`` — отпечаток в момент подтверждения: триггер
+    # ставит его при переходе в ``approved`` и при новом подтверждении
+    # (сменилась ``confirmed_at``) и снимает при возврате в черновик.
+    # Ограничение ниже требует, чтобы у подтверждённой строки они совпадали:
+    # подтверждённого утверждения с изменённым после подтверждения
+    # содержанием в базе быть не может. Значение в памяти после ``save()``
+    # устаревает — читать из базы (:func:`services.capabilities.claim_fingerprint`).
+    content_fingerprint = models.CharField(max_length=80, blank=True, default="", editable=False)
+    approved_fingerprint = models.CharField(max_length=80, blank=True, default="", editable=False)
+
+    #: Поля основания и рамки утверждения, общие для обоих классов знания.
+    FINGERPRINT_FIELDS = (
+        "claim_type", "claim_scope", "limitations", "prohibited_statement",
+        "evidence_source", "evidence_kind", "source_ref",
+    )
+    #: Свои поля содержания класса; порядок — порядок в отпечатке.
+    OWN_FINGERPRINT_FIELDS: tuple[str, ...] = ()
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -3290,6 +3318,12 @@ class ClaimEvidence(models.Model):
             models.CheckConstraint(
                 condition=models.Q(synthetic=False) | ~models.Q(status="approved"),
                 name="%(class)s_synthetic_is_never_approved",
+            ),
+            # DRF-2879: подтверждено именно то содержание, которое записано.
+            models.CheckConstraint(
+                condition=~models.Q(status="approved")
+                | models.Q(content_fingerprint=models.F("approved_fingerprint")),
+                name="%(class)s_approved_content_matches_approval",
             ),
         ]
 
@@ -3414,6 +3448,10 @@ class ProcedureCapability(ClaimEvidence):
 
     objects = ProcedureCapabilityManager()
 
+    OWN_FINGERPRINT_FIELDS = (
+        "key", "text_client", "text_professional", "expected_effect", "result_timeframe", "variability_note",
+    )
+
     def __str__(self) -> str:
         # Имена процедур, а не UUID: эту строку читает куратор — в списке, в
         # выборе возможности у связи с целью, в журнале админки. У ещё не
@@ -3487,6 +3525,8 @@ class CapabilityGoalLink(ClaimEvidence):
         GoalOption, on_delete=models.PROTECT, related_name="capability_links",
     )
     #: Характер курса словами («обычно рассматривается как курс сеансов»).
+    OWN_FINGERPRINT_FIELDS = ("capability_id", "goal_id", "course_pattern", "result_horizon", "variability_note")
+
     course_pattern = models.TextField(blank=True, default="")
     #: Когда ждать результат относительно этой цели — словами.
     result_horizon = models.CharField(max_length=200, blank=True, default="")
