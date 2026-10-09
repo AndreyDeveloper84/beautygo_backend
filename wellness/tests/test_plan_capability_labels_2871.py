@@ -10,7 +10,9 @@
 * (до словаря) один ключ у двух процедур с разными текстами — подписи нет (``ambiguous``):
   выбирать формулировку за владельца код не вправе; одинаковые тексты — одна;
 * «подписи нет» всегда с именем причины, а не пустой строкой;
-* ручка под тем же флагом, что и остальной Plan Engine.
+* ручка под тем же флагом, что и остальной Plan Engine;
+* «зачем этот шаг» — курируемый ожидаемый эффект той же подтверждённой
+  записи (владелец 09.10); не заполнен — ``None``, подпись его не заменяет.
 """
 from __future__ import annotations
 
@@ -128,6 +130,40 @@ class TestReader:
         _capability(templates[0], "silent", "", curator)
         assert capability_labels(["silent"])["silent"].state is LabelState.NO_TEXT
 
+    def test_the_expected_effect_comes_with_the_label(self, templates, curator) -> None:
+        _capability(templates[0], "hair", "Причёска", curator, expected_effect="  Волосы уложены.  ")
+        label = capability_labels(["hair"])["hair"]
+        assert (label.label, label.expected_effect) == ("Причёска", "Волосы уложены.")
+
+    def test_a_missing_expected_effect_is_none_not_the_label(self, templates, curator) -> None:
+        """Пробел называется: подпись на место «зачем» не подставляется."""
+        _capability(templates[0], "plain", "Подпись", curator, expected_effect="   ")
+        assert capability_labels(["plain"])["plain"].expected_effect is None
+
+    def test_the_expected_effect_does_not_depend_on_the_label(self, templates, curator) -> None:
+        _capability(templates[0], "silent", "", curator, expected_effect="Эффект есть.")
+        label = capability_labels(["silent"])["silent"]
+        assert (label.state, label.expected_effect) == (LabelState.NO_TEXT, "Эффект есть.")
+
+    def test_each_key_gets_its_own_expected_effect(self, templates, curator) -> None:
+        _capability(templates[0], "hair", "Причёска", curator, expected_effect="Волосы уложены.")
+        _capability(templates[1], "hands", "Руки", curator, expected_effect="Руки ухожены.")
+        out = capability_labels(["hands", "hair"])
+        assert (out["hair"].expected_effect, out["hands"].expected_effect) == ("Волосы уложены.", "Руки ухожены.")
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"status": ClaimEvidence.Status.SYSTEM_INFERENCE, "confirmed_by": None, "confirmed_at": None},
+            {"claim_scope": ClaimEvidence.ClaimScope.NOT_SUPPORTED},
+            {"valid_until": "PAST"},
+        ],
+    )
+    def test_an_unconfirmed_unsupported_or_expired_effect_is_not_read(self, templates, curator, override) -> None:
+        override = {k: (timezone.now() - timedelta(days=1) if v == "PAST" else v) for k, v in override.items()}
+        _capability(templates[0], "draft", "Черновик", curator, expected_effect="Черновой эффект", **override)
+        assert capability_labels(["draft"])["draft"].expected_effect is None
+
     def test_every_asked_key_gets_an_answer_once(self, templates, curator) -> None:
         _capability(templates[0], "known", "Известная", curator)
         out = capability_labels(["known", "missing", "known"])
@@ -137,17 +173,23 @@ class TestReader:
 
 class TestEndpoint:
     def test_labels_come_back_by_key_with_a_named_state(self, owner, templates, curator) -> None:
-        _capability(templates[0], "tension-relief", "Снимает мышечное напряжение", curator)
+        _capability(
+            templates[0], "tension-relief", "Снимает мышечное напряжение", curator,
+            expected_effect="Мышцы спины расслаблены.",
+        )
         _capability(list(templates), "relaxation", "Помогает расслабиться", curator)
         _capability(templates[1], "silent", "", curator)
         resp = _api().post(URL, {"keys": ["tension-relief", "relaxation", "silent", "nope"]}, format="json")
         assert resp.status_code == 200, resp.content
         assert resp.json()["data"] == {
             "labels": {
-                "tension-relief": {"state": "labelled", "label": "Снимает мышечное напряжение"},
-                "relaxation": {"state": "labelled", "label": "Помогает расслабиться"},
-                "silent": {"state": "no_text", "label": None},
-                "nope": {"state": "unknown", "label": None},
+                "tension-relief": {
+                    "state": "labelled", "label": "Снимает мышечное напряжение",
+                    "expected_effect": "Мышцы спины расслаблены.",
+                },
+                "relaxation": {"state": "labelled", "label": "Помогает расслабиться", "expected_effect": None},
+                "silent": {"state": "no_text", "label": None, "expected_effect": None},
+                "nope": {"state": "unknown", "label": None, "expected_effect": None},
             }
         }
 

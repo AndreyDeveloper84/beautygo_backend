@@ -230,6 +230,11 @@ class LabelState(str, Enum):
 class CapabilityLabel:
     state: LabelState
     label: str | None = None
+    #: Курируемый «ожидаемый эффект» той же подтверждённой записи — ответ на
+    #: «зачем этот шаг» (владелец 09.10: из обоснования, не новое поле и не
+    #: текст модели). ``None`` — у записи он не заполнен: пробел называется,
+    #: а не заполняется подписью. От ``label`` не зависит.
+    expected_effect: str | None = None
     #: Формулировка взята у синтетической возможности (services.synthetic).
     synthetic: bool = False
 
@@ -251,16 +256,23 @@ def capability_labels(
 
     Версии у источника нет (время подтверждения — не версия), поэтому и не
     возвращается.
+
+    Вместе с подписью — ``expected_effect`` той же записи, тем же правилом
+    чтения: это то же поле, что отдаёт чтение знания о процедуре
+    (``services.knowledge_api``).
     """
     now = now or timezone.now()
     wanted = list(dict.fromkeys(keys))
     texts: dict[str, set[str]] = {key: set() for key in wanted}
     seen: set[str] = set()
     marked: set[str] = set()
-    for key, text, synthetic in ProcedureCapability.objects.filter(
+    effects: dict[str, str] = {}
+    for key, text, effect, synthetic in ProcedureCapability.objects.filter(
         _client_facing_q(now, include_synthetic=include_synthetic), key__in=wanted,
-    ).values_list("key", "text_client", "synthetic"):
+    ).values_list("key", "text_client", "expected_effect", "synthetic"):
         seen.add(key)
+        if effect.strip():
+            effects[key] = effect.strip()
         if synthetic:
             marked.add(key)
         if text.strip():
@@ -268,14 +280,17 @@ def capability_labels(
     out: dict[str, CapabilityLabel] = {}
     for key in wanted:
         synthetic = key in marked
+        effect = effects.get(key)
         if key not in seen:
             out[key] = CapabilityLabel(LabelState.UNKNOWN)
         elif not texts[key]:
-            out[key] = CapabilityLabel(LabelState.NO_TEXT, synthetic=synthetic)
+            out[key] = CapabilityLabel(LabelState.NO_TEXT, expected_effect=effect, synthetic=synthetic)
         elif len(texts[key]) > 1:
-            out[key] = CapabilityLabel(LabelState.AMBIGUOUS, synthetic=synthetic)
+            out[key] = CapabilityLabel(LabelState.AMBIGUOUS, expected_effect=effect, synthetic=synthetic)
         else:
-            out[key] = CapabilityLabel(LabelState.LABELLED, next(iter(texts[key])), synthetic=synthetic)
+            out[key] = CapabilityLabel(
+                LabelState.LABELLED, next(iter(texts[key])), expected_effect=effect, synthetic=synthetic,
+            )
     return out
 
 

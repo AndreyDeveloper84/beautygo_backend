@@ -670,11 +670,14 @@ MAX_LABEL_KEYS = 50
 class PlanCapabilityLabelsView(APIView):
     """POST /api/v1/internal/me/plan/capability-labels/
 
-    ``{keys: [...]}`` → ``{labels: {key: {state, label}}}``. У шага плана
+    ``{keys: [...]}`` → ``{labels: {key: {state, label, expected_effect}}}``. У шага плана
     текста нет (контракт PE-2) — подпись способности берётся здесь, из
     подтверждённого знания каталога. ``state``: ``labelled`` (подпись есть) |
     ``unknown`` (подтверждённой способности с таким ключом нет) | ``no_text``
     | ``ambiguous`` (у ключа несколько разных формулировок — подписи нет).
+    ``expected_effect`` — курируемый ожидаемый эффект той же записи, ответ
+    на «зачем этот шаг»; ``null`` — не заполнен, и подставлять вместо него
+    нечего.
     Ничего о человеке не читает и не пишет.
     """
 
@@ -701,5 +704,10 @@ class PlanCapabilityLabelsView(APIView):
             )
         labels = capability_labels(keys)
         return success_response(
-            {"labels": {key: {"state": item.state.value, "label": item.label} for key, item in labels.items()}}
+            {
+                "labels": {
+                    key: {"state": item.state.value, "label": item.label, "expected_effect": item.expected_effect}
+                    for key, item in labels.items()
+                }
+            }
         )
