@@ -191,6 +191,7 @@ class PlanReplaceView(APIView):
             ),
         },
     )
+    @gated
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:

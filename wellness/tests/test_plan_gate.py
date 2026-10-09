@@ -56,6 +56,7 @@ URLS = {
     "booking": "/api/v1/internal/me/plan/steps/booking/",
     "restriction": "/api/v1/internal/me/plan/restrictions/",
     "lift": "/api/v1/internal/me/plan/restrictions/lift/",
+    "replace": "/api/v1/internal/me/plan/replace/",
 }
 LABELS_URL = "/api/v1/internal/me/plan/capability-labels/"
 
@@ -103,7 +104,7 @@ def _bodies(goal, saved=None) -> dict:
     return {
         "save": _command(goal),
         "state": {"plan_id": str(saved.pk) if saved is not None else None, "state": Plan.Status.PAUSED},
-        "decision": _body(), "resolution": {}, "booking": {}, "restriction": {}, "lift": {},
+        "decision": _body(), "resolution": {}, "booking": {}, "restriction": {}, "lift": {}, "replace": {},
     }
 
 
@@ -441,7 +442,7 @@ def test_every_writing_method_of_the_plan_endpoints_is_gated_or_named() -> None:
                 continue
             (gated if getattr(handler, "plan_gate", False) else ungated).add(f"{name}.{method}")
 
-    assert len(gated) >= 7, gated  # положительная пара: перепись что-то нашла
+    assert len(gated) >= 8, gated  # положительная пара: перепись что-то нашла
     assert ungated == set(UNGATED_ON_PURPOSE), (
         "пишущий метод без гейта и без названной причины: "
         f"{sorted(ungated - set(UNGATED_ON_PURPOSE))}; лишнее в перечне: {sorted(set(UNGATED_ON_PURPOSE) - ungated)}"
