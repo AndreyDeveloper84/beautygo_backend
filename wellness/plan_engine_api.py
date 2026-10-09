@@ -44,6 +44,7 @@ from .plan_engine import (
     IdempotencyConflict,
     PlanEngineDisabled,
     PlanNotFound,
+    SaveSafetyBlocked,
     TransitionRefused,
     create_plan_from_command,
     parse_command,
@@ -53,6 +54,14 @@ from .plan_engine import (
     set_plan_status,
 )
 from .plan_compose import compose_plan, parse_compose_request
+from .plan_restrictions import (
+    RestrictionMalformed,
+    RestrictionNotFound,
+    RestrictionNotLiftable,
+    lift_restriction,
+    open_restriction,
+    parse_restriction,
+)
 from .plan_safety import SafetyInputError, parse_safety_input
 from .plan_engine_steps import (
     AppointmentNotFound,
@@ -121,6 +130,12 @@ class PlanEngineView(APIView):
                 "Активная цель не найдена",
                 details={"reason": "goal_not_found"},
                 status_code=status.HTTP_404_NOT_FOUND,
+            )
+        except SaveSafetyBlocked:
+            return error_response(
+                "PLAN_SAVE_SAFETY_BLOCKED",
+                "План сейчас не сохраняется",
+                status_code=status.HTTP_409_CONFLICT,
             )
         except IdempotencyConflict:
             return error_response(
@@ -216,7 +231,7 @@ def _step_refusal(exc: Exception) -> Response:
         return error_response(
             "PLAN_STEP_NOT_EXECUTABLE",
             "Шаг плана сейчас не допущен к действию",
-            details={"reason": exc.reason},
+            details={"reason": exc.reason, **exc.details},
             status_code=status.HTTP_409_CONFLICT,
         )
     raise exc
@@ -353,6 +368,126 @@ class PlanStepBookingView(APIView):
             {"plan": plan_document(link.plan), "created": created},
             status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+class PlanRestrictionView(APIView):
+    """POST /api/v1/internal/me/plan/restrictions/ — открыть ограничение на
+    сохранённом плане (DRF-2877).
+
+    Тело: ``{plan_id, scope: PLAN|STEP, step_id?, cause, question_id,
+    safety_state, safety_policy_version, evaluated_at_revision}``. Текста
+    вопроса и слов человека в теле нет.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            201: OpenApiResponse(description="Restriction opened; body = {restriction_id, created: true, plan}"),
+            200: OpenApiResponse(description="The same open restriction; created: false"),
+            400: OpenApiResponse(description="PLAN_CONTRACT_VIOLATION, details.reason"),
+            404: OpenApiResponse(description="Plan not found for the caller, or PLAN_ENGINE_DISABLED"),
+        },
+    )
+    def post(self, request: Request) -> Response:
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            plan_id = _uuid_field(data, "plan_id")
+            spec = parse_restriction(data)
+            safety = parse_safety_input(data)
+        except (RestrictionMalformed, SafetyInputError) as exc:  # раньше ValueError: SafetyInputError — его род
+            return _restriction_malformed(exc.reason)
+        except ValueError as exc:
+            return _restriction_malformed(f"{exc}_malformed")
+        try:
+            row, created = open_restriction(request.user, plan_id, spec, safety)
+        except RestrictionMalformed as exc:
+            return _restriction_malformed(exc.reason)
+        except PlanEngineDisabled:
+            return _disabled()
+        except PlanNotFound:
+            return error_response(
+                "NOT_FOUND", "План не найден",
+                details={"reason": "plan_not_found"}, status_code=status.HTTP_404_NOT_FOUND,
+            )
+        return success_response(
+            {"restriction_id": str(row.id), "created": created, "plan": plan_document(row.plan)},
+            status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class PlanRestrictionLiftView(APIView):
+    """POST /api/v1/internal/me/plan/restrictions/lift/ — снять ограничение
+    (DRF-2877).
+
+    Тело: ``{plan_id, restriction_id, lift_kind, answer_option_id?,
+    safety_state, safety_policy_version, evaluated_at_revision}``.
+    ``answer_option_id`` — идентификатор варианта ответа, не текст.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(description="Lifted (or already lifted); body = {lifted: true, created, plan}"),
+            400: OpenApiResponse(description="PLAN_CONTRACT_VIOLATION, details.reason"),
+            404: OpenApiResponse(description="Plan / restriction not found for the caller, or PLAN_ENGINE_DISABLED"),
+            409: OpenApiResponse(description="PLAN_RESTRICTION_NOT_LIFTABLE, details.reason"),
+        },
+    )
+    def post(self, request: Request) -> Response:
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            plan_id = _uuid_field(data, "plan_id")
+            restriction_id = _uuid_field(data, "restriction_id")
+            safety = parse_safety_input(data)
+        except SafetyInputError as exc:  # раньше ValueError: SafetyInputError — его род
+            return _restriction_malformed(exc.reason)
+        except ValueError as exc:
+            return _restriction_malformed(f"{exc}_malformed")
+        lift_kind = data.get("lift_kind")
+        if not isinstance(lift_kind, str) or not lift_kind.strip():
+            return _restriction_malformed("lift_kind_missing")
+        answer = data.get("answer_option_id", "")
+        if not isinstance(answer, str) or len(answer) > 128:
+            return _restriction_malformed("answer_option_id_malformed")
+        try:
+            lift, created = lift_restriction(
+                request.user, plan_id, restriction_id,
+                lift_kind=lift_kind.strip(), answer_option_id=answer.strip(), safety=safety,
+            )
+        except PlanEngineDisabled:
+            return _disabled()
+        except PlanNotFound:
+            return error_response(
+                "NOT_FOUND", "План не найден",
+                details={"reason": "plan_not_found"}, status_code=status.HTTP_404_NOT_FOUND,
+            )
+        except RestrictionNotFound:
+            return error_response(
+                "NOT_FOUND", "Ограничение не найдено",
+                details={"reason": "restriction_not_found"}, status_code=status.HTTP_404_NOT_FOUND,
+            )
+        except RestrictionNotLiftable as exc:
+            return error_response(
+                "PLAN_RESTRICTION_NOT_LIFTABLE",
+                "Ограничение сейчас не снимается",
+                details={"reason": exc.reason},
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        return success_response(
+            {"lifted": True, "created": created, "plan": plan_document(lift.restriction.plan)},
+        )
+
+
+def _restriction_malformed(reason: str) -> Response:
+    return error_response(
+        "PLAN_CONTRACT_VIOLATION", "Запрос не конформен", details={"reason": reason},
+    )
 
 
 class PlanDecisionView(APIView):

@@ -7,6 +7,8 @@ from .plan_engine_api import (
     PlanEngineStateView,
     PlanEngineView,
     PlanStepBookingView,
+    PlanRestrictionLiftView,
+    PlanRestrictionView,
     PlanStepResolutionView,
 )
 
@@ -20,4 +22,7 @@ urlpatterns = [
     # DRF-2868 — шаг: чем разрешён и какая запись от него сделана.
     path("steps/resolution/", PlanStepResolutionView.as_view(), name="me-plan-step-resolution"),
     path("steps/booking/", PlanStepBookingView.as_view(), name="me-plan-step-booking"),
+    # DRF-2877 — стойкий вопрос: открыть и снять ограничение плана.
+    path("restrictions/", PlanRestrictionView.as_view(), name="me-plan-restriction"),
+    path("restrictions/lift/", PlanRestrictionLiftView.as_view(), name="me-plan-restriction-lift"),
 ]

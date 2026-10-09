@@ -172,6 +172,7 @@ def _command(goal: ClientGoal, steps: list[dict], verdicts: dict[str, str] | Non
         "decision_id": str(uuid.uuid4()),
         "goal_ref": str(goal.id),
         "confirmation": {"question_id": "plan.save", "option_id": "yes", "state_revision": 1},
+        **SAFETY,
         "provenance": {"policy_versions": dict(POLICY_VERSIONS)},
         "decision": {
             "steps": steps, "assertions": [],
@@ -559,6 +560,9 @@ class TestBookingIsAFact:
         assert set(state) == {
             "level", "canonical_service_ref", "tenant_offer_ref",
             "resolver_decision_id", "recommendation_id", "bookings",
+            # DRF-2877 — на шаге или на плане незакрытый вопрос. Не признак
+            # «выполнено» и не счётчик (PE-4): говорит, что шаг ждёт ответа.
+            "restricted",
         }
 
     def test_the_document_carries_no_forbidden_key(self, linked) -> None:
