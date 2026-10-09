@@ -38,6 +38,7 @@ from services.models import (
 from services.management.commands._synthetic_plan_fixture import load_spec, seed
 from tenants.models import Tenant
 from users.models import User
+from wellness.tests.plan_consent import ATTESTATION
 
 pytestmark = pytest.mark.django_db
 
@@ -315,7 +316,7 @@ def test_plan_composition_and_labels_do_not_read_the_seeded_knowledge(seeded, bo
     from wellness.tests.test_plan_compose_2871 import _body
 
     for who, user in bot_users.items():
-        decision = _bot(user.username).post(DECISION_URL, _body(), format="json")
+        decision = _bot(user.username).post(DECISION_URL, {**_body(), **ATTESTATION}, format="json")
         assert decision.status_code == 200, (who, decision.content[:300])
         assert decision.json()["data"]["outcome"] == "NO_CURATED_DECOMPOSITION", who
         assert not [m for m in seeded["markers"] if m in decision.content.decode("utf-8")], who
@@ -340,7 +341,7 @@ def test_plan_composition_control_real_knowledge_gives_a_plan_without_synthetic_
         _capability(canon, key, curator, goal_option)
 
     for who, user in bot_users.items():
-        data = _bot(user.username).post(DECISION_URL, _body(), format="json").json()["data"]
+        data = _bot(user.username).post(DECISION_URL, {**_body(), **ATTESTATION}, format="json").json()["data"]
         assert data["outcome"] == "PLAN", who
         refs = sorted(step["capability_ref"] for step in data["decision"]["steps"])
         assert refs == ["real_event_first", "real_event_second"], who
@@ -404,7 +405,7 @@ def test_step_candidates_do_not_offer_the_seeded_service_without_a_grant(seeded,
         plan = _save(ClientGoal.objects.get(client=user), steps=[_step("s1", capability_ref=key, outcome_ref="event")])
 
         response = _bot(user.username).post(
-            CANDIDATES_URL, {"plan_id": str(plan.id), "step_id": "s1", **SAFETY}, format="json",
+            CANDIDATES_URL, {"plan_id": str(plan.id), "step_id": "s1", **SAFETY, **ATTESTATION}, format="json",
         )
 
         assert response.status_code == 200, (who, response.content[:400])
@@ -428,7 +429,7 @@ def test_step_candidates_control_a_real_capability_gives_a_real_candidate(seeded
     plan = _save(ClientGoal.objects.get(client=user), steps=[_step("s1", capability_ref=KEY, outcome_ref="event")])
 
     response = _bot(user.username).post(
-        CANDIDATES_URL, {"plan_id": str(plan.id), "step_id": "s1", **SAFETY}, format="json",
+        CANDIDATES_URL, {"plan_id": str(plan.id), "step_id": "s1", **SAFETY, **ATTESTATION}, format="json",
     )
 
     assert response.status_code == 200, response.content[:400]
