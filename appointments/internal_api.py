@@ -208,7 +208,7 @@ class InternalBookingCreateView(_InternalAuthMixin, APIView):
             # шага сюда не относится.
             from wellness.plan_gate import refusal_for
 
-            refusal = refusal_for(request.user)
+            refusal = refusal_for(request.user, request.data)
             if refusal is not None:
                 return refusal
 

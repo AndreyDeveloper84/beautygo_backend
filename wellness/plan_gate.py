@@ -28,6 +28,14 @@
 случай, который каталог может судить сам: **известный отзыв** — последнее
 доставленное состояние этого вида есть и оно «отозвано».
 
+Известный отзыв — не приговор навсегда. Бот сообщает каталогу об отзыве,
+но о согласии, данном снова, сегодня не сообщает; человек, который отозвал
+и вернулся, был бы закрыт здесь без срока. Поэтому отзыв побеждает, только
+если он ПОЗЖЕ утверждения основания, которое бот прислал в теле вызова
+(``consent: {type, document_version, granted_at}``; ``granted_at`` — время
+выдачи действующего согласия). Утверждение старше отзыва — «бот проверил по
+устаревшему состоянию», отказ. Время отзыва в событии бота — момент отзыва.
+
 **Чего этот шаг НЕ закрывает.** «Согласия не было никогда» и «бот не
 сообщал» каталогу неразличимы — в обоих случаях строки состояния нет. Их
 закрывает следующий шаг: бот на каждом пишущем вызове присылает утверждение
@@ -38,12 +46,16 @@
 
 **Область.** Гейт стоит на каждом методе, который пишет или запускает
 обработку (:func:`gated`), и на создании записи от шага плана. Чтение
-своего плана и подписи шагов под гейт не ставятся.
+своего плана и подписи шагов под гейт не ставятся. Архив собственного плана
+открыт: в списке запретов владельца его нет — это распоряжение своим, а не
+новая обработка, и срок хранения оно не продлевает. Снятие ограничения
+закрыто: это ослабление сторожа.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from functools import wraps
 
 from rest_framework import status
@@ -61,8 +73,8 @@ PLAN_CONSENT = PERSONAL_DATA
 CONSENT_WITHDRAWN = "withdrawn"
 
 
-def consent_is_known_withdrawn(user) -> bool:
-    """Последнее доставленное ботом состояние согласия на хранение — отзыв.
+def known_withdrawal_at(user) -> datetime | None:
+    """Момент самого позднего известного отзыва согласия на хранение — или ``None``.
 
     Смотрятся все строки одного человека (аккаунт и его прокси): событие
     отзыва приходит на ту оболочку, с которой человек его дал.
@@ -70,21 +82,51 @@ def consent_is_known_withdrawn(user) -> bool:
     from users.deletion_requests import _person_rows
     from users.models import ConsentState
 
-    return ConsentState.objects.filter(
-        user__in=_person_rows(user), consent_type=PLAN_CONSENT, granted=False,
-    ).exists()
+    return (
+        ConsentState.objects.filter(user__in=_person_rows(user), consent_type=PLAN_CONSENT, granted=False)
+        .order_by("-granted_at")
+        .values_list("granted_at", flat=True)
+        .first()
+    )
 
 
-def refusal_for(user):
+def attested_granted_at(payload) -> datetime | None:
+    """Время выдачи действующего согласия из утверждения основания — или ``None``.
+
+    ``None`` — утверждения нет или оно негодно: не тот вид, пустая версия
+    текста, время без часового пояса или неразборчивое. Fail-closed: негодное
+    утверждение ничем не лучше отсутствующего. Значение версии не толкуется —
+    у старых записей согласия бот шлёт явную метку вместо пустоты.
+    """
+    attestation = payload.get("consent") if hasattr(payload, "get") else None
+    if not isinstance(attestation, dict) or attestation.get("type") != PLAN_CONSENT:
+        return None
+    version = attestation.get("document_version")
+    if not isinstance(version, str) or not version.strip():
+        return None
+    raw = attestation.get("granted_at")
+    if not isinstance(raw, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else None
+
+
+def refusal_for(user, payload=None):
     """Отказ для этого человека — или ``None``, если гейт открыт.
 
     Заявка на удаление раньше согласия: у неё есть номер и срок, и человек на
-    любом экране должен видеть один и тот же отказ.
+    любом экране должен видеть один и тот же отказ. ``payload`` — тело
+    вызова; из него берётся утверждение основания.
     """
     blocked = deletion_block_for(user)
     if blocked is not None:
         return deletion_refusal(blocked)
-    if consent_is_known_withdrawn(user):
+    withdrawn_at = known_withdrawal_at(user)
+    attested = attested_granted_at(payload)
+    if withdrawn_at is not None and not (attested is not None and attested > withdrawn_at):
         logger.info("wellness.plan_gate.consent_refused user=%s reason=%s", user.pk, CONSENT_WITHDRAWN)
         return error_response(
             "CONSENT_REQUIRED",
@@ -95,20 +137,35 @@ def refusal_for(user):
     return None
 
 
-def gated(method):
+def gated(method=None, *, unless=None):
     """Метод ручки, который пишет или запускает обработку: сначала гейт.
 
     Гейт раньше разбора тела и раньше проверки флага движка: человеку с
     заявкой на удаление не отвечают ни «тело неверно», ни «движок выключен»
     — ему отвечают, почему обработка остановлена.
+
+    ``unless`` — названное исключение внутри ручки: функция от запроса,
+    которая говорит «этот вызов под гейт не идёт» (архив своего плана).
     """
 
-    @wraps(method)
-    def wrapper(self, request, *args, **kwargs):
-        refusal = refusal_for(request.user)
-        if refusal is not None:
-            return refusal
-        return method(self, request, *args, **kwargs)
+    def decorate(handler):
+        @wraps(handler)
+        def wrapper(self, request, *args, **kwargs):
+            if unless is None or not unless(request):
+                refusal = refusal_for(request.user, request.data)
+                if refusal is not None:
+                    return refusal
+            return handler(self, request, *args, **kwargs)
 
-    wrapper.plan_gate = True
-    return wrapper
+        wrapper.plan_gate = True
+        return wrapper
+
+    return decorate(method) if method is not None else decorate
+
+
+def archiving_own_plan(request) -> bool:
+    """Вызов смены состояния просит ровно одно — отправить план в архив."""
+    from .models import Plan
+
+    data = request.data if isinstance(request.data, dict) else {}
+    return data.get("state") == Plan.Status.ARCHIVED

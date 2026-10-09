@@ -35,7 +35,7 @@ from services.capabilities import capability_labels
 from users.permissions import IsBotServiceWithVerifiedClient
 from users.response import error_response, success_response
 
-from .plan_gate import gated
+from .plan_gate import archiving_own_plan, gated
 from .plan_engine import (
     REQUESTABLE_STATUSES,
     ActivePlanExists,
@@ -167,7 +167,7 @@ class PlanEngineStateView(APIView):
             409: OpenApiResponse(description="PLAN_TRANSITION_REFUSED | PLAN_ACTIVE_EXISTS"),
         },
     )
-    @gated
+    @gated(unless=archiving_own_plan)
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:

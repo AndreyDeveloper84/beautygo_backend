@@ -98,11 +98,12 @@ def _request_deletion(user, status=DeletionRequest.Status.REQUESTED) -> Deletion
     )
 
 
-def _bodies(goal) -> dict:
-    """Тело на каждую ручку. Гейт стоит раньше разбора, поэтому для отказа важна не валидность тела, а личность."""
+def _bodies(goal, saved=None) -> dict:
+    """Тело на каждую ручку. Гейт стоит раньше разбора тела; у смены состояния — настоящая форма: пауза."""
     return {
-        "save": _command(goal), "state": {"action": "pause"}, "decision": _body(),
-        "resolution": {}, "booking": {}, "restriction": {}, "lift": {},
+        "save": _command(goal),
+        "state": {"plan_id": str(saved.pk) if saved is not None else None, "state": Plan.Status.PAUSED},
+        "decision": _body(), "resolution": {}, "booking": {}, "restriction": {}, "lift": {},
     }
 
 
@@ -120,7 +121,7 @@ def test_an_open_deletion_request_closes_every_writing_endpoint(owner, goal, end
     before = (Plan.objects.count(), Plan.objects.filter(pk=saved.pk).values().get())
 
     with CaptureQueriesContext(connection) as queries:
-        response = _api().post(URLS[endpoint], _bodies(goal)[endpoint], format="json")
+        response = _api().post(URLS[endpoint], _bodies(goal, saved)[endpoint], format="json")
 
     assert response.status_code == 423, (endpoint, response.content[:300])
     error = response.json()["error"]
@@ -150,6 +151,36 @@ def test_every_open_status_of_the_request_blocks(owner, goal, status) -> None:
     assert _api().post(URLS["decision"], _body(), format="json").status_code == 423
 
 
+# ─── архив своего плана открыт ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("blocker", ["deletion_request", "withdrawn_consent"])
+def test_ones_own_plan_can_be_archived_under_the_gate(owner, goal, blocker) -> None:
+    """В списке запретов владельца архива нет: это распоряжение своим, а не новая обработка."""
+    saved = _save(goal)
+    if blocker == "deletion_request":
+        _request_deletion(owner)
+    else:
+        _consent(owner, granted=False)
+
+    paused = _api().post(URLS["state"], {"plan_id": str(saved.pk), "state": Plan.Status.PAUSED}, format="json")
+    archived = _api().post(URLS["state"], {"plan_id": str(saved.pk), "state": Plan.Status.ARCHIVED}, format="json")
+
+    assert paused.status_code in (422, 423), paused.content[:300]  # прочие смены состояния закрыты
+    assert archived.status_code == 200, archived.content[:300]
+    assert Plan.objects.get(pk=saved.pk).status == Plan.Status.ARCHIVED
+
+
+def test_control_the_plan_is_paused_without_any_blocker(owner, goal) -> None:
+    """Положительная пара к узлу выше: та же пауза без заявки и отзыва проходит."""
+    saved = _save(goal)
+
+    response = _api().post(URLS["state"], {"plan_id": str(saved.pk), "state": Plan.Status.PAUSED}, format="json")
+
+    assert response.status_code == 200, response.content[:300]
+    assert Plan.objects.get(pk=saved.pk).status == Plan.Status.PAUSED
+
+
 # ─── отзыв согласия на хранение ───────────────────────────────────────────────
 
 
@@ -170,7 +201,7 @@ def test_a_withdrawn_storage_consent_closes_every_writing_endpoint(owner, goal, 
     before = (Plan.objects.count(), Plan.objects.filter(pk=saved.pk).values().get())
 
     with CaptureQueriesContext(connection) as queries:
-        response = _api().post(URLS[endpoint], _bodies(goal)[endpoint], format="json")
+        response = _api().post(URLS[endpoint], _bodies(goal, saved)[endpoint], format="json")
 
     assert response.status_code == 422, (endpoint, response.content[:300])
     error = response.json()["error"]
@@ -178,6 +209,76 @@ def test_a_withdrawn_storage_consent_closes_every_writing_endpoint(owner, goal, 
     assert error["details"] == {"consent_type": "personal_data", "reason": "withdrawn"}
     assert (Plan.objects.count(), Plan.objects.filter(pk=saved.pk).values().get()) == before
     assert _writes(queries.captured_queries) == []
+
+
+def _attested(granted_at, **over) -> dict:
+    block = {"type": "personal_data", "document_version": "2026-10", "granted_at": granted_at.isoformat()}
+    block.update(over)
+    return {"consent": block}
+
+
+def test_a_consent_given_again_after_the_withdrawal_reopens_the_plan(owner, goal) -> None:
+    """Бот об отзыве сообщает, а о новом согласии — нет: без сравнения времени человек был бы закрыт навсегда."""
+    withdrawal = _consent(owner, granted=False)
+    again = withdrawal.granted_at + timedelta(minutes=5)
+
+    composed = _api().post(URLS["decision"], {**_body(), **_attested(again)}, format="json")
+    saved = _api().post(PLAN_URL, {**_command(goal), **_attested(again)}, format="json")
+
+    assert composed.status_code == 200, composed.content[:300]
+    assert saved.status_code == 201, saved.content[:300]
+
+
+@pytest.mark.parametrize("case", [
+    "older_than_the_withdrawal", "same_instant", "no_timezone", "not_a_date", "wrong_kind", "empty_version",
+    "not_an_object",
+])
+def test_a_stale_or_unusable_attestation_does_not_beat_the_withdrawal(owner, goal, case) -> None:
+    """«Бот проверил по устаревшему состоянию» — отказ; негодное утверждение ничем не лучше отсутствующего."""
+    withdrawal = _consent(owner, granted=False)
+    later = withdrawal.granted_at + timedelta(minutes=5)
+    body = {
+        "older_than_the_withdrawal": _attested(withdrawal.granted_at - timedelta(days=1)),
+        "same_instant": _attested(withdrawal.granted_at),
+        "no_timezone": {"consent": {
+            **_attested(later)["consent"], "granted_at": later.replace(tzinfo=None).isoformat(),
+        }},
+        "not_a_date": {"consent": {**_attested(later)["consent"], "granted_at": "вчера"}},
+        "wrong_kind": _attested(later, type="health"),
+        "empty_version": _attested(later, document_version="  "),
+        "not_an_object": {"consent": "personal_data"},
+    }[case]
+
+    response = _api().post(URLS["decision"], {**_body(), **body}, format="json")
+
+    assert response.status_code == 422, (case, response.content[:300])
+    assert response.json()["error"]["details"]["reason"] == "withdrawn"
+
+
+def test_a_consent_record_without_a_text_version_is_still_a_consent(owner, goal) -> None:
+    """У старых записей согласия версии текста нет; бот шлёт явную метку — её значение каталог не толкует."""
+    withdrawal = _consent(owner, granted=False)
+
+    response = _api().post(URLS["decision"], {
+        **_body(), **_attested(withdrawal.granted_at + timedelta(minutes=5), document_version="unversioned"),
+    }, format="json")
+
+    assert response.status_code == 200, response.content[:300]
+
+
+def test_the_latest_withdrawal_of_the_person_is_the_one_compared(owner, goal) -> None:
+    """Согласие дано между двумя отзывами — действует последний отзыв."""
+    from users.consent_events import PERSONAL_DATA
+    from users.models import ConsentState
+
+    first = timezone.now() - timedelta(days=3)
+    ConsentState.objects.create(
+        user=owner, consent_type=PERSONAL_DATA, granted=False, granted_at=timezone.now(), event_id="gate-latest",
+    )
+
+    response = _api().post(URLS["decision"], {**_body(), **_attested(first + timedelta(days=1))}, format="json")
+
+    assert response.status_code == 422
 
 
 def test_a_granted_storage_consent_lets_the_plan_work(owner, goal) -> None:
@@ -250,7 +351,7 @@ def test_known_gap_a_person_the_bot_never_reported_is_not_blocked_yet(owner, goa
 
 def test_an_unknown_top_level_field_does_not_break_saving_or_composing(owner, goal) -> None:
     """Вызывающие начнут слать утверждение основания раньше, чем каталог начнёт его требовать."""
-    attestation = {"consent": {"type": "personal_data", "document_version": "2026-10"}}
+    attestation = _attested(timezone.now())
 
     saved = _api().post(PLAN_URL, {**_command(goal), **attestation}, format="json")
     composed = _api().post(URLS["decision"], {**_body(), **attestation}, format="json")
