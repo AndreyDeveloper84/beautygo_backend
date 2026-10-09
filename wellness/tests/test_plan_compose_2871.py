@@ -324,6 +324,7 @@ class TestTheDecisionSavesAsIs:
             "goal_ref": decision["goal_ref"],
             "mode": "SAVE",
             "confirmation": {"question_id": "plan.save", "option_id": "yes", "state_revision": 3},
+            "safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4,
             "provenance": {"policy_versions": decision["policy_versions"]},
             "decision": {k: decision[k] for k in ("steps", "assertions", "validation")},
         }

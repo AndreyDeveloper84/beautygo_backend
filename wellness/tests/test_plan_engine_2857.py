@@ -104,6 +104,8 @@ def _command(goal: ClientGoal | None, *, steps: list[dict] | None = None, **over
         "goal_ref": str(goal.id) if goal is not None else None,
         "mode": "SAVE",
         "confirmation": {"question_id": "plan.save", "option_id": "yes", "state_revision": 7},
+        # DRF-2877 — вердикт хода подтверждения обязателен.
+        "safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4,
         "provenance": {"policy_versions": dict(POLICY_VERSIONS)},
         "decision": {
             "steps": steps,
