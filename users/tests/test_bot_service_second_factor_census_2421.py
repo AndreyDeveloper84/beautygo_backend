@@ -241,7 +241,7 @@ def test_the_census_numbers_of_05_10() -> None:
     # DRF-2868: C 17 -> 19, the two plan-step views.
     # DRF-2871: C 19 -> 20, the plan-composition view.
     # DRF-2871: C 20 -> 21, the capability-labels view.
-    assert (len(A_CROSS_CHECKED), len(B_TENANT_ADMIN), len(C_HEADER_ONLY)) == (6, 6, 24)
+    assert (len(A_CROSS_CHECKED), len(B_TENANT_ADMIN), len(C_HEADER_ONLY)) == (6, 6, 25)
 
 
 def test_the_docstring_states_the_census_not_the_old_promise() -> None:
