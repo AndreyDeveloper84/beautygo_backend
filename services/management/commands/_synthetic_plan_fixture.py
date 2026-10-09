@@ -77,6 +77,7 @@ class Report:
     found: list[str] = field(default_factory=list)
     real_capabilities_of_goal: int = 0
     master_id: str = ""
+    master_place: str = ""
     visible_without_grant: list[str] = field(default_factory=list)
     visible_under_grant: list[str] | None = None
     grant_note: str = ""
@@ -281,6 +282,14 @@ def _test_master(row: dict, salon) -> tuple[SpecialistProfile, bool]:
     profile.status = SpecialistProfile.ProfileStatus.ACTIVE
     profile.is_available = True
     profile.is_booking_enabled = True
+    # Место оказания услуг: только уже ПОДТВЕРЖДЁННОЕ место этого салона и
+    # только если оно одно. Команда мест не создаёт и не подтверждает; без
+    # места адрес в подтверждении записи будет пустым — это видно в отчёте.
+    from tenants.service_location import LocationStatus, ServiceLocation
+
+    confirmed = list(ServiceLocation.objects.filter(tenant=salon, status=LocationStatus.CONFIRMED)[:2])
+    if len(confirmed) == 1:
+        profile.works_at = confirmed[0]
     profile.save()
     if not TenantUserRelationship.objects.filter(
         user=user, tenant=salon, is_active=True, role=TenantUserRelationship.Role.STAFF,
@@ -353,6 +362,10 @@ def seed(spec: dict, *, dry_run: bool = False) -> Report:
                 report.created.append(
                     f"рабочие часы тест-мастера: ежедневно {WORKING_HOURS[0]:%H:%M}–{WORKING_HOURS[1]:%H:%M}"
                 )
+            report.master_place = (
+                f"подтверждённое место салона ({master.works_at_id})" if master.works_at_id is not None
+                else "НЕТ — у салона нет единственного подтверждённого места; адрес в подтверждении записи будет пустым"
+            )
 
             for row, offer in offers:
                 _, created = _edge(master, offer, row["master_price"])

@@ -348,3 +348,50 @@ def test_the_command_fails_loudly_and_says_nothing_was_written(tmp_path, spec) -
         _run(tmp_path, spec)
 
     assert _census() == NOTHING
+
+
+# ─── место тест-мастера ──────────────────────────────────────────────────────
+
+
+def _place(salon, status, address):
+    from tenants.service_location import LocationKind, ServiceLocation
+
+    fields = {}
+    if status == "confirmed":
+        fields = {
+            "confirmed_by": User.objects.get_or_create(username="synthetic-seed-place-curator")[0],
+            "confirmed_at": timezone.now(), "confirmed_source_ref": "проверено оператором",
+        }
+    return ServiceLocation.objects.create(
+        tenant=salon, kind=LocationKind.values[0], address=address, city="Пенза", status=status, **fields,
+    )
+
+
+def test_the_test_master_works_at_the_only_confirmed_place_of_the_salon(spec, world) -> None:
+    from tenants.service_location import LocationStatus
+
+    confirmed = _place(world["salon"], LocationStatus.CONFIRMED, "Пенза, Московская, 1")
+    _place(world["salon"], LocationStatus.REVIEW_REQUIRED, "Пенза, Московская, 2")
+
+    report = seed(spec)
+
+    assert SpecialistProfile.objects.get(pk=report.master_id).works_at_id == confirmed.pk
+    assert str(confirmed.pk) in report.master_place
+
+
+@pytest.mark.parametrize("confirmed_places", [0, 2])
+def test_without_a_single_confirmed_place_the_master_has_none_and_the_report_says_so(
+    spec, world, confirmed_places,
+) -> None:
+    """Команда мест не создаёт, не подтверждает и не выбирает между двумя."""
+    from tenants.service_location import LocationStatus, ServiceLocation
+
+    for index in range(confirmed_places):
+        _place(world["salon"], LocationStatus.CONFIRMED, f"Пенза, Московская, {index + 1}")
+    before = ServiceLocation.objects.count()
+
+    report = seed(spec)
+
+    assert SpecialistProfile.objects.get(pk=report.master_id).works_at_id is None
+    assert report.master_place.startswith("НЕТ")
+    assert ServiceLocation.objects.count() == before

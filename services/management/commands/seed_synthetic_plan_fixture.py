@@ -38,6 +38,7 @@ class Command(BaseCommand):
         for line in report.found:
             write(f"  = {line}")
         write(f"Тест-мастер: {report.master_id}")
+        write(f"Место тест-мастера: {report.master_place}")
         write("Что видит обычный читатель знания у этой цели (без разрешения): "
               f"{report.visible_without_grant or 'ничего'}")
         if report.visible_under_grant is None:
