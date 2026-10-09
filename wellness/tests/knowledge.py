@@ -31,6 +31,6 @@ def confirm_capability_for_goal(key: str = CAPABILITY, goal_key: str = GOAL_KEY)
     )
     template, _ = ServiceTemplate.objects.get_or_create(category=category, name="Plan knowledge fixture")
     curator = User.objects.filter(username="plan_knowledge_curator").first() or User.objects.create_user(
-        username="plan_knowledge_curator", password="x", role="client", phone="+79995028799",
+        username="plan_knowledge_curator", password="x", role="client", phone="+79990002871",
     )
     _capability(template, key, curator, option)

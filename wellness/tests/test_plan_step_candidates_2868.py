@@ -313,7 +313,9 @@ class TestWhyThereIsNoCandidate:
         _can([orphan.template, silent.template], curator)
         reason, rejected = self._nothing(_save(goal))
         assert reason == "NONE_ADMITTED"
-        assert rejected == {"NO_SELLABLE_MASTER": 1, "NOT_ADMITTED": 0, "HEALTH_CONDITIONS_UNDEFINED": 1}
+        assert rejected == {
+            "NO_SELLABLE_MASTER": 1, "NOT_ADMITTED": 0, "HEALTH_CONDITIONS_UNDEFINED": 1, "ACROSS_THE_TEST_BOUNDARY": 0,
+        }
 
     def test_one_good_offer_among_rejected_ones_is_still_a_candidate(self, goal, massage, tenant, category, curator) -> None:
         _, good = massage

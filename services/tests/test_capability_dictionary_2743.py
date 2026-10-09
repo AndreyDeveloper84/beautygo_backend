@@ -436,7 +436,11 @@ class TestTheMigrationOnRowsThatWereThereBefore:
         """Вернуть ``services`` на лист графа: DDL здесь коммитится в тестовую базу."""
         yield
         executor = MigrationExecutor(connection)
-        executor.migrate(executor.loader.graph.leaf_nodes("services"))
+        # Листья ВСЕГО графа, не только services: откат services уводит за собой
+        # зависящие от него миграции других приложений (wellness/0009 и дальше),
+        # и один лист services их не возвращает — узлы после этого шли бы по
+        # базе без их таблиц и колонок.
+        executor.migrate(executor.loader.graph.leaf_nodes())
         ClaimApprovalReset.objects.all().delete()
         CapabilityGoalLink.objects.all().delete()
         ProcedureCapability.objects.all().delete()
