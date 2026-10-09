@@ -41,8 +41,10 @@ from ._source_binding import CandidateSourceNotConfigured, get_candidate_source
 from .api import (
     NeedOrigin,
     NeedSpec,
+    Preference,
     PreferenceKind,
     PreferenceOrigin,
+    PreferenceStrength,
     RecommendationRequest,
     SafetyState,
     ScopeMode,
@@ -125,6 +127,47 @@ def _within_own_salons(preferences: tuple, own_salons: tuple) -> tuple:
     return kept
 
 
+#: Имя не искали: режим не «свои салоны» либо происхождение памяти не позволяет.
+_NAME_NOT_APPLICABLE = {"kind": PreferenceKind.MASTER.value, "status": "not_applicable", "matches": 0}
+
+
+def _resolve_named_masters(named: tuple, own_salons: tuple, viewer) -> tuple[tuple, list[dict]]:
+    """Имя мастера из памяти → предпочтение, только среди своих салонов — DRF-2855.
+
+    Ровно одно совпадение — обычное мягкое предпочтение из памяти по этому
+    мастеру. Ноль или несколько — не применяется: произвольного мастера не
+    выбираем, а ответ несёт признак, чтобы бот уточнил у клиента. Имя, чья
+    память записана неизвестно где или в салоне, который клиенту не свой,
+    не ищется вовсе (``not_applicable``). На каждое имя — один элемент
+    ответа, в порядке запроса. Ни имя, ни id в журнал и в ответ не
+    попадают — только исход и число.
+    """
+    from users.own_salons import masters_matching_name
+
+    own = set(own_salons)
+    preferences: list[Preference] = []
+    resolution: list[dict] = []
+    for item in named:
+        if not item.origin_known or (item.tenant_ref is not None and item.tenant_ref not in own):
+            logger.warning(
+                "recommendation.preference.name_not_applicable — память по имени записана неизвестно "
+                "где или в салоне, который клиенту не свой"
+            )
+            resolution.append(dict(_NAME_NOT_APPLICABLE))
+            continue
+        salons = own_salons if item.tenant_ref is None else (item.tenant_ref,)
+        matches = masters_matching_name(item.stems, salons, viewer=viewer)
+        status = "resolved" if len(matches) == 1 else ("not_found" if not matches else "ambiguous")
+        logger.info("recommendation.preference.name_resolution status=%s matches=%d", status, len(matches))
+        resolution.append({"kind": PreferenceKind.MASTER.value, "status": status, "matches": len(matches)})
+        if status == "resolved":
+            preferences.append(Preference(
+                kind=PreferenceKind.MASTER, ref=matches[0], strength=PreferenceStrength.SOFT,
+                origin=PreferenceOrigin.CONFIRMED_MEMORY, tenant_ref=item.tenant_ref,
+            ))
+    return tuple(preferences), resolution
+
+
 class RecommendationResolveView(APIView):
     """`POST /api/v1/internal/recommendation/resolve/` — единственная ручка границы."""
 
@@ -169,6 +212,8 @@ class RecommendationResolveView(APIView):
 
         scope = serializer.build_scope()
         preferences = serializer.build_preferences()
+        named = serializer.named_masters()
+        preference_resolution: list[dict] = []
         if scope.mode is ScopeMode.OWN_SALONS:
             # Салоны клиента называет сервер — по тому же правилу, что полка
             # «Твои места». Бот их не присылает и прислать не может (схема).
@@ -176,8 +221,19 @@ class RecommendationResolveView(APIView):
 
             scope = dataclasses.replace(scope, tenant_refs=own_salon_ids(request.user))
             preferences = _within_own_salons(preferences, scope.tenant_refs)
+            resolved, preference_resolution = _resolve_named_masters(named, scope.tenant_refs, request.user)
+            preferences += resolved
         else:
             preferences = _cross_salon_safe(preferences)
+            if named:
+                # Имя по всему каталогу не ищется: это и была бы межсалонная
+                # передача (NEVER_CROSSES). Само имя в лог не пишется.
+                logger.warning(
+                    "recommendation.preference.name_dropped count=%d — имя мастера разрешается "
+                    "только в режиме «свои салоны»",
+                    len(named),
+                )
+                preference_resolution = [dict(_NAME_NOT_APPLICABLE) for _ in named]
 
         decision = resolve(
             RecommendationRequest(
@@ -196,7 +252,7 @@ class RecommendationResolveView(APIView):
             source=source,
         )
 
-        payload = decision_to_payload(decision)
+        payload = decision_to_payload(decision, preference_resolution=preference_resolution)
         # Проверка СВОЕГО выхода. Не паранойя: у формы ответа теперь есть
         # владелец (§2.1 C3), и владелец обязан ловить своё нарушение сам —
         # иначе он снова окажется у потребителя в виде пустого экрана.
