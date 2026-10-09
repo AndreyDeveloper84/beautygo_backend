@@ -126,7 +126,9 @@ def template_ids_helping_goal(
     )
 
 
-def template_ids_with_capability(key: str, *, now: datetime | None = None) -> frozenset:
+def template_ids_with_capability(
+    key: str, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
+) -> frozenset:
     """Каноны, о которых подтверждено «процедура умеет это» (DRF-2915).
 
     Вход — КЛЮЧ способности: им её называет план (см.
@@ -135,9 +137,10 @@ def template_ids_with_capability(key: str, *, now: datetime | None = None) -> fr
     подтверждено человеком, поддержано, не истекло; вывод системы и запрет не
     считаются. Пустой ответ — «подтверждённого нет», а не «никто не умеет».
 
-    Отдельной функцией, потому что это точка, в которой чтение «способность
-    подтверждена» расширится на помеченные синтетические данные тестового
-    сценария (DRF-2916): расширение должно случиться здесь, а не у читателей.
+    ``include_synthetic`` — серверное разрешение читать помеченную синтетику
+    (DRF-2916) или ``None``: под ним в ответ входят и каноны синтетической
+    способности. Синтетическая способность висит только на синтетическом
+    каноне (замок базы), поэтому настоящих канонов она не добавляет.
 
     Запись словаря привязана к нескольким процедурам (DRF-2743): в ответ
     попадает каждая. Состояние самого канона (выведен из оборота) здесь не
@@ -146,9 +149,9 @@ def template_ids_with_capability(key: str, *, now: datetime | None = None) -> fr
     now = now or timezone.now()
     return frozenset(
         template_id
-        for template_id in ProcedureCapability.objects.filter(_client_facing_q(now), key=key).values_list(
-            "templates", flat=True
-        )
+        for template_id in ProcedureCapability.objects.filter(
+            _client_facing_q(now, include_synthetic=include_synthetic), key=key,
+        ).values_list("templates", flat=True)
         if template_id is not None
     )
 
