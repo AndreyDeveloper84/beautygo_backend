@@ -35,6 +35,7 @@ from services.capabilities import capability_labels
 from users.permissions import IsBotServiceWithVerifiedClient
 from users.response import error_response, success_response
 
+from .plan_gate import gated
 from .plan_engine import (
     REQUESTABLE_STATUSES,
     ActivePlanExists,
@@ -106,6 +107,7 @@ class PlanEngineView(APIView):
             409: OpenApiResponse(description="PLAN_IDEMPOTENCY_CONFLICT"),
         },
     )
+    @gated
     def post(self, request: Request) -> Response:
         try:
             command = parse_command(request.data)
@@ -165,6 +167,7 @@ class PlanEngineStateView(APIView):
             409: OpenApiResponse(description="PLAN_TRANSITION_REFUSED | PLAN_ACTIVE_EXISTS"),
         },
     )
+    @gated
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:
@@ -270,6 +273,7 @@ class PlanStepResolutionView(APIView):
     permission_classes = [IsBotServiceWithVerifiedClient]
 
     @extend_schema(tags=["internal"], responses={201: OpenApiResponse(description="{plan, created}")})
+    @gated
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:
@@ -331,6 +335,7 @@ class PlanStepBookingView(APIView):
     permission_classes = [IsBotServiceWithVerifiedClient]
 
     @extend_schema(tags=["internal"], responses={201: OpenApiResponse(description="{plan, created}")})
+    @gated
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:
@@ -391,6 +396,7 @@ class PlanRestrictionView(APIView):
             404: OpenApiResponse(description="Plan not found for the caller, or PLAN_ENGINE_DISABLED"),
         },
     )
+    @gated
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:
@@ -439,6 +445,7 @@ class PlanRestrictionLiftView(APIView):
             409: OpenApiResponse(description="PLAN_RESTRICTION_NOT_LIFTABLE, details.reason"),
         },
     )
+    @gated
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:
@@ -509,6 +516,7 @@ class PlanDecisionView(APIView):
     permission_classes = [IsBotServiceWithVerifiedClient]
 
     @extend_schema(tags=["internal"], responses={200: OpenApiResponse(description="{outcome, decision}")})
+    @gated
     def post(self, request: Request) -> Response:
         try:
             result = compose_plan(request.user, parse_compose_request(request.data))
@@ -542,6 +550,10 @@ class PlanCapabilityLabelsView(APIView):
     permission_classes = [IsBotServiceWithVerifiedClient]
 
     @extend_schema(tags=["internal"], responses={200: OpenApiResponse(description="{labels}")})
+    # Без гейта (wellness.plan_gate): подписи — чтение знания каталога, нужное
+    # и для ПОКАЗА сохранённого плана; о человеке ручка ничего не читает и не
+    # пишет. Под гейтом человек с заявкой на удаление видел бы свой план
+    # списком ключей.
     def post(self, request: Request) -> Response:
         if not plan_engine_enabled():
             return _disabled()

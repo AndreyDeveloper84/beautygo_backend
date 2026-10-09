@@ -1,0 +1,354 @@
+"""Вторая линия гейта у ручек движка Плана: заявка на удаление и отзыв согласия (решение владельца 09.10.2026).
+
+При активной заявке на удаление: «сохранённый план можно просматривать;
+нельзя собирать новый план; нельзя редактировать или пересобирать план;
+нельзя подбирать услугу, переходить к записи или создавать запись; нельзя
+запускать новую обработку или пересчёт». «После фактического удаления план
+больше не показывается.» «Каталог остаётся второй fail-closed линией.»
+
+Узлы держат:
+
+* каждая пишущая и обрабатывающая ручка отвечает человеку с открытой заявкой
+  отказом 423 с номером заявки и НИЧЕГО не меняет;
+* чтение своего плана и подписи шагов остаются открытыми, и чтение ничего
+  не пишет (использование плана не продлевает хранение);
+* запись от шага плана закрыта; обычная запись без шага сюда не относится;
+* без заявки всё работает как раньше (четвёртый случай владельца);
+* гейт стоит на КАЖДОМ пишущем методе файла ручек: новая ручка без гейта и
+  без записи в перечне исключений краснит узел.
+
+Четыре случая владельца на каталожной линии:
+
+* активная заявка на удаление — блок (узлы ниже);
+* согласие отозвано — блок: каталог знает отзыв, как только бот его
+  доставил (узлы ниже);
+* действующее согласие без заявки — обычная работа (узлы ниже);
+* **согласия не было никогда — этим шагом НЕ закрыто.** «Не было» и «бот
+  не сообщал» каталогу неразличимы: строки состояния нет в обоих случаях.
+  Узел ниже фиксирует сегодняшнее поведение как названный пробел; закрывает
+  его следующий шаг — утверждение основания в теле запроса.
+"""
+
+from __future__ import annotations
+
+import inspect
+from datetime import timedelta
+
+import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+from django.utils import timezone
+
+from users.models import DeletionRequest
+from wellness import plan_engine_api
+from wellness.models import Plan
+from wellness.tests.test_plan_compose_2871 import OWNER, _api, _body
+from wellness.tests.test_plan_engine_2857 import _command, _save
+
+pytestmark = pytest.mark.django_db
+
+PLAN_URL = "/api/v1/internal/me/plan/"
+URLS = {
+    "save": PLAN_URL,
+    "state": "/api/v1/internal/me/plan/state/",
+    "decision": "/api/v1/internal/me/plan/decision/",
+    "resolution": "/api/v1/internal/me/plan/steps/resolution/",
+    "booking": "/api/v1/internal/me/plan/steps/booking/",
+    "restriction": "/api/v1/internal/me/plan/restrictions/",
+    "lift": "/api/v1/internal/me/plan/restrictions/lift/",
+}
+LABELS_URL = "/api/v1/internal/me/plan/capability-labels/"
+
+#: Пишущие методы БЕЗ гейта — каждый с причиной. Сюда нельзя добавить ручку
+#: молча: узел ниже сверяет перечень с файлом.
+UNGATED_ON_PURPOSE = {
+    "PlanCapabilityLabelsView.post": (
+        "чтение знания каталога, нужное и для показа сохранённого плана; о человеке ничего не читает и не пишет"
+    ),
+}
+
+
+@pytest.fixture(autouse=True)
+def _token_and_flag(settings):
+    from wellness.tests.test_plan_compose_2871 import VALID_TOKEN
+
+    settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
+    settings.PLAN_ENGINE_ENABLED = True
+
+
+@pytest.fixture
+def owner(db):
+    from wellness.tests.test_plan_compose_2871 import _user
+
+    return _user(OWNER, "+79995028799", is_proxy=True)
+
+
+@pytest.fixture
+def goal(owner):
+    from goals.models import ClientGoal
+    from services.models import GoalOption
+
+    GoalOption.objects.create(key="gate-goal", label="Цель гейта")
+    return ClientGoal.objects.create(client=owner, goal_key="gate-goal", source_channel="bot")
+
+
+def _request_deletion(user, status=DeletionRequest.Status.REQUESTED) -> DeletionRequest:
+    return DeletionRequest.objects.create(
+        user=user, initiator="bot", status=status, deadline_at=timezone.now() + timedelta(days=30),
+    )
+
+
+def _bodies(goal) -> dict:
+    """Тело на каждую ручку. Гейт стоит раньше разбора, поэтому для отказа важна не валидность тела, а личность."""
+    return {
+        "save": _command(goal), "state": {"action": "pause"}, "decision": _body(),
+        "resolution": {}, "booking": {}, "restriction": {}, "lift": {},
+    }
+
+
+def _writes(queries) -> list[str]:
+    return [q["sql"] for q in queries if q["sql"].lstrip().split(" ", 1)[0].upper() in {"INSERT", "UPDATE", "DELETE"}]
+
+
+# ─── заявка на удаление закрывает запись и обработку ─────────────────────────
+
+
+@pytest.mark.parametrize("endpoint", sorted(URLS))
+def test_an_open_deletion_request_closes_every_writing_endpoint(owner, goal, endpoint) -> None:
+    saved = _save(goal)
+    request = _request_deletion(owner)
+    before = (Plan.objects.count(), Plan.objects.filter(pk=saved.pk).values().get())
+
+    with CaptureQueriesContext(connection) as queries:
+        response = _api().post(URLS[endpoint], _bodies(goal)[endpoint], format="json")
+
+    assert response.status_code == 423, (endpoint, response.content[:300])
+    error = response.json()["error"]
+    assert error["code"] == "DELETION_IN_PROGRESS"
+    assert error["details"]["reason"] == "deletion_requested"
+    assert error["details"]["request_id"] == str(request.pk)
+    assert (Plan.objects.count(), Plan.objects.filter(pk=saved.pk).values().get()) == before
+    assert _writes(queries.captured_queries) == []
+
+
+def test_a_new_plan_is_not_saved_under_a_deletion_request(owner, goal) -> None:
+    _request_deletion(owner)
+
+    response = _api().post(PLAN_URL, _command(goal), format="json")
+
+    assert response.status_code == 423
+    assert Plan.objects.count() == 0
+
+
+@pytest.mark.parametrize("status", [
+    DeletionRequest.Status.REQUESTED,
+    *[s for s in DeletionRequest.OPEN_STATUSES if s != DeletionRequest.Status.REQUESTED],
+])
+def test_every_open_status_of_the_request_blocks(owner, goal, status) -> None:
+    _request_deletion(owner, status=status)
+
+    assert _api().post(URLS["decision"], _body(), format="json").status_code == 423
+
+
+# ─── отзыв согласия на хранение ───────────────────────────────────────────────
+
+
+def _consent(user, *, granted: bool):
+    from users.consent_events import PERSONAL_DATA
+    from users.models import ConsentState
+
+    return ConsentState.objects.create(
+        user=user, consent_type=PERSONAL_DATA, granted=granted, granted_at=timezone.now(),
+        event_id=f"gate-{user.pk}-{granted}",
+    )
+
+
+@pytest.mark.parametrize("endpoint", sorted(URLS))
+def test_a_withdrawn_storage_consent_closes_every_writing_endpoint(owner, goal, endpoint) -> None:
+    saved = _save(goal)
+    _consent(owner, granted=False)
+    before = (Plan.objects.count(), Plan.objects.filter(pk=saved.pk).values().get())
+
+    with CaptureQueriesContext(connection) as queries:
+        response = _api().post(URLS[endpoint], _bodies(goal)[endpoint], format="json")
+
+    assert response.status_code == 422, (endpoint, response.content[:300])
+    error = response.json()["error"]
+    assert error["code"] == "CONSENT_REQUIRED"
+    assert error["details"] == {"consent_type": "personal_data", "reason": "withdrawn"}
+    assert (Plan.objects.count(), Plan.objects.filter(pk=saved.pk).values().get()) == before
+    assert _writes(queries.captured_queries) == []
+
+
+def test_a_granted_storage_consent_lets_the_plan_work(owner, goal) -> None:
+    _consent(owner, granted=True)
+
+    assert _api().post(PLAN_URL, _command(goal), format="json").status_code == 201
+    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+
+
+def test_the_plan_can_still_be_read_after_the_consent_is_withdrawn(owner, goal) -> None:
+    """«Сохранённый план не уничтожается самим отзывом согласия» и остаётся виден."""
+    saved = _save(goal)
+    _consent(owner, granted=False)
+
+    response = _api().get(PLAN_URL)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["plan"]["plan_id"] == str(saved.pk)
+    assert _api().post(LABELS_URL, {"keys": ["any_key"]}, format="json").status_code == 200
+
+
+def test_a_deletion_request_answers_before_the_consent(owner, goal) -> None:
+    """У заявки есть номер и срок — человек на любом экране видит один отказ."""
+    _consent(owner, granted=False)
+    request = _request_deletion(owner)
+
+    response = _api().post(URLS["decision"], _body(), format="json")
+
+    assert response.status_code == 423
+    assert response.json()["error"]["details"]["request_id"] == str(request.pk)
+
+
+def test_a_withdrawal_of_another_consent_kind_does_not_close_the_plan(owner, goal) -> None:
+    from users.consent_events import FOOD_DIARY_PROCESSING
+    from users.models import ConsentState
+
+    ConsentState.objects.create(
+        user=owner, consent_type=FOOD_DIARY_PROCESSING, granted=False, granted_at=timezone.now(), event_id="gate-other",
+    )
+
+    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+
+
+def test_the_catalog_now_keeps_the_storage_consent_the_bot_delivers(owner) -> None:
+    """До правки событие этого вида каталог принимал и выбрасывал — отзыв ему был неизвестен."""
+    from users.consent_events import PERSONAL_DATA, ConsentEvent, apply_consent_event
+    from users.models import ConsentState
+
+    applied = apply_consent_event(owner, ConsentEvent(
+        event_id="gate-delivery-1", consent_type=PERSONAL_DATA, granted=False, granted_at=timezone.now(),
+    ))
+
+    assert applied.outcome == "applied" and applied.erased == ()
+    assert ConsentState.objects.get(user=owner, consent_type=PERSONAL_DATA).granted is False
+
+
+def test_known_gap_a_person_the_bot_never_reported_is_not_blocked_yet(owner, goal) -> None:
+    """НАЗВАННЫЙ ПРОБЕЛ, не желаемое поведение: случай владельца «без согласия — блок» здесь не выполнен.
+
+    Строки состояния нет и у того, кто не соглашался, и у того, о ком бот не
+    сообщал. Закрывается следующим шагом — утверждением основания в теле
+    запроса; когда он появится, этот узел обязан стать «отказ».
+    """
+    from users.models import ConsentState
+
+    assert not ConsentState.objects.filter(user=owner).exists()
+
+    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+
+
+def test_an_unknown_top_level_field_does_not_break_saving_or_composing(owner, goal) -> None:
+    """Вызывающие начнут слать утверждение основания раньше, чем каталог начнёт его требовать."""
+    attestation = {"consent": {"type": "personal_data", "document_version": "2026-10"}}
+
+    saved = _api().post(PLAN_URL, {**_command(goal), **attestation}, format="json")
+    composed = _api().post(URLS["decision"], {**_body(), **attestation}, format="json")
+
+    assert saved.status_code == 201, saved.content[:300]
+    assert composed.status_code == 200, composed.content[:300]
+
+
+# ─── чтение остаётся и ничего не пишет ───────────────────────────────────────
+
+
+def test_the_saved_plan_can_still_be_read_and_reading_writes_nothing(owner, goal) -> None:
+    saved = _save(goal)
+    _request_deletion(owner)
+
+    with CaptureQueriesContext(connection) as queries:
+        response = _api().get(PLAN_URL)
+
+    assert response.status_code == 200, response.content[:300]
+    assert response.json()["data"]["plan"]["plan_id"] == str(saved.pk)
+    assert _writes(queries.captured_queries) == []
+
+
+def test_reading_writes_nothing_without_a_request_either(owner, goal) -> None:
+    """Использование плана не продлевает срок его хранения — чтение не пишет никогда."""
+    _save(goal)
+
+    with CaptureQueriesContext(connection) as queries:
+        assert _api().get(PLAN_URL).status_code == 200
+
+    assert _writes(queries.captured_queries) == []
+
+
+def test_step_labels_stay_readable_under_a_deletion_request(owner, goal) -> None:
+    """Иначе человек видел бы свой сохранённый план списком ключей."""
+    _request_deletion(owner)
+
+    response = _api().post(LABELS_URL, {"keys": ["any_key"]}, format="json")
+
+    assert response.status_code == 200, response.content[:300]
+
+
+# ─── без заявки — обычная работа ─────────────────────────────────────────────
+
+
+def test_without_a_request_the_plan_is_saved_and_composed_as_before(owner, goal) -> None:
+    saved = _api().post(PLAN_URL, _command(goal), format="json")
+    composed = _api().post(URLS["decision"], _body(), format="json")
+
+    assert saved.status_code == 201, saved.content[:300]
+    assert composed.status_code == 200, composed.content[:300]
+
+
+def test_a_finished_or_cancelled_request_does_not_block(owner, goal) -> None:
+    closed = [s for s in DeletionRequest.Status.values if s not in DeletionRequest.OPEN_STATUSES]
+    assert closed, "положительная пара: закрытые состояния заявки существуют"
+    for status in closed:
+        DeletionRequest.objects.create(
+            user=owner, initiator="bot", status=status, deadline_at=timezone.now(), completed_at=timezone.now(),
+        )
+
+    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+
+
+def test_someone_elses_request_does_not_block_me(owner, goal) -> None:
+    from wellness.tests.test_plan_compose_2871 import _user
+
+    _request_deletion(_user("bot:plan-gate-stranger", "+79995028798", is_proxy=True))
+
+    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+
+
+# ─── перепись: гейт на каждом пишущем методе ─────────────────────────────────
+
+
+def test_every_writing_method_of_the_plan_endpoints_is_gated_or_named() -> None:
+    """Новая пишущая ручка без гейта не проходит молча: её либо закрывают, либо называют причину."""
+    writing = ("post", "put", "patch", "delete")
+    ungated = set()
+    gated = set()
+    for name, view in inspect.getmembers(plan_engine_api, inspect.isclass):
+        if view.__module__ != plan_engine_api.__name__ or not name.endswith("View"):
+            continue
+        for method in writing:
+            handler = view.__dict__.get(method)
+            if handler is None:
+                continue
+            (gated if getattr(handler, "plan_gate", False) else ungated).add(f"{name}.{method}")
+
+    assert len(gated) >= 7, gated  # положительная пара: перепись что-то нашла
+    assert ungated == set(UNGATED_ON_PURPOSE), (
+        "пишущий метод без гейта и без названной причины: "
+        f"{sorted(ungated - set(UNGATED_ON_PURPOSE))}; лишнее в перечне: {sorted(set(UNGATED_ON_PURPOSE) - ungated)}"
+    )
+
+
+def test_reading_methods_are_not_gated() -> None:
+    for name, view in inspect.getmembers(plan_engine_api, inspect.isclass):
+        handler = getattr(view, "__dict__", {}).get("get")
+        if handler is not None and view.__module__ == plan_engine_api.__name__:
+            assert not getattr(handler, "plan_gate", False), f"{name}.get под гейтом — чтение своего плана закрыто"
