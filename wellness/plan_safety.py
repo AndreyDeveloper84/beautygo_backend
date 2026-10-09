@@ -33,6 +33,17 @@ SAFETY_STATES: frozenset[str] = frozenset({"NORMAL", "CLARIFY", "CAUTION", "STOP
 SAFETY_BLOCKING: frozenset[str] = frozenset({"STOP", "UNKNOWN"})
 
 
+#: Длительное ограничение S1 на человеке, как его знает бот
+#: (``apps/orchestrator/safety/s1_restriction`` в ai-bot-platform): его нет,
+#: ждёт ответа на маршрутный вопрос, или вопрос разрешён признаком S1 («стоп»).
+#: Ограничение живёт у бота и переживает разговор; каталог его не хранит и не
+#: снимает — каждый раз читает то, что прислано.
+S1_NONE = "none"
+S1_OPEN = "open"
+S1_STOP = "stop"
+S1_RESTRICTIONS: frozenset[str] = frozenset({S1_NONE, S1_OPEN, S1_STOP})
+
+
 class SafetyInputError(ValueError):
     """Вход безопасности не конформен. ``reason`` — машинное имя."""
 
@@ -47,6 +58,9 @@ class SafetyInput:
     state: str
     policy_version: str
     evaluated_at_revision: int
+    #: ``None`` — не спрашивалось (сборка, сохранение, ограничения); у
+    #: действий, ведущих к услуге и записи, поле обязательно.
+    s1_restriction: str | None = None
 
     @property
     def blocks(self) -> bool:
@@ -68,3 +82,25 @@ def parse_safety_input(raw: Any) -> SafetyInput:
     if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
         raise SafetyInputError("safety_revision_malformed")
     return SafetyInput(state=state, policy_version=version.strip(), evaluated_at_revision=revision)
+
+
+def parse_step_safety_input(raw: Any) -> SafetyInput:
+    """Тройка хода + длительное ограничение S1 — вход действий, ведущих к
+    услуге и записи (кандидаты, переход шага, связь и запись от шага).
+
+    Зарегистрированная политика ограничения: пока оно стоит, чувствительные к
+    здоровью рекомендация и запись закрыты. План эту политику исполняет, а не
+    вводит. Молчание об ограничении не читается как его отсутствие: поля нет —
+    отказ.
+    """
+    safety = parse_safety_input(raw)
+    data = raw if isinstance(raw, dict) else {}
+    s1 = data.get("s1_restriction")
+    if s1 not in S1_RESTRICTIONS:
+        raise SafetyInputError("s1_restriction_invalid", str(s1))
+    return SafetyInput(
+        state=safety.state,
+        policy_version=safety.policy_version,
+        evaluated_at_revision=safety.evaluated_at_revision,
+        s1_restriction=s1,
+    )

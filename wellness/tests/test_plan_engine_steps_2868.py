@@ -61,13 +61,27 @@ POLICY_VERSIONS = {
 }
 DECISION = "resolver-decision-1"
 #: DRF-2877 — каждое действие с шагом несёт безопасность хода.
-SAFETY = {"safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4}
+SAFETY = {
+    "safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4,
+    # DRF-2868 — длительное ограничение S1: действия, ведущие к услуге и записи, обязаны его назвать.
+    "s1_restriction": "none",
+}
 
 
 @pytest.fixture(autouse=True)
 def _token_and_flag(settings):
     settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
     settings.PLAN_ENGINE_ENABLED = True
+
+
+@pytest.fixture(autouse=True)
+def _admission_is_not_the_subject(monkeypatch):
+    """Предмет этих узлов — правила шага: уровни, запись как факт, гейты.
+    Допуск предложения как кандидата шага (поиск по способности, восемь
+    проверок, происхождение ответа о здоровье) держит
+    ``test_plan_step_candidates_2868.py`` — на настоящих данных, без подмен.
+    Здесь он снят, чтобы узлы уровня не зависели от разметки услуги."""
+    monkeypatch.setattr("wellness.plan_engine_steps.offer_is_candidate", lambda *a, **k: True)
 
 
 def _user(username: str, phone: str) -> User:

@@ -8,6 +8,7 @@ from .plan_engine_api import (
     PlanEngineView,
     PlanReplaceView,
     PlanStepBookingView,
+    PlanStepCandidatesView,
     PlanRestrictionLiftView,
     PlanRestrictionView,
     PlanStepResolutionView,
@@ -23,6 +24,8 @@ urlpatterns = [
     # DRF-2871 — подписи способностей для экрана плана (у шага текста нет).
     path("capability-labels/", PlanCapabilityLabelsView.as_view(), name="me-plan-capability-labels"),
     # DRF-2868 — шаг: чем разрешён и какая запись от него сделана.
+    # DRF-2868 — кандидаты услуги для шага: подбор по способности, допуск, здоровье.
+    path("steps/candidates/", PlanStepCandidatesView.as_view(), name="me-plan-step-candidates"),
     path("steps/resolution/", PlanStepResolutionView.as_view(), name="me-plan-step-resolution"),
     path("steps/booking/", PlanStepBookingView.as_view(), name="me-plan-step-booking"),
     # DRF-2877 — стойкий вопрос: открыть и снять ограничение плана.

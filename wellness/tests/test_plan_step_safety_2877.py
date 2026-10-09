@@ -35,6 +35,7 @@ from wellness.tests.test_plan_engine_steps_2868 import (  # noqa: F401 — фи�
     _link,
     _resolve,
     _save,
+    _admission_is_not_the_subject,
     _to_offer,
     _token_and_flag,
     canon,
@@ -54,7 +55,10 @@ PASSING = ["NORMAL", "CLARIFY", "CAUTION"]
 
 
 def _safety(state: str) -> dict:
-    return {"safety_state": state, "safety_policy_version": "pre_check-abc", "evaluated_at_revision": 9}
+    return {
+        "safety_state": state, "safety_policy_version": "pre_check-abc", "evaluated_at_revision": 9,
+        "s1_restriction": "none",
+    }
 
 
 def _offer_body(canon, offer) -> dict:
