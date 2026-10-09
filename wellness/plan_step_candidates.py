@@ -35,6 +35,7 @@ from uuid import UUID
 from recommendation.api import first_unmet
 from services.models import SalonService, SpecialistService
 from services.synthetic import SyntheticGrant, grant_for
+from tenants.distance import offer_address
 from users.admission import OfferVerdict, offer_admission
 from users.capability_offers import offers_by_capability
 
@@ -79,7 +80,7 @@ def _masters_with_defined_health(
     out: list[tuple[SpecialistService, bool]] = []
     edges = (
         SpecialistService.objects.filter(salon_service_id=offer_id, specialist_id__in=master_ids)
-        .select_related("specialist", "salon_service", "salon_service__template")
+        .select_related("specialist", "specialist__works_at", "salon_service", "salon_service__template")
         .order_by("specialist_id")
     )
     for edge in edges:
@@ -91,17 +92,22 @@ def _masters_with_defined_health(
 
 def _display(offer: SalonService, masters: list[tuple[SpecialistService, bool]]) -> dict[str, Any]:
     """То, что человек увидит, — словами каталога: те же поля, что у карточки
-    предложения. Ничего сверх них."""
+    предложения. Ничего сверх них.
+
+    Адрес — места, где мастер оказывает услугу, и только подтверждённого
+    (§9, ``offer_address``): старые адреса салона и профиля клиенту не
+    называются. ``None`` — адрес не подтверждён, а не «адреса нет»."""
     tenant = offer.tenant
     return {
         "service_name": offer.name,
-        "salon": {"name": tenant.name, "city": tenant.city or None, "address": tenant.address or None},
+        "salon": {"name": tenant.name, "city": tenant.city or None},
         "masters": [
             {
                 "specialist_ref": str(edge.specialist_id),
                 "name": edge.specialist.display_name,
                 "price": str(edge.price),
                 "duration_minutes": edge.resolved_duration(),
+                "place_address": offer_address(edge.specialist) or None,
             }
             for edge, _ in masters
         ],

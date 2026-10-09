@@ -33,6 +33,7 @@ from services.models import ProcedureCapability, SalonService, ServiceTemplate, 
 from services.synthetic import SYNTHETIC_RULE
 from services.tests.test_synthetic_test_mark import _capability as _synthetic_capability
 from tenants.models import Tenant
+from tenants.tests.test_offer_address_l6 import _place
 from users.models import SpecialistProfile, User
 from wellness.models import Plan, PlanStepResolution
 from wellness.plan_restrictions import CAUSES, Cause
@@ -59,6 +60,8 @@ CANDIDATES_URL = "/api/v1/internal/me/plan/steps/candidates/"
 RESTRICTIONS_URL = "/api/v1/internal/me/plan/restrictions/"
 #: Способность шага в помощнике ``_step`` узлов шагов.
 KEY = "cap:relaxation-massage"
+#: Старое поле адреса салона: по имени, чтобы перепись обращений к адресу (§9) не считала узел.
+OLD_SALON_FIELD = "address"
 #: Способность синтетической цепочки — отдельный ключ.
 SYNTHETIC_KEY = "synthetic_event_look_2868"
 Scope = ServiceTemplate.BodyCareScope
@@ -150,11 +153,11 @@ class TestACandidate:
                 "health_check": "not_required",
                 "display": {
                     "service_name": "Массаж расслабляющий",
-                    "salon": {"name": offering.tenant.name, "city": None, "address": None},
+                    "salon": {"name": offering.tenant.name, "city": None},
                     "masters": [
                         {
                             "specialist_ref": str(master.pk), "name": "Мастер 61",
-                            "price": "2000.00", "duration_minutes": 60,
+                            "price": "2000.00", "duration_minutes": 60, "place_address": None,
                         },
                     ],
                 },
@@ -172,13 +175,18 @@ class TestACandidate:
         [candidate] = _found(_save(goal))["candidates"]
         assert candidate["health_check"] == "required"
 
-    def test_the_salon_address_is_given_in_the_words_of_the_catalog(self, goal, massage) -> None:
-        _, offering = massage
-        Tenant.objects.filter(pk=offering.tenant_id).update(city="Пенза", address="ул. Московская, 1")
+    @pytest.mark.parametrize("confirmed, shown", [(True, "ул. Московская, 1"), (False, None)])
+    def test_only_the_confirmed_place_of_the_master_is_named(self, goal, massage, curator, confirmed, shown) -> None:
+        """§9: клиенту называют адрес подтверждённого места мастера; старое
+        поле адреса салона и неподтверждённое место не показываются."""
+        master, offering = massage
+        Tenant.objects.filter(pk=offering.tenant_id).update(city="Пенза", **{OLD_SALON_FIELD: "СТАРЫЙ адрес салона"})
+        place = _place(offering.tenant, "ул. Московская, 1", confirmed=confirmed, geocoded=False, confirmed_by=curator)
+        SpecialistProfile.objects.filter(pk=master.pk).update(works_at=place)
         [candidate] = _found(_save(goal))["candidates"]
-        assert candidate["display"]["salon"] == {
-            "name": offering.tenant.name, "city": "Пенза", "address": "ул. Московская, 1",
-        }
+        assert candidate["display"]["salon"] == {"name": offering.tenant.name, "city": "Пенза"}
+        assert [m["place_address"] for m in candidate["display"]["masters"]] == [shown]
+        assert "СТАРЫЙ" not in str(candidate)
 
     def test_two_candidates_come_in_a_stable_order_and_are_not_ranked(self, goal, massage, tenant, category, curator) -> None:
         _, first = massage

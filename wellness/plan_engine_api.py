@@ -428,6 +428,7 @@ class PlanStepCandidatesView(APIView):
             409: OpenApiResponse(description="PLAN_STEP_NOT_EXECUTABLE, details.reason"),
         },
     )
+    @gated
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:
