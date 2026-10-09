@@ -2,7 +2,7 @@
 
     manage.py seed_synthetic_plan_fixture [--spec ФАЙЛ] [--dry-run]
 
-Что делает, чего не делает и почему — ``services.synthetic_fixture``.
+Что делает, чего не делает и почему — ``_synthetic_plan_fixture`` рядом.
 ``--dry-run`` исполняет всё в транзакции и откатывает её: в базе ничего не
 остаётся, а вывод тот же, что был бы при настоящем запуске.
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from django.core.management.base import BaseCommand, CommandError
 
-from services.synthetic_fixture import DEFAULT_SPEC, FixtureRefused, load_spec, seed
+from ._synthetic_plan_fixture import DEFAULT_SPEC, FixtureRefused, load_spec, seed
 
 
 class Command(BaseCommand):

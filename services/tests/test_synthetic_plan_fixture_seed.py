@@ -37,7 +37,9 @@ from services.models import (
     SpecialistService,
 )
 from services.synthetic import SYNTHETIC_RULE, grant_for
-from services.synthetic_fixture import DEFAULT_SPEC, SERVICE_USERNAME, FixtureRefused, load_spec, seed
+from services.management.commands._synthetic_plan_fixture import (
+    DEFAULT_SPEC, SERVICE_USERNAME, FixtureRefused, load_spec, seed,
+)
 from tenants.models import Tenant
 from users.models import SpecialistProfile, TenantUserRelationship, User
 from users.sellable import sellable_q

@@ -77,7 +77,7 @@
     }
   ],
   "test_master": {
-    "username": "synthetic-test-master:event",
+    "account": "synthetic-test-master:event",
     "display_name": "Тест-мастер (синтетика)"
   }
 }

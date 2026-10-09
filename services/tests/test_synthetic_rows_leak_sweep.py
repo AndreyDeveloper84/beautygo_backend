@@ -5,7 +5,7 @@
 руками — он снят с маршрутов приложения, а ответ каждой ручки ищется на
 следы засеянного набора. Что вернулось, то и есть перечень.
 
-Узел засевает набор штатной командой (``services.synthetic_fixture``), затем
+Узел засевает набор штатной командой (модулем засева рядом с командой), затем
 шлёт GET на каждый маршрут — анонимно, обычным клиентом, тестовой персоной и
 внутренним сервисным токеном, с параметрами и без — и требует, чтобы ни в
 одном ответе не было ни названий, ни ключей, ни идентификаторов набора.
@@ -35,7 +35,7 @@ from services.models import (
     CapabilityGoalLink, GoalOption, ProcedureCapability, SalonService, ServiceCategory, ServiceTemplate,
     SpecialistService,
 )
-from services.synthetic_fixture import load_spec, seed
+from services.management.commands._synthetic_plan_fixture import load_spec, seed
 from tenants.models import Tenant
 from users.models import User
 

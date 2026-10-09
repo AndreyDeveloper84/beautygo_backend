@@ -6,7 +6,7 @@
 требуют замки базы (канон → способность → связь с целью → услуга салона →
 тест-мастер → его предложение).
 
-Содержание — в файле данных (``services/seed_data/synthetic_plan_event.json``):
+Содержание — в файле данных (``services/seeds/synthetic_plan_event.json``):
 тот же файл показывается владельцу как пример плана. Здесь его только
 проверяют и исполняют.
 
@@ -21,6 +21,10 @@
 * **Чужого не трогает.** Мастер заводится новый, только для теста; расписание
   существующих мастеров не читается и не меняется.
 * **Одна транзакция.** Отказ на любом шаге не оставляет половины набора.
+
+Модуль лежит рядом с командой, а не в ``services/``: это код засева — он
+делает мастера продаваемым и заводит служебные учётки прямой записью, что
+вне засева запрещено сторожами (правило продаваемости, имя учётки наружу).
 
 Чего здесь нет: тестовой персоны и настроек стенда (их ставит оператор
 стенда), записи, отправок.
@@ -47,7 +51,7 @@ from tenants.models import Tenant
 from users.models import SpecialistProfile, TenantUserRelationship, User
 from users.sellable import is_test_persona
 
-DEFAULT_SPEC = Path(__file__).resolve().parent / "seed_data" / "synthetic_plan_event.json"
+DEFAULT_SPEC = Path(__file__).resolve().parents[2] / "seeds" / "synthetic_plan_event.json"
 
 #: Служебный пользователь, которым подписан юридический класс синтетического
 #: канона: у класса нет поля «правило», подтвердить его может только человек.
@@ -260,17 +264,17 @@ def _test_master(row: dict, salon) -> tuple[SpecialistProfile, bool]:
     """
     from appointments.models import SpecialistWorkingHours
 
-    username = row["username"]
-    user = User.objects.filter(username=username).first()
+    account = row["account"]
+    user = User.objects.filter(username=account).first()
     created = user is None
     if created:
-        user = User(username=username, role="specialist", tenant=salon)
+        user = User(username=account, role="specialist", tenant=salon)
         user.set_unusable_password()
         user.save()
     profile = SpecialistProfile.objects.get(user=user)
     if not created:
         if profile.tenant_id != salon.pk:
-            raise FixtureRefused("differs_from_spec", f"тест-мастер «{username}» числится в другом салоне")
+            raise FixtureRefused("differs_from_spec", f"тест-мастер «{account}» числится в другом салоне")
         return profile, False
     profile.tenant = salon
     profile.display_name = row["display_name"]
@@ -282,7 +286,7 @@ def _test_master(row: dict, salon) -> tuple[SpecialistProfile, bool]:
         user=user, tenant=salon, is_active=True, role=TenantUserRelationship.Role.STAFF,
     ).exists():
         raise FixtureRefused(
-            "master_has_no_staff_relation", f"у тест-мастера «{username}» не появилась связь с салоном",
+            "master_has_no_staff_relation", f"у тест-мастера «{account}» не появилась связь с салоном",
         )
     SpecialistWorkingHours.objects.bulk_create([
         SpecialistWorkingHours(
@@ -344,7 +348,7 @@ def seed(spec: dict, *, dry_run: bool = False) -> Report:
 
             master, created = _test_master(spec["test_master"], salon)
             report.master_id = str(master.pk)
-            report.note(created, f"тест-мастер «{spec['test_master']['username']}» ({master.pk})")
+            report.note(created, f"тест-мастер «{spec['test_master']['account']}» ({master.pk})")
             if created:
                 report.created.append(
                     f"рабочие часы тест-мастера: ежедневно {WORKING_HOURS[0]:%H:%M}–{WORKING_HOURS[1]:%H:%M}"
