@@ -35,6 +35,7 @@ import inspect
 from datetime import timedelta
 
 import pytest
+from rest_framework.test import APIClient
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
@@ -42,7 +43,8 @@ from django.utils import timezone
 from users.models import DeletionRequest
 from wellness import plan_engine_api
 from wellness.models import Plan
-from wellness.tests.test_plan_compose_2871 import OWNER, _api, _body
+from wellness.tests.plan_consent import ATTESTATION
+from wellness.tests.test_plan_compose_2871 import OWNER, VALID_TOKEN, _body
 from wellness.tests.test_plan_engine_2857 import _command, _save
 
 pytestmark = pytest.mark.django_db
@@ -57,6 +59,7 @@ URLS = {
     "restriction": "/api/v1/internal/me/plan/restrictions/",
     "lift": "/api/v1/internal/me/plan/restrictions/lift/",
     "replace": "/api/v1/internal/me/plan/replace/",
+    "candidates": "/api/v1/internal/me/plan/steps/candidates/",
 }
 LABELS_URL = "/api/v1/internal/me/plan/capability-labels/"
 
@@ -67,6 +70,14 @@ UNGATED_ON_PURPOSE = {
         "чтение знания каталога, нужное и для показа сохранённого плана; о человеке ничего не читает и не пишет"
     ),
 }
+
+
+def _api(external_user_id: str = OWNER) -> APIClient:
+    """Клиент узлов гейта: шлёт ровно то, что написано в узле, — утверждение основания сам не дописывает."""
+    c = APIClient()
+    c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {VALID_TOKEN}"
+    c.defaults["HTTP_X_EXTERNAL_USER_ID"] = external_user_id
+    return c
 
 
 @pytest.fixture(autouse=True)
@@ -105,6 +116,7 @@ def _bodies(goal, saved=None) -> dict:
         "save": _command(goal),
         "state": {"plan_id": str(saved.pk) if saved is not None else None, "state": Plan.Status.PAUSED},
         "decision": _body(), "resolution": {}, "booking": {}, "restriction": {}, "lift": {}, "replace": {},
+        "candidates": {},
     }
 
 
@@ -176,7 +188,9 @@ def test_control_the_plan_is_paused_without_any_blocker(owner, goal) -> None:
     """Положительная пара к узлу выше: та же пауза без заявки и отзыва проходит."""
     saved = _save(goal)
 
-    response = _api().post(URLS["state"], {"plan_id": str(saved.pk), "state": Plan.Status.PAUSED}, format="json")
+    response = _api().post(
+        URLS["state"], {"plan_id": str(saved.pk), "state": Plan.Status.PAUSED, **ATTESTATION}, format="json",
+    )
 
     assert response.status_code == 200, response.content[:300]
     assert Plan.objects.get(pk=saved.pk).status == Plan.Status.PAUSED
@@ -285,8 +299,8 @@ def test_the_latest_withdrawal_of_the_person_is_the_one_compared(owner, goal) ->
 def test_a_granted_storage_consent_lets_the_plan_work(owner, goal) -> None:
     _consent(owner, granted=True)
 
-    assert _api().post(PLAN_URL, _command(goal), format="json").status_code == 201
-    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+    assert _api().post(PLAN_URL, {**_command(goal), **ATTESTATION}, format="json").status_code == 201
+    assert _api().post(URLS["decision"], {**_body(), **ATTESTATION}, format="json").status_code == 200
 
 
 def test_the_plan_can_still_be_read_after_the_consent_is_withdrawn(owner, goal) -> None:
@@ -320,7 +334,7 @@ def test_a_withdrawal_of_another_consent_kind_does_not_close_the_plan(owner, goa
         user=owner, consent_type=FOOD_DIARY_PROCESSING, granted=False, granted_at=timezone.now(), event_id="gate-other",
     )
 
-    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+    assert _api().post(URLS["decision"], {**_body(), **ATTESTATION}, format="json").status_code == 200
 
 
 def test_the_catalog_now_keeps_the_storage_consent_the_bot_delivers(owner) -> None:
@@ -336,18 +350,64 @@ def test_the_catalog_now_keeps_the_storage_consent_the_bot_delivers(owner) -> No
     assert ConsentState.objects.get(user=owner, consent_type=PERSONAL_DATA).granted is False
 
 
-def test_known_gap_a_person_the_bot_never_reported_is_not_blocked_yet(owner, goal) -> None:
-    """НАЗВАННЫЙ ПРОБЕЛ, не желаемое поведение: случай владельца «без согласия — блок» здесь не выполнен.
+@pytest.mark.parametrize("endpoint", sorted(URLS))
+def test_without_an_attestation_every_writing_endpoint_refuses(owner, goal, endpoint) -> None:
+    """Случай владельца «согласия нет — блок».
 
     Строки состояния нет и у того, кто не соглашался, и у того, о ком бот не
-    сообщал. Закрывается следующим шагом — утверждением основания в теле
-    запроса; когда он появится, этот узел обязан стать «отказ».
+    сообщал, — каталог их не различает. Поэтому вызов без утверждения
+    основания не проходит ни у кого: вторая линия ловит и «согласия нет», и
+    «бот не проверил вовсе».
     """
     from users.models import ConsentState
 
+    saved = _save(goal)
     assert not ConsentState.objects.filter(user=owner).exists()
+    before = (Plan.objects.count(), Plan.objects.get(pk=saved.pk).status)
 
-    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+    response = _api().post(URLS[endpoint], _bodies(goal, saved)[endpoint], format="json")
+
+    assert response.status_code == 422, response.content[:300]
+    error = response.json()["error"]
+    assert error["code"] == "CONSENT_REQUIRED"
+    assert error["details"] == {"consent_type": "personal_data", "reason": "not_attested"}
+    assert (Plan.objects.count(), Plan.objects.get(pk=saved.pk).status) == before
+
+
+@pytest.mark.parametrize("case", ["no_timezone", "not_a_date", "wrong_kind", "empty_version", "not_an_object", "null"])
+def test_an_unusable_attestation_is_no_attestation(owner, goal, case) -> None:
+    """Негодное утверждение ничем не лучше отсутствующего — и без всякого отзыва."""
+    now = timezone.now()
+    body = {
+        "no_timezone": {"consent": {**_attested(now)["consent"], "granted_at": now.replace(tzinfo=None).isoformat()}},
+        "not_a_date": {"consent": {**_attested(now)["consent"], "granted_at": "вчера"}},
+        "wrong_kind": _attested(now, type="health"),
+        "empty_version": _attested(now, document_version="  "),
+        "not_an_object": {"consent": "personal_data"},
+        "null": {"consent": None},
+    }[case]
+
+    response = _api().post(URLS["decision"], {**_body(), **body}, format="json")
+
+    assert response.status_code == 422, (case, response.content[:300])
+    assert response.json()["error"]["details"]["reason"] == "not_attested"
+
+
+def test_control_the_same_call_with_an_attestation_passes(owner, goal) -> None:
+    """Положительная пара к двум узлам выше: тот же человек, то же тело, утверждение есть."""
+    response = _api().post(URLS["decision"], {**_body(), **ATTESTATION}, format="json")
+
+    assert response.status_code == 200, response.content[:300]
+
+
+def test_a_withdrawal_is_named_as_such_even_without_an_attestation(owner, goal) -> None:
+    """Известный отзыв — причина точнее, чем «основание не названо»: её и называют."""
+    _consent(owner, granted=False)
+
+    response = _api().post(URLS["decision"], _body(), format="json")
+
+    assert response.status_code == 422
+    assert response.json()["error"]["details"]["reason"] == "withdrawn"
 
 
 def test_an_unknown_top_level_field_does_not_break_saving_or_composing(owner, goal) -> None:
@@ -399,8 +459,8 @@ def test_step_labels_stay_readable_under_a_deletion_request(owner, goal) -> None
 
 
 def test_without_a_request_the_plan_is_saved_and_composed_as_before(owner, goal) -> None:
-    saved = _api().post(PLAN_URL, _command(goal), format="json")
-    composed = _api().post(URLS["decision"], _body(), format="json")
+    saved = _api().post(PLAN_URL, {**_command(goal), **ATTESTATION}, format="json")
+    composed = _api().post(URLS["decision"], {**_body(), **ATTESTATION}, format="json")
 
     assert saved.status_code == 201, saved.content[:300]
     assert composed.status_code == 200, composed.content[:300]
@@ -414,7 +474,7 @@ def test_a_finished_or_cancelled_request_does_not_block(owner, goal) -> None:
             user=owner, initiator="bot", status=status, deadline_at=timezone.now(), completed_at=timezone.now(),
         )
 
-    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+    assert _api().post(URLS["decision"], {**_body(), **ATTESTATION}, format="json").status_code == 200
 
 
 def test_someone_elses_request_does_not_block_me(owner, goal) -> None:
@@ -422,7 +482,7 @@ def test_someone_elses_request_does_not_block_me(owner, goal) -> None:
 
     _request_deletion(_user("bot:plan-gate-stranger", "+79995028798", is_proxy=True))
 
-    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+    assert _api().post(URLS["decision"], {**_body(), **ATTESTATION}, format="json").status_code == 200
 
 
 # ─── перепись: гейт на каждом пишущем методе ─────────────────────────────────
@@ -519,11 +579,13 @@ def test_wire_the_attestation_of_the_withdrawn_record_is_refused(owner, goal) ->
 
 def test_wire_the_withdrawal_alone_blocks(owner, goal) -> None:
     """Контроль: событие отзыва действительно дошло и закрыло план — иначе два узла выше ничего бы не значили."""
-    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+    assert _api().post(URLS["decision"], {**_body(), **ATTESTATION}, format="json").status_code == 200
 
     _deliver_withdrawal()
 
-    assert _api().post(URLS["decision"], _body(), format="json").status_code == 422
+    blocked = _api().post(URLS["decision"], {**_body(), **ATTESTATION}, format="json")
+    assert blocked.status_code == 422
+    assert blocked.json()["error"]["details"]["reason"] == "withdrawn"
 
 
 def test_wire_the_snapshots_are_in_the_order_the_rule_relies_on() -> None:

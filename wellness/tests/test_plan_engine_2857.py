@@ -27,6 +27,8 @@ import pytest
 from django.db import IntegrityError, connection, transaction
 from rest_framework.test import APIClient
 
+from wellness.tests.plan_consent import AttestingClient
+
 from goals.models import ClientGoal
 from users.models import User
 from wellness.models import (
@@ -149,7 +151,7 @@ def goal(owner) -> ClientGoal:
 
 
 def _api(external_user_id: str = OWNER) -> APIClient:
-    c = APIClient()
+    c = AttestingClient()
     c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {VALID_TOKEN}"
     c.defaults["HTTP_X_EXTERNAL_USER_ID"] = external_user_id
     return c
