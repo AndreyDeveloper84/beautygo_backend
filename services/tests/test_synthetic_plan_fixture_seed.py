@@ -49,7 +49,8 @@ pytestmark = pytest.mark.django_db
 def world(db):
     return {
         "goal": GoalOption.objects.create(key="event", label="Собраться к событию"),
-        "category": ServiceCategory.objects.create(name="Тестовая категория", slug="synthetic-seed-category"),
+        "category": ServiceCategory.objects.create(name="Макияж", slug="макияж"),
+        "nails": ServiceCategory.objects.create(name="Дизайн ногтей", slug="дизайн-ногтей"),
         "salon": Tenant.objects.create(slug="synthetic-seed-demo", name="Демо-салон", is_demo=True),
         "persona": User.objects.create_user(username="synthetic-seed-persona", password="x", is_test_persona=True),
     }
@@ -57,12 +58,9 @@ def world(db):
 
 @pytest.fixture
 def spec(world) -> dict:
-    """Файл из репозитория с вписанными значениями стенда."""
+    """Файл из репозитория; салон и персона — этой базы (на стенде они свои, уже вписаны)."""
     filled = load_spec()
-    filled.update(
-        category_slug=world["category"].slug, salon_id=str(world["salon"].pk),
-        test_persona_id=str(world["persona"].pk),
-    )
+    filled.update(salon_id=str(world["salon"].pk), test_persona_id=str(world["persona"].pk))
     return filled
 
 
@@ -103,9 +101,28 @@ def test_the_shipped_file_has_the_structure_the_mechanics_need() -> None:
     assert len({row["text_client"] for row in shipped["capabilities"]}) == 3
 
 
-def test_the_shipped_file_refuses_to_seed_until_the_stand_values_are_filled(world) -> None:
+def test_the_shipped_file_names_the_stand_values_and_refuses_where_they_do_not_exist(world) -> None:
+    """Файл несёт значения стенда; в базе, где такого салона нет, команда отказывает и ничего не пишет."""
+    shipped = load_spec(DEFAULT_SPEC)
+    assert shipped["salon_id"] and shipped["test_persona_id"]
+    assert [row["category_slug"] for row in shipped["templates"]] == ["макияж", "дизайн-ногтей"]
+
     with pytest.raises(FixtureRefused) as refused:
-        seed(load_spec(DEFAULT_SPEC))
+        seed(shipped)
+
+    assert refused.value.reason == "salon_not_found"
+    assert _census() == NOTHING
+
+
+@pytest.mark.parametrize("missing", ["goal_key", "salon_id", "test_persona_id", "template_category"])
+def test_an_unfilled_value_refuses_before_anything_is_written(spec, missing) -> None:
+    if missing == "template_category":
+        spec["templates"][1]["category_slug"] = ""
+    else:
+        spec[missing] = ""
+
+    with pytest.raises(FixtureRefused) as refused:
+        seed(spec)
 
     assert refused.value.reason == "spec_incomplete"
     assert _census() == NOTHING
@@ -130,6 +147,9 @@ def test_the_whole_set_is_seeded(spec, world) -> None:
 
     offer = SalonService.objects.get(synthetic=True)
     assert (offer.tenant_id, offer.template_id) == (world["salon"].pk, look.pk)
+    assert (look.category_id, manicure.category_id, offer.category_id) == (
+        world["category"].pk, world["nails"].pk, world["category"].pk,
+    )
     assert offer.mapping_status == SalonService.MappingStatus.REVIEW_REQUIRED
     assert (offer.requires_health_check, offer.health_check_origin, offer.health_check_confirmed_rule) == (
         False, "confirmed", SYNTHETIC_RULE,
@@ -250,7 +270,7 @@ def _refusal(spec, world, case: str) -> dict:
     if case == "goal_not_found":
         broken["goal_key"] = "no-such-goal"
     elif case == "category_not_found":
-        broken["category_slug"] = "no-such-category"
+        broken["templates"][0]["category_slug"] = "no-such-category"
     elif case == "salon_not_found":
         broken["salon_id"] = "00000000-0000-0000-0000-000000000000"
     elif case == "test_persona_not_found":

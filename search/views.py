@@ -45,6 +45,7 @@ from services.catalog_reads import (
     specialist_service_text_q,
 )
 from services.models import Service
+from services.synthetic import real_offer_q
 from tenants.distance import distance_km_to, distance_meters
 from tenants.wire import OfferAddressField, OfferLatitudeField, OfferLongitudeField
 from users.models import SpecialistProfile
@@ -344,6 +345,10 @@ class GlobalSearchView(APIView):
             .filter(sellable_q("specialist"))
             # DRF-2420 — третья выборка поиска, тот же предикат.
             .filter(demo_visibility_q(viewer, "specialist"))
+            # Синтетика в обычный поиск не идёт даже тестовой персоне: она
+            # видит демо-салон, а синтетика читается только путём Плана под
+            # серверным разрешением (services.synthetic).
+            .filter(real_offer_q("salon_service__"))
             .filter(Q(salon_service__name__icontains=q) | category_match)
             .select_related(
                 'salon_service', 'salon_service__category',

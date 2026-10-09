@@ -89,17 +89,22 @@ def load_spec(path: str | Path | None = None) -> dict:
 
 
 def _preflight(spec: dict) -> dict:
-    for key in ("goal_key", "category_slug", "salon_id", "test_persona_id", "templates", "capabilities", "offers",
-                "test_master"):
+    for key in ("goal_key", "salon_id", "test_persona_id", "templates", "capabilities", "offers", "test_master"):
         if not spec.get(key):
             raise FixtureRefused("spec_incomplete", f"в файле не заполнено «{key}»")
+    for row in spec["templates"]:
+        if not row.get("category_slug"):
+            raise FixtureRefused("spec_incomplete", f"у канона «{row.get('name')}» не заполнено «category_slug»")
 
     goal = GoalOption.objects.filter(key=spec["goal_key"], is_active=True).first()
     if goal is None:
         raise FixtureRefused("goal_not_found", f"активной цели с ключом «{spec['goal_key']}» нет")
-    category = ServiceCategory.objects.filter(slug=spec["category_slug"]).first()
-    if category is None:
-        raise FixtureRefused("category_not_found", f"категории «{spec['category_slug']}» нет")
+    categories = {}
+    for row in spec["templates"]:
+        category = ServiceCategory.objects.filter(slug=row["category_slug"]).first()
+        if category is None:
+            raise FixtureRefused("category_not_found", f"категории «{row['category_slug']}» нет")
+        categories[row["ref"]] = category
     salon = Tenant.all_objects.filter(pk=spec["salon_id"]).first()
     if salon is None:
         raise FixtureRefused("salon_not_found", str(spec["salon_id"]))
@@ -128,7 +133,7 @@ def _preflight(spec: dict) -> dict:
             f"у цели «{goal.key}» уже есть подтверждённые настоящие способности ({len(real)}): в плане тестовой "
             "персоны настоящие и синтетические шаги смешались бы",
         )
-    return {"goal": goal, "category": category, "salon": salon, "persona": persona}
+    return {"goal": goal, "categories": categories, "salon": salon, "persona": persona}
 
 
 # ─── шаги ────────────────────────────────────────────────────────────────────
@@ -311,7 +316,7 @@ def seed(spec: dict, *, dry_run: bool = False) -> Report:
     try:
         with transaction.atomic():
             ctx = _preflight(spec)
-            goal, category, salon, persona = ctx["goal"], ctx["category"], ctx["salon"], ctx["persona"]
+            goal, categories, salon, persona = ctx["goal"], ctx["categories"], ctx["salon"], ctx["persona"]
             report.real_capabilities_of_goal = 0
 
             service_user, created = _service_user()
@@ -319,7 +324,7 @@ def seed(spec: dict, *, dry_run: bool = False) -> Report:
 
             templates: dict = {}
             for row in spec["templates"]:
-                templates[row["ref"]], created = _template(row, category, service_user)
+                templates[row["ref"]], created = _template(row, categories[row["ref"]], service_user)
                 report.note(created, f"канон «{row['name']}»")
 
             claim = _claim_fields(spec)
@@ -333,7 +338,7 @@ def seed(spec: dict, *, dry_run: bool = False) -> Report:
             # того, как в нём появится пользователь.
             offers = []
             for row in spec["offers"]:
-                offer, created = _offer(row, salon, category, templates[row["template"]])
+                offer, created = _offer(row, salon, categories[row["template"]], templates[row["template"]])
                 report.note(created, f"услуга «{row['name']}» в салоне {salon.slug}")
                 offers.append((row, offer))
 
