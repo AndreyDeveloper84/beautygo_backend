@@ -6,6 +6,7 @@ from .plan_engine_api import (
     PlanDecisionView,
     PlanEngineStateView,
     PlanEngineView,
+    PlanReplaceView,
     PlanStepBookingView,
     PlanRestrictionLiftView,
     PlanRestrictionView,
@@ -15,6 +16,8 @@ from .plan_engine_api import (
 urlpatterns = [
     path("", PlanEngineView.as_view(), name="me-plan"),
     path("state/", PlanEngineStateView.as_view(), name="me-plan-state"),
+    # DRF-2857 — подтверждённая замена действующего плана предложением.
+    path("replace/", PlanReplaceView.as_view(), name="me-plan-replace"),
     # DRF-2871 — сборка эфемерного плана; ничего не сохраняет.
     path("decision/", PlanDecisionView.as_view(), name="me-plan-decision"),
     # DRF-2871 — подписи способностей для экрана плана (у шага текста нет).

@@ -99,6 +99,16 @@ class SaveSafetyBlocked(PlanEngineError):
     «уточнить» — нет)."""
 
 
+class ReplacementTargetChanged(PlanEngineError):
+    """Подтверждение замены относилось к другому плану: действующий план цели
+    за это время стал иным (или его не стало). ``current_plan_id`` — какой
+    действует сейчас, ``None`` — никакой."""
+
+    def __init__(self, current_plan_id: UUID | None) -> None:
+        super().__init__(str(current_plan_id))
+        self.current_plan_id = current_plan_id
+
+
 class IdempotencyConflict(PlanEngineError):
     """Тот же ключ команды, другое содержимое — клиент переиспользовал
     подтверждение; ничего не записано."""
@@ -405,20 +415,33 @@ def create_plan_from_command(user, command: PlanCommand) -> tuple[Plan, bool]:
             if existing is not None:
                 return existing, False
 
+            # Второй рубеж от дублей: от этого решения у человека уже есть
+            # действующий план или предложение — другое подтверждение того же
+            # решения возвращает его же, а не создаёт второй план.
+            same = _plan_of_decision(user, goal, command.decision_id)
+            if same is not None:
+                first = same.revisions.filter(revision_no=1).values_list("content_hash", flat=True).first()
+                if first != digest:
+                    raise IdempotencyConflict()
+                return same, False
+
             now = timezone.now()
-            Plan.objects.filter(goal=goal, status=Plan.Status.ACTIVE).update(
-                status=Plan.Status.SUPERSEDED, status_changed_at=now,
-            )
-            # Один механизм на человека: действующий Lite-план закрывается
-            # этим же сохранением. Строка и её обязательства остаются историей.
-            # Пока идёт проверка на тестовых данных, Lite-план не трогается —
-            # см. ``plan_coexistence``.
-            if engine_displaces_lite():
-                PersonalPlan.objects.filter(user=user, status=PersonalPlan.Status.ACTIVE).update(
-                    status=PersonalPlan.Status.SUPERSEDED, closed_at=now,
+            # Решение владельца 08.10: сохранённое не вытесняет действующий
+            # план без подтверждения замены. Есть действующий — новый
+            # сохраняется предложением, и ничего не гасится; заменяет его
+            # только ``replace_plan`` с идентификатором именно этого плана.
+            has_active = Plan.objects.filter(goal=goal, status=Plan.Status.ACTIVE).exists()
+            if has_active:
+                # У цели не больше одного предложения: прежнее замещается.
+                Plan.objects.filter(goal=goal, status=Plan.Status.PROPOSED).update(
+                    status=Plan.Status.SUPERSEDED, status_changed_at=now,
                 )
+                status = Plan.Status.PROPOSED
+            else:
+                _displace_lite(user, now)
+                status = Plan.Status.ACTIVE
             plan = Plan.objects.create(
-                subject_user=user, goal=goal, idempotency_key=key, status_changed_at=now,
+                subject_user=user, goal=goal, idempotency_key=key, status=status, status_changed_at=now,
             )
             revision = PlanRevision.objects.create(
                 plan=plan,
@@ -445,10 +468,94 @@ def create_plan_from_command(user, command: PlanCommand) -> tuple[Plan, bool]:
     return plan, True
 
 
+def _displace_lite(user, now) -> None:
+    """Один механизм на человека: действующий Lite-план закрывается, когда
+    durable-план СТАНОВИТСЯ действующим. Строка и её обязательства остаются
+    историей. Пока идёт проверка на тестовых данных, Lite-план не трогается —
+    см. ``plan_coexistence``."""
+    if engine_displaces_lite():
+        PersonalPlan.objects.filter(user=user, status=PersonalPlan.Status.ACTIVE).update(
+            status=PersonalPlan.Status.SUPERSEDED, closed_at=now,
+        )
+
+
+def _plan_of_decision(user, goal: ClientGoal, decision_id: UUID) -> Plan | None:
+    """Действующий план или предложение этой цели, сохранённые от этого решения."""
+    return (
+        Plan.objects.filter(
+            subject_user=user,
+            goal=goal,
+            status__in=(Plan.Status.ACTIVE, Plan.Status.PROPOSED),
+            revisions__revision_no=1,
+            revisions__created_from__decision_id=str(decision_id),
+        )
+        .select_related("goal", "current_revision")
+        .first()
+    )
+
+
+def replaced_by(plan: Plan) -> UUID | None:
+    """Какой действующий план заменит это предложение; ``None`` — план не
+    предложение (или действующего у цели уже нет)."""
+    if plan.status != Plan.Status.PROPOSED:
+        return None
+    return Plan.objects.filter(goal_id=plan.goal_id, status=Plan.Status.ACTIVE).values_list("pk", flat=True).first()
+
+
+def replace_plan(user, plan_id: UUID, replaces_plan_id: UUID, safety) -> tuple[Plan, bool]:
+    """Подтверждённая замена: предложение становится действующим, прежний
+    действующий — замещённым. ``replaces_plan_id`` — план, о котором человек
+    сказал «да»: подтверждение относится к нему, а не к любому.
+
+    Возвращает ``(план, выполнено)``; повтор уже выполненной замены — тот же
+    план и ``False``.
+    """
+    if not plan_engine_enabled():
+        raise PlanEngineDisabled()
+    with transaction.atomic():
+        plan = (
+            Plan.objects.select_for_update(of=("self",))
+            .select_related("goal", "current_revision")
+            .filter(pk=plan_id, subject_user=user)
+            .first()
+        )
+        if plan is None:
+            raise PlanNotFound(str(plan_id))
+        replaced = Plan.objects.select_for_update().filter(pk=replaces_plan_id, subject_user=user).first()
+        if replaced is None:
+            raise PlanNotFound(str(replaces_plan_id))
+        if (
+            plan.status == Plan.Status.ACTIVE
+            and replaced.status == Plan.Status.SUPERSEDED
+            and replaced.goal_id == plan.goal_id
+        ):
+            return plan, False  # замена уже выполнена — повтор кнопки
+        if plan.status != Plan.Status.PROPOSED:
+            raise TransitionRefused(plan.status, Plan.Status.ACTIVE)
+        # Замена расширяет действующее: при «стоп» / «не оценивалось» — нет.
+        if safety.blocks:
+            raise SaveSafetyBlocked()
+        # Замок на всех действующих планах цели: подтверждение обязано
+        # относиться к тому, который действует ПРЯМО СЕЙЧАС.
+        current = Plan.objects.select_for_update().filter(goal_id=plan.goal_id, status=Plan.Status.ACTIVE).first()
+        if current is None or current.pk != replaced.pk:
+            raise ReplacementTargetChanged(current.pk if current is not None else None)
+        now = timezone.now()
+        Plan.objects.filter(pk=current.pk).update(status=Plan.Status.SUPERSEDED, status_changed_at=now)
+        _displace_lite(user, now)
+        plan.status = Plan.Status.ACTIVE
+        plan.status_changed_at = now
+        plan.save(update_fields=["status", "status_changed_at"])
+    return plan, True
+
+
 #: Переходы по слову человека (§4.5). ``superseded`` и ``archived`` терминальны.
 _ALLOWED: dict[str, frozenset[str]] = {
     Plan.Status.ACTIVE: frozenset({Plan.Status.PAUSED, Plan.Status.ARCHIVED}),
     Plan.Status.PAUSED: frozenset({Plan.Status.ACTIVE, Plan.Status.ARCHIVED}),
+    # От предложения можно только отказаться; действующим его делает замена
+    # с подтверждением, а не смена статуса.
+    Plan.Status.PROPOSED: frozenset({Plan.Status.ARCHIVED}),
     Plan.Status.SUPERSEDED: frozenset(),
     Plan.Status.ARCHIVED: frozenset(),
 }
@@ -538,6 +645,21 @@ def _step_state(plan: Plan, revision: PlanRevision) -> dict[str, Any]:
     from .plan_engine_steps import step_state  # импорт здесь: тот модуль импортирует этот
 
     return step_state(plan, revision)
+
+
+def proposal_payload(user) -> dict[str, Any] | None:
+    """Предложение плана действующей цели человека; ``None`` — предложения нет
+    или флаг выключен."""
+    if not plan_engine_enabled():
+        return None
+    plan = (
+        Plan.objects.filter(
+            subject_user=user, goal__state=ClientGoal.State.ACTIVE, status=Plan.Status.PROPOSED,
+        )
+        .select_related("goal", "current_revision")
+        .first()
+    )
+    return plan_document(plan) if plan is not None else None
 
 
 def plan_payload(user) -> dict[str, Any] | None:

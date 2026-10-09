@@ -274,6 +274,9 @@ class ErrorCode(str, Enum):
     PLAN_STEP_RESOLUTION_REFUSED = "PLAN_STEP_RESOLUTION_REFUSED"
     # DRF-2868 — запись уже связана с другим шагом: одна запись — один шаг.
     PLAN_STEP_BOOKING_CONFLICT = "PLAN_STEP_BOOKING_CONFLICT"
+    # DRF-2857 — подтверждение замены относилось к другому плану: действующий
+    # план цели за это время стал иным. details.current_plan_id.
+    PLAN_REPLACEMENT_TARGET_CHANGED = "PLAN_REPLACEMENT_TARGET_CHANGED"
     # DRF-2877 — вердикт хода подтверждения «стоп» или «не оценивался»: план
     # не сохраняется. «Уточнить» сохранение не блокирует.
     PLAN_SAVE_SAFETY_BLOCKED = "PLAN_SAVE_SAFETY_BLOCKED"

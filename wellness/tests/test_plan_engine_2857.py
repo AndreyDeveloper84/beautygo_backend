@@ -207,20 +207,29 @@ class TestCreateCommand:
         assert PlanRevision.objects.get().steps_snapshot == body["decision"]["steps"]
 
     def test_the_key_is_the_servers_and_carries_the_confirmation(self, goal) -> None:
-        """Другое подтверждение того же решения — другая команда, а не повтор."""
+        """Ключ считает сервер, и подтверждение в него входит. Но другое
+        подтверждение ТОГО ЖЕ решения второго плана не даёт (решение владельца
+        08.10: двойное нажатие и повтор — без дублей) — возвращается тот же
+        план; подробно — ``test_plan_proposal_2857.py::TestOneDecisionOnePlan``.
+        Другое РЕШЕНИЕ при действующем плане сохраняется предложением."""
         body = _command(goal)
         again = copy.deepcopy(body)
         again["confirmation"]["state_revision"] = 8
         assert _api().post(PLAN_URL, body, format="json").status_code == 201
-        assert _api().post(PLAN_URL, again, format="json").status_code == 201
-        assert Plan.objects.count() == 2
+        assert _api().post(PLAN_URL, again, format="json").status_code == 200
+        assert Plan.objects.count() == 1
+        other = _api().post(PLAN_URL, _command(goal), format="json")
+        assert other.status_code == 201
         assert len(set(Plan.objects.values_list("idempotency_key", flat=True))) == 2
 
-    def test_a_second_plan_for_the_goal_supersedes_the_first_in_place(self, goal) -> None:
+    def test_a_second_plan_for_the_goal_does_not_displace_the_first(self, goal) -> None:
+        """Решение владельца 08.10: сохранённое не вытесняет действующий план
+        без подтверждения замены. Второй план — предложение; замена — в
+        ``test_plan_proposal_2857.py``."""
         first = _save(goal)
         second = _save(goal)
         first.refresh_from_db()
-        assert (first.status, second.status) == ("superseded", "active")
+        assert (first.status, second.status) == ("active", "proposed")
         # История цела: прежний план и его ревизия на месте.
         assert first.current_revision.revision_no == 1
         assert (Plan.objects.count(), PlanRevision.objects.count()) == (2, 2)
@@ -489,7 +498,7 @@ class TestHumanStatus:
 
 class TestRead:
     def test_no_plan_is_null(self, goal) -> None:
-        assert _api().get(PLAN_URL).json()["data"] == {"plan": None}
+        assert _api().get(PLAN_URL).json()["data"] == {"plan": None, "proposal": None}
 
     def test_the_active_plan_wins_over_a_paused_one(self, goal) -> None:
         paused = _save(goal)
@@ -501,13 +510,13 @@ class TestRead:
         """Статус цели в статус плана не переписывается (§4.5 отложен 07.10)."""
         plan = _save(goal)
         ClientGoal.objects.filter(pk=goal.pk).update(state="paused")
-        assert _api().get(PLAN_URL).json()["data"] == {"plan": None}
+        assert _api().get(PLAN_URL).json()["data"] == {"plan": None, "proposal": None}
         plan.refresh_from_db()
         assert plan.status == "active"
 
     def test_a_stranger_reads_nothing(self, goal, stranger) -> None:
         _save(goal)
-        assert _api(STRANGER).get(PLAN_URL).json()["data"] == {"plan": None}
+        assert _api(STRANGER).get(PLAN_URL).json()["data"] == {"plan": None, "proposal": None}
 
     def test_the_document_expresses_no_progress(self, goal) -> None:
         _save(goal)
@@ -541,7 +550,7 @@ class TestFlagsAndLite:
         assert resp.json()["error"]["code"] == "PLAN_ENGINE_DISABLED"
         state = _api().post(STATE_URL, {"plan_id": str(plan.id), "state": "paused"}, format="json")
         assert state.status_code == 404
-        assert _api().get(PLAN_URL).json()["data"] == {"plan": None}
+        assert _api().get(PLAN_URL).json()["data"] == {"plan": None, "proposal": None}
         # Откат флага ничего не удаляет.
         assert (Plan.objects.count(), PlanRevision.objects.count()) == (1, 1)
         assert Plan.objects.get().status == "active"
@@ -724,7 +733,7 @@ class TestErasureAndExport:
 
         person, _ = both
         saved = export_wellness_plan(person)["saved_plans"]
-        assert [p["status"] for p in saved] == ["superseded", "active"]
+        assert [p["status"] for p in saved] == ["active", "proposed"]
         assert saved[0]["goal_key"] == "relax"
         assert saved[1]["revisions"][0]["steps"][0]["capability_ref"] == "cap:relaxation-massage"
         flat = repr(saved)
@@ -786,5 +795,7 @@ class TestRaces:
         results = _in_threads(call, call)
         assert not [r for r in results if isinstance(r, Exception)], results
         assert Plan.objects.count() == 2
-        assert sorted(Plan.objects.values_list("status", flat=True)) == ["active", "superseded"]
+        # Гонка двух РАЗНЫХ решений: одно действует, второе — предложение;
+        # действующих по-прежнему ровно один, и никто никого не погасил молча.
+        assert sorted(Plan.objects.values_list("status", flat=True)) == ["active", "proposed"]
         assert PlanRevision.objects.count() == 2

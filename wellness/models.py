@@ -608,6 +608,11 @@ class Plan(models.Model):
     class Status(models.TextChoices):
         ACTIVE = "active", "Действует"
         PAUSED = "paused", "Приостановлен"
+        # DRF-2857 — сохранённое предложение при действующем плане цели
+        # (решение владельца 08.10: «сохранённый черновик не вытесняет
+        # действующий план без подтверждения замены»). Не действует, шаги не
+        # исполняются; действующим его делает только явная команда замены.
+        PROPOSED = "proposed", "Предложение — ждёт подтверждения замены"
         SUPERSEDED = "superseded", "Замещён другим планом той же цели"
         ARCHIVED = "archived", "В архиве"
 
@@ -665,6 +670,12 @@ class Plan(models.Model):
                 fields=["goal"],
                 condition=models.Q(status="active"),
                 name="plan_one_active_per_goal",
+            ),
+            # У цели не больше одного предложения: новое замещает прежнее.
+            models.UniqueConstraint(
+                fields=["goal"],
+                condition=models.Q(status="proposed"),
+                name="plan_one_proposed_per_goal",
             ),
         ]
         indexes = [
