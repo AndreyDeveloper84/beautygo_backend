@@ -454,3 +454,88 @@ def test_reading_methods_are_not_gated() -> None:
         handler = getattr(view, "__dict__", {}).get("get")
         if handler is not None and view.__module__ == plan_engine_api.__name__:
             assert not getattr(handler, "plan_gate", False), f"{name}.get под гейтом — чтение своего плана закрыто"
+
+
+# ─── сквозной провод: снимки бота, а не представление о них ──────────────────
+#
+# Правило «отзыв побеждает, только если он позже утверждения» держится на том,
+# что бот кладёт в событие отзыва МОМЕНТ ОТЗЫВА. Ниже — тела, снятые
+# исполнением на боте 09.10.2026 (ветка поверх dev 5539860e, один человек,
+# один прогон: согласие → отзыв → сразу согласие снова): настоящие
+# ``withdraw`` → публикация события → подписчик каталога → тело на входе
+# отправки. Подменён только сам HTTP-вызов. Положены дословно; идентификатор
+# события заменён (в снимке он — uuid конверта).
+#
+# Чего снимок не покрывает: диспетчер шины и сам HTTP бота исполнены не были.
+
+BOT_WITHDRAWAL_EVENT = {
+    "event_id": "0f6f1c1e-2967-4a6b-9d1e-5a3d7c9e2967",
+    "consent_type": "personal_data",
+    "granted": False,
+    "granted_at": "2026-10-09T13:37:55.402340+00:00",
+    "granted_via": "chat",
+}
+#: Утверждение после нового согласия того же человека (глобальный путь).
+BOT_ATTESTATION_AFTER_RECONSENT = {
+    "type": "personal_data", "document_version": "unversioned", "granted_at": "2026-10-09T13:37:55.544001+00:00",
+}
+#: Утверждение по прежней, отозванной записи — снято до отзыва.
+BOT_ATTESTATION_BEFORE_WITHDRAWAL = {
+    "type": "personal_data", "document_version": "unversioned", "granted_at": "2026-10-09T13:37:55.378857+00:00",
+}
+CONSENT_EVENTS_URL = "/api/v1/internal/me/consent-events/"
+
+
+def _deliver_withdrawal() -> None:
+    """Событие отзыва приходит в каталог тем же путём, что с бота: настоящей ручкой, телом как есть."""
+    response = _api().post(CONSENT_EVENTS_URL, BOT_WITHDRAWAL_EVENT, format="json")
+    assert response.status_code == 200, response.content[:300]
+    assert response.json()["data"]["outcome"] == "applied", response.content[:300]
+
+
+def test_wire_withdrew_then_consented_again_and_the_catalog_does_not_block(owner, goal) -> None:
+    """Четвёртый случай владельца на настоящих метках времени: действующее согласие — обычная работа."""
+    _deliver_withdrawal()
+    attestation = {"consent": BOT_ATTESTATION_AFTER_RECONSENT}
+
+    composed = _api().post(URLS["decision"], {**_body(), **attestation}, format="json")
+    saved = _api().post(PLAN_URL, {**_command(goal), **attestation}, format="json")
+
+    assert composed.status_code == 200, composed.content[:300]
+    assert saved.status_code == 201, saved.content[:300]
+
+
+def test_wire_the_attestation_of_the_withdrawn_record_is_refused(owner, goal) -> None:
+    """Контроль: тот же человек, утверждение по записи, которую он уже отозвал, — отказ."""
+    _deliver_withdrawal()
+
+    response = _api().post(
+        URLS["decision"], {**_body(), "consent": BOT_ATTESTATION_BEFORE_WITHDRAWAL}, format="json",
+    )
+
+    assert response.status_code == 422, response.content[:300]
+    assert response.json()["error"]["details"] == {"consent_type": "personal_data", "reason": "withdrawn"}
+
+
+def test_wire_the_withdrawal_alone_blocks(owner, goal) -> None:
+    """Контроль: событие отзыва действительно дошло и закрыло план — иначе два узла выше ничего бы не значили."""
+    assert _api().post(URLS["decision"], _body(), format="json").status_code == 200
+
+    _deliver_withdrawal()
+
+    assert _api().post(URLS["decision"], _body(), format="json").status_code == 422
+
+
+def test_wire_the_snapshots_are_in_the_order_the_rule_relies_on() -> None:
+    """Сами снимки: прежнее согласие < отзыв < новое согласие — как моменты времени, а не строки."""
+    from datetime import datetime
+
+    before, withdrawn, after = (
+        datetime.fromisoformat(value) for value in (
+            BOT_ATTESTATION_BEFORE_WITHDRAWAL["granted_at"], BOT_WITHDRAWAL_EVENT["granted_at"],
+            BOT_ATTESTATION_AFTER_RECONSENT["granted_at"],
+        )
+    )
+
+    assert before < withdrawn < after
+    assert all(moment.tzinfo is not None for moment in (before, withdrawn, after))
