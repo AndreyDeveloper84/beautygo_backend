@@ -146,14 +146,27 @@ def template_ids_with_capability(
     попадает каждая. Состояние самого канона (выведен из оборота) здесь не
     судится — это вопрос допуска.
     """
+    return template_ids_by_capability([key], now=now, include_synthetic=include_synthetic)[key]
+
+
+def template_ids_by_capability(
+    keys, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
+) -> dict[str, frozenset]:
+    """То же, что :func:`template_ids_with_capability`, пачкой — одним запросом (DRF-2966).
+
+    На КАЖДЫЙ запрошенный ключ есть ответ: у ключа без подтверждённой
+    способности — пустое множество, а не отсутствие ключа.
+    """
     now = now or timezone.now()
-    return frozenset(
-        template_id
-        for template_id in ProcedureCapability.objects.filter(
-            _client_facing_q(now, include_synthetic=include_synthetic), key=key,
-        ).values_list("templates", flat=True)
-        if template_id is not None
-    )
+    wanted = list(dict.fromkeys(keys))
+    found: dict[str, set] = {key: set() for key in wanted}
+    if wanted:
+        for key, template_id in ProcedureCapability.objects.filter(
+            _client_facing_q(now, include_synthetic=include_synthetic), key__in=wanted,
+        ).values_list("key", "templates"):
+            if template_id is not None:
+                found[key].add(template_id)
+    return {key: frozenset(ids) for key, ids in found.items()}
 
 
 def capability_keys_helping_goal(
