@@ -29,7 +29,13 @@ from django.utils import timezone
 from recommendation.tests.test_goal_fit_depth_2789 import _signed
 from recommendation.tests.test_legal_gate_cat10_ext_2843 import _does, _master, _offer as _admitted_offer
 from recommendation.tests.test_synthetic_admission_2916 import _outside_body_care
-from services.models import ProcedureCapability, SalonService, ServiceTemplate, SpecialistService
+from services.models import (
+    CapabilityTemplate,
+    ProcedureCapability,
+    SalonService,
+    ServiceTemplate,
+    SpecialistService,
+)
 from services.synthetic import SYNTHETIC_RULE
 from services.tests.test_synthetic_test_mark import _capability as _synthetic_capability
 from tenants.models import Tenant
@@ -44,6 +50,7 @@ from wellness.tests.test_plan_engine_steps_2868 import (  # noqa: F401 — фи�
     SAFETY,
     STRANGER,
     _api,
+    _confirmed_knowledge,
     _save,
     _step,
     _token_and_flag,
@@ -98,8 +105,18 @@ def _health(offering: SalonService, curator: User, *, required: bool) -> None:
 
 
 def _can(templates, curator: User, key: str = KEY) -> None:
-    ProcedureCapability.objects.create(
-        templates=list(templates), key=key, text_client="Помогает расслабиться", **_signed(curator, True),
+    """Какие процедуры несут способность шага. Сама способность с
+    подтверждённой связью на цель уже заведена (DRF-2871: без неё план не
+    сохранить) — здесь её процедуры заменяются на названные."""
+    capability = ProcedureCapability.objects.filter(key=key).first()
+    if capability is None:  # другая способность — не та, на которой стоит шаг
+        ProcedureCapability.objects.create(
+            templates=list(templates), key=key, text_client="Помогает расслабиться", **_signed(curator, True),
+        )
+        return
+    CapabilityTemplate.objects.filter(capability=capability).delete()
+    CapabilityTemplate.objects.bulk_create(
+        [CapabilityTemplate(capability=capability, template=template) for template in templates]
     )
 
 
@@ -227,8 +244,10 @@ class TestWhyThereIsNoCandidate:
         assert data["candidates"] == []
         return data["nothing_because"], data["rejected"]
 
-    def test_no_canon_has_the_capability(self, goal) -> None:
-        assert self._nothing(_save(goal))[0] == "NO_CAPABILITY"
+    def test_no_canon_has_the_capability(self, goal, curator) -> None:
+        plan = _save(goal)
+        _can([], curator)  # знание осталось, процедур у способности больше нет
+        assert self._nothing(plan)[0] == "NO_CAPABILITY"
 
     def test_the_canon_has_it_but_no_salon_offers_it(self, goal, category, curator) -> None:
         canon = ServiceTemplate.objects.create(category=category, name="Канон без предложений 2868")
