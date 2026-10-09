@@ -42,7 +42,10 @@ pytestmark = pytest.mark.django_db
 
 REPLACE_URL = "/api/v1/internal/me/plan/replace/"
 RESOLUTION_URL = "/api/v1/internal/me/plan/steps/resolution/"
-SAFETY = {"safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4}
+SAFETY = {
+    "safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4,
+    "s1_restriction": "none",
+}
 
 
 def _post(body: dict):
