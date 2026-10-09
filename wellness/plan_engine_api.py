@@ -35,6 +35,7 @@ from services.capabilities import capability_labels
 from users.permissions import IsBotServiceWithVerifiedClient
 from users.response import error_response, success_response
 
+from .plan_gate import archiving_own_plan, gated
 from .plan_engine import (
     REQUESTABLE_STATUSES,
     ActivePlanExists,
@@ -44,6 +45,7 @@ from .plan_engine import (
     IdempotencyConflict,
     PlanEngineDisabled,
     PlanNotFound,
+    ReplacementTargetChanged,
     SaveSafetyBlocked,
     TransitionRefused,
     create_plan_from_command,
@@ -51,6 +53,9 @@ from .plan_engine import (
     plan_document,
     plan_engine_enabled,
     plan_payload,
+    proposal_payload,
+    replace_plan,
+    replaced_by,
     set_plan_status,
 )
 from .plan_compose import compose_plan, parse_compose_request
@@ -62,7 +67,7 @@ from .plan_restrictions import (
     open_restriction,
     parse_restriction,
 )
-from .plan_safety import SafetyInputError, parse_safety_input
+from .plan_safety import SafetyInputError, parse_safety_input, parse_step_safety_input
 from .plan_engine_steps import (
     AppointmentNotFound,
     BookingLinkConflict,
@@ -70,6 +75,7 @@ from .plan_engine_steps import (
     ResolutionRefused,
     StepNotExecutable,
     StepNotFound,
+    candidates_for_step,
     link_booking,
     resolve_step,
 )
@@ -94,7 +100,9 @@ class PlanEngineView(APIView):
         responses={200: OpenApiResponse(description="{plan: document | null}")},
     )
     def get(self, request: Request) -> Response:
-        return success_response({"plan": plan_payload(request.user)})
+        # DRF-2857 — действующий план и, отдельно, предложение, которое ждёт
+        # подтверждения замены. Одно другое не заслоняет.
+        return success_response({"plan": plan_payload(request.user), "proposal": proposal_payload(request.user)})
 
     @extend_schema(
         tags=["internal"],
@@ -106,6 +114,7 @@ class PlanEngineView(APIView):
             409: OpenApiResponse(description="PLAN_IDEMPOTENCY_CONFLICT"),
         },
     )
+    @gated
     def post(self, request: Request) -> Response:
         try:
             command = parse_command(request.data)
@@ -145,9 +154,86 @@ class PlanEngineView(APIView):
             )
         plan.refresh_from_db()
         return success_response(
-            {"plan": plan_document(plan), "created": created},
+            {**_saved(plan), "created": created},
             status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
+
+
+def _saved(plan) -> dict:
+    """Ответ сохранения: документ плана и — только у предложения — какой
+    действующий план оно заменит. ``status == "proposed"`` ⇔ ``replaces`` есть."""
+    body = {"plan": plan_document(plan)}
+    replaces = replaced_by(plan)
+    if replaces is not None:
+        body["replaces"] = {"plan_id": str(replaces)}
+    return body
+
+
+class PlanReplaceView(APIView):
+    """POST /api/v1/internal/me/plan/replace/ — подтверждённая замена
+    действующего плана предложением (DRF-2857).
+
+    Тело: ``{plan_id, replaces_plan_id, safety_state, safety_policy_version,
+    evaluated_at_revision}``. ``replaces_plan_id`` — план, о замене которого
+    человек сказал «да»: подтверждение относится к нему, а не к любому.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(description="Replaced (or already replaced); body = {plan, replaced: bool}"),
+            400: OpenApiResponse(description="PLAN_CONTRACT_VIOLATION, details.reason"),
+            404: OpenApiResponse(description="Plan not found for the caller, or PLAN_ENGINE_DISABLED"),
+            409: OpenApiResponse(
+                description="PLAN_REPLACEMENT_TARGET_CHANGED | PLAN_TRANSITION_REFUSED | PLAN_SAVE_SAFETY_BLOCKED",
+            ),
+        },
+    )
+    @gated
+    def post(self, request: Request) -> Response:
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            plan_id = _uuid_field(data, "plan_id")
+            replaces_plan_id = _uuid_field(data, "replaces_plan_id")
+            safety = parse_safety_input(data)
+        except SafetyInputError as exc:  # раньше ValueError: SafetyInputError — его род
+            return error_response("PLAN_CONTRACT_VIOLATION", "Запрос не конформен", details={"reason": exc.reason})
+        except ValueError as exc:
+            return error_response(
+                "PLAN_CONTRACT_VIOLATION", "Запрос не конформен", details={"reason": f"{exc}_malformed"},
+            )
+        try:
+            plan, replaced = replace_plan(request.user, plan_id, replaces_plan_id, safety)
+        except PlanEngineDisabled:
+            return _disabled()
+        except PlanNotFound:
+            return error_response(
+                "NOT_FOUND", "План не найден",
+                details={"reason": "plan_not_found"}, status_code=status.HTTP_404_NOT_FOUND,
+            )
+        except SaveSafetyBlocked:
+            return error_response(
+                "PLAN_SAVE_SAFETY_BLOCKED", "План сейчас не заменяется", status_code=status.HTTP_409_CONFLICT,
+            )
+        except ReplacementTargetChanged as exc:
+            return error_response(
+                "PLAN_REPLACEMENT_TARGET_CHANGED",
+                "Действующий план изменился — подтверждение относилось к другому",
+                details={"current_plan_id": str(exc.current_plan_id) if exc.current_plan_id else None},
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        except TransitionRefused as exc:
+            return error_response(
+                "PLAN_TRANSITION_REFUSED",
+                "Этот план нельзя перевести в запрошенное состояние",
+                details={"from": exc.from_status, "to": exc.to_status},
+                status_code=status.HTTP_409_CONFLICT,
+            )
+        plan.refresh_from_db()
+        return success_response({"plan": plan_document(plan), "replaced": replaced})
 
 
 class PlanEngineStateView(APIView):
@@ -165,6 +251,7 @@ class PlanEngineStateView(APIView):
             409: OpenApiResponse(description="PLAN_TRANSITION_REFUSED | PLAN_ACTIVE_EXISTS"),
         },
     )
+    @gated(unless=archiving_own_plan)
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:
@@ -270,6 +357,7 @@ class PlanStepResolutionView(APIView):
     permission_classes = [IsBotServiceWithVerifiedClient]
 
     @extend_schema(tags=["internal"], responses={201: OpenApiResponse(description="{plan, created}")})
+    @gated
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:
@@ -282,7 +370,7 @@ class PlanStepResolutionView(APIView):
         if not isinstance(step_id, str) or not step_id.strip():
             return error_response("VALIDATION_ERROR", "step_id is required")
         try:
-            safety = parse_safety_input(data)
+            safety = parse_step_safety_input(data)
         except SafetyInputError as exc:
             return error_response(
                 "PLAN_CONTRACT_VIOLATION",
@@ -316,6 +404,54 @@ class PlanStepResolutionView(APIView):
         )
 
 
+class PlanStepCandidatesView(APIView):
+    """POST /api/v1/internal/me/plan/steps/candidates/ — кандидаты услуги для
+    шага (DRF-2868, контракт §8.2). Ничего не пишет.
+
+    Тело: ``{plan_id, step_id, safety_state, safety_policy_version,
+    evaluated_at_revision}``. Каталог сам ищет предложения по способности шага
+    в видимости этого человека, проверяет допуск и происхождение ответа о
+    проверке здоровья. Порядок кандидатов — не ранжирование.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsBotServiceWithVerifiedClient]
+
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(
+                description="{step_id, capability_ref, candidates[], search_id, nothing_because, rejected}",
+            ),
+            400: OpenApiResponse(description="PLAN_CONTRACT_VIOLATION, details.reason"),
+            404: OpenApiResponse(description="Plan / step not found for the caller, or PLAN_ENGINE_DISABLED"),
+            409: OpenApiResponse(description="PLAN_STEP_NOT_EXECUTABLE, details.reason"),
+        },
+    )
+    @gated
+    def post(self, request: Request) -> Response:
+        data = request.data if isinstance(request.data, dict) else {}
+        try:
+            plan_id = _uuid_field(data, "plan_id")
+            safety = parse_step_safety_input(data)
+        except SafetyInputError as exc:  # раньше ValueError: SafetyInputError — его род
+            return error_response("PLAN_CONTRACT_VIOLATION", "Запрос не конформен", details={"reason": exc.reason})
+        except ValueError as exc:
+            return error_response(
+                "PLAN_CONTRACT_VIOLATION", "Запрос не конформен", details={"reason": f"{exc}_malformed"},
+            )
+        step_id = data.get("step_id")
+        if not isinstance(step_id, str) or not step_id.strip():
+            return error_response(
+                "PLAN_CONTRACT_VIOLATION", "Запрос не конформен", details={"reason": "step_id_missing"},
+            )
+        try:
+            found = candidates_for_step(request.user, plan_id, step_id.strip(), safety)
+        except (PlanEngineDisabled, PlanNotFound, StepNotFound, StepNotExecutable) as exc:
+            return _step_refusal(exc)
+        return success_response(found)
+
+
 class PlanStepBookingView(APIView):
     """POST /api/v1/internal/me/plan/steps/booking/
 
@@ -331,6 +467,7 @@ class PlanStepBookingView(APIView):
     permission_classes = [IsBotServiceWithVerifiedClient]
 
     @extend_schema(tags=["internal"], responses={201: OpenApiResponse(description="{plan, created}")})
+    @gated
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:
@@ -342,7 +479,7 @@ class PlanStepBookingView(APIView):
         if not isinstance(step_id, str) or not step_id.strip():
             return error_response("VALIDATION_ERROR", "step_id is required")
         try:
-            safety = parse_safety_input(data)
+            safety = parse_step_safety_input(data)
         except SafetyInputError as exc:
             return error_response(
                 "PLAN_CONTRACT_VIOLATION",
@@ -391,6 +528,7 @@ class PlanRestrictionView(APIView):
             404: OpenApiResponse(description="Plan not found for the caller, or PLAN_ENGINE_DISABLED"),
         },
     )
+    @gated
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:
@@ -439,6 +577,7 @@ class PlanRestrictionLiftView(APIView):
             409: OpenApiResponse(description="PLAN_RESTRICTION_NOT_LIFTABLE, details.reason"),
         },
     )
+    @gated
     def post(self, request: Request) -> Response:
         data = request.data if isinstance(request.data, dict) else {}
         try:
@@ -509,6 +648,7 @@ class PlanDecisionView(APIView):
     permission_classes = [IsBotServiceWithVerifiedClient]
 
     @extend_schema(tags=["internal"], responses={200: OpenApiResponse(description="{outcome, decision}")})
+    @gated
     def post(self, request: Request) -> Response:
         try:
             result = compose_plan(request.user, parse_compose_request(request.data))
@@ -530,11 +670,14 @@ MAX_LABEL_KEYS = 50
 class PlanCapabilityLabelsView(APIView):
     """POST /api/v1/internal/me/plan/capability-labels/
 
-    ``{keys: [...]}`` → ``{labels: {key: {state, label}}}``. У шага плана
+    ``{keys: [...]}`` → ``{labels: {key: {state, label, expected_effect}}}``. У шага плана
     текста нет (контракт PE-2) — подпись способности берётся здесь, из
     подтверждённого знания каталога. ``state``: ``labelled`` (подпись есть) |
     ``unknown`` (подтверждённой способности с таким ключом нет) | ``no_text``
     | ``ambiguous`` (у ключа несколько разных формулировок — подписи нет).
+    ``expected_effect`` — курируемый ожидаемый эффект той же записи, ответ
+    на «зачем этот шаг»; ``null`` — не заполнен, и подставлять вместо него
+    нечего.
     Ничего о человеке не читает и не пишет.
     """
 
@@ -542,6 +685,10 @@ class PlanCapabilityLabelsView(APIView):
     permission_classes = [IsBotServiceWithVerifiedClient]
 
     @extend_schema(tags=["internal"], responses={200: OpenApiResponse(description="{labels}")})
+    # Без гейта (wellness.plan_gate): подписи — чтение знания каталога, нужное
+    # и для ПОКАЗА сохранённого плана; о человеке ручка ничего не читает и не
+    # пишет. Под гейтом человек с заявкой на удаление видел бы свой план
+    # списком ключей.
     def post(self, request: Request) -> Response:
         if not plan_engine_enabled():
             return _disabled()
@@ -557,5 +704,10 @@ class PlanCapabilityLabelsView(APIView):
             )
         labels = capability_labels(keys)
         return success_response(
-            {"labels": {key: {"state": item.state.value, "label": item.label} for key, item in labels.items()}}
+            {
+                "labels": {
+                    key: {"state": item.state.value, "label": item.label, "expected_effect": item.expected_effect}
+                    for key, item in labels.items()
+                }
+            }
         )

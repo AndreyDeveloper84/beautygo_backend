@@ -36,6 +36,7 @@ from wellness.tests.test_plan_engine_steps_2868 import (  # noqa: F401 — фи�
     _resolve,
     _save,
     _step,
+    _admission_is_not_the_subject,
     _to_offer,
     _token_and_flag,
     canon,
@@ -176,6 +177,13 @@ class TestIdentifiersDoNotBypassAdmission:
         resp = _create(owner, specialist, offer, provenance=_provenance(plan, safety_state=state))
         self._refused(resp, 409, "safety_blocked")
 
+    @pytest.mark.parametrize("state, reason", [("open", "s1_restriction_open"), ("stop", "s1_restriction_stop")])
+    def test_the_durable_restriction_of_the_person(self, plan, owner, specialist, offer, state, reason) -> None:
+        """Запись от шага — действие, ведущее к услуге: длительное ограничение
+        S1 её закрывает, и записи не появляется."""
+        resp = _create(owner, specialist, offer, provenance=_provenance(plan, s1_restriction=state))
+        self._refused(resp, 409, reason)
+
     @pytest.mark.parametrize("status", ["paused", "archived", "superseded"])
     def test_a_plan_that_is_not_active(self, plan, owner, specialist, offer, status) -> None:
         Plan.objects.filter(pk=plan.pk).update(status=status)
@@ -207,6 +215,9 @@ class TestIdentifiersDoNotBypassAdmission:
             ({"safety_state": None}, "safety_state_invalid"),
             ({"safety_policy_version": ""}, "safety_policy_version_missing"),
             ({"evaluated_at_revision": None}, "safety_revision_malformed"),
+            # Молчание об ограничении — не его отсутствие.
+            ({"s1_restriction": None}, "s1_restriction_invalid"),
+            ({"s1_restriction": "cleared"}, "s1_restriction_invalid"),
         ],
     )
     def test_a_malformed_block_is_refused_and_nothing_is_booked(self, plan, owner, specialist, offer, patch, reason) -> None:
@@ -243,3 +254,60 @@ class TestIdentifiersDoNotBypassAdmission:
         resp = _create(owner, specialist, offer, provenance=_provenance(plan), as_user=STRANGER)
         assert resp.status_code == 403
         _nothing_was_written()
+
+
+# ─── гейт согласия и удаления у записи от шага (решение владельца 09.10) ─────
+
+
+class TestTheStepBookingIsUnderThePlanGate:
+    """«Нельзя переходить к записи или создавать запись» — у записи ОТ ШАГА ПЛАНА.
+
+    Обычная запись без блока шага сюда не относится: что делать с ней при
+    заявке на удаление, спецификация гейта плана не решает.
+    """
+
+    @staticmethod
+    def _request_deletion(user):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from users.models import DeletionRequest
+
+        return DeletionRequest.objects.create(
+            user=user, initiator="bot", status=DeletionRequest.Status.REQUESTED,
+            deadline_at=timezone.now() + timedelta(days=30),
+        )
+
+    def test_a_deletion_request_closes_the_booking_from_a_step(self, plan, owner, specialist, offer) -> None:
+        request = self._request_deletion(owner)
+
+        response = _create(owner, specialist, offer, provenance=_provenance(plan))
+
+        assert response.status_code == 423, response.content[:300]
+        assert response.json()["error"]["details"]["request_id"] == str(request.pk)
+        _nothing_was_written()
+
+    def test_a_withdrawn_storage_consent_closes_the_booking_from_a_step(self, plan, owner, specialist, offer) -> None:
+        from django.utils import timezone
+
+        from users.consent_events import PERSONAL_DATA
+        from users.models import ConsentState
+
+        ConsentState.objects.create(
+            user=owner, consent_type=PERSONAL_DATA, granted=False, granted_at=timezone.now(), event_id="gate-booking",
+        )
+
+        response = _create(owner, specialist, offer, provenance=_provenance(plan))
+
+        assert response.status_code == 422, response.content[:300]
+        assert response.json()["error"]["code"] == "CONSENT_REQUIRED"
+        _nothing_was_written()
+
+    def test_an_ordinary_booking_is_not_judged_by_the_plan_gate(self, plan, owner, specialist, offer) -> None:
+        """Контроль области: без блока шага гейт плана не вызывается."""
+        self._request_deletion(owner)
+
+        response = _create(owner, specialist, offer)
+
+        assert response.status_code == 201, response.content[:300]
