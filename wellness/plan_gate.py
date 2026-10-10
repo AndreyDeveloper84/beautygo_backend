@@ -164,9 +164,12 @@ def gated(method=None, *, unless=None):
     def decorate(handler):
         @wraps(handler)
         def wrapper(self, request, *args, **kwargs):
-            from .plan_engine import plan_engine_enabled
+            from .plan_engine import plan_engine_enabled_for
 
-            if plan_engine_enabled() and (unless is None or not unless(request)):
+            # Кому движок выключен, тому «выключено» отвечает сама ручка — гейт
+            # не судит и ничего не сообщает (в том числе не-тестовому субъекту
+            # под флагом тестовых данных).
+            if plan_engine_enabled_for(request.user) and (unless is None or not unless(request)):
                 refusal = refusal_for(request.user, request.data)
                 if refusal is not None:
                     return refusal

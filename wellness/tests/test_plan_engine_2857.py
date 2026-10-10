@@ -593,6 +593,8 @@ class TestFlagsAndLite:
     def test_under_test_data_saving_a_plan_leaves_the_lite_plan_alone(self, goal, settings) -> None:
         settings.PLAN_ENGINE_ENABLED = True
         settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        # Под тестовыми данными движок включён только субъектам серверного списка.
+        settings.SYNTHETIC_TEST_SUBJECT_IDS = [str(goal.client_id)]
         assert _api().post(LITE_URL, LITE_BODY, format="json").status_code == 201
         lite = PersonalPlan.objects.get()
 

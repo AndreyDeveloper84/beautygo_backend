@@ -113,6 +113,14 @@ def _save(decision: dict, **over):
 
 
 MISSING_ONE = [{"flag": False}, {"listed": False}, {"persona": False}]
+#: Вне серверного списка при включённых тестовых данных движка нет вовсе
+#: (вторая линия изоляции, владелец 10.10): не «плана нет», а «выключено».
+OFF_THE_LIST = {"listed": False}
+
+
+def _engine_is_off(resp) -> None:
+    assert resp.status_code == 404, resp.content
+    assert resp.json()["error"]["code"] == "PLAN_ENGINE_DISABLED"
 
 
 class TestTheServerDecidesWhoReadsSynthetic:
@@ -123,25 +131,29 @@ class TestTheServerDecidesWhoReadsSynthetic:
         self, goal, synthetic, settings, owner, missing,
     ) -> None:
         _allow(settings, owner, **missing)
+        if missing == OFF_THE_LIST:
+            _engine_is_off(_api().post(DECISION_URL, _body(), format="json"))
+            return
         data = _compose()
         assert (data["outcome"], data["decision"]) == ("NO_CURATED_DECOMPOSITION", None)
 
     @pytest.mark.parametrize("value", [True, "true", 1, {"subject_id": "x"}])
     def test_the_request_cannot_ask_for_synthetic(self, goal, synthetic, settings, owner, value) -> None:
         """Разрешение — не поле запроса: присланное в теле ничего не включает,
-        даже при включённом стенде, если субъект не в серверном списке."""
-        _allow(settings, owner, listed=False)
+        даже при включённом стенде и субъекте в списке, если сервер разрешения
+        на синтетику не выдал (нет признака тестовой персоны)."""
+        _allow(settings, owner, persona=False)
         data = _compose(include_synthetic=value)
         assert (data["outcome"], data["decision"]) == ("NO_CURATED_DECOMPOSITION", None)
 
     def test_another_persons_permission_does_not_carry_over(self, goal, synthetic, settings, owner) -> None:
-        """В списке стоит другой субъект — у этого синтетики нет."""
+        """В списке стоит другой субъект — у этого нет ни синтетики, ни движка."""
         other = User.objects.create_user(
             username="plan_synth_other", password="x", role="client", phone="+79995028771", is_test_persona=True,
         )
         _allow(settings, owner)
         settings.SYNTHETIC_TEST_SUBJECT_IDS = [str(other.pk)]
-        assert _compose()["outcome"] == "NO_CURATED_DECOMPOSITION"
+        _engine_is_off(_api().post(DECISION_URL, _body(), format="json"))
 
     def test_under_the_permission_the_plan_is_composed_and_marked(self, goal, synthetic, test_data_on) -> None:
         data = _compose()
@@ -213,6 +225,9 @@ class TestLabelsOfSyntheticSteps:
     @pytest.mark.parametrize("missing", MISSING_ONE)
     def test_without_the_permission_there_is_no_such_label(self, goal, synthetic, settings, owner, missing) -> None:
         _allow(settings, owner, **missing)
+        if missing == OFF_THE_LIST:
+            _engine_is_off(_api().post(self.LABELS_URL, {"keys": ["synthetic-a"]}, format="json"))
+            return
         label = self._labels("synthetic-a")["synthetic-a"]
         assert (label["label"], label["synthetic"]) == (None, False)
         assert label["state"] != "labelled"
@@ -290,6 +305,10 @@ class TestSavingASyntheticPlan:
         decision = _compose()["decision"]
         _allow(settings, owner, **missing)
         resp = _save(decision, include_synthetic=True)
+        if missing == OFF_THE_LIST:
+            _engine_is_off(resp)
+            assert not Plan.objects.exists() and not PlanRevision.objects.exists()
+            return
         assert resp.status_code == 409, resp.content
         assert resp.json()["error"]["code"] == "PLAN_CAPABILITY_NOT_CONFIRMED"
         assert resp.json()["error"]["details"] == {"capability_ref": "synthetic-a"}
@@ -376,8 +395,13 @@ class TestTheMarkOnThePlanNeverChanges:
         assert (marked.status, marked.synthetic) == ("paused", True)
 
     def test_the_mark_survives_the_permission_being_withdrawn(self, marked, settings, owner) -> None:
-        _allow(settings, owner, listed=False)
+        _allow(settings, owner, persona=False)  # в списке, разрешения на синтетику больше нет
         assert _api().get(PLAN_URL).json()["data"]["plan"]["synthetic"] is True
+
+    def test_taken_off_the_list_the_plan_is_not_read_and_keeps_its_mark(self, marked, settings, owner) -> None:
+        _allow(settings, owner, listed=False)
+        assert _api().get(PLAN_URL).json()["data"]["plan"] is None
+        assert Plan.objects.get().synthetic is True
 
     def test_the_mark_survives_the_test_data_being_switched_off(self, marked, settings) -> None:
         """Выключили тестовые данные — сохранённый синтетический план не

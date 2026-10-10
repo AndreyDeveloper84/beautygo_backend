@@ -205,6 +205,24 @@ class TestIdentifiersDoNotBypassAdmission:
         assert resp.json()["error"]["code"] == "PLAN_ENGINE_DISABLED"
         _nothing_was_written()
 
+    def test_under_test_data_a_person_outside_the_list_has_no_engine(self, plan, owner, specialist, offer, settings) -> None:
+        """Вторая линия изоляции (владелец 10.10): пока включены тестовые данные,
+        запись от шага человеку вне серверного списка отвечает как при
+        выключенном движке — путь идёт через ручку записи, не через ручки Плана."""
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        settings.SYNTHETIC_TEST_SUBJECT_IDS = []
+        resp = _create(owner, specialist, offer, provenance=_provenance(plan))
+        assert resp.status_code == 404, resp.content
+        assert resp.json()["error"]["code"] == "PLAN_ENGINE_DISABLED"
+        _nothing_was_written()
+
+    def test_under_test_data_an_ordinary_booking_without_the_block_is_untouched(
+        self, owner, specialist, offer, settings,
+    ) -> None:
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        settings.SYNTHETIC_TEST_SUBJECT_IDS = []
+        assert _create(owner, specialist, offer).status_code == 201
+
     @pytest.mark.parametrize(
         ("patch", "reason"),
         [
