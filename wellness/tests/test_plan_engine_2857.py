@@ -129,6 +129,14 @@ def _token_and_flags(settings):
     settings.PLAN_LITE_ENABLED = True
 
 
+@pytest.fixture(autouse=True)
+def _confirmed_knowledge(db):
+    """DRF-2871: сохраняется только план на подтверждённом знании."""
+    from wellness.tests.knowledge import confirm_capability_for_goal
+
+    confirm_capability_for_goal()
+
+
 def _user(username: str, phone: str) -> User:
     return User.objects.create_user(
         username=username, password="x", role="client", phone=phone, is_proxy=True,
