@@ -393,7 +393,12 @@ def admit_step_for_booking(client_id: UUID, provenance: PlanStepProvenance, *, s
 def step_state(plan: Plan, revision: PlanRevision) -> dict[str, Any]:
     """По каждому шагу ревизии: действующий уровень и записи, сделанные от
     шага. Статус и время записи — с ``Appointment`` на момент чтения. Ни
-    счётчика, ни признака «выполнено» (PE-4)."""
+    счётчика, ни признака «выполнено» (PE-4).
+
+    ``start_datetime`` — момент (в UTC); ``timezone`` — пояс, в котором
+    запись назначена (снимок пояса мастера на момент записи, имя IANA).
+    Без него вызывающий читал часы из строки момента и показывал человеку
+    время со сдвигом либо подставлял свой запасной пояс."""
     bookings: dict[str, list[dict]] = {}
     for link in (
         PlanStepBooking.objects.filter(plan=plan, plan_revision=revision)
@@ -405,6 +410,7 @@ def step_state(plan: Plan, revision: PlanRevision) -> dict[str, Any]:
                 "appointment_id": str(link.appointment_id),
                 "status": link.appointment.status,
                 "start_datetime": link.appointment.start_datetime.isoformat(),
+                "timezone": link.appointment.snapshot_timezone,
             }
         )
     out: dict[str, Any] = {}
