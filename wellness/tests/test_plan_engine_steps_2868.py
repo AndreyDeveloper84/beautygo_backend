@@ -26,6 +26,8 @@ import pytest
 from django.db import IntegrityError, transaction
 from rest_framework.test import APIClient
 
+from wellness.tests.plan_consent import AttestingClient
+
 from appointments.models import Appointment
 from goals.models import ClientGoal
 from services.models import SalonService, ServiceCategory, ServiceTemplate, SpecialistService
@@ -171,7 +173,7 @@ def other_offer(tenant, category, other_canon, specialist) -> SalonService:
 
 
 def _api(external_user_id: str = OWNER) -> APIClient:
-    c = APIClient()
+    c = AttestingClient()
     c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {VALID_TOKEN}"
     c.defaults["HTTP_X_EXTERNAL_USER_ID"] = external_user_id
     return c
