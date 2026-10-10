@@ -763,6 +763,8 @@ SYNTHETIC_TRIGGERS = [
     "capabilitygoallink_synthetic_mark_is_immutable",
     "capabilitygoallink_synthetic_stays_apart",
     "capabilitytemplate_synthetic_stays_apart",
+    # wellness/0012 (DRF-2871): пометка на сохранённом плане — тем же родом замка.
+    "plan_synthetic_mark_is_immutable",
     "procedurecapability_synthetic_mark_is_immutable",
     "salonservice_synthetic_mark_is_immutable",
     "salonservice_synthetic_stays_apart",

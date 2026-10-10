@@ -90,7 +90,7 @@ FIELDS: dict[str, tuple[dict[str, str], dict[str, str]]] = {
     ),
     # DRF-2857 — сохранённый план (Plan Engine) и его ревизии.
     "wellness.Plan": (
-        {**_same("status", "created_via", "created_at", "status_changed_at"), "goal": "goal_key"},
+        {**_same("status", "created_via", "created_at", "status_changed_at", "synthetic"), "goal": "goal_key"},
         {"id": _KEY, "subject_user": _OWNER, "idempotency_key": _REPEAT,
          "current_revision": "указатель на последнюю ревизию — ревизии выгружены внутри плана"},
     ),

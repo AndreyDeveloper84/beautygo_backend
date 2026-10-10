@@ -44,7 +44,11 @@ from django.utils import timezone
 
 from goals.models import ClientGoal
 from recommendation.api import REASON_CODE_REGISTRY_VERSION, RESOLVER_SPEC_VERSION
-from services.capabilities import procedures_by_capability_helping_goal
+from services.capabilities import (
+    procedures_by_capability_helping_goal,
+    synthetic_capability_keys_helping_goal,
+)
+from services.synthetic import grant_for
 
 from .plan_engine import ContractViolation, PlanEngineDisabled, plan_engine_enabled
 from .plan_safety import SAFETY_BLOCKING, SAFETY_STATES
@@ -279,7 +283,11 @@ def compose_plan(user, request: ComposeRequest) -> dict[str, Any]:
     if goal is None or not goal.goal_key:
         return _nothing(Outcome.NO_GOAL, request, reason="no_active_goal" if goal is None else "goal_has_no_key")
 
-    procedures = procedures_by_capability_helping_goal(goal.goal_key)
+    # Подтверждённое знание — всегда; помеченная синтетика — только по
+    # серверному разрешению субъекта (флаг стенда, серверный список, тестовая
+    # персона). Из тела запроса разрешение прислать нельзя.
+    grant = grant_for(user)
+    procedures = procedures_by_capability_helping_goal(goal.goal_key, include_synthetic=grant)
     if not procedures:
         return _nothing(Outcome.NO_CURATED_DECOMPOSITION, request, goal_key=goal.goal_key)
     # По алфавиту ключа — ради воспроизводимости; это не порядок исполнения.
@@ -322,10 +330,18 @@ def compose_plan(user, request: ComposeRequest) -> dict[str, Any]:
         assertions.extend(step_assertions)
         step_validations[step_id] = _step_verdict(step_assertions)
 
+    # Хоть один шаг на синтетической способности — план синтетический целиком:
+    # механика, проверенная на таких данных, не доказывает обоснованности.
+    synthetic_refs = sorted(
+        set(capability_refs)
+        & synthetic_capability_keys_helping_goal(goal.goal_key, include_synthetic=grant)
+    )
     return {
         "outcome": Outcome.PLAN,
         "safety_state": request.safety_state,
         "details": {},
+        "synthetic": bool(synthetic_refs),
+        "synthetic_capability_refs": synthetic_refs,
         "decision": {
             "decision_id": str(uuid.uuid4()),
             "goal_ref": str(goal.id),

@@ -36,6 +36,8 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from goals.models import ClientGoal
+from services.capabilities import capability_keys_helping_goal, synthetic_capability_keys_helping_goal
+from services.synthetic import grant_for
 
 from .models import (
     PLAN_FORBIDDEN_FIELDS,
@@ -112,6 +114,15 @@ class ReplacementTargetChanged(PlanEngineError):
 class IdempotencyConflict(PlanEngineError):
     """Тот же ключ команды, другое содержимое — клиент переиспользовал
     подтверждение; ничего не записано."""
+
+
+class CapabilityNotConfirmed(PlanEngineError):
+    """Шаг стоит на способности, которой нет ни в подтверждённом знании, ни —
+    под двумя факторами — в помеченной синтетике. Такой план не сохраняется."""
+
+    def __init__(self, capability_ref: str) -> None:
+        super().__init__(capability_ref)
+        self.capability_ref = capability_ref
 
 
 class PlanNotFound(PlanEngineError):
@@ -384,6 +395,32 @@ def _replay(key: str, digest: str) -> Plan | None:
     return plan
 
 
+def _synthetic_or_refuse(user, goal: ClientGoal, command: PlanCommand) -> bool:
+    """Стоит ли план на помеченной синтетике; отказ, если шаг не стоит ни на чём.
+
+    ``True`` — хоть один шаг на синтетической способности: план синтетический
+    целиком. Синтетику читает сервер по личности: разрешение выдаёт
+    :func:`services.synthetic.grant_for` (флаг стенда, субъект в серверном
+    списке, тестовая персона) — из запроса его не прислать. Без разрешения
+    способность шага обязана быть в подтверждённом знании.
+    """
+    grant = grant_for(user)
+    confirmed = set(capability_keys_helping_goal(goal.goal_key)) if goal.goal_key else set()
+    synthetic_keys = (
+        synthetic_capability_keys_helping_goal(goal.goal_key, include_synthetic=grant)
+        if goal.goal_key
+        else frozenset()
+    )
+    marked = False
+    for step in command.steps:
+        ref = step["capability_ref"]
+        if ref in synthetic_keys:
+            marked = True
+        elif ref not in confirmed:
+            raise CapabilityNotConfirmed(ref)
+    return marked
+
+
 def create_plan_from_command(user, command: PlanCommand) -> tuple[Plan, bool]:
     """Сохранить план по подтверждению человека. Возвращает ``(plan, created)``;
     повтор команды — тот же ``Plan`` и ``created=False``, без второй ревизии."""
@@ -424,6 +461,12 @@ def create_plan_from_command(user, command: PlanCommand) -> tuple[Plan, bool]:
                 if first != digest:
                     raise IdempotencyConflict()
                 return same, False
+            # Сохранение само перечитывает знание — по существу, а не по метке
+            # ответа сборки. Подтверждённое читается всегда; помеченная
+            # синтетика — только по серверному разрешению субъекта, и план с
+            # ней помечается синтетическим навсегда. Повтор уже сохранённой команды выше не
+            # судится заново.
+            synthetic = _synthetic_or_refuse(user, goal, command)
 
             now = timezone.now()
             # Решение владельца 08.10: сохранённое не вытесняет действующий
@@ -442,6 +485,7 @@ def create_plan_from_command(user, command: PlanCommand) -> tuple[Plan, bool]:
                 status = Plan.Status.ACTIVE
             plan = Plan.objects.create(
                 subject_user=user, goal=goal, idempotency_key=key, status=status, status_changed_at=now,
+                synthetic=synthetic,
             )
             revision = PlanRevision.objects.create(
                 plan=plan,
@@ -605,6 +649,9 @@ def plan_document(plan: Plan) -> dict[str, Any]:
         # плана не переписывается (§4.5 — отложено решением 07.10).
         "in_effect": plan.status == Plan.Status.ACTIVE and goal_state == ClientGoal.State.ACTIVE,
         "created_via": plan.created_via,
+        # План на помеченных тестовых данных. Пометка ставится при сохранении и
+        # не меняется: механика на синтетике не доказывает обоснованности.
+        "synthetic": plan.synthetic,
         "created_at": plan.created_at.isoformat(),
         "status_changed_at": plan.status_changed_at.isoformat(),
         "revision": {

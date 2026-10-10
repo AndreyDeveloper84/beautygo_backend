@@ -31,6 +31,7 @@ from wellness.tests.test_plan_engine_2857 import (  # noqa: F401 — фикст�
     STRANGER,
     _api,
     _command,
+    _confirmed_knowledge,
     _step,
     _token_and_flags,
     goal,

@@ -53,6 +53,12 @@ OUT_OF_SIGHT = "OUT_OF_SIGHT"
 NO_SELLABLE_MASTER = "NO_SELLABLE_MASTER"
 NOT_ADMITTED = "NOT_ADMITTED"
 HEALTH_CONDITIONS_UNDEFINED = "HEALTH_CONDITIONS_UNDEFINED"
+#: Предложение по другую сторону границы теста (DRF-2871): у помеченного
+#: синтетическим плана — настоящее предложение, у настоящего — помеченное.
+#: Решение владельца 08.10: вся цепочка тестовая; обычный путь синтетику не
+#: получает. Шаг настоящей способности в помеченном плане до настоящей
+#: услуги и записи не доходит.
+ACROSS_THE_TEST_BOUNDARY = "ACROSS_THE_TEST_BOUNDARY"
 #: Отклонены все, и по разным причинам.
 NONE_ADMITTED = "NONE_ADMITTED"
 
@@ -119,7 +125,7 @@ def step_candidates(user, plan: Plan, step_id: str) -> dict[str, Any]:
     хода, ограничения) вызывающий проверяет ДО — здесь только подбор."""
     capability_ref = _capability_of(plan.current_revision, step_id)
     found = offers_by_capability(capability_ref, viewer=user)
-    rejected = {NO_SELLABLE_MASTER: 0, NOT_ADMITTED: 0, HEALTH_CONDITIONS_UNDEFINED: 0}
+    rejected = {NO_SELLABLE_MASTER: 0, NOT_ADMITTED: 0, HEALTH_CONDITIONS_UNDEFINED: 0, ACROSS_THE_TEST_BOUNDARY: 0}
     candidates: list[dict[str, Any]] = []
 
     if found.offer_ids:
@@ -134,6 +140,9 @@ def step_candidates(user, plan: Plan, step_id: str) -> dict[str, Any]:
             offer = offers.get(offer_id)
             if verdict is None or offer is None or verdict.verdict is OfferVerdict.NOT_ADMITTED:
                 rejected[NOT_ADMITTED] += 1
+                continue
+            if verdict.synthetic != plan.synthetic:
+                rejected[ACROSS_THE_TEST_BOUNDARY] += 1
                 continue
             if verdict.verdict is OfferVerdict.NO_SELLABLE_MASTER:
                 rejected[NO_SELLABLE_MASTER] += 1
