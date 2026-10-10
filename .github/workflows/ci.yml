@@ -134,10 +134,10 @@ jobs:
     # another PR. A cancelled shard reads as a red PR, and under the serial
     # merge queue it blocks everyone behind it.
     #
-    # 35 is headroom, not a fix: the real answer is to refit the split by
-    # measured time (shard 4 is the catch-all and takes every new app). If a
-    # shard is cancelled at THIS ceiling, do not raise it again — rebalance.
-    timeout-minutes: 35
+    # 35 held two days: on 10.10 shard 4 ran 7189 tests in 33:42, all green,
+    # and was CANCELLED at 35m07s. Raised once more by the owner's decision
+    # (10.10) as a stopgap. 45 buys time only — the split still has to be refit.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
