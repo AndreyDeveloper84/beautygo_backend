@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -63,8 +64,43 @@ VALIDATION_STATUSES: frozenset[str] = frozenset({"VALID", "INCOMPLETE", "BLOCKED
 MODE_SAVE = "SAVE"
 
 
+logger = logging.getLogger(__name__)
+
+
 def plan_engine_enabled() -> bool:
+    """Включён ли движок на стенде вообще. Кому именно он включён — отвечает
+    :func:`plan_engine_enabled_for`; действия человека читают её, а не эту."""
     return bool(getattr(settings, "PLAN_ENGINE_ENABLED", False))
+
+
+def plan_engine_enabled_for(user) -> bool:
+    """Включён ли Plan Engine ЭТОМУ человеку.
+
+    Решение владельца 10.10.2026 (вторая линия изоляции синтетического
+    прогона, независимая от бота): пока на стенде включены тестовые данные
+    (``SYNTHETIC_TEST_DATA_ENABLED``), движок отвечает «выключено» всем, кроме
+    тестовых субъектов. Тестовый субъект — тот, кому сервер выдаёт разрешение
+    на синтетику (:func:`services.synthetic.grant_for`): флаг стенда, субъект
+    в серверном списке, тестовая персона. Из запроса это не прислать.
+
+    Отказ по умолчанию: пустой список, неизвестный человек, ошибка при
+    выдаче разрешения — «выключено». Реальный человек при этом получает
+    ровно то, что получал при выключенном движке, и ничего о тесте не узнаёт.
+
+    Тестовые данные выключены — правило не действует: движок включён всем,
+    как решает один ``PLAN_ENGINE_ENABLED``.
+    """
+    if not plan_engine_enabled():
+        return False
+    if not getattr(settings, "SYNTHETIC_TEST_DATA_ENABLED", False):
+        return True
+    try:
+        from services.synthetic import grant_for
+
+        return grant_for(user) is not None
+    except Exception:  # noqa: BLE001 — отказ по умолчанию: сбой проверки не открывает движок
+        logger.exception("plan_engine.scope_check_failed")
+        return False
 
 
 class PlanEngineError(Exception):
@@ -424,7 +460,7 @@ def _synthetic_or_refuse(user, goal: ClientGoal, command: PlanCommand) -> bool:
 def create_plan_from_command(user, command: PlanCommand) -> tuple[Plan, bool]:
     """Сохранить план по подтверждению человека. Возвращает ``(plan, created)``;
     повтор команды — тот же ``Plan`` и ``created=False``, без второй ревизии."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         raise PlanEngineDisabled()
     key = idempotency_key(user.pk, command)
     digest = content_hash(command)
@@ -554,7 +590,7 @@ def replace_plan(user, plan_id: UUID, replaces_plan_id: UUID, safety) -> tuple[P
     Возвращает ``(план, выполнено)``; повтор уже выполненной замены — тот же
     план и ``False``.
     """
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         raise PlanEngineDisabled()
     with transaction.atomic():
         plan = (
@@ -613,7 +649,7 @@ REQUESTABLE_STATUSES: frozenset[str] = frozenset(
 def set_plan_status(user, plan_id: UUID, to_status: str) -> Plan:
     """Пауза / возобновление / архив. Запрос текущего статуса — не ошибка и не
     запись (повтор кнопки)."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         raise PlanEngineDisabled()
     try:
         with transaction.atomic():
@@ -697,7 +733,7 @@ def _step_state(plan: Plan, revision: PlanRevision) -> dict[str, Any]:
 def proposal_payload(user) -> dict[str, Any] | None:
     """Предложение плана действующей цели человека; ``None`` — предложения нет
     или флаг выключен."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         return None
     plan = (
         Plan.objects.filter(
@@ -715,7 +751,7 @@ def plan_payload(user) -> dict[str, Any] | None:
     ``active`` раньше ``paused``: сохранение нового плана гасит только
     прежний ``active`` (§4.9), поэтому у цели могут быть и действующий, и
     приостановленный — отдаётся действующий, иначе последний приостановленный."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         return None
     plans = Plan.objects.filter(
         subject_user=user, goal__state=ClientGoal.State.ACTIVE,

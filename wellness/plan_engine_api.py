@@ -53,7 +53,7 @@ from .plan_engine import (
     create_plan_from_command,
     parse_command,
     plan_document,
-    plan_engine_enabled,
+    plan_engine_enabled_for,
     plan_payload,
     proposal_payload,
     replace_plan,
@@ -699,7 +699,7 @@ class PlanCapabilityLabelsView(APIView):
     # пишет. Под гейтом человек с заявкой на удаление видел бы свой план
     # списком ключей.
     def post(self, request: Request) -> Response:
-        if not plan_engine_enabled():
+        if not plan_engine_enabled_for(request.user):
             return _disabled()
         keys = request.data.get("keys") if isinstance(request.data, dict) else None
         if (

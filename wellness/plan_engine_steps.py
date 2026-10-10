@@ -36,7 +36,7 @@ from goals.models import ClientGoal
 from services.models import SalonService, ServiceTemplate
 
 from .models import Plan, PlanRevision, PlanStepBooking, PlanStepResolution
-from .plan_engine import PlanEngineDisabled, PlanEngineError, PlanNotFound, plan_engine_enabled
+from .plan_engine import PlanEngineDisabled, PlanEngineError, PlanNotFound, plan_engine_enabled_for
 from .plan_restrictions import blocking_question_ids
 from .plan_step_candidates import offer_is_candidate, step_candidates
 from .plan_safety import S1_NONE, S1_OPEN, SafetyInput, SafetyInputError, parse_step_safety_input
@@ -194,7 +194,7 @@ def resolve_step(
 ) -> tuple[PlanStepResolution, bool]:
     """Записать, чем резолвер разрешил шаг. Возвращает ``(строка, created)``;
     повтор того же перехода с тем же содержимым — та же строка."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         raise PlanEngineDisabled()
     if level not in PlanStepResolution.Level.values:
         raise ResolutionRefused("level_invalid")
@@ -261,7 +261,7 @@ def resolve_step(
 def candidates_for_step(user, plan_id: UUID, step_id: str, safety: SafetyInput) -> dict[str, Any]:
     """Кандидаты услуги для шага (§8.2). Ничего не пишет; допуск шага — тот
     же, что у перехода: план действует, вердикт хода, ограничения."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         raise PlanEngineDisabled()
     _safety_gate(safety)
     with transaction.atomic():
@@ -301,7 +301,7 @@ def link_booking(
 ) -> tuple[PlanStepBooking, bool]:
     """Связь после факта: запись уже создана обычным путём. Возвращает
     ``(строка, created)``; повтор — та же строка."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         raise PlanEngineDisabled()
     _safety_gate(safety)
     try:
@@ -371,6 +371,13 @@ def parse_booking_provenance(raw: Any) -> PlanStepProvenance | None:
     return PlanStepProvenance(plan_id=plan_id, step_id=step_id, safety=safety)
 
 
+def _client(client_id: UUID):
+    """Запись от шага знает только идентификатор клиента — человек читается здесь."""
+    from users.models import User
+
+    return User.objects.filter(pk=client_id).first()
+
+
 def admit_step_for_booking(client_id: UUID, provenance: PlanStepProvenance, *, salon_service_id: UUID | None) -> Plan:
     """Допуск шага ДО создания записи, внутри её транзакции.
 
@@ -379,7 +386,7 @@ def admit_step_for_booking(client_id: UUID, provenance: PlanStepProvenance, *, s
     шаг. Возвращает запертый план для ``attach_booking``. Отказ — исключение;
     транзакция записи откатывается, записи нет.
     """
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(_client(client_id)):
         raise PlanEngineDisabled()
     _safety_gate(provenance.safety)
     plan = _locked_plan(client_id, provenance.plan_id)
