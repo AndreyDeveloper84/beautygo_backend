@@ -380,6 +380,18 @@ class CreateBookingService:
                 dto.client_id, dto.plan_step, salon_service_id=salon_service_id,
             )
 
+        # Решение владельца 10.10.2026: записаться на помеченную синтетическую
+        # услугу обычным путём нельзя — только от шага плана, помеченного
+        # синтетическим (изолированный путь сквозной проверки: такой план
+        # сохраняется лишь под серверным разрешением). Знание идентификатора
+        # услуги пути не открывает, кто бы ни был вызывающим. Отказ — тот же,
+        # что у несуществующей услуги: о существовании синтетики он не сообщает.
+        if salon_service_id is not None and not (plan_for_step is not None and plan_for_step.synthetic):
+            from services.models import SalonService
+
+            if SalonService.objects.filter(pk=salon_service_id, synthetic=True).exists():
+                raise ServiceNotActiveError("This service is not available for booking")
+
         # C1 — billing eligibility (W2): a past_due subscription blocks
         # only NEW bookings. Placed AFTER the idempotency early-return
         # so a retried create of an existing booking is never refused

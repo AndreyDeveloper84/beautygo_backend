@@ -89,7 +89,8 @@ def _callers(seeded) -> dict[str, APIClient]:  # noqa: F811
 class TestTheTestMasterIsNotInTheFeed:
     def test_the_seeded_master_is_a_test_master_by_the_predicate(self, seeded, real_master) -> None:  # noqa: F811
         """Положительный контроль признака: иначе «не пришёл» мог бы значить «не засеян»."""
-        test_masters = set(map(str, SpecialistProfile.objects.filter(synthetic_offer_master_q()).values_list("pk", flat=True)))
+        found = SpecialistProfile.objects.filter(synthetic_offer_master_q()).values_list("pk", flat=True)
+        test_masters = set(map(str, found))
         assert test_masters == {seeded["master_id"]}
 
     def test_no_caller_gets_him_in_the_list(self, seeded, real_master) -> None:  # noqa: F811
