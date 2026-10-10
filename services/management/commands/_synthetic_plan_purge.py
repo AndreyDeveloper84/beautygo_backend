@@ -21,8 +21,13 @@
 * **Что держат следы прогона — остаётся и выключается.** База не даёт
   удалить услугу и мастера, на которых ссылается запись или выбор шага. Такая
   строка остаётся; тест-мастер при этом выводится из продажи (не принимает
-  записи, не действующий, вход закрыт), а его предложение по услуге
-  удаляется — записаться на неё больше нельзя.
+  записи, не действующий, вход закрыт) — записаться к нему больше нельзя.
+* **Оставленный тест-мастер остаётся скрытым.** Из обычной выдачи боту и
+  клиентам его исключает признак «у мастера есть предложение по помеченной
+  услуге» (``users.sellable.synthetic_offer_master_q``, решение владельца
+  10.10.2026). Поэтому у мастера, которого удалить нельзя, это предложение
+  НЕ удаляется: без него он вернулся бы в выдачу обычным мастером
+  демо-салона.
 * **Одна транзакция.** Пробный прогон исполняет всё и откатывает её.
 
 Чего команда не делает и не может: строка тест-мастера в зеркале каталога у
@@ -116,6 +121,12 @@ def _run_traces(offers: list[SalonService], master: SpecialistProfile | None) ->
     return {what: count for what, count in traces.items() if count}
 
 
+def _has_bookings(master: SpecialistProfile) -> bool:
+    from appointments.models import Appointment
+
+    return Appointment.objects.filter(specialist=master).exists()
+
+
 # ─── тест-мастер ────────────────────────────────────────────────────────────
 
 
@@ -199,14 +210,28 @@ def purge(spec: dict, *, dry_run: bool) -> PurgeReport:
                 report.absent.append(f"тест-мастер «{account}»")
 
             report.run_traces = _run_traces(offers, master)
+            # Мастера, к которому есть запись, база удалить не даст: он
+            # остаётся — и вместе с ним его предложение, по которому он скрыт.
+            master_stays = master is not None and _has_bookings(master)
 
             # Порядок — обратный засеву: предложение мастера → услуга →
             # способности (привязки и связи с целью уходят каскадом) → каноны
             # → тест-мастер → служебный пользователь.
             for offer in offers:
+                hides_the_master = False
                 for edge in SpecialistService.objects.filter(salon_service=offer):
+                    if master_stays and edge.specialist_id == master.pk:
+                        hides_the_master = True
+                        report.kept.append(
+                            f"предложение мастера по «{offer.name}» — оставлено намеренно: тест-мастер остаётся "
+                            "в базе, а из обычной выдачи его исключает именно это предложение"
+                        )
+                        continue
                     _remove(report, f"предложение мастера по «{offer.name}»", edge)
-                _remove(report, f"услуга «{offer.name}»", offer)
+                if hides_the_master:
+                    report.kept.append(f"услуга «{offer.name}» — держит оставленное предложение тест-мастера")
+                else:
+                    _remove(report, f"услуга «{offer.name}»", offer)
             for capability in capabilities:
                 _remove(report, f"способность {capability.key}", capability)
             for template in templates:

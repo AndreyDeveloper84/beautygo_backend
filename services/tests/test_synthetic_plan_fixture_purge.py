@@ -9,7 +9,8 @@
 * строка с именем из набора, но без пометки синтетики, — остановка без
   единого удаления;
 * следы прогона (запись, выбор услуги в шаге плана) команда не удаляет: то,
-  что они держат, остаётся, а тест-мастер выводится из продажи.
+  что они держат, остаётся, а тест-мастер выводится из продажи и остаётся
+  скрытым из обычной выдачи.
 
 Пределы: запись здесь создаётся прямой строкой, без события и оплаты — узел
 проверяет запрет удаления, а не то, что запись порождает вокруг себя.
@@ -32,7 +33,7 @@ from services.management.commands._synthetic_plan_purge import purge
 from services.models import ProcedureCapability, SalonService, ServiceTemplate, SpecialistService
 from services.tests.test_synthetic_plan_fixture_seed import NOTHING, SEEDED, _census, spec, world  # noqa: F401
 from users.models import Profile, SpecialistProfile, TenantUserRelationship, User
-from users.sellable import sellable_q
+from users.sellable import sellable_q, synthetic_offer_master_q
 
 pytestmark = pytest.mark.django_db
 
@@ -172,9 +173,12 @@ def test_a_booking_keeps_the_service_and_the_master_and_takes_him_off_sale(spec,
     assert SpecialistProfile.objects.filter(pk=master.pk).exists()
     assert ServiceTemplate.objects.filter(pk=offer.template_id).exists()
     assert report.run_traces == {"записи на синтетическую услугу": 1, "записи к тест-мастеру": 1}
-    # Записаться на услугу больше нельзя, мастер не продаётся и не входит.
-    assert not SpecialistService.objects.filter(salon_service=offer).exists()
+    # Мастер не продаётся и не входит — записаться к нему больше нельзя.
     assert not SpecialistProfile.objects.filter(sellable_q(), pk=master.pk).exists()
+    # И остаётся скрытым из обычной выдачи: признак, по которому его
+    # исключают, — предложение по помеченной услуге — на месте.
+    assert SpecialistService.objects.filter(salon_service=offer, specialist=master).exists()
+    assert not SpecialistProfile.objects.exclude(synthetic_offer_master_q()).filter(pk=master.pk).exists()
     assert not SpecialistWorkingHours.objects.filter(specialist=master).exists()
     assert User.objects.get(username=MASTER).is_active is False
     assert len(report.disabled) == 1
@@ -183,6 +187,7 @@ def test_a_booking_keeps_the_service_and_the_master_and_takes_him_off_sale(spec,
     assert list(ServiceTemplate.objects.filter(synthetic=True).values_list("pk", flat=True)) == [offer.template_id]
     kept = " | ".join(report.kept)
     assert "услуга" in kept and "тест-мастер" in kept and "служебный пользователь" in kept, kept
+    assert "оставлено намеренно" in kept, kept
 
 
 def test_a_step_choice_keeps_the_service_but_not_the_master(spec, world, settings) -> None:  # noqa: F811
