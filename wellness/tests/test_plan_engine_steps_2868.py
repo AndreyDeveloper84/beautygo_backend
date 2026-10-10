@@ -520,10 +520,25 @@ class TestBookingIsAFact:
             "appointment_id": str(appt.id),
             "status": appt.status,
             "start_datetime": appt.start_datetime.isoformat(),
+            "timezone": appt.snapshot_timezone,
         }]
         assert state["s2"]["bookings"] == []
         link = PlanStepBooking.objects.get()
         assert link.resolver_decision_id == DECISION and link.recommendation_id is None
+
+    def test_the_booking_carries_the_zone_it_was_made_in(self, goal, canon, offer, specialist, owner) -> None:
+        """Момент отдаётся в UTC; часы для человека — в поясе записи, не в
+        запасном поясе вызывающего. Пояс не московский — чтобы узел не
+        совпал с умолчанием."""
+        type(specialist).objects.filter(pk=specialist.pk).update(timezone="Asia/Yekaterinburg")
+        plan = _save(goal)
+        _to_offer(plan, canon, offer)
+        appt = _book(owner, specialist, offer)
+        resp = _link(plan, appt)
+        assert resp.status_code == 201, resp.content
+        [booking] = resp.json()["data"]["plan"]["step_state"]["s1"]["bookings"]
+        assert booking["timezone"] == "Asia/Yekaterinburg"
+        assert booking["start_datetime"].endswith("+00:00")
 
     def test_linking_changes_neither_the_plan_nor_the_goal(self, goal, canon, offer, specialist, owner) -> None:
         plan = _save(goal)
