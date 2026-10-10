@@ -50,7 +50,7 @@ from services.capabilities import (
 )
 from services.synthetic import grant_for
 
-from .plan_engine import ContractViolation, PlanEngineDisabled, plan_engine_enabled
+from .plan_engine import ContractViolation, PlanEngineDisabled, plan_engine_enabled_for
 from .plan_safety import SAFETY_BLOCKING, SAFETY_STATES
 
 PLAN_SPEC_VERSION = "1.0"
@@ -274,7 +274,7 @@ def _not_justified_reason(capability_refs: list[str], procedures: dict[str, froz
 
 def compose_plan(user, request: ComposeRequest) -> dict[str, Any]:
     """Собрать эфемерный ``PlanDecision`` по действующей цели человека."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         raise PlanEngineDisabled()
     if request.safety_state in SAFETY_BLOCKING:
         return _nothing(Outcome.SAFETY_BLOCKED, request)
