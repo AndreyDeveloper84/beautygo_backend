@@ -90,6 +90,10 @@ def goal(owner):
     from services.models import GoalOption
 
     GoalOption.objects.create(key="gate-goal", label="Цель гейта")
+    # DRF-2871: план сохраняется только на подтверждённом знании — под эту цель.
+    from wellness.tests.knowledge import confirm_capability_for_goal
+
+    confirm_capability_for_goal(goal_key="gate-goal")
     return ClientGoal.objects.create(client=owner, goal_key="gate-goal", source_channel="bot")
 
 
