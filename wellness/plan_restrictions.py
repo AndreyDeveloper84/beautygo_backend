@@ -35,7 +35,7 @@ from uuid import UUID
 from django.db import IntegrityError, transaction
 
 from .models import Plan, PlanRestriction, PlanRestrictionLift
-from .plan_engine import PlanEngineDisabled, PlanEngineError, PlanNotFound, plan_engine_enabled
+from .plan_engine import PlanEngineDisabled, PlanEngineError, PlanNotFound, plan_engine_enabled_for
 from .plan_safety import SafetyInput
 
 SCOPE_PLAN = PlanRestriction.Scope.PLAN
@@ -215,7 +215,7 @@ def open_restriction(user, plan_id: UUID, spec: RestrictionSpec, safety: SafetyI
     """Открыть ограничение на уже сохранённом плане. Вердикт хода здесь не
     гейт: ограничить план можно при любом состоянии, в том числе при «стоп» —
     ограничение только сужает."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         raise PlanEngineDisabled()
     with transaction.atomic():
         plan = _locked_plan(user, plan_id)
@@ -226,7 +226,7 @@ def lift_restriction(
     user, plan_id: UUID, restriction_id: UUID, *, lift_kind: str, answer_option_id: str, safety: SafetyInput,
 ) -> tuple[PlanRestrictionLift, bool]:
     """Снять ограничение. Повтор — та же строка снятия, без второй."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         raise PlanEngineDisabled()
     with transaction.atomic():
         plan = _locked_plan(user, plan_id)
