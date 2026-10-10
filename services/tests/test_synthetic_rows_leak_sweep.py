@@ -386,14 +386,20 @@ def test_slots_of_the_test_master_come_for_the_seeded_service(seeded) -> None:
 
 
 @pytest.mark.parametrize("key", ["synthetic_event_hair", "synthetic_event_makeup"])
-def test_step_candidates_do_not_offer_the_seeded_service_without_a_grant(seeded, bot_users, key) -> None:
+def test_step_candidates_do_not_offer_the_seeded_service_without_a_grant(seeded, bot_users, key, settings) -> None:
     """Шаг сохранённого плана несёт синтетическую способность; без разрешения услугу под него не предлагают.
 
     Утечка здесь была бы хуже всего: синтетическое предложение обычному
     клиенту с прямой дорогой к записи. Вызывающие — обычный человек и
     тестовая персона (она видит демо-салон), настройки стенда выключены.
+
+    DRF-2871: рубежей два. Без разрешения план на синтетической способности
+    не сохранить вовсе — у обычного человека такого плана быть не может. У
+    тестовой персоны он остаётся с прогона: сохранён под разрешением,
+    разрешение снято — и кандидаты обязаны молчать.
     """
     from goals.models import ClientGoal
+    from wellness.plan_engine import CapabilityNotConfirmed
     from wellness.tests.test_plan_engine_steps_2868 import SAFETY, _save, _step
     from wellness.tests.test_plan_step_candidates_2868 import CANDIDATES_URL
 
@@ -402,7 +408,17 @@ def test_step_candidates_do_not_offer_the_seeded_service_without_a_grant(seeded,
     forbidden = {str(offer.pk), str(edge.pk), str(edge.specialist_id), str(edge.specialist.user_id), "(тест)"}
 
     for who, user in bot_users.items():
-        plan = _save(ClientGoal.objects.get(client=user), steps=[_step("s1", capability_ref=key, outcome_ref="event")])
+        goal = ClientGoal.objects.get(client=user)
+        steps = [_step("s1", capability_ref=key, outcome_ref="event")]
+        with pytest.raises(CapabilityNotConfirmed):
+            _save(goal, steps=steps)
+        if who != "бот: тестовая персона":
+            continue
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        settings.SYNTHETIC_TEST_SUBJECT_IDS = [str(user.pk)]
+        plan = _save(goal, steps=steps)
+        settings.SYNTHETIC_TEST_DATA_ENABLED = False
+        settings.SYNTHETIC_TEST_SUBJECT_IDS = []
 
         response = _bot(user.username).post(
             CANDIDATES_URL, {"plan_id": str(plan.id), "step_id": "s1", **SAFETY, **ATTESTATION}, format="json",
@@ -424,6 +440,10 @@ def test_step_candidates_control_a_real_capability_gives_a_real_candidate(seeded
     _, real_offer = _ready_offer(
         salon, ServiceCategory.objects.get(slug="макияж"), curator, name="Настоящая услуга шага", suffix="88",
     )
+    # DRF-2871: план сохраняется только на способности, подтверждённо помогающей цели.
+    from wellness.tests.knowledge import confirm_capability_for_goal
+
+    confirm_capability_for_goal(KEY, goal_key="event")
     _can([real_offer.template], curator)
     user = bot_users["бот: обычный человек"]
     plan = _save(ClientGoal.objects.get(client=user), steps=[_step("s1", capability_ref=KEY, outcome_ref="event")])
