@@ -36,13 +36,12 @@
 выдачи действующего согласия). Утверждение старше отзыва — «бот проверил по
 устаревшему состоянию», отказ. Время отзыва в событии бота — момент отзыва.
 
-**Чего этот шаг НЕ закрывает.** «Согласия не было никогда» и «бот не
-сообщал» каталогу неразличимы — в обоих случаях строки состояния нет. Их
-закрывает следующий шаг: бот на каждом пишущем вызове присылает утверждение
-основания (``consent: {type, document_version}``), и вызов без него получает
-отказ. Требование не включено здесь намеренно: сначала поле начинают слать
-вызывающие, потом каталог начинает его требовать — иначе окно, в котором
-каждый плановый вызов отвечает отказом.
+**«Согласия не было никогда».** Каталогу оно неотличимо от «бот не
+сообщал»: строки состояния нет в обоих случаях. Поэтому пишущий вызов обязан
+принести утверждение основания (``consent: {type, document_version,
+granted_at}``) — без годного утверждения отказ ``not_attested``. Так вторая
+линия ловит и «согласия нет», и «бот не проверил вовсе». Каталог утверждению
+верит: проверить согласие он не может, оно хранится в боте.
 
 **Область.** Гейт стоит на каждом методе, который пишет или запускает
 обработку (:func:`gated`), и на создании записи от шага плана. Чтение
@@ -71,6 +70,7 @@ logger = logging.getLogger(__name__)
 #: поэтому согласие на здоровье здесь не требуется.
 PLAN_CONSENT = PERSONAL_DATA
 CONSENT_WITHDRAWN = "withdrawn"
+CONSENT_NOT_ATTESTED = "not_attested"
 
 
 def known_withdrawal_at(user) -> datetime | None:
@@ -132,6 +132,14 @@ def refusal_for(user, payload=None):
             "CONSENT_REQUIRED",
             "План не собирается и не изменяется: согласие на хранение данных отозвано.",
             details={"consent_type": PLAN_CONSENT, "reason": CONSENT_WITHDRAWN},
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+    if attested is None:
+        logger.info("wellness.plan_gate.consent_refused user=%s reason=%s", user.pk, CONSENT_NOT_ATTESTED)
+        return error_response(
+            "CONSENT_REQUIRED",
+            "План не собирается и не изменяется: основание — согласие на хранение данных — не названо.",
+            details={"consent_type": PLAN_CONSENT, "reason": CONSENT_NOT_ATTESTED},
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         )
     return None
