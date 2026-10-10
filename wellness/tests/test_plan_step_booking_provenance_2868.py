@@ -63,10 +63,13 @@ def _provenance(plan: Plan, step_id: str = "s1", **over) -> dict:
     return {"entry_point": "PLAN_STEP", "plan_id": str(plan.id), "step_id": step_id, **SAFETY, **over}
 
 
-def _create(who, specialist, offer, *, provenance=None, key: str | None = None, hours: int = 3, as_user: str | None = None):
+def _create(
+    who, specialist, offer, *, provenance=None, key: str | None = None, hours: int = 3, as_user: str | None = None,
+    payment_required: bool = False,
+):
     body = {
         "client_id": str(who.id), "specialist_id": str(specialist.id), "service_id": str(offer.id),
-        "start_datetime": _start(hours), "payment_required": False,
+        "start_datetime": _start(hours), "payment_required": payment_required,
     }
     if provenance is not None:
         body["provenance"] = provenance
@@ -276,6 +279,69 @@ class TestIdentifiersDoNotBypassAdmission:
 
 
 # ─── гейт согласия и удаления у записи от шага (решение владельца 09.10) ─────
+
+
+class TestABookingFromAMarkedPlanIsNeverPrepaid:
+    """DRF-2871: помеченные синтетические данные проверяют механику пути —
+    реальных списаний по ним не бывает (владелец 08.10). Предохранитель на
+    сервере и от вызывающего не зависит: запись от шага плана, помеченного
+    синтетическим, создаётся без предоплаты, что бы ни прислали."""
+
+    @pytest.fixture
+    def marked(self, monkeypatch):
+        """План шага читается как помеченный. Пометка в базе несмываема и
+        ставится только сохранением на синтетическом знании — этот путь
+        держат ``test_plan_synthetic_data_2871`` и узлы кандидатов; здесь
+        предмет — правило предоплаты, поэтому пометка подставлена на
+        прочитанном плане, а остальной путь записи настоящий."""
+        from wellness import plan_engine_steps
+
+        real = plan_engine_steps.admit_step_for_booking
+
+        def admitted(*args, **kwargs):
+            plan = real(*args, **kwargs)
+            plan.synthetic = True
+            return plan
+
+        monkeypatch.setattr(plan_engine_steps, "admit_step_for_booking", admitted)
+
+    def _log(self, caplog):
+        from appointments.tests.test_payment_required_server_decides_b61 import _capturing_the_service_log
+
+        return _capturing_the_service_log(caplog)
+
+    def test_a_prepayment_asked_for_a_marked_plan_is_refused_by_the_server(
+        self, plan, owner, specialist, offer, marked, caplog,
+    ) -> None:
+        with self._log(caplog):
+            resp = _create(owner, specialist, offer, provenance=_provenance(plan), payment_required=True)
+        assert resp.status_code == 201, resp.content
+        booking = Appointment.objects.get()
+        assert booking.payments.count() == 0
+        assert booking.status == Appointment.Status.CONFIRMED
+        assert PlanStepBooking.objects.filter(appointment=booking).count() == 1
+        [refusal] = [r for r in caplog.records if "booking.payment_required_refused" in r.getMessage()]
+        assert "reason=synthetic_test_data" in refusal.getMessage()
+        assert "requested=True applied=False" in refusal.getMessage()
+
+    def test_no_prepayment_asked_is_not_counted_as_a_refusal(self, plan, owner, specialist, offer, marked, caplog) -> None:
+        with self._log(caplog):
+            resp = _create(owner, specialist, offer, provenance=_provenance(plan), payment_required=False)
+        assert resp.status_code == 201, resp.content
+        assert Appointment.objects.get().payments.count() == 0
+        assert [r for r in caplog.records if "payment_required_refused" in r.getMessage()] == []
+
+    def test_the_control_an_ordinary_plan_keeps_the_prepayment_it_asked_for(
+        self, plan, owner, specialist, offer, caplog,
+    ) -> None:
+        """Без пометки правило не срабатывает: запись клиента от шага ждёт оплату, как раньше."""
+        with self._log(caplog):
+            resp = _create(owner, specialist, offer, provenance=_provenance(plan), payment_required=True)
+        assert resp.status_code == 201, resp.content
+        booking = Appointment.objects.get()
+        assert booking.payments.count() == 1
+        assert booking.status == Appointment.Status.AWAITING_PAYMENT
+        assert [r for r in caplog.records if "payment_required_refused" in r.getMessage()] == []
 
 
 class TestTheStepBookingIsUnderThePlanGate:
