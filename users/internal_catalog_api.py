@@ -55,6 +55,7 @@ from rest_framework.throttling import ScopedRateThrottle
 
 from users.models import SpecialistProfile
 from users.permissions import IsInternalBearer
+from users.sellable import synthetic_offer_master_q
 from users.specialists_api import (
     SpecialistDetailSerializer,
     SpecialistFilter,
@@ -231,7 +232,16 @@ class InternalSpecialistViewSet(SpecialistViewSet):
         # тенанта, а не только ``tenant_id``. Без этого список из N
         # мастеров стоил бы N дополнительных запросов. Только внутренний
         # вьюсет: публичный каталог этих полей не отдаёт.
-        return super().get_queryset().select_related('tenant')
+        qs = super().get_queryset().select_related('tenant')
+        # Решение владельца 10.10.2026: мастер тестового набора в обычную
+        # выдачу боту не входит — ни списком (он же фид зеркала и живой запрос
+        # мастеров салона), ни карточкой; при любом статусе профиля и любом
+        # вызывающем. Слоты и услуги по идентификатору не закрыты: ими идёт
+        # санкционированная сквозная проверка, идентификаторы для неё отдаёт
+        # только подбор под серверным разрешением.
+        if self.action in ('list', 'retrieve'):
+            qs = qs.exclude(synthetic_offer_master_q())
+        return qs
 
     def get_serializer_class(self) -> type:
         if self.action == 'retrieve':
