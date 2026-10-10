@@ -2,15 +2,17 @@
 
 Решение владельца 10.10.2026: пока на стенде включены тестовые данные
 (``SYNTHETIC_TEST_DATA_ENABLED``), ручки Плана отвечают «выключено» всем, кроме
-тестовых субъектов из серверного списка. Линия в каталоге и от бота не зависит.
+субъектов серверного списка. Линия в каталоге и от бота не зависит.
 
 Что держат узлы:
 
-* правило по умолчанию отказывает: пустой список, не тот человек, не тестовая
-  персона, сбой проверки — «выключено»;
+* правило по умолчанию отказывает: пустой список, не тот человек, сбой
+  проверки — «выключено»;
+* доступ к Плану — по списку; признак тестовой персоны его не даёт и не
+  отнимает (он — у замка синтетических данных);
 * не-тестовый субъект получает на КАЖДОЙ ручке Плана ровно тот же ответ, что
   при выключенном движке, — и ничего не пишет;
-* тестовый субъект под теми же флагами работает как прежде;
+* субъект списка под теми же флагами работает как прежде;
 * без флага тестовых данных правило не действует вовсе.
 """
 from __future__ import annotations
@@ -71,7 +73,7 @@ def _body(endpoint: str, goal, saved) -> dict:  # noqa: F811
 
 
 def _make_test_subject(user, settings) -> None:
-    type(user).objects.filter(pk=user.pk).update(is_test_persona=True)
+    """В список — и только: признак тестовой персоны для доступа к Плану не нужен."""
     settings.SYNTHETIC_TEST_SUBJECT_IDS = [str(user.pk)]
 
 
@@ -88,9 +90,9 @@ class TestTheRule:
             (False, False, False, False, False),
             (False, True, True, True, False),  # движок выключен — никакой список его не включает
             (True, False, False, False, True),  # тестовых данных нет — правило не действует
-            (True, True, True, True, True),  # тестовый субъект
+            (True, True, True, True, True),  # в списке, тестовая персона
+            (True, True, True, False, True),  # в списке без признака персоны — доступ по списку
             (True, True, False, True, False),  # персона, но не в списке
-            (True, True, True, False, False),  # в списке, но не тестовая персона
             (True, True, False, False, False),  # обычный человек
         ],
     )
@@ -113,16 +115,24 @@ class TestTheRule:
     def test_nobody_and_an_unknown_caller_are_refused(self, settings, test_data_on, nobody) -> None:
         assert plan_engine_enabled_for(nobody) is False
 
-    def test_a_failing_check_closes_the_engine(self, owner, settings, test_data_on, monkeypatch) -> None:  # noqa: F811
+    def test_a_failing_check_closes_the_engine(self, owner, settings, test_data_on) -> None:  # noqa: F811
         _make_test_subject(owner, settings)
         owner.refresh_from_db()
         assert plan_engine_enabled_for(owner) is True
 
-        def broken(user):
-            raise RuntimeError("проверка сломалась")
-
-        monkeypatch.setattr("services.synthetic.grant_for", broken)
+        settings.SYNTHETIC_TEST_SUBJECT_IDS = 5  # непригодное значение: перебрать нельзя
         assert plan_engine_enabled_for(owner) is False
+
+    def test_the_list_opens_the_plan_but_not_the_synthetic_data(
+        self, owner, settings, test_data_on,  # noqa: F811
+    ) -> None:
+        """Два замка разведены: по списку — План; синтетика — ещё и тестовая персона."""
+        from services.synthetic import grant_for
+
+        _make_test_subject(owner, settings)
+        owner.refresh_from_db()
+        assert plan_engine_enabled_for(owner) is True
+        assert grant_for(owner) is None
 
 
 class TestAPersonOutsideTheListGetsADisabledEngine:
