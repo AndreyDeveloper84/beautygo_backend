@@ -429,6 +429,45 @@ def test_step_candidates_do_not_offer_the_seeded_service_without_a_grant(seeded,
         assert not sorted(marker for marker in forbidden if marker in text), (who, key, text[:400])
 
 
+@pytest.mark.parametrize("who", ["бот: обычный человек", "бот: тестовая персона"])
+@pytest.mark.parametrize("marked", [False, True])
+def test_step_candidates_stay_silent_for_a_plan_that_got_past_saving(
+    seeded, bot_users, monkeypatch, who, marked,
+) -> None:
+    """Защита в глубину: рубеж сохранения обойдён — кандидаты всё равно молчат.
+
+    План с синтетическим шагом здесь заведён МИМО проверки знания при
+    сохранении (она подменена), как если бы он попал в базу другим путём:
+    непомеченный — и помеченный, но у человека без разрешения. Ручка
+    кандидатов на рубеж сохранения не опирается: разрешения нет — услуги нет.
+    """
+    from goals.models import ClientGoal
+    from wellness import plan_engine
+    from wellness.tests.test_plan_engine_steps_2868 import SAFETY, _save, _step
+    from wellness.tests.test_plan_step_candidates_2868 import CANDIDATES_URL
+
+    offer = SalonService.objects.get(synthetic=True)
+    edge = offer.specialist_services.get()
+    forbidden = {str(offer.pk), str(edge.pk), str(edge.specialist_id), str(edge.specialist.user_id), "(тест)"}
+    user = bot_users[who]
+    monkeypatch.setattr(plan_engine, "_synthetic_or_refuse", lambda *args, **kwargs: marked)
+    plan = _save(
+        ClientGoal.objects.get(client=user),
+        steps=[_step("s1", capability_ref="synthetic_event_hair", outcome_ref="event")],
+    )
+    monkeypatch.undo()
+    assert plan.synthetic is marked  # контроль: план действительно заведён и помечен так, как задумано
+
+    response = _bot(user.username).post(
+        CANDIDATES_URL, {"plan_id": str(plan.id), "step_id": "s1", **SAFETY, **ATTESTATION}, format="json",
+    )
+
+    assert response.status_code == 200, (who, marked, response.content[:400])
+    text = response.content.decode("utf-8")
+    assert not sorted(marker for marker in forbidden if marker in text), (who, marked, text[:400])
+    assert response.json()["data"]["candidates"] == [], text[:400]
+
+
 def test_step_candidates_control_a_real_capability_gives_a_real_candidate(seeded, bot_users) -> None:
     """Положительный контроль: та же ручка тем же вызывающим отдаёт настоящего кандидата — она исполнилась."""
     from goals.models import ClientGoal
