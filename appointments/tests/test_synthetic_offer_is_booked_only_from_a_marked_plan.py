@@ -32,6 +32,7 @@ from services.tests.test_synthetic_rows_leak_sweep import (  # noqa: F401 — з
     seeded,
 )
 from wellness.models import Plan, PlanStepBooking
+from wellness.tests.plan_consent import ATTESTATION
 from wellness.tests.test_plan_engine_steps_2868 import APPOINTMENTS_URL, RESOLUTION_URL, SAFETY, _save, _step
 from wellness.tests.test_plan_step_candidates_2868 import CANDIDATES_URL
 
@@ -66,7 +67,8 @@ def _book(user, seeded, offer, start: str, *, provenance: dict | None = None):  
         "start_datetime": start, "payment_required": False,
     }
     if provenance is not None:
-        body["provenance"] = provenance
+        # Запись от шага — действие Плана: несёт утверждение основания, как остальные его ручки.
+        body.update(provenance=provenance, **ATTESTATION)
     return _bot(user.username).post(
         APPOINTMENTS_URL, body, format="json", HTTP_X_IDEMPOTENCY_KEY=str(uuid.uuid4()),
     )
@@ -129,7 +131,7 @@ class TestTheIsolatedTestPath:
         )
         assert plan.synthetic is True
         found = _bot(persona.username).post(
-            CANDIDATES_URL, {"plan_id": str(plan.id), "step_id": "s1", **SAFETY}, format="json",
+            CANDIDATES_URL, {"plan_id": str(plan.id), "step_id": "s1", **SAFETY, **ATTESTATION}, format="json",
         )
         assert found.status_code == 200, found.content[:400]
         data = found.json()["data"]
@@ -138,7 +140,7 @@ class TestTheIsolatedTestPath:
             RESOLUTION_URL,
             {"plan_id": str(plan.id), "step_id": "s1", "level": "OFFER",
              "canonical_service_ref": str(offer.template_id), "tenant_offer_ref": str(offer.pk),
-             "resolver_decision_id": data["search_id"], **SAFETY},
+             "resolver_decision_id": data["search_id"], **SAFETY, **ATTESTATION},
             format="json",
         )
         assert chosen.status_code == 201, chosen.content[:400]
