@@ -185,11 +185,13 @@ class TestEndpoint:
             "labels": {
                 "tension-relief": {
                     "state": "labelled", "label": "Снимает мышечное напряжение",
-                    "expected_effect": "Мышцы спины расслаблены.",
+                    "expected_effect": "Мышцы спины расслаблены.", "synthetic": False,
                 },
-                "relaxation": {"state": "labelled", "label": "Помогает расслабиться", "expected_effect": None},
-                "silent": {"state": "no_text", "label": None, "expected_effect": None},
-                "nope": {"state": "unknown", "label": None, "expected_effect": None},
+                "relaxation": {
+                    "state": "labelled", "label": "Помогает расслабиться", "expected_effect": None, "synthetic": False,
+                },
+                "silent": {"state": "no_text", "label": None, "expected_effect": None, "synthetic": False},
+                "nope": {"state": "unknown", "label": None, "expected_effect": None, "synthetic": False},
             }
         }
 

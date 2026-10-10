@@ -199,7 +199,9 @@ def capability_keys_helping_goal(
     )
 
 
-def procedures_by_capability_helping_goal(goal_key: str, *, now: datetime | None = None) -> dict[str, frozenset]:
+def procedures_by_capability_helping_goal(
+    goal_key: str, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
+) -> dict[str, frozenset]:
     """Ключ возможности → процедуры (шаблоны), которые её несут, — под эту цель.
 
     DRF-2871: сборке плана нужно знать не только КАКИЕ способности помогают
@@ -207,12 +209,15 @@ def procedures_by_capability_helping_goal(goal_key: str, *, now: datetime | None
     сводится к одной услуге, и плана не нужно (контракт Plan Engine §6.4).
     Правило чтения то же, что у :func:`capability_keys_helping_goal`: оба
     утверждения подтверждены, поддержаны и не истекли, цель активна.
+    ``include_synthetic`` — серверное разрешение читать помеченную синтетику
+    (:func:`services.synthetic.grant_for`), не булево; какие из ключей синтетические,
+    отвечает :func:`synthetic_capability_keys_helping_goal`.
     """
     now = now or timezone.now()
     out: dict[str, set] = {}
     for key, template_id in CapabilityGoalLink.objects.filter(
-        _client_facing_q(now),
-        _client_facing_q(now, prefix="capability__"),
+        _client_facing_q(now, include_synthetic=include_synthetic),
+        _client_facing_q(now, prefix="capability__", include_synthetic=include_synthetic),
         goal__key=goal_key,
         goal__is_active=True,
     ).values_list("capability__key", "capability__templates"):
@@ -356,6 +361,28 @@ def knowledge_versions(
     }
 
 
+def synthetic_capability_keys_helping_goal(
+    goal_key: str, *, now: datetime | None = None, include_synthetic: SyntheticGrant | None = None,
+) -> frozenset[str]:
+    """Какие способности под цель — помеченная синтетика (DRF-2871).
+
+    Читается тем же правилом и тем же разрешением, что
+    :func:`procedures_by_capability_helping_goal`: без разрешения ответ пуст
+    — синтетики не существует. План, у которого хоть один шаг
+    стоит на ключе отсюда, помечается синтетическим навсегда.
+    """
+    now = now or timezone.now()
+    return frozenset(
+        CapabilityGoalLink.objects.filter(
+            _client_facing_q(now, include_synthetic=include_synthetic),
+            _client_facing_q(now, prefix="capability__", include_synthetic=include_synthetic),
+            goal__key=goal_key,
+            goal__is_active=True,
+            capability__synthetic=True,
+        ).values_list("capability__key", flat=True)
+    )
+
+
 class LabelState(str, Enum):
     #: У ключа ровно одна подтверждённая формулировка для человека.
     LABELLED = "labelled"
@@ -454,5 +481,6 @@ __all__ = [
     "client_facing_capabilities",
     "client_facing_goal_links",
     "procedures_by_capability_helping_goal",
+    "synthetic_capability_keys_helping_goal",
     "template_ids_helping_goal",
 ]
