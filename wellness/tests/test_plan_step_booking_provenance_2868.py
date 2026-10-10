@@ -289,6 +289,21 @@ class TestTheStepBookingIsUnderThePlanGate:
         assert response.json()["error"]["details"]["request_id"] == str(request.pk)
         _nothing_was_written()
 
+    def test_a_booking_from_a_step_without_an_attestation_is_refused(self, plan, owner, specialist, offer) -> None:
+        """«Согласия нет — блок»: запись от шага плана без утверждения основания не создаётся."""
+        body = {
+            "client_id": str(owner.id), "specialist_id": str(specialist.id), "service_id": str(offer.id),
+            "start_datetime": _start(3), "payment_required": False, "provenance": _provenance(plan),
+        }
+
+        response = _api(owner.username).post(
+            APPOINTMENTS_URL, body, format="json", attested=False, HTTP_X_IDEMPOTENCY_KEY=str(uuid.uuid4()),
+        )
+
+        assert response.status_code == 422, response.content[:300]
+        assert response.json()["error"]["details"]["reason"] == "not_attested"
+        _nothing_was_written()
+
     def test_a_withdrawn_storage_consent_closes_the_booking_from_a_step(self, plan, owner, specialist, offer) -> None:
         from django.utils import timezone
 
@@ -306,9 +321,16 @@ class TestTheStepBookingIsUnderThePlanGate:
         _nothing_was_written()
 
     def test_an_ordinary_booking_is_not_judged_by_the_plan_gate(self, plan, owner, specialist, offer) -> None:
-        """Контроль области: без блока шага гейт плана не вызывается."""
+        """Контроль области: без блока шага гейт плана не вызывается — ни заявка, ни отсутствие утверждения."""
         self._request_deletion(owner)
+        body = {
+            "client_id": str(owner.id), "specialist_id": str(specialist.id), "service_id": str(offer.id),
+            "start_datetime": _start(3), "payment_required": False,
+        }
 
-        response = _create(owner, specialist, offer)
+        response = _api(owner.username).post(
+            APPOINTMENTS_URL, body, format="json", attested=False, HTTP_X_IDEMPOTENCY_KEY=str(uuid.uuid4()),
+        )
 
+        assert "consent" not in body
         assert response.status_code == 201, response.content[:300]
