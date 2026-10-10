@@ -192,6 +192,9 @@ def test_a_step_choice_keeps_the_service_but_not_the_master(spec, world, setting
     from goals.models import ClientGoal
 
     settings.PLAN_ENGINE_ENABLED = True
+    # План на синтетической способности сохраняется только под разрешением тестовой персоны.
+    settings.SYNTHETIC_TEST_DATA_ENABLED = True
+    settings.SYNTHETIC_TEST_SUBJECT_IDS = [str(world["persona"].pk)]
     seed(spec)
     offer = SalonService.objects.get(synthetic=True)
     goal = ClientGoal.objects.create(client=world["persona"], goal_key="event", source_channel="bot")
