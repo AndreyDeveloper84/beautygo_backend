@@ -19,8 +19,22 @@ DRF-2518. Снимок еды сохранялся и отправлялся в�
 энтропийной части, срезание сегментов — тот же.
 
 Поэтому здесь срезаются **контейнерные блоки**, а данные изображения не
-трогаются вовсе. Для JPEG это сегменты APPn и COM, для PNG — текстовые и
-``eXIf``-куски, для WebP — чанки ``EXIF``/``XMP ``.
+трогаются вовсе. Для JPEG это сегменты APPn и COM. У PNG и WebP — наоборот,
+белый список (DRF-2529): остаются только куски, без которых изображение не
+прочитать (данные, палитра, прозрачность, анимация, цветовое пространство),
+всё прочее срезается — и текст, и EXIF, и куски, о которых здесь не думали.
+
+Хвост после конца изображения
+-----------------------------
+
+DRF-2529. Живые фото Android дописывают **MP4 после конца JPEG**, а в атомах
+MP4 бывают координаты (``©xyz``). Хвост — не поле метаданных, поэтому срезание
+по сегментам его не видело: JPEG копировался от начала скана до конца файла
+вместе со всем, что дописано после.
+
+Теперь после конца контейнера не копируется ничего: у JPEG — после ``EOI``, у
+PNG — после ``IEND``, у WebP — за размером ``RIFF`` из заголовка. Видеочасть
+живого фото при этом теряется; человек этого не видит.
 
 Белый список из одного поля, а не чёрный из многих
 ---------------------------------------------------
@@ -40,10 +54,12 @@ DRF-2518. Снимок еды сохранялся и отправлялся в�
 
 * **Не чинит уже загруженные снимки.** Он стоит на входе; всё, что попало в
   хранилище раньше, остаётся с метаданными. Их разбор — отдельный предмет.
-* **Не сохраняет ICC-профиль.** Профиль — это метаданные, и его описание у
-  телефонов бывает устройство-зависимым. Цена названа: изображение с широким
-  охватом цвета будет прочитано как sRGB, цвета сместятся. Это сознательный
-  размен в пользу правила «не оставляем того, о чём не подумали».
+* **Не сохраняет ICC-профиль** — ни в JPEG (APP2), ни в PNG (``iCCP``), ни в
+  WebP (``ICCP``); у двух последних — с DRF-2529, до неё профиль у них
+  проходил. Профиль — это метаданные, и его описание у телефонов бывает
+  устройство-зависимым. Цена названа: изображение с широким охватом цвета
+  будет прочитано как sRGB, цвета сместятся. Это сознательный размен в пользу
+  правила «не оставляем того, о чём не подумали».
 * **Не молчит на незнакомом контейнере.** Формат, который здесь не разобран,
   проходит через перекодирование Pillow — приватность не должна отказывать
   «открытым» способом. Цена перекодирования в этой ветке принимается
@@ -53,6 +69,7 @@ DRF-2518. Снимок еды сохранялся и отправлялся в�
 from __future__ import annotations
 
 import io
+import re
 
 #: Тег ориентации в EXIF. Единственное, что переживает срезание.
 ORIENTATION_TAG = 0x0112
@@ -60,10 +77,37 @@ ORIENTATION_TAG = 0x0112
 #: Маркеры JPEG, которые срезаются: APP1..APP15 (EXIF, XMP, IPTC, ICC…) и COM.
 #: APP0 (JFIF) остаётся: это заголовок контейнера, а не сведения о человеке.
 _JPEG_DROP = frozenset(range(0xE1, 0xF0)) | {0xFE}
-#: Куски PNG, которые срезаются: текст в любом виде, EXIF и время правки.
-_PNG_DROP = frozenset({b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"tIME"})
-#: Чанки WebP с метаданными.
-_WEBP_DROP = frozenset({b"EXIF", b"XMP "})
+#: DRF-2529 — следующий маркер вне скана ищется, как ``next_marker()`` в
+#: libjpeg: мусор и заполнители ``FF`` между сегментами пропускаются (T.81
+#: B.1.1.2). Раньше первый же байт не на месте отдавал остаток файла как есть.
+_JPEG_NEXT_MARKER = re.compile(rb"\xff[^\x00\xff]")
+#: Конец энтропийных данных скана: ``FF`` и маркер C0..CF или D9..FE.
+#: ``FF 00`` — байт-стаффинг, ``FF D0..D7`` — RST внутри скана, ``FF FF`` —
+#: заполнитель. Одним поиском, а не циклом по байтам: цикл на Python разбирал
+#: 10-мегабайтный скан из ``FF 00`` секунды.
+_JPEG_SCAN_END = re.compile(rb"\xff[\xc0-\xcf\xd9-\xfe]")
+#: Маркеры без длины: RST0..7, SOI, TEM.
+_JPEG_STANDALONE = frozenset(range(0xD0, 0xD9)) | {0x01}
+#: У настоящих снимков сегментов десятки (progressive + optimize — 25). Без
+#: потолка файл из миллионов пустых сегментов разбирался бы секунды. Дальше
+#: потолка не копируется ничего.
+_JPEG_MAX_SEGMENTS = 4096
+#: Куски PNG, которые остаются (DRF-2529 — белый список вместо чёрного):
+#: данные, палитра, прозрачность, гамма и цветовое пространство без профиля,
+#: плотность пикселей, анимация APNG. Прочее срезается — текст, EXIF, ``iCCP``,
+#: C2PA (``caBX``) и приватные куски.
+_PNG_KEEP = frozenset({
+    b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"sBIT",
+    b"bKGD", b"pHYs", b"acTL", b"fcTL", b"fdAT", b"cICP", b"mDCV", b"cLLI",
+})
+#: Чанки WebP, которые остаются (DRF-2529 — белый список): кадр, альфа,
+#: расширенный заголовок, анимация. ``EXIF``, ``XMP ``, ``ICCP`` и неизвестные
+#: срезаются. Флаги ``VP8X`` о срезанных чанках не сбрасываются — как и раньше,
+#: libwebp такие файлы открывает.
+_WEBP_KEEP = frozenset({b"VP8 ", b"VP8L", b"VP8X", b"ALPH", b"ANIM", b"ANMF"})
+#: Чанки внутри кадра анимации (``ANMF``): неизвестный чанк там спецификация
+#: допускает, и libwebp его читает.
+_WEBP_FRAME_KEEP = frozenset({b"ALPH", b"VP8 ", b"VP8L"})
 
 
 def _orientation_of(data: bytes) -> int:
@@ -89,21 +133,49 @@ def _orientation_segment(orientation: int) -> bytes:
 
 
 def _strip_jpeg(data: bytes) -> bytes:
+    """JPEG без APPn/COM и без всего, что дописано после ``EOI``.
+
+    Скан (энтропийные данные) копируется байт в байт до следующего маркера;
+    у прогрессивного JPEG сканов несколько, между ними — таблицы, разбор идёт
+    дальше. ``EOI`` — конец: хвост живого фото (MP4), второй кадр MPF и любой
+    другой довесок не копируются (DRF-2529).
+    """
     out = bytearray(data[:2])  # SOI
-    i = 2
-    while i < len(data) - 1:
-        if data[i] != 0xFF:
-            # Не маркер — дальше разбирать нечего, отдаём остаток как есть.
-            out.extend(data[i:])
+    i, n = 2, len(data)
+    for _ in range(_JPEG_MAX_SEGMENTS):
+        found = _JPEG_NEXT_MARKER.search(data, i)
+        if found is None:
             break
-        marker = data[i + 1]
-        if marker in (0xD9, 0xDA):  # EOI или начало данных изображения
-            out.extend(data[i:])
+        j = found.start()
+        marker = data[j + 1]
+        if marker == 0xD9:  # EOI — всё, что после него, не копируется
+            out += b"\xff\xd9"
             break
-        length = int.from_bytes(data[i + 2:i + 4], "big")
+        if marker in _JPEG_STANDALONE:
+            i = j + 2
+            continue
+        if j + 4 > n:
+            break
+        end = j + 2 + max(int.from_bytes(data[j + 2:j + 4], "big"), 2)
+        if end > n:
+            # Сегмент длиннее файла. Срезаемый не копируется никогда: иначе
+            # битая длина APP1 отдала бы EXIF целиком. Прочий — остаток как
+            # есть, как и раньше.
+            if marker not in _JPEG_DROP:
+                out += data[j:]
+            break
+        if marker == 0xDA:  # SOS: заголовок скана и данные до следующего маркера
+            scan_end = _JPEG_SCAN_END.search(data, end)
+            if scan_end is None:
+                # Файл оборван внутри скана — остаток как есть, как и раньше.
+                out += data[j:]
+                break
+            out += data[j:scan_end.start()]
+            i = scan_end.start()
+            continue
         if marker not in _JPEG_DROP:
-            out.extend(data[i:i + 2 + length])
-        i += 2 + length
+            out += data[j:end]
+        i = end
     return bytes(out)
 
 
@@ -114,7 +186,7 @@ def _strip_png(data: bytes) -> bytes:
         length = int.from_bytes(data[i:i + 4], "big")
         kind = data[i + 4:i + 8]
         end = i + 12 + length
-        if kind not in _PNG_DROP:
+        if kind in _PNG_KEEP:
             out.extend(data[i:end])
         i = end
         if kind == b"IEND":
@@ -122,20 +194,34 @@ def _strip_png(data: bytes) -> bytes:
     return bytes(out)
 
 
-def _strip_webp(data: bytes) -> bytes:
-    out = bytearray(data[:12])  # RIFF + размер + WEBP
-    i = 12
+def _webp_chunks(data: bytes, start: int, end: int, keep: frozenset, *, top: bool) -> bytes:
+    """Чанки из ``data[start:end]`` по белому списку ``keep``; ни байта за ``end``."""
+    i = start
     kept: list[bytes] = []
-    while i + 8 <= len(data):
+    while i + 8 <= end:
         kind = data[i:i + 4]
         length = int.from_bytes(data[i + 4:i + 8], "little")
-        end = i + 8 + length + (length % 2)  # чанки выровнены по чётности
-        if kind not in _WEBP_DROP:
-            kept.append(data[i:end])
-        i = end
-    body = b"".join(kept)
+        nxt = i + 8 + length + (length % 2)  # чанки выровнены по чётности
+        if kind == b"ANMF" and top and length >= 16:
+            # Кадр анимации: 16 байт заголовка кадра и его собственные чанки.
+            inner = _webp_chunks(data, i + 24, min(i + 8 + length, end), _WEBP_FRAME_KEEP, top=False)
+            payload = data[i + 8:i + 24] + inner
+            pad = b"\x00" * (len(payload) % 2)
+            kept.append(b"ANMF" + len(payload).to_bytes(4, "little") + payload + pad)
+        elif kind in keep:
+            kept.append(data[i:min(nxt, end)])
+        i = nxt
+    return b"".join(kept)
+
+
+def _strip_webp(data: bytes) -> bytes:
+    # DRF-2529 — конец контейнера берётся из заголовка RIFF: всё, что дописано
+    # после, не копируется. Раньше обход шёл до конца файла, хвост читался как
+    # чанки и попадал в новый размер RIFF — и уезжал, и ломал файл.
+    riff_end = min(len(data), 8 + int.from_bytes(data[4:8], "little"))
+    body = _webp_chunks(data, 12, riff_end, _WEBP_KEEP, top=True)
     # Размер в заголовке RIFF обязан сойтись, иначе файл не откроется.
-    return bytes(out[:4]) + (len(body) + 4).to_bytes(4, "little") + b"WEBP" + body
+    return b"RIFF" + (len(body) + 4).to_bytes(4, "little") + b"WEBP" + body
 
 
 def strip_metadata(data: bytes) -> bytes:
