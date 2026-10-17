@@ -274,6 +274,20 @@ class ErrorCode(str, Enum):
     PLAN_STEP_RESOLUTION_REFUSED = "PLAN_STEP_RESOLUTION_REFUSED"
     # DRF-2868 — запись уже связана с другим шагом: одна запись — один шаг.
     PLAN_STEP_BOOKING_CONFLICT = "PLAN_STEP_BOOKING_CONFLICT"
+    # DRF-2857 — подтверждение замены относилось к другому плану: действующий
+    # план цели за это время стал иным. details.current_plan_id.
+    PLAN_REPLACEMENT_TARGET_CHANGED = "PLAN_REPLACEMENT_TARGET_CHANGED"
+    # DRF-2877 — вердикт хода подтверждения «стоп» или «не оценивался»: план
+    # не сохраняется. «Уточнить» сохранение не блокирует.
+    PLAN_SAVE_SAFETY_BLOCKED = "PLAN_SAVE_SAFETY_BLOCKED"
+    # DRF-2877 — ограничение плана не снимается: у причины нет условия
+    # снятия, вид снятия не подходит причине, либо вердикт хода блокирующий.
+    # details.reason.
+    PLAN_RESTRICTION_NOT_LIFTABLE = "PLAN_RESTRICTION_NOT_LIFTABLE"
+    # DRF-2871 — план нельзя сохранить: шаг стоит на способности, которой нет
+    # в подтверждённом знании (и нет в помеченной синтетике, читаемой по
+    # серверному разрешению субъекта). details.capability_ref.
+    PLAN_CAPABILITY_NOT_CONFIRMED = "PLAN_CAPABILITY_NOT_CONFIRMED"
     # DRF-1699 D2 (§7 свода) — у человека живая заявка на удаление:
     # персонализация и новая обработка данных прекращены. Один код на все
     # три класса читателей (память, рекомендации, проактив), чтобы бот ловил

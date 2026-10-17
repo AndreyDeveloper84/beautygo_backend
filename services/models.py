@@ -341,6 +341,11 @@ class ServiceTemplate(models.Model):
     health_check_confirmed_at = models.DateTimeField(null=True, blank=True)
     health_check_source_ref = models.CharField(max_length=200, blank=True, default="")
 
+    #: Синтетика — тестовые данные для проверки механики (решение владельца
+    #: 08.10). Ставится при создании и не меняется никогда (триггер базы);
+    #: что из этого следует — :mod:`services.synthetic`.
+    synthetic = models.BooleanField(default=False)
+
     contraindications = models.TextField(
         blank=True, default="",
         help_text="Противопоказания / оговорки (мед. профиль, разрешение врача и т.п.)",
@@ -568,6 +573,56 @@ class ServiceTemplate(models.Model):
                     | ~models.Q(health_check_rule_version="")
                 ),
                 name="servicetemplate_health_check_rule_carries_version",
+            ),
+            # Синтетика (services.synthetic): ответ о проверке здоровья у
+            # синтетической строки подтверждает только названное синтетическое
+            # правило, человека нет; настоящей строке это правило запрещено.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(synthetic=False)
+                    | (
+                        models.Q(health_check_confirmed_by__isnull=True)
+                        & models.Q(health_check_confirmed_rule__in=["", "synthetic-test-data"])
+                    )
+                ),
+                name="servicetemplate_synthetic_health_only_by_synthetic_rule",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(health_check_confirmed_rule="synthetic-test-data") | models.Q(synthetic=True)
+                ),
+                name="servicetemplate_synthetic_rule_only_on_synthetic",
+            ),
+            # Синтетическому канону нужны настоящие область и класс: проверки
+            # допуска для синтетики не ослабляются. Но основание у них
+            # названо синтетическим — и только им: область подтверждает
+            # правило ``synthetic-test-data`` (человека нет), а у класса,
+            # который правилом подтверждаться не умеет, синтетическим назван
+            # источник. Настоящему канону оба значения запрещены.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(synthetic=False)
+                    | (
+                        models.Q(scope_confirmed_by__isnull=True)
+                        & models.Q(scope_confirmed_rule__in=["", "synthetic-test-data"])
+                    )
+                ),
+                name="servicetemplate_synthetic_scope_only_by_synthetic_rule",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(scope_confirmed_rule="synthetic-test-data") | models.Q(synthetic=True),
+                name="servicetemplate_synthetic_scope_rule_only_on_synthetic",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(synthetic=False)
+                    | models.Q(legal_class_source_ref__in=["", "synthetic-test-data"])
+                ),
+                name="servicetemplate_synthetic_class_source_is_synthetic",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(legal_class_source_ref="synthetic-test-data") | models.Q(synthetic=True),
+                name="servicetemplate_synthetic_class_source_only_on_synthetic",
             ),
             # Body Care CAT-2: вывод из оборота — решение того же веса, что
             # одобрение, и провенанс у него тот же.
@@ -1422,6 +1477,11 @@ class SalonService(models.Model):
     health_check_confirmed_at = models.DateTimeField(null=True, blank=True)
     health_check_source_ref = models.CharField(max_length=200, blank=True, default="")
 
+    #: Синтетика — тестовые данные для проверки механики (решение владельца
+    #: 08.10). Ставится при создании и не меняется никогда (триггер базы);
+    #: что из этого следует — :mod:`services.synthetic`.
+    synthetic = models.BooleanField(default=False)
+
     is_active = models.BooleanField(default=True)
     source = models.CharField(
         max_length=10, choices=Source.choices, default=Source.MANUAL,
@@ -1673,6 +1733,37 @@ class SalonService(models.Model):
                     )
                 ),
                 name="salonservice_health_check_unset_carries_no_confirmation",
+            ),
+            # Синтетическая услуга никогда не «подтверждённая связь с каноном»:
+            # иначе любой счёт verified посчитал бы её настоящей.
+            models.CheckConstraint(
+                condition=models.Q(synthetic=False) | ~models.Q(mapping_status="verified"),
+                name="salonservice_synthetic_is_never_verified",
+            ),
+            # …и не бывает без канона: исключение в допуске — только для
+            # ПОДТВЕРЖДЕНИЯ связи, сама ссылка на канон обязана существовать.
+            models.CheckConstraint(
+                condition=models.Q(synthetic=False) | models.Q(template__isnull=False),
+                name="salonservice_synthetic_has_a_canon",
+            ),
+            # Синтетика (services.synthetic): ответ о проверке здоровья у
+            # синтетической строки подтверждает только названное синтетическое
+            # правило, человека нет; настоящей строке это правило запрещено.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(synthetic=False)
+                    | (
+                        models.Q(health_check_confirmed_by__isnull=True)
+                        & models.Q(health_check_confirmed_rule__in=["", "synthetic-test-data"])
+                    )
+                ),
+                name="salonservice_synthetic_health_only_by_synthetic_rule",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(health_check_confirmed_rule="synthetic-test-data") | models.Q(synthetic=True)
+                ),
+                name="salonservice_synthetic_rule_only_on_synthetic",
             ),
         ]
         indexes = [
@@ -2160,7 +2251,9 @@ class SpecialistService(models.Model):
         """Вердикт гейта — см. :meth:`resolved_health_check` (DRF-2614)."""
         return self.resolved_health_check()[0]
 
-    def resolved_health_check_with_origin(self) -> tuple[bool | None, str, bool]:
+    def resolved_health_check_with_origin(
+        self, *, include_synthetic=None,
+    ) -> tuple[bool | None, str, bool]:
         """Вердикт гейта, его основание и ПОДТВЕРЖДЕНО ЛИ это основание (DRF-2877).
 
         Решение владельца 07.10 (S2): неподтверждённое «проверка не нужна» —
@@ -2181,13 +2274,23 @@ class SpecialistService(models.Model):
         каскад здесь не повторяется. Сам вердикт этот метод не меняет — что
         из неподтверждённого открывает запись, решает правило записи, а его
         включает владелец.
+
+        **Синтетика.** У синтетической услуги основание подтверждено
+        синтетическим правилом, и «подтверждено» отдаётся только под
+        действующим разрешением (``include_synthetic`` —
+        :class:`services.synthetic.SyntheticGrant`); без него — ``False``,
+        как у любого неподтверждённого. Настоящих услуг параметр не касается.
         """
+        from .synthetic import reads_synthetic
+
         verdict, basis = self.resolved_health_check()
         if basis == "template_confirmed":
             confirmed = True
         elif basis == "salon":
             confirmed = self.salon_service.health_check_answer_confirmed
         else:
+            confirmed = False
+        if self.salon_service.synthetic and not reads_synthetic(include_synthetic):
             confirmed = False
         return verdict, basis, confirmed
 
@@ -3098,6 +3201,39 @@ class ClaimEvidence(models.Model):
     )
     reviewed_at = models.DateTimeField(null=True, blank=True)
 
+    #: Синтетика — тестовые данные для проверки механики (решение владельца
+    #: 08.10). Ставится при создании и не меняется никогда (триггер базы);
+    #: что из этого следует — :mod:`services.synthetic`.
+    synthetic = models.BooleanField(default=False)
+
+    # DRF-2879. Версия знания — отпечаток его содержания и основания
+    # (решение владельца: «основание входит в версию знания»).
+    #
+    # Оба поля ставит БАЗА (триггер миграции 0053), не код: отпечаток
+    # пересчитывается при любой записи строки, в том числе через
+    # ``QuerySet.update()``. Состав — :data:`FINGERPRINT_FIELDS` плюс свои поля
+    # класса (:data:`OWN_FINGERPRINT_FIELDS`). Не входят: статус, кто и когда
+    # подтвердил, срок годности (свойство подтверждения, а не утверждения),
+    # состав привязанных процедур, пометка синтетики, служебные времена.
+    #
+    # ``approved_fingerprint`` — отпечаток в момент подтверждения: триггер
+    # ставит его при переходе в ``approved`` и при новом подтверждении
+    # (сменилась ``confirmed_at``) и снимает при возврате в черновик.
+    # Ограничение ниже требует, чтобы у подтверждённой строки они совпадали:
+    # подтверждённого утверждения с изменённым после подтверждения
+    # содержанием в базе быть не может. Значение в памяти после ``save()``
+    # устаревает — читать из базы (:func:`services.capabilities.claim_fingerprint`).
+    content_fingerprint = models.CharField(max_length=80, blank=True, default="", editable=False)
+    approved_fingerprint = models.CharField(max_length=80, blank=True, default="", editable=False)
+
+    #: Поля основания и рамки утверждения, общие для обоих классов знания.
+    FINGERPRINT_FIELDS = (
+        "claim_type", "claim_scope", "limitations", "prohibited_statement",
+        "evidence_source", "evidence_kind", "source_ref",
+    )
+    #: Свои поля содержания класса; порядок — порядок в отпечатке.
+    OWN_FINGERPRINT_FIELDS: tuple[str, ...] = ()
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -3177,6 +3313,17 @@ class ClaimEvidence(models.Model):
                     | (models.Q(reviewed_by__isnull=False) & models.Q(reviewed_at__isnull=False))
                 ),
                 name="%(class)s_review_is_whole",
+            ),
+            # Синтетическое знание никогда не подтверждённое (services.synthetic).
+            models.CheckConstraint(
+                condition=models.Q(synthetic=False) | ~models.Q(status="approved"),
+                name="%(class)s_synthetic_is_never_approved",
+            ),
+            # DRF-2879: подтверждено именно то содержание, которое записано.
+            models.CheckConstraint(
+                condition=~models.Q(status="approved")
+                | models.Q(content_fingerprint=models.F("approved_fingerprint")),
+                name="%(class)s_approved_content_matches_approval",
             ),
         ]
 
@@ -3301,6 +3448,10 @@ class ProcedureCapability(ClaimEvidence):
 
     objects = ProcedureCapabilityManager()
 
+    OWN_FINGERPRINT_FIELDS = (
+        "key", "text_client", "text_professional", "expected_effect", "result_timeframe", "variability_note",
+    )
+
     def __str__(self) -> str:
         # Имена процедур, а не UUID: эту строку читает куратор — в списке, в
         # выборе возможности у связи с целью, в журнале админки. У ещё не
@@ -3374,6 +3525,8 @@ class CapabilityGoalLink(ClaimEvidence):
         GoalOption, on_delete=models.PROTECT, related_name="capability_links",
     )
     #: Характер курса словами («обычно рассматривается как курс сеансов»).
+    OWN_FINGERPRINT_FIELDS = ("capability_id", "goal_id", "course_pattern", "result_horizon", "variability_note")
+
     course_pattern = models.TextField(blank=True, default="")
     #: Когда ждать результат относительно этой цели — словами.
     result_horizon = models.CharField(max_length=200, blank=True, default="")

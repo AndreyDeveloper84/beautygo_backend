@@ -608,6 +608,11 @@ class Plan(models.Model):
     class Status(models.TextChoices):
         ACTIVE = "active", "Действует"
         PAUSED = "paused", "Приостановлен"
+        # DRF-2857 — сохранённое предложение при действующем плане цели
+        # (решение владельца 08.10: «сохранённый черновик не вытесняет
+        # действующий план без подтверждения замены»). Не действует, шаги не
+        # исполняются; действующим его делает только явная команда замены.
+        PROPOSED = "proposed", "Предложение — ждёт подтверждения замены"
         SUPERSEDED = "superseded", "Замещён другим планом той же цели"
         ARCHIVED = "archived", "В архиве"
 
@@ -657,6 +662,14 @@ class Plan(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     status_changed_at = models.DateTimeField(default=timezone.now)
+    # DRF-2871 — план собран на помеченных тестовых данных (решение владельца
+    # 08.10: сквозная проверка на подготовленных данных). Ставится при
+    # сохранении и не меняется никогда — триггер миграции 0013 ловит и
+    # ``update()``: синтетический план не может стать настоящим, и наоборот.
+    synthetic = models.BooleanField(
+        default=False,
+        help_text="План на помеченных синтетических данных; ставится при создании, не меняется",
+    )
 
     class Meta:
         ordering = ["-created_at"]
@@ -665,6 +678,12 @@ class Plan(models.Model):
                 fields=["goal"],
                 condition=models.Q(status="active"),
                 name="plan_one_active_per_goal",
+            ),
+            # У цели не больше одного предложения: новое замещает прежнее.
+            models.UniqueConstraint(
+                fields=["goal"],
+                condition=models.Q(status="proposed"),
+                name="plan_one_proposed_per_goal",
             ),
         ]
         indexes = [
@@ -905,3 +924,78 @@ class PlanStepBooking(_AppendOnlyModel):
 
     def __str__(self) -> str:
         return f"PlanStepBooking<plan={self.plan_id} step={self.step_id}> appt={self.appointment_id}"
+
+
+class PlanRestriction(_AppendOnlyModel):
+    """Ограничение плана — стойкий незакрытый вопрос (DRF-2877).
+
+    Решение владельца 08.10: вопрос «уточнить» не исчезает от следующего
+    сообщения; ограничение затрагивает шаг или весь план — по области причины;
+    план с открытыми ограничениями сохраняется.
+
+    Строка только дописывается. Открыто ограничение или снято — отвечает
+    наличие строки ``PlanRestrictionLift``; сама строка ограничения не
+    меняется, история не переписывается. Срока жизни нет.
+
+    Текста вопроса и слов человека здесь нет: ``question_id`` — идентификатор
+    вопроса у бота, который его задаёт и оценивает ответ. Каталог хранит и
+    отказывает действиям с шагом.
+    """
+
+    class Scope(models.TextChoices):
+        PLAN = "PLAN", "Весь план"
+        STEP = "STEP", "Один шаг"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    plan = models.ForeignKey(Plan, on_delete=models.CASCADE, related_name="restrictions")
+    scope = models.CharField(max_length=8, choices=Scope.choices)
+    # Пусто у области PLAN; идентификатор шага ревизии у области STEP.
+    step_id = models.CharField(max_length=128, blank=True, default="")
+    # Причина из закрытой таблицы ``plan_restrictions.CAUSES``.
+    cause = models.CharField(max_length=64)
+    question_id = models.CharField(max_length=128)
+    # Безопасность хода, на котором ограничение открыто.
+    safety_state = models.CharField(max_length=16)
+    safety_policy_version = models.CharField(max_length=64)
+    safety_evaluated_at_revision = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["plan", "created_at"]
+        constraints = [
+            models.CheckConstraint(
+                check=(
+                    models.Q(scope="PLAN", step_id="") | (models.Q(scope="STEP") & ~models.Q(step_id=""))
+                ),
+                name="planrestriction_step_id_matches_scope",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["plan", "scope", "step_id"], name="planrestriction_plan_scope_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"PlanRestriction<plan={self.plan_id} {self.scope} {self.step_id}> {self.cause}:{self.question_id}"
+
+
+class PlanRestrictionLift(_AppendOnlyModel):
+    """Снятие ограничения — отдельный факт (DRF-2877).
+
+    Одно ограничение снимается один раз: повтор читает эту же строку.
+    ``answer_option_id`` — идентификатор варианта ответа (кнопки), не текст
+    человека; свободный текст в каталог не приходит.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    restriction = models.OneToOneField(PlanRestriction, on_delete=models.CASCADE, related_name="lift")
+    lift_kind = models.CharField(max_length=32)
+    answer_option_id = models.CharField(max_length=128, blank=True, default="")
+    # Безопасность хода, на котором ограничение снято; при STOP / UNKNOWN
+    # строка не появляется вовсе.
+    safety_state = models.CharField(max_length=16)
+    safety_policy_version = models.CharField(max_length=64)
+    safety_evaluated_at_revision = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f"PlanRestrictionLift<{self.restriction_id}> {self.lift_kind}"

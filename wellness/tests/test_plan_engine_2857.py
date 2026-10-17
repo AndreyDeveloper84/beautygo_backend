@@ -27,6 +27,8 @@ import pytest
 from django.db import IntegrityError, connection, transaction
 from rest_framework.test import APIClient
 
+from wellness.tests.plan_consent import AttestingClient
+
 from goals.models import ClientGoal
 from users.models import User
 from wellness.models import (
@@ -104,6 +106,8 @@ def _command(goal: ClientGoal | None, *, steps: list[dict] | None = None, **over
         "goal_ref": str(goal.id) if goal is not None else None,
         "mode": "SAVE",
         "confirmation": {"question_id": "plan.save", "option_id": "yes", "state_revision": 7},
+        # DRF-2877 — вердикт хода подтверждения обязателен.
+        "safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4,
         "provenance": {"policy_versions": dict(POLICY_VERSIONS)},
         "decision": {
             "steps": steps,
@@ -123,6 +127,14 @@ def _token_and_flags(settings):
     settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
     settings.PLAN_ENGINE_ENABLED = True
     settings.PLAN_LITE_ENABLED = True
+
+
+@pytest.fixture(autouse=True)
+def _confirmed_knowledge(db):
+    """DRF-2871: сохраняется только план на подтверждённом знании."""
+    from wellness.tests.knowledge import confirm_capability_for_goal
+
+    confirm_capability_for_goal()
 
 
 def _user(username: str, phone: str) -> User:
@@ -147,7 +159,7 @@ def goal(owner) -> ClientGoal:
 
 
 def _api(external_user_id: str = OWNER) -> APIClient:
-    c = APIClient()
+    c = AttestingClient()
     c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {VALID_TOKEN}"
     c.defaults["HTTP_X_EXTERNAL_USER_ID"] = external_user_id
     return c
@@ -205,20 +217,29 @@ class TestCreateCommand:
         assert PlanRevision.objects.get().steps_snapshot == body["decision"]["steps"]
 
     def test_the_key_is_the_servers_and_carries_the_confirmation(self, goal) -> None:
-        """Другое подтверждение того же решения — другая команда, а не повтор."""
+        """Ключ считает сервер, и подтверждение в него входит. Но другое
+        подтверждение ТОГО ЖЕ решения второго плана не даёт (решение владельца
+        08.10: двойное нажатие и повтор — без дублей) — возвращается тот же
+        план; подробно — ``test_plan_proposal_2857.py::TestOneDecisionOnePlan``.
+        Другое РЕШЕНИЕ при действующем плане сохраняется предложением."""
         body = _command(goal)
         again = copy.deepcopy(body)
         again["confirmation"]["state_revision"] = 8
         assert _api().post(PLAN_URL, body, format="json").status_code == 201
-        assert _api().post(PLAN_URL, again, format="json").status_code == 201
-        assert Plan.objects.count() == 2
+        assert _api().post(PLAN_URL, again, format="json").status_code == 200
+        assert Plan.objects.count() == 1
+        other = _api().post(PLAN_URL, _command(goal), format="json")
+        assert other.status_code == 201
         assert len(set(Plan.objects.values_list("idempotency_key", flat=True))) == 2
 
-    def test_a_second_plan_for_the_goal_supersedes_the_first_in_place(self, goal) -> None:
+    def test_a_second_plan_for_the_goal_does_not_displace_the_first(self, goal) -> None:
+        """Решение владельца 08.10: сохранённое не вытесняет действующий план
+        без подтверждения замены. Второй план — предложение; замена — в
+        ``test_plan_proposal_2857.py``."""
         first = _save(goal)
         second = _save(goal)
         first.refresh_from_db()
-        assert (first.status, second.status) == ("superseded", "active")
+        assert (first.status, second.status) == ("active", "proposed")
         # История цела: прежний план и его ревизия на месте.
         assert first.current_revision.revision_no == 1
         assert (Plan.objects.count(), PlanRevision.objects.count()) == (2, 2)
@@ -487,7 +508,7 @@ class TestHumanStatus:
 
 class TestRead:
     def test_no_plan_is_null(self, goal) -> None:
-        assert _api().get(PLAN_URL).json()["data"] == {"plan": None}
+        assert _api().get(PLAN_URL).json()["data"] == {"plan": None, "proposal": None}
 
     def test_the_active_plan_wins_over_a_paused_one(self, goal) -> None:
         paused = _save(goal)
@@ -499,13 +520,13 @@ class TestRead:
         """Статус цели в статус плана не переписывается (§4.5 отложен 07.10)."""
         plan = _save(goal)
         ClientGoal.objects.filter(pk=goal.pk).update(state="paused")
-        assert _api().get(PLAN_URL).json()["data"] == {"plan": None}
+        assert _api().get(PLAN_URL).json()["data"] == {"plan": None, "proposal": None}
         plan.refresh_from_db()
         assert plan.status == "active"
 
     def test_a_stranger_reads_nothing(self, goal, stranger) -> None:
         _save(goal)
-        assert _api(STRANGER).get(PLAN_URL).json()["data"] == {"plan": None}
+        assert _api(STRANGER).get(PLAN_URL).json()["data"] == {"plan": None, "proposal": None}
 
     def test_the_document_expresses_no_progress(self, goal) -> None:
         _save(goal)
@@ -539,7 +560,7 @@ class TestFlagsAndLite:
         assert resp.json()["error"]["code"] == "PLAN_ENGINE_DISABLED"
         state = _api().post(STATE_URL, {"plan_id": str(plan.id), "state": "paused"}, format="json")
         assert state.status_code == 404
-        assert _api().get(PLAN_URL).json()["data"] == {"plan": None}
+        assert _api().get(PLAN_URL).json()["data"] == {"plan": None, "proposal": None}
         # Откат флага ничего не удаляет.
         assert (Plan.objects.count(), PlanRevision.objects.count()) == (1, 1)
         assert Plan.objects.get().status == "active"
@@ -558,6 +579,53 @@ class TestFlagsAndLite:
         assert resp.status_code == 409
         assert resp.json()["error"]["code"] == "PLAN_LITE_SUPERSEDED_BY_ENGINE"
         assert PersonalPlan.objects.count() == 1
+
+    def test_under_test_data_the_lite_writer_is_not_displaced(self, goal, settings) -> None:
+        """Решение владельца 08.10: пока идёт проверка на тестовых данных,
+        включённый движок создание через Lite не ломает."""
+        settings.PLAN_ENGINE_ENABLED = True
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        assert _api().post(LITE_URL, LITE_BODY, format="json").status_code == 201
+        assert _api().delete(LITE_URL).status_code == 200
+        assert _api().post(LITE_URL, LITE_BODY, format="json").status_code == 201
+        assert PersonalPlan.objects.count() == 2
+
+    def test_under_test_data_saving_a_plan_leaves_the_lite_plan_alone(self, goal, settings) -> None:
+        settings.PLAN_ENGINE_ENABLED = True
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        # Под тестовыми данными движок включён только субъектам серверного списка.
+        settings.SYNTHETIC_TEST_SUBJECT_IDS = [str(goal.client_id)]
+        assert _api().post(LITE_URL, LITE_BODY, format="json").status_code == 201
+        lite = PersonalPlan.objects.get()
+
+        _save(goal)
+
+        lite.refresh_from_db()
+        assert (lite.status, lite.closed_at) == ("active", None)
+        assert Plan.objects.filter(status="active").count() == 1  # оба механизма живы
+
+    def test_test_data_off_again_the_displacement_is_back(self, goal, settings) -> None:
+        """Вытеснение подавлено, а не снято: выключили тестовые данные —
+        действует как решено в WP1, в обоих местах."""
+        settings.PLAN_ENGINE_ENABLED = True
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        assert _api().post(LITE_URL, LITE_BODY, format="json").status_code == 201
+        lite = PersonalPlan.objects.get()
+        settings.SYNTHETIC_TEST_DATA_ENABLED = False
+
+        _save(goal)
+        lite.refresh_from_db()
+        assert lite.status == "superseded"
+        resp = _api().post(LITE_URL, LITE_BODY, format="json")
+        assert resp.json()["error"]["code"] == "PLAN_LITE_SUPERSEDED_BY_ENGINE"
+
+    def test_test_data_alone_displaces_nothing_and_enables_nothing(self, goal, settings) -> None:
+        """Флаг тестовых данных движок не включает: без PLAN_ENGINE_ENABLED
+        Lite пишет, а писатель Plan отвечает 404."""
+        settings.PLAN_ENGINE_ENABLED = False
+        settings.SYNTHETIC_TEST_DATA_ENABLED = True
+        assert _api().post(LITE_URL, LITE_BODY, format="json").status_code == 201
+        assert _api().post(PLAN_URL, _command(goal), format="json").status_code == 404
 
     def test_engine_off_again_lite_writes_and_engine_rows_stay(self, goal, settings) -> None:
         _save(goal)
@@ -677,7 +745,7 @@ class TestErasureAndExport:
 
         person, _ = both
         saved = export_wellness_plan(person)["saved_plans"]
-        assert [p["status"] for p in saved] == ["superseded", "active"]
+        assert [p["status"] for p in saved] == ["active", "proposed"]
         assert saved[0]["goal_key"] == "relax"
         assert saved[1]["revisions"][0]["steps"][0]["capability_ref"] == "cap:relaxation-massage"
         flat = repr(saved)
@@ -739,5 +807,7 @@ class TestRaces:
         results = _in_threads(call, call)
         assert not [r for r in results if isinstance(r, Exception)], results
         assert Plan.objects.count() == 2
-        assert sorted(Plan.objects.values_list("status", flat=True)) == ["active", "superseded"]
+        # Гонка двух РАЗНЫХ решений: одно действует, второе — предложение;
+        # действующих по-прежнему ровно один, и никто никого не погасил молча.
+        assert sorted(Plan.objects.values_list("status", flat=True)) == ["active", "proposed"]
         assert PlanRevision.objects.count() == 2

@@ -1,0 +1,83 @@
+{
+  "_about": "Синтетический тестовый набор для сквозной проверки Плана. Содержание — docs/AYLA_PLAN_SYNTHETIC_FIXTURE_SPEC_2026-10-08.md (утверждено главным окном, показывается владельцу). Всё здесь — помеченная синтетика: проверяет механику пути, а не обоснованность рекомендаций.",
+  "_fill_before_seeding": "Значения стенда вписаны по чтению главного окна 09.10.2026: демо-салон mednyy-kovsh, тестовая персона, категории канонов (существующие, вне Body Care). Команда сверит их до первой записи: нет категории, салона или персоны — отказ с причиной, в базе ничего не изменится.",
+  "goal_key": "event",
+  "salon_id": "4b61b277-3007-4fe9-83b4-06fc7dac8606",
+  "test_persona_id": "8152e4e7-36aa-4afd-8f02-93798bd6668a",
+  "templates": [
+    {
+      "ref": "event_look",
+      "name": "Образ к событию: укладка и макияж (тест)",
+      "body_care_scope": "not_body_care",
+      "legal_service_class": "non_medical_cosmetic",
+      "required_practitioner_class": null,
+      "requires_health_check": false,
+      "duration_default": 120,
+      "category_slug": "макияж"
+    },
+    {
+      "ref": "event_manicure",
+      "name": "Маникюр к событию (тест)",
+      "body_care_scope": "not_body_care",
+      "legal_service_class": "non_medical_cosmetic",
+      "required_practitioner_class": null,
+      "requires_health_check": false,
+      "duration_default": 60,
+      "category_slug": "дизайн-ногтей"
+    }
+  ],
+  "capabilities": [
+    {
+      "key": "synthetic_event_hair",
+      "templates": [
+        "event_look"
+      ],
+      "text_client": "Причёска к событию",
+      "expected_effect": "Волосы уложены под формат события; в день события ими не нужно заниматься самой.",
+      "why_for_person": "Чтобы в день события не заниматься волосами самой и не поправлять причёску в течение вечера."
+    },
+    {
+      "key": "synthetic_event_makeup",
+      "templates": [
+        "event_look"
+      ],
+      "text_client": "Макияж к событию",
+      "expected_effect": "Макияж подобран под формат и освещение события.",
+      "why_for_person": "Чтобы лицо выглядело так, как задумано, и на месте, и на фотографиях."
+    },
+    {
+      "key": "synthetic_event_hands",
+      "templates": [
+        "event_manicure"
+      ],
+      "text_client": "Ухоженные руки к событию",
+      "expected_effect": "Руки выглядят ухоженно; маникюр сделан заранее.",
+      "why_for_person": "Руки на виду — при приветствии, с бокалом, на фото; их готовят заранее, а не в день события."
+    }
+  ],
+  "claim": {
+    "claim_scope": "supported",
+    "claim_type": "product",
+    "evidence_kind": "",
+    "evidence_source": "synthetic-test-data",
+    "source_ref": "synthetic-test-data"
+  },
+  "offers": [
+    {
+      "template": "event_look",
+      "name": "Образ к событию: укладка и макияж (тест)",
+      "base_price": "3500.00",
+      "duration_minutes": 120,
+      "master_price": "3500.00",
+      "health_check": {
+        "answer": false,
+        "confirmed_rule": "synthetic-test-data",
+        "rule_version": "1"
+      }
+    }
+  ],
+  "test_master": {
+    "account": "synthetic-test-master:event",
+    "display_name": "Тест-мастер (синтетика)"
+  }
+}

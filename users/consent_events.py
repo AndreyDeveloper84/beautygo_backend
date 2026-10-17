@@ -59,9 +59,14 @@ logger = logging.getLogger(__name__)
 PERSONAL_CALCULATION = "personal_calculation"
 HEALTH = "health"
 FOOD_DIARY_PROCESSING = "food_diary_processing"
+#: Согласие на хранение личных данных. Под ним хранится и обрабатывается
+#: план (``wellness.plan_gate``): каталогу нужно знать его отзыв, чтобы
+#: быть второй линией гейта. Стирать по нему здесь нечего — что делать с
+#: данными при отзыве, решает заявка на удаление, а не это событие.
+PERSONAL_DATA = "personal_data"
 
 #: Типы, от которых зависит поведение каталога. Остальные — ``ignored``.
-HANDLED_TYPES = frozenset({PERSONAL_CALCULATION, HEALTH, FOOD_DIARY_PROCESSING})
+HANDLED_TYPES = frozenset({PERSONAL_CALCULATION, HEALTH, FOOD_DIARY_PROCESSING, PERSONAL_DATA})
 
 Outcome = ConsentEventReceipt.Outcome
 

@@ -25,6 +25,7 @@
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -35,8 +36,10 @@ from goals.models import ClientGoal
 from services.models import SalonService, ServiceTemplate
 
 from .models import Plan, PlanRevision, PlanStepBooking, PlanStepResolution
-from .plan_engine import PlanEngineDisabled, PlanEngineError, PlanNotFound, plan_engine_enabled
-from .plan_safety import SafetyInput
+from .plan_engine import PlanEngineDisabled, PlanEngineError, PlanNotFound, plan_engine_enabled_for
+from .plan_restrictions import blocking_question_ids
+from .plan_step_candidates import offer_is_candidate, step_candidates
+from .plan_safety import S1_NONE, S1_OPEN, SafetyInput, SafetyInputError, parse_step_safety_input
 
 _LEVEL_ORDER = {"CAPABILITY": 0, "SERVICE": 1, "OFFER": 2}
 
@@ -46,11 +49,14 @@ class StepNotFound(PlanEngineError):
 
 
 class StepNotExecutable(PlanEngineError):
-    """Шаг не допущен к действию. ``reason`` — машинное имя условия."""
+    """Шаг не допущен к действию. ``reason`` — машинное имя условия;
+    ``details`` — что вызывающему нужно показать человеку (идентификаторы
+    открытых вопросов), без текста."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, **details: Any) -> None:
         super().__init__(reason)
         self.reason = reason
+        self.details = details
 
 
 class ResolutionRefused(PlanEngineError):
@@ -118,6 +124,12 @@ def _plan_gate(plan: Plan, revision: PlanRevision, step_id: str) -> None:
         raise StepNotExecutable("step_blocked")
     if verdict not in ("VALID", "INCOMPLETE"):
         raise StepNotExecutable("step_validation_unknown")
+    # DRF-2877 — стойкий незакрытый вопрос: открытое ограничение на всём плане
+    # или на этом шаге. Последним: отказ называет вопрос только там, где шаг
+    # иначе был бы исполним.
+    questions = blocking_question_ids(plan, step_id)
+    if questions:
+        raise StepNotExecutable("restriction_open", question_ids=questions)
 
 
 def step_admission(plan: Plan, revision: PlanRevision, step_id: str, *, salon_service_id: UUID | None) -> dict:
@@ -141,6 +153,17 @@ def _safety_gate(safety: SafetyInput) -> None:
     есть ли он. Статус плана при этом не меняется: гейт отказывает действию."""
     if safety.blocks:
         raise StepNotExecutable("safety_blocked")
+    # Длительное ограничение S1: действие, ведущее к услуге и записи, закрыто,
+    # пока ограничение стоит. Область — по причине: сборку, обсуждение,
+    # сохранение и просмотр оно не закрывает (они этот гейт не проходят).
+    # Раздельные имена: при «открыто» вызывающий снова ставит свой вопрос, при
+    # «стоп» — показывает текст S1. Не названо — отказ, а не «ограничения нет».
+    if safety.s1_restriction != S1_NONE:
+        if safety.s1_restriction is None:
+            raise StepNotExecutable("s1_restriction_unknown")
+        raise StepNotExecutable(
+            "s1_restriction_open" if safety.s1_restriction == S1_OPEN else "s1_restriction_stop"
+        )
 
 
 def _locked_plan(user, plan_id: UUID) -> Plan:
@@ -171,7 +194,7 @@ def resolve_step(
 ) -> tuple[PlanStepResolution, bool]:
     """Записать, чем резолвер разрешил шаг. Возвращает ``(строка, created)``;
     повтор того же перехода с тем же содержимым — та же строка."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         raise PlanEngineDisabled()
     if level not in PlanStepResolution.Level.values:
         raise ResolutionRefused("level_invalid")
@@ -215,6 +238,11 @@ def resolve_step(
                 raise ResolutionRefused("tenant_offer_unknown")
             if offer_template != canonical_service_ref:
                 raise ResolutionRefused("offer_not_of_canonical_service")
+            # §8.2: шаг не получает услугу в обход подбора. Предложение обязано
+            # быть допущенным кандидатом этого шага для этого человека ПРЯМО
+            # СЕЙЧАС — перепроверяется при выборе, а не берётся с показа.
+            if not offer_is_candidate(user, plan, step_id, tenant_offer_ref):
+                raise ResolutionRefused("offer_not_a_candidate")
 
         resolution = PlanStepResolution.objects.create(
             plan_revision=revision,
@@ -228,6 +256,22 @@ def resolve_step(
             safety_evaluated_at_revision=safety.evaluated_at_revision,
         )
     return resolution, True
+
+
+def candidates_for_step(user, plan_id: UUID, step_id: str, safety: SafetyInput) -> dict[str, Any]:
+    """Кандидаты услуги для шага (§8.2). Ничего не пишет; допуск шага — тот
+    же, что у перехода: план действует, вердикт хода, ограничения."""
+    if not plan_engine_enabled_for(user):
+        raise PlanEngineDisabled()
+    _safety_gate(safety)
+    with transaction.atomic():
+        plan = _locked_plan(user, plan_id)
+        revision = plan.current_revision
+        _plan_gate(plan, revision, step_id)
+        if effective_step(revision, step_id)["level"] == PlanStepResolution.Level.OFFER:
+            # Исполненный уровень не откатывается (§4.3): искать нечего.
+            raise StepNotExecutable("step_already_resolved")
+        return step_candidates(user, plan, step_id)
 
 
 # ─── запись как факт на шаге ─────────────────────────────────────────────────
@@ -257,7 +301,7 @@ def link_booking(
 ) -> tuple[PlanStepBooking, bool]:
     """Связь после факта: запись уже создана обычным путём. Возвращает
     ``(строка, created)``; повтор — та же строка."""
-    if not plan_engine_enabled():
+    if not plan_engine_enabled_for(user):
         raise PlanEngineDisabled()
     _safety_gate(safety)
     try:
@@ -281,13 +325,87 @@ def link_booking(
     return link, True
 
 
+# ─── запись от шага: происхождение в создании записи (решение владельца 07.10) ──
+
+ENTRY_POINT_PLAN_STEP = "PLAN_STEP"
+
+
+class ProvenanceMalformed(PlanEngineError):
+    """Блок происхождения не конформен. ``reason`` — машинное имя."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class PlanStepProvenance:
+    """Откуда запись: шаг какого плана и при какой безопасности хода (канон
+    §16.4: ``entry_point = PLAN_STEP`` + ссылки на план и шаг)."""
+
+    plan_id: UUID
+    step_id: str
+    safety: SafetyInput
+
+
+def parse_booking_provenance(raw: Any) -> PlanStepProvenance | None:
+    """Необязательный блок ``provenance`` тела создания записи. ``None`` —
+    блока нет: обычная запись, плана она не касается."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ProvenanceMalformed("provenance_not_object")
+    if raw.get("entry_point") != ENTRY_POINT_PLAN_STEP:
+        raise ProvenanceMalformed("entry_point_unsupported")
+    try:
+        plan_id = UUID(str(raw.get("plan_id")))
+    except (TypeError, ValueError) as exc:
+        raise ProvenanceMalformed("plan_id_malformed") from exc
+    step_id = raw.get("step_id")
+    if not isinstance(step_id, str) or not step_id.strip():
+        raise ProvenanceMalformed("step_id_missing")
+    try:
+        safety = parse_step_safety_input(raw)
+    except SafetyInputError as exc:
+        raise ProvenanceMalformed(exc.reason) from exc
+    return PlanStepProvenance(plan_id=plan_id, step_id=step_id, safety=safety)
+
+
+def _client(client_id: UUID):
+    """Запись от шага знает только идентификатор клиента — человек читается здесь."""
+    from users.models import User
+
+    return User.objects.filter(pk=client_id).first()
+
+
+def admit_step_for_booking(client_id: UUID, provenance: PlanStepProvenance, *, salon_service_id: UUID | None) -> Plan:
+    """Допуск шага ДО создания записи, внутри её транзакции.
+
+    Идентификаторы из тела допуска не обходят: план ищется строго среди планов
+    этого человека, шаг — в его текущей ревизии, услуга — та, которой разрешён
+    шаг. Возвращает запертый план для ``attach_booking``. Отказ — исключение;
+    транзакция записи откатывается, записи нет.
+    """
+    if not plan_engine_enabled_for(_client(client_id)):
+        raise PlanEngineDisabled()
+    _safety_gate(provenance.safety)
+    plan = _locked_plan(client_id, provenance.plan_id)
+    step_admission(plan, plan.current_revision, provenance.step_id, salon_service_id=salon_service_id)
+    return plan
+
+
 # ─── чтение ──────────────────────────────────────────────────────────────────
 
 
 def step_state(plan: Plan, revision: PlanRevision) -> dict[str, Any]:
     """По каждому шагу ревизии: действующий уровень и записи, сделанные от
     шага. Статус и время записи — с ``Appointment`` на момент чтения. Ни
-    счётчика, ни признака «выполнено» (PE-4)."""
+    счётчика, ни признака «выполнено» (PE-4).
+
+    ``start_datetime`` — момент (в UTC); ``timezone`` — пояс, в котором
+    запись назначена (снимок пояса мастера на момент записи, имя IANA).
+    Без него вызывающий читал часы из строки момента и показывал человеку
+    время со сдвигом либо подставлял свой запасной пояс."""
     bookings: dict[str, list[dict]] = {}
     for link in (
         PlanStepBooking.objects.filter(plan=plan, plan_revision=revision)
@@ -299,10 +417,16 @@ def step_state(plan: Plan, revision: PlanRevision) -> dict[str, Any]:
                 "appointment_id": str(link.appointment_id),
                 "status": link.appointment.status,
                 "start_datetime": link.appointment.start_datetime.isoformat(),
+                "timezone": link.appointment.snapshot_timezone,
             }
         )
     out: dict[str, Any] = {}
     for step in revision.steps_snapshot:
         step_id = step["step_id"]
-        out[step_id] = {**effective_step(revision, step_id), "bookings": bookings.get(step_id, [])}
+        out[step_id] = {
+            **effective_step(revision, step_id),
+            "bookings": bookings.get(step_id, []),
+            # DRF-2877 — на шаге или на всём плане есть незакрытый вопрос.
+            "restricted": bool(blocking_question_ids(plan, step_id)),
+        }
     return out
