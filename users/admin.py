@@ -17,6 +17,8 @@ from django.utils.html import format_html
 
 from appointments.admin import SpecialistWorkingHoursInline
 
+from .master_salon_link import grant_staff_on_admin_assignment, was_revoked_from
+
 from .models import (
     DeletionRequest, DeviceToken, OTPCode, Profile, SalonAdminLinkRequest, SocialAccount,
     SpecialistProfile, User,
@@ -47,7 +49,9 @@ TENANT_HELP = (
     "Назначенный салон здесь не меняется (DRF-2893): перевода мастера "
     "между салонами в каталоге нет. Смена этой ссылки не перенесла бы ни "
     "доступ мастера, ни его услуги, ни место — они остались бы за прежним "
-    "салоном, а услуги перестали бы сохраняться."
+    "салоном, а услуги перестали бы сохраняться. "
+    "Назначение салона заводит мастеру и доступ сотрудника к записям и "
+    "расписанию этого салона (DRF-2913)."
 )
 
 VISIBILITY_HELP = (
@@ -421,7 +425,12 @@ class TenantMasterInlineForm(forms.ModelForm):
         model = SpecialistProfile
         fields = '__all__'
 
+    #: Эта строка назначает мастеру салон (новая или подхваченный профиль
+    #: без салона). Строка мастера, уже работающего здесь, — нет.
+    _assigns_salon = False
+
     def _post_clean(self):
+        self._assigns_salon = self.instance._state.adding
         # ``_state.adding``, а НЕ ``instance.pk``: первичный ключ здесь
         # ``UUIDField(default=uuid.uuid4)``, поэтому у новой, ещё не
         # сохранённой строки он уже заполнен свежим uuid4, и проверка по
@@ -459,7 +468,39 @@ class TenantMasterInlineForm(forms.ModelForm):
                 # формсет, и именно он здесь и заводится.
                 existing.tenant_id = self.instance.tenant_id
                 self.instance = existing
+                self._assigns_salon = owner is None
+        if user is not None and self._assigns_salon and was_revoked_from(user, self.instance.tenant_id):
+            # DRF-2913: назначение заводит доступ сотрудника, а отозванного
+            # формой не возвращают.
+            self.add_error('user', ValidationError(
+                'Связь этого человека с салоном «%(salon)s» была отозвана. Назначение '
+                'салона формой вернуло бы ему доступ к записям и расписанию салона '
+                'в обход отзыва. Вернуть отозванного может только отдельное решение '
+                'администратора салона — формой это не делается.',
+                code='master_was_revoked_from_this_tenant',
+                params={'salon': self.instance.tenant},
+            ))
+            return
         super()._post_clean()
+
+    def save(self, commit=True):
+        # DRF-2913: строка блока назначает мастеру салон — значит, заводит и
+        # доступ сотрудника. Раньше писалась одна ссылка профиля, и мастер
+        # продавался клиенту без права открыть расписание салона.
+        profile = super().save(commit=commit)
+        if not self._assigns_salon:
+            return profile
+        if commit:
+            grant_staff_on_admin_assignment(profile.user, profile.tenant_id)
+        else:
+            save_m2m = self.save_m2m
+
+            def save_m2m_and_grant():
+                save_m2m()
+                grant_staff_on_admin_assignment(profile.user, profile.tenant_id)
+
+            self.save_m2m = save_m2m_and_grant
+        return profile
 
 
 class TenantMastersInline(admin.StackedInline):
@@ -674,8 +715,35 @@ class ProfileAdmin(admin.ModelAdmin):
 
 # ─── SpecialistProfileAdmin ───────────────────────────────────────────────────
 
+class SpecialistProfileAdminForm(forms.ModelForm):
+    """Назначение салона мастеру заводит и доступ сотрудника (DRF-2913)."""
+
+    class Meta:
+        model = SpecialistProfile
+        fields = '__all__'
+
+    def assigns_salon(self) -> bool:
+        """Салон назначается этим сохранением: был пуст — стал задан."""
+        return 'tenant' in self.changed_data and self.cleaned_data.get('tenant') is not None
+
+    def clean(self):
+        cleaned = super().clean()
+        user, tenant = cleaned.get('user'), cleaned.get('tenant')
+        if 'tenant' in self.changed_data and tenant is not None and was_revoked_from(user, tenant.pk):
+            self.add_error('tenant', ValidationError(
+                'Связь этого человека с салоном «%(salon)s» была отозвана. Назначение '
+                'салона формой вернуло бы ему доступ к записям и расписанию салона '
+                'в обход отзыва. Вернуть отозванного может только отдельное решение '
+                'администратора салона — формой это не делается.',
+                code='master_was_revoked_from_this_tenant',
+                params={'salon': tenant},
+            ))
+        return cleaned
+
+
 @admin.register(SpecialistProfile)
 class SpecialistProfileAdmin(admin.ModelAdmin):
+    form = SpecialistProfileAdminForm
     actions = [approve_specialists, reject_specialists, apply_default_schedule]
     # Расписание — рядом с человеком, а не отдельным экраном. Инлайн живёт
     # в appointments.admin рядом с моделью и монтируется сюда: правила
@@ -712,6 +780,14 @@ class SpecialistProfileAdmin(admin.ModelAdmin):
         if obj is not None and obj.tenant_id is not None:
             return base + ('tenant',)
         return base
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        # DRF-2913: только когда салон НАЗНАЧАЕТСЯ этим сохранением. Уже
+        # заведённым мастерам без связи форма доступ не раздаёт — это
+        # запись в данные, она делается отдельно и по решению.
+        if form.assigns_salon():
+            grant_staff_on_admin_assignment(obj.user, obj.tenant_id)
 
     # DRF-1596. Порядок разделов повторяет порядок решений оператора:
     # чей мастер → кто он → увидит ли его клиент → как он принимает
