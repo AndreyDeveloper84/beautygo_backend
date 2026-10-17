@@ -102,7 +102,7 @@ from services.body_care_address import address_states
 from services.body_care_license import license_states
 from services.body_care_qualification import qualification_states
 from services.body_care_validation import NOT_SUBJECT, READY_FOR_SCREENING, VALIDATION_STATES, validation_states
-from services.capabilities import template_ids_helping_goal
+from services.capabilities import template_ids_by_capability, template_ids_helping_goal
 from services.catalog_reads import catalog_services_for, catalog_services_prefetch
 from services.offer_sellable import sellable_offer_q
 from services.synthetic import real_offer_q
@@ -414,6 +414,13 @@ class SpecialistCandidateSource:
             template_ids_helping_goal(need.goal_key) if goal_categories else frozenset()
         )
         needle = (need.raw_text or "").strip().casefold()
+        # DRF-2917: каноны с ПОДТВЕРЖДЁННОЙ названной способностью — тем же
+        # чтением, что у плана. Разрешения на помеченную синтетику здесь нет и
+        # не бывает: обычный подбор её не видит.
+        capability_templates = (
+            frozenset().union(*template_ids_by_capability(need.capability_refs).values())
+            if need.capability_refs else frozenset()
+        )
 
         facts = [
             self._facts_for(
@@ -423,6 +430,7 @@ class SpecialistCandidateSource:
                 goal_categories=goal_categories,
                 goal_positions=goal_positions,
                 helping_templates=helping_templates,
+                capability_templates=capability_templates,
             )
             for specialist in specialists
         ]
@@ -570,6 +578,7 @@ class SpecialistCandidateSource:
         goal_categories: tuple[UUID, ...] | None,
         goal_positions=None,
         helping_templates: frozenset = frozenset(),
+        capability_templates: frozenset = frozenset(),
     ) -> CandidateFacts:
         # ОБА слоя каталога, а не только канонический.
         #
@@ -589,6 +598,7 @@ class SpecialistCandidateSource:
         match_level, matched_service_id, matched_category_id, goal_fit_depth = self._match(
             services, needle=needle, goal_categories=goal_categories, mapping=mapping,
             goal_positions=goal_positions, helping_templates=helping_templates,
+            capability_templates=capability_templates,
         )
         return CandidateFacts(
             # Ключ ПОЛЬЗОВАТЕЛЯ, а не профиля. Разница не косметическая:
@@ -675,6 +685,7 @@ class SpecialistCandidateSource:
         mapping: "_MappingFacts",
         goal_positions=None,
         helping_templates: frozenset = frozenset(),
+        capability_templates: frozenset = frozenset(),
     ) -> tuple[MatchLevel, UUID | None, UUID | None, int | None]:
         """Соответствие нужде на сегодняшних данных. Честно слабое.
 
@@ -719,6 +730,14 @@ class SpecialistCandidateSource:
             ]
             if partial:
                 return MatchLevel.SERVICE_PARTIAL, mapping.best_of(partial), None, None
+
+        if capability_templates:
+            # DRF-2917: услуга на каноне с подтверждённой способностью. Слабее
+            # совпадения по названию (человек назвал услугу), сильнее категории
+            # цели (способность — знание о самой процедуре, а не о её полке).
+            capable = [s for s in services if mapping.template_by_service.get(s.id) in capability_templates]
+            if capable:
+                return MatchLevel.CAPABILITY_ONLY, mapping.best_of(capable), None, None
 
         if goal_categories:
             allowed = set(goal_categories)
