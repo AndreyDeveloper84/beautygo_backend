@@ -515,6 +515,10 @@ class CatalogRecommendationsView(APIView):
         # пустеет — другими мастерами «Новых мест» на «только Анна» не
         # отвечаем. Объяснить пустоту и спросить про альтернативы — дело бота.
         preferences = build_preferences(serializer.validated_data.get("preferences"))
+        if any("name" in item for item in serializer.validated_data.get("preferences") or ()):
+            # DRF-2855: имя мастера разрешает только граница resolve в режиме
+            # «свои салоны»; эта ручка — не канал для него. Имя в лог не пишется.
+            logger.warning("catalog.recommendations.preference.name_dropped — имя мастера здесь не разрешается")
 
         # Константа поверхности, не производная от запроса (§72).
         # Ни `get`, ни `or`, ни умолчания сериализатора: значение известно
