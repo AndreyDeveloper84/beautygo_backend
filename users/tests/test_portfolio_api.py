@@ -168,6 +168,72 @@ class TestPortfolioUpload:
 
 
 # ---------------------------------------------------------------------------
+# POST — the declared type is the client's word; the bytes are checked
+# ---------------------------------------------------------------------------
+
+_NOT_IMAGES = {
+    "svg_named_svg": ("evil.svg", b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>'),
+    "svg_named_png": ("evil.png", b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"/>'),
+    "html_named_html": ("evil.html", b"<html><script>alert(1)</script></html>"),
+    "html_named_jpg": ("evil.jpg", b"<html><script>alert(1)</script></html>"),
+}
+
+
+@pytest.mark.django_db
+class TestPortfolioUploadChecksContent:
+    """The Pro-app door checks the bytes like the internal and salon-admin doors.
+
+    Before: only the client-declared ``content_type`` was read, so markup
+    signed as ``image/png`` was stored and served from ``image.url``.
+    """
+
+    @pytest.mark.parametrize("declared", sorted(ALLOWED_CONTENT_TYPES))
+    @pytest.mark.parametrize("case", sorted(_NOT_IMAGES))
+    def test_markup_signed_as_an_image_is_refused_and_nothing_is_stored(
+        self, pro_client, specialist_profile, case, declared,
+    ):
+        name, payload = _NOT_IMAGES[case]
+        upload = SimpleUploadedFile(name, payload, content_type=declared)
+        storage = SpecialistPortfolio._meta.get_field('image').storage
+        with patch.object(storage, 'save', wraps=storage.save) as save:
+            resp = pro_client.post(PORTFOLIO_URL, {'image': upload}, format='multipart')
+        assert resp.status_code == 400, resp.content
+        error = resp.json()['error']
+        assert error['code'] == 'VALIDATION_ERROR'
+        assert error['details'] == {'reason': 'not_an_image'}
+        save.assert_not_called()
+        assert specialist_profile.portfolio.count() == 0
+
+    def test_gif_bytes_signed_as_png_are_refused_as_unsupported(self, pro_client, specialist_profile):
+        buf = io.BytesIO()
+        Image.new('RGB', (10, 10), color='red').save(buf, format='GIF')
+        upload = SimpleUploadedFile('anim.png', buf.getvalue(), content_type='image/png')
+        resp = pro_client.post(PORTFOLIO_URL, {'image': upload}, format='multipart')
+        assert resp.status_code == 400
+        assert resp.json()['error']['details'] == {'reason': 'unsupported_type'}
+        assert specialist_profile.portfolio.count() == 0
+
+    @pytest.mark.parametrize("content_type", sorted(ALLOWED_CONTENT_TYPES))
+    def test_a_real_image_is_stored(self, pro_client, specialist_profile, content_type):
+        resp = pro_client.post(
+            PORTFOLIO_URL,
+            {'image': _make_image(content_type=content_type)},
+            format='multipart',
+        )
+        assert resp.status_code == 201
+        item = specialist_profile.portfolio.get()
+        with item.image.open('rb') as fh:
+            Image.open(fh).verify()
+
+    def test_a_non_square_image_is_stored(self, pro_client, specialist_profile):
+        buf = io.BytesIO()
+        Image.new('RGB', (40, 10), color='red').save(buf, format='JPEG')
+        upload = SimpleUploadedFile('wide.jpg', buf.getvalue(), content_type='image/jpeg')
+        resp = pro_client.post(PORTFOLIO_URL, {'image': upload}, format='multipart')
+        assert resp.status_code == 201
+
+
+# ---------------------------------------------------------------------------
 # GET — list
 # ---------------------------------------------------------------------------
 

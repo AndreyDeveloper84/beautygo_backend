@@ -14,6 +14,10 @@ Caps and validation here are deliberate guardrails:
   serves with text/html sometimes and that's an XSS lever.
 - Hard size cap 10 MiB. The client app should compress before upload
   but the server is the only enforcer the user can't disable.
+- The declared MIME type is the client's word, so the bytes are checked
+  too (``validate_image``, the same check the internal and salon-admin
+  doors run): markup signed as ``image/png`` would otherwise be stored
+  and served from ``image.url``.
 """
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.request import Request
 from rest_framework.response import Response
 
+from .internal_specialist_profile_api import MediaRefused, validate_image
 from .models import SpecialistPortfolio, SpecialistProfile
 from .permissions import IsProApp, IsSpecialist
 from .response import error_response, success_response
@@ -112,6 +117,16 @@ class PortfolioListCreateView(GenericAPIView):
                     "Unsupported file type. Allowed: "
                     f"{', '.join(sorted(ALLOWED_CONTENT_TYPES))}."
                 ),
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validate_image(image, max_bytes=MAX_FILE_BYTES, square=False)
+        except MediaRefused as exc:
+            return error_response(
+                code="VALIDATION_ERROR",
+                message="File is not an accepted image.",
+                details={"reason": exc.reason, **exc.extra},
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
