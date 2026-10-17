@@ -36,7 +36,7 @@ python-dotenv==1.2.4
 # Observability — error monitoring + structured logging.
 # Sentry SDK no-ops when SENTRY_DSN env is empty, so dev / CI stay quiet.
 # python-json-logger is the JSON formatter used by prod LOGGING config.
-sentry-sdk[django]==2.70.0
+sentry-sdk[django]==2.71.0
 python-json-logger==3.3.0
 
 # Async tasks — Celery + Redis broker/result backend, django-redis cache,
@@ -110,7 +110,7 @@ pytest-cov==6.3.0
 factory-boy==3.3.3
 Faker==37.12.0
 freezegun==1.5.5
-yookassa==3.12.1
+yookassa==3.13.0
 
 # AI orchestration shared package (DRF-236..239 + DRF-241 — tool_dispatcher hook).
 # Repo: https://github.com/AndreyDeveloper84/ayla-ai-core (public)
