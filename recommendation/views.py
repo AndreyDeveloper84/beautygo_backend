@@ -36,7 +36,14 @@ from users.permissions import IsBotServiceWithVerifiedClient
 from users.response import error_response, success_response
 from users.deletion_requests import deletion_block_for, deletion_refusal
 
-from ._serializers import ResolveRequestSerializer, ResolveResponseSerializer, decision_to_payload
+from ._serializers import (
+    NEED_KIND_CAPABILITY,
+    NEED_KNOWN,
+    NEED_NO_CONFIRMED_KNOWLEDGE,
+    ResolveRequestSerializer,
+    ResolveResponseSerializer,
+    decision_to_payload,
+)
 from ._source_binding import CandidateSourceNotConfigured, get_candidate_source
 from .api import (
     NeedOrigin,
@@ -76,6 +83,28 @@ def _with_saved_goal(need: NeedSpec, subject) -> NeedSpec:
     if not saved:
         return need
     return dataclasses.replace(need, goal_key=saved)
+
+
+def _need_resolution(need: NeedSpec) -> list[dict]:
+    """Что каталог знает о названной способности — причина уровня запроса (DRF-2917).
+
+    Без этого пустая выдача по способности неотличима от «никто в области
+    поиска её не оказывает». Наружу — одна причина, как у чтения знания:
+    подтверждённого знания по ключу нет. Чем оно не подтверждено (черновик,
+    запрет, истекло, помечено синтетикой, ключа нет вовсе), провод не говорит.
+    """
+    if not need.capability_refs:
+        return []
+    from services.capabilities import template_ids_by_capability
+
+    known = template_ids_by_capability(need.capability_refs)
+    return [
+        {
+            "kind": NEED_KIND_CAPABILITY, "key": key,
+            "status": NEED_KNOWN if known.get(key) else NEED_NO_CONFIRMED_KNOWLEDGE,
+        }
+        for key in need.capability_refs
+    ]
 
 
 def _cross_salon_safe(preferences: tuple) -> tuple:
@@ -179,6 +208,7 @@ class RecommendationResolveView(APIView):
         else:
             preferences = _cross_salon_safe(preferences)
 
+        decision_need = _with_saved_goal(serializer.build_need(), request.user)
         decision = resolve(
             RecommendationRequest(
                 request_id=serializer.validated_data["request_id"],
@@ -186,7 +216,7 @@ class RecommendationResolveView(APIView):
                 subject_ref=str(request.user.id),
                 surface=Surface(serializer.validated_data["surface"]),
                 scope=scope,
-                need=_with_saved_goal(serializer.build_need(), request.user),
+                need=decision_need,
                 constraints=serializer.build_constraints(),
                 safety_state=SafetyState(serializer.validated_data["safety_state"]),
                 tie_break_seed=serializer.validated_data.get("tie_break_seed"),
@@ -196,7 +226,7 @@ class RecommendationResolveView(APIView):
             source=source,
         )
 
-        payload = decision_to_payload(decision)
+        payload = decision_to_payload(decision, need_resolution=_need_resolution(decision_need))
         # Проверка СВОЕГО выхода. Не паранойя: у формы ответа теперь есть
         # владелец (§2.1 C3), и владелец обязан ловить своё нарушение сам —
         # иначе он снова окажется у потребителя в виде пустого экрана.

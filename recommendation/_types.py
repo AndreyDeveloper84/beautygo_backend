@@ -370,7 +370,11 @@ class NeedSpec:
     """Что человеку нужно. `origin` обязателен и не бывает модельным."""
 
     origin: NeedOrigin
-    capability_refs: tuple[UUID, ...] = ()
+    #: Способности — КЛЮЧАМИ словаря (DRF-2917): ключ — утверждённое имя
+    #: смысла, одно на всех контурах; идентификатор строки таким не является.
+    capability_refs: tuple[str, ...] = ()
+    #: Канон по ссылке резолвер пока не ищет: провод отвечает на непустое поле
+    #: отказом, а не молчаливым «никого» (DRF-2917).
     canonical_service_refs: tuple[UUID, ...] = ()
     goal_key: str | None = None
     raw_text: str | None = None
