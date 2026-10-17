@@ -405,7 +405,7 @@ class TestTheContract:
         assert ResolveResponseSerializer(data=payload).is_valid()
         without = {k: v for k, v in payload.items() if k != "preference_resolution"}
         assert not ResolveResponseSerializer(data=without).is_valid()
-        assert tuple(int(p) for p in RESOLVER_SPEC_VERSION.split(".")[:2]) >= (1, 2)
+        assert tuple(int(p) for p in RESOLVER_SPEC_VERSION.split(".")[:2]) >= (1, 3)
 
 
 class TestTheSearchItself:

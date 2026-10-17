@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import itertools
 import uuid
 from datetime import time
 from decimal import Decimal
@@ -48,6 +49,9 @@ pytestmark = pytest.mark.django_db
 RUNTIME_TOKEN = "test-runtime-internal-token-1796"  # noqa: S105
 OLGA = "bot:max:1796001"
 IRINA = "bot:max:1796002"
+
+#: Телефон уникален на всю таблицу; случайный из десяти тысяч сталкивается сам с собой.
+_PHONES = itertools.count(1)
 
 
 @pytest.fixture(autouse=True)
@@ -161,7 +165,7 @@ def _salon_master(*, status: str, external_user_id: str) -> SpecialistProfile:
         username=f"salon_1796_{uuid.uuid4().hex[:6]}",
         password="x",  # pragma: allowlist secret
         role="specialist",
-        phone=f"+7999517{uuid.uuid4().int % 10000:04d}",
+        phone=f"+7999517{next(_PHONES):04d}",
     )
     user.tenant = salon
     user.save(update_fields=["tenant"])

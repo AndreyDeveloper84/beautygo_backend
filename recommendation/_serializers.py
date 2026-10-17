@@ -55,6 +55,13 @@ logger = logging.getLogger(__name__)
 NAME_STEM_MIN_LENGTH = 3
 MAX_NAME_STEMS = 4
 
+#: Сколько способностей можно назвать в одной нужде (DRF-2917).
+MAX_CAPABILITIES_PER_NEED = 1
+
+NEED_KIND_CAPABILITY = "capability"
+NEED_KNOWN = "known"
+NEED_NO_CONFIRMED_KNOWLEDGE = "no_confirmed_knowledge"
+
 FORBIDDEN_RESPONSE_FIELDS = frozenset({"reasoning_text", "reason_text", "why_text", "score", "match_score"})
 
 
@@ -100,10 +107,37 @@ class _ScopeSerializer(serializers.Serializer):
 
 class _NeedSerializer(serializers.Serializer):
     origin = serializers.ChoiceField(choices=[o.value for o in NeedOrigin])
-    capability_refs = serializers.ListField(child=serializers.UUIDField(), required=False, default=list)
+    # DRF-2917: способность называется КЛЮЧОМ словаря — тем же, что у шага
+    # плана и у чтения знания; идентификатор строки на проводе не ходит.
+    capability_refs = serializers.ListField(
+        child=serializers.SlugField(max_length=64), required=False, default=list,
+    )
     canonical_service_refs = serializers.ListField(child=serializers.UUIDField(), required=False, default=list)
     goal_key = serializers.CharField(required=False, allow_null=True, default=None)
     raw_text = serializers.CharField(required=False, allow_null=True, default=None)
+
+    def validate_capability_refs(self, value):
+        """Одна способность на запрос.
+
+        «Мастер умеет любую из названных» или «все сразу» — политика, которую
+        никто не решал; выбрать её молча значило бы назначить порядок выдачи.
+        """
+        if len(value) > MAX_CAPABILITIES_PER_NEED:
+            raise serializers.ValidationError(
+                "В одном запросе называется одна способность: как сочетать несколько, не решено."
+            )
+        return value
+
+    def validate_canonical_service_refs(self, value):
+        """Поиск по ссылке на канон не построен — отказ честнее пустой выдачи.
+
+        До DRF-2917 непустое поле молча исключало всех кандидатов как «не
+        умеет». Чем называть канон на проводе (идентификатор строки или код
+        справочника), не решено.
+        """
+        if value:
+            raise serializers.ValidationError("Поиск по canonical_service_refs не поддерживается.")
+        return value
 
 
 class PreferenceSerializer(serializers.Serializer):
@@ -365,12 +399,27 @@ class _PreferenceResolutionSerializer(serializers.Serializer):
     matches = serializers.IntegerField(min_value=0)
 
 
+class _NeedResolutionSerializer(serializers.Serializer):
+    """Исход по названной способности — причина пустой выдачи уровня запроса.
+
+    Без него «такой подтверждённой способности нет» и «в области поиска её
+    никто не оказывает» неразличимы: оба дают «не умеет» у каждого кандидата.
+    Причина наружу одна, как у чтения знания: черновик там, запрет, истёкшее
+    или пусто — провод не говорит.
+    """
+
+    kind = serializers.ChoiceField(choices=[NEED_KIND_CAPABILITY])
+    key = serializers.CharField()
+    status = serializers.ChoiceField(choices=[NEED_KNOWN, NEED_NO_CONFIRMED_KNOWLEDGE])
+
+
 class ResolveResponseSerializer(serializers.Serializer):
     """Форма ответа. У неё есть владелец, и владелец — этот файл (§2.1 C3)."""
 
     decision_id = serializers.CharField()
     request_id = serializers.CharField()
     resolver_spec_version = serializers.CharField()
+    need_resolution = _NeedResolutionSerializer(many=True)
     ordered = _RankedCandidateSerializer(many=True)
     excluded = _ExcludedCandidateSerializer(many=True)
     stage_activity = _StageActivitySerializer(many=True)
@@ -386,17 +435,23 @@ class ResolveResponseSerializer(serializers.Serializer):
     candidate_count = serializers.IntegerField(min_value=0)
     # O2 (§9): до калибровки по тени — всегда null.
     separation_score = serializers.FloatField(allow_null=True, min_value=0.0, max_value=1.0)
-    # DRF-2855 (1.2.0): по одному элементу на КАЖДОЕ присланное имя, в порядке запроса.
+    # DRF-2855 (1.3.0): по одному элементу на КАЖДОЕ присланное имя, в порядке запроса.
     preference_resolution = _PreferenceResolutionSerializer(many=True)
 
 
-def decision_to_payload(decision: RecommendationDecision, *, preference_resolution=()) -> dict:
+def decision_to_payload(
+    decision: RecommendationDecision, *, need_resolution=(), preference_resolution=(),
+) -> dict:
     """Разложить решение в тело ответа. Ни строки для показа, ни балла.
+
+    ``need_resolution`` — что каталог знает о названной способности (DRF-2917);
+    считает его вызывающий, резолвер знания не читает.
 
     ``preference_resolution`` — исходы разрешения имён (DRF-2855); считает их
     ручка, а не резолвер: имя — дело границы, решение имён не знает.
     """
     return {
+        "need_resolution": [dict(item) for item in need_resolution],
         "preference_resolution": [dict(item) for item in preference_resolution],
         "decision_id": decision.decision_id,
         "request_id": decision.request_id,

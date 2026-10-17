@@ -280,7 +280,10 @@ class Command(BaseCommand):
         if salon.template_id != template.id or salon.requires_health_check is not False:
             salon.template = template
             salon.requires_health_check = False
-            salon.save(update_fields=["template", "requires_health_check"])
+            # DRF-2883: подтверждение выдаётся для конкретного канона — сидер
+            # меняет канон и подтверждает связь заново тем же правилом.
+            salon.mapping_confirmed_at = timezone.now()
+            salon.save(update_fields=["template", "requires_health_check", "mapping_confirmed_at"])
         edge, _ = SpecialistService.objects.get_or_create(
             salon_service=salon,
             specialist=profile,

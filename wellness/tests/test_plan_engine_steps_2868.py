@@ -26,6 +26,8 @@ import pytest
 from django.db import IntegrityError, transaction
 from rest_framework.test import APIClient
 
+from wellness.tests.plan_consent import AttestingClient
+
 from appointments.models import Appointment
 from goals.models import ClientGoal
 from services.models import SalonService, ServiceCategory, ServiceTemplate, SpecialistService
@@ -61,13 +63,35 @@ POLICY_VERSIONS = {
 }
 DECISION = "resolver-decision-1"
 #: DRF-2877 — каждое действие с шагом несёт безопасность хода.
-SAFETY = {"safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4}
+SAFETY = {
+    "safety_state": "NORMAL", "safety_policy_version": "pre_check-test", "evaluated_at_revision": 4,
+    # DRF-2868 — длительное ограничение S1: действия, ведущие к услуге и записи, обязаны его назвать.
+    "s1_restriction": "none",
+}
 
 
 @pytest.fixture(autouse=True)
 def _token_and_flag(settings):
     settings.AYLA_INTERNAL_API_TOKEN = VALID_TOKEN
     settings.PLAN_ENGINE_ENABLED = True
+
+
+@pytest.fixture(autouse=True)
+def _admission_is_not_the_subject(monkeypatch):
+    """Предмет этих узлов — правила шага: уровни, запись как факт, гейты.
+    Допуск предложения как кандидата шага (поиск по способности, восемь
+    проверок, происхождение ответа о здоровье) держит
+    ``test_plan_step_candidates_2868.py`` — на настоящих данных, без подмен.
+    Здесь он снят, чтобы узлы уровня не зависели от разметки услуги."""
+    monkeypatch.setattr("wellness.plan_engine_steps.offer_is_candidate", lambda *a, **k: True)
+
+
+@pytest.fixture(autouse=True)
+def _confirmed_knowledge(db):
+    """DRF-2871: сохраняется только план на подтверждённом знании."""
+    from wellness.tests.knowledge import confirm_capability_for_goal
+
+    confirm_capability_for_goal()
 
 
 def _user(username: str, phone: str) -> User:
@@ -149,7 +173,7 @@ def other_offer(tenant, category, other_canon, specialist) -> SalonService:
 
 
 def _api(external_user_id: str = OWNER) -> APIClient:
-    c = APIClient()
+    c = AttestingClient()
     c.defaults["HTTP_AUTHORIZATION"] = f"Bearer {VALID_TOKEN}"
     c.defaults["HTTP_X_EXTERNAL_USER_ID"] = external_user_id
     return c
@@ -172,6 +196,7 @@ def _command(goal: ClientGoal, steps: list[dict], verdicts: dict[str, str] | Non
         "decision_id": str(uuid.uuid4()),
         "goal_ref": str(goal.id),
         "confirmation": {"question_id": "plan.save", "option_id": "yes", "state_revision": 1},
+        **SAFETY,
         "provenance": {"policy_versions": dict(POLICY_VERSIONS)},
         "decision": {
             "steps": steps, "assertions": [],
@@ -503,10 +528,25 @@ class TestBookingIsAFact:
             "appointment_id": str(appt.id),
             "status": appt.status,
             "start_datetime": appt.start_datetime.isoformat(),
+            "timezone": appt.snapshot_timezone,
         }]
         assert state["s2"]["bookings"] == []
         link = PlanStepBooking.objects.get()
         assert link.resolver_decision_id == DECISION and link.recommendation_id is None
+
+    def test_the_booking_carries_the_zone_it_was_made_in(self, goal, canon, offer, specialist, owner) -> None:
+        """Момент отдаётся в UTC; часы для человека — в поясе записи, не в
+        запасном поясе вызывающего. Пояс не московский — чтобы узел не
+        совпал с умолчанием."""
+        type(specialist).objects.filter(pk=specialist.pk).update(timezone="Asia/Yekaterinburg")
+        plan = _save(goal)
+        _to_offer(plan, canon, offer)
+        appt = _book(owner, specialist, offer)
+        resp = _link(plan, appt)
+        assert resp.status_code == 201, resp.content
+        [booking] = resp.json()["data"]["plan"]["step_state"]["s1"]["bookings"]
+        assert booking["timezone"] == "Asia/Yekaterinburg"
+        assert booking["start_datetime"].endswith("+00:00")
 
     def test_linking_changes_neither_the_plan_nor_the_goal(self, goal, canon, offer, specialist, owner) -> None:
         plan = _save(goal)
@@ -559,6 +599,9 @@ class TestBookingIsAFact:
         assert set(state) == {
             "level", "canonical_service_ref", "tenant_offer_ref",
             "resolver_decision_id", "recommendation_id", "bookings",
+            # DRF-2877 — на шаге или на плане незакрытый вопрос. Не признак
+            # «выполнено» и не счётчик (PE-4): говорит, что шаг ждёт ответа.
+            "restricted",
         }
 
     def test_the_document_carries_no_forbidden_key(self, linked) -> None:
@@ -677,3 +720,50 @@ class TestErasureAndExport:
         assert saved["step_bookings"][0]["step_id"] == "s1"
         assert saved["step_bookings"][0]["appointment_start"] == appt.start_datetime.isoformat()
         assert DECISION not in repr(saved)
+
+
+# ─── слои раздельны: нет услуги под шаг ≠ нельзя сохранить план ──────────────
+#
+# Решение владельца 08.10: непроверенная (или отсутствующая) услуга не идёт в
+# рекомендацию, но её отсутствие само по себе не запрещает сохранить допустимую
+# общую часть плана. Что мешает подобрать услугу и что мешает сохранить — разные
+# слои, и первый не протекает во второй.
+
+
+class TestNoServiceForAStepIsNotNoPlan:
+    def test_a_plan_is_saved_and_read_with_no_service_in_the_catalog_at_all(self, goal) -> None:
+        assert not SalonService.objects.exists()
+        saved = _api().post(PLAN_URL, _command(goal, [_step("s1"), _step("s2", role="OPTIONAL")]), format="json")
+        assert saved.status_code == 201, saved.content
+        plan = _api().get(PLAN_URL).json()["data"]["plan"]
+        steps = plan["revision"]["steps"]
+        assert [(s["step_id"], s["level"], s["tenant_offer_ref"]) for s in steps] == [
+            ("s1", "CAPABILITY", None), ("s2", "CAPABILITY", None),
+        ]
+        assert plan["status"] == "active"
+
+    def test_a_refused_way_to_a_service_leaves_the_saved_plan_whole(
+        self, goal, canon, tenant, category, specialist, owner, offer,
+    ) -> None:
+        plan = _save(goal)
+        before = _api().get(PLAN_URL).json()["data"]["plan"]
+
+        refused = _resolve(
+            plan, level="OFFER", canonical_service_ref=str(canon.id), tenant_offer_ref=str(uuid.uuid4()),
+        )
+        assert refused.status_code == 409
+        assert refused.json()["error"]["code"] == "PLAN_STEP_RESOLUTION_REFUSED"
+        # И запись от шага, не дошедшего до услуги, отказана своим слоем.
+        link = _link(plan, _book(owner, specialist, offer))
+        assert link.json()["error"]["details"]["reason"] == "step_not_offer_level"
+
+        assert _api().get(PLAN_URL).json()["data"]["plan"] == before
+        plan.refresh_from_db()
+        assert plan.status == Plan.Status.ACTIVE
+        assert not PlanStepResolution.objects.exists() and not PlanStepBooking.objects.exists()
+
+    def test_the_other_step_still_goes_to_a_service(self, goal, canon, offer) -> None:
+        """Отказ одному шагу — не ограничение соседнему и не ограничение плану."""
+        plan = _save(goal)
+        _resolve(plan, "s1", level="OFFER", canonical_service_ref=str(canon.id), tenant_offer_ref=str(uuid.uuid4()))
+        assert _to_offer(plan, canon, offer, step_id="s2").status_code in (200, 201)

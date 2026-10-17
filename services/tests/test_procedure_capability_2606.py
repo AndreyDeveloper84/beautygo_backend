@@ -227,8 +227,11 @@ class TestGoalLinkHasItsOwnEvidence:
         _approve(CapabilityGoalLink.objects.create(capability=capability, goal=goal), curator)
         assert len(client_facing_goal_links(capability)) == 1
 
+        # DRF-2879: содержание подтверждённой строки меняется только вместе
+        # с новым подтверждением — отсюда свежая дата в той же записи.
         ProcedureCapability.objects.filter(pk=capability.pk).update(
             claim_scope=C.PROHIBITED_CLAIM, prohibited_statement="синтетика",  # DRF-2726
+            confirmed_at=timezone.now() + timedelta(seconds=1),
         )
 
         assert client_facing_goal_links(capability) == ()  # capability in memory still says SUPPORTED
@@ -259,7 +262,10 @@ class TestGoalLinkHasItsOwnEvidence:
                 valid_until=timezone.now() - timedelta(seconds=1)
             )
         else:
-            CapabilityGoalLink.objects.filter(pk=link.pk).update(**change)
+            # DRF-2879: правка содержания — с новым подтверждением в той же записи.
+            CapabilityGoalLink.objects.filter(pk=link.pk).update(
+                **change, confirmed_at=timezone.now() + timedelta(seconds=1),
+            )
 
         assert client_facing_goal_links(capability) == ()
 
@@ -273,6 +279,9 @@ class TestStableIdentity:
 
         row.text_client = "Помогает расслабиться — формулировка переписана редактором"
         row.text_professional = "Снижение мышечного тонуса"
+        # DRF-2879: переписанная формулировка подтверждена заново — без этого
+        # база не даст подтверждённой строке нести другое содержание.
+        row.confirmed_at = timezone.now() + timedelta(seconds=1)
         row.save()
         row.refresh_from_db()
 

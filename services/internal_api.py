@@ -16,6 +16,7 @@ from users.response import success_response
 
 from .goal_resolution import build_category_goal_index
 from .models import SalonService, ServiceCategory, SpecialistService
+from .synthetic import real_offer_q
 from .serializers import (
     SalonServiceInternalSerializer,
     ServiceDirectionSerializer,
@@ -80,8 +81,12 @@ class InternalSalonServiceViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = SalonServiceInternalSerializer
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['tenant', 'template', 'is_active']
+    # Синтетика (``services.synthetic``) в зеркало бота не идёт: у ручки нет
+    # личности, значит и разрешения на неё быть не может, а зеркало бот
+    # раздаёт всем. Найдено обходом читающих ручек на засеянном наборе.
     queryset = (
         SalonService.objects
+        .filter(real_offer_q())
         .select_related('tenant', 'template', 'category')
         .order_by('created_at')
     )
@@ -108,8 +113,10 @@ class InternalSpecialistServiceViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = SpecialistServiceInternalSerializer
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['tenant', 'specialist', 'salon_service', 'is_active']
+    # То же правило, что у зеркала услуг салона выше.
     queryset = (
         SpecialistService.objects
+        .filter(real_offer_q('salon_service__'))
         .select_related(
             'salon_service', 'salon_service__template', 'specialist', 'tenant',
         )

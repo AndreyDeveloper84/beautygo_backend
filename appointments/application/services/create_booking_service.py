@@ -76,6 +76,11 @@ PAYMENT_REQUIRED_REFUSED = "payment_required_refused"
 # the same fact: counted together, "the client asked for prepayment and
 # never got it" leaves no trace at all.
 REFUSAL_STAFF_RECORDED = "staff_recorded"
+# DRF-2871 — запись от шага плана, помеченного синтетическим: помеченные
+# данные проверяют механику пути, и реальных списаний по ним не бывает
+# (решение владельца 08.10). Предохранитель на сервере: от того, что
+# прислал вызывающий, он не зависит.
+REFUSAL_SYNTHETIC_TEST_DATA = "synthetic_test_data"
 
 
 def _refuse_if_quote_changed(dto, applied_price, applied_duration) -> None:
@@ -94,7 +99,7 @@ def _refuse_if_quote_changed(dto, applied_price, applied_duration) -> None:
         raise QuoteChangedError("duration_minutes", int(quoted_duration), int(applied_duration))
 
 
-def _resolve_payment_required(dto) -> tuple[bool, str | None]:
+def _resolve_payment_required(dto, *, plan_for_step=None) -> tuple[bool, str | None]:
     """Decide whether this booking carries an online prepayment.
 
     ``dto.payment_required`` arrives verbatim from the request body on
@@ -121,6 +126,11 @@ def _resolve_payment_required(dto) -> tuple[bool, str | None]:
       carry — there is no per-specialist or per-tenant "requires
       prepayment" field — and inventing one here would quietly turn the
       pilot's "запись без предоплаты" back into an awaited payment.
+    * A booking made FROM A STEP OF A PLAN MARKED SYNTHETIC never carries
+      a prepayment, whoever asks (``plan_for_step`` — the plan the step
+      was admitted under, or ``None`` for a booking that is not from a
+      step). Marked test data exercises the path; no real charge may
+      follow from it. Checked first: it holds for every actor.
 
     Returns ``(payment_required, refusal_reason)``. ``refusal_reason`` is
     ``None`` whenever the server agreed with the caller, INCLUDING the
@@ -129,6 +139,8 @@ def _resolve_payment_required(dto) -> tuple[bool, str | None]:
     booking is unpaid.
     """
     requested = bool(dto.payment_required)
+    if plan_for_step is not None and plan_for_step.synthetic:
+        return False, (REFUSAL_SYNTHETIC_TEST_DATA if requested else None)
     if requested and not _is_client_actor(dto.actor_role):
         return False, REFUSAL_STAFF_RECORDED
     return requested, None
@@ -367,6 +379,30 @@ class CreateBookingService:
                 existing.id, dto.idempotency_key,
             )
             return existing, existing.payments.filter(status="pending").first()
+
+        # DRF-2868 — запись от шага плана: допуск шага проверяется здесь, в
+        # транзакции записи и ДО её создания. После возврата по идемпотентности
+        # — повтор уже созданной записи не судится заново. Отказ — исключение
+        # ``wellness.plan_engine.PlanEngineError``: транзакция откатывается.
+        plan_for_step = None
+        if dto.plan_step is not None:
+            from wellness.plan_engine_steps import admit_step_for_booking
+
+            plan_for_step = admit_step_for_booking(
+                dto.client_id, dto.plan_step, salon_service_id=salon_service_id,
+            )
+
+        # Решение владельца 10.10.2026: записаться на помеченную синтетическую
+        # услугу обычным путём нельзя — только от шага плана, помеченного
+        # синтетическим (изолированный путь сквозной проверки: такой план
+        # сохраняется лишь под серверным разрешением). Знание идентификатора
+        # услуги пути не открывает, кто бы ни был вызывающим. Отказ — тот же,
+        # что у несуществующей услуги: о существовании синтетики он не сообщает.
+        if salon_service_id is not None and not (plan_for_step is not None and plan_for_step.synthetic):
+            from services.models import SalonService
+
+            if SalonService.objects.filter(pk=salon_service_id, synthetic=True).exists():
+                raise ServiceNotActiveError("This service is not available for booking")
 
         # C1 — billing eligibility (W2): a past_due subscription blocks
         # only NEW bookings. Placed AFTER the idempotency early-return
@@ -616,7 +652,7 @@ class CreateBookingService:
         # the verdict. The status below and the Payment row further down
         # both read the RESOLVED value, so the two can never end up
         # stating different things about the same booking.
-        payment_required, payment_refusal = _resolve_payment_required(dto)
+        payment_required, payment_refusal = _resolve_payment_required(dto, plan_for_step=plan_for_step)
         if payment_refusal is not None:
             # Inward: which rule refused, for whom, what was asked and
             # what was applied. Its own log event — deliberately not
@@ -670,6 +706,13 @@ class CreateBookingService:
             snapshot_platform_fee=snapshot.platform_fee,
             snapshot_timezone=snapshot.specialist_timezone,
         )
+
+        # DRF-2868 — связь записи с шагом: та же транзакция, что и запись.
+        # Запись на шаге — факт; ни план, ни цель от неё не меняются.
+        if plan_for_step is not None:
+            from wellness.plan_engine_steps import attach_booking
+
+            attach_booking(plan_for_step, dto.plan_step.step_id, appointment, dto.plan_step.safety)
 
         # Create payment record (online-payment path only). Walk-ins are
         # settled off-platform — no Payment row.
