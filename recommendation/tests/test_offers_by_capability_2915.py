@@ -236,28 +236,23 @@ class TestTheReaderOfKnowledge:
         assert template_ids_with_capability(KEY) == frozenset()
 
 
-class TestTheWireOfTheResolverStillDoesNotSearchByCapability:
-    """Известный дефект провода, НЕ починенный этим листом (DRF-2915, «остаётся открытым»).
+class TestTheWireOfTheResolverNowSearchesByCapability:
+    """До DRF-2917 этот класс закреплял дефект провода: нужда только со способностью исключала всех.
 
-    Нужда, в которой названа только способность, считается названной, но
-    источник по этому полю не ищет — исключены все. Узел держит факт, чтобы
-    починка провода пришла осознанной правкой, а не побочным эффектом; плану
-    этот путь не нужен — он зовёт ``offers_by_capability``.
+    Теперь резолвер ищет мастеров по ключу способности; подробные узлы — в
+    ``test_resolver_by_capability_2917.py``. Здесь остаётся связка с поиском
+    предложений: один ключ, одно чтение знания, два входа.
     """
 
-    def test_a_need_naming_only_a_capability_excludes_everybody(self, massage, curator):  # noqa: F811
+    def test_the_key_that_finds_the_offer_finds_its_master(self, massage, curator):  # noqa: F811
         master, offering = massage
-        capability = _can([offering.template], curator)
-        need = NeedSpec(origin=NeedOrigin.USER_EXPLICIT, capability_refs=(capability.pk,))
+        _can([offering.template], curator)
+        need = NeedSpec(origin=NeedOrigin.USER_EXPLICIT, capability_refs=(KEY,))
 
-        decision = _resolve(need)
-
-        assert need.is_stated
-        assert _shown(decision) == set()
-        assert _excluded(decision)[str(master.user_id)] is ReasonCode.ELIG_EXCLUDED_NOT_CAPABLE
+        assert offers_by_capability(KEY).offer_ids == (offering.pk,)
+        assert _shown(_resolve(need)) == {str(master.user_id)}
 
     def test_the_same_master_is_shown_when_nothing_is_named(self, massage):
-        """Контроль: мастер исключён именно из-за способности в нужде, а не сам по себе."""
         master, _ = massage
 
         assert _shown(_resolve()) == {str(master.user_id)}
