@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import io
 import re
+import zlib
 
 #: Тег ориентации в EXIF. Единственное, что переживает срезание.
 ORIENTATION_TAG = 0x0112
@@ -122,14 +123,35 @@ def _orientation_of(data: bytes) -> int:
     return value if isinstance(value, int) and 1 <= value <= 8 else 1
 
 
-def _orientation_segment(orientation: int) -> bytes:
-    """APP1 c ОДНИМ тегом ориентации и больше ничем."""
+def _orientation_tiff(orientation: int) -> bytes:
+    """Блок TIFF (заголовок + IFD0) с ОДНИМ тегом ориентации, без префикса ``Exif\\0\\0``.
+
+    ``Image.Exif().tobytes()`` в Pillow 11 сам начинается с ``Exif\\0\\0``.
+    Раньше префикс дописывался ещё раз, и сегмент выходил
+    ``Exif\\0\\0Exif\\0\\0MM…``: Pillow такое прощает, Chromium — нет, и снимок
+    в браузере показывался без поворота. Префикс снимается здесь, а ставится
+    там, где его требует контейнер (JPEG — да, PNG ``eXIf`` — нет).
+    """
     from PIL import Image
 
     exif = Image.Exif()
     exif[ORIENTATION_TAG] = orientation
-    payload = b"Exif\x00\x00" + exif.tobytes()
+    raw = exif.tobytes()
+    return raw[6:] if raw.startswith(b"Exif\x00\x00") else raw
+
+
+def _orientation_segment(orientation: int) -> bytes:
+    """APP1 c ОДНИМ тегом ориентации и больше ничем."""
+    payload = b"Exif\x00\x00" + _orientation_tiff(orientation)
     return b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload
+
+
+def _orientation_chunk(orientation: int) -> bytes:
+    """Кусок PNG ``eXIf`` с ОДНИМ тегом ориентации. По спецификации PNG — без ``Exif\\0\\0``."""
+    data = _orientation_tiff(orientation)
+    kind = b"eXIf"
+    crc = zlib.crc32(kind + data).to_bytes(4, "big")
+    return len(data).to_bytes(4, "big") + kind + data + crc
 
 
 def _strip_jpeg(data: bytes) -> bytes:
@@ -179,7 +201,7 @@ def _strip_jpeg(data: bytes) -> bytes:
     return bytes(out)
 
 
-def _strip_png(data: bytes) -> bytes:
+def _strip_png(data: bytes, orientation: int = 1) -> bytes:
     out = bytearray(data[:8])  # сигнатура
     i = 8
     while i + 8 <= len(data):
@@ -188,6 +210,9 @@ def _strip_png(data: bytes) -> bytes:
         end = i + 12 + length
         if kind in _PNG_KEEP:
             out.extend(data[i:end])
+            # Ориентация — сразу за IHDR: ``eXIf`` обязан стоять до IDAT.
+            if kind == b"IHDR" and orientation != 1:
+                out.extend(_orientation_chunk(orientation))
         i = end
         if kind == b"IEND":
             break
@@ -242,9 +267,12 @@ def strip_metadata(data: bytes) -> bytes:
         return stripped[:2] + _orientation_segment(orientation) + stripped[2:]
 
     if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return _strip_png(data)
+        return _strip_png(data, _orientation_of(data))
 
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        # Ориентация у WebP не возвращается: Chromium (движок Mini App) тег
+        # ориентации у WebP не применяет вовсе — проверено 17.10 на снимке
+        # с Orientation=6, — так что потеря тега на экране не видна.
         return _strip_webp(data)
 
     # Контейнер не разобран — единственный безопасный путь — перекодирование.
