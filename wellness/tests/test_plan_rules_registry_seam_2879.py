@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from wellness.plan_compose import CAPABILITY_LEVEL_KINDS, RULE_KINDS, parse_compose_request
+from wellness.plan_compose import CAPABILITY_LEVEL_KINDS, RULE_KINDS_BY_MAJOR, parse_compose_request
 from wellness.plan_engine import ContractViolation
 from wellness.tests.test_plan_compose_2871 import (  # noqa: F401 — фикстуры того же сценария
     DECISION_URL,
@@ -90,7 +90,7 @@ class TestTheFile:
 
     def test_its_closed_lists_are_the_catalogs(self) -> None:
         data = yaml.safe_load(_file_bytes())
-        assert set(data["kinds"]) == RULE_KINDS
+        assert set(data["kinds"]) == RULE_KINDS_BY_MAJOR[0]
         assert data["registry_version"] == "0.1"
         assert len(data["rules"]) == 13
 
