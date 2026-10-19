@@ -23,6 +23,13 @@ Signature=…&Expires=…``. Телефон этот хост не видит, �
 
 Нет мастера, нет фото, объект пропал из хранилища, объект пуст — всё 404.
 Пустое тело с 200 поверхность прочитала бы как «фото есть, но сломано».
+
+# Метаданные на выходе
+
+Срезание метаданных при записи (``core.image_privacy``) стоит с 28.09. Всё,
+что попало в хранилище раньше, лежит с EXIF, в том числе с координатами
+съёмки. Поэтому отдаваемые байты проходят ``strip_metadata`` ещё раз. Сам
+файл в хранилище не переписывается: ремонт хранимого — отдельное решение.
 """
 
 from __future__ import annotations
@@ -31,13 +38,14 @@ import logging
 import mimetypes
 from uuid import UUID
 
-from django.http import FileResponse
+from django.http import HttpResponse
 from rest_framework import status
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from core.image_privacy import strip_metadata
 from users.models import SpecialistPortfolio, SpecialistProfile
 from users.permissions import IsInternalBearer
 from users.response import error_response
@@ -56,7 +64,7 @@ def _absent() -> Response:
     return error_response("NOT_FOUND", "Фото нет", status_code=status.HTTP_404_NOT_FOUND)
 
 
-def _file_response(field_file, *, what: str, key: object) -> FileResponse | Response:
+def _file_response(field_file, *, what: str, key: object) -> HttpResponse | Response:
     """Байты файла или 404 — одинаковый на «нет», «пропал», «пуст»."""
     if not field_file:
         return _absent()
@@ -73,10 +81,21 @@ def _file_response(field_file, *, what: str, key: object) -> FileResponse | Resp
         handle.close()
         logger.warning("users.specialist_media.object_empty what=%s key=%s size=%s", what, key, size)
         return _absent()
+    try:
+        raw = handle.read()
+    except OSError as exc:
+        logger.warning("users.specialist_media.object_unreadable what=%s key=%s err=%s", what, key, type(exc).__name__)
+        return _absent()
+    finally:
+        handle.close()
     content_type = mimetypes.guess_type(field_file.name)[0] or "application/octet-stream"
     if content_type not in IMAGE_TYPES:
         content_type = "application/octet-stream"
-    response = FileResponse(handle, content_type=content_type)
+    # Срезание на выходе (№2, вариант А): то, что легло в хранилище до
+    # срезания на входе (#576/#577, 28.09), до сих пор несёт EXIF с
+    # координатами. Файл не переписывается — чистятся только отдаваемые
+    # байты. У уже чистого файла результат тот же, что на диске.
+    response = HttpResponse(strip_metadata(raw), content_type=content_type)
     # Приватно и ненадолго: общий кэш между ботом и хранилищем не нужен,
     # а смену фото бот сбивает версией в своём адресе.
     response["Cache-Control"] = "private, max-age=300"
