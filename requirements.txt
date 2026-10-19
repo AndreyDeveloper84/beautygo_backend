@@ -14,7 +14,7 @@ Pillow==11.3.0
 
 # S3-compatible storage (Minio / AWS S3)
 django-storages==1.14.6
-boto3==1.43.110
+boto3==1.43.114
 
 # Social Auth (OAuth providers)
 requests==2.34.2
