@@ -28,6 +28,12 @@ TOPIC_SUBSCRIPTION_PAST_DUE = "subscription.past_due"
 TOPIC_FEE_CHARGED = "billing.fee_charged"
 
 
+def _tenant_id(subscription: "SpecialistSubscription") -> str | None:
+    # DRF-2984 §6: the bot mirrors by tenant; personal (legacy) accounts
+    # carry null and the mirror skips them.
+    return str(subscription.tenant_id) if subscription.tenant_id else None
+
+
 def emit_fee_charged(fee: "BookingFee", *, correlation_id=None) -> None:
     """billing.fee_charged — {specialist_id, appointment_id, amount, period}.
 
@@ -55,11 +61,12 @@ def emit_fee_charged(fee: "BookingFee", *, correlation_id=None) -> None:
 def emit_subscription_activated(
     subscription: "SpecialistSubscription", *, correlation_id=None,
 ) -> None:
-    """subscription.activated — {specialist_id, tariff, period_end}."""
+    """subscription.activated — {specialist_id, tenant_id, tariff, period_end}."""
     emit_outbox_event(
         topic=TOPIC_SUBSCRIPTION_ACTIVATED,
         data={
             "specialist_id": str(subscription.user_id),
+            "tenant_id": _tenant_id(subscription),
             "tariff": subscription.tariff.code,
             "period_end": (
                 subscription.current_period_end.isoformat()
@@ -77,11 +84,12 @@ def emit_subscription_past_due(
     subscription: "SpecialistSubscription", *, debt_amount, failed_attempts: int,
     correlation_id=None,
 ) -> None:
-    """subscription.past_due — {specialist_id, debt_amount, failed_attempts}."""
+    """subscription.past_due — {specialist_id, tenant_id, debt_amount, failed_attempts}."""
     emit_outbox_event(
         topic=TOPIC_SUBSCRIPTION_PAST_DUE,
         data={
             "specialist_id": str(subscription.user_id),
+            "tenant_id": _tenant_id(subscription),
             "debt_amount": f"{debt_amount:.2f}",
             "failed_attempts": failed_attempts,
         },
