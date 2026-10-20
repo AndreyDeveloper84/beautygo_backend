@@ -152,20 +152,31 @@ class TestHttpDoors:
         assert not open_invoice.payments.exists()
         _assert_no_sdk(sdk_spy)
 
-    @pytest.mark.parametrize("url,headers", [
-        ("/api/v1/internal/billing/webhook/", {}),
-        ("/api/v1/payments/webhook/", {"HTTP_X_APP_TYPE": "client"}),
+    @pytest.mark.parametrize("url,headers,logger_path", [
+        ("/api/v1/internal/billing/webhook/", {}, "billing.webhooks.logger"),
+        (
+            "/api/v1/payments/webhook/", {"HTTP_X_APP_TYPE": "client"},
+            "payments.views.logger",
+        ),
     ])
-    def test_webhooks_ack_without_refetch(
-        self, pending_payment, sdk_spy, url, headers,
+    def test_webhooks_ack_200_ignored_loudly_without_refetch(
+        self, monkeypatch, pending_payment, sdk_spy, url, headers, logger_path,
     ):
-        resp = APIClient().post(
-            url,
-            {"event": "payment.succeeded", "object": {"id": PROVIDER_ID}},
-            format="json", **headers,
-        )
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "ignored"
+        """200, not 503: an event deliberately ignored while billing is
+        off must not be retried by YooKassa (main window, 20.10). Not
+        silent either — every delivery leaves an ERROR line."""
+        log = MagicMock()
+        monkeypatch.setattr(logger_path, log)
+        for _ in range(2):  # a redelivery gets the same final answer
+            resp = APIClient().post(
+                url,
+                {"event": "payment.succeeded", "object": {"id": PROVIDER_ID}},
+                format="json", **headers,
+            )
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "ignored"
+        assert log.error.call_count == 2
+        assert "charges disabled" in log.error.call_args.args[0]
         pending_payment.refresh_from_db()
         assert pending_payment.status == BillingPayment.Status.PENDING
         _assert_no_sdk(sdk_spy)
