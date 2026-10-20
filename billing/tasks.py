@@ -19,6 +19,7 @@ from celery import shared_task
 from django.utils import timezone
 
 from billing.charges import charge_subscription, retry_open_invoice
+from billing.flags import billing_enabled, charges_enabled
 from billing.models import SpecialistSubscription
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,9 @@ def charge_subscriptions_monthly() -> int:
     Due = current paid period ended + a saved card exists. One broken
     subscription must not block the rest — per-item try/except + Sentry.
     """
+    if not (billing_enabled() and charges_enabled()):
+        logger.info("billing.monthly_charge.skipped flags_off")
+        return 0
     today = timezone.localdate()
     due = (
         SpecialistSubscription.objects
@@ -59,6 +63,9 @@ def charge_subscriptions_monthly() -> int:
 @shared_task
 def retry_failed_subscription_charges() -> int:
     """Dunning retries: subscriptions whose next_retry_at has arrived."""
+    if not (billing_enabled() and charges_enabled()):
+        logger.info("billing.dunning_retry.skipped flags_off")
+        return 0
     now = timezone.now()
     due = (
         SpecialistSubscription.objects

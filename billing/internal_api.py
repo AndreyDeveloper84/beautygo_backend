@@ -26,6 +26,7 @@ from billing.charges import (
     pay_debt,
     start_card_setup,
 )
+from billing.flags import BillingChargesDisabled
 from billing.services import build_billing_status, resolve_billing_account
 from billing.yookassa import BillingPaymentClientError, BillingPaymentConfigError
 from users.models import SpecialistProfile
@@ -35,6 +36,14 @@ from users.response import error_response, success_response
 logger = logging.getLogger(__name__)
 
 _validate_https_url = URLValidator(schemes=["https"])
+
+
+def _charges_disabled_response() -> Response:
+    # DRF-2984: the pilot is free until the owner's "GO на платный".
+    return error_response(
+        "BILLING_CHARGES_DISABLED", "Billing charges are switched off.",
+        status_code=503,
+    )
 
 
 def _is_https_url(value: object) -> bool:
@@ -165,6 +174,8 @@ class BillingCardSetupView(APIView):
                 tenant=tenant,
                 return_url=return_url,
             )
+        except BillingChargesDisabled:
+            return _charges_disabled_response()
         except BillingPaymentConfigError as exc:
             logger.error("billing.card_setup.config_error: %s", exc)
             return error_response(
@@ -256,6 +267,8 @@ class BillingPayDebtView(APIView):
             return error_response(
                 "NO_DEBT", "Subscription has no outstanding debt.", status_code=409,
             )
+        except BillingChargesDisabled:
+            return _charges_disabled_response()
         except BillingPaymentConfigError as exc:
             logger.error("billing.pay_debt.config_error: %s", exc)
             return error_response(
