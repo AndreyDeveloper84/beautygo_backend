@@ -18,7 +18,11 @@ import sentry_sdk
 from celery import shared_task
 from django.utils import timezone
 
-from billing.charges import charge_subscription, retry_open_invoice
+from billing.charges import (
+    charge_subscription,
+    freeze_ended_trials,
+    retry_open_invoice,
+)
 from billing.flags import billing_enabled, charges_enabled
 from billing.models import SpecialistSubscription
 
@@ -36,6 +40,11 @@ def charge_subscriptions_monthly() -> int:
         logger.info("billing.monthly_charge.skipped flags_off")
         return 0
     today = timezone.localdate()
+    # DRF-2984 В-6: only with charges on — with them off nobody can save a
+    # card, and freezing every ended trial would punish the free pilot.
+    frozen = freeze_ended_trials(today=today)
+    if frozen:
+        logger.info("billing.trial_ended.frozen count=%s", frozen)
     due = (
         SpecialistSubscription.objects
         .filter(
