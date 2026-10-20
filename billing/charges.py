@@ -31,6 +31,7 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from billing import events
+from billing.flags import require_charges_enabled
 from billing.models import (
     BillingConsent,
     BillingInvoice,
@@ -105,6 +106,7 @@ def start_card_setup(
     Idempotent: a repeat call on the same day returns the existing
     invoice's confirmation_url (unique keys on invoice + payment).
     """
+    require_charges_enabled()  # DRF-2984: before any row or provider call
     with transaction.atomic():
         subscription = get_or_create_subscription(
             user=user, tariff_code=tariff_code, tenant=tenant,
@@ -172,6 +174,7 @@ def charge_subscription(
     None when the subscription is not chargeable / not due. Failures go
     through the dunning path (register_charge_failure).
     """
+    require_charges_enabled()  # DRF-2984: before any row or provider call
     today = today or timezone.localdate()
     if subscription.status not in (
         SpecialistSubscription.Status.TRIAL,
@@ -350,6 +353,7 @@ def register_charge_failure(
 
 def retry_open_invoice(*, subscription: SpecialistSubscription, client=None) -> bool:
     """Re-attempt the latest open invoice (dunning retry task)."""
+    require_charges_enabled()  # DRF-2984: before any row or provider call
     invoice = (
         subscription.invoices
         .filter(status=BillingInvoice.Status.OPEN)
@@ -448,6 +452,7 @@ def pay_debt(
     On instant success the subscription returns to active (C1 unblocks)
     via settle_charge_success.
     """
+    require_charges_enabled()  # DRF-2984: before any row or provider call
     invoice = find_outstanding_invoice(subscription)
     if invoice is None:
         raise NoDebtError("Subscription has no outstanding debt")
@@ -564,6 +569,7 @@ def handle_webhook_event(
     succeeded payment acks as duplicate; unknown payments ack silently
     (could be a test notification from the YooKassa console).
     """
+    require_charges_enabled()  # DRF-2984: before any row or provider call
     payment_row = (
         BillingPayment.objects
         .filter(provider_payment_id=provider_payment_id)

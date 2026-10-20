@@ -15,6 +15,15 @@ from tenants.models import Tenant
 from users.models import SpecialistProfile, User
 
 
+@pytest.fixture(autouse=True)
+def _billing_switched_on(settings):
+    """These suites test the charging machinery itself, so both DRF-2984
+    switches are on here. The switched-off behaviour (the default) is
+    pinned by test_billing_flags_2984.py, which turns them back off."""
+    settings.BILLING_ENABLED = True
+    settings.BILLING_CHARGES_ENABLED = True
+
+
 @pytest.fixture
 def specialist_user(db):
     return User.objects.create_user(

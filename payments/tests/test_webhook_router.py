@@ -38,6 +38,15 @@ def _allow_all(settings):
     settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
 
 
+@pytest.fixture(autouse=True)
+def _billing_charges_on(settings):
+    # The billing branch of the router is exercised with charges on; the
+    # switched-off branch (DRF-2984) lives in
+    # billing/tests/test_billing_flags_2984.py.
+    settings.BILLING_ENABLED = True
+    settings.BILLING_CHARGES_ENABLED = True
+
+
 @pytest.fixture
 def specialist_user(db):
     return User.objects.create_user(

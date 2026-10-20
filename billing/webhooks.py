@@ -29,6 +29,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from billing.charges import handle_webhook_event
+from billing.flags import BillingChargesDisabled
 from billing.yookassa import BillingPaymentClientError, BillingPaymentConfigError
 
 logger = logging.getLogger(__name__)
@@ -127,6 +128,14 @@ class BillingYooKassaWebhookView(APIView):
             status_ = handle_webhook_event(
                 event=event, provider_payment_id=provider_payment_id,
             )
+        except BillingChargesDisabled:
+            # DRF-2984: with charges off billing/ creates no payments, so
+            # an event here is stray — ack it, loudly, without re-fetching.
+            logger.error(
+                "billing webhook ignored: charges disabled (event=%s id=%s)",
+                event, provider_payment_id,
+            )
+            return Response({"status": "ignored"}, status=200)
         except (BillingPaymentClientError, BillingPaymentConfigError) as exc:
             # 200 stops YooKassa retries; reconciliation job picks it up.
             logger.error("billing webhook verify failed: %s", exc)

@@ -27,6 +27,11 @@ class BillingYooKassaClient:
     """Thin wrapper over the yookassa SDK for billing payments."""
 
     def __init__(self) -> None:
+        # DRF-2984: the client itself refuses to exist with charges off —
+        # a door that forgot its own gate still cannot reach YooKassa.
+        from billing.flags import require_charges_enabled
+
+        require_charges_enabled()
         import yookassa
 
         shop_id = getattr(settings, "YOOKASSA_SHOP_ID", "")

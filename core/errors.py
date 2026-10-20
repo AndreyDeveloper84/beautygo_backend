@@ -176,6 +176,9 @@ class ErrorCode(str, Enum):
     # W2 billing — pay-debt endpoint: 409 when the subscription has no
     # outstanding debt (no failed/open invoice).
     NO_DEBT = "NO_DEBT"
+    # DRF-2984 — billing/ doors answer 503 while BILLING_CHARGES_ENABLED
+    # is off (the pilot is free until the owner's "GO на платный").
+    BILLING_CHARGES_DISABLED = "BILLING_CHARGES_DISABLED"
 
     # --- AI Chat (spec §AI) ---
     CONVERSATION_NOT_FOUND = "CONVERSATION_NOT_FOUND"
