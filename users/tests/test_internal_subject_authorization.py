@@ -641,6 +641,11 @@ SPECIALIST_ROUTES_TESTED_ELSEWHERE: dict[str, str] = {
     "internal-specialist-availability": (
         "users/tests/test_internal_availability_1845.py::TestSubject"
     ),
+    # DRF-2984 C3: субъект — админ тенанта мастера; чужой салон, мастер без
+    # салона, сам мастер → 404; без заголовка → 403.
+    "internal-specialist-archive": (
+        "users/tests/test_internal_specialist_archive_2984.py::TestSubject"
+    ),
     "internal-specialist-reviews": (
         "users/tests/test_internal_specialist_reviews_1857.py::TestSubject"
     ),

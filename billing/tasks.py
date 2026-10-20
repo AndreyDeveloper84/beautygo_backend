@@ -22,6 +22,7 @@ from billing.charges import (
     charge_subscription,
     freeze_ended_trials,
     retry_open_invoice,
+    start_pending_trials,
 )
 from billing.flags import billing_enabled, charges_enabled
 from billing.models import SpecialistSubscription
@@ -98,3 +99,16 @@ def retry_failed_subscription_charges() -> int:
             sentry_sdk.capture_exception(exc)
     logger.info("billing.dunning_retry.done due=%s ok=%s", due.count(), retried)
     return retried
+
+
+@shared_task
+def start_billing_trials() -> int:
+    """DRF-2984 В-10: the trial month starts on the cabinet's first
+    publication. Accounting only — no money moves, so BILLING_ENABLED
+    alone is enough."""
+    if not billing_enabled():
+        logger.info("billing.trial_start.skipped flags_off")
+        return 0
+    started = start_pending_trials()
+    logger.info("billing.trial_start.done started=%s", started)
+    return started

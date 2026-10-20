@@ -179,6 +179,13 @@ class ErrorCode(str, Enum):
     # DRF-2984 — billing/ doors answer 503 while BILLING_CHARGES_ENABLED
     # is off (the pilot is free until the owner's "GO на платный").
     BILLING_CHARGES_DISABLED = "BILLING_CHARGES_DISABLED"
+    # DRF-2984 C3 — the cabinet billing surface (contract §6).
+    BILLING_DISABLED = "BILLING_DISABLED"
+    NO_TENANT_ADMIN = "NO_TENANT_ADMIN"
+    SUBSCRIPTION_NOT_FOUND = "SUBSCRIPTION_NOT_FOUND"
+    CONSENT_VERSION_MISMATCH = "CONSENT_VERSION_MISMATCH"
+    PRICE_MISMATCH = "PRICE_MISMATCH"
+    ALREADY_SALON = "ALREADY_SALON"
 
     # --- AI Chat (spec §AI) ---
     CONVERSATION_NOT_FOUND = "CONVERSATION_NOT_FOUND"

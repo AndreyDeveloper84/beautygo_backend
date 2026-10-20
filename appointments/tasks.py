@@ -84,6 +84,23 @@ EVENT_HANDLERS: dict[str, EventHandler] = {
     OutboxEvent.Topic.BILLING_FEE_CHARGED: _log_handler(
         "billing.fee_charged",
     ),
+    # DRF-2984 C3 — the consumer is the bot's mirror; the local stub keeps
+    # the dispatcher from leaving the rows unprocessed forever.
+    OutboxEvent.Topic.SUBSCRIPTION_TRIAL_STARTED: _log_handler(
+        "subscription.trial_started",
+    ),
+    OutboxEvent.Topic.SUBSCRIPTION_RENEWED: _log_handler(
+        "subscription.renewed",
+    ),
+    OutboxEvent.Topic.SUBSCRIPTION_FROZEN: _log_handler(
+        "subscription.frozen",
+    ),
+    OutboxEvent.Topic.SUBSCRIPTION_CANCELED: _log_handler(
+        "subscription.canceled",
+    ),
+    OutboxEvent.Topic.SUBSCRIPTION_PLAN_CHANGED: _log_handler(
+        "subscription.plan_changed",
+    ),
     # DRF-2196 — системный сигнал нужен только внешнему потребителю (боту),
     # но локальный обработчик ОБЯЗАН быть: `dispatch_outbox_events` выбирает
     # все строки с `processed_at IS NULL` независимо от

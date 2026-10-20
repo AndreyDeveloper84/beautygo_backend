@@ -26,6 +26,11 @@ if TYPE_CHECKING:  # pragma: no cover
 TOPIC_SUBSCRIPTION_ACTIVATED = "subscription.activated"
 TOPIC_SUBSCRIPTION_PAST_DUE = "subscription.past_due"
 TOPIC_FEE_CHARGED = "billing.fee_charged"
+TOPIC_SUBSCRIPTION_TRIAL_STARTED = "subscription.trial_started"
+TOPIC_SUBSCRIPTION_RENEWED = "subscription.renewed"
+TOPIC_SUBSCRIPTION_FROZEN = "subscription.frozen"
+TOPIC_SUBSCRIPTION_CANCELED = "subscription.canceled"
+TOPIC_SUBSCRIPTION_PLAN_CHANGED = "subscription.plan_changed"
 
 
 def _tenant_id(subscription: "SpecialistSubscription") -> str | None:
@@ -98,3 +103,67 @@ def emit_subscription_past_due(
         actor="system",
         correlation_id=correlation_id,
     )
+
+
+# --- DRF-2984 C3: tenant-scoped lifecycle (bot mirror, contract §6) ---------
+# Each is emitted inside the transaction that changes the status.
+
+def _emit_tenant_event(
+    subscription: "SpecialistSubscription", topic: str, data: dict,
+) -> None:
+    emit_outbox_event(
+        topic=topic,
+        data={"tenant_id": _tenant_id(subscription), **data},
+        user_id=subscription.user_id,
+        tenant_id=subscription.tenant_id,
+        actor="system",
+    )
+
+
+def emit_subscription_trial_started(subscription: "SpecialistSubscription") -> None:
+    """subscription.trial_started — {tenant_id, tariff, trial_ends_at}."""
+    _emit_tenant_event(subscription, TOPIC_SUBSCRIPTION_TRIAL_STARTED, {
+        "tariff": subscription.tariff.code,
+        "trial_ends_at": subscription.trial_ends_at.isoformat(),
+    })
+
+
+def emit_subscription_renewed(
+    subscription: "SpecialistSubscription", *, amount, masters_count,
+) -> None:
+    """subscription.renewed — {tenant_id, tariff, period_end, amount, masters_count}."""
+    _emit_tenant_event(subscription, TOPIC_SUBSCRIPTION_RENEWED, {
+        "tariff": subscription.tariff.code,
+        "period_end": subscription.current_period_end.isoformat(),
+        "amount": f"{amount:.2f}",
+        "masters_count": masters_count,
+    })
+
+
+def emit_subscription_frozen(subscription: "SpecialistSubscription") -> None:
+    """subscription.frozen — {tenant_id, reason}."""
+    _emit_tenant_event(subscription, TOPIC_SUBSCRIPTION_FROZEN, {
+        "reason": subscription.frozen_reason,
+    })
+
+
+def emit_subscription_canceled(
+    subscription: "SpecialistSubscription", *, effective_at,
+) -> None:
+    """subscription.canceled — {tenant_id, effective_at}."""
+    _emit_tenant_event(subscription, TOPIC_SUBSCRIPTION_CANCELED, {
+        "effective_at": effective_at.isoformat(),
+    })
+
+
+def emit_subscription_plan_changed(subscription: "SpecialistSubscription") -> None:
+    """subscription.plan_changed — {tenant_id, tariff, effective_from}.
+
+    The change waits for the next period: the mirror records it as
+    pending and flips its plan on the ``renewed`` that carries the new
+    tariff.
+    """
+    _emit_tenant_event(subscription, TOPIC_SUBSCRIPTION_PLAN_CHANGED, {
+        "tariff": subscription.pending_tariff.code,
+        "effective_from": subscription.pending_tariff_from.isoformat(),
+    })

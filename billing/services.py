@@ -104,6 +104,14 @@ def can_accept_booking(
             SpecialistSubscription.Status.FROZEN,
         ):
             return EligibilityResult(ok=False, reason=REASON_SUBSCRIPTION_PAST_DUE)
+        # DRF-2984 C3: a canceled account works to the end of what it paid.
+        if (
+            subscription.status == SpecialistSubscription.Status.CANCELED
+            and subscription.canceled_at is not None
+            and subscription.current_period_end is not None
+            and timezone.localdate() > subscription.current_period_end
+        ):
+            return EligibilityResult(ok=False, reason=REASON_SUBSCRIPTION_PAST_DUE)
         return EligibilityResult(ok=True)
     except Exception as exc:  # fail-open (C1) — never raise to the booking path
         logger.exception("billing.eligibility.error")

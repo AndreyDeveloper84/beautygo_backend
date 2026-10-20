@@ -52,6 +52,7 @@ from appointments.internal_specialist_api import (
 from users.internal_reviews_api import InternalSpecialistReviewsView
 from users.internal_specialist_identity_api import InternalSpecialistIdentityLinkView
 from users.internal_schedule_api import (
+    InternalSpecialistArchiveView,
     InternalSpecialistAvailabilityView,
     InternalSpecialistScheduleView,
     InternalSpecialistTimeOffView,
@@ -286,6 +287,12 @@ urlpatterns = [
         'api/v1/internal/specialists/<uuid:specialist_id>/availability/',
         InternalSpecialistAvailabilityView.as_view(),
         name='internal-specialist-availability',
+    ),
+    # DRF-2984 C3: архив мастера решением салона (субъект — админ тенанта).
+    path(
+        'api/v1/internal/specialists/<uuid:specialist_id>/archive/',
+        InternalSpecialistArchiveView.as_view(),
+        name='internal-specialist-archive',
     ),
     # DRF-2442 (решение владельца §77 п.38) — дверь личности мастера: бот
     # связывает личность принявшего приглашение с его учёткой, без человека.

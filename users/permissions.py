@@ -1120,6 +1120,59 @@ class IsInternalBearerForSalonSubject(IsInternalBearerForSubject):
         return True
 
 
+class IsInternalBearerForSpecialistTenantAdminSubject(IsInternalBearerForSubject):
+    """URL names a specialist profile; the actor administers ITS tenant
+    (DRF-2984 C3).
+
+    For decisions a salon owner takes about a master — the archive
+    (deactivate / return) — not the master themself: a CATALOG_ONLY
+    master has no identity of their own, and sending the master's
+    identity when the owner acts would forge the subject. The actor is
+    resolved as everywhere on this surface, then compared to a
+    relationship: an active ``admin`` ``TenantUserRelationship`` in the
+    specialist's tenant.
+
+    A profile without a tenant, of a tenant the actor does not
+    administer, or unknown — 404, not 403 (DRF-1036: a foreign UUID is
+    not confirmed).
+    """
+
+    def _subject_verdict(
+        self, request: Any, *, purpose: str, subject_id: str, actor: Any,
+        external_user_id: str,
+    ) -> bool:
+        from rest_framework.exceptions import NotFound
+
+        from users.models import SpecialistProfile, TenantUserRelationship
+
+        profile = (
+            SpecialistProfile.objects.filter(pk=subject_id)
+            .only("pk", "tenant_id").first()
+        )
+        administers = (
+            profile is not None and profile.tenant_id is not None
+            and TenantUserRelationship.objects.filter(
+                user=actor,
+                tenant_id=profile.tenant_id,
+                role=TenantUserRelationship.Role.ADMIN,
+                is_active=True,
+            ).exists()
+        )
+        if not administers:
+            logger.warning(
+                "internal.subject_authz.specialist_tenant_admin_mismatch "
+                "path=%s specialist=%s actor=%s",
+                request.path, subject_id, actor.pk,
+            )
+            _publish_verdict(
+                request, purpose=purpose, actor=actor, actor_named=True,
+                allowed=False, reason="specialist_tenant_admin_mismatch",
+            )
+            raise NotFound("Specialist not found.")
+        _publish_verdict(request, purpose=purpose, actor=actor, actor_named=True, allowed=True)
+        return True
+
+
 def _publish_verdict(
     request: Any, *, purpose: str, actor: Any, actor_named: bool,
     allowed: bool, reason: str = "",

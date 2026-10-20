@@ -927,6 +927,12 @@ class OutboxEvent(models.Model):
         SUBSCRIPTION_ACTIVATED = "subscription.activated", "Подписка активирована"
         SUBSCRIPTION_PAST_DUE = "subscription.past_due", "Подписка просрочена"
         BILLING_FEE_CHARGED = "billing.fee_charged", "Комиссия за запись начислена"
+        # DRF-2984 C3 — tenant-scoped subscription lifecycle (bot mirror).
+        SUBSCRIPTION_TRIAL_STARTED = "subscription.trial_started", "Пробный период начат"
+        SUBSCRIPTION_RENEWED = "subscription.renewed", "Подписка продлена"
+        SUBSCRIPTION_FROZEN = "subscription.frozen", "Подписка заморожена"
+        SUBSCRIPTION_CANCELED = "subscription.canceled", "Подписка отменена"
+        SUBSCRIPTION_PLAN_CHANGED = "subscription.plan_changed", "Тариф сменится"
         # DRF-2196 (вариант а1, решение владельца §64) — системный сигнал
         # здоровья модуля. Первый эмиттер — бюджет распознавания фото
         # (80 / 100 % общего суточного потолка). Конверт БЕЗ пользователя и
