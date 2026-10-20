@@ -23,7 +23,6 @@ from datetime import timedelta
 from decimal import Decimal
 from uuid import UUID
 
-import sentry_sdk
 from dateutil.relativedelta import relativedelta
 from django.conf import settings
 from django.db import transaction
@@ -32,6 +31,7 @@ from django.utils import timezone
 
 from billing import events
 from billing.flags import require_charges_enabled
+from billing.pricing import period_price
 from billing.models import (
     BillingConsent,
     BillingInvoice,
@@ -50,7 +50,10 @@ from billing.yookassa import (
 
 logger = logging.getLogger(__name__)
 
-# Dunning schedule (W2 brief): fail → retry T+1d, T+3d → past_due.
+FROZEN_PAST_DUE_TIMEOUT = "past_due_timeout"
+FROZEN_TRIAL_ENDED_NO_CARD = "trial_ended_no_card"
+
+# Dunning schedule (W2 brief): fail → retry T+1d, T+3d → frozen (DRF-2984).
 RETRY_DELAYS = (timedelta(days=1), timedelta(days=3))
 
 
@@ -96,6 +99,72 @@ def get_or_create_subscription(
         user=user, tenant=tenant, tariff=tariff,
         status=SpecialistSubscription.Status.TRIAL,
     )
+
+
+def start_trial(
+    subscription: SpecialistSubscription, *, started_on,
+) -> SpecialistSubscription:
+    """Open the free trial month (DRF-2984, owner В-5/В-10).
+
+    Date-to-date: started on the 20th → the first charge is due on the
+    20th ``tariff.trial_months`` later. The trial is the first period, so
+    the monthly sweep charges a saved card on ``trial_ends_at`` and
+    :func:`freeze_ended_trials` freezes the account without one.
+    Idempotent: a subscription whose trial already has an end keeps it.
+    """
+    if subscription.trial_ends_at is not None:
+        return subscription
+    trial_ends_at = started_on + relativedelta(
+        months=subscription.tariff.trial_months,
+    )
+    subscription.status = SpecialistSubscription.Status.TRIAL
+    subscription.trial_ends_at = trial_ends_at
+    subscription.current_period_start = started_on
+    subscription.current_period_end = trial_ends_at - timedelta(days=1)
+    subscription.save(update_fields=[
+        "status", "trial_ends_at", "current_period_start",
+        "current_period_end", "updated_at",
+    ])
+    return subscription
+
+
+def freeze_ended_trials(*, today=None) -> int:
+    """Trial over and no card saved → soft freeze at once (owner В-6).
+
+    Only trials with a known end: rows from before DRF-2984 have no
+    ``trial_ends_at`` and stay as they were.
+    """
+    today = today or timezone.localdate()
+    ended = (
+        SpecialistSubscription.objects
+        .filter(
+            status=SpecialistSubscription.Status.TRIAL,
+            trial_ends_at__isnull=False,
+            trial_ends_at__lte=today,
+            payment_method_id="",
+        )
+        .values_list("pk", flat=True)
+    )
+    frozen = 0
+    for pk in list(ended):
+        with transaction.atomic():
+            # Re-check under the lock: a card may have landed meanwhile.
+            subscription = (
+                SpecialistSubscription.objects.select_for_update().get(pk=pk)
+            )
+            if (
+                subscription.status != SpecialistSubscription.Status.TRIAL
+                or subscription.payment_method_id
+            ):
+                continue
+            subscription.status = SpecialistSubscription.Status.FROZEN
+            subscription.frozen_at = timezone.now()
+            subscription.frozen_reason = FROZEN_TRIAL_ENDED_NO_CARD
+            subscription.save(update_fields=[
+                "status", "frozen_at", "frozen_reason", "updated_at",
+            ])
+            frozen += 1
+    return frozen
 
 
 def start_card_setup(
@@ -190,6 +259,8 @@ def charge_subscription(
         return None
 
     period_start = subscription.current_period_end + timedelta(days=1)
+    # DRF-2984: priced on the billable-masters snapshot taken now.
+    price = period_price(subscription)
     with transaction.atomic():
         invoice, created = BillingInvoice.objects.get_or_create(
             idempotency_key=f"charge:{subscription.id}:{period_start.isoformat()}",
@@ -197,9 +268,11 @@ def charge_subscription(
                 "subscription": subscription,
                 "period_start": period_start,
                 "period_end": _period_end(period_start),
-                "subscription_amount": subscription.tariff.price,
+                "subscription_amount": price.total,
+                "masters_count": price.masters_count,
+                "extra_masters_amount": price.extra_masters_amount,
                 "fees_amount": 0,
-                "total_amount": subscription.tariff.price,
+                "total_amount": price.total,
             },
         )
         if created:
@@ -296,22 +369,21 @@ def settle_charge_success(
             subscription.card_brand = card_brand
         became_active = subscription.status == SpecialistSubscription.Status.TRIAL
         subscription.status = SpecialistSubscription.Status.ACTIVE
+        # Paying the debt lifts a soft freeze (DRF-2984).
+        subscription.frozen_at = None
+        subscription.frozen_reason = ""
         subscription.save()
-
-    if became_active:
-        try:
+        # DRF-2984: the event is part of the status change — same
+        # transaction (the topic is registered; no best-effort anymore).
+        if became_active:
             events.emit_subscription_activated(subscription)
-        except Exception as exc:  # topics may be unregistered pre-W1-patch
-            logger.exception("billing.activated.emit_failed sub=%s", subscription.id)
-            sentry_sdk.capture_exception(exc)
 
 
 def register_charge_failure(
     *, subscription: SpecialistSubscription, invoice: BillingInvoice,
     payment_row: BillingPayment | None = None, reason: str = "",
 ) -> None:
-    """Dunning: retry T+1d, T+3d, then past_due (+ C4 event)."""
-    became_past_due = False
+    """Dunning: retry T+1d, T+3d, then frozen (+ C4 past_due event)."""
     with transaction.atomic():
         if payment_row is not None:
             payment_row.status = BillingPayment.Status.FAILED
@@ -327,28 +399,29 @@ def register_charge_failure(
                 update_fields=["failed_attempts", "next_retry_at", "updated_at"],
             )
         else:
+            # DRF-2984 В-6: dunning exhausted → soft freeze (terminal until
+            # the debt is paid). past_due stays for rows from before.
             subscription.next_retry_at = None
-            subscription.status = SpecialistSubscription.Status.PAST_DUE
+            subscription.status = SpecialistSubscription.Status.FROZEN
+            subscription.frozen_at = timezone.now()
+            subscription.frozen_reason = FROZEN_PAST_DUE_TIMEOUT
             subscription.save(
-                update_fields=["failed_attempts", "next_retry_at", "status", "updated_at"],
+                update_fields=[
+                    "failed_attempts", "next_retry_at", "status",
+                    "frozen_at", "frozen_reason", "updated_at",
+                ],
             )
             invoice.status = BillingInvoice.Status.FAILED
             invoice.save(update_fields=["status", "updated_at"])
-            became_past_due = True
-
-    if became_past_due:
-        debt = quantize_money(
-            subscription.invoices.filter(
-                status=BillingInvoice.Status.FAILED,
-            ).aggregate(total=Sum("total_amount"))["total"] or 0,
-        )
-        try:
+            # DRF-2984: emitted with the status change, same transaction.
+            debt = quantize_money(
+                subscription.invoices.filter(
+                    status=BillingInvoice.Status.FAILED,
+                ).aggregate(total=Sum("total_amount"))["total"] or 0,
+            )
             events.emit_subscription_past_due(
                 subscription, debt_amount=debt, failed_attempts=attempts,
             )
-        except Exception as exc:
-            logger.exception("billing.past_due.emit_failed sub=%s", subscription.id)
-            sentry_sdk.capture_exception(exc)
 
 
 def retry_open_invoice(*, subscription: SpecialistSubscription, client=None) -> bool:

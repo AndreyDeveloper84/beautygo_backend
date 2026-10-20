@@ -321,7 +321,7 @@ class TestChargeSubscription:
 
 
 class TestDunning:
-    def test_retry_schedule_then_past_due(self, db, due_subscription):
+    def test_retry_schedule_then_frozen(self, db, due_subscription):
         invoice = BillingInvoice.objects.create(
             subscription=due_subscription,
             period_start=date(2026, 7, 11), period_end=date(2026, 8, 10),
@@ -347,13 +347,15 @@ class TestDunning:
             assert due_subscription.failed_attempts == 2
             assert due_subscription.next_retry_at > timezone.now() + timedelta(days=2)
 
-            # fail 3 → past_due + C4 event with debt amount
+            # fail 3 → soft freeze (DRF-2984 В-6) + C4 past_due event
             register_charge_failure(
                 subscription=due_subscription, invoice=invoice, reason="x",
             )
             due_subscription.refresh_from_db()
             invoice.refresh_from_db()
-            assert due_subscription.status == SpecialistSubscription.Status.PAST_DUE
+            assert due_subscription.status == SpecialistSubscription.Status.FROZEN
+            assert due_subscription.frozen_reason == "past_due_timeout"
+            assert due_subscription.frozen_at is not None
             assert due_subscription.next_retry_at is None
             assert invoice.status == BillingInvoice.Status.FAILED
         emit.assert_called_once()

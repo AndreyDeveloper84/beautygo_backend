@@ -83,7 +83,8 @@ def can_accept_booking(
 ) -> EligibilityResult:
     """C1: may this specialist accept a NEW booking right now.
 
-    Only ``past_due`` blocks. Fail-open per contract: missing data or
+    ``past_due`` and ``frozen`` block (DRF-2984: frozen is the soft
+    freeze — new bookings closed, same reason code for the bot). Fail-open per contract: missing data or
     technical errors return ``ok=True`` and alert Sentry WITHOUT any
     personal or payment data. Existing bookings, reschedule, cancel and
     completion are never gated here (consumer-side rule, C1).
@@ -98,7 +99,10 @@ def can_accept_booking(
                 "billing.eligibility.account_not_found", level="warning",
             )
             return EligibilityResult(ok=True)
-        if subscription.status == SpecialistSubscription.Status.PAST_DUE:
+        if subscription.status in (
+            SpecialistSubscription.Status.PAST_DUE,
+            SpecialistSubscription.Status.FROZEN,
+        ):
             return EligibilityResult(ok=False, reason=REASON_SUBSCRIPTION_PAST_DUE)
         return EligibilityResult(ok=True)
     except Exception as exc:  # fail-open (C1) — never raise to the booking path

@@ -64,6 +64,14 @@ class TariffPlan(models.Model):
     name = models.CharField(max_length=120)
     price = models.DecimalField(**_MONEY, validators=[MinValueValidator(_ZERO)])
     max_masters = models.PositiveSmallIntegerField(default=1)
+    # DRF-2984 (owner 20.10): each billable master above ``max_masters``
+    # costs this much per period. NULL = no masters above the limit on
+    # this plan (solo: a second master means converting to salon, В-2).
+    extra_master_price = models.DecimalField(
+        **_MONEY, null=True, blank=True, validators=[MinValueValidator(_ZERO)],
+    )
+    # Free trial length in whole months, date-to-date (owner В-5).
+    trial_months = models.PositiveSmallIntegerField(default=1)
     is_active = models.BooleanField(default=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
@@ -92,6 +100,9 @@ class SpecialistSubscription(models.Model):
         TRIAL = "trial", "Пробный период"
         ACTIVE = "active", "Активна"
         PAST_DUE = "past_due", "Просрочена"
+        # DRF-2984 В-4: a soft freeze is a status, never Tenant.is_active —
+        # the billing screen and pay-debt must stay reachable.
+        FROZEN = "frozen", "Заморожена"
         CANCELED = "canceled", "Отменена"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -129,6 +140,26 @@ class SpecialistSubscription(models.Model):
     # Dunning (wave 2): fail → retry T+1d, T+3d → past_due.
     failed_attempts = models.PositiveSmallIntegerField(default=0)
     next_retry_at = models.DateTimeField(null=True, blank=True)
+
+    # DRF-2984. Trial end (first charge date), date-to-date (В-5); NULL on
+    # rows created before the trial month existed.
+    trial_ends_at = models.DateField(null=True, blank=True)
+    frozen_at = models.DateTimeField(null=True, blank=True)
+    frozen_reason = models.CharField(
+        max_length=32, blank=True, default="", choices=[
+            ("past_due_timeout", "Дожим исчерпан"),
+            ("trial_ended_no_card", "Пробный период кончился без карты"),
+        ],
+    )
+    canceled_at = models.DateTimeField(null=True, blank=True)
+    # Promo / grandfathered prices live next to the price, not in the bot:
+    # the charge must see them. NULL = the plan's price applies.
+    price_override = models.DecimalField(
+        **_MONEY, null=True, blank=True, validators=[MinValueValidator(_ZERO)],
+    )
+    extra_master_price_override = models.DecimalField(
+        **_MONEY, null=True, blank=True, validators=[MinValueValidator(_ZERO)],
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -228,6 +259,11 @@ class BillingInvoice(models.Model):
     period_start = models.DateField()
     period_end = models.DateField()
     subscription_amount = models.DecimalField(**_MONEY, default=_ZERO)
+    # DRF-2984: the billable-masters snapshot this invoice was priced on
+    # and the part of subscription_amount above the plan's limit. NULL on
+    # invoices issued before the snapshot existed.
+    masters_count = models.PositiveSmallIntegerField(null=True, blank=True)
+    extra_masters_amount = models.DecimalField(**_MONEY, default=_ZERO)
     fees_amount = models.DecimalField(**_MONEY, default=_ZERO)
     total_amount = models.DecimalField(**_MONEY, default=_ZERO)
     status = models.CharField(
