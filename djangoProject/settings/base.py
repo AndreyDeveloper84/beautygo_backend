@@ -747,6 +747,21 @@ YOOKASSA_SECRET_KEY = os.environ.get("YOOKASSA_SECRET_KEY", "")
 # don't crash, but payments/services.py no longer consults it.
 YOOKASSA_AGENT_ID = os.environ.get("YOOKASSA_AGENT_ID", "")
 
+# Platform billing of specialists/salons (DRF-2984, PR-C1). Two keys, both
+# off by default — off is the pilot's free mode.
+# BILLING_ENABLED: subscription accounting runs (beat charge/dunning tasks
+# do work). Off → the beat tasks are no-ops.
+# BILLING_CHARGES_ENABLED: billing/ may talk to YooKassa at all (card
+# binding, auto-charges, debt collection, webhook re-fetch). Off → not one
+# YooKassa call from billing/, whatever YOOKASSA_SHOP_ID/SECRET_KEY hold.
+# Turned on ONLY on the owner's "GO на платный".
+# CHARGES without ENABLED refuses to start (billing.apps): money must never
+# move with the accounting switched off.
+BILLING_ENABLED = os.environ.get("BILLING_ENABLED", "false").lower() == "true"
+BILLING_CHARGES_ENABLED = (
+    os.environ.get("BILLING_CHARGES_ENABLED", "false").lower() == "true"
+)
+
 # Pilot monetization (AYLA-DEC-0001/D1): flat platform fee per successful
 # booking — replaces the pre-pilot 8% commission. String on purpose:
 # callers Decimal() it (money is never float, data contract §1).

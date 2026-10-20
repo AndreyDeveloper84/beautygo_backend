@@ -632,6 +632,7 @@ class PaymentWebhookView(APIView):
             # Billing-owned payment — dispatch to the W2 handler (it does
             # its own provider re-fetch + idempotency).
             from billing.charges import handle_webhook_event
+            from billing.flags import BillingChargesDisabled
             from billing.yookassa import (
                 BillingPaymentClientError,
                 BillingPaymentConfigError,
@@ -640,6 +641,13 @@ class PaymentWebhookView(APIView):
                 status_ = handle_webhook_event(
                     event=event, provider_payment_id=provider_payment_id,
                 )
+            except BillingChargesDisabled:
+                # DRF-2984: charges off → no re-fetch from YooKassa; ack.
+                logger.error(
+                    "billing webhook ignored: charges disabled (id=%s)",
+                    provider_payment_id,
+                )
+                return Response({'status': 'ignored'}, status=200)
             except BillingPaymentClientError as exc:
                 # Provider unreachable — 200 stops retries; the billing
                 # reconciliation job picks it up (G).
