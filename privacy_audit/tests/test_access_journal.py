@@ -778,6 +778,11 @@ class TestGuardCoversTheWholeSurface:
             "InternalSpecialistAvailabilityView": (
                 "приём записей — настройка workspace мастера, не персданные субъекта"
             ),
+            # DRF-2984 C3 — архив мастера салоном: тот же признак is_available,
+            # что у приёма записей; пишет и отвечает только флагами профиля.
+            "InternalSpecialistArchiveView": (
+                "архив мастера — флаг is_available салона, не персданные субъекта"
+            ),
         }
         guarded = set()
         for module in (
