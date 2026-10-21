@@ -64,7 +64,11 @@ from appointments.application.services.schedule_impact_service import (
 )
 from appointments.models import SpecialistTimeOff, SpecialistWorkingHours
 
-from .permissions import IsInternalBearer, IsInternalBearerForSpecialistSubject
+from .permissions import (
+    IsInternalBearer,
+    IsInternalBearerForSpecialistSubject,
+    IsInternalBearerForSpecialistTenantAdminSubject,
+)
 from .response import error_response, success_response
 from .schedule_api import (
     _WORKING_HOURS_RESPONSE_FIELDS, SchedulePutSerializer, _invalidate_slots,
@@ -713,3 +717,57 @@ class InternalSpecialistAvailabilityView(APIView):
             profile.pk, value,
         )
         return success_response(self._payload(profile))
+
+
+class InternalSpecialistArchiveView(APIView):
+    """PATCH /api/v1/internal/specialists/{specialist_id}/archive/
+
+    Архив мастера из бота (DRF-2984 C3): деактивация / возврат
+    владельцем или администратором салона. ``archived=true`` выводит
+    профиль из пула каталога (``is_available=False``) — мастер не
+    продаётся и не входит в счёт подписки. Пауза приёма
+    (``is_booking_enabled``, ручка ``availability/``) не трогается: это
+    решение самого мастера, архив — решение салона.
+
+    **Субъект** — :class:`IsInternalBearerForSpecialistTenantAdminSubject`:
+    актор администрирует тенант ЭТОГО мастера. Статус профиля не
+    проверяется — архивировать можно и неопубликованного.
+    """
+
+    authentication_classes: list = []
+    permission_classes = [IsInternalBearerForSpecialistTenantAdminSubject]
+    subject_url_kwarg = "specialist_id"
+
+    @extend_schema(
+        tags=["internal"],
+        responses={
+            200: OpenApiResponse(description="specialist_id, archived, accepting_bookings, status"),
+            400: OpenApiResponse(description="archived is not a boolean"),
+            403: OpenApiResponse(description="No acting subject"),
+            404: OpenApiResponse(description="Not a master of the actor's salon"),
+        },
+    )
+    def patch(self, request: Request, specialist_id: UUID) -> Response:
+        from users.models import SpecialistProfile
+
+        data = request.data if hasattr(request.data, "get") else {}
+        archived = data.get("archived")
+        # Strict: "true" as a string is a caller bug, not an archive.
+        if not isinstance(archived, bool):
+            return error_response(
+                "VALIDATION_ERROR", "archived must be a boolean.", status_code=400,
+            )
+        profile = SpecialistProfile.objects.get(pk=specialist_id)
+        if profile.is_available == archived:
+            profile.is_available = not archived
+            profile.save(update_fields=["is_available"])
+        logger.info(
+            "internal.specialist_archive.saved specialist=%s archived=%s",
+            profile.pk, archived,
+        )
+        return success_response({
+            "specialist_id": str(profile.pk),
+            "archived": not profile.is_available,
+            "accepting_bookings": bool(profile.is_booking_enabled),
+            "status": profile.status,
+        })

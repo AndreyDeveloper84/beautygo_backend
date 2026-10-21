@@ -25,7 +25,7 @@ from uuid import UUID
 
 from dateutil.relativedelta import relativedelta
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
 
@@ -117,14 +117,16 @@ def start_trial(
     trial_ends_at = started_on + relativedelta(
         months=subscription.tariff.trial_months,
     )
-    subscription.status = SpecialistSubscription.Status.TRIAL
-    subscription.trial_ends_at = trial_ends_at
-    subscription.current_period_start = started_on
-    subscription.current_period_end = trial_ends_at - timedelta(days=1)
-    subscription.save(update_fields=[
-        "status", "trial_ends_at", "current_period_start",
-        "current_period_end", "updated_at",
-    ])
+    with transaction.atomic():
+        subscription.status = SpecialistSubscription.Status.TRIAL
+        subscription.trial_ends_at = trial_ends_at
+        subscription.current_period_start = started_on
+        subscription.current_period_end = trial_ends_at - timedelta(days=1)
+        subscription.save(update_fields=[
+            "status", "trial_ends_at", "current_period_start",
+            "current_period_end", "updated_at",
+        ])
+        events.emit_subscription_trial_started(subscription)
     return subscription
 
 
@@ -163,6 +165,7 @@ def freeze_ended_trials(*, today=None) -> int:
             subscription.save(update_fields=[
                 "status", "frozen_at", "frozen_reason", "updated_at",
             ])
+            events.emit_subscription_frozen(subscription)
             frozen += 1
     return frozen
 
@@ -188,15 +191,18 @@ def start_card_setup(
                 user=user, document_version=_offer_version(),
             )
         period_start = timezone.localdate()
+        price = period_price(subscription)
         invoice, _ = BillingInvoice.objects.get_or_create(
             idempotency_key=f"setup:{subscription.id}:{period_start.isoformat()}",
             defaults={
                 "subscription": subscription,
                 "period_start": period_start,
                 "period_end": _period_end(period_start),
-                "subscription_amount": subscription.tariff.price,
+                "subscription_amount": price.total,
+                "masters_count": price.masters_count,
+                "extra_masters_amount": price.extra_masters_amount,
                 "fees_amount": 0,
-                "total_amount": subscription.tariff.price,
+                "total_amount": price.total,
             },
         )
         existing = BillingPayment.objects.filter(
@@ -259,9 +265,10 @@ def charge_subscription(
         return None
 
     period_start = subscription.current_period_end + timedelta(days=1)
-    # DRF-2984: priced on the billable-masters snapshot taken now.
-    price = period_price(subscription)
     with transaction.atomic():
+        _apply_pending_tariff(subscription, period_start=period_start)
+        # DRF-2984: priced on the billable-masters snapshot taken now.
+        price = period_price(subscription)
         invoice, created = BillingInvoice.objects.get_or_create(
             idempotency_key=f"charge:{subscription.id}:{period_start.isoformat()}",
             defaults={
@@ -373,17 +380,21 @@ def settle_charge_success(
         subscription.frozen_at = None
         subscription.frozen_reason = ""
         subscription.save()
-        # DRF-2984: the event is part of the status change — same
-        # transaction (the topic is registered; no best-effort anymore).
+        # DRF-2984: the events are part of the status change — same
+        # transaction (the topics are registered; no best-effort anymore).
         if became_active:
             events.emit_subscription_activated(subscription)
+        events.emit_subscription_renewed(
+            subscription, amount=invoice.total_amount,
+            masters_count=invoice.masters_count,
+        )
 
 
 def register_charge_failure(
     *, subscription: SpecialistSubscription, invoice: BillingInvoice,
     payment_row: BillingPayment | None = None, reason: str = "",
 ) -> None:
-    """Dunning: retry T+1d, T+3d, then frozen (+ C4 past_due event)."""
+    """Dunning: retry T+1d, T+3d, then frozen (+ subscription.frozen)."""
     with transaction.atomic():
         if payment_row is not None:
             payment_row.status = BillingPayment.Status.FAILED
@@ -413,15 +424,9 @@ def register_charge_failure(
             )
             invoice.status = BillingInvoice.Status.FAILED
             invoice.save(update_fields=["status", "updated_at"])
-            # DRF-2984: emitted with the status change, same transaction.
-            debt = quantize_money(
-                subscription.invoices.filter(
-                    status=BillingInvoice.Status.FAILED,
-                ).aggregate(total=Sum("total_amount"))["total"] or 0,
-            )
-            events.emit_subscription_past_due(
-                subscription, debt_amount=debt, failed_attempts=attempts,
-            )
+            # DRF-2984 C3: the status is frozen, so the event is frozen —
+            # past_due is no longer set by new code (В-6, variant 1).
+            events.emit_subscription_frozen(subscription)
 
 
 def retry_open_invoice(*, subscription: SpecialistSubscription, client=None) -> bool:
@@ -691,3 +696,205 @@ def handle_webhook_event(
         else:
             return "ignored"
     return "ok"
+
+
+# --- DRF-2984 C3: the tenant-scoped account (contract §6) -------------------
+
+
+class NoTenantAdmin(Exception):
+    """The tenant has no active admin to be the payer of its account."""
+
+
+class PriceMismatch(Exception):
+    """The price the owner confirmed is not the current salon price."""
+
+
+class AlreadySalon(Exception):
+    """The cabinet is already a salon."""
+
+
+def tariff_for_tenant(tenant) -> TariffPlan:
+    """The plan follows the cabinet kind (Z8), never the request body."""
+    from tenants.models import Tenant
+
+    code = (
+        TariffPlan.Code.SOLO if tenant.kind == Tenant.Kind.SOLO
+        else TariffPlan.Code.SALON
+    )
+    return TariffPlan.objects.get(code=code, is_active=True)
+
+
+def _tenant_payer(tenant):
+    """The payer is the earliest active admin of the cabinet: the owner,
+    or the solo master, who administers their own workspace."""
+    from users.models import TenantUserRelationship
+
+    rel = (
+        TenantUserRelationship.objects
+        .filter(
+            tenant=tenant, role=TenantUserRelationship.Role.ADMIN,
+            is_active=True,
+        )
+        .select_related("user")
+        .order_by("granted_at")
+        .first()
+    )
+    if rel is None:
+        raise NoTenantAdmin(str(tenant.pk))
+    return rel.user
+
+
+def tenant_has_published_master(tenant) -> bool:
+    """В-10: the trial starts once the cabinet is visible to clients."""
+    from users.models import SpecialistProfile
+    from users.sellable import sellable_q
+
+    return SpecialistProfile.objects.filter(sellable_q(), tenant=tenant).exists()
+
+
+def ensure_tenant_subscription(tenant, *, today=None):
+    """Open the cabinet account; idempotent. Returns ``(subscription,
+    created)``. The trial month starts now when the cabinet already has
+    a master on sale, otherwise on the first publication
+    (:func:`start_pending_trials`)."""
+    today = today or timezone.localdate()
+    existing = SpecialistSubscription.objects.filter(tenant=tenant).first()
+    if existing is not None:
+        return existing, False
+    payer = _tenant_payer(tenant)
+    try:
+        with transaction.atomic():
+            subscription = SpecialistSubscription.objects.create(
+                user=payer, tenant=tenant, tariff=tariff_for_tenant(tenant),
+                status=SpecialistSubscription.Status.TRIAL,
+            )
+    except IntegrityError:
+        # Two first calls raced; the unique-per-tenant row is the answer.
+        return SpecialistSubscription.objects.get(tenant=tenant), False
+    if tenant_has_published_master(tenant):
+        start_trial(subscription, started_on=today)
+    return subscription, True
+
+
+def start_pending_trials(*, today=None) -> int:
+    """Daily: open the trial of every account whose cabinet got its first
+    master on sale since (В-10). Publication happens in several places
+    (moderation, admin actions), so a sweep catches them all."""
+    today = today or timezone.localdate()
+    pending = (
+        SpecialistSubscription.objects
+        .filter(
+            status=SpecialistSubscription.Status.TRIAL,
+            trial_ends_at__isnull=True,
+            tenant__isnull=False,
+        )
+        .select_related("tenant", "tariff")
+    )
+    started = 0
+    for subscription in pending:
+        if tenant_has_published_master(subscription.tenant):
+            start_trial(subscription, started_on=today)
+            started += 1
+    return started
+
+
+def cancel_effective_on(subscription: SpecialistSubscription):
+    """The account works until the end of what is paid (or of the trial)."""
+    if subscription.current_period_end is not None:
+        return subscription.current_period_end + timedelta(days=1)
+    return timezone.localdate()
+
+
+def cancel_subscription(subscription: SpecialistSubscription):
+    """Stop auto-renewal; idempotent. Returns the effective date."""
+    with transaction.atomic():
+        locked = SpecialistSubscription.objects.select_for_update().get(
+            pk=subscription.pk,
+        )
+        effective_on = cancel_effective_on(locked)
+        if locked.status != SpecialistSubscription.Status.CANCELED:
+            locked.status = SpecialistSubscription.Status.CANCELED
+            locked.canceled_at = timezone.now()
+            locked.next_retry_at = None
+            locked.save(update_fields=[
+                "status", "canceled_at", "next_retry_at", "updated_at",
+            ])
+            # No further auto-charges: the consent ends with the account.
+            BillingConsent.objects.filter(
+                user=locked.user, revoked_at__isnull=True,
+            ).update(revoked_at=timezone.now())
+            events.emit_subscription_canceled(locked, effective_at=effective_on)
+    subscription.refresh_from_db()
+    return effective_on
+
+
+def convert_to_salon(tenant, *, confirmed_price, today=None):
+    """Solo cabinet becomes a salon (В-2), confirmed with the price.
+
+    The kind changes now, so a second master can be provisioned at once;
+    the price changes from the next period, so the current one is never
+    charged twice. Idempotent: a repeat answers with the pending change.
+    Raises PriceMismatch / AlreadySalon.
+    """
+    from tenants.models import Tenant
+
+    today = today or timezone.localdate()
+    salon = TariffPlan.objects.get(code=TariffPlan.Code.SALON, is_active=True)
+    if quantize_money(confirmed_price) != quantize_money(salon.price):
+        raise PriceMismatch(f"{salon.price:.2f}")
+    with transaction.atomic():
+        locked = Tenant.all_objects.select_for_update().get(pk=tenant.pk)
+        subscription = (
+            SpecialistSubscription.objects.select_for_update()
+            .filter(tenant=locked).first()
+        )
+        if locked.kind == Tenant.Kind.SALON:
+            if (
+                subscription is not None
+                and subscription.pending_tariff_id == salon.pk
+            ):
+                return subscription  # repeat of a confirmed conversion
+            raise AlreadySalon(str(locked.pk))
+        locked.kind = Tenant.Kind.SALON
+        locked.save(update_fields=["kind"])
+        if subscription is None:
+            return None
+        subscription.pending_tariff = salon
+        subscription.pending_tariff_from = (
+            subscription.current_period_end + timedelta(days=1)
+            if subscription.current_period_end is not None else today
+        )
+        subscription.save(update_fields=[
+            "pending_tariff", "pending_tariff_from", "updated_at",
+        ])
+        events.emit_subscription_plan_changed(subscription)
+    return subscription
+
+
+def _apply_pending_tariff(subscription: SpecialistSubscription, *, period_start):
+    """Switch to the confirmed plan when its period begins.
+
+    Read under the row lock, not from the caller's instance: the owner may
+    confirm the conversion after the sweep loaded the row. Call inside a
+    transaction.
+    """
+    locked = (
+        # No select_related: Postgres rejects FOR UPDATE on the nullable
+        # side of an outer join (pending_tariff is nullable).
+        SpecialistSubscription.objects.select_for_update().get(pk=subscription.pk)
+    )
+    if (
+        locked.pending_tariff_id is None
+        or locked.pending_tariff_from is None
+        or period_start < locked.pending_tariff_from
+    ):
+        return
+    locked.tariff = locked.pending_tariff
+    locked.pending_tariff = None
+    locked.pending_tariff_from = None
+    locked.save(update_fields=[
+        "tariff", "pending_tariff", "pending_tariff_from", "updated_at",
+    ])
+    subscription.tariff = locked.tariff
+    subscription.pending_tariff = None
+    subscription.pending_tariff_from = None

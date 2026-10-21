@@ -328,7 +328,7 @@ class TestDunning:
             subscription_amount=Decimal("690.00"), total_amount=Decimal("690.00"),
             idempotency_key="charge:test-dunning:2026-07-11",
         )
-        with patch("billing.events.emit_subscription_past_due") as emit:
+        with patch("billing.events.emit_subscription_frozen") as emit:
             # fail 1 → retry T+1d
             register_charge_failure(
                 subscription=due_subscription, invoice=invoice, reason="x",
@@ -347,7 +347,7 @@ class TestDunning:
             assert due_subscription.failed_attempts == 2
             assert due_subscription.next_retry_at > timezone.now() + timedelta(days=2)
 
-            # fail 3 → soft freeze (DRF-2984 В-6) + C4 past_due event
+            # fail 3 → soft freeze (DRF-2984 В-6) + subscription.frozen
             register_charge_failure(
                 subscription=due_subscription, invoice=invoice, reason="x",
             )
@@ -359,9 +359,9 @@ class TestDunning:
             assert due_subscription.next_retry_at is None
             assert invoice.status == BillingInvoice.Status.FAILED
         emit.assert_called_once()
-        _, kwargs = emit.call_args
-        assert kwargs["failed_attempts"] == 3
-        assert kwargs["debt_amount"] == Decimal("690.00")
+        (frozen_sub,), _ = emit.call_args
+        assert frozen_sub.pk == due_subscription.pk
+        assert frozen_sub.frozen_reason == "past_due_timeout"
 
     def test_retry_success_settles_and_resets(self, db, due_subscription):
         invoice = BillingInvoice.objects.create(

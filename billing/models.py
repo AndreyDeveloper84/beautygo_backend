@@ -160,6 +160,14 @@ class SpecialistSubscription(models.Model):
     extra_master_price_override = models.DecimalField(
         **_MONEY, null=True, blank=True, validators=[MinValueValidator(_ZERO)],
     )
+    # DRF-2984 C3 (В-2): a confirmed plan change waits for the next period
+    # — the current one is never charged twice. Applied by the charge
+    # whose period starts on or after ``pending_tariff_from``.
+    pending_tariff = models.ForeignKey(
+        TariffPlan, on_delete=models.PROTECT, null=True, blank=True,
+        related_name='+',
+    )
+    pending_tariff_from = models.DateField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

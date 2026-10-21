@@ -1356,6 +1356,12 @@ CELERY_BEAT_SCHEDULE = {
         "task": "billing.tasks.retry_failed_subscription_charges",
         "schedule": crontab(hour=5, minute=15),
     },
+    # DRF-2984 В-10: trial month from the first publication. Before the
+    # monthly charge (04:30) so a trial opened today is dated today.
+    "billing-start-trials": {
+        "task": "billing.tasks.start_billing_trials",
+        "schedule": crontab(hour=4, minute=0),
+    },
     # Water reminders fire twice daily at 14:00 and 18:00 UTC. Pilot is
     # single-tz Penza (MSK = UTC+3), so 17:00 / 21:00 local — afternoon
     # slump and evening cool-down windows where users typically fall
