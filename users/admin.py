@@ -133,8 +133,11 @@ def approve_specialists(modeladmin, request, queryset):
     «модерация профиля <id>» — в одной транзакции с активацией. Место вне
     workspace мастера так не подтверждается: отказ с ``location_not_confirmed``.
     """
+    from functools import partial
+
     from django.db import transaction
 
+    from billing.charges import open_on_publication
     from users.publication import (
         LOCATION_NOT_CONFIRMED,
         approval_refusal,
@@ -167,6 +170,9 @@ def approve_specialists(modeladmin, request, queryset):
             updated += SpecialistProfile.objects.filter(pk=profile.pk).update(
                 status=SpecialistProfile.ProfileStatus.ACTIVE,
             )
+            # DRF-2990: публикация открывает подписку тенанта (соло и салон).
+            if profile.tenant_id is not None:
+                transaction.on_commit(partial(open_on_publication, profile.tenant_id))
     modeladmin.message_user(
         request, f'Подтверждено мастеров: {updated}', messages.SUCCESS,
     )

@@ -59,6 +59,7 @@ workspace мастера так не подтверждается — его п�
 from __future__ import annotations
 
 import logging
+from functools import partial
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -248,6 +249,11 @@ def publish(profile: SpecialistProfile, command_id: UUID) -> PublishResult:
                 locked.status = Status.PENDING
                 locked.save(update_fields=["status"])
                 outcome = Outcome.SUBMITTED
+                # DRF-2990: заявка на публикацию открывает подписку тенанта;
+                # пробный месяц — только когда мастер в выдаче (модерация).
+                from billing.charges import open_on_publication
+
+                transaction.on_commit(partial(open_on_publication, locked.tenant_id))
             request = SpecialistPublicationRequest.objects.create(
                 specialist=locked,
                 command_id=command_id,

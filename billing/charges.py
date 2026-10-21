@@ -771,29 +771,94 @@ def ensure_tenant_subscription(tenant, *, today=None):
     except IntegrityError:
         # Two first calls raced; the unique-per-tenant row is the answer.
         return SpecialistSubscription.objects.get(tenant=tenant), False
-    if tenant_has_published_master(tenant):
-        start_trial(subscription, started_on=today)
+    subscription = _start_trial_if_published(subscription, today=today)
     return subscription, True
 
 
-def start_pending_trials(*, today=None) -> int:
-    """Daily: open the trial of every account whose cabinet got its first
-    master on sale since (В-10). Publication happens in several places
-    (moderation, admin actions), so a sweep catches them all."""
-    today = today or timezone.localdate()
-    pending = (
-        SpecialistSubscription.objects
-        .filter(
-            status=SpecialistSubscription.Status.TRIAL,
-            trial_ends_at__isnull=True,
-            tenant__isnull=False,
+def _start_trial_if_published(subscription, *, today):
+    """Start the trial of a not-yet-started account whose cabinet has a
+    master on sale. The row is re-read under lock: the publication hook
+    and the daily sweep may reach the same account at once, and the
+    trial (with its ``trial_started`` event) must start exactly once."""
+    with transaction.atomic():
+        locked = (
+            SpecialistSubscription.objects.select_for_update()
+            .get(pk=subscription.pk)
         )
-        .select_related("tenant", "tariff")
+        if (
+            locked.status == SpecialistSubscription.Status.TRIAL
+            and locked.trial_ends_at is None
+            and locked.tenant_id is not None
+            and tenant_has_published_master(locked.tenant)
+        ):
+            start_trial(locked, started_on=today)
+    return locked
+
+
+def open_on_publication(tenant_id) -> None:
+    """DRF-2990 (В-10, variant A): the catalog — not the bot — opens the
+    cabinet account when the tenant publishes.
+
+    Called on commit of a publication transition (solo ``publish()`` →
+    PENDING, moderation → ACTIVE). Opens the row by tenant kind; the
+    trial starts only once a master is on sale (visible to clients), so
+    a solo master's PENDING opens the account without starting the
+    month. Never raises: a billing failure must not undo or fail the
+    publication — it is logged and :func:`start_pending_trials` picks
+    the tenant up at night.
+    """
+    from billing.flags import billing_enabled
+    from tenants.models import Tenant
+
+    if not billing_enabled():
+        return
+    try:
+        tenant = Tenant.objects.filter(pk=tenant_id).first()
+        if tenant is None:
+            return
+        subscription, created = ensure_tenant_subscription(tenant)
+        if not created:
+            _start_trial_if_published(subscription, today=timezone.localdate())
+    except NoTenantAdmin:
+        logger.error("billing.open_on_publication.no_tenant_admin tenant=%s", tenant_id)
+    except Exception:
+        logger.exception("billing.open_on_publication.failed tenant=%s", tenant_id)
+
+
+def start_pending_trials(*, today=None) -> int:
+    """Daily: open the account of every tenant with a master on sale and
+    no account yet, and start the trial of every account whose cabinet
+    got its first master on sale since (В-10). The publication hook
+    (:func:`open_on_publication`) covers moderation and solo publish; this
+    sweep catches the rest — seeds, admin edits, a failed hook."""
+    from tenants.models import Tenant
+    from users.models import SpecialistProfile
+    from users.sellable import sellable_q
+
+    today = today or timezone.localdate()
+    unopened = (
+        SpecialistProfile.objects
+        .filter(sellable_q(), tenant__isnull=False)
+        .exclude(tenant__billing_subscriptions__isnull=False)
+        .values_list("tenant", flat=True)
+        .distinct()
     )
     started = 0
+    for tenant in Tenant.objects.filter(pk__in=list(unopened)):
+        try:
+            subscription, _ = ensure_tenant_subscription(tenant, today=today)
+        except NoTenantAdmin:
+            logger.error("billing.trial_start.no_tenant_admin tenant=%s", tenant.pk)
+            continue
+        if subscription.trial_ends_at is not None:
+            started += 1
+    pending = SpecialistSubscription.objects.filter(
+        status=SpecialistSubscription.Status.TRIAL,
+        trial_ends_at__isnull=True,
+        tenant__isnull=False,
+    )
     for subscription in pending:
-        if tenant_has_published_master(subscription.tenant):
-            start_trial(subscription, started_on=today)
+        if _start_trial_if_published(subscription, today=today).trial_ends_at is not None:
             started += 1
     return started
 
