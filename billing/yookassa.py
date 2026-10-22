@@ -80,6 +80,43 @@ class BillingYooKassaClient:
             "status": payment.status,
         }
 
+    def create_binding_hold(
+        self, *, amount, description: str, return_url: str,
+        idempotency_key: str, receipt: dict | None, metadata: dict,
+    ) -> dict:
+        """DRF-2989 (В3): a two-stage hold that saves the card and is
+        never captured — ``payment.waiting_for_capture`` carries the
+        saved method, then :meth:`cancel_payment` releases the hold."""
+        payload: dict[str, Any] = {
+            "amount": {"value": f"{amount:.2f}", "currency": "RUB"},
+            "confirmation": {"type": "redirect", "return_url": return_url},
+            "capture": False,
+            "save_payment_method": True,
+            "description": description,
+            "metadata": metadata,
+        }
+        if receipt:
+            payload["receipt"] = receipt
+        payment = self._wrap(
+            lambda: self._payment_cls.create(payload, idempotency_key)
+        )
+        confirmation = getattr(payment, "confirmation", None)
+        return {
+            "provider_payment_id": payment.id,
+            "confirmation_url": getattr(confirmation, "confirmation_url", "") or "",
+            "status": payment.status,
+        }
+
+    def cancel_payment(self, provider_payment_id: str, idempotency_key: str) -> dict:
+        """Release a ``waiting_for_capture`` hold (no money moves)."""
+        payment = self._wrap(
+            lambda: self._payment_cls.cancel(provider_payment_id, idempotency_key)
+        )
+        return {
+            "provider_payment_id": getattr(payment, "id", provider_payment_id),
+            "status": getattr(payment, "status", ""),
+        }
+
     def create_recurrent_payment(
         self, *, amount, payment_method_id: str, description: str,
         idempotency_key: str, receipt: dict | None, metadata: dict,
