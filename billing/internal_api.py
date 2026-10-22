@@ -190,7 +190,8 @@ class BillingCardSetupView(APIView):
             )
         return success_response({
             "subscription_id": str(result.subscription_id),
-            "invoice_id": str(result.invoice_id),
+            # DRF-2989: null — the card is bound in the trial without a charge.
+            "invoice_id": str(result.invoice_id) if result.invoice_id else None,
             "confirmation_url": result.confirmation_url,
         })
 

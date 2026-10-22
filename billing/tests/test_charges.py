@@ -36,7 +36,22 @@ class FakeYooKassaClient:
         self.card_brand = card_brand
         self.setup_calls = []
         self.recurrent_calls = []
+        self.binding_calls = []
+        self.cancel_calls = []
         self._counter = 0
+
+    def create_binding_hold(self, **kwargs):
+        self.binding_calls.append(kwargs)
+        self._counter += 1
+        return {
+            "provider_payment_id": f"yk_bind_{self._counter}",
+            "confirmation_url": f"https://pay.example/bind/{self._counter}",
+            "status": "pending",
+        }
+
+    def cancel_payment(self, provider_payment_id, idempotency_key):
+        self.cancel_calls.append((provider_payment_id, idempotency_key))
+        return {"provider_payment_id": provider_payment_id, "status": "canceled"}
 
     def create_setup_payment(self, **kwargs):
         self.setup_calls.append(kwargs)
@@ -131,6 +146,8 @@ class TestStartCardSetup:
         assert BillingPayment.objects.count() == 1
 
     def test_salon_binds_tenant_account(self, db, specialist_user, tenant):
+        # DRF-2989: a cabinet before publication is in its trial — the card
+        # is bound without a charge (billing/tests/test_card_binding_2989.py).
         result = start_card_setup(
             user=specialist_user, tariff_code="salon", tenant=tenant,
             return_url="https://miniapp.example/billing",

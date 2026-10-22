@@ -296,13 +296,17 @@ class BillingPayment(models.Model):
     """YooKassa payment attempt for an invoice (or the card-binding charge).
 
     `setup` — first master payment with save_payment_method:true (D7);
-    `recurrent` — monthly auto-charge via the saved payment_method_id.
+    `recurrent` — monthly auto-charge via the saved payment_method_id;
+    `card_binding` — DRF-2989: a 1 ₽ hold that saves the card in the
+    trial and is released, never captured. It has no invoice, so it
+    names its subscription directly.
     Retries create a new row each (mirrors payments.Payment 1:N style).
     """
 
     class Kind(models.TextChoices):
         SETUP = "setup", "Привязка карты"
         RECURRENT = "recurrent", "Автосписание"
+        CARD_BINDING = "card_binding", "Привязка карты без списания"
 
     class Status(models.TextChoices):
         PENDING = "pending", "Ожидает"
@@ -316,6 +320,12 @@ class BillingPayment(models.Model):
         on_delete=models.PROTECT,
         null=True, blank=True,
         related_name='payments',
+    )
+    subscription = models.ForeignKey(
+        SpecialistSubscription,
+        on_delete=models.PROTECT,
+        null=True, blank=True,
+        related_name='card_bindings',
     )
     kind = models.CharField(max_length=20, choices=Kind.choices)
     amount = models.DecimalField(**_MONEY, validators=[MinValueValidator(_ZERO)])

@@ -76,7 +76,8 @@ def _subscription_description(subscription: SpecialistSubscription, period_start
 @dataclass(frozen=True, slots=True)
 class CardSetupResult:
     subscription_id: UUID
-    invoice_id: UUID
+    #: None when the card is bound without a charge (trial, DRF-2989).
+    invoice_id: UUID | None
     confirmation_url: str
 
 
@@ -173,11 +174,21 @@ def freeze_ended_trials(*, today=None) -> int:
 def start_card_setup(
     *, user, tariff_code: str, return_url: str, tenant=None, client=None,
 ) -> CardSetupResult:
-    """Create the first invoice + YooKassa setup payment (card binding).
+    """Save the card — without a charge in the trial, else with the first
+    invoice's setup payment.
 
-    Idempotent: a repeat call on the same day returns the existing
-    invoice's confirmation_url (unique keys on invoice + payment).
+    DRF-2989 (В-10): in the free trial the card is bound by
+    :mod:`billing.card_binding` — no invoice, the trial and its period
+    stay, the first charge comes on ``trial_ends_at``. Outside the trial
+    (frozen after it, a re-bind on an active account) the setup payment
+    pays the period as before.
+
+    Idempotent: an unfinished setup payment of this account is returned
+    as it is on any day — a second payment is never opened while the
+    first may still be confirmed (DRF-2989; the key used to be per day).
     """
+    from billing import card_binding
+
     require_charges_enabled()  # DRF-2984: before any row or provider call
     with transaction.atomic():
         subscription = get_or_create_subscription(
@@ -190,7 +201,29 @@ def start_card_setup(
             BillingConsent.objects.create(
                 user=user, document_version=_offer_version(),
             )
-        period_start = timezone.localdate()
+    period_start = timezone.localdate()
+    if card_binding.binding_applies(subscription, today=period_start):
+        payment = card_binding.start_card_binding(
+            subscription, return_url=return_url,
+            client=client or BillingYooKassaClient(),
+        )
+        return CardSetupResult(subscription.id, None, payment.confirmation_url)
+
+    unfinished = (
+        BillingPayment.objects
+        .filter(
+            invoice__subscription=subscription,
+            kind=BillingPayment.Kind.SETUP,
+            status=BillingPayment.Status.PENDING,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if unfinished is not None:
+        return CardSetupResult(
+            subscription.id, unfinished.invoice_id, unfinished.confirmation_url,
+        )
+    with transaction.atomic():
         price = period_price(subscription)
         invoice, _ = BillingInvoice.objects.get_or_create(
             idempotency_key=f"setup:{subscription.id}:{period_start.isoformat()}",
@@ -670,6 +703,18 @@ def handle_webhook_event(
         )
         if locked.status == BillingPayment.Status.SUCCEEDED:
             return "duplicate"
+        if locked.kind == BillingPayment.Kind.CARD_BINDING:
+            # DRF-2989: a trial card binding — no invoice, no dunning.
+            from billing import card_binding
+
+            status_, release = card_binding.complete_card_binding(
+                locked, event=event, info=info,
+            )
+            if release:
+                transaction.on_commit(
+                    lambda: card_binding.release_hold(locked, client=client),
+                )
+            return status_
         invoice = locked.invoice
         if invoice is None:
             # BillingPayments always carry an invoice in our flows; a
