@@ -114,6 +114,14 @@ REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'core.pagination.DefaultPagination',
     'PAGE_SIZE': 20,
     'EXCEPTION_HANDLER': 'djangoProject.exception_handler.api_exception_handler',
+    # How many proxies sit in front of the app; the throttles take the client
+    # address from the X-Forwarded-For entry the LAST of them appended. Unset
+    # (None), DRF keys the throttle by the WHOLE header — a value the client
+    # writes — so a fresh header per request was a fresh bucket and every
+    # per-IP limit (anon, auth/OTP) could be walked around (security audit
+    # 2026-10-24, DRF-2994). The stand runs one nginx that appends
+    # `$proxy_add_x_forwarded_for`; set DRF_NUM_PROXIES if that changes.
+    'NUM_PROXIES': int(os.environ.get('DRF_NUM_PROXIES', '1')),
     # Rate limiting — see docs/REFACTORING_PLAN.md Phase 2.2. Per-IP for
     # anonymous, per-user for authenticated, plus two scoped throttles
     # applied on expensive endpoints (auth handshake, payment creation).
