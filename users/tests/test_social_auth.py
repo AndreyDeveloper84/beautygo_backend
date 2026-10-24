@@ -22,7 +22,12 @@ BIND_PHONE_URL = '/api/v1/auth/bind-phone/'
 
 
 def make_social_info(provider="vk", uid="12345", **kwargs):
-    """Helper to create SocialUserInfo with defaults."""
+    """Helper to create SocialUserInfo with defaults.
+
+    Contacts default to provider-verified: these tests describe what an
+    account holder with a proven contact gets. The unproven case is
+    ``TestUnverifiedContactsDoNotMatch``.
+    """
     defaults = {
         "provider": provider,
         "provider_uid": uid,
@@ -31,6 +36,8 @@ def make_social_info(provider="vk", uid="12345", **kwargs):
         "last_name": "User",
         "phone": None,
         "extra_data": {"id": uid},
+        "email_verified": True,
+        "phone_verified": True,
     }
     defaults.update(kwargs)
     return SocialUserInfo(**defaults)
@@ -673,3 +680,130 @@ class TestSocialAuthDisabledProvidersEnvParsing:
         assert 'vk' in providers
         assert 'yandex' in providers
         assert all(p == p.strip().lower() for p in providers)
+
+
+@pytest.mark.django_db
+class TestUnverifiedContactsDoNotMatch:
+    """Security audit 2026-10-24: a contact the provider did not prove must
+    neither adopt an existing account nor be stored on a new one.
+
+    Google returns ``email`` for addresses it never confirmed (a Workspace
+    or consumer account can carry any address); ``email_verified`` is the
+    claim that says it was proven. Matching on the bare ``email`` handed the
+    holder of such an account the User that owns the address.
+    """
+
+    URL = SOCIAL_URL.format(provider='google')
+
+    def test_unverified_email_does_not_adopt_existing_account(self, client_app):
+        victim = User.objects.create(
+            username='victim_email', email='victim@example.com', role='client',
+        )
+        mock_google = MagicMock(return_value=make_social_info(
+            provider='google', uid='google_attacker',
+            email='victim@example.com', email_verified=False,
+        ))
+        verifiers = mock_verifiers(google=mock_google)
+        with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
+            response = client_app.post(self.URL, {'token': 't'}, format='json')
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['is_new_user'] is True
+        assert response.data['data']['user']['id'] != victim.pk
+        assert not SocialAccount.objects.filter(user=victim).exists()
+        created = User.objects.get(social_accounts__provider_uid='google_attacker')
+        assert created.email == ''
+
+    def test_verified_email_still_links_existing_account(self, client_app):
+        owner = User.objects.create(
+            username='owner_email', email='owner@example.com', role='client',
+        )
+        mock_google = MagicMock(return_value=make_social_info(
+            provider='google', uid='google_owner',
+            email='owner@example.com', email_verified=True,
+        ))
+        verifiers = mock_verifiers(google=mock_google)
+        with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
+            response = client_app.post(self.URL, {'token': 't'}, format='json')
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['is_new_user'] is False
+        assert response.data['data']['user']['id'] == owner.pk
+
+    def test_unverified_phone_does_not_adopt_or_verify(self):
+        """Service level: VK/Yandex are behind the containment gate, so the
+        HTTP path never reaches matching for them today; the rule must hold
+        the day a provider with an unproven phone is enabled."""
+        victim = User.objects.create(
+            username='victim_phone', phone='+79001112233', role='client',
+        )
+        info = make_social_info(
+            provider='vk', uid='vk_attacker', email=None,
+            phone='+79001112233', phone_verified=False,
+        )
+        user, is_new = SocialAuthService()._find_or_create_user(info, 'client')
+
+        assert is_new is True
+        assert user.pk != victim.pk
+        assert user.phone is None
+        assert user.is_verified is False
+        assert not SocialAccount.objects.filter(user=victim).exists()
+
+
+class TestProviderVerifiedClaims:
+    """The verifiers read the provider's own proof, not the bare contact."""
+
+    def _google_response(self, **claims):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"sub": "g-1", "email": "u@example.com", **claims}
+        return resp
+
+    @pytest.mark.parametrize(
+        'claim,expected',
+        [({'email_verified': 'true'}, True),
+         ({'email_verified': 'false'}, False),
+         ({}, False)],
+    )
+    def test_google_email_verified_claim(self, settings, claim, expected):
+        from users.social_auth import verify_google_token
+
+        settings.GOOGLE_CLIENT_ID = ''
+        with patch('users.social_auth.requests.get') as mock_get:
+            mock_get.return_value = self._google_response(**claim)
+            info = verify_google_token('fake-token')
+
+        assert info.email_verified is expected
+
+    @pytest.mark.parametrize(
+        'value,expected',
+        [(True, True), ('true', True), ('TRUE', True),
+         (False, False), ('false', False), (None, False), (1, False)],
+    )
+    def test_claim_is_true(self, value, expected):
+        from users.social_auth import _claim_is_true
+
+        assert _claim_is_true(value) is expected
+
+    def test_vk_and_yandex_contacts_are_unverified(self):
+        from users.social_auth import verify_vk_token, verify_yandex_token
+
+        vk = MagicMock()
+        vk.json.return_value = {'response': [{'id': 1, 'mobile_phone': '+79000000000'}]}
+        ya = MagicMock()
+        ya.status_code = 200
+        ya.json.return_value = {
+            'id': '2', 'default_email': 'a@example.com',
+            'default_phone': {'number': '+79000000001'},
+        }
+        with patch('users.social_auth.requests.get', return_value=vk):
+            vk_info = verify_vk_token('t')
+        with patch('users.social_auth.requests.get', return_value=ya):
+            ya_info = verify_yandex_token('t')
+
+        assert vk_info.phone_verified is False
+        assert (ya_info.email_verified, ya_info.phone_verified) == (False, False)
+
+    def test_info_defaults_fail_closed(self):
+        info = SocialUserInfo(provider='x', provider_uid='1', email='a@b.c', phone='+7')
+        assert (info.email_verified, info.phone_verified) == (False, False)
