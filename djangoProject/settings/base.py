@@ -526,6 +526,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 OTP_CODE_LENGTH = 4
 OTP_EXPIRY_MINUTES = 5
 OTP_RATE_LIMIT_SECONDS = 60
+# DRF-2994: не больше стольких кодов на номер за скользящие 24 часа. 10 кодов
+# по 3 попытки — 30 догадок в сутки из 9000 вариантов (~0,3 %).
+OTP_MAX_SENDS_PER_DAY = 10
 OTP_MAX_ATTEMPTS = 3
 OTP_DEBUG_CODE = "0000"
 

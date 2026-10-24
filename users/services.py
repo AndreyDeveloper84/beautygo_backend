@@ -1327,8 +1327,19 @@ class RateLimitError(AuthError):
     code = "RATE_LIMITED"
     status_code = 429
 
+    def __init__(self, message="Please wait before requesting a new code"):
+        super().__init__(message)
+
+
+class OTPDailyLimitError(RateLimitError):
+    """Номер исчерпал ``OTP_MAX_SENDS_PER_DAY`` отправок за сутки (DRF-2994).
+
+    Код ответа прежний — ``RATE_LIMITED`` / 429: его мобильные приложения уже
+    обрабатывают, новый код ошибки был бы сменой контракта.
+    """
+
     def __init__(self):
-        super().__init__("Please wait before requesting a new code")
+        super().__init__("Too many codes requested for this number, try again later")
 
 
 class OTPNotSentError(AuthError):
@@ -1416,6 +1427,16 @@ class OTPService:
             seconds_since = (now - last_otp.created_at).total_seconds()
             if seconds_since < settings.OTP_RATE_LIMIT_SECONDS:
                 raise RateLimitError()
+
+        # DRF-2994: дневной потолок на номер. Без него минутный интервал
+        # давал ~1440 кодов в сутки на один номер — поток SMS за наш счёт и
+        # ~4300 попыток угадать четырёхзначный код (3 на код). Считаются
+        # выданные коды; неотправленный код удаляется ниже и не считается.
+        sent_today = OTPCode.objects.filter(
+            phone=phone, created_at__gte=now - timedelta(days=1),
+        ).count()
+        if sent_today >= settings.OTP_MAX_SENDS_PER_DAY:
+            raise OTPDailyLimitError()
 
         # Generate code
         dev_code = settings.DEBUG and not getattr(settings, 'SMS_ENABLED', False)
