@@ -1,6 +1,6 @@
 # Core
 Django==5.2.18
-django-unfold==0.108.0
+django-unfold==0.110.0
 djangorestframework==3.18.3
 djangorestframework-simplejwt==5.5.1
 django-cors-headers==4.9.0
@@ -36,7 +36,7 @@ python-dotenv==1.2.4
 # Observability — error monitoring + structured logging.
 # Sentry SDK no-ops when SENTRY_DSN env is empty, so dev / CI stay quiet.
 # python-json-logger is the JSON formatter used by prod LOGGING config.
-sentry-sdk[django]==2.71.0
+sentry-sdk[django]==2.72.0
 python-json-logger==3.3.0
 
 # Async tasks — Celery + Redis broker/result backend, django-redis cache,
