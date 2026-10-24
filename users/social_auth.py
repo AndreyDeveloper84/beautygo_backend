@@ -74,7 +74,15 @@ class SocialProviderDisabledError(SocialAuthError):
 
 @dataclass
 class SocialUserInfo:
-    """Normalized user info from any social provider."""
+    """Normalized user info from any social provider.
+
+    ``email_verified`` / ``phone_verified`` say whether the PROVIDER proved
+    the account holder owns the contact. Only a proven contact may match an
+    existing User (security audit 2026-10-24): an unproven one is a value
+    the holder typed in, and matching on it hands over someone else's
+    account. Both default to False — a verifier that forgets to set them
+    fails closed.
+    """
     provider: str
     provider_uid: str
     email: str | None = None
@@ -82,6 +90,14 @@ class SocialUserInfo:
     last_name: str = ""
     phone: str | None = None
     extra_data: dict = field(default_factory=dict)
+    email_verified: bool = False
+    phone_verified: bool = False
+
+
+def _claim_is_true(value) -> bool:
+    """Provider boolean claim: Google tokeninfo sends ``"true"`` as a string,
+    Apple sends a JSON boolean or the string ``"true"``."""
+    return value is True or (isinstance(value, str) and value.lower() == "true")
 
 
 # --- Provider verifiers ---
@@ -138,6 +154,8 @@ def verify_vk_token(token: str) -> SocialUserInfo:
         last_name=user.get("last_name", ""),
         phone=user.get("mobile_phone") or None,
         extra_data=user,
+        # `mobile_phone` is a free-text profile field, not a confirmed number.
+        phone_verified=False,
     )
 
 
@@ -171,6 +189,7 @@ def verify_google_token(token: str) -> SocialUserInfo:
         last_name=data.get("family_name", ""),
         phone=None,
         extra_data=data,
+        email_verified=_claim_is_true(data.get("email_verified")),
     )
 
 
@@ -219,6 +238,7 @@ def verify_apple_token(token: str) -> SocialUserInfo:
         last_name="",
         phone=None,
         extra_data=payload,
+        email_verified=_claim_is_true(payload.get("email_verified")),
     )
 
 
@@ -251,6 +271,9 @@ def verify_yandex_token(token: str) -> SocialUserInfo:
         last_name=data.get("last_name", ""),
         phone=phone,
         extra_data=data,
+        # DRF-1245 ruled both self-declared: no proof of ownership.
+        email_verified=False,
+        phone_verified=False,
     )
 
 
@@ -362,8 +385,9 @@ class SocialAuthService:
             except SocialAccount.DoesNotExist:
                 pass
 
-            # Try match by email
-            if info.email:
+            # Try match by email — only one the provider proved is the
+            # holder's; an unproven one would adopt the account it names.
+            if info.email and info.email_verified:
                 try:
                     user = User.objects.get(email=info.email)
                     self._link_social_account(user, info)
@@ -371,8 +395,8 @@ class SocialAuthService:
                 except User.DoesNotExist:
                     pass
 
-            # Try match by phone
-            if info.phone:
+            # Try match by phone — same rule as email.
+            if info.phone and info.phone_verified:
                 try:
                     user = User.objects.get(phone=info.phone)
                     self._link_social_account(user, info)
@@ -387,16 +411,21 @@ class SocialAuthService:
         """Create a new user from social provider info."""
         role = APP_TYPE_TO_ROLE.get(app_type, "client")
         username = f"social_{info.provider}_{info.provider_uid}"
+        # An unproven contact is not stored on the new account either: a
+        # later lookup by it would treat it as the holder's. The phone then
+        # comes through bind-phone (OTP), the email stays empty.
+        phone = info.phone if info.phone_verified else None
+        email = info.email if info.email_verified else None
 
         try:
             user = User.objects.create(
                 username=username,
-                phone=info.phone,
-                email=info.email or "",
+                phone=phone,
+                email=email or "",
                 first_name=info.first_name,
                 last_name=info.last_name,
                 role=role,
-                is_verified=bool(info.phone),
+                is_verified=bool(phone),
             )
         except IntegrityError:
             # Race condition: user was just created
