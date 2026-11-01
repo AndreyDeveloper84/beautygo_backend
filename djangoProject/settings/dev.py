@@ -4,6 +4,14 @@ from .base import *
 
 DEBUG = True
 
+# Development-only SECRET_KEY fallback. base.py deliberately has none (a
+# shared default signed real tokens on every deploy that forgot the env
+# var); this profile is the ONLY place a placeholder is acceptable, and
+# prod.py refuses exactly this prefix. settings/test.py inherits it, so
+# pytest runs without DJANGO_SECRET_KEY still work.
+if not SECRET_KEY:
+    SECRET_KEY = 'django-insecure-dev-only-fallback'  # pragma: allowlist secret
+
 # Default to eager Celery in dev — synchronous task execution keeps
 # `runserver` self-contained (no separate worker process). Override
 # CELERY_TASK_ALWAYS_EAGER=False in env when testing real async flow.

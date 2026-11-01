@@ -12,6 +12,19 @@ def _disable_sms(settings):
     settings.SMS_ENABLED = False
 
 
+@pytest.fixture(autouse=True)
+def _fixed_dev_otp_code(settings):
+    """Opt in to the fixed development OTP code for the users test package.
+
+    The constant code ("0000") now needs an explicit
+    ``OTP_FIXED_DEV_CODE_ENABLED`` on top of ``DEBUG`` — DEBUG alone used
+    to be enough, and the pre-existing tests here were written against
+    that. ``users/tests/test_otp_fixed_dev_code_flag.py`` flips the flag
+    both ways explicitly.
+    """
+    settings.OTP_FIXED_DEV_CODE_ENABLED = True
+
+
 @pytest.fixture
 def sms_delivered(settings, _disable_sms):
     """Отправка включена, провайдер принимает сообщение — без сети (DRF-2652).

@@ -27,7 +27,15 @@ load_dotenv(BASE_DIR / '.env')
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-dev-only-fallback')
+#
+# No fallback here, on purpose. The previous default was a string that
+# sits in a public repository; any deployment that forgot the env var
+# signed sessions, JWTs and password-reset tokens with it. An empty value
+# makes Django itself refuse to start ("The SECRET_KEY setting must not be
+# empty") at first use. settings/dev.py supplies a development-only
+# fallback; settings/prod.py rejects a missing, blank or
+# 'django-insecure-' value at import.
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', '')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = False
@@ -520,6 +528,14 @@ OTP_EXPIRY_MINUTES = 5
 OTP_RATE_LIMIT_SECONDS = 60
 OTP_MAX_ATTEMPTS = 3
 OTP_DEBUG_CODE = "0000"
+# The constant code above is issued ONLY when this is true AND DEBUG is on
+# AND SMS sending is off (users/services.py OTPService.send_otp). It used
+# to be gated on DEBUG alone: a DEBUG container with SMS_ENABLED unset let
+# anyone log in as any phone number with "0000". Explicit opt-in, default
+# off; prod.py refuses to boot with it on. See .env.example.
+OTP_FIXED_DEV_CODE_ENABLED = (
+    os.environ.get("OTP_FIXED_DEV_CODE_ENABLED", "false").lower() == "true"
+)
 
 # Booking Engine Configuration
 # (commission: see BOOKING_PLATFORM_FEE_RUB in the YooKassa section —
@@ -830,6 +846,13 @@ YOOKASSA_WEBHOOK_ALLOWED_IPS = _validated_networks(
     os.environ.get("YOOKASSA_WEBHOOK_ALLOWED_IPS", "").split(","),
     setting_name="YOOKASSA_WEBHOOK_ALLOWED_IPS",
 ) or list(YOOKASSA_OFFICIAL_WEBHOOK_NETWORKS)
+
+# What an EMPTY allowlist means (core.webhook_security.enforce_source_allowlist).
+# False — "allow all, log a warning": a development convenience (dev.py
+# sets the list empty on purpose because YooKassa cannot reach localhost).
+# prod.py flips this to True: on production and staging an empty list is a
+# refused request (403), not an open webhook.
+YOOKASSA_WEBHOOK_ALLOWLIST_REQUIRED = False
 
 # Proxies whose forwarded headers (X-Forwarded-For) may be trusted for the
 # webhook client-IP check (amendment C): only OUR nginx (loopback in

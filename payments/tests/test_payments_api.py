@@ -886,9 +886,11 @@ class TestPaymentWebhookSecurity:
         assert response.status_code == status.HTTP_200_OK
 
     def test_empty_allowlist_permits_all(self, anon_app, settings):
-        """Dev / initial-deploy mode: unset env permits all, with a warning
-        logged (behaviour preserved from before H1)."""
+        """Dev mode: unset env permits all, with a warning logged
+        (behaviour preserved from before H1) — ONLY while
+        YOOKASSA_WEBHOOK_ALLOWLIST_REQUIRED is off (dev/test profiles)."""
         settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
+        settings.YOOKASSA_WEBHOOK_ALLOWLIST_REQUIRED = False
         response = anon_app.post(
             WEBHOOK_URL,
             {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
@@ -896,6 +898,21 @@ class TestPaymentWebhookSecurity:
             REMOTE_ADDR='1.2.3.4',
         )
         assert response.status_code == status.HTTP_200_OK
+
+    def test_empty_allowlist_is_refused_where_required(self, anon_app, settings):
+        """prod.py sets YOOKASSA_WEBHOOK_ALLOWLIST_REQUIRED (production AND
+        staging): an empty allowlist there is fail-closed — 403 for every
+        source, including YooKassa's own, until the env is set."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
+        settings.YOOKASSA_WEBHOOK_ALLOWLIST_REQUIRED = True
+        response = anon_app.post(
+            WEBHOOK_URL,
+            {'event': 'payment.succeeded', 'object': {'id': 'unknown'}},
+            format='json',
+            REMOTE_ADDR='185.71.76.5',
+        )
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        assert response.data['error']['code'] == 'PERMISSION_DENIED'
 
 
 @pytest.mark.django_db

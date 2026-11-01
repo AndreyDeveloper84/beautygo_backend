@@ -76,10 +76,76 @@ class TestBillingWebhookView:
         assert resp.status_code == 200
 
     def test_basic_auth_enforced_when_configured(self, db, settings):
+        """401 + realm, same contract as the payments webhook (used to be
+        a 403, which YooKassa's dashboard does not read as "credentials")."""
         settings.YOOKASSA_WEBHOOK_BASIC_AUTH_USER = "ayla"
-        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = "secret"
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = "secret"  # pragma: allowlist secret
         resp = self._post(APIClient())
+        assert resp.status_code == 401
+        assert resp.headers["WWW-Authenticate"] == 'Basic realm="YooKassa webhook"'
+
+    def test_basic_auth_correct_creds_pass(self, db, settings):
+        import base64
+
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_USER = "ayla"
+        settings.YOOKASSA_WEBHOOK_BASIC_AUTH_PASS = "secret"  # pragma: allowlist secret
+        token = base64.b64encode(b"ayla:secret").decode()
+        with patch("billing.webhooks.handle_webhook_event", return_value="ok"):
+            resp = self._post(APIClient(), HTTP_AUTHORIZATION=f"Basic {token}")
+        assert resp.status_code == 200
+
+    # --- X-Forwarded-For trust model (shared with payments, amendment C) ---
+
+    def test_xff_from_untrusted_peer_is_ignored(self, db, settings):
+        """The hole this closes: the old copy here read XFF by position,
+        so a direct caller with ``X-Forwarded-For: <yookassa ip>`` passed
+        the allowlist. From a peer that is not our proxy the header is
+        ignored and the TCP address (the attacker's) is checked -> 403."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ["185.71.76.0/27"]
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS = ["127.0.0.1"]
+        client = APIClient(REMOTE_ADDR="1.2.3.4", HTTP_X_FORWARDED_FOR="185.71.76.10")
+        with patch("billing.webhooks.handle_webhook_event", return_value="ok") as handler:
+            resp = self._post(client)
         assert resp.status_code == 403
+        handler.assert_not_called()
+
+    def test_xff_from_trusted_proxy_is_honoured(self, db, settings):
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ["185.71.76.0/27"]
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS = ["10.0.0.1"]
+        client = APIClient(REMOTE_ADDR="10.0.0.1", HTTP_X_FORWARDED_FOR="185.71.76.10")
+        with patch("billing.webhooks.handle_webhook_event", return_value="ok"):
+            resp = self._post(client)
+        assert resp.status_code == 200
+
+    def test_spoofed_entry_before_the_proxy_appended_one_is_ignored(self, db, settings):
+        """nginx appends the real peer LAST; only that entry counts."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = ["185.71.76.0/27"]
+        settings.YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS = ["10.0.0.1"]
+        client = APIClient(
+            REMOTE_ADDR="10.0.0.1", HTTP_X_FORWARDED_FOR="185.71.76.10, 1.2.3.4",
+        )
+        resp = self._post(client)
+        assert resp.status_code == 403
+
+    # --- empty allowlist policy ---
+
+    def test_empty_allowlist_is_refused_where_required(self, db, settings):
+        """prod.py sets YOOKASSA_WEBHOOK_ALLOWLIST_REQUIRED: an unset
+        allowlist on production/staging is a 403, not allow-all."""
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
+        settings.YOOKASSA_WEBHOOK_ALLOWLIST_REQUIRED = True
+        client = APIClient(REMOTE_ADDR="185.71.76.10")
+        with patch("billing.webhooks.handle_webhook_event", return_value="ok") as handler:
+            resp = self._post(client)
+        assert resp.status_code == 403
+        handler.assert_not_called()
+
+    def test_empty_allowlist_permits_all_in_development(self, db, settings):
+        settings.YOOKASSA_WEBHOOK_ALLOWED_IPS = []
+        settings.YOOKASSA_WEBHOOK_ALLOWLIST_REQUIRED = False
+        with patch("billing.webhooks.handle_webhook_event", return_value="ok"):
+            resp = self._post(APIClient(REMOTE_ADDR="1.2.3.4"))
+        assert resp.status_code == 200
 
 
 class TestBeatTasks:

@@ -1389,7 +1389,8 @@ class OtpSendOutcome(StrEnum):
     #: Провайдер принял сообщение.
     SENT = "sent"
     #: Режим разработки: отправка выключена, код — ``OTP_DEBUG_CODE``, человек
-    #: знает его без SMS. Это успех.
+    #: знает его без SMS. Это успех. Требует явного
+    #: ``OTP_FIXED_DEV_CODE_ENABLED=true`` вдобавок к ``DEBUG``.
     DEV_CODE = "dev_code"
     #: Выдан настоящий код, и он не ушёл: провайдер отказал, не настроен, или
     #: отправка выключена вне режима разработки.
@@ -1417,8 +1418,14 @@ class OTPService:
             if seconds_since < settings.OTP_RATE_LIMIT_SECONDS:
                 raise RateLimitError()
 
-        # Generate code
-        dev_code = settings.DEBUG and not getattr(settings, 'SMS_ENABLED', False)
+        # Generate code. The fixed development code needs an EXPLICIT
+        # opt-in (OTP_FIXED_DEV_CODE_ENABLED) on top of DEBUG and sending
+        # being off: DEBUG says nothing about who can reach the server.
+        dev_code = (
+            settings.DEBUG
+            and getattr(settings, 'OTP_FIXED_DEV_CODE_ENABLED', False)
+            and not getattr(settings, 'SMS_ENABLED', False)
+        )
         if dev_code:
             code = settings.OTP_DEBUG_CODE
         else:

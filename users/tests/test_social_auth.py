@@ -116,8 +116,11 @@ class TestSocialAuthVK:
         user = User.objects.create(
             username='email_match', email='match@test.com', role='client',
         )
+        # Linking by email requires the provider's own assertion that the
+        # holder controls the address — see TestEmailVerifiedLinking.
         mock_vk = MagicMock(return_value=make_social_info(
             provider="vk", uid="vk_003", email="match@test.com",
+            email_verified=True,
         ))
         verifiers = mock_verifiers(vk=mock_vk)
         with patch('users.social_auth.PROVIDER_VERIFIERS', verifiers):
@@ -150,7 +153,7 @@ class TestSocialAuthGoogle:
     def test_new_user_with_email(self, client_app):
         mock_google = MagicMock(return_value=make_social_info(
             provider="google", uid="google_001",
-            email="social.user1@example.org",
+            email="social.user1@example.org", email_verified=True,
             first_name="Jane", last_name="Doe",
         ))
         verifiers = mock_verifiers(google=mock_google)
@@ -328,6 +331,239 @@ class TestBindPhone:
         assert response.data['error']['code'] == 'PHONE_ALREADY_BOUND'
 
 
+def _access_token_user_id(data: dict) -> str:
+    """The user the issued access token actually belongs to."""
+    from rest_framework_simplejwt.tokens import AccessToken
+
+    return str(AccessToken(data['access_token'])['user_id'])
+
+
+@pytest.mark.django_db
+class TestEmailVerifiedLinking:
+    """Account takeover via social login.
+
+    ``_find_or_create_user`` matched an incoming identity against an
+    existing User by email alone. Google and Apple tell us whether the
+    holder actually controls that address (``email_verified``); the code
+    never read the claim. An attacker whose provider account carried a
+    victim's address as an UNVERIFIED email received the victim's JWT.
+
+    Linking now requires ``email_verified`` to be literally ``True``;
+    anything else is treated as "no email": a fresh user is created,
+    without the address, and a warning (without the address) is logged.
+    """
+
+    GOOGLE_URL = SOCIAL_URL.format(provider='google')
+    APPLE_URL = SOCIAL_URL.format(provider='apple')
+    VICTIM_EMAIL = 'victim.social@example.com'
+
+    @pytest.fixture
+    def victim(self):
+        return User.objects.create(
+            username='victim_social', email=self.VICTIM_EMAIL, role='client',
+        )
+
+    def _login(self, client_app, provider, url, **info_kwargs):
+        verifier = MagicMock(return_value=make_social_info(
+            provider=provider, uid=f'{provider}_attacker',
+            email=self.VICTIM_EMAIL, **info_kwargs,
+        ))
+        with patch('users.social_auth.PROVIDER_VERIFIERS', mock_verifiers(**{provider: verifier})):
+            return client_app.post(url, {'token': 'provider_token'}, format='json')
+
+    def test_unverified_google_email_does_not_yield_the_existing_users_tokens(
+        self, client_app, victim,
+    ):
+        response = self._login(
+            client_app, 'google', self.GOOGLE_URL, email_verified=False,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data['data']
+        assert data['is_new_user'] is True
+        assert data['user']['id'] != victim.pk
+        assert _access_token_user_id(data) != str(victim.pk)
+        assert not SocialAccount.objects.filter(user=victim).exists()
+        # The fresh user does not carry the unverified address either.
+        created = User.objects.get(
+            social_accounts__provider='google',
+            social_accounts__provider_uid='google_attacker',
+        )
+        assert created.email == ''
+        victim.refresh_from_db()
+        assert victim.email == self.VICTIM_EMAIL
+
+    def test_verified_google_email_still_links_the_existing_user(
+        self, client_app, victim,
+    ):
+        response = self._login(
+            client_app, 'google', self.GOOGLE_URL, email_verified=True,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        data = response.data['data']
+        assert data['is_new_user'] is False
+        assert data['user']['id'] == victim.pk
+        assert _access_token_user_id(data) == str(victim.pk)
+        assert SocialAccount.objects.filter(
+            user=victim, provider='google', provider_uid='google_attacker',
+        ).exists()
+
+    def test_unverified_apple_email_does_not_link(self, client_app, victim):
+        response = self._login(
+            client_app, 'apple', self.APPLE_URL, email_verified=False,
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['is_new_user'] is True
+        assert response.data['data']['user']['id'] != victim.pk
+        assert not SocialAccount.objects.filter(user=victim).exists()
+
+    def test_unverified_email_is_not_echoed_into_the_log(self, client_app, victim, caplog):
+        """The warning says WHICH provider, never WHOSE address."""
+        social_logger = logging.getLogger('users.social_auth')
+        social_logger.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.WARNING, logger='users.social_auth'):
+                self._login(client_app, 'google', self.GOOGLE_URL, email_verified=False)
+        finally:
+            social_logger.removeHandler(caplog.handler)
+
+        captured = '\n'.join(r.getMessage() for r in caplog.records)
+        assert 'email_unverified' in captured, 'the event itself must be visible'
+        assert self.VICTIM_EMAIL not in captured
+
+    def test_existing_social_account_wins_regardless_of_email_claim(self, client_app, victim):
+        """Return visits are matched by (provider, uid) — the email claim
+        is irrelevant once the account is linked."""
+        SocialAccount.objects.create(
+            user=victim, provider='google', provider_uid='google_attacker',
+        )
+        response = self._login(
+            client_app, 'google', self.GOOGLE_URL, email_verified=False,
+        )
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data['data']['user']['id'] == victim.pk
+
+
+class TestEmailVerifiedClaimParsing:
+    """The verifiers read the provider's claim in the shape the provider
+    sends it: Google tokeninfo gives strings, Apple gives a bool or a
+    string. Anything that is not an affirmative is ``False``."""
+
+    CLIENT_ID = "our-real-client.apps.googleusercontent.com"
+
+    def _google_response(self, **claims):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {
+            "sub": "g-user-ev", "aud": self.CLIENT_ID,
+            "email": "u@example.com", **claims,
+        }
+        return resp
+
+    @pytest.mark.parametrize('claim,expected', [
+        ("true", True), ("True", True), (True, True),
+        ("false", False), (False, False), ("1", False), (None, False),
+    ])
+    def test_google_claim(self, settings, claim, expected):
+        from users.social_auth import verify_google_token
+
+        settings.GOOGLE_CLIENT_ID = self.CLIENT_ID
+        claims = {} if claim is None else {"email_verified": claim}
+        with patch("users.social_auth.requests.get", return_value=self._google_response(**claims)):
+            info = verify_google_token("fake-token")
+
+        assert info.email_verified is expected
+
+    @pytest.mark.parametrize('claim,expected', [
+        (True, True), ("true", True), (False, False), ("false", False), (None, False),
+    ])
+    def test_apple_claim(self, settings, claim, expected):
+        from users.social_auth import verify_apple_token
+
+        settings.APPLE_CLIENT_ID = "ru.ayla.client"
+        payload = {"sub": "apple-ev", "email": "relay.address@example.com"}
+        if claim is not None:
+            payload["email_verified"] = claim
+        keys = MagicMock()
+        keys.json.return_value = {"keys": [{"kid": "k1"}]}
+        with patch("users.social_auth.requests.get", return_value=keys), \
+                patch("users.social_auth.jwt.get_unverified_header", return_value={"kid": "k1"}), \
+                patch("users.social_auth.jwt.algorithms.RSAAlgorithm.from_jwk", return_value=object()), \
+                patch("users.social_auth.jwt.decode", return_value=payload):
+            info = verify_apple_token("apple-jwt")
+
+        assert info.email_verified is expected
+
+
+class TestAudienceCheckNeverSkipped:
+    """An empty client id used to switch the ``aud`` check OFF. It now
+    refuses the token with a configuration error (503), never 200."""
+
+    def test_google_without_client_id_is_refused(self, settings):
+        from users.social_auth import (
+            SocialProviderNotConfiguredError,
+            verify_google_token,
+        )
+
+        settings.GOOGLE_CLIENT_ID = None
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"sub": "g", "aud": "anything", "email": "u@example.com"}
+        with patch("users.social_auth.requests.get", return_value=resp):
+            with pytest.raises(SocialProviderNotConfiguredError) as exc_info:
+                verify_google_token("fake-token")
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.code == "SOCIAL_PROVIDER_NOT_CONFIGURED"
+
+    def test_apple_without_client_id_never_reaches_decode(self, settings):
+        from users.social_auth import (
+            SocialProviderNotConfiguredError,
+            verify_apple_token,
+        )
+
+        settings.APPLE_CLIENT_ID = None
+        keys = MagicMock()
+        keys.json.return_value = {"keys": [{"kid": "k1"}]}
+        with patch("users.social_auth.requests.get", return_value=keys), \
+                patch("users.social_auth.jwt.get_unverified_header", return_value={"kid": "k1"}), \
+                patch("users.social_auth.jwt.algorithms.RSAAlgorithm.from_jwk", return_value=object()), \
+                patch("users.social_auth.jwt.decode") as decode:
+            with pytest.raises(SocialProviderNotConfiguredError):
+                verify_apple_token("apple-jwt")
+        decode.assert_not_called()
+
+    def test_apple_decode_always_verifies_the_audience(self, settings):
+        from users.social_auth import verify_apple_token
+
+        settings.APPLE_CLIENT_ID = "ru.ayla.client"
+        keys = MagicMock()
+        keys.json.return_value = {"keys": [{"kid": "k1"}]}
+        with patch("users.social_auth.requests.get", return_value=keys), \
+                patch("users.social_auth.jwt.get_unverified_header", return_value={"kid": "k1"}), \
+                patch("users.social_auth.jwt.algorithms.RSAAlgorithm.from_jwk", return_value=object()), \
+                patch("users.social_auth.jwt.decode", return_value={"sub": "a"}) as decode:
+            verify_apple_token("apple-jwt")
+        _, kwargs = decode.call_args
+        assert kwargs["audience"] == "ru.ayla.client"
+        assert "options" not in kwargs
+
+    @pytest.mark.django_db
+    def test_api_surfaces_the_configuration_error(self, client_app, settings):
+        settings.GOOGLE_CLIENT_ID = None
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"sub": "g", "aud": "anything", "email": "u@example.com"}
+        with patch("users.social_auth.requests.get", return_value=resp):
+            response = client_app.post(
+                SOCIAL_URL.format(provider='google'), {'token': 'x'}, format='json',
+            )
+        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+        assert response.data['error']['code'] == 'SOCIAL_PROVIDER_NOT_CONFIGURED'
+        assert User.objects.count() == 0
+
+
 class TestGoogleAudienceEnforcement:
     """Regression tests for ln-621 #1 — Google id-tokens issued for another
     OAuth client must be rejected when GOOGLE_CLIENT_ID is configured."""
@@ -381,6 +617,14 @@ class TestProdOAuthFailFast:
         import importlib
         import sys
 
+        # Required on production AND staging since the security hardening
+        # (djangoProject/tests/test_prod_security_hardening.py) — supplied
+        # here so these tests keep exercising only the OAuth gate.
+        env_overrides = {
+            "MINIO_ROOT_USER": "minio-access-key",
+            "MINIO_ROOT_PASSWORD": "minio-secret-key",  # pragma: allowlist secret
+            **env_overrides,
+        }
         # Ensure the target env is applied before the module runs its
         # top-level fail-fast check.
         for key, value in env_overrides.items():

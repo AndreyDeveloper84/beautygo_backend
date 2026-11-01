@@ -70,11 +70,37 @@ class SocialProviderDisabledError(SocialAuthError):
         )
 
 
+class SocialProviderNotConfiguredError(SocialAuthError):
+    """The server has no OAuth client id for this provider.
+
+    Without ``GOOGLE_CLIENT_ID`` / ``APPLE_CLIENT_ID`` the ``aud`` claim
+    of a provider token cannot be checked, and a token minted for ANY
+    other OAuth client would be accepted (confused deputy). The check
+    used to be skipped when the id was empty; it now fails closed with
+    a 503 so a missing env var is a visible outage, not a silent hole.
+    """
+    code = "SOCIAL_PROVIDER_NOT_CONFIGURED"
+    status_code = 503
+
+    def __init__(self, provider: str):
+        super().__init__(
+            f"Authentication via '{provider}' is not configured on this server",
+        )
+
+
 # --- Provider data ---
 
 @dataclass
 class SocialUserInfo:
-    """Normalized user info from any social provider."""
+    """Normalized user info from any social provider.
+
+    ``email_verified`` is the provider's own assertion that the account
+    holder controls ``email`` (Google / Apple ``email_verified`` claim).
+    Only a verified email may be used to match an EXISTING user: an
+    unverified one is whatever the provider account holder typed in, and
+    matching on it hands them the victim's account. Providers that make
+    no such assertion (VK, Yandex) leave it ``False``.
+    """
     provider: str
     provider_uid: str
     email: str | None = None
@@ -82,6 +108,22 @@ class SocialUserInfo:
     last_name: str = ""
     phone: str | None = None
     extra_data: dict = field(default_factory=dict)
+    email_verified: bool = False
+
+
+def _claim_is_true(value) -> bool:
+    """Read a boolean claim that providers encode inconsistently.
+
+    Google's tokeninfo endpoint returns ``"true"`` / ``"false"`` as
+    strings; Apple's identity token carries either a JSON boolean or the
+    string ``"true"``. Anything else — missing, ``None``, ``"0"``, an
+    unexpected type — is NOT verified.
+    """
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
 
 
 # --- Provider verifiers ---
@@ -159,7 +201,16 @@ def verify_google_token(token: str) -> SocialUserInfo:
 
     data = response.json()
 
-    if settings.GOOGLE_CLIENT_ID and data.get("aud") != settings.GOOGLE_CLIENT_ID:
+    # Audience check is never skipped: an empty client id used to mean
+    # "accept any aud", i.e. a token issued to another OAuth client logged
+    # the bearer in here. Missing config is a 503, not a bypass.
+    if not settings.GOOGLE_CLIENT_ID:
+        logger.error(
+            "social_auth.google.client_id_missing — GOOGLE_CLIENT_ID is empty, "
+            "aud cannot be verified; refusing the token",
+        )
+        raise SocialProviderNotConfiguredError("google")
+    if data.get("aud") != settings.GOOGLE_CLIENT_ID:
         logger.warning("Google aud mismatch: %s", data.get("aud"))
         raise SocialAuthTokenError("Invalid audience")
 
@@ -171,6 +222,7 @@ def verify_google_token(token: str) -> SocialUserInfo:
         last_name=data.get("family_name", ""),
         phone=None,
         extra_data=data,
+        email_verified=_claim_is_true(data.get("email_verified")),
     )
 
 
@@ -196,16 +248,21 @@ def verify_apple_token(token: str) -> SocialUserInfo:
 
         public_key = jwt.algorithms.RSAAlgorithm.from_jwk(key_data)
 
-        decode_options = {
-            "verify_aud": bool(settings.APPLE_CLIENT_ID),
-        }
+        # Same rule as Google: no client id → no audience check → any
+        # Apple-signed token for any app would pass. Fail closed instead.
+        if not settings.APPLE_CLIENT_ID:
+            logger.error(
+                "social_auth.apple.client_id_missing — APPLE_CLIENT_ID is empty, "
+                "aud cannot be verified; refusing the token",
+            )
+            raise SocialProviderNotConfiguredError("apple")
+
         payload = jwt.decode(
             token,
             public_key,
             algorithms=["RS256"],
-            audience=settings.APPLE_CLIENT_ID or None,
+            audience=settings.APPLE_CLIENT_ID,
             issuer="https://appleid.apple.com",
-            options=decode_options,
         )
     except jwt.PyJWTError as e:
         logger.warning("Apple JWT decode error: %s", e)
@@ -219,6 +276,9 @@ def verify_apple_token(token: str) -> SocialUserInfo:
         last_name="",
         phone=None,
         extra_data=payload,
+        # Apple asserts this for private-relay addresses too; a relay
+        # address without the claim is treated like any unverified email.
+        email_verified=_claim_is_true(payload.get("email_verified")),
     )
 
 
@@ -362,14 +422,25 @@ class SocialAuthService:
             except SocialAccount.DoesNotExist:
                 pass
 
-            # Try match by email
-            if info.email:
+            # Try match by email — ONLY when the provider vouches for it.
+            # An unverified email is a self-declared string; matching an
+            # existing account on it is an account takeover (the victim's
+            # JWT is handed to whoever typed the victim's address into
+            # their provider profile). Unverified → treated as absent.
+            if info.email and info.email_verified:
                 try:
                     user = User.objects.get(email=info.email)
                     self._link_social_account(user, info)
                     return user, False
                 except User.DoesNotExist:
                     pass
+            elif info.email:
+                # The address itself is deliberately not logged.
+                logger.warning(
+                    "social_auth.%s.email_unverified — email not used for "
+                    "account matching and not stored on the new user",
+                    info.provider,
+                )
 
             # Try match by phone
             if info.phone:
@@ -388,11 +459,16 @@ class SocialAuthService:
         role = APP_TYPE_TO_ROLE.get(app_type, "client")
         username = f"social_{info.provider}_{info.provider_uid}"
 
+        # An unverified email is not persisted either: stored, it would
+        # become a match key for the NEXT login (any path that looks users
+        # up by email) and the takeover would merely be deferred.
+        email = info.email if (info.email and info.email_verified) else ""
+
         try:
             user = User.objects.create(
                 username=username,
                 phone=info.phone,
-                email=info.email or "",
+                email=email,
                 first_name=info.first_name,
                 last_name=info.last_name,
                 role=role,

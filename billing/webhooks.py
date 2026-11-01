@@ -4,23 +4,24 @@ POST /api/v1/internal/billing/webhook/ (mounted by W1's urls patch,
 B-5 — under the AppType-exempt internal prefix because YooKassa is a
 server-to-server caller that cannot send X-App-Type).
 
-Defense-in-depth mirrors payments/views.py PaymentWebhookView (helpers
-copied, not imported — stream isolation: W1 owns payments/):
+Defense-in-depth mirrors payments/views.py PaymentWebhookView. The
+source checks are SHARED (core.webhook_security), not copied: the copy
+that lived here trusted X-Forwarded-For by position (N proxies from the
+right) without checking that the direct peer was our own proxy, so a
+direct caller could spoof an allowlisted address into the header.
 1. Source-IP allowlist ``YOOKASSA_WEBHOOK_ALLOWED_IPS`` (YooKassa does
-   not sign webhooks; it publishes source IP ranges).
-2. Optional Basic Auth (user:pass in the webhook URL).
+   not sign webhooks; it publishes source IP ranges). XFF is honoured
+   only from ``YOOKASSA_WEBHOOK_TRUSTED_PROXY_IPS``; an empty allowlist
+   is refused when ``YOOKASSA_WEBHOOK_ALLOWLIST_REQUIRED`` (prod/staging).
+2. Optional Basic Auth (user:pass in the webhook URL) — 401 + realm on
+   failure, like the payments webhook.
 3. State re-fetch via the API — the payload is never trusted.
 4. Status-based idempotency under select_for_update (replay-safe).
 """
 from __future__ import annotations
 
-import base64
-import ipaddress
 import logging
-import secrets
 
-from django.conf import settings
-from django.core.exceptions import PermissionDenied
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import permissions, serializers
 from rest_framework.request import Request
@@ -31,53 +32,13 @@ from rest_framework.views import APIView
 from billing.charges import handle_webhook_event
 from billing.flags import BillingChargesDisabled
 from billing.yookassa import BillingPaymentClientError, BillingPaymentConfigError
+from core.webhook_security import (
+    basic_auth_denied_response,
+    enforce_source_allowlist,
+    verify_basic_auth,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def _verify_basic_auth(request: Request) -> bool:
-    """Constant-time Basic-auth check; skipped when env creds are unset."""
-    expected_user = getattr(settings, "YOOKASSA_WEBHOOK_BASIC_AUTH_USER", "")
-    expected_pass = getattr(settings, "YOOKASSA_WEBHOOK_BASIC_AUTH_PASS", "")
-    if not expected_user or not expected_pass:
-        return True
-    auth_header = request.META.get("HTTP_AUTHORIZATION", "")
-    if not auth_header.startswith("Basic "):
-        return False
-    try:
-        decoded = base64.b64decode(auth_header[len("Basic "):]).decode("utf-8")
-        user, _, password = decoded.partition(":")
-    except (ValueError, UnicodeDecodeError):
-        return False
-    return (
-        secrets.compare_digest(user, expected_user)
-        and secrets.compare_digest(password, expected_pass)
-    )
-
-
-def _client_ip(request: Request) -> str:
-    """Real client IP behind N trusted proxies (see payments/views.py)."""
-    trusted = max(1, getattr(settings, "YOOKASSA_WEBHOOK_TRUSTED_PROXY_COUNT", 1))
-    xff = [s.strip() for s in request.META.get("HTTP_X_FORWARDED_FOR", "").split(",") if s.strip()]
-    if len(xff) >= trusted:
-        return xff[-trusted]
-    return request.META.get("REMOTE_ADDR", "")
-
-
-def _ip_in_allowlist(ip: str, allowlist: list[str]) -> bool:
-    """Match ip against CIDR / single-IP entries; empty list = allow all."""
-    if not allowlist:
-        return True
-    for entry in allowlist:
-        try:
-            if "/" in entry:
-                if ipaddress.ip_address(ip) in ipaddress.ip_network(entry, strict=False):
-                    return True
-            elif ip == entry:
-                return True
-        except ValueError:
-            logger.warning("Skipping malformed allowlist entry %r", entry)
-    return False
 
 
 class BillingYooKassaWebhookView(APIView):
@@ -103,20 +64,15 @@ class BillingYooKassaWebhookView(APIView):
         )},
     )
     def post(self, request: Request) -> Response:
-        allowlist = getattr(settings, "YOOKASSA_WEBHOOK_ALLOWED_IPS", [])
-        client_ip = _client_ip(request)
-        if not allowlist:
-            logger.warning(
-                "YOOKASSA_WEBHOOK_ALLOWED_IPS unset — billing webhook "
-                "accepts all sources (client_ip=%s).", client_ip,
-            )
-        elif not _ip_in_allowlist(client_ip, allowlist):
-            logger.warning("Rejected billing webhook from %s", client_ip)
-            raise PermissionDenied("Source IP not allowed.")
+        # 403 on a non-allowlisted peer, or on an empty allowlist where
+        # YOOKASSA_WEBHOOK_ALLOWLIST_REQUIRED (prod/staging).
+        enforce_source_allowlist(request, log=logger)
 
-        if not _verify_basic_auth(request):
+        # 401 + WWW-Authenticate, never 403: the same contract as the
+        # payments webhook. No password / header / payload in the log.
+        if not verify_basic_auth(request):
             logger.warning("Rejected billing webhook — invalid Basic Auth")
-            raise PermissionDenied("Invalid credentials.")
+            return basic_auth_denied_response()
 
         event = request.data.get("event")
         obj = request.data.get("object", {})

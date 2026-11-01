@@ -28,11 +28,55 @@ from django.core.exceptions import ImproperlyConfigured
 logger = logging.getLogger("django.security")
 
 
+def _env_label() -> str:
+    return os.environ.get("DJANGO_ENV", "production").strip().lower()
+
+
 def is_strict_production() -> bool:
     """Return ``True`` when the current process should treat missing
     security-critical env as fatal."""
-    label = os.environ.get("DJANGO_ENV", "production").strip().lower()
-    return label == "production"
+    return _env_label() == "production"
+
+
+#: Labels of environments that run prod.py against real infrastructure
+#: and real people — production itself and the staging / pilot VPS.
+PRODUCTION_LIKE_LABELS = frozenset({"production", "staging"})
+
+
+def is_production_like() -> bool:
+    """``True`` for production AND staging.
+
+    Some settings are not "nice to have before promotion" but a hard
+    precondition of the code path working at all — an OAuth client id
+    without which the audience check fails closed, object-storage
+    credentials without which every upload fails. A staging box that
+    boots without them is not "degraded", it is broken in a way the boot
+    log hides. Those gates use this predicate instead of
+    :func:`is_strict_production`.
+    """
+    return _env_label() in PRODUCTION_LIKE_LABELS
+
+
+def enforce_required_env_production_like(missing: list[str], purpose: str) -> None:
+    """Raise on production AND staging; warn only on other labels (dev,
+    local docker runs of prod.py).
+
+    Same shape as :func:`enforce_required_env`; the only difference is the
+    set of labels that make absence fatal.
+    """
+    if not missing:
+        return
+    detail = f"missing {', '.join(missing)}: {purpose}"
+    if is_production_like():
+        raise ImproperlyConfigured(
+            f"DJANGO_ENV={_env_label()} requires these env vars: {detail}"
+        )
+    logger.warning(
+        "DJANGO_ENV=%s — degraded security: %s. On production and staging "
+        "the same gap aborts startup.",
+        os.environ.get("DJANGO_ENV", "(unset)"),
+        detail,
+    )
 
 
 def enforce_required_env(missing: list[str], purpose: str) -> None:

@@ -55,6 +55,10 @@ _FULL_ENV = dict(
     APPLE_CLIENT_ID="apple-id",
     YOOKASSA_WEBHOOK_ALLOWED_IPS="185.71.76.0/27",
     AYLA_INTERNAL_API_TOKEN="bearer-token",
+    # Required on production AND staging since the security hardening
+    # (djangoProject/tests/test_prod_security_hardening.py).
+    MINIO_ROOT_USER="minio-access-key",
+    MINIO_ROOT_PASSWORD="minio-secret-key",  # pragma: allowlist secret
 )
 
 # The shapes the pilot / prod stack actually runs with: public TLS host,

@@ -1,12 +1,51 @@
 import os
 
+from django.core.exceptions import ImproperlyConfigured
+
 from .base import *
 
-from core.env_strictness import enforce_required_env, enforce_url_env
+from core.env_strictness import (
+    enforce_required_env,
+    enforce_required_env_production_like,
+    enforce_url_env,
+)
 
 # Security
 DEBUG = False
-SECRET_KEY = os.environ['DJANGO_SECRET_KEY']
+
+# DJANGO_SECRET_KEY — unconditional, whatever DJANGO_ENV says: prod.py is
+# never a local profile. Missing, blank, or the development fallback (any
+# 'django-insecure-' prefix — also what `startproject` generates) aborts
+# the boot with the variable named. The former `os.environ[...]` raised a
+# bare KeyError for the first case and silently accepted the other two.
+_secret_key = os.environ.get('DJANGO_SECRET_KEY', '')
+if not _secret_key.strip() or _secret_key.startswith('django-insecure-'):
+    raise ImproperlyConfigured(
+        "DJANGO_SECRET_KEY must be set to a strong random value in the prod "
+        "settings profile (it is missing, blank, or a 'django-insecure-' "
+        "development fallback)."
+    )
+SECRET_KEY = _secret_key
+
+# The fixed OTP code ("0000") is a development convenience and nothing
+# else. With this profile — production or the staging pilot, real phone
+# numbers — a true value is a misconfiguration loud enough to stop the
+# boot, not something to downgrade to a warning. Forced off afterwards
+# as belt-and-braces (DEBUG=False already gates it).
+if os.environ.get("OTP_FIXED_DEV_CODE_ENABLED", "false").lower() == "true":
+    raise ImproperlyConfigured(
+        "OTP_FIXED_DEV_CODE_ENABLED must not be enabled with the prod settings "
+        "profile: it would let anyone log in as any phone number with the "
+        "fixed development code."
+    )
+OTP_FIXED_DEV_CODE_ENABLED = False
+
+# An empty YooKassa webhook allowlist is refused here (403 on every
+# webhook, logged), not accepted with a warning: the pilot runs this
+# profile with DJANGO_ENV=staging, where the presence gate above only
+# WARNS about a missing YOOKASSA_WEBHOOK_ALLOWED_IPS — and a warning in a
+# boot log is not a defence against a forged payment.succeeded.
+YOOKASSA_WEBHOOK_ALLOWLIST_REQUIRED = True
 
 ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',')
 
@@ -14,10 +53,12 @@ ALLOWED_HOSTS = os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',')
 # Fail-fast on env vars whose absence silently degrades a security control
 # in code that would otherwise look like it's working.
 #
-# - GOOGLE_CLIENT_ID / APPLE_CLIENT_ID: without these,
-#   social_auth.verify_google_token / verify_apple_token skip the "aud"
-#   claim check and accept tokens issued for any other OAuth client.
-#   That's the confused-deputy account-takeover path.
+# - GOOGLE_CLIENT_ID / APPLE_CLIENT_ID: the "aud" claim of every provider
+#   token is checked against these. social_auth.verify_google_token /
+#   verify_apple_token used to SKIP the check when the id was empty and
+#   accept tokens issued for any other OAuth client (confused-deputy
+#   account takeover); they now fail closed (503) instead — so an empty
+#   id is "social login down", and the gate below makes it a boot error.
 # - YOOKASSA_WEBHOOK_ALLOWED_IPS: without this, the webhook IP allowlist
 #   logs a warning but accepts every source. An attacker who can guess a
 #   provider_payment_id can replay events; the re-fetch + idempotency
@@ -46,6 +87,35 @@ enforce_required_env(
     _missing_prod,
     "each disables a defence layer when unset; see djangoProject/settings/"
     "base.py for what each one gates",
+)
+
+# Harder gate: fatal on staging too, not only on production.
+#
+# The warn-and-boot downgrade above exists so a pilot box can come up
+# before every credential is provisioned. That is defensible for a
+# webhook allowlist (the handler has further layers) — it is not for the
+# OAuth client ids: users/social_auth.py now REFUSES every Google / Apple
+# token when the id is empty (the ``aud`` check is no longer skipped), so
+# a staging box without them has social login down with nothing in the
+# boot log to say so. Better to refuse to boot with the variable named.
+#
+# MINIO_ROOT_USER / MINIO_ROOT_PASSWORD are here for the same reason: the
+# S3 storage block below used to default both to the vendor's documented
+# credentials, as did docker-compose.yml, so a host that forgot the env
+# ran object storage on `minioadmin`/`minioadmin` without a word in any
+# log. docker-compose.yml now refuses to start without them; this gate
+# makes a Django process without them refuse too.
+_REQUIRED_PRODUCTION_LIKE_ENV = (
+    "GOOGLE_CLIENT_ID",
+    "APPLE_CLIENT_ID",
+    "MINIO_ROOT_USER",
+    "MINIO_ROOT_PASSWORD",
+)
+enforce_required_env_production_like(
+    [name for name in _REQUIRED_PRODUCTION_LIKE_ENV if not os.environ.get(name)],
+    "social login fails closed without the provider's OAuth client id "
+    "(audience check cannot run) and object storage has no credentials "
+    "without MINIO_ROOT_USER/PASSWORD; staging must carry real values",
 )
 
 # DRF-1244 — presence is not fitness.
@@ -173,8 +243,10 @@ STORAGES = {
     "default": {
         "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
         "OPTIONS": {
-            "access_key": os.environ.get("MINIO_ROOT_USER", "minioadmin"),
-            "secret_key": os.environ.get("MINIO_ROOT_PASSWORD", "minioadmin"),
+            # No vendor-default fallback; presence is enforced by
+            # _REQUIRED_PRODUCTION_LIKE_ENV above.
+            "access_key": os.environ.get("MINIO_ROOT_USER", ""),
+            "secret_key": os.environ.get("MINIO_ROOT_PASSWORD", ""),
             "bucket_name": os.environ.get("S3_BUCKET_NAME", "beautygo-media"),
             "endpoint_url": os.environ.get("MINIO_ENDPOINT", "http://minio:9000"),
             "custom_domain": None,
