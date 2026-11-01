@@ -101,14 +101,16 @@ services:
       # still resolve python:3.12-slim from Docker Hub, and the deploy
       # would keep failing exactly where it failed on 2026-08-31.
       #
-      # GH_DEPLOY_TOKEN is deliberately NOT added here: this service has
-      # always built without it and does so successfully today (verified
-      # on the pilot 2026-08-31 — dev-celery_worker:latest builds clean).
-      # Adding it would change what pip is authenticated as, which is a
-      # separate question from this ticket. DRF-1466 explains why it is
-      # not needed at all: ayla-ai-core is public and clones anonymously.
+      # GH_DEPLOY_TOKEN used to be deliberately absent here (2026-08-31:
+      # ayla-ai-core was public, the clone was anonymous). The repo went
+      # private again on 2026-10-20, and since then this service — same
+      # requirements.txt, same `pip install` — fails at the ayla-ai-core
+      # clone with «could not read Username» while `web` builds fine.
+      # Forward the same optional ARG `web` forwards; empty keeps the
+      # anonymous path (the Dockerfile skips the git config).
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+        GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
         # DRF-2409 — владелец каталога отчётов внутри образа. Те же значения,
         # что у `user:` ниже: каталог, созданный не тому uid, существует и
         # не пишется — ровно состояние, сломавшее стенд.
@@ -148,9 +150,11 @@ services:
     logging: *app_logging
     build:
       context: .
-      # DRF-1431 — see celery_worker above.
+      # DRF-1431 — see celery_worker above. GH_DEPLOY_TOKEN: same reason
+      # as celery_worker (private ayla-ai-core since 2026-10-20).
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
+        GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
         # DRF-2409 — владелец каталога отчётов внутри образа. Те же значения,
         # что у `user:` ниже: каталог, созданный не тому uid, существует и
         # не пишется — ровно состояние, сломавшее стенд.
