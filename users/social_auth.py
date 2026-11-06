@@ -109,6 +109,7 @@ class SocialUserInfo:
     phone: str | None = None
     extra_data: dict = field(default_factory=dict)
     email_verified: bool = False
+    phone_verified: bool = False
 
 
 def _claim_is_true(value) -> bool:
@@ -180,6 +181,8 @@ def verify_vk_token(token: str) -> SocialUserInfo:
         last_name=user.get("last_name", ""),
         phone=user.get("mobile_phone") or None,
         extra_data=user,
+        # `mobile_phone` is a free-text profile field, not a confirmed number.
+        phone_verified=False,
     )
 
 
@@ -311,6 +314,9 @@ def verify_yandex_token(token: str) -> SocialUserInfo:
         last_name=data.get("last_name", ""),
         phone=phone,
         extra_data=data,
+        # DRF-1245 ruled both self-declared: no proof of ownership.
+        email_verified=False,
+        phone_verified=False,
     )
 
 
@@ -442,8 +448,8 @@ class SocialAuthService:
                     info.provider,
                 )
 
-            # Try match by phone
-            if info.phone:
+            # Try match by phone — same rule as email.
+            if info.phone and info.phone_verified:
                 try:
                     user = User.objects.get(phone=info.phone)
                     self._link_social_account(user, info)
@@ -458,6 +464,10 @@ class SocialAuthService:
         """Create a new user from social provider info."""
         role = APP_TYPE_TO_ROLE.get(app_type, "client")
         username = f"social_{info.provider}_{info.provider_uid}"
+        # An unproven contact is not stored on the new account either: a
+        # later lookup by it would treat it as the holder's. The phone then
+        # comes through bind-phone (OTP), the email stays empty.
+        phone = info.phone if info.phone_verified else None
 
         # An unverified email is not persisted either: stored, it would
         # become a match key for the NEXT login (any path that looks users
@@ -467,12 +477,12 @@ class SocialAuthService:
         try:
             user = User.objects.create(
                 username=username,
-                phone=info.phone,
+                phone=phone,
                 email=email,
                 first_name=info.first_name,
                 last_name=info.last_name,
                 role=role,
-                is_verified=bool(info.phone),
+                is_verified=bool(phone),
             )
         except IntegrityError:
             # Race condition: user was just created
