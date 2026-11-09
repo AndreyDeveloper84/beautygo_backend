@@ -239,6 +239,11 @@ def test_master_created_through_the_form_reaches_the_client_feed(client):
             "working_hours-INITIAL_FORMS": "0",
             "working_hours-MIN_NUM_FORMS": "0",
             "working_hours-MAX_NUM_FORMS": "1000",
+            # То же для блока услуг мастера (09.11.2026).
+            "specialist_services-TOTAL_FORMS": "0",
+            "specialist_services-INITIAL_FORMS": "0",
+            "specialist_services-MIN_NUM_FORMS": "0",
+            "specialist_services-MAX_NUM_FORMS": "1000",
         },
     )
     assert resp.status_code == 302, resp.content[:4000]

@@ -16,6 +16,7 @@ from django.urls import reverse
 from django.utils.html import format_html
 
 from appointments.admin import SpecialistWorkingHoursInline
+from services.admin import MasterServicesInline
 
 from .master_salon_link import grant_staff_on_admin_assignment, was_revoked_from
 
@@ -754,7 +755,9 @@ class SpecialistProfileAdmin(admin.ModelAdmin):
     # Расписание — рядом с человеком, а не отдельным экраном. Инлайн живёт
     # в appointments.admin рядом с моделью и монтируется сюда: правила
     # у одного объекта обязаны быть одни и те же, где бы его ни правили.
-    inlines = [SpecialistWorkingHoursInline]
+    # Услуги — тем же приёмом (09.11.2026): вопрос «что оказывает этот
+    # мастер» задают на карточке мастера, а ответ лежал на формах услуг.
+    inlines = [SpecialistWorkingHoursInline, MasterServicesInline]
 
     list_display = (
         'display_name', 'tenant', 'get_phone', 'status_badge',
