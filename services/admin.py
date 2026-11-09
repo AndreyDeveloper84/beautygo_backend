@@ -4,7 +4,8 @@ from __future__ import annotations
 from django import forms
 from django.contrib import admin, messages
 from django.contrib.admin.widgets import AutocompleteSelectMultiple
-from django.core.exceptions import ValidationError
+from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
+from django.forms.models import BaseInlineFormSet
 from django.utils import timezone
 
 from services.contraindication_intake import approval_errors
@@ -357,6 +358,189 @@ class SpecialistServiceInline(admin.TabularInline):
     )
     raw_id_fields = ('specialist',)
     show_change_link = True
+
+
+# ─── Услуги мастера на его карточке ─────────────────────────────────────────
+#
+# Владелец 09.11.2026 включил мастеру услугу и пошёл проверять привязку на
+# карточке мастера — и не нашёл её там. Предложение мастера правилось с двух
+# экранов, и оба про услугу, а не про человека: строка в блоке на форме
+# услуги салона и отдельный список, в котором мастера ищут строкой поиска.
+# Ответ на вопрос «что оказывает этот мастер» требовал обойти их все.
+
+# У табличного блока нет своего текста-описания: подсказка поля показывается
+# значком у заголовка колонки. Поэтому последствия названы на двух колонках,
+# в которых оператор принимает решение, — «какая услуга» и «включена ли».
+
+MASTER_SERVICE_CHOICE_HELP = (
+    'В списке новой строки — только услуги салона этого мастера, которых у него '
+    'ещё нет. У существующей строки услуга не меняется: идентификатор строки — '
+    'ключ, по которому бот находит запись. Нужна другая услуга — добавьте строку.'
+)
+
+MASTER_SERVICE_ACTIVE_HELP = (
+    'Клиент может записаться только на включённую строку. Выключенная остаётся '
+    'в списке, но в каталог не уходит. Строку не удаляют, а выключают. Бот видит '
+    'изменение после очередной синхронизации каталога — она идёт раз в 15 минут.'
+)
+
+
+class MasterServiceRowForm(forms.ModelForm):
+    """Строка «услуга мастера» в блоке на форме мастера.
+
+    Услуга выбирается из списка, а не вводится идентификатором: в нём только
+    услуги салона мастера, поэтому чужую услугу выбрать нечем. Правило «мастер
+    и услуга — из одного салона» остаётся в ``SpecialistService.clean()``;
+    список — подсказка формы, а не второй сторож.
+    """
+
+    class Meta:
+        model = SpecialistService
+        fields = (
+            'salon_service', 'duration_minutes', 'price',
+            'requires_health_check', 'buffer_after_minutes', 'is_active',
+        )
+
+    def __init__(self, *args, salon_id=None, master_id=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        field = self.fields['salon_service']
+        field.label_from_instance = self._service_label
+        field.help_text = MASTER_SERVICE_CHOICE_HELP
+        self.fields['is_active'].help_text = MASTER_SERVICE_ACTIVE_HELP
+        # ``_state.adding``, а не ``pk``: идентификатор у строки есть с рождения
+        # (``default=uuid4``), и по ``pk`` новая строка читалась бы как старая.
+        if not self.instance._state.adding:
+            # Идентификатор строки — стабильный ключ записи (см. модель).
+            # Сменить услугу у существующей строки значило бы молча увести
+            # этот ключ на другую услугу. ``disabled`` берёт значение из базы,
+            # а не из запроса, поэтому подмена в POST тоже ничего не меняет.
+            field.queryset = SalonService.objects.filter(pk=self.instance.salon_service_id)
+            # Список из одной строки собран с уже загруженной услуги
+            # (``select_related`` блока), иначе каждая строка таблицы ходила
+            # бы за своей услугой отдельным запросом.
+            field.choices = [
+                (self.instance.salon_service_id, self._service_label(self.instance.salon_service)),
+            ]
+            field.disabled = True
+            return
+        if salon_id is None:
+            field.queryset = SalonService.objects.none()
+            return
+        offered = SalonService.objects.filter(tenant_id=salon_id)
+        if master_id is not None:
+            offered = offered.exclude(specialist_services__specialist_id=master_id)
+        field.queryset = offered.order_by('name')
+
+    def _update_errors(self, errors):
+        # Правило «мастер и услуга — из одного салона» модель вешает на поле
+        # ``specialist`` — под форму услуги, где мастера выбирают. Здесь это
+        # скрытое поле связи со строкой-родителем: ошибку на нём таблица не
+        # рисует, и оператор видел бы «исправьте ошибки ниже» без единой
+        # ошибки на странице — и не мог бы сохранить карточку вовсе. На
+        # карточке мастера это ошибка строки.
+        by_field = getattr(errors, 'error_dict', None)
+        if by_field and 'specialist' in by_field:
+            by_field.setdefault(NON_FIELD_ERRORS, []).extend(by_field.pop('specialist'))
+        super()._update_errors(errors)
+
+    @staticmethod
+    def _service_label(service: SalonService) -> str:
+        # Без «@ слаг салона» из ``__str__``: салон здесь один и тот же.
+        return service.name if service.is_active else f'{service.name} (услуга выключена)'
+
+
+class MasterServicesFormSet(BaseInlineFormSet):
+    """Формсет блока: знает салон мастера и называет повтор услуги по-человечески."""
+
+    def get_form_kwargs(self, index):
+        kwargs = super().get_form_kwargs(index)
+        kwargs['salon_id'] = self.instance.tenant_id
+        kwargs['master_id'] = self.instance.pk
+        return kwargs
+
+    def clean(self):
+        # Две новые строки с одной услугой в одной отправке. Каждая по
+        # отдельности проходит проверку: в базе пары ещё нет. Штатная проверка
+        # формсета повтор ловит, но называет поля их именами в коде
+        # («specialist и salon_service»). Поэтому своя проверка идёт первой и
+        # называет услугу; штатная остаётся следом как сторож.
+        seen = set()
+        for form in self.forms:
+            if not hasattr(form, 'cleaned_data') or not form.instance._state.adding:
+                continue
+            service = form.cleaned_data.get('salon_service')
+            if service is None:
+                continue
+            if service.pk in seen:
+                raise ValidationError(
+                    'Услуга «%(service)s» добавлена дважды. У мастера одна строка на услугу.',
+                    code='master_service_twice',
+                    params={'service': service.name},
+                )
+            seen.add(service.pk)
+        super().clean()
+
+
+class MasterServicesInline(admin.TabularInline):
+    """Услуги мастера рядом с мастером, а не отдельным экраном.
+
+    Живёт здесь, рядом с ``SpecialistServiceAdmin``, а монтируется в
+    ``users.admin.SpecialistProfileAdmin`` — тем же приёмом, что
+    ``SpecialistWorkingHoursInline``: правила у одного объекта обязаны быть
+    одни и те же, где бы его ни правили. Набор полей повторяет блок на форме
+    услуги салона (``SpecialistServiceInline``), только вместо мастера —
+    услуга.
+
+    Два отличия от того блока, оба намеренные:
+
+    * строку нельзя удалить. Таблица мастера — десятки строк, колонка
+      «Удалить» стояла бы рядом с «Активна», а удаление рвёт ключ записи.
+      Выключают флажком; удалить по-прежнему можно в отдельном списке;
+    * мастеру без салона строку не добавить. Модель такую строку отвергает
+      («мастер не из салона этой услуги»), и предлагать пустую форму,
+      которая не сохранится, незачем.
+
+    ``extra = 0`` — как у расписания: пустая строка, которую предлагают
+    заполнить, — приглашение завести предложение, которого нет.
+    """
+
+    model = SpecialistService
+    form = MasterServiceRowForm
+    formset = MasterServicesFormSet
+    extra = 0
+    can_delete = False
+    show_change_link = True
+    # ``pk`` последним: названия услуг не уникальны, а при повторном показе
+    # формы с ошибкой админка сопоставляет присланные строки с выборкой по
+    # порядку — без однозначного порядка подпись строки могла бы сместиться.
+    ordering = ('-is_active', 'salon_service__name', 'pk')
+    verbose_name = 'Услуга мастера'
+    verbose_name_plural = 'Услуги мастера'
+
+    def get_queryset(self, request):
+        # Мастер — тоже: подпись строки (``__str__``) читает и его имя.
+        return super().get_queryset(request).select_related('salon_service', 'specialist')
+
+    def has_add_permission(self, request, obj=None):
+        if obj is None or obj.tenant_id is None:
+            return False
+        return super().has_add_permission(request, obj)
+
+    def formfield_for_dbfield(self, db_field, request, **kwargs):
+        formfield = super().formfield_for_dbfield(db_field, request, **kwargs)
+        if db_field.name == 'salon_service' and formfield is not None:
+            # Услугу салона заводят на её собственной форме: там шаблон,
+            # категория и проверка здоровья. Всплывающее окно из строки
+            # мастера дало бы услугу без всего этого. Флаги ставятся здесь,
+            # а не в ``formfield_for_foreignkey``: кнопки рисует обёртка
+            # виджета, и надевается она уже после него. «Посмотреть» — тоже:
+            # ссылка открывает услугу в этой же вкладке и теряет несохранённые
+            # правки карточки.
+            for flag in (
+                'can_add_related', 'can_change_related', 'can_delete_related', 'can_view_related',
+            ):
+                setattr(formfield.widget, flag, False)
+        return formfield
 
 
 class ResolverDecisionFilter(admin.SimpleListFilter):

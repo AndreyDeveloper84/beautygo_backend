@@ -2383,7 +2383,17 @@ class SpecialistService(models.Model):
         return None, "unknown"
 
     def clean(self) -> None:
-        if self.is_active and self.resolved_duration() is None:
+        # Без услуги длительность искать негде: ``resolved_duration`` пошёл бы
+        # за ней к ``salon_service`` и ответил ``RelatedObjectDoesNotExist`` —
+        # исключением, а не ошибкой формы. Форма зовёт ``clean()`` и тогда,
+        # когда поле услуги уже отвергнуто («обязательное поле»), так что
+        # пустая услуга с пустой длительностью давала страницу с ошибкой
+        # сервера. О пустой услуге говорит её собственное поле.
+        if (
+            self.is_active
+            and self.salon_service_id is not None
+            and self.resolved_duration() is None
+        ):
             raise ValidationError(
                 {"duration_minutes": "An active bookable service needs a resolvable duration."}
             )
