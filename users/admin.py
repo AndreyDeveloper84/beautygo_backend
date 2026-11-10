@@ -151,6 +151,10 @@ def approve_specialists(modeladmin, request, queryset):
             SpecialistProfile.ProfileStatus.PENDING,
             SpecialistProfile.ProfileStatus.DRAFT,
         ],
+        # Удалённый аккаунт одобрять нечего: профиль «Удалён» вернулся в
+        # черновик исполнителем удаления, и одно нажатие не должно
+        # публиковать его снова (10.11.2026).
+        user__deleted_at__isnull=True,
     ).select_related('tenant', 'works_at')
     refused = []
     updated = 0
