@@ -181,8 +181,14 @@ SOLO_TENANT_ERASED_TEXT_FIELDS: tuple[str, ...] = (
 #: строка жила бы ``TRIAL``/``ACTIVE`` при аккаунте, которого нет (замечание
 #: ревью 10.11.2026). Ключ шага — ``anonymised``, на том проходе, который
 #: закрыл (повтор после отказа бота застаёт уже закрытый — ключа не пишет).
+#: Отменяется только подписка, которую платит сам удаляемый: ``cancel_subscription``
+#: снимает ВСЕ согласия на списание у плательщика, а плательщиком соло-workspace
+#: может быть другой человек (на пилоте — прокси владельца) — его согласий
+#: удаление чужого аккаунта не касается. Такая подписка остаётся как есть и
+#: называется в ``kept``; ночные задания биллинга закрытый тенант не берут.
 SOLO_TENANT_CLOSED_KEY = "tenants.Tenant.solo_closed"
 SOLO_SUBSCRIPTION_CANCELED_KEY = "billing.SpecialistSubscription.solo_canceled"
+SOLO_SUBSCRIPTION_OTHER_PAYER_KEY = "billing.SpecialistSubscription.solo_other_payer"
 #: Профиль удалённого мастера, стоявший на проверке или опубликованный,
 #: возвращается в черновик: модератору нечего одобрять («Удалён» без фото), а
 #: витрине — показывать. Ключ шага — ``anonymised``, на проходе, который снял.
@@ -1120,16 +1126,25 @@ def _erase_solo_tenant(sp, anonymised: dict, kept: dict) -> None:
     if closing:
         anonymised[SOLO_TENANT_CLOSED_KEY] = anonymised.get(SOLO_TENANT_CLOSED_KEY, 0) + 1
     # Подписка закрытого workspace: отменить (идемпотентно), чтобы ночные
-    # задания биллинга не вели счёт кабинета, которого нет.
+    # задания биллинга не вели счёт кабинета, которого нет, — но только ту,
+    # что платит сам удаляемый (см. SOLO_SUBSCRIPTION_OTHER_PAYER_KEY).
     canceled = 0
+    other_payer = 0
     for subscription in SpecialistSubscription.objects.filter(tenant=tenant).exclude(
         status=SpecialistSubscription.Status.CANCELED
     ):
+        if subscription.user_id != sp.user_id:
+            other_payer += 1
+            continue
         cancel_subscription(subscription)
         canceled += 1
     if canceled:
         anonymised[SOLO_SUBSCRIPTION_CANCELED_KEY] = (
             anonymised.get(SOLO_SUBSCRIPTION_CANCELED_KEY, 0) + canceled
+        )
+    if other_payer:
+        kept[SOLO_SUBSCRIPTION_OTHER_PAYER_KEY] = (
+            kept.get(SOLO_SUBSCRIPTION_OTHER_PAYER_KEY, 0) + other_payer
         )
 
 
@@ -1303,7 +1318,7 @@ def _own_place_residue(sp) -> dict[str, int]:
         from billing.models import SpecialistSubscription
 
         live_subscriptions = (
-            SpecialistSubscription.objects.filter(tenant=tenant)
+            SpecialistSubscription.objects.filter(tenant=tenant, user_id=sp.user_id)
             .exclude(status=SpecialistSubscription.Status.CANCELED)
             .count()
         )

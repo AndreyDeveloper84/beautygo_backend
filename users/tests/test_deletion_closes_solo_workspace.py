@@ -23,7 +23,9 @@
 * w7 — бот отказал на первом проходе, подтвердил на втором: закрытие и черновик
   сделаны первым проходом, второй данных не меняет и ключей закрытия не пишет;
 * w8 — подписка закрытого workspace отменена (идемпотентно, как кнопка «отменить»),
-  шаг называет; у workspace с другим живым мастером — не тронута;
+  шаг называет; у workspace с другим живым мастером — не тронута; подписка,
+  которую платит другой человек, — не тронута (его согласия на списание чужое
+  удаление не снимает), названа в ``kept``;
 * w9 — модератор: «Подтвердить мастеров» не берёт профиль удалённого аккаунта —
   и салонного, где гейт готовности соло не действует;
 * w10 — остаток: открытый workspace или профиль не в черновике после стирания —
@@ -48,6 +50,7 @@ from tenants.models import Tenant
 from users.admin import SpecialistProfileAdmin, approve_specialists
 from users.deletion_executor import (
     SOLO_SUBSCRIPTION_CANCELED_KEY,
+    SOLO_SUBSCRIPTION_OTHER_PAYER_KEY,
     SOLO_TENANT_CLOSED_KEY,
     SPECIALIST_PUBLICATION_WITHDRAWN_KEY,
     BotConfirmation,
@@ -250,6 +253,31 @@ def test_w8_a_shared_workspaces_subscription_is_untouched():
 
     sub.refresh_from_db()
     assert sub.status == SpecialistSubscription.Status.ACTIVE
+    assert SOLO_SUBSCRIPTION_CANCELED_KEY not in req.steps["anonymised"]
+
+
+def test_w8_a_subscription_paid_by_someone_else_is_left_alone():
+    """``cancel_subscription`` снимает все согласия плательщика — чужих согласий
+    удаление этого аккаунта касаться не должно."""
+    from billing.models import BillingConsent
+
+    solo = _tenant("close-w8p", Tenant.Kind.SOLO)
+    u = _master("close-w8p", tenant=solo)
+    payer = User.objects.create_user(
+        username="close-w8p-payer", password="pass", role="admin",  # pragma: allowlist secret
+    )
+    sub = _subscription(payer, solo)
+    consent = BillingConsent.objects.create(user=payer, document_version="offer-test")
+    assert consent.revoked_at is None
+
+    req = _delete(u)
+
+    sub.refresh_from_db()
+    consent.refresh_from_db()
+    assert sub.status == SpecialistSubscription.Status.ACTIVE
+    assert consent.revoked_at is None
+    assert Tenant.all_objects.get(pk=solo.pk).is_active is False
+    assert req.steps["kept"][SOLO_SUBSCRIPTION_OTHER_PAYER_KEY] == 1
     assert SOLO_SUBSCRIPTION_CANCELED_KEY not in req.steps["anonymised"]
 
 
