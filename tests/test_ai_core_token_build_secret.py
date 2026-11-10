@@ -17,7 +17,9 @@ build-arg печатает ``docker history`` и хранит ``docker buildx hi
 * шаг сборки в ci.yml передаёт файл секрета только команде ``build`` и
   отказывает, если токен вернулся в ``docker-compose.override.yml``;
 * на собранной конфигурации compose с фальшивым токеном значение не видно
-  ни в одном сервисе (``docker compose config``; пропуск только без docker).
+  ни в одном сервисе, а без строки токена вовсе (состояние после переноса в
+  build.env) конфигурация по-прежнему собирается и секрет объявлен
+  (``docker compose config``; пропуск только без docker).
 
 Каждая проверка отсутствия идёт после проверки наличия на тех же данных.
 """
@@ -43,7 +45,8 @@ SECRET_MOUNT = f"--mount=type=secret,id={SECRET_ID}"
 BUILT_SERVICES = ("web", "celery_worker", "celery_beat")
 #: Все сервисы с `env_file: .env` — туда же уходит и строка токена, пока она в файле.
 ENV_FILE_SERVICES = BUILT_SERVICES + ("db",)
-FAKE_VALUE = "ghp_fake_token_for_the_guard_0123456789abcdef"
+#: Составное: буквальный `ghp_` + 36 символов ловит detect-secrets, исключение не нужно.
+FAKE_VALUE = "gh" + "p_" + ("7" * 36)
 
 
 def _dockerfile_instructions() -> list[str]:
@@ -168,13 +171,13 @@ def test_no_workflow_passes_the_token_as_a_build_arg() -> None:
 # ─── собранная конфигурация ─────────────────────────────────────────────────
 
 
-def test_resolved_config_keeps_the_fake_token_out_of_every_service(tmp_path: Path) -> None:
+def _resolved_config(tmp_path: Path, token_line: str) -> tuple[dict, str]:
+    """`docker compose config` на копии compose с данным `.env`; без docker — skip."""
     if shutil.which("docker") is None:  # pragma: no cover - depends on the host
         pytest.skip("нет docker")
     shutil.copy(COMPOSE, tmp_path / COMPOSE.name)
     (tmp_path / ".env").write_text(
-        f"{TOKEN_VAR}={FAKE_VALUE}\nPOSTGRES_PASSWORD=x\nMINIO_ROOT_USER=x\nMINIO_ROOT_PASSWORD=x\n"
-        "DJANGO_ALLOWED_HOSTS=localhost\n",
+        f"{token_line}POSTGRES_PASSWORD=x\nMINIO_ROOT_USER=x\nMINIO_ROOT_PASSWORD=x\nDJANGO_ALLOWED_HOSTS=localhost\n",
         encoding="utf-8",
     )
     result = subprocess.run(  # noqa: S603 — фиксированная команда, без ввода извне
@@ -188,10 +191,28 @@ def test_resolved_config_keeps_the_fake_token_out_of_every_service(tmp_path: Pat
     assert result.returncode == 0, result.stderr[-2000:]
     resolved = yaml.safe_load(result.stdout)
     assert set(BUILT_SERVICES) <= set(resolved["services"]), "compose config не отдал собираемые сервисы"
+    return resolved, result.stdout
+
+
+def _assert_secret_declared_and_token_blank(resolved: dict) -> None:
     for name in BUILT_SERVICES:
         build = resolved["services"][name]["build"]
-        assert SECRET_ID in [s.get("source") for s in build.get("secrets") or []], f"{name}: секрет потерян"
+        sources = [s.get("source") if isinstance(s, dict) else s for s in build.get("secrets") or []]
+        assert SECRET_ID in sources, f"{name}: секрет потерян"
     for name, service in resolved["services"].items():
         assert service.get("environment", {}).get(TOKEN_VAR, "") == "", f"{name}: токен виден процессу контейнера"
     assert resolved["secrets"][SECRET_ID].get("environment") == TOKEN_VAR
-    assert FAKE_VALUE not in result.stdout, "фальшивый токен виден в собранной конфигурации"
+
+
+def test_resolved_config_keeps_the_fake_token_out_of_every_service(tmp_path: Path) -> None:
+    """Переходный режим: строка токена ещё в `.env`."""
+    resolved, stdout = _resolved_config(tmp_path, f"{TOKEN_VAR}={FAKE_VALUE}\n")
+    _assert_secret_declared_and_token_blank(resolved)
+    assert FAKE_VALUE not in stdout, "фальшивый токен виден в собранной конфигурации"
+
+
+def test_resolved_config_without_the_token_line_still_builds_and_declares_the_secret(tmp_path: Path) -> None:
+    """После переноса в build.env: `up`/`ps`/`logs` идут без переменной — compose не должен спотыкаться о секрет."""
+    resolved, stdout = _resolved_config(tmp_path, "")
+    _assert_secret_declared_and_token_blank(resolved)
+    assert TOKEN_VAR in stdout, "переменная должна остаться обнулённой в environment сервисов"

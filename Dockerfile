@@ -70,7 +70,7 @@ RUN --mount=type=secret,id=gh_deploy_token \
     if [ -s /run/secrets/gh_deploy_token ]; then \
       echo "gh_deploy_token: present"; \
       export GIT_CONFIG_COUNT=1 \
-        GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/gh_deploy_token)@github.com/.insteadOf" \
+        GIT_CONFIG_KEY_0="url.https://x-access-token:$(tr -d '\r\n' < /run/secrets/gh_deploy_token)@github.com/.insteadOf" \
         GIT_CONFIG_VALUE_0="https://github.com/"; \
     else \
       echo "gh_deploy_token: absent — fetching ayla-ai-core anonymously"; \

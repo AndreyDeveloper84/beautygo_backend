@@ -796,8 +796,11 @@ jobs:
               # `--env-file` replaces compose's implicit `.env`, so name both.
               BUILD_ENV_ARGS=(--env-file .env --env-file "$BUILD_ENV")
               TOKEN_ENV_FILE="$BUILD_ENV"
+            elif grep -q '^GH_DEPLOY_TOKEN=.' .env 2>/dev/null; then
+              echo "::warning::нет $BUILD_ENV — токен ayla-ai-core для сборки берётся из .env; перенести строку GH_DEPLOY_TOKEN=<значение> в этот файл (каталог 700, файл 600; без кавычек, без export, LF)"
             else
-              echo "::warning::нет $BUILD_ENV — токен ayla-ai-core для сборки берётся из .env; перенести строку GH_DEPLOY_TOKEN в этот файл (каталог 700, файл 600)"
+              echo "::error::токена нет ни в $BUILD_ENV, ни в .env — сборка приватного ayla-ai-core невозможна (DRF-2996)"
+              exit 1
             fi
             if grep -q '^GH_DEPLOY_TOKEN=' .env 2>/dev/null && [ "$TOKEN_ENV_FILE" != .env ]; then
               echo "::warning::GH_DEPLOY_TOKEN всё ещё в .env — после переноса в $BUILD_ENV строку удалить"
