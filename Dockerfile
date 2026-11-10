@@ -42,29 +42,40 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# OPTIONAL build-time credential for the ayla-ai-core dep.
+# Build-time credential for the ayla-ai-core dependency (DRF-2996).
 #
-# ayla-ai-core is PUBLIC (owner's decision 04.09.2026, recorded in
-# OPEN_DECISIONS.md §22 in the workspace root, outside this repo), so this
-# build needs no token: with the ARG empty the `if` below is skipped and
-# pip clones the pinned SHA anonymously. Verified 04.09.2026 by an
-# unauthenticated fetch of the pin.
+# ayla-ai-core is private again since 20.10.2026 (it was public 04.09–20.10,
+# OPEN_DECISIONS.md §22), so `pip install` of the git+ pin needs a token.
+# Until DRF-2996 the token travelled as `ARG GH_DEPLOY_TOKEN` and
+# `git config --global` wrote it to /root/.gitconfig: the value showed in
+# `docker history`, in `docker buildx history inspect` and in the image
+# itself (single stage, no USER — the app could read the file). The
+# comment that said "not baked into the runtime image" was wrong.
 #
-# The token path is kept for the day the visibility is closed again (the
-# decision says public "for now"): pass via
-# `docker compose build --build-arg GH_DEPLOY_TOKEN=...` or set it in
-# compose under web.build.args, and the URL-rewrite makes pip's git clone
-# authenticate transparently. Consumed at build time only and NOT baked
-# into the final image (no COPY of secret files; the .gitconfig that
-# `git config --global` writes lives in /root/.gitconfig but is not
-# user-facing at runtime).
-ARG GH_DEPLOY_TOKEN=""
-RUN if [ -n "$GH_DEPLOY_TOKEN" ]; then \
-      git config --global url."https://${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"; \
-    fi
-
+# Now the token is a BuildKit secret mounted for THIS RUN only
+# (`--mount=type=secret,id=gh_deploy_token`, supplied by compose
+# `build.secrets`) and reaches git through GIT_CONFIG_COUNT/KEY/VALUE —
+# environment of one process, nothing on disk, nothing in a layer. pip
+# spawns `git clone` as a subprocess and the subprocess inherits the
+# variables. Without the secret (an empty or missing file) the clone is
+# anonymous and fails on the private pin: an honest failure, not a quiet
+# fallback. The log line says whether the secret was there, never its value.
+#
+# No `# syntax=` directive: it would pull a frontend image from Docker Hub,
+# which the pilot box reaches badly (see the top of this file); the frontend
+# built into Docker already supports secret mounts.
+# Guard: tests/test_ai_core_token_build_secret.py.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=secret,id=gh_deploy_token \
+    if [ -s /run/secrets/gh_deploy_token ]; then \
+      echo "gh_deploy_token: present"; \
+      export GIT_CONFIG_COUNT=1 \
+        GIT_CONFIG_KEY_0="url.https://x-access-token:$(cat /run/secrets/gh_deploy_token)@github.com/.insteadOf" \
+        GIT_CONFIG_VALUE_0="https://github.com/"; \
+    else \
+      echo "gh_deploy_token: absent — fetching ayla-ai-core anonymously"; \
+    fi; \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
