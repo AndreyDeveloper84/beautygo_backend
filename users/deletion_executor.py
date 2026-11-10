@@ -43,7 +43,8 @@
 запроса нельзя. Поэтому: транзакция каталога → подтверждение бота →
 ``COMPLETED``. Бот не ответил 2xx с ``all_ok`` — заявка остаётся
 ``PROCESSING`` с названной причиной, ``deletion_gate`` закрыт, следующий
-тик повторяет только бот-половину (все шаги каталога идемпотентны).
+тик повторяет проход целиком — шаги каталога идемпотентны и на втором
+проходе ничего не меняют (их счётчики в ``steps`` — со второго прохода).
 
 Повтор не бесконечен (DRF-2644): проходы без подтверждения считаются в
 ``bot_attempts``, и на :func:`bot_attempts_limit`-м заявка становится
@@ -112,7 +113,8 @@ ERASED_NAME = "Удалён"
 NOT_ERASED_ON_DELETION: dict[str, str] = {}
 
 #: Поля ``SpecialistProfile``, которые стирает D3 (``_erase_catalog``, шаг 6):
-#: ровно этот список уходит в ``save(update_fields=...)``. Он же — вход сторожа
+#: этот список уходит в ``save(update_fields=...)`` (плюс ``status``, когда
+#: профиль снимается с проверки — он хранится, но меняется). Он же — вход сторожа
 #: выгрузки DRF-1918: стёртое поле либо выгружается, либо исключено с причиной
 #: (``users.personal_data_api.SPECIALIST_EXPORTED_FIELDS`` / ``..._EXCLUDED_FIELDS``).
 SPECIALIST_PROFILE_ERASED_FIELDS: tuple[str, ...] = (
@@ -142,7 +144,11 @@ SPECIALIST_PROFILE_RETAINED_FIELDS: dict[str, str] = {
         "часовой пояс региона, не данные о человеке в отдельности; нужен, чтобы "
         "хранимые 5 лет записи (D7) показывались в местном времени мастера"
     ),
-    "status": "служебное состояние профиля на платформе, не данные о человеке",
+    "status": (
+        "служебное состояние профиля на платформе, не данные о человеке; "
+        "удалённый профиль снимается с проверки и из витрины — не черновик → "
+        "черновик (решение владельца 10.11.2026)"
+    ),
     "rating": "производное от отзывов клиентов, не данные о человеке",
     "reviews_count": "производное от отзывов клиентов, не данные о человеке",
     "booking_source": _EXTERNAL_REF,
@@ -165,6 +171,28 @@ SOLO_TENANT_ERASED_NAME = "Студия"
 SOLO_TENANT_ERASED_TEXT_FIELDS: tuple[str, ...] = (
     "address", "city", "geocode_source_address", "geocode_normalized_address",
 )
+#: Решение владельца 10.11.2026: соло-workspace, в котором мастер один,
+#: вместе с аккаунтом ЗАКРЫВАЕТСЯ — ``Tenant.is_active=False`` (у тенанта это
+#: и есть «выключен»: скрыт от обычных запросов, данные остаются). Бот делает
+#: то же со своим зеркалом кабинета и заводит вернувшемуся человеку новый;
+#: закрытый остаётся надгробием. Подписка закрытого workspace отменяется
+#: той же операцией, что у кнопки «отменить» (``billing.charges.cancel_subscription``:
+#: до конца оплаченного периода, без списаний дальше, событие боту) — иначе
+#: строка жила бы ``TRIAL``/``ACTIVE`` при аккаунте, которого нет (замечание
+#: ревью 10.11.2026). Ключ шага — ``anonymised``, на том проходе, который
+#: закрыл (повтор после отказа бота застаёт уже закрытый — ключа не пишет).
+#: Отменяется только подписка, которую платит сам удаляемый: ``cancel_subscription``
+#: снимает ВСЕ согласия на списание у плательщика, а плательщиком соло-workspace
+#: может быть другой человек (на пилоте — прокси владельца) — его согласий
+#: удаление чужого аккаунта не касается. Такая подписка остаётся как есть и
+#: называется в ``kept``; ночные задания биллинга закрытый тенант не берут.
+SOLO_TENANT_CLOSED_KEY = "tenants.Tenant.solo_closed"
+SOLO_SUBSCRIPTION_CANCELED_KEY = "billing.SpecialistSubscription.solo_canceled"
+SOLO_SUBSCRIPTION_OTHER_PAYER_KEY = "billing.SpecialistSubscription.solo_other_payer"
+#: Профиль удалённого мастера, стоявший на проверке или опубликованный,
+#: возвращается в черновик: модератору нечего одобрять («Удалён» без фото), а
+#: витрине — показывать. Ключ шага — ``anonymised``, на проходе, который снял.
+SPECIALIST_PUBLICATION_WITHDRAWN_KEY = "users.SpecialistProfile.publication_withdrawn"
 
 #: Что пишется в тексте отзыва вместо найденных ПДн (D9 scrub).
 SCRUBBED = "[скрыто]"
@@ -883,7 +911,17 @@ def _erase_catalog(user) -> dict:
         sp.experience_years = 0
         sp.provisioned_external_user_id = None
         sp.yookassa_account_id = ""
-        sp.save(update_fields=[*SPECIALIST_PROFILE_ERASED_FIELDS, "updated_at"])
+        # Снять с проверки и из витрины: статус хранится (служебный), но
+        # удалённому профилю на проверке и в листинге делать нечего — очередь
+        # модератора иначе предлагала бы одобрить «Удалён». Без сырого имени
+        # опубликованного статуса (сторож DRF-1845): «не черновик → черновик».
+        draft = SpecialistProfile.ProfileStatus.DRAFT
+        status_fields: list[str] = []
+        if sp.status != draft:
+            sp.status = draft
+            status_fields = ["status"]
+            anonymised[SPECIALIST_PUBLICATION_WITHDRAWN_KEY] = 1
+        sp.save(update_fields=[*SPECIALIST_PROFILE_ERASED_FIELDS, *status_fields, "updated_at"])
         anonymised["users.SpecialistProfile.user"] = 1
         _erase_own_place(sp, anonymised, kept)
         _erase_solo_tenant(sp, anonymised, kept)
@@ -1059,7 +1097,11 @@ def _erase_service_areas(sp, anonymised: dict) -> None:
 
 def _erase_solo_tenant(sp, anonymised: dict, kept: dict) -> None:
     """Соло-workspace: имя «Студия {имя}» → «Студия», адрес/город/координаты
-    стереть, строку оставить (записи, подписка и общий с ботом UUID)."""
+    стереть, строку оставить (записи, подписка и общий с ботом UUID) — и
+    ЗАКРЫТЬ (``is_active=False``), если мастер в нём один (решение владельца
+    10.11.2026; у бота — то же со своим зеркалом). Повтор данных не меняет."""
+    from billing.charges import cancel_subscription
+    from billing.models import SpecialistSubscription
     from tenants.models import Tenant
 
     tenant = Tenant.all_objects.filter(pk=sp.tenant_id, kind=Tenant.Kind.SOLO).first()
@@ -1073,8 +1115,37 @@ def _erase_solo_tenant(sp, anonymised: dict, kept: dict) -> None:
         setattr(tenant, name, "")
     tenant.latitude = None
     tenant.longitude = None
-    tenant.save(update_fields=["name", *SOLO_TENANT_ERASED_TEXT_FIELDS, "latitude", "longitude", "updated_at"])
+    closing = bool(tenant.is_active)
+    tenant.is_active = False
+    tenant.save(
+        update_fields=[
+            "name", *SOLO_TENANT_ERASED_TEXT_FIELDS, "latitude", "longitude", "is_active", "updated_at",
+        ]
+    )
     anonymised["tenants.Tenant.solo"] = anonymised.get("tenants.Tenant.solo", 0) + 1
+    if closing:
+        anonymised[SOLO_TENANT_CLOSED_KEY] = anonymised.get(SOLO_TENANT_CLOSED_KEY, 0) + 1
+    # Подписка закрытого workspace: отменить (идемпотентно), чтобы ночные
+    # задания биллинга не вели счёт кабинета, которого нет, — но только ту,
+    # что платит сам удаляемый (см. SOLO_SUBSCRIPTION_OTHER_PAYER_KEY).
+    canceled = 0
+    other_payer = 0
+    for subscription in SpecialistSubscription.objects.filter(tenant=tenant).exclude(
+        status=SpecialistSubscription.Status.CANCELED
+    ):
+        if subscription.user_id != sp.user_id:
+            other_payer += 1
+            continue
+        cancel_subscription(subscription)
+        canceled += 1
+    if canceled:
+        anonymised[SOLO_SUBSCRIPTION_CANCELED_KEY] = (
+            anonymised.get(SOLO_SUBSCRIPTION_CANCELED_KEY, 0) + canceled
+        )
+    if other_payer:
+        kept[SOLO_SUBSCRIPTION_OTHER_PAYER_KEY] = (
+            kept.get(SOLO_SUBSCRIPTION_OTHER_PAYER_KEY, 0) + other_payer
+        )
 
 
 def _residue(user, *, external_name: str | None = None) -> dict[str, int]:
@@ -1214,6 +1285,8 @@ def _residue(user, *, external_name: str | None = None) -> dict[str, int]:
         sp.experience_years or sp.provisioned_external_user_id is not None or sp.yookassa_account_id
     ):
         residue["users.SpecialistProfile.claims"] = 1
+    if sp is not None and sp.status != SpecialistProfile.ProfileStatus.DRAFT:
+        residue["users.SpecialistProfile.publication"] = 1
     residue.update(_own_place_residue(sp))
     return residue
 
@@ -1240,6 +1313,17 @@ def _own_place_residue(sp) -> dict[str, int]:
             or tenant.latitude is not None
         ):
             found["tenants.Tenant.solo"] = 1
+        if tenant.is_active:
+            found["tenants.Tenant.solo_open"] = 1
+        from billing.models import SpecialistSubscription
+
+        live_subscriptions = (
+            SpecialistSubscription.objects.filter(tenant=tenant, user_id=sp.user_id)
+            .exclude(status=SpecialistSubscription.Status.CANCELED)
+            .count()
+        )
+        if live_subscriptions:
+            found["billing.SpecialistSubscription.solo_live"] = live_subscriptions
     from users.models import PractitionerQualification
 
     qualifications = PractitionerQualification.objects.filter(specialist=sp).count()
