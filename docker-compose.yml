@@ -22,21 +22,17 @@ services:
         # pilot VPS reaches Hub badly — see the comment block at the top
         # of the Dockerfile for the measurements.
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
-        # Forwards GH_DEPLOY_TOKEN from the host env into the build for
-        # the ayla-ai-core clone (DRF-242 post-merge ops fix, 2026-05-07).
-        # It is OPTIONAL: that repo is public (owner's decision
-        # 04.09.2026, OPEN_DECISIONS.md §22 in the workspace root), so
-        # empty / unset on the host is the normal case — the Dockerfile
-        # skips the git config
-        # and pip clones the pinned SHA anonymously. Kept wired so the
-        # authenticated path revives untouched if the visibility is closed
-        # again (DRF-1466).
-        GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
         # DRF-2409 — владелец каталога отчётов внутри образа. Те же значения,
         # что у `user:` ниже: каталог, созданный не тому uid, существует и
         # не пишется — ровно состояние, сломавшее стенд.
         APP_UID: ${APP_UID:-1000}
         APP_GID: ${APP_GID:-1000}
+      # DRF-2996. Токен для клона приватного ayla-ai-core — секрет BuildKit,
+      # не build-arg: значение build-arg печатает `docker history` и хранит
+      # история BuildKit. Источник — переменная GH_DEPLOY_TOKEN окружения
+      # compose (см. `secrets:` внизу файла); пустая даёт анонимный клон.
+      secrets:
+        - gh_deploy_token
     restart: unless-stopped
     # DRF-1677 (класс DRF-1646). Без `user:` контейнер идёт от root образа —
     # в Dockerfile нет USER, — и всё, что entrypoint пишет в смонтированные
@@ -57,6 +53,10 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=djangoProject.settings.prod
       - REDIS_URL=redis://redis:6379
+      # DRF-2996. `.env` подключён как env_file; пока в нём лежит строка
+      # GH_DEPLOY_TOKEN, процесс контейнера видел бы токен сборки.
+      # `environment` перекрывает `env_file`: в контейнере переменная пустая.
+      - GH_DEPLOY_TOKEN=
     volumes:
       - /home/taximeter/beautygo/dev/staticfiles:/app/staticfiles
       - /home/taximeter/beautygo/dev/media:/app/media
@@ -101,21 +101,20 @@ services:
       # still resolve python:3.12-slim from Docker Hub, and the deploy
       # would keep failing exactly where it failed on 2026-08-31.
       #
-      # GH_DEPLOY_TOKEN used to be deliberately absent here (2026-08-31:
-      # ayla-ai-core was public, the clone was anonymous). The repo went
-      # private again on 2026-10-20, and since then this service — same
-      # requirements.txt, same `pip install` — fails at the ayla-ai-core
-      # clone with «could not read Username» while `web` builds fine.
-      # Forward the same optional ARG `web` forwards; empty keeps the
-      # anonymous path (the Dockerfile skips the git config).
+      # The ayla-ai-core token: same BuildKit secret as `web` (DRF-2996).
+      # It used to be absent here (2026-08-31, the repo was public), and
+      # after 2026-10-20 this service failed at the clone with «could not
+      # read Username» while `web` built fine — the three services share
+      # one requirements.txt and must share the secret.
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
-        GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
         # DRF-2409 — владелец каталога отчётов внутри образа. Те же значения,
         # что у `user:` ниже: каталог, созданный не тому uid, существует и
         # не пишется — ровно состояние, сломавшее стенд.
         APP_UID: ${APP_UID:-1000}
         APP_GID: ${APP_GID:-1000}
+      secrets:
+        - gh_deploy_token
     restart: unless-stopped
     # DRF-1677 (класс DRF-1646). Без `user:` контейнер идёт от root образа —
     # в Dockerfile нет USER, — и всё, что entrypoint пишет в смонтированные
@@ -134,6 +133,10 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=djangoProject.settings.prod
       - REDIS_URL=redis://redis:6379
+      # DRF-2996. `.env` подключён как env_file; пока в нём лежит строка
+      # GH_DEPLOY_TOKEN, процесс контейнера видел бы токен сборки.
+      # `environment` перекрывает `env_file`: в контейнере переменная пустая.
+      - GH_DEPLOY_TOKEN=
     command: celery -A djangoProject worker --loglevel=info --concurrency=2
     volumes:
       - ./firebase-admin.json:/app/firebase-admin.json:ro
@@ -150,16 +153,17 @@ services:
     logging: *app_logging
     build:
       context: .
-      # DRF-1431 — see celery_worker above. GH_DEPLOY_TOKEN: same reason
-      # as celery_worker (private ayla-ai-core since 2026-10-20).
+      # DRF-1431 — see celery_worker above. The ayla-ai-core token: same
+      # BuildKit secret as `web` and `celery_worker` (DRF-2996).
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-python:3.12-slim}
-        GH_DEPLOY_TOKEN: ${GH_DEPLOY_TOKEN:-}
         # DRF-2409 — владелец каталога отчётов внутри образа. Те же значения,
         # что у `user:` ниже: каталог, созданный не тому uid, существует и
         # не пишется — ровно состояние, сломавшее стенд.
         APP_UID: ${APP_UID:-1000}
         APP_GID: ${APP_GID:-1000}
+      secrets:
+        - gh_deploy_token
     restart: unless-stopped
     # DRF-1677 (класс DRF-1646). Без `user:` контейнер идёт от root образа —
     # в Dockerfile нет USER, — и всё, что entrypoint пишет в смонтированные
@@ -178,6 +182,10 @@ services:
     environment:
       - DJANGO_SETTINGS_MODULE=djangoProject.settings.prod
       - REDIS_URL=redis://redis:6379
+      # DRF-2996. `.env` подключён как env_file; пока в нём лежит строка
+      # GH_DEPLOY_TOKEN, процесс контейнера видел бы токен сборки.
+      # `environment` перекрывает `env_file`: в контейнере переменная пустая.
+      - GH_DEPLOY_TOKEN=
     # Default PersistentScheduler reads CELERY_BEAT_SCHEDULE from settings
     # and keeps last-run state in a shelve file. Its DEFAULT path is
     # ./celerybeat-schedule — то есть /app, каталог образа, владелец root.
@@ -217,6 +225,9 @@ services:
     env_file:
       - .env
     environment:
+      # DRF-2996. Тот же `.env` целиком уходит и в Postgres; пока в нём
+      # строка GH_DEPLOY_TOKEN, перекрыть её пустым значением, как у app-сервисов.
+      GH_DEPLOY_TOKEN: ""
       POSTGRES_USER: ${POSTGRES_USER:-beautygo}
       # No default: a missing value used to fall back to a well-known
       # password on whatever host ran this file. `:?` makes compose refuse
@@ -303,3 +314,11 @@ volumes:
   minio_data:
   redis_data:
   mapping_reports:
+
+# DRF-2996. Секрет сборки для приватного ayla-ai-core. Значение берётся из
+# переменной GH_DEPLOY_TOKEN окружения compose: shell, `.env` проекта или
+# `--env-file`. На пилоте ci.yml даёт `--env-file ~/.config/beautygo/build.env`
+# (0600, вне дерева) только команде `build`; `up` токен не нужен.
+secrets:
+  gh_deploy_token:
+    environment: GH_DEPLOY_TOKEN

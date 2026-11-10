@@ -614,10 +614,10 @@ jobs:
             # конфиг не вернётся молча. Печатается только маска origin.
             #
             # Тот же токен читают ещё два места, и ЭТОТ шаг их не трогает:
-            # job `test` на раннере (auth для ayla-ai-core, необязательный —
-            # репозиторий публичный) и шаг 2/4 ниже (GH_DEPLOY_TOKEN= в .env
-            # хоста как запасной вход в ghcr). Отзыв токена владельцем
-            # обязан учитывать оба — см. тело PR.
+            # job `test` на раннере (auth для ayla-ai-core, приватного с
+            # 20.10.2026) и шаг 2/4 ниже (секрет сборки и запасной вход в
+            # ghcr из ~/.config/beautygo/build.env, переходно — из .env
+            # хоста; DRF-2996). Отзыв токена владельцем обязан учитывать оба.
             ORIGIN="$(git remote get-url origin)"
             if printf '%s' "$ORIGIN" | grep -qE '^https?://[^/@]+@github[.]com'; then
               echo "::error::origin несёт credential (форма https://<…>@github.com). DRF-979: токен в .git/config запрещён. Перевести remote на deploy key: git remote set-url origin git@github.com:AndreyDeveloper84/beautygo_backend.git"
@@ -775,17 +775,52 @@ jobs:
             # Preference order. Every branch is strictly better than the
             # one below it, and the bottom branch is exactly what this
             # step did before DRF-1431 — so this can only add options.
+            # --- where the ayla-ai-core build token lives (DRF-2996) ------
+            # The token is a BuildKit secret now (Dockerfile, compose
+            # `secrets:`), read by compose from GH_DEPLOY_TOKEN of ITS
+            # environment. Its home is the owner's file outside the deploy
+            # tree, 0600, handed to `build` only. Transitional mode: while
+            # the file is absent the line in .env still feeds the build, as
+            # before — and the step says so, because that line is also what
+            # `env_file: .env` would hand to every container (compose blanks
+            # it there, see `GH_DEPLOY_TOKEN=` in the service environment).
+            # Values are never read into this script, only line presence.
+            BUILD_ENV="$HOME/.config/beautygo/build.env"
+            BUILD_ENV_ARGS=()
+            TOKEN_ENV_FILE=.env
+            if [ -f "$BUILD_ENV" ]; then
+              if ! grep -q '^GH_DEPLOY_TOKEN=.' "$BUILD_ENV"; then
+                echo "::error::$BUILD_ENV есть, но строки GH_DEPLOY_TOKEN=<значение> в нём нет — сборка пошла бы анонимно и упала на пине ayla-ai-core"
+                exit 1
+              fi
+              # `--env-file` replaces compose's implicit `.env`, so name both.
+              BUILD_ENV_ARGS=(--env-file .env --env-file "$BUILD_ENV")
+              TOKEN_ENV_FILE="$BUILD_ENV"
+            elif grep -q '^GH_DEPLOY_TOKEN=.' .env 2>/dev/null; then
+              echo "::warning::нет $BUILD_ENV — токен ayla-ai-core для сборки берётся из .env; перенести строку GH_DEPLOY_TOKEN=<значение> в этот файл (каталог 700, файл 600; без кавычек, без export, LF)"
+            else
+              echo "::error::токена нет ни в $BUILD_ENV, ни в .env — сборка приватного ayla-ai-core невозможна (DRF-2996)"
+              exit 1
+            fi
+            if grep -q '^GH_DEPLOY_TOKEN=' .env 2>/dev/null && [ "$TOKEN_ENV_FILE" != .env ]; then
+              echo "::warning::GH_DEPLOY_TOKEN всё ещё в .env — после переноса в $BUILD_ENV строку удалить"
+            fi
+            if grep -q 'GH_DEPLOY_TOKEN' docker-compose.override.yml 2>/dev/null; then
+              echo "::error::GH_DEPLOY_TOKEN в docker-compose.override.yml — build-arg снова ушёл бы в историю BuildKit (DRF-2996)"
+              exit 1
+            fi
+
             BASE=""
             if try_pull "$MIRROR"; then
               BASE="$MIRROR"; SOURCE="ghcr (anonymous)"
-            elif grep -q '^GH_DEPLOY_TOKEN=' .env 2>/dev/null; then
+            elif grep -q '^GH_DEPLOY_TOKEN=' "$TOKEN_ENV_FILE" 2>/dev/null; then
               # The package is private (public is the recommended setup —
               # it is a copy of a public image and needs no secret). Log in
               # with the token ALREADY on this box; nothing new is written
               # here that was not here before, and the value is never
               # echoed. Needs `read:packages` on the token.
               echo "anonymous GHCR pull failed — trying an authenticated one"
-              if grep -m1 '^GH_DEPLOY_TOKEN=' .env | cut -d= -f2- \
+              if grep -m1 '^GH_DEPLOY_TOKEN=' "$TOKEN_ENV_FILE" | cut -d= -f2- \
                    | docker login ghcr.io -u "$OWNER" --password-stdin >/dev/null 2>&1 \
                  && try_pull "$MIRROR"; then
                 BASE="$MIRROR"; SOURCE="ghcr (authenticated)"
@@ -821,7 +856,7 @@ jobs:
             started=$SECONDS
             attempt=1
             while :; do
-              if docker compose build web celery_worker celery_beat; then
+              if docker compose "${BUILD_ENV_ARGS[@]}" build web celery_worker celery_beat; then
                 break
               fi
               elapsed=$((SECONDS - started))
