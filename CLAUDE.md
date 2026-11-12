@@ -146,6 +146,8 @@ OneToOne (один отзыв на запись, 409 `REVIEW_EXISTS`); `is_anony
 | Personal Context internal API (FROZEN) | `docs/PERSONAL_CONTEXT_INTERNAL_API_CONTRACT.md` |
 | AI Chat plan | `docs/AI_CHAT_PLAN.md` |
 | Food Scanner decision | `docs/FOOD_SCANNER_DECISION.md` |
+| Owner decision 04.10: калории и энергопотребность для всех | `docs/OWNER_DECISION_CALORIES_AND_ENERGY_FOR_ALL_2026-10-04.md` |
+| Owner decision 07.11: массаж без опроса о здоровье (каноны 1.1.1/1.1.4/1.1.5) | `docs/OWNER_DECISION_MASSAGE_WITHOUT_HEALTH_SCREENING_2026-11-07.md` |
 | Multi-tenant | `docs/MULTI_TENANT.md` |
 | Observability | `docs/OBSERVABILITY.md` |
 | Проектный индекс экосистемы (5 репо) | `docs/PROJECT_INDEX.md` |
