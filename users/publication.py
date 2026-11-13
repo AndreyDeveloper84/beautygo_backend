@@ -89,6 +89,14 @@ LOCATION_NOT_CONFIRMED = "location_not_confirmed"
 #: Провенанс места, подтверждённого модератором при одобрении профиля (Q2 → а).
 MODERATION_SOURCE_REF = "модерация профиля {profile_id}"
 
+#: Гейт модератора для мастера САЛОНА (аудит регистрации салона 13.11.2026,
+#: находка 6): одобрение активировало салонного специалиста без единого
+#: предложения и без человека за ним — профиль, заведённый приглашением бота
+#: (DRF-2379), которое так и не приняли, становился ACTIVE и стоял в пуле
+#: каталога, не умея принять ни одной записи.
+SALON_NO_ACTIVE_OFFER = "salon_no_active_offer"
+SALON_INVITE_NOT_ACCEPTED = "salon_invite_not_accepted"
+
 
 @dataclass(frozen=True)
 class MissingItem:
@@ -311,15 +319,41 @@ def approval_readiness(profile: SpecialistProfile) -> Readiness:
 def approval_refusal(profile: SpecialistProfile) -> list[str] | None:
     """Гейт модератора: ``None`` — можно активировать, иначе коды недостающего.
 
-    Только соло-тенант: салонного мастера активируют как прежде (каталог и
-    публикацию салона ведёт владелец салона) — разница названа тестом.
+    Соло — полная готовность публикации. Салонный мастер — свой короткий
+    гейт (:func:`salon_approval_refusal`): каталог и публикацию салона ведёт
+    владелец, соло-готовности (фото, место, часы) у него нет, но активировать
+    профиль, который не примет ни одной записи, нельзя и салону.
     """
 
     tenant = profile.tenant
-    if tenant is None or tenant.kind != Tenant.Kind.SOLO:
+    if tenant is None:
         return None
+    if tenant.kind != Tenant.Kind.SOLO:
+        return salon_approval_refusal(profile) or None
     codes = approval_readiness(profile).codes
     return codes or None
+
+
+def salon_approval_refusal(profile: SpecialistProfile) -> list[str]:
+    """Коды, по которым модератор не активирует мастера салона.
+
+    * ``salon_no_active_offer`` — ни одного активного предложения: к мастеру
+      нельзя записаться ни на одну услугу;
+    * ``salon_invite_not_accepted`` — профиль заведён приглашением бота
+      (``provisioned_external_user_id``), а личность человека с ним не связана:
+      приглашение не принято, за профилем никого нет.
+
+    Профиль, заведённый оператором в админке (без claim бота), второго кода
+    не получает: у него нет приглашения, которое можно не принять.
+    """
+    from services.models import SpecialistService
+
+    codes: list[str] = []
+    if not SpecialistService.objects.filter(specialist=profile, is_active=True).exists():
+        codes.append(SALON_NO_ACTIVE_OFFER)
+    if (profile.provisioned_external_user_id or "").strip() and not is_linked(profile):
+        codes.append(SALON_INVITE_NOT_ACCEPTED)
+    return codes
 
 
 def place_confirmable_by_moderation(profile: SpecialistProfile) -> bool:
