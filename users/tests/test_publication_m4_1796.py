@@ -179,16 +179,19 @@ def _salon_master(*, status: str, external_user_id: str) -> SpecialistProfile:
     return profile
 
 
-def _salon_offer(profile: SpecialistProfile, *, is_active: bool = True) -> SpecialistService:
+def _salon_offer(
+    profile: SpecialistProfile, *, is_active: bool = True, service_active: bool = True,
+    price: str = "1500",
+) -> SpecialistService:
     suffix = uuid.uuid4().hex[:6]
     category = ServiceCategory.objects.create(name=f"Массаж 1796 {suffix}", slug=f"massage-1796-{suffix}")
     service = SalonService.objects.create(
         tenant=profile.tenant, category=category, name=f"Массаж {suffix}", duration_minutes=60,
-        requires_health_check=False,
+        requires_health_check=False, is_active=service_active,
     )
     return SpecialistService.objects.create(
         salon_service=service, specialist=profile, tenant=profile.tenant,
-        price=Decimal("1500"), duration_minutes=60, is_active=is_active,
+        price=Decimal(price), duration_minutes=60, is_active=is_active,
     )
 
 
@@ -484,6 +487,19 @@ class TestTheModeratorDoesNotActivateAnEmptySalonMaster:
         master.refresh_from_db()
         assert master.status == SpecialistProfile.ProfileStatus.DRAFT
         assert any("salon_no_active_offer" in m for m in messages), messages
+
+    @pytest.mark.parametrize("edge", ["service_off", "zero_price"])
+    def test_an_unsellable_offer_does_not_count(self, operator, edge):
+        """Ребро есть, но продать нельзя: услуга салона выключена или цена 0 (DRF-1962)."""
+        master = _salon_master(
+            status=SpecialistProfile.ProfileStatus.DRAFT, external_user_id=f"bot:max:17969{len(edge)}",
+        )
+        if edge == "service_off":
+            _salon_offer(master, service_active=False)
+        else:
+            _salon_offer(master, price="0")
+
+        assert approval_refusal(master) == ["salon_no_active_offer"]
 
     def test_a_bot_invited_master_who_never_accepted_stays(self, operator):
         master = _salon_master(status=SpecialistProfile.ProfileStatus.DRAFT, external_user_id="bot:max:1796903")

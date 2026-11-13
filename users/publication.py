@@ -337,8 +337,8 @@ def approval_refusal(profile: SpecialistProfile) -> list[str] | None:
 def salon_approval_refusal(profile: SpecialistProfile) -> list[str]:
     """Коды, по которым модератор не активирует мастера салона.
 
-    * ``salon_no_active_offer`` — ни одного активного предложения: к мастеру
-      нельзя записаться ни на одну услугу;
+    * ``salon_no_active_offer`` — ни одного продаваемого предложения (активное
+      ребро, активная услуга салона, цена ≥ 1): к мастеру не записаться;
     * ``salon_invite_not_accepted`` — профиль заведён приглашением бота
       (``provisioned_external_user_id``), а личность человека с ним не связана:
       приглашение не принято, за профилем никого нет.
@@ -347,9 +347,15 @@ def salon_approval_refusal(profile: SpecialistProfile) -> list[str]:
     не получает: у него нет приглашения, которое можно не принять.
     """
     from services.models import SpecialistService
+    from services.offer_sellable import sellable_offer_q
 
     codes: list[str] = []
-    if not SpecialistService.objects.filter(specialist=profile, is_active=True).exists():
+    # Предложение — по единому правилу «продаётся» (DRF-1962): активное ребро,
+    # активная услуга ЭТОГО салона, цена ≥ 1. Голый ``is_active`` пропустил бы
+    # ребро на выключенную услугу или с ценой 0 — к мастеру всё равно не записаться.
+    if not SpecialistService.objects.filter(
+        sellable_offer_q(), specialist=profile, salon_service__tenant_id=profile.tenant_id,
+    ).exists():
         codes.append(SALON_NO_ACTIVE_OFFER)
     if (profile.provisioned_external_user_id or "").strip() and not is_linked(profile):
         codes.append(SALON_INVITE_NOT_ACCEPTED)
