@@ -133,6 +133,11 @@ def approve_specialists(modeladmin, request, queryset):
     своего места, одобрение подтверждает и место — модератор, сейчас,
     «модерация профиля <id>» — в одной транзакции с активацией. Место вне
     workspace мастера так не подтверждается: отказ с ``location_not_confirmed``.
+
+    Аудит регистрации салона 13.11.2026 (находка 6): салонный мастер больше
+    не активируется без проверки — нужен хотя бы одно активное предложение,
+    а профиль из приглашения бота — ещё и принятое приглашение
+    (``users.publication.salon_approval_refusal``).
     """
     from functools import partial
 
@@ -188,7 +193,7 @@ def approve_specialists(modeladmin, request, queryset):
     if refused:
         modeladmin.message_user(
             request,
-            'Не подтверждены — соло-мастер не готов к публикации: ' + '; '.join(refused),
+            'Не подтверждены — мастер не готов к публикации: ' + '; '.join(refused),
             messages.WARNING,
         )
 

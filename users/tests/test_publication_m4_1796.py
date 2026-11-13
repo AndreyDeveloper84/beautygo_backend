@@ -35,7 +35,7 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from appointments.models import SpecialistWorkingHours
-from services.models import ServiceCategory, ServiceTemplate, SpecialistService
+from services.models import SalonService, ServiceCategory, ServiceTemplate, SpecialistService
 from services.offer_selection import select_templates, set_offer
 from tenants.models import GeocodeStatus, LocationStatus, ServiceLocation, Tenant
 from tenants.solo_provisioning import provision_solo_workspace
@@ -177,6 +177,22 @@ def _salon_master(*, status: str, external_user_id: str) -> SpecialistProfile:
         username=external_user_id, role="client", is_proxy=True, is_guest=False, linked_user=user,
     )
     return profile
+
+
+def _salon_offer(
+    profile: SpecialistProfile, *, is_active: bool = True, service_active: bool = True,
+    price: str = "1500",
+) -> SpecialistService:
+    suffix = uuid.uuid4().hex[:6]
+    category = ServiceCategory.objects.create(name=f"Массаж 1796 {suffix}", slug=f"massage-1796-{suffix}")
+    service = SalonService.objects.create(
+        tenant=profile.tenant, category=category, name=f"Массаж {suffix}", duration_minutes=60,
+        requires_health_check=False, is_active=service_active,
+    )
+    return SpecialistService.objects.create(
+        salon_service=service, specialist=profile, tenant=profile.tenant,
+        price=Decimal(price), duration_minutes=60, is_active=is_active,
+    )
 
 
 class TestReadinessIsOneServerAnswer:
@@ -445,11 +461,65 @@ class TestTheModeratorActivatesOnlyAReadyLinkedSoloMaster:
         assert olga.status == SpecialistProfile.ProfileStatus.DRAFT
         assert any("identity_not_linked" in m for m in messages), messages
 
-    def test_a_salon_master_keeps_the_old_approval(self, operator):
-        """Названная разница: каталог салона ведёт владелец салона, соло-готовности
-        у салонного мастера нет — модератор активирует его как прежде."""
+    def test_a_salon_master_with_an_offer_is_approved(self, operator):
+        """Названная разница: соло-готовности (фото, место, часы) у салонного
+        мастера нет — каталог салона ведёт владелец. Но предложение нужно."""
 
         master = _salon_master(status=SpecialistProfile.ProfileStatus.PENDING, external_user_id="bot:max:1796901")
+        _salon_offer(master)
+
+        _approve(SpecialistProfile.objects.filter(pk=master.pk), operator)
+
+        master.refresh_from_db()
+        assert master.status == SpecialistProfile.ProfileStatus.ACTIVE
+
+
+class TestTheModeratorDoesNotActivateAnEmptySalonMaster:
+    """Аудит регистрации салона 13.11.2026, находка 6: «призрак» приглашения
+    становился ACTIVE без предложений и без человека за профилем."""
+
+    def test_a_salon_master_without_an_active_offer_stays(self, operator):
+        master = _salon_master(status=SpecialistProfile.ProfileStatus.DRAFT, external_user_id="bot:max:1796902")
+        _salon_offer(master, is_active=False)
+
+        messages = _approve(SpecialistProfile.objects.filter(pk=master.pk), operator)
+
+        master.refresh_from_db()
+        assert master.status == SpecialistProfile.ProfileStatus.DRAFT
+        assert any("salon_no_active_offer" in m for m in messages), messages
+
+    @pytest.mark.parametrize("edge", ["service_off", "zero_price"])
+    def test_an_unsellable_offer_does_not_count(self, operator, edge):
+        """Ребро есть, но продать нельзя: услуга салона выключена или цена 0 (DRF-1962)."""
+        master = _salon_master(
+            status=SpecialistProfile.ProfileStatus.DRAFT, external_user_id=f"bot:max:17969{len(edge)}",
+        )
+        if edge == "service_off":
+            _salon_offer(master, service_active=False)
+        else:
+            _salon_offer(master, price="0")
+
+        assert approval_refusal(master) == ["salon_no_active_offer"]
+
+    def test_a_bot_invited_master_who_never_accepted_stays(self, operator):
+        master = _salon_master(status=SpecialistProfile.ProfileStatus.DRAFT, external_user_id="bot:max:1796903")
+        User.objects.filter(is_proxy=True, linked_user_id=master.user_id).update(linked_user=None)
+        master.provisioned_external_user_id = "bot:max:1796903"
+        master.save(update_fields=["provisioned_external_user_id"])
+        _salon_offer(master)
+
+        messages = _approve(SpecialistProfile.objects.filter(pk=master.pk), operator)
+
+        master.refresh_from_db()
+        assert master.status == SpecialistProfile.ProfileStatus.DRAFT
+        assert approval_refusal(master) == ["salon_invite_not_accepted"]
+        assert any("salon_invite_not_accepted" in m for m in messages), messages
+
+    def test_a_bot_invited_master_who_accepted_is_approved(self, operator):
+        master = _salon_master(status=SpecialistProfile.ProfileStatus.DRAFT, external_user_id="bot:max:1796904")
+        master.provisioned_external_user_id = "bot:max:1796904"
+        master.save(update_fields=["provisioned_external_user_id"])
+        _salon_offer(master)
 
         _approve(SpecialistProfile.objects.filter(pk=master.pk), operator)
 
